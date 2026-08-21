@@ -61,7 +61,9 @@ _GREY_C = "#888888"
 _GREY_D = "#444444"
 _GREY_E = "#222222"
 _GREEN = "#83C167"
+_GREEN_E = "#699C52"
 _RED = "#FC6255"
+_RED_E = "#CF5044"
 _YELLOW = "#FFFF00"
 _BLUE = "#58C4DD"
 _BLUE_D = "#29ABCA"
@@ -7443,6 +7445,51 @@ class DieFace(VGroup):
         self.dots = arrangement
         self.value = value
         self.index = value
+
+
+class Dartboard(VGroup):
+    """Concentric annular sectors and bullseyes over native Atlas geometry."""
+
+    radius = 3
+    n_sectors = 20
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        n_sectors = self.n_sectors
+        angle = _math.tau / n_sectors
+        segments = VGroup(
+            *(
+                VGroup(
+                    *(
+                        AnnularSector(
+                            inner_radius=in_r,
+                            outer_radius=out_r,
+                            start_angle=n * angle,
+                            angle=angle,
+                            fill_color=color,
+                        )
+                        for n, color in zip(
+                            range(n_sectors),
+                            _itertools.cycle(colors),
+                        )
+                    )
+                )
+                for colors, in_r, out_r in (
+                    ([_GREY_B, _GREY_E], 0, 1),
+                    ([_GREEN_E, _RED_E], 0.5, 0.55),
+                    ([_GREEN_E, _RED_E], 0.95, 1),
+                )
+            )
+        )
+        segments.rotate(-angle / 2.0)
+        bullseyes = VGroup(*(Circle(radius=radius) for radius in (0.07, 0.035)))
+        bullseyes.set_fill(opacity=1)
+        bullseyes.set_stroke(width=0)
+        bullseyes[0].set_color(_GREEN_E)
+        bullseyes[1].set_color(_RED_E)
+        self.bullseye = bullseyes[1]
+        self.add(*segments, *bullseyes)
+        self.scale(self.radius)
 
 
 class Cross(VGroup):
@@ -15434,6 +15481,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.drawings", "ClockPassesTime"): ClockPassesTime,
         ("manimlib.mobject.svg.drawings", "Speedometer"): Speedometer,
         ("manimlib.mobject.svg.drawings", "DieFace"): DieFace,
+        ("manimlib.mobject.svg.drawings", "Dartboard"): Dartboard,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (

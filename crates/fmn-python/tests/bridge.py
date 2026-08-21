@@ -4268,6 +4268,25 @@ except Exception as error:
 else:
     raise AssertionError("DieFace accepted a pip count of 7")
 
+assert drawings.Dartboard.__bases__ == (manimlib.VGroup,)
+assert list(inspect.signature(drawings.Dartboard).parameters) == ["kwargs"]
+assert drawings.Dartboard.n_sectors == 20
+assert drawings.Dartboard.radius == 3
+dartboard = drawings.Dartboard()
+assert dartboard.n_sectors == 20
+assert dartboard.radius == 3
+assert dartboard.bullseye is dartboard.submobjects[4]
+assert len(dartboard.submobjects) == 5
+assert all(len(ring) == 20 for ring in dartboard.submobjects[:3])
+assert np.isclose(dartboard.get_width(), 6.0, atol=1e-5)
+assert dartboard.submobjects[0][0].get_fill_color() == manimlib.GREY_B
+assert dartboard.submobjects[0][1].get_fill_color() == manimlib.GREY_E
+assert dartboard.submobjects[1][0].get_fill_color() == manimlib.GREEN_E
+assert dartboard.submobjects[1][1].get_fill_color() == manimlib.RED_E
+assert dartboard.bullseye.get_fill_color() == manimlib.RED_E
+assert np.isclose(dartboard.submobjects[3].get_fill_opacity(), 1.0)
+assert np.isclose(dartboard.bullseye.get_stroke_width(), 0.0)
+
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
 # `.animate` builder can mutate its generated target before Scene adoption.
