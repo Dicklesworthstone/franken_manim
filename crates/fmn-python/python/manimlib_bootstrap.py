@@ -10512,14 +10512,23 @@ class EnableDisableButton(ControlMobject):
         self.rect_kwargs = rect_config
         self.enable_color = enable_color
         self.disable_color = disable_color
+        enable_rgb = tuple(_color_to_rgb(enable_color))
+        disable_rgb = tuple(_color_to_rgb(disable_color))
         self._enable_disable_native_config = (
             width,
             height,
             fill_opacity,
-            tuple(_color_to_rgb(enable_color)),
-            tuple(_color_to_rgb(disable_color)),
+            enable_rgb,
+            disable_rgb,
         )
-        (box,) = self._native_enable_disable_parts(value, colored=False)
+        custom_colors = (
+            enable_rgb != tuple(_color_to_rgb(_GREEN))
+            or disable_rgb != tuple(_color_to_rgb(_RED))
+        )
+        (box,) = self._native_enable_disable_parts(
+            value,
+            colored=custom_colors,
+        )
         super().__init__(value, box)
         self.box = box
 

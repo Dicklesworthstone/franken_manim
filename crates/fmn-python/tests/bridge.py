@@ -4322,6 +4322,25 @@ assert translucent_toggle.box is toggle_box
 assert np.isclose(translucent_toggle.box.get_fill_opacity(), 0.4)
 assert translucent_toggle.box.get_fill_color() == manimlib.RED
 
+custom_toggle = interactive.EnableDisableButton(
+    True,
+    enable_color=manimlib.BLUE,
+    disable_color=manimlib.YELLOW,
+)
+assert bool(custom_toggle.get_value()) is True
+assert custom_toggle.box.get_fill_color() == manimlib.BLUE
+custom_toggle_box = custom_toggle.box
+custom_toggle.toggle_value()
+assert bool(custom_toggle.get_value()) is False
+assert custom_toggle.box is custom_toggle_box
+assert custom_toggle.box.get_fill_color() == manimlib.YELLOW
+try:
+    interactive.EnableDisableButton(True, enable_color=object())
+except TypeError as error:
+    assert str(error)
+else:
+    raise AssertionError("EnableDisableButton accepted a non-color object")
+
 # LinearNumberSlider is a distinct interactive control from number_line.Slider.
 # Atlas owns its bar/handle/axis geometry; the portal keeps the tracker root,
 # Reference construction-time midpoint quirk, kwargs, and named drag gap.
