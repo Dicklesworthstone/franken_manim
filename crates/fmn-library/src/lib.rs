@@ -167,9 +167,9 @@ pub use vmobject::{DashError, MAX_DASHES, VMobject};
 // construct them through their declared fmn-library edge, mirroring
 // fmn-scene's studio_bridge facade pattern (plan §19).
 pub use fmn_geom::{
-    AnchorMode, MAX_SUBDIVIDED_CURVES, QuadPath,
+    AnchorMode, BooleanOperation, BooleanOptions, MAX_SUBDIVIDED_CURVES, QuadPath,
     bezier::integer_interpolate,
-    rotation_matrix,
+    path_boolean, rotation_matrix,
     space_ops::{angle_between_vectors, angle_of_vector, line_intersects_path},
 };
 pub use fmn_tex::TexEngine;

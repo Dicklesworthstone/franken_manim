@@ -2959,6 +2959,51 @@ impl BridgeMobject {
         install_native_tree(slf, factory, fmn_library::Polygon::new(vertices).build())
     }
 
+    /// `Union`/`Difference`/`Intersection`/`Exclusion` over Chisel path booleans.
+    fn _build_boolean<'py>(
+        slf: &Bound<'py, Self>,
+        factory: &Bound<'py, PyAny>,
+        operation: &str,
+        operands: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let operation = match operation {
+            "union" => fmn_library::BooleanOperation::Union,
+            "intersection" => fmn_library::BooleanOperation::Intersection,
+            "difference" => fmn_library::BooleanOperation::Difference,
+            "exclusion" => fmn_library::BooleanOperation::Exclusion,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown boolean operation `{other}`"
+                )));
+            }
+        };
+        if operands.len() < 2 {
+            return Err(PyValueError::new_err(
+                "boolean constructors need at least two VMobject operands",
+            ));
+        }
+        let mut paths = Vec::with_capacity(operands.len());
+        for operand in &operands {
+            let proxy = operand.cast::<BridgeMobject>()?;
+            let points = with_stage(proxy, |stage, mob| {
+                stage.get_points(mob).unwrap_or_default()
+            })?;
+            paths.push(fmn_library::QuadPath::from_points(points).map_err(native_error)?);
+        }
+        let mut acc = paths.remove(0);
+        for clip in paths {
+            let result = fmn_library::path_boolean(
+                &acc,
+                &clip,
+                operation,
+                fmn_library::BooleanOptions::default(),
+            )
+            .map_err(native_error)?;
+            acc = result.path;
+        }
+        install_native_tree(slf, factory, fmn_library::VMobject::from_path(&acc))
+    }
+
     /// `Polyline(*vertices)` over Atlas's open shared-anchor polygon builder.
     fn _build_polyline<'py>(
         slf: &Bound<'py, Self>,

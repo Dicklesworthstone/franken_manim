@@ -6587,6 +6587,41 @@ assert list(inspect.signature(geometry.ArrowTip).parameters) == [
     "kwargs",
 ]
 
+boolean_ops = importlib.import_module("manimlib.mobject.boolean_ops")
+assert boolean_ops.Union.__bases__ == (VMobject,)
+assert boolean_ops.Difference.__bases__ == (VMobject,)
+assert boolean_ops.Intersection.__bases__ == (VMobject,)
+assert boolean_ops.Exclusion.__bases__ == (VMobject,)
+assert str(inspect.signature(boolean_ops.Union)) == "(*vmobjects, **kwargs)"
+assert str(inspect.signature(boolean_ops.Difference)) == (
+    "(subject, clip, **kwargs)"
+)
+union_left = manimlib.Square().shift(manimlib.LEFT * 0.5)
+union_right = manimlib.Square().shift(manimlib.RIGHT * 0.5)
+native_union = boolean_ops.Union(union_left, union_right)
+assert native_union.get_num_points() > 0
+assert native_union.get_width() > union_left.get_width()
+native_difference = boolean_ops.Difference(union_left, union_right)
+assert native_difference.get_num_points() > 0
+native_intersection = boolean_ops.Intersection(union_left, union_right)
+assert native_intersection.get_num_points() > 0
+native_exclusion = boolean_ops.Exclusion(union_left, union_right)
+assert native_exclusion.get_num_points() > 0
+boolean_scene = Scene().add(native_union)
+assert native_union._is_bound()
+try:
+    boolean_ops.Union(manimlib.Square())
+except ValueError as error:
+    assert str(error) == "At least 2 mobjects needed for Union"
+else:
+    raise AssertionError("Union accepted a single operand")
+try:
+    boolean_ops.Union(manimlib.Square(), manimlib.DotCloud())
+except TypeError as error:
+    assert str(error) == "Union operands must be VMobjects"
+else:
+    raise AssertionError("Union accepted a non-VMobject operand")
+
 polygon = geometry.Polygon(
     [0.0, 0.0, 0.0],
     [2.0, 0.0, 0.0],

@@ -3413,6 +3413,47 @@ class Polyline(VMobject):
         _apply_vmobject_style_kwargs(self, kwargs)
 
 
+def _boolean_from_operands(self, operation, operands, kwargs):
+    if len(operands) < 2:
+        raise ValueError("At least 2 mobjects needed for " + type(self).__name__)
+    if any(not isinstance(mobject, VMobject) for mobject in operands):
+        raise TypeError(type(self).__name__ + " operands must be VMobjects")
+    _preflight_vmobject_style_kwargs(kwargs)
+    _install_live_state(self)
+    specs = self._build_boolean(_native_shell_factory, operation, list(operands))
+    _hang_native_children(self, specs)
+    self.match_style(operands[0], recurse=False)
+    _apply_vmobject_style_kwargs(self, kwargs)
+
+
+class Union(VMobject):
+    """Filled-set union over Chisel's certified path-boolean kernel."""
+
+    def __init__(self, *vmobjects, **kwargs):
+        _boolean_from_operands(self, "union", vmobjects, kwargs)
+
+
+class Difference(VMobject):
+    """Filled-set difference over Chisel's certified path-boolean kernel."""
+
+    def __init__(self, subject, clip, **kwargs):
+        _boolean_from_operands(self, "difference", (subject, clip), kwargs)
+
+
+class Intersection(VMobject):
+    """Filled-set intersection over Chisel's certified path-boolean kernel."""
+
+    def __init__(self, *vmobjects, **kwargs):
+        _boolean_from_operands(self, "intersection", vmobjects, kwargs)
+
+
+class Exclusion(VMobject):
+    """Filled-set exclusive-or over Chisel's certified path-boolean kernel."""
+
+    def __init__(self, *vmobjects, **kwargs):
+        _boolean_from_operands(self, "exclusion", vmobjects, kwargs)
+
+
 class RegularPolygon(Polygon):
     """The bounded native regular-polygon compass construction."""
 
@@ -14390,6 +14431,10 @@ def _install_schema_surface():
         ("manimlib.mobject.functions", "FunctionGraph"): FunctionGraph,
         ("manimlib.mobject.functions", "ImplicitFunction"): ImplicitFunction,
         ("manimlib.mobject.geometry", "CubicBezier"): CubicBezier,
+        ("manimlib.mobject.boolean_ops", "Union"): Union,
+        ("manimlib.mobject.boolean_ops", "Difference"): Difference,
+        ("manimlib.mobject.boolean_ops", "Intersection"): Intersection,
+        ("manimlib.mobject.boolean_ops", "Exclusion"): Exclusion,
         ("manimlib.mobject.geometry", "Polygon"): Polygon,
         ("manimlib.mobject.geometry", "Polyline"): Polyline,
         ("manimlib.mobject.geometry", "RegularPolygon"): RegularPolygon,
