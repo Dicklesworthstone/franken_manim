@@ -3182,6 +3182,33 @@ assert tuple(inspect.signature(indication.WiggleOutThenIn).parameters) == (
     "kwargs",
 )
 
+passing_flash_signature = inspect.signature(indication.ShowPassingFlash)
+assert tuple(passing_flash_signature.parameters) == (
+    "mobject",
+    "time_width",
+    "remover",
+    "kwargs",
+)
+plain_flash_scene = Scene()
+plain_flash_mobject = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
+plain_flash = indication.ShowPassingFlash(
+    plain_flash_mobject,
+    time_width=0.4,
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(plain_flash.get_bounds(0.5), (0.3, 0.7))
+plain_flash_samples = []
+plain_flash_mobject.add_updater(
+    lambda mob: plain_flash_samples.append(mob.get_points().copy()), call=False
+)
+plain_flash_scene.play(plain_flash)
+assert any(
+    not np.allclose(points, plain_flash_samples[-1])
+    for points in plain_flash_samples[:-1]
+)
+assert plain_flash_mobject not in plain_flash_scene.get_mobjects()
+
 indicate_mobject = geometry.Rectangle(width=2.0, height=1.0).set_color(
     manimlib.BLUE
 )
