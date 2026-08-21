@@ -14614,6 +14614,10 @@ class SceneFileWriter:
         )
 
 
+class LatexError(Exception):
+    """Reference-compatible native-typesetting failure signal."""
+
+
 def _refuse_shader_wrapper():
     raise _CapabilityError(
         "the Reference OpenGL ShaderWrapper is excluded; "
@@ -15302,6 +15306,7 @@ def _install_schema_surface():
         ("manimlib.module_loader", "ModuleLoader"): ModuleLoader,
         ("manimlib.window", "Window"): Window,
         ("manimlib.scene.scene_file_writer", "SceneFileWriter"): SceneFileWriter,
+        ("manimlib.utils.tex_file_writing", "LatexError"): LatexError,
         ("manimlib.shader_wrapper", "ShaderWrapper"): ShaderWrapper,
         ("manimlib.shader_wrapper", "VShaderWrapper"): VShaderWrapper,
         ("manimlib.animation.animation", "Animation"): Animation,

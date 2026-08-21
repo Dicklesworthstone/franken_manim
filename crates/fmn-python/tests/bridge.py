@@ -10977,6 +10977,21 @@ except bridge_errors.CapabilityError as error:
     assert str(error) == _shader_error
 else:
     raise AssertionError("ShaderWrapper.__init__ did not refuse a context")
+
+tex_file_writing_mod = importlib.import_module(
+    "manimlib.utils.tex_file_writing"
+)
+assert tex_file_writing_mod.LatexError.__bases__ == (Exception,)
+assert manimlib.LatexError is tex_file_writing_mod.LatexError
+try:
+    raise tex_file_writing_mod.LatexError("native typesetting failed")
+except tex_file_writing_mod.LatexError as error:
+    assert isinstance(error, Exception)
+    assert error.args == ("native typesetting failed",)
+    assert str(error) == "native typesetting failed"
+else:
+    raise AssertionError("LatexError did not preserve Exception raise semantics")
+
 assert not any(
     name == root or name.startswith(root + ".")
     for name in sys.modules
