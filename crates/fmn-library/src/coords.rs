@@ -1234,9 +1234,10 @@ impl Axes {
     // --- labels ------------------------------------------------------------
 
     /// `add_coordinate_labels`: numbers on both axes (`excluding=[0]` by
-    /// default; values default to each axis's tick range). The labels
-    /// land on the axes' [`NumberLine::numbers`] and the family is
-    /// re-synced.
+    /// default; values default to each axis's tick range). `font_size`
+    /// overrides the [`DecimalNumber`] size used by both native number
+    /// shelves. The labels land on the axes' [`NumberLine::numbers`] and
+    /// the family is re-synced.
     ///
     /// # Errors
     /// [`CoordsError`] from bounded default-range sampling or typesetting.
@@ -1246,8 +1247,13 @@ impl Axes {
         x_values: Option<&[f64]>,
         y_values: Option<&[f64]>,
         excluding: Option<&[f64]>,
+        font_size: Option<f64>,
     ) -> Result<(), CoordsError> {
         let excluding = excluding.unwrap_or(&[0.0]);
+        if let Some(font_size) = font_size {
+            self.x_axis.numbers_font_size = font_size;
+            self.y_axis.numbers_font_size = font_size;
+        }
         self.x_axis.add_numbers(book, x_values, Some(excluding))?;
         self.y_axis.add_numbers(book, y_values, Some(excluding))?;
         self.vmob = v_group([self.x_axis.vmob().clone(), self.y_axis.vmob().clone()]);
@@ -2236,7 +2242,7 @@ mod tests {
             .y_range([-1.0, 1.0, 1.0])
             .build(&book())
             .expect("build axes");
-        axes.add_coordinate_labels(&book(), None, None, None)
+        axes.add_coordinate_labels(&book(), None, None, None, None)
             .expect("typeset labels");
         let xs: Vec<&str> = axes
             .x_axis()

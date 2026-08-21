@@ -5604,6 +5604,7 @@ impl BridgeMobject {
                     x_values.as_deref(),
                     y_values.as_deref(),
                     Some(&excluding),
+                    font_size,
                 )
                 .map_err(native_error)
         })?;
