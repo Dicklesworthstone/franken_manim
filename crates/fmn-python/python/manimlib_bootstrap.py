@@ -11567,6 +11567,11 @@ class Scene(_SceneCore):
     def get_mobject_copies(self):
         return [mobject.copy() for mobject in self.mobjects]
 
+    def get_group(self, *mobjects):
+        if all(isinstance(mobject, VMobject) for mobject in mobjects):
+            return VGroup(*mobjects)
+        return Group(*mobjects)
+
     def run(self):
         return self._run_lifecycle()
 

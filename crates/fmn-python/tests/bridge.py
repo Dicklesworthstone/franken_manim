@@ -1130,6 +1130,25 @@ assert membership_scene.remove_all_except() is membership_scene
 assert membership_scene.get_mobjects() == []
 
 
+# Scene.get_group preserves the Reference's exact concrete group choice over
+# the native Mobject and VMobject family surfaces.
+assert str(inspect.signature(Scene.get_group)) == "(self, *mobjects)"
+group_scene = Scene()
+group_circle = manimlib.Circle(radius=0.2)
+group_square = manimlib.Square(side_length=0.4)
+vector_group = group_scene.get_group(group_circle, group_square)
+assert type(vector_group) is manimlib.VGroup
+assert list(vector_group.submobjects) == [group_circle, group_square]
+
+group_vmobject = manimlib.Circle(radius=0.3)
+group_mobject = Mobject()
+mixed_group = group_scene.get_group(group_vmobject, group_mobject)
+assert type(mixed_group) is manimlib.Group
+assert list(mixed_group.submobjects) == [group_vmobject, group_mobject]
+assert type(group_scene.get_group()) is manimlib.VGroup
+assert group_scene.get_mobjects() == []
+
+
 # Python-owned Scene collection helpers filter arbitrary iterables before
 # routing through native add, and copy each native top-level placement.
 class AmongMobject(Mobject):
