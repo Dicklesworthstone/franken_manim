@@ -3028,12 +3028,14 @@ impl BridgeMobject {
     /// `Checkbox(value)` over Atlas's native bool-control composition.
     /// The constructing Python proxy remains a live `ValueTracker`; Atlas
     /// supplies its two visual children in Reference order: box, then mark.
+    #[allow(clippy::too_many_arguments)]
     fn _build_checkbox<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
         value: bool,
         box_width: f64,
         box_height: f64,
+        fill_opacity: f64,
         checkmark_color: [f64; 3],
         cross_color: [f64; 3],
     ) -> PyResult<Bound<'py, PyList>> {
@@ -3041,6 +3043,7 @@ impl BridgeMobject {
             fmn_library::Checkbox::new(value)
                 .box_width(box_width)
                 .box_height(box_height)
+                .box_fill_opacity(fill_opacity)
                 .checkmark_color(fmn_core::color::Srgb {
                     r: checkmark_color[0],
                     g: checkmark_color[1],
@@ -3075,12 +3078,14 @@ impl BridgeMobject {
         colored: bool,
         width: f64,
         height: f64,
+        fill_opacity: f64,
         enable_color: [f64; 3],
         disable_color: [f64; 3],
     ) -> PyResult<Bound<'py, PyList>> {
         let mut control = fmn_library::EnableDisableButton::new(value)
             .width(width)
             .height(height)
+            .fill_opacity(fill_opacity)
             .enable_color(fmn_core::color::Srgb {
                 r: enable_color[0],
                 g: enable_color[1],

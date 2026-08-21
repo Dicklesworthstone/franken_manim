@@ -391,6 +391,7 @@ pub struct EnableDisableButton {
     value: bool,
     width: f64,
     height: f64,
+    fill_opacity: f64,
     enable_color: Srgb,
     disable_color: Srgb,
     /// Whether `set_value` has run at least once — see the module docs for
@@ -407,6 +408,7 @@ impl EnableDisableButton {
             value,
             width: 0.5,
             height: 0.5,
+            fill_opacity: 1.0,
             enable_color: GREEN,
             disable_color: RED,
             colored: false,
@@ -428,6 +430,14 @@ impl EnableDisableButton {
     #[must_use]
     pub fn height(mut self, height: f64) -> Self {
         self.height = height;
+        self.rebuild_rect();
+        self
+    }
+
+    /// Box fill opacity (`rect_kwargs["fill_opacity"]`).
+    #[must_use]
+    pub fn fill_opacity(mut self, opacity: f64) -> Self {
+        self.fill_opacity = opacity;
         self.rebuild_rect();
         self
     }
@@ -496,7 +506,7 @@ impl EnableDisableButton {
         self.rect = Rectangle::new()
             .width(self.width)
             .height(self.height)
-            .style(Style::default().fill(fill, 1.0))
+            .style(Style::default().fill(fill, self.fill_opacity))
             .build()
             .expect("an unrounded control rectangle cannot request arc components");
     }
@@ -539,6 +549,7 @@ pub struct Checkbox {
     value: bool,
     box_width: f64,
     box_height: f64,
+    fill_opacity: f64,
     checkmark_color: Srgb,
     cross_color: Srgb,
     content_scale: f64,
@@ -555,6 +566,7 @@ impl Checkbox {
             value,
             box_width: 0.5,
             box_height: 0.5,
+            fill_opacity: 0.0,
             checkmark_color: GREEN,
             cross_color: RED,
             content_scale: 0.5,
@@ -581,6 +593,14 @@ impl Checkbox {
         self.box_height = height;
         self.rect = self.build_rect();
         self.content = self.build_content();
+        self
+    }
+
+    /// Box fill opacity (`rect_kwargs["fill_opacity"]`).
+    #[must_use]
+    pub fn box_fill_opacity(mut self, opacity: f64) -> Self {
+        self.fill_opacity = opacity;
+        self.rect = self.build_rect();
         self
     }
 
@@ -641,7 +661,7 @@ impl Checkbox {
         Rectangle::new()
             .width(self.box_width)
             .height(self.box_height)
-            .style(Style::default().fill_opacity(0.0))
+            .style(Style::default().fill_opacity(self.fill_opacity))
             .build()
             .expect("an unrounded checkbox cannot request arc components")
     }
@@ -1950,6 +1970,15 @@ mod tests {
     }
 
     #[test]
+    fn enable_disable_button_custom_fill_opacity() {
+        let mut button = EnableDisableButton::new(true).fill_opacity(0.4);
+        assert_eq!(button.rect().style().fill_opacity, 0.4);
+        button.set_value(false);
+        assert_eq!(button.rect().style().fill_opacity, 0.4);
+        assert_eq!(button.rect().style().fill_color, RED);
+    }
+
+    #[test]
     fn enable_disable_button_scalar_encoding() {
         let button = EnableDisableButton::new(true);
         assert_eq!(button.scalar_value(), 1.0);
@@ -1972,6 +2001,9 @@ mod tests {
         assert!((rect.length_over_dim(0) - 0.5).abs() < 1e-9);
         assert!((rect.length_over_dim(1) - 0.5).abs() < 1e-9);
         assert_eq!(rect.style().fill_opacity, 0.0);
+
+        let filled = Checkbox::new(true).box_fill_opacity(0.35);
+        assert_eq!(filled.rect().style().fill_opacity, 0.35);
 
         // Checked: GREEN checkmark, half the box's size, centred on it.
         assert_eq!(checkbox.content().style().fill_color, GREEN);

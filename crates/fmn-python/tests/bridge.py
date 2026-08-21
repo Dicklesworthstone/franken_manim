@@ -2404,6 +2404,16 @@ else:
     raise AssertionError("Checkbox silently discarded an unknown option")
 assert not hasattr(failed_checkbox, "submobjects")
 
+opaque_checkbox = interactive.Checkbox(
+    True,
+    rect_kwargs=dict(width=0.5, height=0.5, fill_opacity=0.35),
+)
+assert np.isclose(opaque_checkbox.box.get_fill_opacity(), 0.35)
+opaque_box = opaque_checkbox.box
+opaque_checkbox.toggle_value()
+assert opaque_checkbox.box is opaque_box
+assert np.isclose(opaque_checkbox.box.get_fill_opacity(), 0.35)
+
 # EnableDisableButton is a one-box native control on the same real tracker
 # base. Construction preserves the Reference's default-white quirk; the first
 # state change routes through Atlas and colors the stable box proxy.
@@ -2462,6 +2472,17 @@ else:
         "EnableDisableButton silently discarded an unknown option"
     )
 assert not hasattr(failed_enable_disable, "submobjects")
+
+translucent_toggle = interactive.EnableDisableButton(
+    True,
+    rect_kwargs=dict(width=0.5, height=0.5, fill_opacity=0.4),
+)
+assert np.isclose(translucent_toggle.box.get_fill_opacity(), 0.4)
+toggle_box = translucent_toggle.box
+translucent_toggle.toggle_value()
+assert translucent_toggle.box is toggle_box
+assert np.isclose(translucent_toggle.box.get_fill_opacity(), 0.4)
+assert translucent_toggle.box.get_fill_color() == manimlib.RED
 
 # LinearNumberSlider is a distinct interactive control from number_line.Slider.
 # Atlas owns its bar/handle/axis geometry; the portal keeps the tracker root,

@@ -8910,10 +8910,6 @@ class Checkbox(ControlMobject):
         box_width = float(rect_config.get("width", 0.5))
         box_height = float(rect_config.get("height", 0.5))
         fill_opacity = float(rect_config.get("fill_opacity", 0.0))
-        if fill_opacity != 0.0:
-            raise NotImplementedError(
-                "Checkbox rect_kwargs.fill_opacity is not routed to the native builder"
-            )
 
         check_config = dict(checkmark_kwargs)
         check_unknown = sorted(
@@ -8948,6 +8944,7 @@ class Checkbox(ControlMobject):
         self._checkbox_native_config = (
             box_width,
             box_height,
+            fill_opacity,
             tuple(_color_to_rgb(check_config.get("stroke_color", _GREEN))),
             tuple(_color_to_rgb(cross_config.get("stroke_color", _RED))),
         )
@@ -9016,11 +9013,6 @@ class EnableDisableButton(ControlMobject):
         width = float(rect_config.get("width", 0.5))
         height = float(rect_config.get("height", 0.5))
         fill_opacity = float(rect_config.get("fill_opacity", 1.0))
-        if fill_opacity != 1.0:
-            raise NotImplementedError(
-                "EnableDisableButton rect_kwargs.fill_opacity is not routed "
-                "to the native builder"
-            )
 
         self.value_type = _np.dtype(value_type).type
         self.rect_kwargs = rect_config
@@ -9029,6 +9021,7 @@ class EnableDisableButton(ControlMobject):
         self._enable_disable_native_config = (
             width,
             height,
+            fill_opacity,
             tuple(_color_to_rgb(enable_color)),
             tuple(_color_to_rgb(disable_color)),
         )
