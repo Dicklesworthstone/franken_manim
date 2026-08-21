@@ -26,9 +26,9 @@ use fmn_anim::{
     AnimError, Animation, AnimationBoundary, FramePacket, ImpureEffect, OpenSegment, OpenWait,
     Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind,
     SegmentReport, abort_open_play, abort_open_wait, complete_play_frame, complete_wait_frame,
-    finish_open_play, finish_open_wait, open_play_with_mode, open_wait, play_segment_with_boundary,
-    prepare_play_animation, prepare_play_frame, prepare_wait_frame, validate_play,
-    wait_segment_with_boundary,
+    finish_open_play, finish_open_play_animations, finish_open_wait, open_play_with_mode,
+    open_wait, play_segment_with_boundary, prepare_play_animation, prepare_play_frame,
+    prepare_wait_frame, validate_play, wait_segment_with_boundary,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_hash::SerialError;
@@ -1128,6 +1128,24 @@ impl Scene {
             &mut emit,
         )?;
         Ok(())
+    }
+
+    /// Finish animation lifecycles while retaining the stepped-play handle.
+    ///
+    /// A host-language portal calls this after the last frame and before its
+    /// zero-`dt` updater dispatch.  In particular, this resumes mobjects whose
+    /// animation requested updater suspension.  [`Self::finish_stepped_play`]
+    /// then runs the native updater half and consumes the play normally.
+    pub fn finish_stepped_play_animations(
+        &mut self,
+        play: &mut SteppedPlay,
+    ) -> Result<Vec<Mob>, SceneError> {
+        let mut resumed = Vec::new();
+        for animation in &play.animations {
+            animation.collect_resumed_updater_mobjects(&mut resumed);
+        }
+        finish_open_play_animations(&mut self.stage, &mut play.animations, &mut play.open)?;
+        Ok(resumed)
     }
 
     /// Finish a stepped play through the ordinary animation cleanup,

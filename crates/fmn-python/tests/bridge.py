@@ -2812,6 +2812,172 @@ callback_scene.play(callback_animation)
 assert np.allclose(callback_alphas, [0.0, 1.0, 1.0])
 assert np.allclose(callback_mover.get_x(), 1.0)
 
+# The rotation family is an exact public Animation -> Rotating -> Rotate
+# lineage over Choreo's absolute-pose mechanism.  Direct lifecycle calls
+# preserve the pinned Reference surface, while Scene.play stays entirely on
+# the native path and therefore never accumulates an earlier frame's turn.
+rotation = importlib.import_module("manimlib.animation.rotation")
+assert rotation.Rotating.__bases__ == (manimlib.Animation,)
+assert rotation.Rotate.__bases__ == (rotation.Rotating,)
+rotating_signature = inspect.signature(rotation.Rotating)
+rotate_signature = inspect.signature(rotation.Rotate)
+assert tuple(rotating_signature.parameters) == (
+    "mobject",
+    "angle",
+    "axis",
+    "about_point",
+    "about_edge",
+    "run_time",
+    "rate_func",
+    "suspend_mobject_updating",
+    "kwargs",
+)
+assert tuple(rotate_signature.parameters) == (
+    "mobject",
+    "angle",
+    "axis",
+    "run_time",
+    "rate_func",
+    "about_edge",
+    "kwargs",
+)
+assert rotating_signature.parameters["rate_func"].default is manimlib.linear
+assert rotate_signature.parameters["rate_func"].default is manimlib.smooth
+assert np.array_equal(
+    rotate_signature.parameters["about_edge"].default,
+    manimlib.ORIGIN,
+)
+assert str(inspect.signature(rotation.Rotating.interpolate_mobject)) == (
+    "(self, alpha)"
+)
+
+
+def expected_z_rotation(points, angle):
+    matrix = np.array(
+        [
+            [math.cos(angle), -math.sin(angle), 0.0],
+            [math.sin(angle), math.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    return np.asarray(points) @ matrix.T
+
+
+standalone_rotating_mobject = geometry.Line(
+    manimlib.RIGHT,
+    2.0 * manimlib.RIGHT,
+)
+standalone_rotation_updates = []
+standalone_rotating_mobject.add_updater(
+    lambda _mob, dt: standalone_rotation_updates.append(dt),
+    call=False,
+)
+standalone_start_points = standalone_rotating_mobject.get_points().copy()
+standalone_rotation = rotation.Rotating(
+    standalone_rotating_mobject,
+    angle=math.pi,
+    about_point=manimlib.ORIGIN,
+    about_edge=manimlib.RIGHT,
+    run_time=2.0,
+    rate_func=manimlib.linear,
+    time_span=(0.5, 1.5),
+    suspend_mobject_updating=True,
+)
+standalone_rotation.begin()
+assert standalone_rotation.starting_mobject is not standalone_rotating_mobject
+assert standalone_rotating_mobject._is_updating_suspended()
+standalone_rotation.interpolate(0.5)
+assert np.allclose(
+    standalone_rotating_mobject.get_points(),
+    expected_z_rotation(standalone_start_points, math.pi / 2.0),
+)
+standalone_rotation.interpolate(0.75)
+assert np.allclose(
+    standalone_rotating_mobject.get_points(),
+    expected_z_rotation(standalone_start_points, math.pi),
+)
+standalone_rotation.finish()
+assert not standalone_rotating_mobject._is_updating_suspended()
+assert standalone_rotation_updates == [0.0]
+assert np.allclose(
+    standalone_rotating_mobject.get_points(),
+    expected_z_rotation(standalone_start_points, math.pi),
+)
+
+native_rotation_scene = Scene()
+native_rotating_mobject = geometry.Line(
+    manimlib.RIGHT,
+    2.0 * manimlib.RIGHT,
+)
+native_rotation_samples = []
+native_rotating_mobject.add_updater(
+    lambda mob, dt: native_rotation_samples.append((dt, mob.get_center().copy())),
+    call=False,
+)
+native_rotation_scene.play(
+    rotation.Rotating(
+        native_rotating_mobject,
+        angle=math.pi,
+        about_point=manimlib.ORIGIN,
+        about_edge=manimlib.RIGHT,
+        run_time=2.0 / 30.0,
+        rate_func=manimlib.linear,
+    )
+)
+assert len(native_rotation_samples) == 3
+assert np.allclose(native_rotation_samples[0][1], [0.0, 1.5, 0.0])
+assert np.allclose(native_rotation_samples[1][1], [-1.5, 0.0, 0.0])
+assert np.allclose(native_rotation_samples[2][1], [-1.5, 0.0, 0.0])
+
+suspended_rotation_scene = Scene()
+suspended_rotating_mobject = geometry.Line(
+    manimlib.RIGHT,
+    2.0 * manimlib.RIGHT,
+)
+suspended_rotation_updates = []
+suspended_rotating_mobject.add_updater(
+    lambda mob, dt: suspended_rotation_updates.append((dt, mob.get_center().copy())),
+    call=False,
+)
+suspended_rotation_scene.play(
+    rotation.Rotating(
+        suspended_rotating_mobject,
+        angle=math.pi / 2.0,
+        about_point=manimlib.ORIGIN,
+        run_time=1.0 / 30.0,
+        rate_func=manimlib.linear,
+        suspend_mobject_updating=True,
+    )
+)
+assert len(suspended_rotation_updates) == 2, suspended_rotation_updates
+assert [sample[0] for sample in suspended_rotation_updates] == [0.0, 0.0]
+assert np.allclose(
+    [sample[1] for sample in suspended_rotation_updates],
+    [[0.0, 1.5, 0.0], [0.0, 1.5, 0.0]],
+)
+
+rotation_composition_scene = Scene()
+rotate_about_center = geometry.Line(manimlib.LEFT, manimlib.RIGHT).shift(
+    2.0 * manimlib.LEFT
+)
+rotate_about_origin = geometry.Line(manimlib.RIGHT, 2.0 * manimlib.RIGHT)
+rotation_composition_scene.play(
+    manimlib.AnimationGroup(
+        rotation.Rotate(rotate_about_center, angle=math.pi / 2.0),
+        rotation.Rotating(
+            rotate_about_origin,
+            angle=math.pi / 2.0,
+            about_point=manimlib.ORIGIN,
+            run_time=1.0 / 30.0,
+            rate_func=manimlib.linear,
+        ),
+    ),
+    run_time=1.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(rotate_about_center.get_center(), 2.0 * manimlib.LEFT)
+assert np.allclose(rotate_about_origin.get_center(), [0.0, 1.5, 0.0])
+
 # The growing family is one authored Transform lineage over Choreo's native
 # start-prep mechanism.  Anchors are frozen by the Python constructors like
 # the pinned Reference, while the target is copied from the current source at

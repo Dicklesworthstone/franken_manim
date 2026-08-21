@@ -574,6 +574,13 @@ impl AnimState {
     pub fn families(&self) -> &[Vec<Mob>] {
         &self.families
     }
+
+    /// Whether `begin` suspended an updater-active mobject that `finish`
+    /// must resume.
+    #[must_use]
+    pub fn mobject_was_updating(&self) -> bool {
+        self.mobject_was_updating
+    }
 }
 
 // -------------------------------------------------------------- signature
@@ -607,6 +614,19 @@ pub trait Animation {
 
     /// Mutable runtime state.
     fn state_mut(&mut self) -> &mut AnimState;
+
+    /// Append mobjects whose Python/host updater layer must receive the
+    /// `resume_updating(call_updater=True)` zero-`dt` callback after this
+    /// animation's lifecycle finishes.
+    fn collect_resumed_updater_mobjects(&self, out: &mut Vec<Mob>) {
+        let state = self.state();
+        if state.config.suspend_mobject_updating && state.mobject_was_updating() {
+            let mobject = state.mobject();
+            if !out.contains(&mobject) {
+                out.push(mobject);
+            }
+        }
+    }
 
     /// Subclass extension slot, run at the top of [`Animation::begin`]
     /// *before* the canonical sequence — where the Transform family will

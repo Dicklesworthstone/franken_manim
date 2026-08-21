@@ -68,6 +68,15 @@ _FRAME_HEIGHT = 8.0
 # Scene.play maps rate_func callables into the engine's named catalog.
 _RATE_FUNC_NAMES = {}
 
+
+def _linear_rate(t):
+    return t
+
+
+def _smooth_rate(t):
+    s = 1 - t
+    return (t**3) * (10 * s * s + 5 * s * t + t * t)
+
 # The Reference leaks its OpenGL/window implementation modules into ordinary
 # Python namespaces.  Those names remain part of the compatibility surface,
 # but importing their host packages would initialize a second renderer (and
@@ -8148,6 +8157,9 @@ class Scene(_SceneCore):
                 )
             if isinstance(proto, Animation) and getattr(proto, "_native_kind", None):
                 params = dict(proto._native_params())
+                params["suspend_mobject_updating"] = bool(
+                    proto.suspend_mobject_updating
+                )
                 if proto.time_span is not None:
                     params["time_span"] = proto.time_span
                 if isinstance(proto, AnimationGroup):
@@ -8431,6 +8443,8 @@ class _NativeAnimation(Animation):
         rate_func=None,
         lag_ratio=None,
         time_span=None,
+        final_alpha_value=1.0,
+        suspend_mobject_updating=False,
         **kwargs,
     ):
         _refuse_unrouted(
@@ -8443,6 +8457,8 @@ class _NativeAnimation(Animation):
         self.time_span = (
             None if time_span is None else (float(time_span[0]), float(time_span[1]))
         )
+        self.final_alpha_value = float(final_alpha_value)
+        self.suspend_mobject_updating = bool(suspend_mobject_updating)
 
     def _native_params(self):
         return {}
@@ -8573,38 +8589,7 @@ class VFadeOut(_NativeAnimation):
         super().__init__(vmobject, **kwargs)
 
 
-class Rotate(_NativeAnimation):
-    _native_kind = "rotate"
-
-    def __init__(
-        self,
-        mobject,
-        angle=_math.pi,
-        axis=_OUT,
-        run_time=1,
-        rate_func=None,
-        about_edge=_ORIGIN,
-        **kwargs,
-    ):
-        about_point = kwargs.pop("about_point", None)
-        super().__init__(mobject, run_time=run_time, rate_func=rate_func, **kwargs)
-        self.angle = float(angle)
-        self.axis = _vec3(axis)
-        self.about_edge = _vec3(about_edge)
-        self.about_point = None if about_point is None else _vec3(about_point)
-
-    def _native_params(self):
-        params = {
-            "angle": self.angle,
-            "axis": self.axis,
-            "about_edge": self.about_edge,
-        }
-        if self.about_point is not None:
-            params["about_point"] = self.about_point
-        return params
-
-
-class Rotating(_NativeAnimation):
+class Rotating(Animation):
     _native_kind = "rotating"
 
     def __init__(
@@ -8615,19 +8600,48 @@ class Rotating(_NativeAnimation):
         about_point=None,
         about_edge=None,
         run_time=5.0,
-        rate_func=None,
+        rate_func=_linear_rate,
         suspend_mobject_updating=False,
         **kwargs,
     ):
-        _refuse_unrouted(
-            "Rotating()",
-            [("suspend_mobject_updating", bool(suspend_mobject_updating))],
+        super().__init__(
+            mobject,
+            run_time=run_time,
+            rate_func=rate_func,
+            suspend_mobject_updating=suspend_mobject_updating,
+            **kwargs,
         )
-        super().__init__(mobject, run_time=run_time, rate_func=rate_func, **kwargs)
         self.angle = float(angle)
         self.axis = _vec3(axis)
         self.about_point = None if about_point is None else _vec3(about_point)
         self.about_edge = None if about_edge is None else _vec3(about_edge)
+
+    def begin(self):
+        if self.time_span is not None:
+            self.run_time = max(float(self.time_span[1]), self.run_time)
+        self.starting_mobject = self.mobject.copy()
+        if self.suspend_mobject_updating:
+            self.mobject_was_updating = not self.mobject._is_updating_suspended()
+            self.mobject.suspend_updating()
+        self.interpolate(0.0)
+
+    def finish(self):
+        self.interpolate(self.final_alpha_value)
+        if self.suspend_mobject_updating and self.mobject_was_updating:
+            self.mobject.resume_updating()
+
+    def interpolate_mobject(self, alpha):
+        for current, starting in zip(
+            self.mobject.family_members_with_points(),
+            self.starting_mobject.family_members_with_points(),
+        ):
+            current.match_points(starting)
+        self.mobject.rotate(
+            self.rate_func(self.time_spanned_alpha(float(alpha))) * self.angle,
+            axis=self.axis,
+            about_point=self.about_point,
+            about_edge=self.about_edge,
+        )
 
     def _native_params(self):
         params = {"angle": self.angle, "axis": self.axis}
@@ -8636,6 +8650,33 @@ class Rotating(_NativeAnimation):
         if self.about_edge is not None:
             params["about_edge"] = self.about_edge
         return params
+
+    def _native_target(self):
+        return None
+
+
+class Rotate(Rotating):
+    _native_kind = "rotate"
+
+    def __init__(
+        self,
+        mobject,
+        angle=_math.pi,
+        axis=_OUT,
+        run_time=1,
+        rate_func=_smooth_rate,
+        about_edge=_ORIGIN,
+        **kwargs,
+    ):
+        super().__init__(
+            mobject,
+            angle=angle,
+            axis=axis,
+            run_time=run_time,
+            rate_func=rate_func,
+            about_edge=about_edge,
+            **kwargs,
+        )
 
 
 class Restore(_NativeAnimation):
@@ -9788,12 +9829,8 @@ def _install_rate_functions():
 
         return result
 
-    def linear(t):
-        return t
-
-    def smooth(t):
-        s = 1 - t
-        return (t**3) * (10 * s * s + 5 * s * t + t * t)
+    linear = _linear_rate
+    smooth = _smooth_rate
 
     def rush_into(t):
         return 2 * smooth(0.5 * t)

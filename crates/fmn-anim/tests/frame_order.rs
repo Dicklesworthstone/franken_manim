@@ -7,8 +7,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use fmn_anim::frame::{
-    FramePacket, abort_open_play, complete_play_frame, finish_open_play, open_play, play_segment,
-    prepare_play_frame, wait_segment, wait_segment_with_boundary,
+    FramePacket, abort_open_play, complete_play_frame, finish_open_play,
+    finish_open_play_animations, open_play, play_segment, prepare_play_frame, wait_segment,
+    wait_segment_with_boundary,
 };
 use fmn_anim::{
     AnimConfig, AnimError, AnimState, Animation, FrameSample, RationalFrameClock, RationalTime,
@@ -39,6 +40,62 @@ fn shift_animation(stage: &mut Stage, mob: Mob, dx: f64, run_time: f64) -> Box<d
         .and_then(|b| b.shift([dx, 0.0, 0.0]))
         .expect("chain records");
     prepare_animation(builder, stage).expect("prepares")
+}
+
+#[test]
+fn host_finish_boundary_resumes_before_host_zero_dt_and_updates_native_once() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).expect("rooted");
+    let ticks = Rc::new(RefCell::new(0usize));
+    let seen_ticks = Rc::clone(&ticks);
+    stage
+        .add_dt_updater(
+            mob,
+            move |_stage, current, dt| {
+                if current == mob {
+                    assert_eq!(dt, 0.0);
+                    *seen_ticks.borrow_mut() += 1;
+                }
+            },
+            false,
+        )
+        .expect("updater installs");
+
+    let mut animation = shift_animation(&mut stage, mob, 1.0, 1.0 / 30.0);
+    animation.state_mut().config.suspend_mobject_updating = true;
+    let mut animations = vec![animation];
+    let mut clock = RationalFrameClock::new(30).expect("fps");
+    let mut open = open_play(&mut stage, &clock, &mut animations).expect("opens");
+    while prepare_play_frame(&mut stage, &mut clock, &mut animations, &mut open)
+        .expect("prepares")
+        .is_some()
+    {
+        complete_play_frame(
+            &mut stage,
+            &clock,
+            &rng(),
+            &mut open,
+            false,
+            &mut |_, _| {},
+            &mut |_| {},
+        )
+        .expect("completes");
+    }
+    assert!(stage.is_updating_suspended(mob));
+    assert_eq!(*ticks.borrow(), 0);
+
+    finish_open_play_animations(&mut stage, &mut animations, &mut open)
+        .expect("animation lifecycles finish");
+    assert!(!stage.is_updating_suspended(mob));
+    assert_eq!(
+        *ticks.borrow(),
+        1,
+        "resume_updating performs its own zero-dt pass"
+    );
+
+    finish_open_play(&mut stage, &mut animations, open).expect("native epilogue finishes");
+    assert_eq!(*ticks.borrow(), 2);
 }
 
 fn rng() -> RngRoot {

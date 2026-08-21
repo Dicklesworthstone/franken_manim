@@ -302,6 +302,12 @@ macro_rules! composite_common {
             &mut self.state
         }
 
+        fn collect_resumed_updater_mobjects(&self, out: &mut Vec<Mob>) {
+            for animation in &self.animations {
+                animation.collect_resumed_updater_mobjects(out);
+            }
+        }
+
         /// A composition has no zipped family table: it interpolates
         /// *through its members*, each of which runs its own pipeline over
         /// its own families. This slot is unreachable for compositions and

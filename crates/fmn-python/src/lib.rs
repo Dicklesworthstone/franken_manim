@@ -5730,6 +5730,29 @@ fn run_python_updaters(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<u64> {
     Ok(u64::try_from(python_start.elapsed().as_nanos()).unwrap_or(u64::MAX))
 }
 
+/// Model `Mobject.resume_updating(call_updater=True)` for the host-language
+/// updater layer after Choreo has finished an animation lifecycle.  This is
+/// deliberately root-scoped; the subsequent scene-wide zero-`dt` pass is a
+/// separate Reference event.
+fn run_resumed_python_updaters(scene: &Bound<'_, PyScene>, roots: &[Mob]) -> PyResult<()> {
+    let targets = {
+        let scene_cell = scene.borrow();
+        let runtime = scene_cell.engine.borrow();
+        let mut targets = Vec::new();
+        for &root in roots {
+            collect_update_targets(runtime.stage(), root, &mut targets);
+        }
+        targets
+    };
+    let py = scene.py();
+    for target in targets {
+        if let Some(proxy) = live_proxy(py, scene, target) {
+            run_proxy_updaters(&proxy, 0.0)?;
+        }
+    }
+    Ok(())
+}
+
 fn has_python_updaters(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
     let py = scene.py();
     if camera_frame(scene)?.getattr("updaters")?.is_truthy()? {
@@ -6420,16 +6443,34 @@ impl PyScene {
                     callback.bind(slf.py()).call_method0("finish")?;
                 }
                 sink.finish_camera_before_updaters(slf.py())?;
-                // Reference Scene.finish_animations performs one final
-                // update_mobjects(0) after every Animation.finish().  The
-                // native half follows inside finish_stepped_play; run the
-                // portal half while the Scene borrow is released so a
-                // root-order dependency that changed on the last sample is
-                // settled before a final-state capture.
-                run_python_updaters(slf, 0.0)?;
                 Ok(())
             })();
             if let Err(error) = drive_result {
+                engine.borrow_mut().abort_stepped_play(play, &mut sink);
+                return Err(error);
+            }
+            // Reference Scene.finish_animations first finishes every
+            // animation (which resumes animation-suspended mobjects), then
+            // performs one final update_mobjects(0). Split that updater pass
+            // at the same host-language release boundary as ordinary frames:
+            // Python first, native second, with no Scene borrow crossing the
+            // callback.
+            let resumed = match engine
+                .borrow_mut()
+                .finish_stepped_play_animations(&mut play)
+                .map_err(&map_play_error)
+            {
+                Ok(resumed) => resumed,
+                Err(error) => {
+                    engine.borrow_mut().abort_stepped_play(play, &mut sink);
+                    return Err(error);
+                }
+            };
+            if let Err(error) = run_resumed_python_updaters(slf, &resumed) {
+                engine.borrow_mut().abort_stepped_play(play, &mut sink);
+                return Err(error);
+            }
+            if let Err(error) = run_python_updaters(slf, 0.0) {
                 engine.borrow_mut().abort_stepped_play(play, &mut sink);
                 return Err(error);
             }
@@ -6690,6 +6731,7 @@ struct AnimSpec {
     time_span: Option<(f64, f64)>,
     group_lag: f64,
     remover: bool,
+    suspend_mobject_updating: bool,
     surface_resolution: (usize, usize),
     surface_axis: usize,
     members: Vec<AnimSpec>,
@@ -6791,6 +6833,7 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             .transpose()?,
         group_lag: get1("lag_ratio", 0.0)?,
         remover: get_bool("remover", false)?,
+        suspend_mobject_updating: get_bool("suspend_mobject_updating", false)?,
         surface_resolution: get_usize_pair("surface_resolution", (0, 0))?,
         surface_axis: get_usize("surface_axis", 1)?,
         members,
@@ -6971,6 +7014,7 @@ fn build_native_animation(
         if let Some(span) = spec.time_span {
             config.time_span = Some(span);
         }
+        config.suspend_mobject_updating = spec.suspend_mobject_updating;
     }
     Ok(animation)
 }
@@ -8136,7 +8180,7 @@ fn run_portal_gauntlet_png(
             .set_item("_fmn_single_frame", single_frame)
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedLine, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, GrowArrow, GrowFromCenter, GrowFromEdge, GrowFromPoint, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, RoundedRectangle, Scene, ScreenRectangle, Square3D, StrokeArrow, TangentLine, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField, linear
+            r#"from manimlib import AnnularSector, Arrow, Axes, BLUE_C, BLUE_E, BraceLabel, BraceText, BulletedList, Checkmark, Circle, Cone, Cross, CubicBezier, CurvedDoubleArrow, DashedLine, DashedVMobject, Disk3D, Dot, Dodecahedron, Elbow, Exmark, FullScreenFadeRectangle, FullScreenRectangle, FunctionGraph, GREY_C, GrowArrow, GrowFromCenter, GrowFromEdge, GrowFromPoint, ImplicitFunction, Line, Line3D, Matrix, ParametricSurface, Polygon, Polyline, Prismify, RED, Rectangle, Rotate, Rotating, RoundedRectangle, Scene, ScreenRectangle, Square3D, StrokeArrow, TangentLine, TimeVaryingVectorField, Title, Torus, Underline, VCube, VGroup3D, VMobject, VPrism, Vector, VectorField, linear
 
 class _GauntletPortalScene(Scene):
     # NumPy's compatibility RandomState accepts only 32-bit scalar seeds.
@@ -8510,6 +8554,15 @@ class _GauntletPortalScene(Scene):
             GrowFromEdge(primitive_round, (-1.0, 0.0, 0.0)),
             GrowFromCenter(native_tangent_line),
             GrowArrow(native_arrow),
+            # The public Animation -> Rotating -> Rotate hierarchy reaches
+            # Choreo's absolute-pose rotation in the same real Lumen/Reel
+            # frame stream.  Distinct pivots exercise both rotation routes.
+            Rotate(primitive_polyline, angle=0.15),
+            Rotating(
+                primitive_rect,
+                angle=-0.1,
+                about_point=(0.0, 0.0, 0.0),
+            ),
             run_time=1 / 30,
             rate_func=linear,
         )

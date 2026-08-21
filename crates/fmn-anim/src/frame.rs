@@ -378,6 +378,7 @@ pub struct OpenSegment {
     current_sample: Option<FrameSample>,
     next_animation: usize,
     prepared: Option<StepPlan>,
+    animations_finished: bool,
 }
 
 impl OpenSegment {
@@ -440,6 +441,7 @@ pub fn open_play_with_mode(
         current_sample: None,
         next_animation: 0,
         prepared: None,
+        animations_finished: false,
     })
 }
 
@@ -575,14 +577,10 @@ pub fn complete_play_frame(
 pub fn finish_open_play(
     stage: &mut Stage,
     animations: &mut [Box<dyn Animation>],
-    open: OpenSegment,
+    mut open: OpenSegment,
 ) -> Result<SegmentReport, AnimError> {
-    if open.prepared.is_some() || open.current_sample.is_some() {
-        return Err(AnimError::InvalidFramePhase(
-            "complete the prepared frame before finishing the segment",
-        ));
-    }
-    finish_animations(stage, animations);
+    finish_open_play_animations(stage, animations, &mut open)?;
+    update_scene_mobjects(stage, 0.0);
     if let Some(error) = animations
         .iter()
         .find_map(|animation| animation.deferred_error())
@@ -590,6 +588,36 @@ pub fn finish_open_play(
         return Err(error);
     }
     Ok(open.report)
+}
+
+/// Finish animation lifecycles without running the final scene-updater pass.
+///
+/// Host-language portals use this release point to resume animation-suspended
+/// mobjects before dispatching their own zero-`dt` updaters.  They then call
+/// [`finish_open_play`], which runs the native half of that same updater pass
+/// and consumes the segment.  Ordinary Rust callers need only call
+/// [`finish_open_play`], which performs both phases exactly once.
+///
+/// # Errors
+/// A frame was prepared but not completed.
+pub fn finish_open_play_animations(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    open: &mut OpenSegment,
+) -> Result<(), AnimError> {
+    if open.prepared.is_some() || open.current_sample.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete the prepared frame before finishing the segment",
+        ));
+    }
+    if !open.animations_finished {
+        for animation in animations.iter_mut() {
+            animation.finish(stage);
+            animation.clean_up_from_scene(stage);
+        }
+        open.animations_finished = true;
+    }
+    Ok(())
 }
 
 /// Abandon an open play without landing its endpoint.
@@ -916,6 +944,7 @@ pub fn play_segment_with_boundary(
         current_sample: None,
         next_animation: 0,
         prepared: None,
+        animations_finished: false,
     };
     // Both modes use the exact same stepped driver. Skip changes one thing:
     // `complete_play_frame` suppresses capture/emission. In particular, a
