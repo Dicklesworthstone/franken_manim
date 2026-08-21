@@ -3205,10 +3205,10 @@ impl BridgeMobject {
             PyRuntimeError::new_err(format!("bundled FontBook unavailable: {error}"))
         })?);
         let mut textbox = fmn_library::Textbox::new(book, current)
-            .map_err(native_error)?
+            .map_err(textbox_error)?
             .initially_active(initially_active);
         if let Some(value) = replacement {
-            textbox.set_value(value).map_err(native_error)?;
+            textbox.set_value(value).map_err(textbox_error)?;
         }
         let mut composition = fmn_mobject::Mobject::from(textbox.composition());
         let mut children = std::mem::take(&mut composition.submobjects);
@@ -8570,6 +8570,19 @@ fn with_font_book<T>(operation: impl FnOnce(&fmn_library::FontBook) -> PyResult<
 
 fn native_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+/// Preserve Scribe's precise Textbox diagnostic while naming the portal's
+/// schema-level unmapped-glyph refusal for callers that classify errors.
+fn textbox_error(error: fmn_library::TextMobjectError) -> PyErr {
+    let diagnostic = error.to_string();
+    if matches!(&error, fmn_library::TextMobjectError::Text(_))
+        && diagnostic.contains("has no glyph")
+    {
+        PyValueError::new_err(format!("unmapped glyph: {diagnostic}"))
+    } else {
+        PyValueError::new_err(diagnostic)
+    }
 }
 
 fn tex_error(error: impl std::fmt::Display) -> PyErr {
