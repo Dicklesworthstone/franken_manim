@@ -50,8 +50,8 @@ use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::basic::CompareOp;
 use pyo3::create_exception;
 use pyo3::exceptions::{
-    PyBufferError, PyImportError, PyKeyError, PyOSError, PyOverflowError, PyRuntimeError,
-    PyTypeError, PyValueError,
+    PyBufferError, PyException, PyImportError, PyKeyError, PyOSError, PyOverflowError,
+    PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
@@ -86,6 +86,12 @@ create_exception!(
     TexError,
     PyValueError,
     "Native TeX parsing or span provenance failed."
+);
+create_exception!(
+    manimlib,
+    EndScene,
+    PyException,
+    "Normal early termination of a Scene."
 );
 
 type Engine = Rc<EngineState>;
@@ -6864,6 +6870,12 @@ impl PyScene {
         })
     }
 
+    /// Raise Proscenium's normal early-termination signal as the portal's
+    /// exact `manimlib.scene.scene.EndScene` exception type.
+    fn _end_scene(&self) -> PyResult<()> {
+        self.engine.borrow_mut().end::<()>().map_err(scene_error)
+    }
+
     /// Start one no-clobber native PNG-sequence generation before lifecycle
     /// execution. Configuration is accepted only while the Scene is pristine,
     /// so changing fps/seed cannot reinterpret already-created engine state.
@@ -7362,7 +7374,7 @@ impl PyScene {
                      (Surface.pointwise_become_partial)"
                 ))
             } else {
-                PyRuntimeError::new_err(text)
+                scene_error(error)
             }
         };
         if animations.is_empty() {
@@ -7747,6 +7759,13 @@ impl PyScene {
 /// rate_func is a crossing-budget decision for a later rung.
 fn anim_error(error: fmn_anim::AnimError) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
+}
+
+fn scene_error(error: fmn_scene::SceneError) -> PyErr {
+    match error {
+        fmn_scene::SceneError::EndScene(error) => EndScene::new_err(error.to_string()),
+        error => PyRuntimeError::new_err(error.to_string()),
+    }
 }
 
 /// Timing/lifecycle slot for a top-level Python-authored Animation.
@@ -9537,6 +9556,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add("_FamilyCycleError", py.get_type::<FamilyCycleError>())?;
     module.add("_CapabilityError", py.get_type::<CapabilityError>())?;
     module.add("_TexError", py.get_type::<TexError>())?;
+    module.add("_EndScene", py.get_type::<EndScene>())?;
     module.add("__engine__", "FrankenManim")?;
     module.add(
         "__thread_policy__",
