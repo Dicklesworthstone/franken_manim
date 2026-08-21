@@ -8086,6 +8086,7 @@ class VCube(VGroup3D):
         stroke_width=0,
         **kwargs,
     ):
+        z_index = int(kwargs.pop("z_index", 0))
         style, depth_test, shading, joint_type = _split_native_vgroup3d_kwargs(
             "VCube()", kwargs, (0.2, 0.2, 0.2)
         )
@@ -8096,6 +8097,7 @@ class VCube(VGroup3D):
             fill_color,
             float(fill_opacity),
             float(stroke_width),
+            z_index,
         )
         _hang_native_children(self, specs)
         style.setdefault("fill_color", fill_color)

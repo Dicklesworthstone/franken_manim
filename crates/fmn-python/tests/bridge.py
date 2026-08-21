@@ -8471,6 +8471,30 @@ for face in vcube.submobjects:
     assert np.allclose(face.uniforms["shading"], [0.1, 0.2, 0.3])
     assert face.get_joint_type() == 0
 
+default_vcube = three_dimensions.VCube()
+assert len(default_vcube.submobjects) == 6
+assert np.allclose(
+    [default_vcube.get_width(), default_vcube.get_height(), default_vcube.get_depth()],
+    [2.0, 2.0, 2.0],
+    atol=1e-6,
+)
+
+back_vcube = three_dimensions.VCube(z_index=-1)
+front_vcube = three_dimensions.VCube(z_index=1)
+vcube_order_scene = Scene().add(front_vcube, back_vcube)
+assert vcube_order_scene.get_mobjects() == [back_vcube, front_vcube]
+
+failed_vcube = three_dimensions.VCube.__new__(three_dimensions.VCube)
+try:
+    three_dimensions.VCube.__init__(failed_vcube, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "VCube() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted VCube keyword reached the native builder")
+assert not hasattr(failed_vcube, "submobjects")
+
 vprism = three_dimensions.VPrism(
     width=4.0,
     height=3.0,

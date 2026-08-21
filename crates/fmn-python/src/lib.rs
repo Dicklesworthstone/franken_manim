@@ -3691,11 +3691,14 @@ impl BridgeMobject {
         fill_color: &Bound<'_, PyAny>,
         fill_opacity: f64,
         stroke_width: f64,
+        z_index: i32,
     ) -> PyResult<Bound<'py, PyList>> {
         let cube = fmn_library::VCube::new(side_length)
             .fill_color(srgb_from_py(fill_color)?)
             .fill_opacity(fill_opacity)
-            .stroke_width(stroke_width);
+            .stroke_width(stroke_width)
+            .build()
+            .with_z_index(z_index);
         install_native_tree(slf, factory, cube)
     }
 
