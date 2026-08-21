@@ -1813,6 +1813,7 @@ assert scene_module.Scene.show_animation_progress is False
 assert Scene().show_animation_progress is False
 assert Scene(show_animation_progress=True).show_animation_progress is True
 assert Scene(show_animation_progress="yes").show_animation_progress is True
+assert Scene(show_animation_progress="").show_animation_progress is False
 
 # fm-5wq.4: temp_skip/temp_progress_bar are host-free context managers;
 # temp_record names the missing file-writer insert seam; temp_config_change
@@ -18056,3 +18057,35 @@ except TypeError as error:
     assert str(error) == "unexpected keyword arguments: bogus"
 else:
     raise AssertionError("Scene silently dropped file_writer_config.bogus")
+
+# fm-5wq.4: InteractiveScene remaining constructor knobs overlay the class
+# defaults so get_crosshair / get_selection_rectangle observe the instance
+# values. Scene kwargs still reach the ancestor (skip_animations).
+assert np.isclose(InteractiveScene.crosshair_width, 0.2)
+styled_interactive = InteractiveScene(
+    skip_animations=True,
+    crosshair_width=0.5,
+    selection_nudge_size=0.2,
+    selection_rectangle_stroke_color=manimlib.BLUE,
+    selection_rectangle_stroke_width=3.0,
+    select_top_level_mobs=False,
+    crosshair_style=dict(stroke_color=manimlib.RED, stroke_width=2.0),
+)
+assert styled_interactive.skip_animations is True
+assert np.isclose(styled_interactive.crosshair_width, 0.5)
+assert np.isclose(styled_interactive.selection_nudge_size, 0.2)
+assert styled_interactive.selection_rectangle_stroke_color == manimlib.BLUE
+assert np.isclose(styled_interactive.selection_rectangle_stroke_width, 3.0)
+assert styled_interactive.select_top_level_mobs is False
+styled_crosshair = styled_interactive.get_crosshair()
+assert np.isclose(styled_crosshair.get_width(), 0.5, atol=1e-6)
+assert styled_crosshair.get_stroke_color() == manimlib.RED
+styled_rect = styled_interactive.get_selection_rectangle()
+assert styled_rect.get_stroke_color() == manimlib.BLUE
+assert np.isclose(styled_rect.get_stroke_width(), 3.0)
+try:
+    InteractiveScene(crosshair_style="nope")
+except TypeError as error:
+    assert str(error) == "InteractiveScene crosshair_style must be a dict"
+else:
+    raise AssertionError("InteractiveScene accepted a non-dict crosshair_style")

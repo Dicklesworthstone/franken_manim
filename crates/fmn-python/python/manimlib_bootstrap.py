@@ -12835,6 +12835,38 @@ class InteractiveScene(Scene):
     selection_nudge_size = 0.05
     select_top_level_mobs = True
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Remaining InteractiveScene constructor knobs overlay the class
+        # defaults. Scene kwargs (camera_config, skip_animations, …) stay
+        # on the ancestor; unknown keys stay in self.kwargs.
+        self.crosshair_width = float(
+            kwargs.get("crosshair_width", type(self).crosshair_width)
+        )
+        self.selection_nudge_size = float(
+            kwargs.get("selection_nudge_size", type(self).selection_nudge_size)
+        )
+        self.selection_rectangle_stroke_width = float(
+            kwargs.get(
+                "selection_rectangle_stroke_width",
+                type(self).selection_rectangle_stroke_width,
+            )
+        )
+        self.selection_rectangle_stroke_color = kwargs.get(
+            "selection_rectangle_stroke_color",
+            type(self).selection_rectangle_stroke_color,
+        )
+        self.select_top_level_mobs = bool(
+            kwargs.get("select_top_level_mobs", type(self).select_top_level_mobs)
+        )
+        style = kwargs.get("crosshair_style", None)
+        if style is None:
+            self.crosshair_style = dict(type(self).crosshair_style)
+        elif not isinstance(style, dict):
+            raise TypeError("InteractiveScene crosshair_style must be a dict")
+        else:
+            self.crosshair_style = dict(style)
+
     def embed(self, namespace=None):
         return _portal_embed(self, namespace)
 
