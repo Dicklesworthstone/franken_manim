@@ -9361,6 +9361,9 @@ cone = three_dimensions.Cone(
     radius=2.0,
     axis=manimlib.RIGHT,
 )
+cone_mesh = three_dimensions.SurfaceMesh(cone, resolution=(4, 3))
+assert len(cone_mesh.submobjects) == 7
+assert all(isinstance(line, VMobject) and line.has_points() for line in cone_mesh)
 assert cone.n_records() == 15
 assert cone.u_range == (0, math.tau)
 assert cone.v_range == (0, 1)
@@ -9444,6 +9447,9 @@ else:
 assert not hasattr(failed_line3d, "submobjects")
 
 disk3d = three_dimensions.Disk3D(radius=2.0, resolution=(2, 5))
+disk_mesh = three_dimensions.SurfaceMesh(disk3d, resolution=(4, 3))
+assert len(disk_mesh.submobjects) == 7
+assert all(isinstance(line, VMobject) and line.has_points() for line in disk_mesh)
 assert disk3d.n_records() == 10
 assert np.allclose(disk3d.uv_func(0.5, 0.0), [0.5, 0.0, 0.0])
 assert np.allclose(

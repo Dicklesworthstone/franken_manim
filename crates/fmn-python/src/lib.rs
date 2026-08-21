@@ -3427,11 +3427,8 @@ impl BridgeMobject {
                 limit: limits.max_bytes,
             }));
         }
-        let document = fmn_library::svg::SvgDocument::parse_with_limits(
-            source.as_bytes(),
-            &limits,
-        )
-        .map_err(native_error)?;
+        let document = fmn_library::svg::SvgDocument::parse_with_limits(source.as_bytes(), &limits)
+            .map_err(native_error)?;
         let family = fmn_library::svg_document_mobject(&document);
         let path = family.children().first().cloned().unwrap_or_default();
         install_native_tree(slf, factory, path)
@@ -5061,6 +5058,10 @@ impl BridgeMobject {
             "cylinder" => fmn_library::Cylinder::new(source_minor_radius, source_radius)
                 .axis(source_axis)
                 .build(),
+            "cone" => fmn_library::Cone::new(source_minor_radius, source_radius)
+                .axis(source_axis)
+                .build(),
+            "disk" => fmn_library::Disk3D::new(source_radius).build(),
             other => {
                 return Err(PyValueError::new_err(format!(
                     "SurfaceMesh over `{other}` awaits its native rebuild \

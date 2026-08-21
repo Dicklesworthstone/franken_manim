@@ -8526,6 +8526,13 @@ class Cone(Cylinder):
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
+        self._solid_params = (
+            "cone",
+            self.height,
+            self.radius,
+            tuple(float(component) for component in self.axis),
+        )
+        self._solid_native_height = self.get_height()
 
     def uv_func(self, u, v):
         return _np.array(self._cone_uv(float(u), float(v)))
@@ -8619,6 +8626,8 @@ class Disk3D(Surface):
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
+        self._solid_params = ("disk", self.radius)
+        self._solid_native_height = self.get_height()
 
     def uv_func(self, u, v):
         return _np.array(self._disk3d_uv(float(u), float(v)))
@@ -8978,7 +8987,7 @@ class SurfaceMesh(VGroup):
         if source_kind == "torus":
             source_radius = float(params[1])
             source_minor_radius = float(params[2])
-        elif source_kind == "cylinder":
+        elif source_kind in ("cylinder", "cone"):
             source_radius = float(params[2])
             source_minor_radius = float(params[1])
             source_axis = tuple(float(component) for component in params[3])
