@@ -11597,6 +11597,7 @@ class Scene(_SceneCore):
         self.frame = CameraFrame()
         self.num_plays = 0
         self.undo_stack = []
+        self.redo_stack = []
         # Reference Scene.__init__ keeps the pointer as two live Point
         # mobjects on the scene itself, and they are the same Point class
         # EventDispatcher constructs (dispatch() moves the drag point for
@@ -11965,6 +11966,16 @@ class Scene(_SceneCore):
         self.undo_stack.append(self.get_state())
         return self
 
+    def undo(self):
+        # Reference Scene.undo (scene.py): push the live state onto
+        # redo_stack, pop undo_stack into restore_state; an empty stack is
+        # a no-op. The Reference tail call refresh_static_mobjects() has no
+        # portal surface yet, so it is skipped like save_state's was.
+        if not self.undo_stack:
+            return
+        self.redo_stack.append(self.get_state())
+        self.restore_state(self.undo_stack.pop())
+
     def restore_state(self, scene_state):
         if not isinstance(scene_state, SceneState):
             raise TypeError("restore_state expects a SceneState")
@@ -12113,6 +12124,27 @@ class InteractiveScene(Scene):
 
     def checkpoint_paste(self):
         return _portal_checkpoint_paste(self)
+
+    def on_mouse_motion(self, point, d_point):
+        base_handler = Scene.__dict__.get("on_mouse_motion")
+        if base_handler is not None and not getattr(
+            base_handler, "_fmn_schema_placeholder", False
+        ):
+            base_handler(self, point, d_point)
+        else:
+            self.mouse_point.move_to(point)
+
+        crosshair = getattr(self, "crosshair", None)
+        if crosshair is not None:
+            crosshair.move_to(self.frame.to_fixed_frame_point(point))
+
+        if getattr(self, "is_grabbing", False):
+            self.handle_grabbing(point)
+        elif getattr(self, "window", None) is not None:
+            raise NotImplementedError(
+                "InteractiveScene windowed resize/sweep motion requires a "
+                "host key-state adapter"
+            )
 
     def add(self, *mobjects):
         super().add(*mobjects)
@@ -12535,11 +12567,7 @@ class InteractiveScene(Scene):
         if len(self.selection) == 0:
             return
         if self.color_palette not in self.mobjects:
-            # Reference calls Scene.save_state before mounting the palette;
-            # the portal Scene has no undo stack yet, so skip until it lands.
-            save_state = getattr(self, "save_state", None)
-            if callable(save_state):
-                save_state()
+            self.save_state()
             self.add(self.color_palette)
         else:
             self.remove(self.color_palette)
@@ -12578,6 +12606,18 @@ class InteractiveScene(Scene):
         raise _CapabilityError(
             "InteractiveScene selection clipboard requires a host clipboard "
             "capability supplied by pyperclip or IPython"
+        )
+
+    def copy_cursor_position(self):
+        raise _CapabilityError(
+            "InteractiveScene cursor clipboard requires a host clipboard "
+            "capability supplied by pyperclip"
+        )
+
+    def copy_frame_positioning(self):
+        raise _CapabilityError(
+            "InteractiveScene frame clipboard requires a host clipboard "
+            "capability supplied by pyperclip"
         )
 
     def group_selection(self):
@@ -16041,6 +16081,7 @@ def _placeholder_method(module_name, owner, name):
     unavailable.__name__ = name
     unavailable.__qualname__ = f"{owner}.{name}"
     unavailable.__module__ = module_name
+    unavailable._fmn_schema_placeholder = True
     return unavailable
 
 

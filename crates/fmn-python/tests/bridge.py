@@ -1455,6 +1455,38 @@ assert saved_scene.undo_stack == []
 assert saved_scene.save_state() is saved_scene
 assert len(saved_scene.undo_stack) == 1
 assert isinstance(saved_scene.undo_stack[0], scene_module.SceneState)
+
+# fm-5wq.4: Scene.undo pops the native SceneState undo_stack back through
+# restore_state, mirroring the popped state onto redo_stack; an empty
+# stack is a no-op and InteractiveScene keeps its overlay after undo.
+assert str(inspect.signature(scene_module.Scene.undo)) == "(self)"
+undo_scene = Scene()
+assert undo_scene.undo_stack == []
+assert undo_scene.redo_stack == []
+assert undo_scene.undo() is None
+assert undo_scene.undo_stack == []
+undo_circle = manimlib.Circle()
+undo_scene.add(undo_circle)
+undo_saved_center = undo_circle.get_center().copy()
+undo_scene.save_state()
+undo_circle.shift([2.0, 1.0, 0.0])
+assert undo_scene.undo() is None
+assert np.allclose(undo_circle.get_center(), undo_saved_center)
+assert undo_scene.undo_stack == []
+assert len(undo_scene.redo_stack) == 1
+assert isinstance(undo_scene.redo_stack[0], scene_module.SceneState)
+undo_overlay_scene = InteractiveScene()
+undo_overlay_scene.setup()
+undo_overlay_circle = manimlib.Circle()
+undo_overlay_scene.add(undo_overlay_circle)
+undo_overlay_scene.save_state()
+undo_overlay_circle.shift([1.0, 0.0, 0.0])
+assert undo_overlay_scene.undo() is None
+assert np.allclose(undo_overlay_circle.get_center(), [0.0, 0.0, 0.0])
+assert (
+    undo_overlay_scene.selection_highlight in undo_overlay_scene.mobjects
+)
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()
@@ -3152,10 +3184,12 @@ palette_scene = InteractiveScene()
 palette_scene.setup()
 assert palette_scene.toggle_color_palette() is None
 assert palette_scene.color_palette not in palette_scene.mobjects
+assert palette_scene.undo_stack == []
 palette_circle = manimlib.Circle()
 palette_scene.add(palette_circle)
 palette_scene.add_to_selection(palette_circle)
 assert palette_scene.toggle_color_palette() is None
+assert len(palette_scene.undo_stack) == 1
 assert palette_scene.color_palette in palette_scene.mobjects
 assert (
     palette_scene.color_palette
@@ -3202,6 +3236,42 @@ assert recolor_scene.choose_color(recolor_source.get_center()) is None
 assert recolor_target.get_color() == manimlib.RED
 assert recolor_scene.color_palette not in recolor_scene.mobjects
 
+# fm-5wq.4: mouse motion updates the native pointer and fixed-frame crosshair,
+# then routes an active free-axis grab through the existing Group.move_to seam.
+assert str(inspect.signature(InteractiveScene.on_mouse_motion)) == (
+    "(self, point, d_point)"
+)
+motion_scene = InteractiveScene()
+motion_scene.setup()
+assert motion_scene.on_mouse_motion([1.0, 2.0, 0.0], [0.0, 0.0, 0.0]) is None
+fixed_motion_point = motion_scene.frame.to_fixed_frame_point(
+    [1.0, 2.0, 0.0]
+)
+assert np.allclose(
+    motion_scene.mouse_point.get_center(),
+    [1.0, 2.0, 0.0],
+)
+assert np.allclose(
+    motion_scene.crosshair.get_center()[:2],
+    fixed_motion_point[:2],
+    atol=1e-4,
+)
+
+motion_circle = manimlib.Circle().move_to([0.0, 0.0, 0.0])
+motion_scene.add(motion_circle)
+motion_scene.add_to_selection(motion_circle)
+motion_scene.mouse_point.move_to([1.0, 0.0, 0.0])
+motion_start = motion_circle.get_center().copy()
+motion_scene.prepare_grab()
+assert motion_scene.on_mouse_motion(
+    [2.0, 1.0, 0.0],
+    [1.0, 1.0, 0.0],
+) is None
+assert np.allclose(
+    motion_circle.get_center(),
+    motion_start + [1.0, 1.0, 0.0],
+)
+
 # fm-5wq.4: clipboard selection transfer is an explicit host-capability
 # refusal; the sovereign portal never imports pyperclip or IPython implicitly.
 assert str(inspect.signature(InteractiveScene.copy_selection)) == "(self)"
@@ -3228,6 +3298,28 @@ except bridge_errors.CapabilityError as error:
     assert "pyperclip" in clipboard_error or "ipython" in clipboard_error
 else:
     raise AssertionError("paste_selection faked a clipboard transfer")
+assert str(inspect.signature(InteractiveScene.copy_cursor_position)) == (
+    "(self)"
+)
+assert str(inspect.signature(InteractiveScene.copy_frame_positioning)) == (
+    "(self)"
+)
+try:
+    clipboard_scene.copy_cursor_position()
+except bridge_errors.CapabilityError as error:
+    clipboard_error = str(error).lower()
+    assert "clipboard" in clipboard_error
+    assert "pyperclip" in clipboard_error
+else:
+    raise AssertionError("copy_cursor_position faked a clipboard transfer")
+try:
+    clipboard_scene.copy_frame_positioning()
+except bridge_errors.CapabilityError as error:
+    clipboard_error = str(error).lower()
+    assert "clipboard" in clipboard_error
+    assert "pyperclip" in clipboard_error
+else:
+    raise AssertionError("copy_frame_positioning faked a clipboard transfer")
 
 
 # The schema-generated import topology and exact-name aliases are present.
