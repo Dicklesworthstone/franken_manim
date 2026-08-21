@@ -3211,13 +3211,14 @@ impl BridgeMobject {
             textbox.set_value(value).map_err(native_error)?;
         }
         let mut composition = fmn_mobject::Mobject::from(textbox.composition());
-        let children = std::mem::take(&mut composition.submobjects);
+        let mut children = std::mem::take(&mut composition.submobjects);
         if children.len() != 2 {
             return Err(PyRuntimeError::new_err(format!(
                 "native Textbox family contract drift: expected 2 children, got {}",
                 children.len()
             )));
         }
+        hoist_descendant_records(&mut children[1])?;
         native_shell_specs(slf.py(), factory, children)
     }
 
@@ -8885,6 +8886,80 @@ fn native_shell_specs<'py>(
         out.append((shell, child_specs))?;
     }
     Ok(out)
+}
+
+/// Flatten pointful descendants onto a portal shell's own VMobject records.
+///
+/// Native Scribe text intentionally remains a recordless root with one child
+/// per glyph. Some compatibility proxies, such as `Textbox.text`, must keep a
+/// single Python identity across `become` rebuilds, so their portal candidate
+/// owns a flattened copy of the glyph outlines instead. Separate glyph paths
+/// are joined with the shared-anchor model's null-curve marker; per-record
+/// style lanes are copied unchanged. The native Rust family is never mutated.
+fn hoist_descendant_records(root: &mut Mobject) -> PyResult<()> {
+    fn collect_pointful<'a>(node: &'a Mobject, out: &mut Vec<&'a RecordBuffer>) {
+        if !node.buffer.is_empty() {
+            out.push(&node.buffer);
+        }
+        for child in &node.submobjects {
+            collect_pointful(child, out);
+        }
+    }
+
+    let schema = root.buffer.schema().clone();
+    let hoisted = {
+        let mut sources = Vec::new();
+        for child in &root.submobjects {
+            collect_pointful(child, &mut sources);
+        }
+        for source in &sources {
+            if source.schema() != &schema {
+                return Err(PyRuntimeError::new_err(
+                    "native text descendant schema cannot be hoisted onto its portal shell",
+                ));
+            }
+        }
+        let source_records = sources.iter().try_fold(0usize, |total, source| {
+            total.checked_add(source.len()).ok_or_else(|| {
+                PyOverflowError::new_err("native text descendant record count overflows usize")
+            })
+        })?;
+        let separators = sources.len().saturating_sub(1).checked_mul(2).ok_or_else(|| {
+            PyOverflowError::new_err("native text separator record count overflows usize")
+        })?;
+        let total = source_records.checked_add(separators).ok_or_else(|| {
+            PyOverflowError::new_err("native text flattened record count overflows usize")
+        })?;
+        let mut buffer = RecordBuffer::new(schema.clone(), total).map_err(record_error_to_py)?;
+        let mut output = 0;
+        for (index, source) in sources.iter().enumerate() {
+            if index > 0 {
+                let previous = sources[index - 1];
+                for field in schema.fields() {
+                    let previous_value = previous
+                        .read(previous.len() - 1, &field.name)
+                        .expect("pointful source and iterated field exist");
+                    let first_value = source
+                        .read(0, &field.name)
+                        .expect("pointful source and iterated field exist");
+                    assert!(buffer.write(output, &field.name, &previous_value));
+                    assert!(buffer.write(output + 1, &field.name, &first_value));
+                }
+                output += 2;
+            }
+            for field in schema.fields() {
+                let values = source
+                    .read_column(&field.name)
+                    .expect("iterated source field exists");
+                assert!(buffer.write_range(&field.name, output, &values));
+            }
+            output += source.len();
+        }
+        buffer
+    };
+    root.buffer = hoisted;
+    root.submobjects.clear();
+    Ok(())
 }
 
 /// Install a native brace and retain the analytic tip's point index. Point
