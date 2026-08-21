@@ -67,7 +67,10 @@ _RED = "#FC6255"
 _RED_E = "#CF5044"
 _YELLOW = "#FFFF00"
 _BLUE = "#58C4DD"
+_BLUE_A = "#C7E9F1"
+_BLUE_B = "#9CDCEB"
 _BLUE_D = "#29ABCA"
+_GREEN_SCREEN = "#00FF00"
 _BLUE_E = "#1C758A"
 _DEFAULT_LIGHT_COLOR = "#BBBBBB"
 _ASPECT_RATIO = 16.0 / 9.0
@@ -7946,6 +7949,91 @@ class Piano3D(VGroup):
             if piano_2d[index] in black_keys:
                 key.shift(float(black_key_shift) * _OUT)
                 key.set_color(_BLACK)
+
+
+class OldSpeechBubble(Bubble):
+    """SVG-file speech bubble; construction is the named drawings-shelf gap."""
+
+    file_name = "Bubbles_speech.svg"
+
+
+class OldThoughtBubble(Bubble):
+    """SVG-file thought bubble; construction is the named drawings-shelf gap."""
+
+    file_name = "Bubbles_thought.svg"
+
+    def get_body(self, content, direction, buff):
+        body = super().get_body(content, direction, buff)
+        body.sort(lambda point: point[1])
+        return body
+
+    def make_green_screen(self):
+        self.body[-1].set_fill(_GREEN_SCREEN, opacity=1)
+        return self
+
+
+class Lightbulb(SVGMobject):
+    """Bundled lightbulb SVG; the drawings SVG shelf is fm-3kr."""
+
+    file_name = "lightbulb"
+
+    def __init__(
+        self,
+        height=1.0,
+        color=_YELLOW,
+        stroke_width=3.0,
+        fill_opacity=0.0,
+        **kwargs,
+    ):
+        raise NotImplementedError(
+            "Lightbulb requires bundled SVG 'lightbulb'; "
+            "the drawings SVG shelf is fm-3kr"
+        )
+
+
+class VideoIcon(SVGMobject):
+    """Bundled video-icon SVG; the drawings SVG shelf is fm-3kr."""
+
+    file_name = "video_icon"
+
+    def __init__(self, width=1.2, color=_BLUE_A, **kwargs):
+        raise NotImplementedError(
+            "VideoIcon requires bundled SVG 'video_icon'; "
+            "the drawings SVG shelf is fm-3kr"
+        )
+
+
+class VectorizedEarth(SVGMobject):
+    """Bundled earth SVG; the drawings SVG shelf is fm-3kr."""
+
+    file_name = "earth"
+
+    def __init__(self, height=2.0, **kwargs):
+        raise NotImplementedError(
+            "VectorizedEarth requires bundled SVG 'earth'; "
+            "the drawings SVG shelf is fm-3kr"
+        )
+
+
+class VideoSeries(VGroup):
+    """A row of VideoIcons; construction waits on the bundled video_icon SVG."""
+
+    def __init__(
+        self,
+        num_videos=11,
+        gradient_colors=(_BLUE_B, _BLUE_D),
+        width=None,
+        **kwargs,
+    ):
+        if width is None:
+            width = _FRAME_HEIGHT * _ASPECT_RATIO - _MED_LARGE_BUFF
+        super().__init__(
+            *(VideoIcon() for _index in range(_operator.index(num_videos))),
+            **kwargs,
+        )
+        self.arrange(_RIGHT)
+        self.set_width(float(width))
+        self.set_color_by_gradient(*gradient_colors)
 
 
 class Cross(VGroup):
@@ -15948,6 +16036,12 @@ def _install_schema_surface():
         ): DoubleSpeechBubble,
         ("manimlib.mobject.svg.drawings", "Laptop"): Laptop,
         ("manimlib.mobject.svg.drawings", "Piano3D"): Piano3D,
+        ("manimlib.mobject.svg.drawings", "OldSpeechBubble"): OldSpeechBubble,
+        ("manimlib.mobject.svg.drawings", "OldThoughtBubble"): OldThoughtBubble,
+        ("manimlib.mobject.svg.drawings", "Lightbulb"): Lightbulb,
+        ("manimlib.mobject.svg.drawings", "VideoIcon"): VideoIcon,
+        ("manimlib.mobject.svg.drawings", "VectorizedEarth"): VectorizedEarth,
+        ("manimlib.mobject.svg.drawings", "VideoSeries"): VideoSeries,
         ("manimlib.animation.update", "UpdateFromFunc"): UpdateFromFunc,
         ("manimlib.animation.update", "UpdateFromAlphaFunc"): UpdateFromAlphaFunc,
         (

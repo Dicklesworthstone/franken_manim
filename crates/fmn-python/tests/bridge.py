@@ -4456,6 +4456,79 @@ zs = [key.get_center()[2] for key in piano3d]
 assert max(zs) - min(zs) >= 0.05 - 1e-6
 assert piano3d[0].get_stroke_color() == manimlib.BLACK
 
+assert drawings.OldSpeechBubble.__bases__ == (drawings.Bubble,)
+assert drawings.OldSpeechBubble.file_name == "Bubbles_speech.svg"
+try:
+    drawings.OldSpeechBubble()
+except NotImplementedError as error:
+    assert "Bubbles_speech.svg" in str(error)
+else:
+    raise AssertionError("OldSpeechBubble constructed an SVG-file body")
+
+assert drawings.OldThoughtBubble.__bases__ == (drawings.Bubble,)
+assert drawings.OldThoughtBubble.file_name == "Bubbles_thought.svg"
+assert callable(drawings.OldThoughtBubble.make_green_screen)
+try:
+    drawings.OldThoughtBubble()
+except NotImplementedError as error:
+    assert "Bubbles_thought.svg" in str(error)
+else:
+    raise AssertionError("OldThoughtBubble constructed an SVG-file body")
+
+assert drawings.Lightbulb.__bases__ == (manimlib.SVGMobject,)
+assert list(inspect.signature(drawings.Lightbulb).parameters) == [
+    "height",
+    "color",
+    "stroke_width",
+    "fill_opacity",
+    "kwargs",
+]
+try:
+    drawings.Lightbulb()
+except NotImplementedError as error:
+    assert "lightbulb" in str(error)
+else:
+    raise AssertionError("Lightbulb constructed without bundled SVG")
+
+assert drawings.VideoIcon.__bases__ == (manimlib.SVGMobject,)
+assert list(inspect.signature(drawings.VideoIcon).parameters) == [
+    "width",
+    "color",
+    "kwargs",
+]
+try:
+    drawings.VideoIcon()
+except NotImplementedError as error:
+    assert "video_icon" in str(error)
+else:
+    raise AssertionError("VideoIcon constructed without bundled SVG")
+
+assert drawings.VectorizedEarth.__bases__ == (manimlib.SVGMobject,)
+assert list(inspect.signature(drawings.VectorizedEarth).parameters) == [
+    "height",
+    "kwargs",
+]
+try:
+    drawings.VectorizedEarth()
+except NotImplementedError as error:
+    assert "earth" in str(error)
+else:
+    raise AssertionError("VectorizedEarth constructed without bundled SVG")
+
+assert drawings.VideoSeries.__bases__ == (manimlib.VGroup,)
+assert list(inspect.signature(drawings.VideoSeries).parameters) == [
+    "num_videos",
+    "gradient_colors",
+    "width",
+    "kwargs",
+]
+try:
+    drawings.VideoSeries()
+except NotImplementedError as error:
+    assert "video_icon" in str(error)
+else:
+    raise AssertionError("VideoSeries constructed without bundled VideoIcon SVG")
+
 # ValueTracker targets are native typed state, not record-buffer decoration.
 # Detached copy/deepcopy/pickle must preserve that payload so the ordinary
 # `.animate` builder can mutate its generated target before Scene adoption.
