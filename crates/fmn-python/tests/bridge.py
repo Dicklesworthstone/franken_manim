@@ -11820,3 +11820,39 @@ except NotImplementedError as error:
     assert "str" in str(error), error
 else:
     raise AssertionError("Scene.play accepted a non-Animation member")
+
+# fm-5wq.4.99: .animate anim args — path_arc/path_arc_axis ride the native
+# transform's arc surface; anything else stays a refusal naming the key.
+animate_shift_dot = manimlib.Dot()
+animate_args_scene = InteractiveScene()
+animate_args_scene.add(animate_shift_dot)
+animate_args_scene.play(
+    animate_shift_dot.animate.shift(manimlib.RIGHT),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.allclose(animate_shift_dot.get_center(), [1.0, 0.0, 0.0], atol=1e-9)
+
+# A clockwise (−π) builder arc from (1, 0) to (−1, 0) dips through (0, −1)
+# at the constant-rate halfway probe — the arc, not the chord.
+animate_arc_dot = manimlib.Dot().move_to((1.0, 0.0, 0.0))
+animate_args_scene.add(animate_arc_dot)
+animate_args_scene.play(
+    animate_arc_dot.animate(
+        path_arc=-math.pi, rate_func=lambda t: 0.5
+    ).move_to((-1.0, 0.0, 0.0)),
+    run_time=1.0 / 30.0,
+)
+assert np.allclose(animate_arc_dot.get_center(), [0.0, -1.0, 0.0], atol=1e-6)
+
+# A bogus anim arg refuses by the exact key, never a silent drop.
+animate_bogus_dot = manimlib.Dot()
+animate_args_scene.add(animate_bogus_dot)
+try:
+    animate_args_scene.play(
+        animate_bogus_dot.animate(wobble_speed=3).shift(manimlib.RIGHT)
+    )
+except NotImplementedError as error:
+    assert "anim arg `wobble_speed`" in str(error), error
+else:
+    raise AssertionError("a bogus anim arg was silently dropped")

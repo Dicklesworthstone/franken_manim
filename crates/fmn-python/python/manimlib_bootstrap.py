@@ -8759,13 +8759,22 @@ class Scene(_SceneCore):
                 if proto.overridden_animation is not None:
                     return build_spec(proto.build(), nested)
                 spec_args = {}
+                spec_params = {}
                 for key, value in proto.anim_args.items():
-                    if key not in ("run_time", "rate_func", "lag_ratio"):
+                    if key in ("run_time", "rate_func", "lag_ratio"):
+                        spec_args[key] = value
+                    elif key == "path_arc":
+                        # fm-5wq.4.99: the builder's Transform rides the
+                        # native path_arc surface, same as Transform(...,
+                        # path_arc=...).
+                        spec_params["path_arc"] = float(value)
+                    elif key == "path_arc_axis":
+                        spec_params["path_arc_axis"] = _vec3(value)
+                    else:
                         raise NotImplementedError(
                             "anim arg `" + key + "` is not yet routed to "
                             "the engine play"
                         )
-                    spec_args[key] = value
                 mobject = proto.mobject
                 if isinstance(mobject, CameraFrame):
                     raise NotImplementedError(
@@ -8788,7 +8797,7 @@ class Scene(_SceneCore):
                         spec_args.get("run_time") or run_time or 1.0,
                     ),
                     spec_args.get("lag_ratio"),
-                    {},
+                    spec_params,
                 )
             if isinstance(proto, Animation) and getattr(proto, "_native_kind", None):
                 params = dict(proto._native_params())
