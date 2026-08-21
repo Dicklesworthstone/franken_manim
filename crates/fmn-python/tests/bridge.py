@@ -1422,6 +1422,38 @@ skipped_circle = manimlib.Circle()
 three_d_scene.add(skipped_circle, set_depth_test=False, perp_stroke=False)
 assert skipped_circle.uniforms["depth_test"] is False
 
+assert scene_module.SceneState.__bases__ == (object,)
+assert str(inspect.signature(scene_module.SceneState)) == (
+    "(scene, ignore=None)"
+)
+assert str(inspect.signature(scene_module.Scene.get_state)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.restore_state)) == (
+    "(self, scene_state)"
+)
+state_scene = Scene()
+state_square = manimlib.Square()
+state_circle = manimlib.Circle()
+state_scene.add(state_square, state_circle)
+origin = state_square.get_center().copy()
+captured = state_scene.get_state()
+assert isinstance(captured, scene_module.SceneState)
+assert list(captured.mobjects_to_copies) == [state_square, state_circle]
+assert captured.n_changes(captured) == 0
+state_square.shift(manimlib.RIGHT)
+assert captured.n_changes(captured) == 1
+ignored = scene_module.SceneState(state_scene, ignore=[state_circle])
+assert list(ignored.mobjects_to_copies) == [state_square]
+state_scene.restore_state(captured)
+assert np.allclose(state_square.get_center(), origin)
+assert state_scene.get_mobjects() == [state_square, state_circle]
+failed_state = scene_module.SceneState.__new__(scene_module.SceneState)
+try:
+    scene_module.SceneState.__init__(failed_state, manimlib.Square())
+except TypeError as error:
+    assert str(error) == "SceneState scene must be a Scene"
+else:
+    raise AssertionError("SceneState accepted a non-Scene")
+
 live_box = manimlib.Square()
 live_box_before = live_box.get_bounding_box().copy()
 live_box.get_points()[:, 0] += 2.0

@@ -10506,6 +10506,8 @@ class Scene(_SceneCore):
         # out of the drawable Stage, but it must still exist before the first
         # update crossing so initialization never contaminates frame work.
         self.frame = CameraFrame()
+        self.num_plays = 0
+        self.undo_stack = []
 
     @property
     def frame(self):
@@ -10838,6 +10840,79 @@ class Scene(_SceneCore):
         for mobject in mobjects:
             for updater in list(mobject.updaters):
                 mobject._dispatch_updater(updater, dt)
+
+    def get_state(self):
+        return SceneState(self)
+
+    def restore_state(self, scene_state):
+        if not isinstance(scene_state, SceneState):
+            raise TypeError("restore_state expects a SceneState")
+        scene_state.restore_scene(self)
+        return self
+
+
+def _mobject_looks_identical(mobject, other):
+    if type(mobject) is not type(other):
+        return False
+    count = mobject.get_num_points()
+    if count != other.get_num_points():
+        return False
+    if count == 0:
+        return True
+    return bool(_np.allclose(mobject.get_points(), other.get_points()))
+
+
+class SceneState:
+    """A captured draw-list of mobject copies, restored through become()."""
+
+    def __init__(self, scene, ignore=None):
+        if not isinstance(scene, Scene):
+            raise TypeError("SceneState scene must be a Scene")
+        self.time = scene.get_time()
+        self.num_plays = int(getattr(scene, "num_plays", 0))
+        skip = set() if ignore is None else set(ignore)
+        last = {}
+        if getattr(scene, "undo_stack", None):
+            last = scene.undo_stack[-1].mobjects_to_copies
+        copies = {}
+        for mobject in list(scene.mobjects):
+            if mobject in skip:
+                continue
+            prior = last.get(mobject)
+            if prior is not None and _mobject_looks_identical(mobject, prior):
+                copies[mobject] = prior
+            else:
+                copies[mobject] = mobject.copy()
+        self.mobjects_to_copies = copies
+
+    def mobjects_match(self, state):
+        if not isinstance(state, SceneState):
+            raise TypeError("mobjects_match expects a SceneState")
+        return self.mobjects_to_copies == state.mobjects_to_copies
+
+    def n_changes(self, state):
+        if not isinstance(state, SceneState):
+            raise TypeError("n_changes expects a SceneState")
+        other = state.mobjects_to_copies
+        return sum(
+            1
+            - int(
+                mobject in other
+                and _mobject_looks_identical(mobject, other[mobject])
+            )
+            for mobject in self.mobjects_to_copies
+        )
+
+    def restore_scene(self, scene):
+        if not isinstance(scene, Scene):
+            raise TypeError("restore_scene expects a Scene")
+        restored = [
+            mobject.become(copy, match_updaters=True)
+            for mobject, copy in self.mobjects_to_copies.items()
+        ]
+        scene.clear()
+        if restored:
+            scene.add(*restored)
 
 
 class ThreeDScene(Scene):
@@ -14585,6 +14660,7 @@ def _install_schema_surface():
         ("manimlib.mobject.svg.brace", "BraceText"): BraceText,
         ("manimlib.mobject.svg.brace", "LineBrace"): LineBrace,
         ("manimlib.scene.scene", "Scene"): Scene,
+        ("manimlib.scene.scene", "SceneState"): SceneState,
         ("manimlib.scene.scene", "ThreeDScene"): ThreeDScene,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,
