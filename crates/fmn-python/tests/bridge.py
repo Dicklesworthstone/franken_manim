@@ -11770,3 +11770,42 @@ except NotImplementedError as error:
     assert "stretch" in str(error)
 else:
     raise AssertionError("FadeTransformPieces silently dropped stretch")
+
+# fm-5wq.4.97: one Scene.play mixing a native-kind animation with a
+# Python-authored one — the per-animation release loop yields every
+# boundary in index order, so the Python member interleaves with the
+# native segment instead of refusing.
+mix_faded_dot = manimlib.Dot()
+mix_moved_dot = manimlib.Dot()
+mix_scene = InteractiveScene()
+mix_scene.add(mix_faded_dot, mix_moved_dot)
+mix_update_calls = []
+
+
+def _mix_nudge(mobject):
+    mix_update_calls.append(True)
+    mobject.shift((0.05, 0.0, 0.0))
+
+
+mix_scene.play(
+    manimlib.FadeOut(mix_faded_dot),
+    manimlib.UpdateFromFunc(mix_moved_dot, _mix_nudge),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+# The native member completed: FadeOut removed its dot from the scene.
+assert mix_faded_dot not in mix_scene.get_mobjects()
+# The Python member ran per frame and its mutations landed.
+assert mix_update_calls
+assert float(mix_moved_dot.get_center()[0]) > 0.0
+
+# A non-Animation play member stays the existing named refusal.
+try:
+    mix_scene.play("nope")
+except NotImplementedError as error:
+    assert "mobject.animate builders and the bound Animation classes" in str(
+        error
+    ), error
+    assert "str" in str(error), error
+else:
+    raise AssertionError("Scene.play accepted a non-Animation member")

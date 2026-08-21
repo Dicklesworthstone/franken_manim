@@ -50,8 +50,8 @@ use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::basic::CompareOp;
 use pyo3::create_exception;
 use pyo3::exceptions::{
-    PyBufferError, PyImportError, PyKeyError, PyNotImplementedError, PyOSError, PyOverflowError,
-    PyRuntimeError, PyTypeError, PyValueError,
+    PyBufferError, PyImportError, PyKeyError, PyOSError, PyOverflowError, PyRuntimeError,
+    PyTypeError, PyValueError,
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
@@ -6613,14 +6613,12 @@ impl PyScene {
                 "animation callback table must align one-for-one with specs",
             ));
         }
+        // fm-5wq.4.97: a mixed play rides the same per-animation release
+        // loop — the engine yields one boundary per animation in index
+        // order (native ones already interpolated inside prepare), so
+        // Python-authored members interleave with native kinds and their
+        // mutations stay visible to later animations in the same frame.
         let callback_count = callbacks.iter().flatten().count();
-        if callback_count != 0 && callback_count != callbacks.len() {
-            return Err(PyNotImplementedError::new_err(
-                "mixing Python-authored and native mobject animations awaits \
-                 the per-animation finish release; camera-frame animation may \
-                 still accompany a Python-authored play",
-            ));
-        }
 
         // Resolve every Python-side value before the engine borrow.
         let play_rate = rate_func.as_ref().map(rate_func_from_py).transpose()?;
@@ -6754,13 +6752,15 @@ impl PyScene {
                             let Some(animation) = animation else {
                                 break;
                             };
-                            let callback = callbacks[animation.animation_index]
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    PyRuntimeError::new_err(
-                                        "a Python animation slot lost its callback",
-                                    )
-                                })?;
+                            let Some(callback) =
+                                callbacks[animation.animation_index].as_ref()
+                            else {
+                                // A native-kind animation in a mixed play:
+                                // its interpolate already ran natively in
+                                // prepare; this boundary is release
+                                // ordering only.
+                                continue;
+                            };
                             crossing::record(CrossingClass::MethodDispatch);
                             callback
                                 .bind(slf.py())
