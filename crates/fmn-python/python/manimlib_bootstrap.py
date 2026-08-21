@@ -6845,11 +6845,16 @@ class DecimalNumber(VMobject):
         )
         _hang_native_children(scratch, specs)
         if scratch.n_records() != 0:
-            raise NotImplementedError(
-                "DecimalNumber.set_value with root-level records (background "
-                "rectangle) awaits the live-state core (fm-p107)"
-            )
-        self.set_submobjects(list(scratch.submobjects))
+            # fm-5wq.4.92: root-level records (the background rectangle's
+            # geometry lives on the root) cannot ride set_submobjects, but
+            # the live-state become seam replaces them: align_family pads
+            # the two families, then per-member data assignment rewrites
+            # the root's own records and every glyph child in place, in
+            # both proxy states — the fm-p107 upgrade this branch used to
+            # await.
+            self.become(scratch)
+        else:
+            self.set_submobjects(list(scratch.submobjects))
         self.move_to(move_to_point, self.edge_to_fix)
         if style is not None:
             self.set_style(**style)

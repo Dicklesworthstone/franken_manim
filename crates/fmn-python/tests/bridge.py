@@ -11359,3 +11359,43 @@ except NotImplementedError as error:
     assert "a composition member" in str(error)
 else:
     raise AssertionError("AnimationGroup accepted a non-Animation member")
+
+
+# --------------------- DecimalNumber.set_value with background rectangle
+# fm-5wq.4.92: root-level records (the background rectangle) rebuild
+# through the live-state become seam — the fm-p107 refusal is retired.
+
+bg_decimal = manimlib.DecimalNumber(1.25, include_background_rectangle=True)
+assert bg_decimal.n_records() != 0  # the rectangle lives on the root
+bg_glyphs_before = [
+    child for child in bg_decimal.submobjects if child.has_points()
+]
+assert bg_glyphs_before
+bg_decimal.set_value(2.5)
+assert math.isclose(bg_decimal.get_value(), 2.5)
+assert bg_decimal.n_records() != 0  # the rectangle survived the rebuild
+assert any(child.has_points() for child in bg_decimal.submobjects)
+
+# Digit-count changes rebuild too (align_family pads the families).
+bg_decimal.set_value(10.75)
+assert math.isclose(bg_decimal.get_value(), 10.75)
+assert any(child.has_points() for child in bg_decimal.submobjects)
+
+# The live path still plays: ChangingDecimal drives a background-rectangle
+# number through Scene.play.
+bg_scene = Scene()
+bg_live = manimlib.DecimalNumber(0.0, include_background_rectangle=True)
+bg_scene.add(bg_live)
+bg_scene.play(
+    numbers_animation.ChangeDecimalToValue(bg_live, 3.0, run_time=2.0 / 30.0)
+)
+assert math.isclose(bg_live.get_value(), 3.0)
+assert bg_live.n_records() != 0
+
+# Named negative: a non-numeric set_value is the 4.80 TypeError.
+try:
+    bg_decimal.set_value("nope")
+except TypeError as error:
+    assert "real or complex number" in str(error)
+else:
+    raise AssertionError("set_value accepted a string")
