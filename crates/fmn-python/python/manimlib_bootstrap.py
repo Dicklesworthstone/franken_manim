@@ -11,6 +11,7 @@ from __future__ import annotations
 import abc as _abc
 import ast as _ast
 import collections.abc as _collections_abc
+import contextlib as _contextlib
 import copy as _copy
 import difflib as _difflib
 import enum as _enum
@@ -11671,6 +11672,9 @@ class Scene(_SceneCore):
         if self.start_at_animation_number is not None:
             self.skip_animations = True
         self.original_skipping_status = self.skip_animations
+        self.show_animation_progress = bool(
+            kwargs.get("show_animation_progress", False)
+        )
 
     @property
     def frame(self):
@@ -12267,6 +12271,49 @@ class Scene(_SceneCore):
                 "FrankenManim Studio owns interactive windows"
             )
         self.hold_on_wait = True
+
+    @_contextlib.contextmanager
+    def temp_skip(self):
+        prev_status = self.skip_animations
+        self.skip_animations = True
+        try:
+            yield
+        finally:
+            if not prev_status:
+                self.stop_skipping()
+            else:
+                self.skip_animations = True
+
+    @_contextlib.contextmanager
+    def temp_progress_bar(self):
+        prev_progress = self.show_animation_progress
+        self.show_animation_progress = True
+        try:
+            yield
+        finally:
+            self.show_animation_progress = prev_progress
+
+    @_contextlib.contextmanager
+    def temp_record(self):
+        raise _CapabilityError(
+            "Scene.temp_record requires a file-writer insert path; "
+            "the portal's native encoder owns recording"
+        )
+        yield
+
+    def temp_config_change(self, skip=False, record=False, progress_bar=False):
+        stack = _contextlib.ExitStack()
+        try:
+            if skip:
+                stack.enter_context(self.temp_skip())
+            if record:
+                stack.enter_context(self.temp_record())
+            if progress_bar:
+                stack.enter_context(self.temp_progress_bar())
+        except BaseException:
+            stack.close()
+            raise
+        return stack
 
 
 def _mobject_looks_identical(mobject, other):

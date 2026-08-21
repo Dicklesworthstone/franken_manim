@@ -1771,6 +1771,49 @@ except scene_module.EndScene:
 else:
     raise AssertionError("update_skipping_status missed end_at_animation_number")
 
+# fm-5wq.4: temp_skip/temp_progress_bar are host-free context managers;
+# temp_record names the missing file-writer insert seam; temp_config_change
+# stacks the skip/progress pair without a pyglet window.
+assert str(inspect.signature(scene_module.Scene.temp_skip)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.temp_progress_bar)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.temp_record)) == "(self)"
+assert str(inspect.signature(scene_module.Scene.temp_config_change)) == (
+    "(self, skip=False, record=False, progress_bar=False)"
+)
+temp_scene = Scene()
+assert temp_scene.skip_animations is False
+assert temp_scene.show_animation_progress is False
+with temp_scene.temp_skip():
+    assert temp_scene.skip_animations is True
+assert temp_scene.skip_animations is False
+already_skip = Scene(skip_animations=True)
+with already_skip.temp_skip():
+    assert already_skip.skip_animations is True
+    already_skip.skip_animations = False
+assert already_skip.skip_animations is True
+with temp_scene.temp_progress_bar():
+    assert temp_scene.show_animation_progress is True
+assert temp_scene.show_animation_progress is False
+with temp_scene.temp_config_change(skip=True, progress_bar=True):
+    assert temp_scene.skip_animations is True
+    assert temp_scene.show_animation_progress is True
+assert temp_scene.skip_animations is False
+assert temp_scene.show_animation_progress is False
+try:
+    with temp_scene.temp_record():
+        pass
+except bridge_errors.CapabilityError as error:
+    assert "file-writer" in str(error)
+else:
+    raise AssertionError("temp_record faked a file-writer insert")
+try:
+    temp_scene.temp_config_change(skip=True, record=True)
+except bridge_errors.CapabilityError as error:
+    assert "file-writer" in str(error)
+else:
+    raise AssertionError("temp_config_change(record=True) faked a recording")
+assert temp_scene.skip_animations is False
+
 state_scene = Scene()
 state_square = manimlib.Square()
 state_circle = manimlib.Circle()
