@@ -145,22 +145,21 @@ fn native_span_keys_match_stably_without_shape_assignment() {
         (source_plus, "+".to_owned()),
         (source_x1, "x".to_owned()),
     ];
-    let target_parts = vec![
-        (target_x, "x".to_owned()),
-        (target_minus, "-".to_owned()),
-    ];
-    let anims = transform_matching_keys(
-        &mut stage,
-        source,
-        target,
-        &source_parts,
-        &target_parts,
-    )
-    .unwrap();
+    let target_parts = vec![(target_x, "x".to_owned()), (target_minus, "-".to_owned())];
+    let anims =
+        transform_matching_keys(&mut stage, source, target, &source_parts, &target_parts).unwrap();
     let names: Vec<&str> = anims
         .iter()
         .map(|animation| animation.state().config.name.as_str())
         .collect();
-    assert_eq!(names, ["Transform", "FadeOutToPoint", "FadeOutToPoint", "FadeInFromPoint"]);
+    assert_eq!(
+        names,
+        [
+            "Transform",
+            "FadeOutToPoint",
+            "FadeOutToPoint",
+            "FadeInFromPoint"
+        ]
+    );
     assert_eq!(anims[0].state().mobject(), source_x0);
 }

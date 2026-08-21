@@ -223,10 +223,7 @@ pub fn transform_matching_keys(
             });
         if let Some(index) = target_index {
             target_claimed[index] = true;
-            anims.push(Box::new(Transform::new(
-                *source_mob,
-                target_parts[index].0,
-            )));
+            anims.push(Box::new(Transform::new(*source_mob, target_parts[index].0)));
         } else {
             source_unmatched.push(*source_mob);
         }
