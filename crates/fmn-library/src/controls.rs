@@ -1651,10 +1651,49 @@ impl ControlPanelMobject {
         &self.opener_rect
     }
 
+    /// The opener's info text.
+    #[must_use]
+    pub fn info_text(&self) -> &VMobject {
+        &self.info_text
+    }
+
     /// The controls column.
     #[must_use]
     pub fn controls(&self) -> &VMobject {
         &self.controls
+    }
+
+    /// Reference family order: `[panel, opener, controls]`.
+    #[must_use]
+    pub fn family_parts(&self) -> (&VMobject, VMobject, &VMobject) {
+        (&self.panel, self.opener(), &self.controls)
+    }
+
+    /// The Reference's `move_panel_and_controls_to_panel_opener` as a
+    /// pure layout: panel sits on the opener; controls keep their x and
+    /// sit `MED_SMALL_BUFF` above it. The portal bind uses this after
+    /// hanging live Python control children onto a native panel.
+    #[must_use]
+    pub fn layout_against_opener(
+        panel: VMobject,
+        opener_rect: &VMobject,
+        controls: VMobject,
+    ) -> (VMobject, VMobject) {
+        let panel = panel.next_to(opener_rect, UP, 0.0, ORIGIN);
+        let controls_x = controls.center_point()[0];
+        let controls = controls.next_to(opener_rect, UP, MED_SMALL_BUFF, ORIGIN);
+        let new_x = controls.center_point()[0];
+        let controls = controls.shifted([controls_x - new_x, 0.0, 0.0]);
+        (panel, controls)
+    }
+
+    /// `panel_opener.to_corner(corner, buff=0)` keeping the opener's x.
+    #[must_use]
+    pub fn opener_to_corner(opener: VMobject, corner: Vec3) -> VMobject {
+        let x = opener.center_point()[0];
+        let opener = to_corner(opener, corner, 0.0);
+        let new_x = opener.center_point()[0];
+        opener.shifted([x - new_x, 0.0, 0.0])
     }
 
     /// The whole group: `[panel, opener, controls]`.
@@ -1703,29 +1742,19 @@ impl ControlPanelMobject {
     /// panel sits directly on the opener; the controls keep their x and
     /// sit `MED_SMALL_BUFF` above the opener.
     fn move_panel_and_controls_to_panel_opener(&mut self) {
-        self.panel = self
-            .panel
-            .clone()
-            .next_to(&self.opener_rect, UP, 0.0, ORIGIN);
-        let controls_x = self.controls.center_point()[0];
-        self.controls =
-            self.controls
-                .clone()
-                .next_to(&self.opener_rect, UP, MED_SMALL_BUFF, ORIGIN);
-        let new_x = self.controls.center_point()[0];
-        self.controls = self
-            .controls
-            .clone()
-            .shifted([controls_x - new_x, 0.0, 0.0]);
+        let (panel, controls) = Self::layout_against_opener(
+            self.panel.clone(),
+            &self.opener_rect,
+            self.controls.clone(),
+        );
+        self.panel = panel;
+        self.controls = controls;
     }
 
     /// `panel_opener.to_corner(corner, buff=0)` keeping the opener's x,
     /// moving rect and info text as one group.
     fn move_opener_to_corner(&mut self, corner: Vec3) {
-        let x = self.opener().center_point()[0];
-        let opener = to_corner(self.opener(), corner, 0.0);
-        let new_x = opener.center_point()[0];
-        let opener = opener.shifted([x - new_x, 0.0, 0.0]);
+        let opener = Self::opener_to_corner(self.opener(), corner);
         let mut children = opener.children().to_vec();
         self.info_text = children.remove(1);
         self.opener_rect = children.remove(0);
@@ -2337,6 +2366,32 @@ mod tests {
     // -------------------------------------------------------- ControlPanel
 
     #[test]
+    fn control_panel_empty_family_and_info_text() {
+        let book = book();
+        let panel = ControlPanel::new([])
+            .opener_text("Panel")
+            .build(&book)
+            .expect("opener text typesets");
+        let (panel_part, opener, controls) = panel.family_parts();
+        assert_eq!(panel.composition().children().len(), 3);
+        assert_eq!(opener.children().len(), 2, "opener: [rect, text]");
+        assert_eq!(controls.children().len(), 0);
+        assert_eq!(panel_part, panel.panel());
+        assert_eq!(panel.info_text(), &opener.children()[1]);
+        assert!(
+            !panel.info_text().children().is_empty(),
+            "opener label typeset glyphs"
+        );
+        let (laid_panel, laid_controls) = ControlPanelMobject::layout_against_opener(
+            panel.panel().clone(),
+            panel.opener_rect(),
+            panel.controls().clone(),
+        );
+        assert_eq!(&laid_panel, panel.panel());
+        assert_eq!(&laid_controls, panel.controls());
+    }
+
+    #[test]
     fn control_panel_composition() {
         let book = book();
         let panel = ControlPanel::new([Checkbox::new(true).composition()])
@@ -2350,6 +2405,11 @@ mod tests {
             "opener: [rect, text]"
         );
         assert_eq!(comp.children()[2].children().len(), 1, "one control");
+        assert_eq!(
+            panel.info_text(),
+            &comp.children()[1].children()[1],
+            "info text is the opener's second child"
+        );
 
         // Panel geometry: FRAME_WIDTH/4 × MED_SMALL_BUFF + FRAME_HEIGHT.
         assert!((panel.panel().length_over_dim(0) - FRAME_WIDTH / 4.0).abs() < 1e-9);
