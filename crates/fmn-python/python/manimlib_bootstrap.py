@@ -10643,7 +10643,9 @@ class LinearNumberSlider(ControlMobject):
         value = self.min_value + proportion * (
             self.max_value - self.min_value
         )
-        step_count = int((value - self.min_value) / self.step)
+        step_position = (value - self.min_value) / self.step
+        boundary_tolerance = 1e-12 * max(1.0, abs(step_position))
+        step_count = int(_math.ceil(step_position - boundary_tolerance))
         snapped = self.min_value + step_count * self.step
         snapped_proportion = (snapped - self.min_value) / (
             self.max_value - self.min_value
