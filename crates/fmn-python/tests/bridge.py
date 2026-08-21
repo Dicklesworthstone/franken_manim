@@ -1473,6 +1473,38 @@ except TypeError as error:
 else:
     raise AssertionError("SceneState accepted a non-Scene")
 
+embed_module = importlib.import_module("manimlib.scene.scene_embed")
+assert embed_module.CheckpointManager.__bases__ == (object,)
+assert str(inspect.signature(embed_module.CheckpointManager)) == "()"
+assert str(inspect.signature(embed_module.CheckpointManager.get_leading_comment)) == (
+    "(code_string)"
+)
+checkpoint_manager = embed_module.CheckpointManager()
+assert checkpoint_manager.get_leading_comment("# start\nplay()") == "# start"
+assert checkpoint_manager.get_leading_comment("play()") == ""
+checkpoint_scene = Scene()
+checkpoint_square = manimlib.Square()
+checkpoint_scene.add(checkpoint_square)
+checkpoint_origin = checkpoint_square.get_center().copy()
+checkpoint_manager.handle_checkpoint_key(checkpoint_scene, "# start")
+checkpoint_square.shift(manimlib.RIGHT)
+checkpoint_manager.handle_checkpoint_key(checkpoint_scene, "# later")
+assert "# later" in checkpoint_manager.checkpoint_states
+checkpoint_manager.handle_checkpoint_key(checkpoint_scene, "# start")
+assert np.allclose(checkpoint_square.get_center(), checkpoint_origin)
+assert "# later" not in checkpoint_manager.checkpoint_states
+checkpoint_manager.clear_checkpoints()
+assert checkpoint_manager.checkpoint_states == {}
+try:
+    importlib.import_module("pyperclip")
+except ImportError:
+    try:
+        checkpoint_manager.checkpoint_paste(None, checkpoint_scene)
+    except Exception as error:
+        assert "pyperclip" in str(error)
+    else:
+        raise AssertionError("checkpoint_paste succeeded without pyperclip")
+
 live_box = manimlib.Square()
 live_box_before = live_box.get_bounding_box().copy()
 live_box.get_points()[:, 0] += 2.0

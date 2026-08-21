@@ -22,6 +22,7 @@ import operator as _operator
 import pathlib as _pathlib
 import re as _re
 import sys as _sys
+import textwrap as _textwrap
 import types as _types
 import weakref as _weakref
 
@@ -11098,6 +11099,50 @@ class InteractiveScene(Scene):
         return _portal_checkpoint_paste(self)
 
 
+class CheckpointManager:
+    """Named SceneState snapshots for interactive re-run of a comment-keyed block."""
+
+    def __init__(self):
+        self.checkpoint_states = {}
+
+    def checkpoint_paste(self, shell, scene):
+        try:
+            pyperclip = _importlib.import_module("pyperclip")
+        except ImportError as error:
+            raise _CapabilityError(
+                "pyperclip is not installed; CheckpointManager.checkpoint_paste "
+                "needs a clipboard, or call handle_checkpoint_key directly"
+            ) from error
+        code_string = _textwrap.dedent(
+            "\n".join(line.rstrip() for line in str(pyperclip.paste()).splitlines())
+        )
+        self.handle_checkpoint_key(scene, self.get_leading_comment(code_string))
+        if shell is not None:
+            shell.run_cell(code_string)
+
+    @staticmethod
+    def get_leading_comment(code_string):
+        leading_line = str(code_string).partition("\n")[0].lstrip()
+        if leading_line.startswith("#"):
+            return leading_line
+        return ""
+
+    def handle_checkpoint_key(self, scene, key):
+        if not key:
+            return
+        if key in self.checkpoint_states:
+            scene.restore_state(self.checkpoint_states[key])
+            all_keys = list(self.checkpoint_states.keys())
+            index = all_keys.index(key)
+            for later_key in all_keys[index + 1 :]:
+                self.checkpoint_states.pop(later_key)
+        else:
+            self.checkpoint_states[key] = scene.get_state()
+
+    def clear_checkpoints(self):
+        self.checkpoint_states = {}
+
+
 class Animation:
     def __init__(
         self,
@@ -14822,6 +14867,7 @@ def _install_schema_surface():
         ("manimlib.scene.scene", "Scene"): Scene,
         ("manimlib.scene.scene", "SceneState"): SceneState,
         ("manimlib.scene.scene", "ThreeDScene"): ThreeDScene,
+        ("manimlib.scene.scene_embed", "CheckpointManager"): CheckpointManager,
         ("manimlib.scene.interactive_scene", "InteractiveScene"): InteractiveScene,
         ("manimlib.animation.animation", "Animation"): Animation,
     }
