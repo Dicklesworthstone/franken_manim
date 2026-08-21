@@ -536,8 +536,10 @@ mod tests {
 
         let mut array = view.as_numpy_mut().expect("the view is writable");
         assert_eq!(array.scope(), Some("fill_rgba"));
-        // numpy: vmobject itemsize 68, fill_rgba at byte 32, four lanes.
-        assert_eq!(array.byte_offset(), 32);
+        // numpy: vmobject itemsize 68, fill_rgba at byte 36, four lanes.
+        // (32 is joint_angle; the whole table is pinned in
+        // `vmobject_dtype_offsets_match_numpy_structured_packing` below.)
+        assert_eq!(array.byte_offset(), 36);
         assert_eq!(array.layout().shape, vec![3, 4]);
         assert_eq!(array.layout().strides, vec![68, 4]);
         assert_eq!(array.layout().item_size, 4);
@@ -557,6 +559,53 @@ mod tests {
 
         assert_eq!(buffer.storage_id(), generation);
         assert_eq!(buffer.read(1, "fill_rgba"), Some(vec![0.1, 0.2, 0.3, 0.4]));
+    }
+
+    /// The dtype's whole byte-offset table, against the same numbers
+    /// `tests/data_plane.rs` locks to numpy's structured-dtype packing.
+    ///
+    /// A field-scoped export's `byte_offset()` is one row of this table, so
+    /// pinning the table is what keeps a hand-typed constant in any single
+    /// export test from being the only guard on the packing.
+    #[test]
+    fn vmobject_dtype_offsets_match_numpy_structured_packing() {
+        let dtype = RecordDType::of(&RecordSchema::vmobject());
+        assert_eq!(dtype.itemsize(), 68);
+        for (field, byte_offset, lanes) in [
+            ("point", 0, 3),
+            ("stroke_rgba", 12, 4),
+            ("stroke_width", 28, 1),
+            ("joint_angle", 32, 1),
+            ("fill_rgba", 36, 4),
+            ("base_normal", 52, 3),
+            ("fill_border_width", 64, 1),
+        ] {
+            assert_eq!(
+                dtype.byte_offset(field),
+                Some(byte_offset),
+                "byte offset of {field}"
+            );
+            assert_eq!(dtype.subshape(field), Some(lanes), "subshape of {field}");
+        }
+
+        // Every field-scoped export reports its row of that table, and the
+        // last field's lane view lands exactly on fnp's legality bound —
+        // offset 64 leaves 35 reachable lanes for a (3, 1) view of stride 68.
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).expect("3 records");
+        for (field, byte_offset, lanes) in [
+            ("point", 0, 3),
+            ("stroke_width", 28, 1),
+            ("fill_rgba", 36, 4),
+            ("fill_border_width", 64, 1),
+        ] {
+            let view = buffer
+                .export_field_view(field, false)
+                .expect("the field exists");
+            let array = view.as_numpy().expect("the field view exports");
+            assert_eq!(array.byte_offset(), byte_offset, "export offset of {field}");
+            assert_eq!(array.layout().shape, vec![3, lanes], "shape of {field}");
+            assert_eq!(array.layout().strides, vec![68, 4], "strides of {field}");
+        }
     }
 
     #[test]
