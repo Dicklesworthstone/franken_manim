@@ -8123,6 +8123,7 @@ class VCube(VGroup3D):
 class VPrism(VCube):
     def __init__(self, width=3.0, height=2.0, depth=1.0, **kwargs):
         side_length = kwargs.pop("side_length", 2.0)
+        z_index = int(kwargs.pop("z_index", 0))
         _refuse_unrouted(
             "VPrism()", [("side_length", float(side_length) != 2.0)]
         )
@@ -8141,6 +8142,7 @@ class VPrism(VCube):
             fill_color,
             float(fill_opacity),
             float(stroke_width),
+            z_index,
         )
         _hang_native_children(self, specs)
         style.setdefault("fill_color", fill_color)

@@ -8561,6 +8561,30 @@ assert np.allclose(
 )
 assert all(face.get_fill_color() == manimlib.BLUE for face in vprism.submobjects)
 
+default_vprism = three_dimensions.VPrism()
+assert len(default_vprism.submobjects) == 6
+assert np.allclose(
+    [default_vprism.get_width(), default_vprism.get_height(), default_vprism.get_depth()],
+    [3.0, 2.0, 1.0],
+    atol=1e-6,
+)
+
+back_vprism = three_dimensions.VPrism(z_index=-1)
+front_vprism = three_dimensions.VPrism(z_index=1)
+vprism_order_scene = Scene().add(front_vprism, back_vprism)
+assert vprism_order_scene.get_mobjects() == [back_vprism, front_vprism]
+
+failed_vprism = three_dimensions.VPrism.__new__(three_dimensions.VPrism)
+try:
+    three_dimensions.VPrism.__init__(failed_vprism, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "VPrism() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted VPrism keyword reached the native builder")
+assert not hasattr(failed_vprism, "submobjects")
+
 dodecahedron = three_dimensions.Dodecahedron(
     fill_color=manimlib.RED,
     fill_opacity=0.6,
