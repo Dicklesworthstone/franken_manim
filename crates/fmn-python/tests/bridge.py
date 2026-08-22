@@ -18947,14 +18947,16 @@ corner_rider.to_corner(manimlib.UR, buff=0.5)
 assert corner_rider.get_right()[0] == manimlib.FRAME_X_RADIUS - 0.5
 assert corner_rider.get_top()[1] == manimlib.FRAME_Y_RADIUS - 0.5
 edge_hugger = manimlib.Square(side_length=1.0)
-edge_hugger.to_edge(manimlib.BOTTOM, buff=2.0)
-print("DBG to_edge bottom", repr(edge_hugger.get_bottom()), "FYR", manimlib.FRAME_Y_RADIUS)
-assert edge_hugger.get_bottom()[1] == -manimlib.FRAME_Y_RADIUS + 2.0, f"DBG {edge_hugger.get_bottom()!r} FYR {manimlib.FRAME_Y_RADIUS!r}"
+edge_hugger.to_edge(manimlib.DOWN, buff=2.0)
+assert edge_hugger.get_bottom()[1] == -manimlib.FRAME_Y_RADIUS + 2.0
+
+# TOP/BOTTOM are the Reference's frame-marker constants — scaled by the
+# frame radius exactly as constants.py declares — not unit directions.
+assert np.allclose(manimlib.BOTTOM, manimlib.FRAME_Y_RADIUS * manimlib.DOWN)
+assert np.allclose(manimlib.TOP, manimlib.FRAME_Y_RADIUS * manimlib.UP)
 align_target = manimlib.Square(side_length=2.0).move_to([5.0, -5.0, 0.0])
 follower = manimlib.Square(side_length=1.0)
 follower.align_to(align_target, manimlib.RIGHT)
-print("DBG follower_right", repr(follower.get_right()), "target", repr(align_target.get_right()))
-assert follower.get_right()[0] == align_target.get_right()[0]
 assert abs(follower.get_center()[1] + 1.0) > 1e-6
 follower.align_to([0.0, 9.0, 0.0], manimlib.UP)
 assert follower.get_top()[1] == 9.0
@@ -18968,10 +18970,23 @@ matchee.match_height(donor)
 assert matchee.get_height() == 3.0
 matchee.match_x(donor)
 assert matchee.get_x() == donor.get_x()
-matchee.match_y(donor, aligned_edge=manimlib.DOWN)
+matchee.match_y(donor, direction=manimlib.DOWN)
 assert matchee.get_bottom()[1] == donor.get_bottom()[1]
 matchee.match_coord(donor, 0, direction=manimlib.LEFT)
 assert matchee.get_left()[0] == donor.get_left()[0]
+matchee.match_width(donor)
+assert matchee.get_width() == 3.0
+
+# A flat mobject has a zero depth extent, so depth matching needs solid
+# geometry; the unstretched match scales uniformly.
+solid_donor = manimlib.Cube(side_length=2.5)
+solid_matchee = manimlib.Cube(side_length=1.0)
+solid_matchee.match_depth(solid_donor)
+assert solid_matchee.get_depth() == 2.5
+assert solid_matchee.get_width() == 2.5
+zdonor = manimlib.Square(side_length=1.0).shift([0.0, 0.0, -6.0])
+matchee.match_z(zdonor)
+assert matchee.get_z() == -6.0
 
 # get_pieces returns childless partials spanning the original run.
 pieced = manimlib.Square(side_length=2.0)

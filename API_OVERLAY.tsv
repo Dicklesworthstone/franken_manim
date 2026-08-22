@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	b4f11bae63657562586751b9b3f9a68f9d9288cefa3940947c1947dcf17b141d
+ledger_reviewed_digest	82a202f8a7f4be94aa24ed7878d73d382e342f78306d52fa3802f13628849e4e
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -816,6 +816,59 @@ manimlib.mobject.mobject:Mobject.stash_mobject_pointers	same	scripts/manim_ref/m
 manimlib.mobject.mobject:Mobject.serialize	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the pickle payload over the portal's structural reduce
 manimlib.mobject.mobject:Mobject.deserialize	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	becomes the unpickled counterpart and returns self
 manimlib.mobject.mobject:Mobject.pointwise_become_partial	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	base-class no-op exactly as the Reference documents with real partials in subclasses
+manimlib.mobject.mobject:Mobject.get_center	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the revisioned world-space family box center
+manimlib.mobject.mobject:Mobject.get_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	measures the live box extent along the width axis
+manimlib.mobject.mobject:Mobject.get_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	measures the live box extent along the height axis
+manimlib.mobject.mobject:Mobject.get_depth	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	measures the live box extent along the depth axis
+manimlib.mobject.mobject:Mobject.get_shape	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the three live extents as one width height depth tuple
+manimlib.mobject.mobject:Mobject.length_over_dim	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	absorbs the diagonal corner delta over the requested dimension
+manimlib.mobject.mobject:Mobject.has_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reports whether any live point records exist
+manimlib.mobject.mobject:Mobject.get_right	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	selects the box point toward the positive width direction
+manimlib.mobject.mobject:Mobject.get_left	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	selects the box point toward the negative width direction
+manimlib.mobject.mobject:Mobject.get_top	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	selects the box point toward the positive height direction
+manimlib.mobject.mobject:Mobject.get_bottom	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	selects the box point toward the negative height direction
+manimlib.mobject.mobject:Mobject.get_corner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	selects the box corner toward any signed direction
+manimlib.mobject.mobject:Mobject.get_edge_center	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	delegates edge selection to the sign-directed box point
+manimlib.mobject.mobject:Mobject.get_zenith	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the edge center along OUT
+manimlib.mobject.mobject:Mobject.get_nadir	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the edge center along IN
+manimlib.mobject.mobject:Mobject.get_bounding_box_point	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	sign-directed corner selection over the revisioned family box
+manimlib.mobject.mobject:Mobject.get_x	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the directed box point width coordinate
+manimlib.mobject.mobject:Mobject.get_y	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the directed box point height coordinate
+manimlib.mobject.mobject:Mobject.get_z	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the directed box point depth coordinate
+manimlib.mobject.mobject:Mobject.get_coord	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads one directed box coordinate by dimension index
+manimlib.mobject.mobject:Mobject.set_x	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	shifts so the directed edge lands on the requested width coordinate
+manimlib.mobject.mobject:Mobject.set_y	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	shifts so the directed edge lands on the requested height coordinate
+manimlib.mobject.mobject:Mobject.set_z	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	shifts so the directed edge lands on the requested depth coordinate
+manimlib.mobject.mobject:Mobject.set_coord	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	shifts so the directed edge lands on the requested coordinate by dimension
+manimlib.mobject.mobject:Mobject.set_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales uniformly or stretches the width axis to the requested extent
+manimlib.mobject.mobject:Mobject.set_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales uniformly or stretches the height axis to the requested extent
+manimlib.mobject.mobject:Mobject.rescale_to_fit	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	scales by the extent ratio with stretch selecting axis affine over uniform scale
+manimlib.mobject.mobject:Mobject.stretch_to_fit_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales to the requested width through the one rescale path
+manimlib.mobject.mobject:Mobject.stretch_to_fit_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales to the requested height through the one rescale path
+manimlib.mobject.mobject:Mobject.stretch_to_fit_depth	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales to the requested depth through the one rescale path
+manimlib.mobject.mobject:Mobject.stretch_in_place	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	applies the axis affine factor about the box center
+manimlib.mobject.mobject:Mobject.stretch_about_point	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	applies the axis affine factor anchored at the caller point
+manimlib.mobject.mobject:Mobject.set_shape	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	stretches each named extent through the stretch-mode setters in declaration order
+manimlib.mobject.mobject:Mobject.set_max_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	clamps the width only when the live extent exceeds the band
+manimlib.mobject.mobject:Mobject.set_max_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	clamps the height only when the live extent exceeds the band
+manimlib.mobject.mobject:Mobject.set_max_depth	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	clamps the depth only when the live extent exceeds the band
+manimlib.mobject.mobject:Mobject.set_min_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	floors the width only when the live extent falls below the band
+manimlib.mobject.mobject:Mobject.set_min_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	floors the height only when the live extent falls below the band
+manimlib.mobject.mobject:Mobject.set_min_depth	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	floors the depth only when the live extent falls below the band
+manimlib.mobject.mobject:Mobject.center	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	moves the family box center to the origin
+manimlib.mobject.mobject:Mobject.align_on_border	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	sign-directed border placement with the buff term along the direction over Marionette placement
+manimlib.mobject.mobject:Mobject.to_corner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	align_on_border alias for diagonal corners
+manimlib.mobject.mobject:Mobject.to_edge	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	align_on_border alias for frame edges
+manimlib.mobject.mobject:Mobject.align_to	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	directed mobject or point alignment preserving the untouched coordinates
+manimlib.mobject.mobject:Mobject.match_dim_size	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales to the donor extent along the requested dimension
+manimlib.mobject.mobject:Mobject.match_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	match_dim_size alias for the width dimension
+manimlib.mobject.mobject:Mobject.match_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	match_dim_size alias for the height dimension
+manimlib.mobject.mobject:Mobject.match_depth	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	match_dim_size alias for the depth dimension
+manimlib.mobject.mobject:Mobject.match_x	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	aligns the directed edge to the donor or point width coordinate
+manimlib.mobject.mobject:Mobject.match_y	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	aligns the directed edge to the donor or point height coordinate
+manimlib.mobject.mobject:Mobject.match_z	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	aligns the directed edge to the donor or point depth coordinate
+manimlib.mobject.mobject:Mobject.match_coord	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	aligns the directed edge to the donor or point coordinate by dimension
+manimlib.mobject.mobject:Mobject.get_pieces	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns childless partial copies over one linspace slice of the point run each
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
