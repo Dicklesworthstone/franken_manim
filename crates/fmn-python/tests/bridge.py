@@ -19120,3 +19120,75 @@ wrapper.surround(wrapped, buff=0.75)
 assert wrapper.get_width() == 3.5
 assert wrapper.get_height() == 3.5
 assert np.allclose(wrapper.get_center(), wrapped.get_center())
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the color/style family and looks_identical.
+
+# set_color routes the Reference RED through fmn-core's one color model.
+tinted = manimlib.Square(side_length=1.0).set_color(manimlib.RED)
+assert tinted.get_color() == "#FC6255"
+assert tinted.get_opacity() == 1.0
+tinted.set_opacity(0.35)
+assert abs(tinted.get_opacity() - 0.35) < 1e-6
+assert tinted.get_color() == "#FC6255"
+tinted.set_color(manimlib.BLUE, opacity=0.6)
+assert tinted.get_color() == "#58C4DD"
+assert abs(tinted.get_opacity() - 0.6) < 1e-6
+
+# Recursion paints children; recurse=False leaves them untouched.
+style_parent = manimlib.Square(side_length=3.0)
+kid = manimlib.Dot().move_to([0.5, 0.5, 0.0])
+style_parent.add(kid)
+style_parent.set_color(manimlib.GREEN, opacity=0.8)
+assert kid.get_color() == "#83C167"
+assert abs(kid.get_opacity() - 0.8) < 1e-6
+shy_parent = manimlib.Square(side_length=3.0).set_color(manimlib.YELLOW)
+shy_kid = manimlib.Dot(color=manimlib.RED).move_to([0.25, 0.25, 0.0])
+shy_parent.add(shy_kid)
+shy_parent.set_color(manimlib.PURPLE, recurse=False)
+assert shy_kid.get_color() == "#FC6255"
+# The base rgba lane exists only on the base record schema; a plain
+# Mobject carries it, while vectorized mobjects route through fill/stroke.
+graded = manimlib.Mobject()
+graded.resize(4)
+n_points = len(graded.get_points())
+alphas = np.linspace(0.1, 0.9, n_points)
+rgba_rows = np.hstack((np.full((n_points, 3), 0.5), alphas.reshape(-1, 1)))
+graded.set_rgba_array(rgba_rows)
+assert np.allclose(graded.get_opacities(), alphas)
+assert abs(float(np.mean(graded.get_opacities())) - 0.5) < 1e-6
+
+# A color list interpolates across the point run by the Reference rule,
+# landing in both style lanes of a vectorized mobject.
+gradient = manimlib.Square(side_length=1.0).set_color([manimlib.RED, manimlib.BLUE])
+for lane in ("fill_rgba", "stroke_rgba"):
+    assert np.allclose(
+        gradient.data[lane][0, :3],
+        [252 / 255, 98 / 255, 85 / 255],
+        atol=1e-4,
+    )
+    assert np.allclose(
+        gradient.data[lane][-1, :3],
+        [88 / 255, 196 / 255, 221 / 255],
+        atol=1e-4,
+    )
+
+# looks_identical compares families member-wise over dtype, data keys,
+# and uniforms: true for a fresh copy, false for any semantic drift.
+original = manimlib.VGroup(
+    manimlib.Square(side_length=1.0).set_color(manimlib.RED),
+    manimlib.Dot().move_to([1.0, 0.0, 0.0]),
+)
+assert original.looks_identical(original.copy())
+recolored = original.copy()
+recolored[0].set_opacity(0.5)
+assert not original.looks_identical(recolored)
+reshaped = original.copy()
+reshaped[1].shift([0.25, 0.0, 0.0])
+assert not original.looks_identical(reshaped)
+shrunk_family = manimlib.Square(side_length=1.0)
+assert not original.looks_identical(shrunk_family)
+plain_a = manimlib.Square(side_length=2.0)
+plain_b = manimlib.Square(side_length=2.0)
+assert plain_a.looks_identical(plain_b)

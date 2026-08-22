@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	4fcf30d1dbda7839794dc4c57bb5ca748d93d2fc7943e6934e2a7a6e354f4191
+ledger_reviewed_digest	d36d8558287305059e06c88dab895cc898c49906bded38931763520a51ee59c9
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -880,6 +880,14 @@ manimlib.mobject.mobject:Mobject.next_to	same	scripts/manim_ref/manimlib/mobject
 manimlib.mobject.mobject:Mobject.put_start_and_end_on	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales rotates and shifts the run onto the segment with zero-length targets collapsing through min_scale_factor
 manimlib.mobject.mobject:Mobject.replace	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	takes the donor place matching one dimension or stretching all three
 manimlib.mobject.mobject:Mobject.surround	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	wraps the donor box with the requested margin centered on it
+manimlib.mobject.mobject:Mobject.get_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the first record row rgb through the one hex color model
+manimlib.mobject.mobject:Mobject.set_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	paints the family recursing so subclass lane overrides stay observable
+manimlib.mobject.mobject:Mobject.get_opacity	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the first record row alpha
+manimlib.mobject.mobject:Mobject.get_opacities	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the per-record alpha column
+manimlib.mobject.mobject:Mobject.set_opacity	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rewrites alpha across the family preserving rgb
+manimlib.mobject.mobject:Mobject.set_rgba_array	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	writes raw style rows over the named record lane
+manimlib.mobject.mobject:Mobject.set_rgba_array_by_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	interpolates color lists across records into the requested lane
+manimlib.mobject.mobject:Mobject.looks_identical	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	compares point-carrying families member-wise over dtype data keys and uniforms
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
