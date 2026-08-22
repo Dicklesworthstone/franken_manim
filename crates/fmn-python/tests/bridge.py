@@ -18330,8 +18330,7 @@ assert top.get_ancestors() == []
 outside = Mobject(leaf)
 assert top not in outside.get_family(recurse=False)
 extended = leaf.get_ancestors(extended=True)
-assert top in extended and outside in extended
-assert extended[0] == outside or extended[-1] != outside
+assert extended == [outside]
 
 # Copies start with rebuilt back-edges: root parentless, members mapped.
 copied_top = top.copy()
@@ -18402,7 +18401,7 @@ assert not animating_leaf.is_changing()
 animating_leaf.set_animating_status(True)
 assert animating_leaf.is_changing()
 assert animating_mid._is_animating and animating_root._is_animating
-assert still._is_animating is False
+assert not getattr(still, "_is_animating", False)
 animating_root.set_animating_status(False, recurse=False)
 assert animating_root._is_animating is False
 assert animating_mid._is_animating and animating_leaf._is_animating

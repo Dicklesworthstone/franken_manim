@@ -1963,6 +1963,9 @@ class Mobject(_BridgeMobject):
             parent.note_changed_family()
         return self
 
+    def clear(self):
+        return self.remove(*list(self.submobjects), recurse=False)
+
     def add_updater(self, updater, index=None, call=True):
         if not callable(updater):
             raise TypeError(
