@@ -18950,10 +18950,32 @@ edge_hugger = manimlib.Square(side_length=1.0)
 edge_hugger.to_edge(manimlib.DOWN, buff=2.0)
 assert edge_hugger.get_bottom()[1] == -manimlib.FRAME_Y_RADIUS + 2.0
 
-# TOP/BOTTOM are the Reference's frame-marker constants — scaled by the
-# frame radius exactly as constants.py declares — not unit directions.
-assert np.allclose(manimlib.BOTTOM, manimlib.FRAME_Y_RADIUS * manimlib.DOWN)
-assert np.allclose(manimlib.TOP, manimlib.FRAME_Y_RADIUS * manimlib.UP)
+# C-16 (BN-07): the Reference's frame-marker constants are frame-radius-scaled,
+# which breaks every direction-argument use (align_on_border subtracts
+# buff * direction unnormalized). FrankenManim resolves them to unit
+# directions; frame math keeps the FRAME_*_RADIUS spellings.
+assert np.allclose(manimlib.TOP, manimlib.UP)
+assert np.allclose(manimlib.BOTTOM, manimlib.DOWN)
+assert np.allclose(manimlib.LEFT_SIDE, manimlib.LEFT)
+assert np.allclose(manimlib.RIGHT_SIDE, manimlib.RIGHT)
+marker = manimlib.Square(side_length=2.0)
+marker.to_edge(manimlib.BOTTOM, buff=0.5)
+assert np.isclose(marker.get_bottom()[1], -manimlib.FRAME_Y_RADIUS + 0.5)
+marker.to_edge(manimlib.TOP, buff=1.5)
+assert np.isclose(marker.get_top()[1], manimlib.FRAME_Y_RADIUS - 1.5)
+marker.to_edge(manimlib.LEFT_SIDE, buff=0.25)
+assert np.isclose(marker.get_left()[0], -manimlib.FRAME_X_RADIUS + 0.25)
+marker.to_edge(manimlib.RIGHT_SIDE, buff=0.75)
+assert np.isclose(marker.get_right()[0], manimlib.FRAME_X_RADIUS - 0.75)
+# The bound path routes through Stage::to_edge and must agree with the
+# detached branch under the C-16 unit directions.
+bound_scene = Scene()
+bound_marker = manimlib.Square(side_length=2.0)
+bound_scene.add(bound_marker)
+bound_marker.to_edge(manimlib.BOTTOM, buff=0.5)
+assert np.isclose(bound_marker.get_bottom()[1], -manimlib.FRAME_Y_RADIUS + 0.5)
+bound_marker.to_edge(manimlib.TOP, buff=1.0)
+assert np.isclose(bound_marker.get_top()[1], manimlib.FRAME_Y_RADIUS - 1.0)
 align_target = manimlib.Square(side_length=2.0).move_to([5.0, -5.0, 0.0])
 follower = manimlib.Square(side_length=1.0)
 follower.align_to(align_target, manimlib.RIGHT)
@@ -19367,3 +19389,89 @@ animation = built.build()
 assert isinstance(animation, manimlib.Animation)
 assert builder_src.get_width() == 1.0
 assert np.allclose(builder_src.get_center(), [2.0, 0.0, 0.0])
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: schema attributes, init seams, wag, Point/Group, and the
+# continuous bounding box.
+
+# The record-schema class attributes carry the Reference identities; the
+# render primitive keeps the familiar numeric value without moderngl.
+assert manimlib.Mobject.render_primitive == 5
+assert manimlib.Square.render_primitive == 5
+assert manimlib.Mobject().data.dtype.names == ("point", "rgba")
+assert manimlib.Mobject.aligned_data_keys == ["point"]
+assert manimlib.Mobject.pointlike_data_keys == ["point"]
+
+# init_colors re-applies the CONSTRUCTOR style seeds (post-construction
+# set_color mutates lanes but not the seed attributes).
+reseeded = manimlib.Mobject(color=manimlib.RED)
+assert reseeded.color == "#FC6255"
+assert reseeded.opacity == 1.0
+reseeded.set_opacity(0.2)
+assert abs(reseeded.get_opacity() - 0.2) < 1e-6
+reseeded.init_colors()
+assert reseeded.get_color() == "#FC6255"
+assert abs(reseeded.get_opacity() - 1.0) < 1e-6
+
+# wag offsets points along direction by the normalized axis projection.
+wagged = manimlib.Mobject()
+wagged.resize(3)
+for index in range(3):
+    wagged.data["point"][index] = [0.0, index - 1.0, 0.0]
+wagged.wag(manimlib.RIGHT, manimlib.DOWN, 1.0)
+assert np.allclose(
+    [row[0] for row in wagged.get_points()],
+    [1.0, 0.5, 0.0],
+)
+curved = wagged.copy()
+curved.data["point"][:, 0] = 0.0
+curved.wag(manimlib.RIGHT, manimlib.DOWN, 2.0)
+assert np.allclose(
+    [row[0] for row in curved.get_points()],
+    [1.0, 0.25, 0.0],
+)
+
+# The constructor style seeds ride through family copies too.
+fam = manimlib.Group(manimlib.Mobject(color=manimlib.ORANGE))
+assert fam[0].color == "#FF862F"
+
+# set_depth rescales the depth axis through the one stretch path.
+depthy = manimlib.Cube(side_length=2.0)
+depthy.set_depth(5.0)
+assert depthy.get_depth() == 5.0
+flat = manimlib.Square(side_length=1.0)
+flat.set_depth(3.0, stretch=True)
+assert flat.get_depth() == 0.0
+assert flat.get_width() == 1.0
+
+# Point carries an artificial one-record box around its location.
+pinned_point = manimlib.Point([2.0, -3.0, 0.5])
+assert np.allclose(pinned_point.get_location(), [2.0, -3.0, 0.5])
+assert pinned_point.get_width() == 1e-6
+assert pinned_point.get_height() == 1e-6
+assert np.allclose(pinned_point.get_bounding_box_point(manimlib.UR), [2.0, -3.0, 0.5])
+pinned_point.set_location([-1.0, 4.0, 0.0])
+assert np.allclose(pinned_point.get_location(), [-1.0, 4.0, 0.0])
+
+# Group spreads a single iterable of members and split returns them.
+members = [manimlib.Dot(), manimlib.Dot(), manimlib.Dot()]
+bundle = manimlib.Group(members)
+assert len(bundle) == 3
+assert bundle.split() is bundle.submobjects or bundle.split() == bundle.submobjects
+
+# get_continuous_bounding_box_point returns where the ray from the center
+# exits the box — here the right edge at fractional height, not a corner.
+slab = manimlib.Rectangle(width=4.0, height=2.0)
+exit_point = slab.get_continuous_bounding_box_point([2.0, 0.5, 0.0])
+assert np.allclose(exit_point, [2.0, 0.5, 0.0])
+
+# override_animate routes the animate builder to the replacement factory.
+@manimlib.override_animate(manimlib.Mobject.wag)
+def _wag_override_factory(mobject, direction=None, axis=None, wag_factor=1.0):
+    return manimlib.Animation(mobject)
+
+
+probe = manimlib.Square(side_length=1.0)
+override_built = probe.animate.wag(wag_factor=2.0).build()
+assert isinstance(override_built, manimlib.Animation)

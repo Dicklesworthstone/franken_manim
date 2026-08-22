@@ -469,6 +469,12 @@ def _install_live_state(mobject):
     mobject.event_listners = []
     mobject.saved_state = None
     mobject.target = None
+    # Reference __init__ (mobject.py:92-93) style seeds. Constructors in
+    # the native-build family bypass Mobject.__init__ entirely, so the
+    # seeds live here where every construction path passes; copy and
+    # pickle restores overwrite them from the saved attributes.
+    mobject.color = _WHITE
+    mobject.opacity = 1.0
 
 
 class _AnimationBuilder:
@@ -696,6 +702,7 @@ class Mobject(_BridgeMobject):
     data_dtype = [("point", 3), ("rgba", 4)]
     aligned_data_keys = ["point"]
     pointlike_data_keys = ["point"]
+    render_primitive = 5  # moderngl.TRIANGLE_STRIP, without importing a renderer
 
     def __init__(self, *submobjects, **kwargs):
         _install_live_state(self)
@@ -748,6 +755,14 @@ class Mobject(_BridgeMobject):
         ])
 
     def init_data(self):
+        pass
+
+    def init_points(self):
+        pass
+
+    def init_colors(self):
+        # Reference mobject.py:151: re-apply the constructor style seeds.
+        self.set_color(self.color, self.opacity)
         pass
 
     def init_points(self):
@@ -1948,6 +1963,21 @@ class Mobject(_BridgeMobject):
     # slicing regroups through the family's group class.
     def split(self):
         return self.submobjects
+
+    def wag(self, direction=_RIGHT, axis=_DOWN, wag_factor=1.0):
+        # Reference mobject.py:1036: offset every point-carrying family
+        # member along direction in proportion to its normalized axis
+        # projection raised to wag_factor.
+        for mob in self.family_members_with_points():
+            alphas = _np.dot(mob.get_points(), _np.transpose(axis))
+            alphas -= min(alphas)
+            alphas /= max(alphas)
+            alphas = alphas ** wag_factor
+            mob.set_points(mob.get_points() + _np.dot(
+                alphas.reshape((len(alphas), 1)),
+                _np.array(direction).reshape((1, mob.dim)),
+            ))
+        return self
 
     def get_group_class(self):
         return getattr(_FMN_ROOT, "Group", Mobject)
@@ -18252,6 +18282,54 @@ def _resolve_symbolic_constants(rows):
     return resolved
 
 
+def _constant_overrides():
+    """C-16 constant-value rulings from the overlay's [constants] section.
+
+    The extracted schema stays verbatim-faithful to the pin; a ruling here
+    replaces the RESOLVED spelling of exactly one module constant, so both
+    front doors evaluate the same governed value instead of the extracted
+    default. Each spelling is itself a closed-environment expression over
+    already-resolved constants.
+    """
+    overrides = {}
+    in_constants = False
+    for raw_line in _API_OVERLAY_TSV.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_constants = line == "[constants]"
+            continue
+        if not in_constants:
+            continue
+        columns = raw_line.split("\t")
+        if len(columns) < 4 or ":" not in columns[0]:
+            continue
+        module_name, qualified = columns[0].split(":", 1)
+        overrides[(module_name, qualified)] = columns[1]
+    return overrides
+
+
+def _apply_constant_overrides(rows):
+    """Substitute ruled constant spellings before fixpoint evaluation."""
+    overrides = _constant_overrides()
+    if not overrides:
+        return rows
+    return [
+        (
+            module_name,
+            qualified,
+            kind,
+            origin,
+            exported,
+            overrides.get((module_name, qualified), detail)
+            if kind == "constant"
+            else detail,
+        )
+        for (module_name, qualified, kind, origin, exported, detail) in rows
+    ]
+
+
 def _install_schema_surface():
     root = _FMN_MODULE
     _sys.modules.setdefault(__name__, root)
@@ -18259,7 +18337,9 @@ def _install_schema_surface():
     rows = _schema_rows()
     for module_name, *_ in rows:
         _ensure_module(module_name)
-    _resolved_constants = _resolve_symbolic_constants(rows)
+    _resolved_constants = _resolve_symbolic_constants(
+        _apply_constant_overrides(rows)
+    )
 
     specials = {
         (

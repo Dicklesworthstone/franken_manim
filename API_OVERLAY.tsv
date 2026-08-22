@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	818c79dee3eb67334b71fd55269d8a8b21b06b199990a9127f7812727b29b254
+ledger_reviewed_digest	9046b5ddaa983e0f459394cc9deda06dea6292856bf3ede29953b99701c69f6f
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -72,6 +72,23 @@ manimlib.mobject.numbers:char_to_cahced_mob	char_to_cached_mob	C-9	the plan's na
 [param_canonical]
 manimlib.event_handler.event_dispatcher:EventDispatcher.add_listner	event_listner	event_listener	C-9
 manimlib.event_handler.event_dispatcher:EventDispatcher.remove_listner	event_listner	event_listener	C-9
+
+
+# ---------------------------------------------------------------------------
+# [constants] — C-16 constant-value rulings.
+#
+# One row per Reference module constant whose EFFECTIVE value is governed by
+# an Appendix-C ruling instead of its extracted spelling. The extracted layer
+# (API_SCHEMA.tsv) stays verbatim-faithful to the pin; this section records
+# the deliberate divergence so both front doors resolve the same value and
+# the drift gate fails if the constant leaves the surface.
+#
+# reference_symbol	resolved_spelling	ruling	note
+[constants]
+manimlib.constants:TOP	UP	C-16	-
+manimlib.constants:BOTTOM	DOWN	C-16	-
+manimlib.constants:LEFT_SIDE	LEFT	C-16	-
+manimlib.constants:RIGHT_SIDE	RIGHT	C-16	-
 
 # ---------------------------------------------------------------------------
 # [optional_config] — keys with no default, which therefore cannot be
@@ -214,6 +231,10 @@ OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL
 #
 # symbol	status	evidence	tests	notes
 [status]
+manimlib.constants:BOTTOM	improved	BN-07	crates/fmn-python/tests/bridge.py	resolves to the unit DOWN direction per C-16, so to_edge and align_on_border receive a direction instead of a frame-radius-scaled marker
+manimlib.constants:LEFT_SIDE	improved	BN-07	crates/fmn-python/tests/bridge.py	resolves to the unit LEFT direction per C-16, matching the unit-diagonal UL/UR/DL/DR convention for direction-argument use
+manimlib.constants:RIGHT_SIDE	improved	BN-07	crates/fmn-python/tests/bridge.py	resolves to the unit RIGHT direction per C-16, matching the unit-diagonal UL/UR/DL/DR convention for direction-argument use
+manimlib.constants:TOP	improved	BN-07	crates/fmn-python/tests/bridge.py	resolves to the unit UP direction per C-16, so to_edge and align_on_border receive a direction instead of a frame-radius-scaled marker
 manimlib.mobject.geometry:Line	improved	BN-09	crates/fmn-python/tests/bridge.py	is the authored TipableVMobject subclass whose constructor uses Atlas's governed straight or curved geometry and preserves the declared Reference MRO
 manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
 manimlib.mobject.geometry:Line.get_angle	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	computes the planar bearing from virtual-dispatched live endpoints through Atlas geometry
@@ -918,6 +939,26 @@ manimlib.mobject.mobject:_AnimationBuilder.build	same	scripts/manim_ref/manimlib
 manimlib.mobject.mobject:_AnimationBuilder.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the interceptor to its owning mobject with empty call state
 manimlib.mobject.mobject:_UpdaterBuilder.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the bound-method builder to its owner
 manimlib.mobject.mobject:_FunctionalUpdaterBuilder.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the function-fed builder to its owner
+manimlib.mobject.mobject:Mobject.render_primitive	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the familiar triangle-strip primitive identity without importing a renderer
+manimlib.mobject.mobject:Mobject.data_dtype	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	declares the exact point rgba base record schema
+manimlib.mobject.mobject:Mobject.aligned_data_keys	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	names point as the one aligned record key
+manimlib.mobject.mobject:Mobject.pointlike_data_keys	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	names point as the one pointlike record key
+manimlib.mobject.mobject:Mobject.init_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	construction hook over the native record schema
+manimlib.mobject.mobject:Mobject.init_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	blank base hook exactly as the Reference documents for subclass override
+manimlib.mobject.mobject:Mobject.init_colors	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reapplies the constructor color and opacity seeds through the style surface
+manimlib.mobject.mobject:Mobject.wag	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	offsets point-carrying family members by normalized axis projection raised to wag_factor
+manimlib.mobject.mobject:Mobject.split	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the submobject list as the container protocol
+manimlib.mobject.mobject:Mobject.get_continuous_bounding_box_point	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the center-ray box exit point with zero-component guards
+manimlib.mobject.mobject:Mobject.set_depth	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales the depth dimension through the one rescale path
+manimlib.mobject.mobject:Point	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	is the authored one-record location mobject with artificial box extents over native records
+manimlib.mobject.mobject:Point.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	installs artificial extents and the requested location record
+manimlib.mobject.mobject:Point.get_location	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns a copy of the live location record
+manimlib.mobject.mobject:Point.set_location	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rewrites the single record row to the requested location
+manimlib.mobject.mobject:Point.get_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the artificial width extent
+manimlib.mobject.mobject:Point.get_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the artificial height extent
+manimlib.mobject.mobject:Point.get_bounding_box_point	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	collapses every direction to the location
+manimlib.mobject.mobject:Group	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	is the authored any-mobject container over the live family graph
+manimlib.mobject.mobject:Group.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	spreads a single iterable argument into members exactly as the Reference documents
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
