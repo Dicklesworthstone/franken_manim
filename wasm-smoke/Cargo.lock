@@ -299,6 +299,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -529,6 +535,8 @@ dependencies = [
  "fmn-dmath",
  "fmn-geom",
  "fmn-hash",
+ "fnp-dtype",
+ "fnp-ndarray",
 ]
 
 [[package]]
@@ -564,6 +572,19 @@ dependencies = [
  "fmn-render",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "fnp-dtype"
+version = "0.2.0"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=8d7415dc48887efc8925b9c2536ceec1d0a2bb9c#8d7415dc48887efc8925b9c2536ceec1d0a2bb9c"
+dependencies = [
+ "half",
+]
+
+[[package]]
+name = "fnp-ndarray"
+version = "0.2.0"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=8d7415dc48887efc8925b9c2536ceec1d0a2bb9c#8d7415dc48887efc8925b9c2536ceec1d0a2bb9c"
 
 [[package]]
 name = "foldhash"
@@ -683,6 +704,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
 dependencies = [
  "polyval",
+]
+
+[[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
 ]
 
 [[package]]
