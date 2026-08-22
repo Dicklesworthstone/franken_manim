@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	1327a5d6b4291cb87683c9b4386af9645efbe6f1c6fbd17dc91e88354059bc55
+ledger_reviewed_digest	38b18cb89d51df52378a299510358824c27c4890685d3e58af967b319976a62d
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -894,6 +894,18 @@ manimlib.mobject.mobject:Mobject.arrange_to_fit_dim	same	scripts/manim_ref/manim
 manimlib.mobject.mobject:Mobject.arrange_to_fit_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	arrange_to_fit_dim alias for the height dimension
 manimlib.mobject.mobject:Mobject.arrange_to_fit_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	arrange_to_fit_dim alias for the width dimension
 manimlib.mobject.mobject:Mobject.arrange_to_fit_depth	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	arrange_to_fit_dim alias for the depth dimension
+manimlib.mobject.mobject:Mobject.get_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes world-space record rows with retained placement baked in
+manimlib.mobject.mobject:Mobject.get_start	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the first live point record
+manimlib.mobject.mobject:Mobject.get_end	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the last live point record
+manimlib.mobject.mobject:Mobject.get_start_and_end	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	pairs the terminal point records
+manimlib.mobject.mobject:Mobject.reverse_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reverses every family member's record order
+manimlib.mobject.mobject:Mobject.point_from_proportion	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	interpolates raw record rows by segment index and subalpha
+manimlib.mobject.mobject:Mobject.pfp	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	abbreviation delegating to point_from_proportion
+manimlib.mobject.mobject:Mobject.match_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	adopts the donor's exact record layout
+manimlib.mobject.mobject:Mobject.copy	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	copies the family into independent records preserving identity semantics
+manimlib.mobject.mobject:Mobject.generate_target	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	stores an independent copy on target sharing the current saved state
+manimlib.mobject.mobject:Mobject.replicate	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the class group holding n independent copies
+manimlib.mobject.mobject:Mobject.save_state	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	stores an independent copy on saved_state linked to target
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
