@@ -19192,3 +19192,61 @@ assert not original.looks_identical(shrunk_family)
 plain_a = manimlib.Square(side_length=2.0)
 plain_b = manimlib.Square(side_length=2.0)
 assert plain_a.looks_identical(plain_b)
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the arrange family.
+
+# arrange lines members up along direction with the requested buff, then
+# centers the family box.
+trio = manimlib.VGroup(
+    manimlib.Square(side_length=0.5),
+    manimlib.Square(side_length=1.0),
+    manimlib.Square(side_length=1.5),
+).shift([10.0, 10.0, 0.0])
+trio.arrange(manimlib.RIGHT, buff=0.25)
+gap01 = trio[1].get_left()[0] - trio[0].get_right()[0]
+gap12 = trio[2].get_left()[0] - trio[1].get_right()[0]
+assert abs(gap01 - 0.25) < 1e-9
+assert abs(gap12 - 0.25) < 1e-9
+assert np.allclose(trio.get_center(), [0.0, 0.0, 0.0])
+
+# arrange_in_grid lays rows-first by default into distinct row and column
+# positions.
+grid = manimlib.VGroup(*[manimlib.Square(side_length=0.5) for _ in range(6)])
+grid.arrange_in_grid(n_cols=3, buff=0.5)
+assert len({round(m.get_center()[1], 9) for m in grid}) == 2
+assert len({round(m.get_center()[0], 9) for m in grid}) == 3
+
+# arrange_to_fit_dim packs every member into an exact span with even gaps.
+packed = manimlib.VGroup(
+    manimlib.Square(side_length=1.0),
+    manimlib.Square(side_length=2.0),
+    manimlib.Square(side_length=1.0),
+)
+packed.arrange_to_fit_width(8.0)
+span = packed[-1].get_right()[0] - packed[0].get_left()[0]
+assert abs(span - 8.0) < 1e-9
+even_gap = (8.0 - sum(m.get_width() for m in packed)) / 2
+assert np.allclose(
+    [
+        packed[1].get_left()[0] - packed[0].get_right()[0],
+        packed[2].get_left()[0] - packed[1].get_right()[0],
+    ],
+    [even_gap, even_gap],
+)
+stacked = manimlib.VGroup(
+    manimlib.Square(side_length=1.0),
+    manimlib.Square(side_length=1.0),
+    manimlib.Square(side_length=1.0),
+)
+stacked.arrange_to_fit_height(6.0)
+vspan = stacked[-1].get_top()[1] - stacked[0].get_bottom()[1]
+assert abs(vspan - 6.0) < 1e-9
+depthful = manimlib.Group(
+    manimlib.Cube(side_length=1.0),
+    manimlib.Cube(side_length=1.0),
+)
+depthful.arrange_to_fit_depth(5.0)
+dspan = depthful[-1].get_edge_center(manimlib.OUT)[2] - depthful[0].get_edge_center(manimlib.IN)[2]
+assert abs(dspan - 5.0) < 1e-9

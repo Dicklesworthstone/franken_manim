@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	d36d8558287305059e06c88dab895cc898c49906bded38931763520a51ee59c9
+ledger_reviewed_digest	1327a5d6b4291cb87683c9b4386af9645efbe6f1c6fbd17dc91e88354059bc55
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -888,6 +888,12 @@ manimlib.mobject.mobject:Mobject.set_opacity	same	scripts/manim_ref/manimlib/mob
 manimlib.mobject.mobject:Mobject.set_rgba_array	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	writes raw style rows over the named record lane
 manimlib.mobject.mobject:Mobject.set_rgba_array_by_color	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	interpolates color lists across records into the requested lane
 manimlib.mobject.mobject:Mobject.looks_identical	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	compares point-carrying families member-wise over dtype data keys and uniforms
+manimlib.mobject.mobject:Mobject.arrange	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	chains next_to along the direction over submobjects then centers the family
+manimlib.mobject.mobject:Mobject.arrange_in_grid	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	places rows-first or columns-first cells with derived or explicit buffers then centers
+manimlib.mobject.mobject:Mobject.arrange_to_fit_dim	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	packs members into an exact span with even gaps about the anchored reference point
+manimlib.mobject.mobject:Mobject.arrange_to_fit_height	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	arrange_to_fit_dim alias for the height dimension
+manimlib.mobject.mobject:Mobject.arrange_to_fit_width	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	arrange_to_fit_dim alias for the width dimension
+manimlib.mobject.mobject:Mobject.arrange_to_fit_depth	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	arrange_to_fit_dim alias for the depth dimension
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
