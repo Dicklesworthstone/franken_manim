@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	120e72817959ffd22d1dc6db8ad53c6f8eb2368a2cd1ced5e1b0a6abcab572ed
+ledger_reviewed_digest	f9c2b1353dde2189e51e27b85648407f3c82b947c97fec1b0ba81b0c54f2ad75
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -782,6 +782,18 @@ manimlib.mobject.mobject:Mobject.set_uniforms	same	scripts/manim_ref/manimlib/mo
 manimlib.mobject.mobject:Mobject.init_uniforms	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	installs the live typed-uniform mapping idempotently
 manimlib.mobject.mobject:Mobject.lock_uniforms	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	records the locked keys only when no updaters are registered
 manimlib.mobject.mobject:Mobject.refresh_shader_wrapper_id	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	kept as the public protocol step for the absent wrapper id
+manimlib.mobject.mobject:Mobject.shader_folder	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	carries the Reference's empty default folder string on the base class
+manimlib.mobject.mobject:Mobject.set_color_by_rgba_func	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	writes each pointful member's rgba records from the callable with point-free members as zero-row no-ops
+manimlib.mobject.mobject:Mobject.set_color_by_rgb_func	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	hstacks the callable rgb output with the opacity column into live rgba records
+manimlib.mobject.mobject:Mobject.get_shader_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the live structured record run without a GPU upload
+manimlib.mobject.mobject:Mobject.get_shader_vert_indices	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns None exactly as the base class does
+manimlib.mobject.mobject:Mobject.replace_shader_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-python/tests/bridge.py	names the excluded shader-injection capability instead of admitting arbitrary GLSL
+manimlib.mobject.mobject:Mobject.set_color_by_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-python/tests/bridge.py	names the excluded shader-injection capability instead of admitting arbitrary GLSL
+manimlib.mobject.mobject:Mobject.set_color_by_xyz_func	excluded	OOT-ARBITRARY-GLSL	crates/fmn-python/tests/bridge.py	names the excluded shader-injection capability instead of admitting arbitrary GLSL
+manimlib.mobject.mobject:Mobject.init_shader_wrapper	excluded	OOT-ARBITRARY-GLSL	crates/fmn-python/tests/bridge.py	the moderngl wrapper has no analytic-render counterpart so construction refuses by capability name
+manimlib.mobject.mobject:Mobject.get_shader_wrapper	excluded	OOT-ARBITRARY-GLSL	crates/fmn-python/tests/bridge.py	the moderngl wrapper has no analytic-render counterpart so access refuses by capability name
+manimlib.mobject.mobject:Mobject.get_shader_wrapper_list	excluded	OOT-ARBITRARY-GLSL	crates/fmn-python/tests/bridge.py	the moderngl wrapper list has no analytic-render counterpart so aggregation refuses by capability name
+manimlib.mobject.mobject:Mobject.render	excluded	OOT-ARBITRARY-GLSL	crates/fmn-python/tests/bridge.py	per-mobject moderngl rendering is owned by Lumen so the entry point refuses by capability name
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

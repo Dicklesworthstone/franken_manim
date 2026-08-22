@@ -18631,3 +18631,50 @@ assert box_planes[0] == [1.0, 0.0, 0.0, -left_edge]
 assert box_planes[1] == [-1.0, 0.0, 0.0, right_edge]
 assert box_planes[2] == [0.0, 1.0, 0.0, -bottom_edge]
 assert box_planes[3] == [0.0, -1.0, 0.0, top_edge]
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: GLSL-era surface — Python-callable color functions bind over the
+# live records; shader-code injection refuses by naming OOT-ARBITRARY-GLSL.
+assert Mobject.shader_folder == ""
+
+rgba_mob = manimlib.Point([1.0, 2.0, 3.0])
+rgba_mob.set_color_by_rgba_func(
+    lambda points: np.hstack((points * 0.5, np.ones((points.shape[0], 1))))
+)
+assert np.allclose(rgba_mob.data["rgba"][0], [0.5, 1.0, 1.5, 1.0])
+
+rgb_mob = manimlib.Point([2.0, 4.0, 6.0])
+rgb_mob.set_color_by_rgb_func(lambda points: points * 0.25, opacity=0.5)
+assert np.allclose(rgb_mob.data["rgba"][0], [0.5, 1.0, 1.5, 0.5])
+
+# Point-free receivers are the Reference's zero-row writes: silent no-ops.
+empty_mob = Mobject()
+empty_mob.set_color_by_rgb_func(lambda points: points, opacity=1.0)
+empty_mob.set_color_by_rgba_func(lambda points: points)
+
+# get_shader_data exposes the live structured records without an upload.
+assert rgba_mob.get_shader_vert_indices() is None
+records = rgba_mob.get_shader_data()
+assert records.shape[0] == rgba_mob.get_num_points()
+assert np.allclose(records["point"][0], [1.0, 2.0, 3.0])
+
+# Every shader-injection and Context-dependent entry point refuses by name.
+for surface_name, call in (
+    ("replace_shader_code", lambda mob: mob.replace_shader_code("a", "b")),
+    ("set_color_by_code", lambda mob: mob.set_color_by_code("color.rgb = vec3(1);")),
+    (
+        "set_color_by_xyz_func",
+        lambda mob: mob.set_color_by_xyz_func("point.x"),
+    ),
+    ("init_shader_wrapper", lambda mob: mob.init_shader_wrapper(None)),
+    ("get_shader_wrapper", lambda mob: mob.get_shader_wrapper(None)),
+    ("get_shader_wrapper_list", lambda mob: mob.get_shader_wrapper_list(None)),
+    ("render", lambda mob: mob.render(None, {})),
+):
+    try:
+        call(rgba_mob)
+    except NotImplementedError as error:
+        assert "OOT-ARBITRARY-GLSL" in str(error), surface_name
+    else:
+        raise AssertionError("GLSL surface did not refuse: " + surface_name)

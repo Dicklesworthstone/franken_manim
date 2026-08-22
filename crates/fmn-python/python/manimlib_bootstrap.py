@@ -2354,6 +2354,68 @@ class Mobject(_BridgeMobject):
             recurse=recurse,
         )
 
+    # ------------------------------------------------------------------
+    # GLSL-era surface (Reference mobject.py:1333-1360, 1989-2104). The
+    # Python-callable color functions bind over the live records; every
+    # shader-code injection and Context-dependent entry point refuses by
+    # naming the excluded capability (OOT-ARBITRARY-GLSL).
+
+    shader_folder = ""
+
+    def set_color_by_rgba_func(self, func, recurse=True):
+        for mob in self.get_family(recurse):
+            if not mob.has_points():
+                continue
+            mob.set_rgba_array(func(mob.get_points()))
+        return self
+
+    def set_color_by_rgb_func(self, func, opacity=1, recurse=True):
+        for mob in self.get_family(recurse):
+            if not mob.has_points():
+                continue
+            points = mob.get_points()
+            opacity_column = _np.full((points.shape[0], 1), float(opacity))
+            mob.set_rgba_array(_np.hstack((func(points), opacity_column)))
+        return self
+
+    def get_shader_data(self):
+        if indices := self.get_shader_vert_indices():
+            return self.data[indices]
+        return self.data
+
+    def get_shader_vert_indices(self):
+        return None
+
+    def _refuse_glsl_surface(self, name):
+        raise NotImplementedError(
+            f"Mobject.{name} injects code into the Reference's GLSL shader "
+            "pipeline; the sovereign engine renders analytically and admits "
+            "no arbitrary shader code (OOT-ARBITRARY-GLSL)"
+        )
+
+    def replace_shader_code(self, old, new):
+        self._refuse_glsl_surface("replace_shader_code")
+
+    def set_color_by_code(self, glsl_code):
+        self._refuse_glsl_surface("set_color_by_code")
+
+    def set_color_by_xyz_func(
+        self, glsl_snippet, min_value=-5.0, max_value=5.0, colormap="viridis"
+    ):
+        self._refuse_glsl_surface("set_color_by_xyz_func")
+
+    def init_shader_wrapper(self, ctx):
+        self._refuse_glsl_surface("init_shader_wrapper")
+
+    def get_shader_wrapper(self, ctx):
+        self._refuse_glsl_surface("get_shader_wrapper")
+
+    def get_shader_wrapper_list(self, ctx):
+        self._refuse_glsl_surface("get_shader_wrapper_list")
+
+    def render(self, ctx, camera_uniforms):
+        self._refuse_glsl_surface("render")
+
     def generate_target(self, use_deepcopy=False):
         self.target = self.copy(deep=use_deepcopy)
         self.target.saved_state = self.saved_state
