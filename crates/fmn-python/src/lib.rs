@@ -1966,6 +1966,9 @@ impl BridgeMobject {
         stroke_width_taper,
         stroke_opacity_taper,
     ))]
+    // The argument count mirrors the Reference TracingTail constructor
+    // surface one-to-one; collapsing it would change the Python-visible API.
+    #[allow(clippy::too_many_arguments)]
     fn _init_native_tracer(
         slf: &Bound<'_, Self>,
         scene: &Bound<'_, PyScene>,
@@ -4649,6 +4652,9 @@ impl BridgeMobject {
     /// `ParametricSurface(uv_func, ...)`: the native sampler over a
     /// Python callable. The callable runs during construction only (no
     /// engine borrow is held); its first error aborts the build.
+    // The argument count mirrors the Reference ParametricSurface constructor
+    // surface one-to-one; collapsing it would change the Python-visible API.
+    #[allow(clippy::too_many_arguments)]
     fn _build_parametric_surface<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
@@ -5074,15 +5080,18 @@ impl BridgeMobject {
             })
         };
 
-        let mut style = fmn_library::fields::StreamLineStyle::default();
-        style.stroke_width = stroke_width;
-        if let Some(color) = stroke_color {
-            style.stroke_color = srgb_from_py(color)?;
-        }
-        style.stroke_opacity = stroke_opacity;
-        style.color_by_magnitude = color_by_magnitude;
-        style.magnitude_range = magnitude_range;
-        style.taper_stroke_width = taper_stroke_width;
+        let style = fmn_library::fields::StreamLineStyle {
+            stroke_width,
+            stroke_color: match stroke_color {
+                Some(color) => srgb_from_py(color)?,
+                None => fmn_core::constants::DEFAULT_MOBJECT_COLOR,
+            },
+            stroke_opacity,
+            color_by_magnitude,
+            magnitude_range,
+            taper_stroke_width,
+            ..Default::default()
+        };
 
         let rng = fmn_core::rng::RngRoot::from_seed(seed);
         let mut builder = fmn_library::fields::StreamLines::new(field, adapter, &rng)

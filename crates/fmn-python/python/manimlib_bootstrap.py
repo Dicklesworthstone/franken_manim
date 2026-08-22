@@ -14,6 +14,7 @@ import collections.abc as _collections_abc
 import contextlib as _contextlib
 import copy as _copy
 import difflib as _difflib
+import functools as _functools
 import enum as _enum
 import importlib as _importlib
 import inspect as _inspect
@@ -313,9 +314,21 @@ class _LiveSubmobjects(list):
         owner = self._owner_ref()
         if owner is None:
             raise ReferenceError("the owning Mobject has been collected")
+        # Maintain the Reference's parent back-edges (mobject.py:465/480):
+        # every child newly placed under this owner records it and every
+        # child detached here drops it. Identity membership keeps shared
+        # descendants (legal multi-parent graphs) coherent.
+        added = [child for child in candidate if child not in self]
+        removed = [child for child in self if child not in candidate]
         owner._replace_submobjects(candidate)
         list.clear(self)
         list.extend(self, candidate)
+        for child in added:
+            if isinstance(child, _BridgeMobject) and owner not in child.parents:
+                child.parents.append(owner)
+        for child in removed:
+            if isinstance(child, _BridgeMobject) and owner in child.parents:
+                child.parents.remove(owner)
 
     def append(self, value):
         self._commit([*self, value])
@@ -452,6 +465,7 @@ def _install_live_state(mobject):
     mobject.submobjects = _LiveSubmobjects(mobject)
     mobject.uniforms = _LiveUniforms(mobject)
     mobject.updaters = []
+    mobject.parents = []
     mobject.saved_state = None
     mobject.target = None
 
@@ -619,6 +633,7 @@ def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
         "submobjects",
         "uniforms",
         "updaters",
+        "parents",
         "_scene",
         "target",
         "saved_state",
@@ -740,6 +755,8 @@ class Mobject(_BridgeMobject):
         for mobject in mobjects:
             if mobject not in self.submobjects:
                 self.submobjects.append(mobject)
+        # Reference add (mobject.py:467) closes with note_changed_family.
+        self.note_changed_family()
         return self
 
     def add_to_back(self, *mobjects):
@@ -1933,18 +1950,18 @@ class Mobject(_BridgeMobject):
         # reverse-edge maintenance.  Marionette has no stale family cache to
         # defer, so `reassemble` remains the accepted batching hint while the
         # live graph is kept coherent immediately.
-        del reassemble
-        parents = self.get_family(recurse)
-        for parent in parents:
+        family = self.get_family(recurse)
+        for parent in family:
             for child in to_remove:
                 if not isinstance(child, _BridgeMobject):
                     raise TypeError("submobjects must be Mobject instances")
                 if child in parent.submobjects:
                     parent.submobjects.remove(child)
+            # Reference remove (mobject.py:479) reassembles each visited
+            # parent; the live graph is already coherent so this only
+            # honors the observable notification contract.
+            parent.note_changed_family()
         return self
-
-    def clear(self):
-        return self.remove(*list(self.submobjects), recurse=False)
 
     def add_updater(self, updater, index=None, call=True):
         if not callable(updater):
@@ -2005,6 +2022,108 @@ class Mobject(_BridgeMobject):
             self.update(0.0, recurse=recurse)
         return self
 
+    def init_updaters(self):
+        # Reference mobject.py:820. The live-state installer already gives
+        # every instance the list; this public initializer stays idempotent
+        # rather than discarding updaters registered before an explicit call.
+        if "updaters" not in self.__dict__:
+            self.updaters = []
+        return self
+
+    def get_updaters(self):
+        return self.updaters
+
+    def has_updaters(self):
+        # Reference caches `_has_updaters_in_family`; the engine answers by
+        # walking the live family directly, so every call observes current
+        # truth with no invalidation protocol to keep coherent.
+        return any(mob.updaters for mob in self.get_family())
+
+    def insert_updater(self, update_func, index=0):
+        if not callable(update_func):
+            raise TypeError(
+                "Mobject.insert_updater requires a callable updater; got "
+                + type(update_func).__name__
+            )
+        self.updaters.insert(index, update_func)
+        return self
+
+    def match_updaters(self, mobject):
+        # Reference mobject.py:853: assumes aligned families, as become does.
+        if not isinstance(mobject, _BridgeMobject):
+            raise TypeError("Mobject.match_updaters expects a Mobject")
+        self.updaters = list(mobject.updaters)
+        return self
+
+    def refresh_has_updater_status(self):
+        # has_updaters() walks the live family, so the Reference's cached
+        # flag has nothing to invalidate; kept as the public protocol step.
+        return self
+
+    def is_changing(self):
+        return bool(getattr(self, "_is_animating", False)) or self.has_updaters()
+
+    def set_animating_status(self, is_animating, recurse=True):
+        # Reference mobject.py:912: the flag covers the requested family and
+        # every ancestor, so parents report changing while children animate.
+        flag = bool(is_animating)
+        for mob in (*self.get_family(recurse), *self.get_ancestors()):
+            mob._is_animating = flag
+        return self
+
+    def get_ancestors(self, extended=False):
+        # Reference mobject.py:439 verbatim over the parent back-edges the
+        # live submobject list maintains: highest ancestors first, deduped,
+        # excluding this mobject's own family unless `extended` also pulls
+        # in outside parents of family members.
+        ancestors = []
+        to_process = list(self.get_family(recurse=extended))
+        excluded = set(to_process)
+        while to_process:
+            for parent in to_process.pop().parents:
+                if parent not in excluded:
+                    ancestors.append(parent)
+                    to_process.append(parent)
+        ancestors.reverse()
+        return list(dict.fromkeys(ancestors))
+
+    def note_changed_data(self, recurse_up=True):
+        self._data_has_changed = True
+        if recurse_up:
+            for mob in self.parents:
+                mob.note_changed_data()
+        return self
+
+    def note_changed_family(self, only_changed_order=False):
+        # No Python-side family or bounding-box caches exist to drop (the
+        # engine derives both lazily from the live graph); preserve the
+        # upward recursion contract so callers stay Reference-shaped.
+        del only_changed_order
+        for parent in list(self.parents):
+            parent.note_changed_family()
+        return self
+
+    @staticmethod
+    def affects_data(func):
+        @_functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            result = func(self, *args, **kwargs)
+            self.note_changed_data()
+            return result
+
+        return wrapper
+
+    @staticmethod
+    def affects_family_data(func):
+        @_functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            result = func(self, *args, **kwargs)
+            for mob in self.family_members_with_points():
+                mob.note_changed_data()
+            return result
+
+        return wrapper
+
     def generate_target(self, use_deepcopy=False):
         self.target = self.copy(deep=use_deepcopy)
         self.target.saved_state = self.saved_state
@@ -2029,6 +2148,11 @@ class Mobject(_BridgeMobject):
         receiver_family = self.get_family()
         source_family = mobject.get_family()
         self._become(mobject, match_updaters)
+        if match_updaters:
+            # Reference become (mobject.py:742) also copies the host-side
+            # updater list onto the aligned root; the native call above only
+            # reconciles the engine's own native updaters.
+            self.match_updaters(mobject)
         for name, value in list(mobject.__dict__.items()):
             if not isinstance(value, _BridgeMobject):
                 continue
@@ -2141,7 +2265,7 @@ class Mobject(_BridgeMobject):
 
     def __reduce_ex__(self, protocol):
         del protocol
-        internal = {"submobjects", "uniforms", "updaters", "_scene"}
+        internal = {"submobjects", "uniforms", "updaters", "parents", "_scene"}
         attributes = {
             key: value
             for key, value in self.__dict__.items()

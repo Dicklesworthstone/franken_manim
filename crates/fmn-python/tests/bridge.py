@@ -18276,3 +18276,161 @@ for overlay_config_name in (
         raise AssertionError(
             "InteractiveScene accepted a non-dict " + overlay_config_name
         )
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4.141: Mobject parent back-edges, the updater family, animating
+# status, and the data-changed notification surface.
+
+
+def _chain():
+    grandparent = Mobject()
+    parent = Mobject(grandparent)
+    child = Mobject(parent)
+    return grandparent, parent, child
+
+
+# add/remove maintain the Reference's parent back-edges through the live list.
+gp, pa, ch = _chain()
+assert ch.parents == [pa] and pa.parents == [gp] and gp.parents == []
+other = Mobject()
+pa.add(other)
+assert other.parents == [pa]
+pa.remove(other)
+assert other.parents == []
+
+# set_submobjects reconciles added and dropped children in one commit.
+left = Mobject()
+right = Mobject()
+holder = Mobject()
+first = Mobject()
+second = Mobject()
+holder.set_submobjects([first, second])
+assert first.parents == [holder] and second.parents == [holder]
+replacement = Mobject()
+holder.set_submobjects([first, replacement])
+assert replacement.parents == [holder]
+assert second.parents == []
+assert holder.submobjects == [first, replacement]
+
+# A shared descendant legally records every parent; detaching from one keeps
+# the other edge intact.
+shared = Mobject()
+family_a = Mobject(shared)
+family_b = Mobject(shared)
+assert shared.parents == [family_a, family_b]
+family_a.remove(shared)
+assert shared.parents == [family_b]
+
+# get_ancestors returns highest ancestors first, deduped.
+top, mid, leaf = _chain()
+assert leaf.get_ancestors() == [top, mid]
+assert mid.get_ancestors() == [top]
+assert top.get_ancestors() == []
+outside = Mobject(leaf)
+assert top not in outside.get_family(recurse=False)
+extended = leaf.get_ancestors(extended=True)
+assert top in extended and outside in extended
+assert extended[0] == outside or extended[-1] != outside
+
+# Copies start with rebuilt back-edges: root parentless, members mapped.
+copied_top = top.copy()
+assert copied_top.parents == []
+copied_mid = copied_top.submobjects[0]
+copied_leaf = copied_mid.submobjects[0]
+assert copied_leaf is not leaf
+assert copied_leaf.parents == [copied_mid]
+assert copied_mid.parents == [copied_top]
+
+# Pickle round-trips rebuild parents from the children lists alone.
+revived = pickle.loads(pickle.dumps(top))
+assert revived.parents == []
+revived_mid = revived.submobjects[0]
+revived_leaf = revived_mid.submobjects[0]
+assert revived_leaf.parents == [revived_mid]
+assert revived_mid.parents == [revived]
+
+# Updater family: registration shape, ordering, and validation.
+tracked = Mobject()
+assert tracked.get_updaters() == [] and not tracked.has_updaters()
+
+
+def _noop_updater(mob):
+    return None
+
+
+tracked.add_updater(_noop_updater)
+assert tracked.get_updaters() == [_noop_updater]
+assert tracked.has_updaters()
+earlier = Mobject()
+tracked.insert_updater(lambda mob: None, 0)
+try:
+    tracked.insert_updater("not callable")
+except TypeError as error:
+    assert "callable updater" in str(error)
+else:
+    raise AssertionError("insert_updater accepted a non-callable")
+assert tracked.get_updaters()[1] is _noop_updater
+
+# has_updaters observes the whole live family, including deep descendants.
+deep_parent = Mobject()
+deep_child = Mobject(deep_parent)
+assert not deep_parent.has_updaters()
+deep_child.add_updater(lambda mob: None)
+assert deep_parent.has_updaters()
+
+# match_updaters copies the source list without aliasing it.
+source = Mobject()
+source.add_updater(_noop_updater)
+target = Mobject()
+target.match_updaters(source)
+assert target.get_updaters() == [_noop_updater]
+assert target.get_updaters() is not source.get_updaters()
+try:
+    target.match_updaters(42)
+except TypeError:
+    pass
+else:
+    raise AssertionError("match_updaters accepted a non-Mobject")
+
+# Animating status covers the requested family and every ancestor.
+still = Mobject()
+animating_root = Mobject()
+animating_mid = Mobject(animating_root)
+animating_leaf = Mobject(animating_mid)
+assert not animating_leaf.is_changing()
+animating_leaf.set_animating_status(True)
+assert animating_leaf.is_changing()
+assert animating_mid._is_animating and animating_root._is_animating
+assert still._is_animating is False
+animating_root.set_animating_status(False, recurse=False)
+assert animating_root._is_animating is False
+assert animating_mid._is_animating and animating_leaf._is_animating
+
+# An updater alone marks a mobject changing without an animation flag.
+updater_only = Mobject()
+flagged_child = Mobject(updater_only)
+flagged_child.add_updater(lambda mob: None)
+assert flagged_child.is_changing() and updater_only.is_changing()
+
+# note_changed_data propagates upward along real parent edges.
+data_top = Mobject()
+data_bottom = Mobject(data_top)
+data_bottom.note_changed_data()
+assert data_bottom._data_has_changed and data_top._data_has_changed
+data_side = Mobject(data_top)
+data_top.note_changed_data(recurse_up=False)
+assert data_top._data_has_changed
+assert not hasattr(data_side, "_data_has_changed")
+
+# The affects_data decorator marks after the wrapped call succeeds.
+@Mobject.affects_data
+def _restyle(mob):
+    mob.restyle_calls = getattr(mob, "restyle_calls", 0) + 1
+    return "styled"
+
+
+decorated_target = Mobject()
+assert _restyle(decorated_target) == "styled"
+assert decorated_target.restyle_calls == 1
+assert decorated_target._data_has_changed
