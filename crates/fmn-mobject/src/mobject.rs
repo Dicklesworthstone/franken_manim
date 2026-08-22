@@ -235,6 +235,11 @@ pub struct Mobject {
     pub z_index: i32,
     /// Children still outside any arena; `Stage::add` recurses over these.
     pub submobjects: Vec<Mobject>,
+    /// The Reference's `_data_defaults` row for a point-free mobject
+    /// (§6.1): the constructor style a later resize seeds from, flattened
+    /// as `(lane name, first-row values)` pairs. `None` unless the source
+    /// builder carried an explicit style onto zero points.
+    pub defaults_row: Option<Vec<(String, Vec<f32>)>>,
 }
 
 impl Default for Mobject {
@@ -260,11 +265,12 @@ impl Mobject {
         Self {
             buffer,
             uniforms: Uniforms::default(),
+            submobjects: Vec::new(),
+            defaults_row: None,
             shape: ShapeTag::General,
             render_primitive: RenderPrimitive::Vector,
             image: None,
             z_index: 0,
-            submobjects: Vec::new(),
         }
     }
 

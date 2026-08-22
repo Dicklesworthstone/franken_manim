@@ -1766,6 +1766,26 @@ class Mobject(_BridgeMobject):
             self.__dict__["_data_defaults"] = defaults
         return defaults
 
+    def _seed_data_defaults(self, rows):
+        # Native builders hand over a point-free node's constructor style
+        # as (lane name, first-row values) pairs — the Reference's
+        # `_data_defaults` row. Lanes the local schema does not carry are
+        # skipped; values pad with the row's existing content.
+        names = self.data.dtype.names
+        if not names:
+            return self
+        defaults = self.__dict__.get("_data_defaults")
+        if defaults is None:
+            defaults = _np.ones(1, dtype=self.data.dtype)
+            self.__dict__["_data_defaults"] = defaults
+        for name, values in rows:
+            if name in names:
+                width = defaults[name].shape[-1]
+                padded = list(values)[:width]
+                padded.extend([0.0] * (width - len(padded)))
+                defaults[name][0] = padded
+        return self
+
     def set_rgba_array(self, rgba_array, name="rgba", recurse=False):
         rgba_array = _np.asarray(rgba_array, dtype=float)
         for mob in _family_preorder(self) if recurse else [self]:
@@ -11931,6 +11951,7 @@ class Scene(_SceneCore):
     default_camera_config = dict()
     default_file_writer_config = dict()
     samples = 0
+    show_animation_progress = False
 
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -17273,6 +17294,26 @@ class SceneFileWriter:
         if not extension.startswith("."):
             return "." + extension
         return extension
+
+    def begin_animation(self):
+        # Reference scene_file_writer.py:182 opens a partial movie pipe per
+        # animation only under subdivide_output+write_to_movie. The sovereign
+        # pipeline owns segmentation behind the Reel boundary, so the common
+        # disabled branch stays the exact silent no-op and the exotic enabled
+        # combination names its missing capability instead of pretending.
+        if self.subdivide_output and self.write_to_movie:
+            raise NotImplementedError(
+                "partial movie files are produced by the native render"
+                " pipeline; SceneFileWriter has no Python-side pipe to open"
+            )
+
+    def end_animation(self):
+        # Mirror of begin_animation (Reference scene_file_writer.py:186).
+        if self.subdivide_output and self.write_to_movie:
+            raise NotImplementedError(
+                "partial movie files are produced by the native render"
+                " pipeline; SceneFileWriter has no Python-side pipe to close"
+            )
 
     def get_output_file_name(self):
         if self.file_name:

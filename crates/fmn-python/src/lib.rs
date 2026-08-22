@@ -9231,6 +9231,7 @@ fn native_shell_specs<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let out = PyList::empty(py);
     for mut node in nodes {
+        let defaults_row = node.defaults_row.take();
         let children = std::mem::take(&mut node.submobjects);
         let shell = factory.call0()?;
         {
@@ -9240,6 +9241,12 @@ fn native_shell_specs<'py>(
             let mut cell = bridge.borrow_mut();
             cell.nursery = Some(Nursery::new(node));
             cell.initialized = true;
+        }
+        if let Some(row) = defaults_row {
+            // A point-free native node's constructor style is the
+            // Reference's `_data_defaults` row; the portal color getters
+            // answer from it until real records arrive.
+            shell.call_method1("_seed_data_defaults", (row,))?;
         }
         let child_specs = native_shell_specs(py, factory, children)?;
         out.append((shell, child_specs))?;

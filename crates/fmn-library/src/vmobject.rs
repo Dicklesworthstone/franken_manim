@@ -909,7 +909,7 @@ impl From<VMobject> for Mobject {
             stroke_profile,
             submobjects,
         } = v;
-
+        let pointless = points.is_empty();
         let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len())
             .expect("record sizing bounded by the point list");
         #[allow(clippy::cast_possible_truncation)]
@@ -926,6 +926,39 @@ impl From<VMobject> for Mobject {
             buffer.write_range("joint_angle", 0, &angles);
         }
         style.write(&mut buffer);
+        // A point-free node keeps its constructor style as the Reference's
+        // `_data_defaults` row: the portal's color getters answer from it
+        // and a later resize seeds records with it. With points present the
+        // per-record lanes above already carry the style.
+        let defaults_row = if pointless {
+            Some(vec![
+                (
+                    "fill_rgba".to_string(),
+                    vec![
+                        style.fill_color.r as f32,
+                        style.fill_color.g as f32,
+                        style.fill_color.b as f32,
+                        style.fill_opacity as f32,
+                    ],
+                ),
+                (
+                    "stroke_rgba".to_string(),
+                    vec![
+                        style.stroke_color.r as f32,
+                        style.stroke_color.g as f32,
+                        style.stroke_color.b as f32,
+                        style.stroke_opacity as f32,
+                    ],
+                ),
+                ("stroke_width".to_string(), vec![style.stroke_width as f32]),
+                (
+                    "fill_border_width".to_string(),
+                    vec![style.fill_border_width as f32],
+                ),
+            ])
+        } else {
+            None
+        };
         // A taper overrides the uniform width the style just wrote — the
         // Reference's `set_stroke(width=[0, 6, 0])`, which resizes the list
         // onto the point run by linear interpolation.
@@ -945,6 +978,7 @@ impl From<VMobject> for Mobject {
             render_primitive: RenderPrimitive::Vector,
             image: None,
             z_index,
+            defaults_row,
             submobjects: submobjects.into_iter().map(Mobject::from).collect(),
         }
     }

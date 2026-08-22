@@ -573,7 +573,7 @@ mod tests {
     fn header_keys_parse_in_any_order() {
         let bytes = doc(
             "{'shape': (4, 3), 'fortran_order': False, 'descr': '<f4'}",
-            &vec![0u8; 4 * 3 * 4],
+            &[0u8; 4 * 3 * 4],
         );
         let array = read_npy(&bytes).expect("key order is not significant");
         assert_eq!(array.shape, vec![4, 3]);

@@ -610,7 +610,12 @@ impl Stage {
             render_primitive,
             image,
             submobjects,
+            defaults_row,
         } = mobject.into();
+        // The portal consumes a point-free node's defaults row when it
+        // wraps the builder output; the arena's own resize path re-derives
+        // rows from live records, so the carried row ends here.
+        drop(defaults_row);
         let mut entry = Entry::from_data(buffer);
         entry.uniforms = uniforms;
         entry.z_index = z_index;

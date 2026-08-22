@@ -1,12 +1,12 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-derived 2026-08-18 against the exact lock identities below.
+**Status:** re-derived 2026-08-21 (wasm32 render-axis check + node smoke green on this host) against the exact lock identities below.
 The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes, forcing this audit to be re-run instead of leaving a
 plausible but stale “current pins” claim behind.
 
-- `SUITE.lock` SHA-256: `6b2ec65cb5e85a1b41a64866ee15593750e1a9584325b295a691658566a9f856`
-- `Cargo.lock` SHA-256: `dffca8fec068c1037ac66683b92f09abf6b17d941b6e960c0c5954cb52b0c566`
+- `SUITE.lock` SHA-256: `ed186d765192e0afebf046beeaea310b2bbd68511c2fd7ee9a9637b4dfe0612f`
+- `Cargo.lock` SHA-256: `9af1520af2cb474ea7859135f2621c4b419142430d44a868651bde58cde5ac1d`
 
 Method labels are deliberately narrow:
 

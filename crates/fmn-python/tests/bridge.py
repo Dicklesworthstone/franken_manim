@@ -1908,12 +1908,12 @@ frame_scene.add(frame_probe)
 assert frame_scene.should_update_mobjects() is True
 assert frame_scene.increment_time(0.25) is None
 assert np.isclose(frame_scene.get_time(), 0.75)
-assert frame_ticks == []
+assert frame_ticks == [0.0]
 assert frame_scene.update_mobjects(0.25) is None
-assert frame_ticks == [0.25]
+assert frame_ticks == [0.0, 0.25]
 assert frame_scene.update_frame(0.125) is None
 assert np.isclose(frame_scene.get_time(), 0.875)
-assert frame_ticks == [0.25, 0.125]
+assert frame_ticks == [0.0, 0.25, 0.125]
 
 # fm-5wq.4: always_update_mobjects=True forces should_update_mobjects with
 # zero mobjects and with updater-less mobjects; increment_time still never
@@ -1935,9 +1935,9 @@ always_probe = manimlib.Circle()
 always_probe.add_updater(lambda mob, dt: always_ticks.append(dt))
 always_scene.add(always_probe)
 assert always_scene.increment_time(0.25) is None
-assert always_ticks == []
+assert always_ticks == [0.0]
 assert always_scene.update_mobjects(0.25) is None
-assert always_ticks == [0.25]
+assert always_ticks == [0.0, 0.25]
 coerced_always_scene = Scene(always_update_mobjects="yes")
 assert coerced_always_scene.always_update_mobjects is True
 assert coerced_always_scene.should_update_mobjects() is True
@@ -18282,12 +18282,13 @@ for overlay_config_name in (
 # fm-5wq.4.141: Mobject parent back-edges, the updater family, animating
 # status, and the data-changed notification surface.
 
-
 def _chain():
-    grandparent = Mobject()
-    parent = Mobject(grandparent)
-    child = Mobject(parent)
-    return grandparent, parent, child
+    top = Mobject()
+    mid = Mobject()
+    leaf = Mobject()
+    top.add(mid)
+    mid.add(leaf)
+    return top, mid, leaf
 
 
 # add/remove maintain the Reference's parent back-edges through the live list.
@@ -18330,7 +18331,9 @@ assert top.get_ancestors() == []
 outside = Mobject(leaf)
 assert top not in outside.get_family(recurse=False)
 extended = leaf.get_ancestors(extended=True)
-assert extended == [outside]
+# Reference extended traversal starts from the downward family only, so
+# every ancestor qualifies: highest first after the reverse.
+assert extended == [top, outside, mid]
 
 # Copies start with rebuilt back-edges: root parentless, members mapped.
 copied_top = top.copy()
@@ -18373,7 +18376,8 @@ assert tracked.get_updaters()[1] is _noop_updater
 
 # has_updaters observes the whole live family, including deep descendants.
 deep_parent = Mobject()
-deep_child = Mobject(deep_parent)
+deep_child = Mobject()
+deep_parent.add(deep_child)
 assert not deep_parent.has_updaters()
 deep_child.add_updater(lambda mob: None)
 assert deep_parent.has_updaters()
@@ -18395,8 +18399,10 @@ else:
 # Animating status covers the requested family and every ancestor.
 still = Mobject()
 animating_root = Mobject()
-animating_mid = Mobject(animating_root)
-animating_leaf = Mobject(animating_mid)
+animating_mid = Mobject()
+animating_leaf = Mobject()
+animating_root.add(animating_mid)
+animating_mid.add(animating_leaf)
 assert not animating_leaf.is_changing()
 animating_leaf.set_animating_status(True)
 assert animating_leaf.is_changing()
@@ -18408,16 +18414,19 @@ assert animating_mid._is_animating and animating_leaf._is_animating
 
 # An updater alone marks a mobject changing without an animation flag.
 updater_only = Mobject()
-flagged_child = Mobject(updater_only)
+flagged_child = Mobject()
+updater_only.add(flagged_child)
 flagged_child.add_updater(lambda mob: None)
 assert flagged_child.is_changing() and updater_only.is_changing()
 
 # note_changed_data propagates upward along real parent edges.
 data_top = Mobject()
-data_bottom = Mobject(data_top)
+data_bottom = Mobject()
+data_top.add(data_bottom)
 data_bottom.note_changed_data()
 assert data_bottom._data_has_changed and data_top._data_has_changed
-data_side = Mobject(data_top)
+data_side = Mobject()
+data_top.add(data_side)
 data_top.note_changed_data(recurse_up=False)
 assert data_top._data_has_changed
 assert not hasattr(data_side, "_data_has_changed")

@@ -1731,9 +1731,11 @@ mod tests {
         assert_eq!(opening_a, opening_b);
         assert_eq!(
             sha256(&opening_a).to_string(),
-            // Canonical snapshots include each detached family's transformed
-            // primitive tag, not only its point records.
-            "f1e38d8a6a7234ee3c2c3eb6b2e6fc44d4e6d587bf5836f9204ce4ec4ea6a5d3"
+            // Re-pinned for fm-5wq.4 (commit 76f2cbf): shape hints no longer
+            // serialize the process-local RecordBuffer revision — decode
+            // rebinds liveness to the reconstructed buffer, so durable bytes
+            // carry semantic state only.
+            "e12bc3142110fe88afd8aeb077a409dc4c789ee22fcfffef45785c77dd6d9d0c"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);
