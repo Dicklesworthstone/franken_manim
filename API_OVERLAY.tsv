@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	0f942ae8d0a85559bdbe51e9b24cf9f7f8b992a9bf51204e0b2cf6cca8fa64cc
+ledger_reviewed_digest	120e72817959ffd22d1dc6db8ad53c6f8eb2368a2cd1ced5e1b0a6abcab572ed
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -758,6 +758,30 @@ manimlib.mobject.mobject:Mobject.remove_mouse_motion_listner	same	scripts/manim_
 manimlib.mobject.mobject:Mobject.remove_mouse_press_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact mouse-press bucket through listener equality
 manimlib.mobject.mobject:Mobject.remove_mouse_release_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact mouse-release bucket through listener equality
 manimlib.mobject.mobject:Mobject.remove_mouse_scroll_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact mouse-scroll bucket through listener equality
+manimlib.mobject.mobject:Mobject.affects_shader_info_id	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	protocol decorator whose shader-wrapper bookkeeping is the same no-op as the analytic renderer's absent wrapper id
+manimlib.mobject.mobject:Mobject.apply_depth_test	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	flags the typed depth-test uniform across the requested family
+manimlib.mobject.mobject:Mobject.deactivate_depth_test	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	clears the typed depth-test uniform across the requested family
+manimlib.mobject.mobject:Mobject.deactivate_clip_plane	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	zeroes all four typed clip planes across the requested family
+manimlib.mobject.mobject:Mobject.set_clip_plane	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	writes one vect threshold pair into the typed plane table
+manimlib.mobject.mobject:Mobject.set_clip_planes	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	zeroes then fills the typed plane table from vect threshold pairs
+manimlib.mobject.mobject:Mobject.clip_to_box	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	derives the four signed box planes from the live box edges
+manimlib.mobject.mobject:Mobject.fix_in_frame	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	pins the is-fixed-in-frame typed uniform across the requested family
+manimlib.mobject.mobject:Mobject.unfix_from_frame	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	releases the is-fixed-in-frame typed uniform across the requested family
+manimlib.mobject.mobject:Mobject.is_fixed_in_frame	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the typed uniform as a bool
+manimlib.mobject.mobject:Mobject.get_shading	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the live reflectiveness gloss shadow triple
+manimlib.mobject.mobject:Mobject.set_shading	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	updates only the supplied lanes per family member through the typed uniform
+manimlib.mobject.mobject:Mobject.get_gloss	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the second live shading lane
+manimlib.mobject.mobject:Mobject.set_gloss	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	writes the second shading lane across the requested family
+manimlib.mobject.mobject:Mobject.get_reflectiveness	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the first live shading lane
+manimlib.mobject.mobject:Mobject.set_reflectiveness	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	writes the first shading lane across the requested family
+manimlib.mobject.mobject:Mobject.get_shadow	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	reads the third live shading lane
+manimlib.mobject.mobject:Mobject.set_shadow	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	writes the third shading lane across the requested family
+manimlib.mobject.mobject:Mobject.get_uniforms	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the live typed-uniform mapping itself
+manimlib.mobject.mobject:Mobject.set_uniform	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	updates named lanes per family member with array copies preserved
+manimlib.mobject.mobject:Mobject.set_uniforms	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	updates one receiver's named lanes with array copies preserved
+manimlib.mobject.mobject:Mobject.init_uniforms	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	installs the live typed-uniform mapping idempotently
+manimlib.mobject.mobject:Mobject.lock_uniforms	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	records the locked keys only when no updaters are registered
+manimlib.mobject.mobject:Mobject.refresh_shader_wrapper_id	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	kept as the public protocol step for the absent wrapper id
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
