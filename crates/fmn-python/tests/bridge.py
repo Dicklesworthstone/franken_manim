@@ -19250,3 +19250,120 @@ depthful = manimlib.Group(
 depthful.arrange_to_fit_depth(5.0)
 dspan = depthful[-1].get_edge_center(manimlib.OUT)[2] - depthful[0].get_edge_center(manimlib.IN)[2]
 assert abs(dspan - 5.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the points, copy, and state family.
+
+# Endpoint accessors and reversal over a vectorized run.
+runner = manimlib.Line(start=[-2.0, 0.0, 0.0], end=[2.0, 0.0, 0.0])
+assert np.allclose(runner.get_start(), [-2.0, 0.0, 0.0])
+assert np.allclose(runner.get_end(), [2.0, 0.0, 0.0])
+pairs = runner.get_start_and_end()
+assert np.allclose(pairs[0], [-2.0, 0.0, 0.0]) and np.allclose(pairs[1], [2.0, 0.0, 0.0])
+runner.reverse_points()
+assert np.allclose(runner.get_start(), [2.0, 0.0, 0.0])
+assert np.allclose(runner.get_end(), [-2.0, 0.0, 0.0])
+
+# Base-Mobject point_from_proportion walks raw record rows; the VMobject
+# override walks true arc length (BN-03).
+row_mob = manimlib.Mobject()
+row_mob.resize(3)
+for index in range(3):
+    row_mob.data["point"][index] = [index * 1.0, 0.0, 0.0]
+assert np.allclose(row_mob.point_from_proportion(0.0), [0.0, 0.0, 0.0])
+assert np.allclose(row_mob.pfp(1.0), [2.0, 0.0, 0.0])
+assert np.allclose(row_mob.point_from_proportion(0.25), [0.5, 0.0, 0.0])
+assert np.allclose(runner.point_from_proportion(0.5), [0.0, 0.0, 0.0])
+
+# match_points adopts the donor's exact record layout.
+donor_pts = manimlib.Line(start=[0.0, 0.0, 0.0], end=[4.0, -3.0, 0.0])
+adopter = manimlib.Square(side_length=1.0)
+adopter.match_points(donor_pts)
+assert np.allclose(adopter.get_points(), donor_pts.get_points())
+
+# Copies are independent at the record level.
+twin = runner.copy()
+twin.shift([5.0, 0.0, 0.0])
+assert not np.allclose(twin.get_center(), runner.get_center())
+
+# generate_target/save_state/restore round-trip through the Reference
+# attribute contract.
+moved = manimlib.Square(side_length=1.0).move_to([3.0, 0.0, 0.0])
+target = moved.generate_target()
+assert target is moved.target
+assert moved.looks_identical(moved.target)
+target.shift([-6.0, 0.0, 0.0])
+moved.save_state()
+assert hasattr(moved, "saved_state")
+moved.shift([0.0, 9.0, 0.0])
+moved.restore()
+assert np.allclose(moved.get_center(), [3.0, 0.0, 0.0])
+
+# replicate returns the group class holding n independent copies.
+clones = manimlib.Dot().replicate(3)
+assert type(clones) is manimlib.VGroup
+assert len(clones) == 3
+clones[0].shift([1.0, 0.0, 0.0])
+assert not np.allclose(clones[0].get_center(), clones[1].get_center())
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the updater lifecycle family and the animate builder.
+
+tick_box = manimlib.Square(side_length=1.0)
+dt_log = []
+
+
+def push_dt(mob, dt):
+    dt_log.append(dt)
+    mob.shift([dt, 0.0, 0.0])
+
+
+tick_box.add_updater(push_dt)
+tick_box.update(0.5)
+assert np.allclose(tick_box.get_center(), [0.5, 0.0, 0.0])
+
+# Suspension stops execution; resume without call_updater stays quiet until
+# the next explicit update.
+tick_box.suspend_updating()
+tick_box.update(1.0)
+assert np.allclose(tick_box.get_center(), [0.5, 0.0, 0.0])
+tick_box.resume_updating(call_updater=False)
+tick_box.update(0.25)
+assert len(dt_log) == 3
+assert abs(dt_log[-1] - 0.25) < 1e-12
+
+# remove_updater detaches the exact handler; clear_updaters empties family.
+tick_box.remove_updater(push_dt)
+tick_box.update(1.0)
+assert len(dt_log) == 3
+echo = manimlib.Dot().move_to([9.9, 9.9, 0.0])
+echo.add_updater(lambda m: m.set_opacity(0.5))
+echo.clear_updaters()
+assert not echo.has_updaters()
+
+# always chains bound-method calls per frame; f_always feeds function
+# results into the named setter.
+drifter = manimlib.Dot()
+drifter.always.shift([0.1, 0.0, 0.0])
+drifter.update(0)
+drifter.update(0)
+assert np.allclose(drifter.get_center(), [0.3, 0.0, 0.0])
+x_source = [1.0]
+slider = manimlib.Dot()
+slider.f_always.set_x(lambda: x_source[0])
+slider.update(0)
+assert slider.get_x() == 1.0
+x_source[0] = 3.0
+slider.update(0)
+assert slider.get_x() == 3.0
+
+# The animate builder intercepts chained calls and builds one method
+# animation against the generated target.
+builder_src = manimlib.Square(side_length=1.0).move_to([2.0, 0.0, 0.0])
+built = builder_src.animate.shift([1.0, 0.0, 0.0]).scale(2.0)
+animation = built.build()
+assert isinstance(animation, manimlib.Animation)
+assert builder_src.get_width() == 1.0
+assert np.allclose(builder_src.get_center(), [2.0, 0.0, 0.0])

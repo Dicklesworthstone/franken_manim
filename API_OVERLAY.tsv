@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	38b18cb89d51df52378a299510358824c27c4890685d3e58af967b319976a62d
+ledger_reviewed_digest	818c79dee3eb67334b71fd55269d8a8b21b06b199990a9127f7812727b29b254
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -906,6 +906,18 @@ manimlib.mobject.mobject:Mobject.copy	same	scripts/manim_ref/manimlib/mobject/mo
 manimlib.mobject.mobject:Mobject.generate_target	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	stores an independent copy on target sharing the current saved state
 manimlib.mobject.mobject:Mobject.replicate	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the class group holding n independent copies
 manimlib.mobject.mobject:Mobject.save_state	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	stores an independent copy on saved_state linked to target
+manimlib.mobject.mobject:Mobject.update	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	runs family updaters in insertion order passing dt when declared unless suspended
+manimlib.mobject.mobject:Mobject.remove_updater	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	detaches every registration of the exact handler
+manimlib.mobject.mobject:Mobject.clear_updaters	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	empties family updater lists and refreshes propagation flags
+manimlib.mobject.mobject:Mobject.suspend_updating	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	halts updater execution across the family
+manimlib.mobject.mobject:Mobject.resume_updating	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	resumes the family optionally firing once immediately
+manimlib.mobject.mobject:Mobject.always	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	registers a bound-method call as an updater through the builder
+manimlib.mobject.mobject:Mobject.f_always	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	registers a function-fed setter call through the functional builder
+manimlib.mobject.mobject:Mobject.animate	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	intercepts chained calls into one generated-target animation spec
+manimlib.mobject.mobject:_AnimationBuilder.build	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	produces the method animation over the intercepted call chain
+manimlib.mobject.mobject:_AnimationBuilder.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the interceptor to its owning mobject with empty call state
+manimlib.mobject.mobject:_UpdaterBuilder.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the bound-method builder to its owner
+manimlib.mobject.mobject:_FunctionalUpdaterBuilder.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the function-fed builder to its owner
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
