@@ -736,6 +736,17 @@ class Mobject(_BridgeMobject):
         """Abbreviation for point_from_proportion."""
         return self.point_from_proportion(alpha)
 
+    def get_pieces(self, n_pieces):
+        # Reference mobject.py:1627: childless copies of this mobject's own
+        # class, each partial over one linspace slice of the point run.
+        template = self.copy()
+        template.set_submobjects([])
+        alphas = _np.linspace(0, 1, int(n_pieces) + 1)
+        return Group(*[
+            template.copy().pointwise_become_partial(self, a1, a2)
+            for a1, a2 in zip(alphas[:-1], alphas[1:])
+        ])
+
     def init_data(self):
         pass
 
@@ -1277,6 +1288,26 @@ class Mobject(_BridgeMobject):
             self.set_height(max_height, **kwargs)
         return self
 
+    def set_max_depth(self, max_depth, **kwargs):
+        if self.get_depth() > max_depth:
+            self.set_depth(max_depth, **kwargs)
+        return self
+
+    def set_min_width(self, min_width, **kwargs):
+        if self.get_width() < min_width:
+            self.set_width(min_width, **kwargs)
+        return self
+
+    def set_min_height(self, min_height, **kwargs):
+        if self.get_height() < min_height:
+            self.set_height(min_height, **kwargs)
+        return self
+
+    def set_min_depth(self, min_depth, **kwargs):
+        if self.get_depth() < min_depth:
+            self.set_depth(min_depth, **kwargs)
+        return self
+
     def set_submobjects(self, submobject_list):
         # Reference Mobject.set_submobjects (mobject.py:508) through the
         # live-list seam.  The clear-then-add order is observable on a later
@@ -1665,6 +1696,9 @@ class Mobject(_BridgeMobject):
 
     def get_depth(self):
         return self.length_over_dim(2)
+
+    def get_shape(self):
+        return (self.get_width(), self.get_height(), self.get_depth())
 
     def get_coord(self, dim, direction=_ORIGIN):
         return float(self.get_bounding_box_point(direction)[dim])

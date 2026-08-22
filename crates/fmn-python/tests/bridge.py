@@ -18834,3 +18834,151 @@ assert reviver.get_width() == original.get_width()
 # pointwise_become_partial is the base-class no-op the Reference documents.
 partial_mob = Mobject()
 assert partial_mob.pointwise_become_partial(Mobject(), 0.1, 0.9) is partial_mob
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: geometry accessors, dimension setters, and alignment.
+probe = manimlib.Square(side_length=2.0).shift([3.0, -1.0, 0.0])
+assert np.allclose(probe.get_center(), [3.0, -1.0, 0.0])
+assert probe.get_width() == 2.0
+assert probe.get_height() == 2.0
+assert probe.get_depth() == 0.0
+assert probe.get_shape() == (2.0, 2.0, 0.0)
+assert probe.length_over_dim(1) == 2.0
+assert probe.has_points()
+assert not Mobject().has_points()
+assert np.allclose(probe.get_right(), [4.0, -1.0, 0.0])
+assert np.allclose(probe.get_left(), [2.0, -1.0, 0.0])
+assert np.allclose(probe.get_top(), [3.0, 0.0, 0.0])
+assert np.allclose(probe.get_bottom(), [3.0, -2.0, 0.0])
+assert np.allclose(probe.get_corner(manimlib.UR), [4.0, 0.0, 0.0])
+assert np.allclose(probe.get_edge_center(manimlib.DOWN), [3.0, -2.0, 0.0])
+assert np.allclose(probe.get_zenith(), probe.get_center())
+assert np.allclose(probe.get_nadir(), probe.get_center())
+assert np.allclose(probe.get_bounding_box_point(manimlib.RIGHT), [4.0, -1.0, 0.0])
+assert probe.get_x() == 3.0
+assert probe.get_y(manimlib.UP) == 0.0
+assert probe.get_z() == 0.0
+assert probe.get_coord(0, manimlib.LEFT) == 2.0
+
+# set_coord/set_x/set_y/set_z shift so the chosen edge lands on the value.
+mover = manimlib.Square(side_length=2.0).move_to([10.0, 10.0, 0.0])
+mover.set_x(0.0)
+assert mover.get_x() == 0.0
+assert np.allclose(mover.get_center()[1:], [10.0, 0.0])
+mover.set_y(-3.0, manimlib.DOWN)
+assert mover.get_bottom()[1] == -3.0
+mover.set_z(7.0)
+assert mover.get_z() == 7.0
+mover.set_coord(5.0, dim=1, direction=manimlib.UP)
+assert mover.get_top()[1] == 5.0
+
+# set_width without stretch rescales uniformly; with stretch only that dim.
+uniform = manimlib.Square(side_length=2.0)
+uniform.set_width(6.0)
+assert uniform.get_width() == 6.0
+assert uniform.get_height() == 6.0
+stretched = manimlib.Square(side_length=2.0)
+stretched.set_height(8.0, stretch=True)
+assert stretched.get_height() == 8.0
+assert stretched.get_width() == 2.0
+flat = manimlib.Square(side_length=2.0)
+flat.rescale_to_fit(4.0, 2, stretch=True)
+assert flat.get_depth() == 0.0
+solid = manimlib.Cube(side_length=2.0)
+solid.rescale_to_fit(4.0, 2, stretch=True)
+assert solid.get_depth() == 4.0
+assert solid.get_width() == 2.0
+for fitter in (manimlib.Square(side_length=2.0),):
+    fitter.stretch_to_fit_width(3.0)
+    assert fitter.get_width() == 3.0
+    fitter.stretch_to_fit_height(9.0)
+    assert fitter.get_height() == 9.0
+    fitter.stretch_to_fit_depth(1.5)
+    assert fitter.get_depth() == 0.0
+
+# stretch variants move edges, not the anchor point.
+stretch_probe = manimlib.Square(side_length=2.0)
+stretch_probe.stretch_in_place(3.0, 0)
+assert stretch_probe.get_width() == 6.0
+anchor = manimlib.Square(side_length=2.0)
+fixed_point = anchor.get_corner(manimlib.DL).copy()
+anchor.stretch_about_point(2.0, 1, fixed_point)
+assert np.allclose(anchor.get_corner(manimlib.DL), fixed_point)
+assert anchor.get_height() == 4.0
+
+# set_shape stretches every named dimension in one call.
+shaped = manimlib.Square(side_length=2.0)
+shaped.set_shape(width=5.0, height=1.0)
+assert shaped.get_shape() == (5.0, 1.0, 0.0)
+
+# min/max clamps fire only outside the band and keep the other dims honest.
+capped = manimlib.Square(side_length=4.0)
+capped.set_max_width(2.0)
+assert capped.get_width() == 2.0
+assert capped.get_height() == 2.0
+kept = manimlib.Square(side_length=1.0)
+kept.set_max_width(2.0)
+assert kept.get_width() == 1.0
+floored = manimlib.Square(side_length=1.0)
+floored.set_min_height(3.0)
+assert floored.get_height() == 3.0
+untouched = manimlib.Square(side_length=4.0)
+untouched.set_min_height(3.0)
+assert untouched.get_height() == 4.0
+depthful = manimlib.Cube(side_length=2.0)
+depthful.set_min_depth(3.0)
+assert depthful.get_depth() == 3.0
+depthful.set_max_depth(1.0)
+assert depthful.get_depth() == 1.0
+flat_depth = manimlib.Square(side_length=2.0)
+flat_depth.set_min_depth(1.0)
+assert flat_depth.get_depth() == 0.0
+
+# center/align_on_border/align_to land the box where the names promise.
+wanderer = manimlib.Square(side_length=1.0).shift([20.0, -20.0, 4.0])
+wanderer.center()
+assert np.allclose(wanderer.get_center(), [0.0, 0.0, 0.0])
+edge_rider = manimlib.Square(side_length=1.0).shift([-14.0, 14.0, 0.0])
+edge_rider.align_on_border(manimlib.LEFT, buff=1.0)
+assert edge_rider.get_left()[0] == -manimlib.FRAME_X_RADIUS + 1.0
+corner_rider = manimlib.Square(side_length=1.0)
+corner_rider.to_corner(manimlib.UR, buff=0.5)
+assert corner_rider.get_right()[0] == manimlib.FRAME_X_RADIUS - 0.5
+assert corner_rider.get_top()[1] == manimlib.FRAME_Y_RADIUS - 0.5
+edge_hugger = manimlib.Square(side_length=1.0)
+edge_hugger.to_edge(manimlib.BOTTOM, buff=2.0)
+print("DBG to_edge bottom", repr(edge_hugger.get_bottom()), "FYR", manimlib.FRAME_Y_RADIUS)
+assert edge_hugger.get_bottom()[1] == -manimlib.FRAME_Y_RADIUS + 2.0, f"DBG {edge_hugger.get_bottom()!r} FYR {manimlib.FRAME_Y_RADIUS!r}"
+align_target = manimlib.Square(side_length=2.0).move_to([5.0, -5.0, 0.0])
+follower = manimlib.Square(side_length=1.0)
+follower.align_to(align_target, manimlib.RIGHT)
+print("DBG follower_right", repr(follower.get_right()), "target", repr(align_target.get_right()))
+assert follower.get_right()[0] == align_target.get_right()[0]
+assert abs(follower.get_center()[1] + 1.0) > 1e-6
+follower.align_to([0.0, 9.0, 0.0], manimlib.UP)
+assert follower.get_top()[1] == 9.0
+
+# match_* copies one coordinate or dimension from the donor.
+donor = manimlib.Square(side_length=3.0).move_to([-4.0, 4.0, 0.0])
+matchee = manimlib.Square(side_length=1.0)
+matchee.match_dim_size(donor, 0)
+assert matchee.get_width() == 3.0
+matchee.match_height(donor)
+assert matchee.get_height() == 3.0
+matchee.match_x(donor)
+assert matchee.get_x() == donor.get_x()
+matchee.match_y(donor, aligned_edge=manimlib.DOWN)
+assert matchee.get_bottom()[1] == donor.get_bottom()[1]
+matchee.match_coord(donor, 0, direction=manimlib.LEFT)
+assert matchee.get_left()[0] == donor.get_left()[0]
+
+# get_pieces returns childless partials spanning the original run.
+pieced = manimlib.Square(side_length=2.0)
+pieces = pieced.get_pieces(4)
+assert type(pieces) is manimlib.Group
+assert len(pieces) == 4
+assert all(isinstance(piece, manimlib.Square) for piece in pieces)
+assert all(len(piece.submobjects) == 0 for piece in pieces)
+assert np.allclose(pieces[0].get_start(), pieced.get_start())
+assert np.allclose(pieces[-1].get_end(), pieced.get_end())
