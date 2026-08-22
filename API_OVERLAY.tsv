@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	92532d12ca43e40be2cfcb7cb5711e26706a3b07256775b0d82b1c24cd8fadd5
+ledger_reviewed_digest	b4f11bae63657562586751b9b3f9a68f9d9288cefa3940947c1947dcf17b141d
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -801,6 +801,21 @@ manimlib.mobject.mobject:Mobject.throw_error_if_no_points	same	scripts/manim_ref
 manimlib.mobject.mobject:Mobject.put_start_on	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	shifts by the delta to the live start endpoint
 manimlib.mobject.mobject:Mobject.put_end_on	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	shifts by the delta to the live end endpoint
 manimlib.mobject.mobject:Mobject.get_z_index_reference_point	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rides the declared z-index group's center when present else this mobject
+manimlib.mobject.mobject:Mobject.align_points	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	base-class resize of both runs with the order-preserving policy while VMobject keeps the native true-shape seam
+manimlib.mobject.mobject:Mobject.align_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	zips path-wise families and aligns every pair's point runs
+manimlib.mobject.mobject:Mobject.align_data_and_family	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	aligns the family graph first then the data rows
+manimlib.mobject.mobject:Mobject.interpolate	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	lerps every unlocked lane through the straight or supplied path function and marks data changed
+manimlib.mobject.mobject:Mobject.set_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	asserts dtype equality then resizes and copies the structured rows
+manimlib.mobject.mobject:Mobject.lock_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	records locked lanes only when no updaters are registered
+manimlib.mobject.mobject:Mobject.lock_matching_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	locks value-matching lanes matching uniforms and marks constant lanes across the zipped families
+manimlib.mobject.mobject:Mobject.unlock_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	clears the data uniform and constant key sets across the family
+manimlib.mobject.mobject:Mobject.has_same_shape_as	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	compares center-normalized height-one point sets at the width-scaled tolerance
+manimlib.mobject.mobject:Mobject.is_aligned_with	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	checks row counts child counts and recursive alignment
+manimlib.mobject.mobject:Mobject.digest_mobject_attrs	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	adopts mobject-valued attributes into the family with ordered identity dedupe
+manimlib.mobject.mobject:Mobject.stash_mobject_pointers	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	decorator nulls parents target and saved state around the wrapped call and restores them after
+manimlib.mobject.mobject:Mobject.serialize	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the pickle payload over the portal's structural reduce
+manimlib.mobject.mobject:Mobject.deserialize	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	becomes the unpickled counterpart and returns self
+manimlib.mobject.mobject:Mobject.pointwise_become_partial	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	base-class no-op exactly as the Reference documents with real partials in subclasses
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

@@ -18741,3 +18741,96 @@ z_member = Mobject(z_group)
 z_member.z_index_group = z_group
 z_group.move_to([9.0, 9.0, 9.0])
 assert np.allclose(z_member.get_z_index_reference_point(), z_group.get_center())
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: data alignment, interpolation, locking, and serialization.
+left_shape = manimlib.Square(side_length=1.0)
+right_shape = manimlib.Circle(radius=0.5)
+assert not left_shape.is_aligned_with(right_shape)
+left_shape.align_data_and_family(right_shape)
+assert left_shape.is_aligned_with(right_shape)
+assert right_shape.is_aligned_with(left_shape)
+
+# interpolate lerps every unlocked lane; locked lanes keep their rows.
+lerp_target = manimlib.Square(side_length=1.0).shift(2 * manimlib.RIGHT)
+lerp_source = manimlib.Square(side_length=1.0)
+aligned_target = lerp_target.copy()
+aligned_work = lerp_source.copy()
+aligned_work.align_data_and_family(aligned_target)
+work = lerp_source.copy()
+work.align_data_and_family(aligned_target)
+work.lock_data(["point"])
+work.interpolate(lerp_source, aligned_target, 0.25)
+assert np.allclose(work.data["point"], lerp_source.data["point"])
+work.unlock_data()
+work.interpolate(lerp_source, aligned_target, 0.25)
+expected_points = (1 - 0.25) * lerp_source.data["point"] + 0.25 * aligned_target.data["point"]
+assert np.allclose(work.data["point"], expected_points)
+
+# set_data round-trips a structured array of the exact dtype.
+donor = manimlib.Dot().move_to([1.0, 1.0, 0.0])
+receiver = manimlib.Dot()
+receiver.set_data(donor.data.copy())
+assert np.array_equal(receiver.data, donor.data)
+
+# lock_matching_data locks lanes that already agree and marks constants.
+match_a = manimlib.Dot()
+match_b = manimlib.Dot()
+match_a.align_data_and_family(match_b)
+
+
+def _rows_match(arr1, arr2):
+    return arr1.shape == arr2.shape and bool((arr1 == arr2).all())
+
+
+match_a.lock_matching_data(match_a, match_b)
+for key in match_a.data.dtype.names:
+    if _rows_match(match_a.data[key], match_b.data[key]):
+        assert key in getattr(match_a, "locked_data_keys", set())
+
+# has_same_shape_as normalizes center and height.
+square_one = manimlib.Square(side_length=1.0)
+square_two = manimlib.Square(side_length=2.0)
+assert square_two.has_same_shape_as(square_one)
+circle_shape = manimlib.Circle(radius=1.0)
+assert not circle_shape.has_same_shape_as(square_one)
+
+# digest_mobject_attrs adopts mobject-valued attributes into the family.
+digest_parent = Mobject()
+adopted = Mobject()
+digest_parent.orphan_attr = adopted
+assert adopted not in digest_parent.submobjects
+digest_parent.digest_mobject_attrs()
+assert adopted in digest_parent.submobjects
+
+# stash_mobject_pointers hides relationship pointers for the wrapped call.
+@Mobject.stash_mobject_pointers
+def _mutate_without_pointers(mob):
+    return (mob.parents, mob.target, mob.saved_state)
+
+
+stash_probe = Mobject()
+stash_child = Mobject()
+stash_probe.add(stash_child)
+stash_probe.target = Mobject()
+seen = _mutate_without_pointers(stash_probe)
+assert seen == ([], None, None)
+assert stash_probe.parents == []
+assert isinstance(stash_probe.target, Mobject)
+assert stash_probe.saved_state is None
+assert stash_probe.submobjects == [stash_child]
+assert stash_child.parents == [stash_probe]
+
+# serialize/deserialize round-trips through become.
+original = manimlib.Square(side_length=1.5).shift([1.0, 2.0, 3.0])
+payload = original.serialize()
+reviver = manimlib.Square()
+returned = reviver.deserialize(payload)
+assert returned is reviver
+assert np.allclose(reviver.get_center(), original.get_center())
+assert reviver.get_width() == original.get_width()
+
+# pointwise_become_partial is the base-class no-op the Reference documents.
+partial_mob = Mobject()
+assert partial_mob.pointwise_become_partial(Mobject(), 0.1, 0.9) is partial_mob

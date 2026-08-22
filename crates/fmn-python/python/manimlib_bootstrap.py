@@ -681,6 +681,16 @@ def _restore_mobject(cls, engine_state, attributes, children, extras, updaters):
     return result
 
 
+def _arrays_match(arr1, arr2):
+    # Reference utils/iterables.py:138.
+    return arr1.shape == arr2.shape and bool((arr1 == arr2).all())
+
+
+def _array_is_constant(arr):
+    # Reference utils/iterables.py:142: every row equals the first.
+    return arr.shape[0] == 0 or bool((arr == arr[0]).all())
+
+
 class Mobject(_BridgeMobject):
     dim = 3
     data_dtype = [("point", 3), ("rgba", 4)]
@@ -2458,6 +2468,154 @@ class Mobject(_BridgeMobject):
     def get_z_index_reference_point(self):
         z_index_group = getattr(self, "z_index_group", self)
         return z_index_group.get_center()
+
+    # ------------------------------------------------------------------
+    # Data alignment, interpolation, and locking (Reference mobject.py:
+    # 1333-1360 area, 1855-1908, 2029-2046, plus serialize/deserialize).
+    # Alignment resizes both runs with the order-preserving policy so
+    # per-key interpolation stays row-aligned; VMobject overrides
+    # align_points with the native true-shape seam.
+
+    def align_points(self, mobject):
+        max_len = max(self.get_num_points(), mobject.get_num_points())
+        for mob in (self, mobject):
+            mob.resize_points(max_len, resize_func=resize_preserving_order)
+        return self
+
+    def align_data(self, mobject):
+        for mob1, mob2 in zip(self.get_family(), mobject.get_family()):
+            mob1.align_points(mob2)
+        return self
+
+    def align_data_and_family(self, mobject):
+        self.align_family(mobject)
+        self.align_data(mobject)
+        return self
+
+    def interpolate(self, mobject1, mobject2, alpha, path_func=None):
+        if path_func is None:
+            path_func = getattr(_FMN_ROOT, "straight_path")
+        locked = getattr(self, "locked_data_keys", ())
+        const = getattr(self, "const_data_keys", ())
+        keys = [k for k in self.data.dtype.names if k not in locked]
+        if keys:
+            self.note_changed_data()
+        for key in keys:
+            md1 = mobject1.data[key]
+            md2 = mobject2.data[key]
+            if key in const:
+                self.data[key][:] = md1
+            else:
+                self.data[key][:] = path_func(md1, md2, alpha)
+        return self
+
+    def set_data(self, data):
+        assert data.dtype == self.data.dtype
+        self.resize_points(len(data))
+        self.data[:] = data
+        return self
+
+    def lock_data(self, keys):
+        if self.has_updaters():
+            return self
+        self.locked_data_keys = set(keys)
+        return self
+
+    def lock_matching_data(self, mobject1, mobject2):
+        tuples = zip(
+            self.get_family(),
+            mobject1.get_family(),
+            mobject2.get_family(),
+        )
+        for sm, sm1, sm2 in tuples:
+            if not sm.data.dtype == sm1.data.dtype == sm2.data.dtype:
+                continue
+            sm.lock_data(
+                key for key in sm.data.dtype.names
+                if _arrays_match(sm1.data[key], sm2.data[key])
+            )
+            sm.lock_uniforms(
+                key for key in self.uniforms
+                if _listify(mobject1.uniforms.get(key, 0))
+                == _listify(mobject2.uniforms.get(key, 0))
+            )
+            sm.const_data_keys = set(
+                key for key in sm.data.dtype.names
+                if key not in sm.locked_data_keys
+                if all(
+                    _array_is_constant(mob.data[key])
+                    for mob in (sm, sm1, sm2)
+                )
+            )
+        return self
+
+    def unlock_data(self):
+        for mob in self.get_family():
+            mob.locked_data_keys = set()
+            mob.const_data_keys = set()
+            mob.locked_uniform_keys = set()
+        return self
+
+    def has_same_shape_as(self, mobject):
+        points1, points2 = (
+            (m.get_all_points() - m.get_center()) / m.get_height()
+            for m in (self, mobject)
+        )
+        if len(points1) != len(points2):
+            return False
+        return bool(
+            _np.isclose(points1, points2, atol=self.get_width() * 1e-2).all()
+        )
+
+    def is_aligned_with(self, mobject):
+        if len(self.data) != len(mobject.data):
+            return False
+        if len(self.submobjects) != len(mobject.submobjects):
+            return False
+        return all(
+            sm1.is_aligned_with(sm2)
+            for sm1, sm2 in zip(self.submobjects, mobject.submobjects)
+        )
+
+    def digest_mobject_attrs(self):
+        mobject_attrs = [
+            x for x in list(self.__dict__.values())
+            if isinstance(x, _BridgeMobject)
+        ]
+        candidate = [*mobject_attrs, *self.submobjects]
+        candidate = list(reversed(dict.fromkeys(reversed(candidate))))
+        self.set_submobjects(candidate)
+        return self
+
+    @staticmethod
+    def stash_mobject_pointers(func):
+        @_functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            uncopied_attrs = ["parents", "target", "saved_state"]
+            stash = {}
+            for attr in uncopied_attrs:
+                if hasattr(self, attr):
+                    value = getattr(self, attr)
+                    stash[attr] = value
+                    null_value = [] if isinstance(value, list) else None
+                    setattr(self, attr, null_value)
+            result = func(self, *args, **kwargs)
+            self.__dict__.update(stash)
+            return result
+
+        return wrapper
+
+    def serialize(self):
+        return pickle.dumps(self)
+
+    def deserialize(self, data):
+        self.become(pickle.loads(data))
+        return self
+
+    def pointwise_become_partial(self, mobject, a, b):
+        # To be implemented in subclass (Reference mobject.py verbatim).
+        del mobject, a, b
+        return self
 
     def generate_target(self, use_deepcopy=False):
         self.target = self.copy(deep=use_deepcopy)
