@@ -18080,6 +18080,19 @@ def _constant_expression(detail, env):
                 if result:
                     return result
             return result
+        if (
+            isinstance(node, _ast.Call)
+            and node.keywords
+            and isinstance(node.func, _ast.Name)
+            and node.func.id == "TypeVar"
+            and "TypeVar" in env
+        ):
+            # The one keyword-bearing spelling in the schema: the
+            # Reference's generic TypeVar declarations.
+            return env["TypeVar"](
+                *[visit(arg) for arg in node.args],
+                **{kw.arg: visit(kw.value) for kw in node.keywords},
+            )
         if isinstance(node, _ast.Call) and not node.keywords:
             args = [visit(arg) for arg in node.args]
             if isinstance(node.func, _ast.Name):
@@ -18251,6 +18264,10 @@ def _resolve_symbolic_constants(rows):
         "manim_config": _pinned_manim_config(),
         "np": numpy,
         "version": lambda _name: "1.7.2",
+        # The Reference's generic TypeVar spellings (SubmobjectType) are
+        # real typing objects at import time; a string bound evaluates
+        # lazily exactly as in the Reference's own import order.
+        "TypeVar": _importlib.import_module("typing").TypeVar,
     }
     pending = {}
     resolved = {}

@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	9046b5ddaa983e0f459394cc9deda06dea6292856bf3ede29953b99701c69f6f
+ledger_reviewed_digest	07d033622959867bcc8ff0c1437640116977b997ad1256e2ed517ae547e9745c
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -959,6 +959,15 @@ manimlib.mobject.mobject:Point.get_height	same	scripts/manim_ref/manimlib/mobjec
 manimlib.mobject.mobject:Point.get_bounding_box_point	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	collapses every direction to the location
 manimlib.mobject.mobject:Group	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	is the authored any-mobject container over the live family graph
 manimlib.mobject.mobject:Group.__init__	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	spreads a single iterable argument into members exactly as the Reference documents
+manimlib.mobject.mobject:os	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib os module the Reference imports
+manimlib.mobject.mobject:sys	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib sys module the Reference imports
+manimlib.mobject.mobject:random	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib random module the Reference imports
+manimlib.mobject.mobject:copy	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib copy module the Reference imports
+manimlib.mobject.mobject:pickle	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib pickle module the Reference imports
+manimlib.mobject.mobject:wraps	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical functools wraps decorator the Reference imports
+manimlib.mobject.mobject:TypeVar	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical typing TypeVar factory the Reference imports
+manimlib.mobject.mobject:Generic	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical typing Generic base the Reference imports
+manimlib.mobject.mobject:SubmobjectType	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	resolves the generic spelling into a real TypeVar carrying the Reference's name
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

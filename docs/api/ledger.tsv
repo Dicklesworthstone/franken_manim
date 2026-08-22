@@ -1071,7 +1071,7 @@ manimlib.mobject.matrix	MobjectMatrix.__init__	MobjectMatrix.__init__	method	0	(
 manimlib.mobject.matrix	MobjectMatrix.element_to_mobject	MobjectMatrix.element_to_mobject	method	0	(self[positional_or_keyword], element[positional_or_keyword]:VMobject, **config[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.matrix	TexMatrix	TexMatrix	class	1	(self[positional_or_keyword], matrix[positional_or_keyword]:StringMatrixType, tex_config[positional_or_keyword]:dict=dict(), **config[var_keyword])	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass whose scalar sources use the bundled fmd-math entry and delimiter engine
 manimlib.mobject.matrix	TexMatrix.__init__	TexMatrix.__init__	method	0	(self[positional_or_keyword], matrix[positional_or_keyword]:StringMatrixType, tex_config[positional_or_keyword]:dict=dict(), **config[var_keyword])	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves string grid configuration font and style forwarding and live Tex entry identity without an external TeX toolchain
-manimlib.mobject.mobject	Generic	Generic	leaked_import	1	-	unreviewed	-	-	-
+manimlib.mobject.mobject	Generic	Generic	leaked_import	1	-	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical typing Generic base the Reference imports
 manimlib.mobject.mobject	Group	Group	class	1	(self[positional_or_keyword], *mobjects[var_positional]:SubmobjectType | Iterable[SubmobjectType], **kwargs[var_keyword])	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	is the authored any-mobject container over the live family graph
 manimlib.mobject.mobject	Group.__init__	Group.__init__	method	0	(self[positional_or_keyword], *mobjects[var_positional]:SubmobjectType | Iterable[SubmobjectType], **kwargs[var_keyword])	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	spreads a single iterable argument into members exactly as the Reference documents
 manimlib.mobject.mobject	Mobject	Mobject	class	1	(self[positional_or_keyword], color[positional_or_keyword]:ManimColor=DEFAULT_MOBJECT_COLOR, opacity[positional_or_keyword]:float=1.0, shading[positional_or_keyword]:Tuple[float, float, float]=(0.0, 0.0, 0.0), texture_paths[positional_or_keyword]:dict[str, str] | None=None, is_fixed_in_frame[positional_or_keyword]:bool=False, depth_test[positional_or_keyword]:bool=False, z_index[positional_or_keyword]:int=0)	unreviewed	-	-	-
@@ -1337,8 +1337,8 @@ manimlib.mobject.mobject	Point.get_height	Point.get_height	method	0	(self[positi
 manimlib.mobject.mobject	Point.get_location	Point.get_location	method	0	(self[positional_or_keyword])	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns a copy of the live location record
 manimlib.mobject.mobject	Point.get_width	Point.get_width	method	0	(self[positional_or_keyword])	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the artificial width extent
 manimlib.mobject.mobject	Point.set_location	Point.set_location	method	0	(self[positional_or_keyword], new_loc[positional_or_keyword]:npt.ArrayLike)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rewrites the single record row to the requested location
-manimlib.mobject.mobject	SubmobjectType	SubmobjectType	constant	1	default=TypeVar('SubmobjectType', bound='Mobject')	unreviewed	-	-	-
-manimlib.mobject.mobject	TypeVar	TypeVar	leaked_import	1	-	unreviewed	-	-	-
+manimlib.mobject.mobject	SubmobjectType	SubmobjectType	constant	1	default=TypeVar('SubmobjectType', bound='Mobject')	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	resolves the generic spelling into a real TypeVar carrying the Reference's name
+manimlib.mobject.mobject	TypeVar	TypeVar	leaked_import	1	-	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical typing TypeVar factory the Reference imports
 manimlib.mobject.mobject	_AnimationBuilder	_AnimationBuilder	class	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	unreviewed	-	-	-
 manimlib.mobject.mobject	_AnimationBuilder.__init__	_AnimationBuilder.__init__	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the interceptor to its owning mobject with empty call state
 manimlib.mobject.mobject	_AnimationBuilder.build	_AnimationBuilder.build	method	0	(self[positional_or_keyword])	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	produces the method animation over the intercepted call chain
@@ -1347,13 +1347,13 @@ manimlib.mobject.mobject	_FunctionalUpdaterBuilder	_FunctionalUpdaterBuilder	cla
 manimlib.mobject.mobject	_FunctionalUpdaterBuilder.__init__	_FunctionalUpdaterBuilder.__init__	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the function-fed builder to its owner
 manimlib.mobject.mobject	_UpdaterBuilder	_UpdaterBuilder	class	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	unreviewed	-	-	-
 manimlib.mobject.mobject	_UpdaterBuilder.__init__	_UpdaterBuilder.__init__	method	0	(self[positional_or_keyword], mobject[positional_or_keyword]:Mobject)	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	binds the bound-method builder to its owner
-manimlib.mobject.mobject	copy	copy	leaked_import	1	-	unreviewed	-	-	-
-manimlib.mobject.mobject	os	os	leaked_import	1	-	unreviewed	-	-	-
+manimlib.mobject.mobject	copy	copy	leaked_import	1	-	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib copy module the Reference imports
+manimlib.mobject.mobject	os	os	leaked_import	1	-	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib os module the Reference imports
 manimlib.mobject.mobject	override_animate	override_animate	function	1	(method[positional_or_keyword])	unreviewed	-	-	-
-manimlib.mobject.mobject	pickle	pickle	leaked_import	1	-	unreviewed	-	-	-
-manimlib.mobject.mobject	random	random	leaked_import	1	-	unreviewed	-	-	-
-manimlib.mobject.mobject	sys	sys	leaked_import	1	-	unreviewed	-	-	-
-manimlib.mobject.mobject	wraps	wraps	leaked_import	1	-	unreviewed	-	-	-
+manimlib.mobject.mobject	pickle	pickle	leaked_import	1	-	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib pickle module the Reference imports
+manimlib.mobject.mobject	random	random	leaked_import	1	-	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib random module the Reference imports
+manimlib.mobject.mobject	sys	sys	leaked_import	1	-	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib sys module the Reference imports
+manimlib.mobject.mobject	wraps	wraps	leaked_import	1	-	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical functools wraps decorator the Reference imports
 manimlib.mobject.mobject_update_utils	always	always	function	1	(method[positional_or_keyword], *args[var_positional], **kwargs[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject_update_utils	always_redraw	always_redraw	function	1	(func[positional_or_keyword]:Callable[..., Mobject], *args[var_positional], **kwargs[var_keyword])	unreviewed	-	-	-
 manimlib.mobject.mobject_update_utils	always_rotate	always_rotate	function	1	(mobject[positional_or_keyword]:Mobject, rate[positional_or_keyword]:float=20 * DEG, **kwargs[var_keyword])	unreviewed	-	-	-

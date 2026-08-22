@@ -19475,3 +19475,24 @@ def _wag_override_factory(mobject, direction=None, axis=None, wag_factor=1.0):
 probe = manimlib.Square(side_length=1.0)
 override_built = probe.animate.wag(wag_factor=2.0).build()
 assert isinstance(override_built, manimlib.Animation)
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: module-surface fidelity for the Reference's imported names.
+
+_mobj_module = sys.modules["manimlib.mobject.mobject"]
+assert _mobj_module.os is importlib.import_module("os")
+assert _mobj_module.sys is importlib.import_module("sys")
+assert _mobj_module.random is importlib.import_module("random")
+assert _mobj_module.copy is importlib.import_module("copy")
+assert _mobj_module.pickle is importlib.import_module("pickle")
+assert _mobj_module.wraps is importlib.import_module("functools").wraps
+assert _mobj_module.TypeVar is importlib.import_module("typing").TypeVar
+assert _mobj_module.Generic is importlib.import_module("typing").Generic
+
+# The generic TypeVar spelling resolves to a real typing object with the
+# Reference's name, not its declared string.
+_submobject_type = _mobj_module.SubmobjectType
+assert type(_submobject_type).__name__ == "TypeVar"
+assert _submobject_type.__name__ == "SubmobjectType"
+assert manimlib.SubmobjectType is _submobject_type
