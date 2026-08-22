@@ -18442,3 +18442,111 @@ decorated_target = Mobject()
 assert _restyle(decorated_target) == "styled"
 assert decorated_target.restyle_calls == 1
 assert decorated_target._data_has_changed
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: Mobject event-listener family over the process-wide dispatcher.
+event_type_module = importlib.import_module("manimlib.event_handler")
+EventTypeSurface = importlib.import_module(
+    "manimlib.event_handler.event_type"
+).EventType
+dispatcher = event_type_module.EVENT_DISPATCHER
+
+event_host = Mobject()
+event_child = Mobject()
+event_host.add(event_child)
+assert event_host.get_event_listners() == []
+assert not event_host.get_has_event_listner()
+
+motion_hits = []
+
+
+def _motion_recorder(mob, event_data):
+    motion_hits.append(event_data["point"])
+
+
+event_host.add_mouse_motion_listner(_motion_recorder)
+press_hits = []
+event_child.add_mouse_press_listner(lambda mob, event_data: press_hits.append(1))
+assert len(event_host.get_event_listners()) == 1
+assert event_host.get_has_event_listner()
+assert event_host.get_family_event_listners() and len(
+    event_host.get_family_event_listners()
+) == 2
+
+# The dispatcher bucket holds the registration and dispatch reaches it.
+assert dispatcher.event_listners[EventTypeSurface.MouseMotionEvent]
+dispatcher.dispatch(
+    EventTypeSurface.MouseMotionEvent, point=[1.0, 2.0, 0.0]
+)
+assert motion_hits == [[1.0, 2.0, 0.0]]
+
+# Removal through a fresh equal EventListener clears both the mobject list
+# and the dispatcher bucket (Reference event_listner.py:23 equality).
+event_host.remove_mouse_motion_listner(_motion_recorder)
+assert event_host.get_event_listners() == []
+assert not dispatcher.event_listners[EventTypeSurface.MouseMotionEvent]
+dispatcher.dispatch(
+    EventTypeSurface.MouseMotionEvent, point=[3.0, 4.0, 0.0]
+)
+assert motion_hits == [[1.0, 2.0, 0.0]]
+
+# clear_event_listners resets the whole subtree.
+assert event_child.get_has_event_listner()
+event_host.clear_event_listners()
+assert event_child.get_event_listners() == []
+assert not event_host.get_family_event_listners()
+# Reference clear_event_listners resets local lists only; dispatcher
+# buckets keep the registration until an explicit remove (preserved
+# wart, mirrored exactly).
+assert dispatcher.event_listners[EventTypeSurface.MousePressEvent]
+
+# Every wrapper routes to its exact event-type bucket.
+routing_host = Mobject()
+seen_types = []
+
+
+def _routing_recorder(mob, event_data):
+    seen_types.append(mob)
+
+
+for name in (
+    "add_mouse_motion_listner",
+    "add_mouse_drag_listner",
+    "add_mouse_press_listner",
+    "add_mouse_release_listner",
+    "add_mouse_scroll_listner",
+    "add_key_press_listner",
+    "add_key_release_listner",
+):
+    getattr(routing_host, name)(_routing_recorder)
+registered = {
+    listener.event_type for listener in routing_host.get_event_listners()
+}
+assert registered == {
+    EventTypeSurface.MouseMotionEvent,
+    EventTypeSurface.MouseDragEvent,
+    EventTypeSurface.MousePressEvent,
+    EventTypeSurface.MouseReleaseEvent,
+    EventTypeSurface.MouseScrollEvent,
+    EventTypeSurface.KeyPressEvent,
+    EventTypeSurface.KeyReleaseEvent,
+}
+for name in (
+    "remove_mouse_motion_listner",
+    "remove_mouse_drag_listner",
+    "remove_mouse_press_listner",
+    "remove_mouse_release_listner",
+    "remove_mouse_scroll_listner",
+    "remove_key_press_listner",
+    "remove_key_release_listner",
+):
+    getattr(routing_host, name)(_routing_recorder)
+assert routing_host.get_event_listners() == []
+
+# init_event_listners is idempotent and never discards live registrations.
+init_host = Mobject()
+init_host.init_event_listners()
+init_host.add_key_press_listner(lambda mob, event_data: None)
+init_host.init_event_listners()
+assert len(init_host.get_event_listners()) == 1

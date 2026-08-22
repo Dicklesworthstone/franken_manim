@@ -466,6 +466,7 @@ def _install_live_state(mobject):
     mobject.uniforms = _LiveUniforms(mobject)
     mobject.updaters = []
     mobject.parents = []
+    mobject.event_listners = []
     mobject.saved_state = None
     mobject.target = None
 
@@ -2147,6 +2148,91 @@ class Mobject(_BridgeMobject):
 
         return wrapper
 
+    # ------------------------------------------------------------------
+    # Event-listener family (Reference mobject.py:2101-2174): registration
+    # mirrors the per-mobject list while fan-out lives on the process-wide
+    # dispatcher the schema surface installs.
+
+    def init_event_listners(self):
+        if "event_listners" not in self.__dict__:
+            self.event_listners = []
+        return self
+
+    def add_event_listner(self, event_type, event_callback):
+        event_listner = EventListener(self, event_type, event_callback)
+        self.event_listners.append(event_listner)
+        _event_dispatcher().add_listner(event_listner)
+        return self
+
+    def remove_event_listner(self, event_type, event_callback):
+        event_listner = EventListener(self, event_type, event_callback)
+        while event_listner in self.event_listners:
+            self.event_listners.remove(event_listner)
+        _event_dispatcher().remove_listner(event_listner)
+        return self
+
+    def clear_event_listners(self, recurse=True):
+        self.event_listners = []
+        if recurse:
+            for submobject in self.submobjects:
+                submobject.clear_event_listners(recurse=recurse)
+        return self
+
+    def get_event_listners(self):
+        return self.event_listners
+
+    def get_family_event_listners(self):
+        return list(
+            _itertools.chain(
+                *(mob.get_event_listners() for mob in self.get_family())
+            )
+        )
+
+    def get_has_event_listner(self):
+        return any(mob.get_event_listners() for mob in self.get_family())
+
+    def add_mouse_motion_listner(self, callback):
+        return self.add_event_listner(EventType.MouseMotionEvent, callback)
+
+    def remove_mouse_motion_listner(self, callback):
+        return self.remove_event_listner(EventType.MouseMotionEvent, callback)
+
+    def add_mouse_press_listner(self, callback):
+        return self.add_event_listner(EventType.MousePressEvent, callback)
+
+    def remove_mouse_press_listner(self, callback):
+        return self.remove_event_listner(EventType.MousePressEvent, callback)
+
+    def add_mouse_release_listner(self, callback):
+        return self.add_event_listner(EventType.MouseReleaseEvent, callback)
+
+    def remove_mouse_release_listner(self, callback):
+        return self.remove_event_listner(EventType.MouseReleaseEvent, callback)
+
+    def add_mouse_drag_listner(self, callback):
+        return self.add_event_listner(EventType.MouseDragEvent, callback)
+
+    def remove_mouse_drag_listner(self, callback):
+        return self.remove_event_listner(EventType.MouseDragEvent, callback)
+
+    def add_mouse_scroll_listner(self, callback):
+        return self.add_event_listner(EventType.MouseScrollEvent, callback)
+
+    def remove_mouse_scroll_listner(self, callback):
+        return self.remove_event_listner(EventType.MouseScrollEvent, callback)
+
+    def add_key_press_listner(self, callback):
+        return self.add_event_listner(EventType.KeyPressEvent, callback)
+
+    def remove_key_press_listner(self, callback):
+        return self.remove_event_listner(EventType.KeyPressEvent, callback)
+
+    def add_key_release_listner(self, callback):
+        return self.add_event_listner(EventType.KeyReleaseEvent, callback)
+
+    def remove_key_release_listner(self, callback):
+        return self.remove_event_listner(EventType.KeyReleaseEvent, callback)
+
     def generate_target(self, use_deepcopy=False):
         self.target = self.copy(deep=use_deepcopy)
         self.target.saved_state = self.saved_state
@@ -2418,6 +2504,19 @@ class EventListener:
         self.event_type = event_type
         self.callback = event_callback
 
+    def __eq__(self, other):
+        # Reference event_listner.py:23: listeners match by callback,
+        # mobject, and event type, so remove_event_listner can target a
+        # registration through a fresh equal instance.
+        try:
+            return (
+                self.callback == other.callback
+                and self.mobject == other.mobject
+                and self.event_type == other.event_type
+            )
+        except AttributeError:
+            return False
+
 
 class EventDispatcher:
     """In-process event fan-out; Studio owns the window, this owns listeners."""
@@ -2447,9 +2546,11 @@ class EventDispatcher:
         bucket = self.event_listners.get(event_listner.event_type)
         if not bucket:
             return
-        self.event_listners[event_listner.event_type] = [
-            item for item in bucket if item is not event_listner
-        ]
+        # Reference event_dispatcher.py:27 removes every value-equal
+        # registration, so a fresh equal EventListener targets the original.
+        remaining = [item for item in bucket if item != event_listner]
+        self.event_listners[event_listner.event_type] = remaining
+
 
     def dispatch(self, event_type, **event_data):
         point = event_data.get("point")

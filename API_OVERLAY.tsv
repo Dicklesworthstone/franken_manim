@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	6fe2e3c34c80a6084df383052ba62f91f78a4447172839ab87f57510b4fece28
+ledger_reviewed_digest	0f942ae8d0a85559bdbe51e9b24cf9f7f8b992a9bf51204e0b2cf6cca8fa64cc
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -737,6 +737,27 @@ manimlib.mobject.mobject:Mobject.refresh_has_updater_status	same	scripts/manim_r
 manimlib.mobject.mobject:Mobject.set_animating_status	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	covers the requested family and every ancestor so parents report changing while children animate
 manimlib.scene.scene_file_writer:SceneFileWriter.begin_animation	tiered	OOT-PARTIAL-MOVIE-PIPES	crates/fmn-python/tests/bridge.py	keeps the disabled branch the exact silent no-op and names the native Reel segmentation capability for subdivide_output mode
 manimlib.scene.scene_file_writer:SceneFileWriter.end_animation	tiered	OOT-PARTIAL-MOVIE-PIPES	crates/fmn-python/tests/bridge.py	mirrors begin_animation refusing the Python-side pipe close the sovereign pipeline owns
+manimlib.mobject.mobject:Mobject.add_event_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	registers an EventListener on the live list and the process dispatcher
+manimlib.mobject.mobject:Mobject.add_key_press_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	routes to the exact key-press event-type bucket
+manimlib.mobject.mobject:Mobject.add_key_release_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	routes to the exact key-release event-type bucket
+manimlib.mobject.mobject:Mobject.add_mouse_drag_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	routes to the exact mouse-drag event-type bucket
+manimlib.mobject.mobject:Mobject.add_mouse_motion_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	routes to the exact mouse-motion event-type bucket
+manimlib.mobject.mobject:Mobject.add_mouse_press_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	routes to the exact mouse-press event-type bucket
+manimlib.mobject.mobject:Mobject.add_mouse_release_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	routes to the exact mouse-release event-type bucket
+manimlib.mobject.mobject:Mobject.add_mouse_scroll_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	routes to the exact mouse-scroll event-type bucket
+manimlib.mobject.mobject:Mobject.clear_event_listners	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	resets local lists down the subtree and preserves the dispatcher wart exactly
+manimlib.mobject.mobject:Mobject.get_event_listners	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the live per-mobject listener list
+manimlib.mobject.mobject:Mobject.get_family_event_listners	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	chains every family member's listeners in path-wise preorder
+manimlib.mobject.mobject:Mobject.get_has_event_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	answers whether any family member holds a registration
+manimlib.mobject.mobject:Mobject.init_event_listners	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	stays idempotent so late explicit calls never discard live registrations
+manimlib.mobject.mobject:Mobject.remove_event_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	removes every value-equal registration from list and dispatcher
+manimlib.mobject.mobject:Mobject.remove_key_press_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact key-press bucket through listener equality
+manimlib.mobject.mobject:Mobject.remove_key_release_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact key-release bucket through listener equality
+manimlib.mobject.mobject:Mobject.remove_mouse_drag_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact mouse-drag bucket through listener equality
+manimlib.mobject.mobject:Mobject.remove_mouse_motion_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact mouse-motion bucket through listener equality
+manimlib.mobject.mobject:Mobject.remove_mouse_press_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact mouse-press bucket through listener equality
+manimlib.mobject.mobject:Mobject.remove_mouse_release_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact mouse-release bucket through listener equality
+manimlib.mobject.mobject:Mobject.remove_mouse_scroll_listner	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	targets the exact mouse-scroll bucket through listener equality
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
