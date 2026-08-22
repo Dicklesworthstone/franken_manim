@@ -233,6 +233,7 @@ const OVERLAY_SECTIONS: &[&str] = &[
     "meta",
     "canonical",
     "param_canonical",
+    "constants",
     "optional_config",
     "config_binding",
     "config_status",
@@ -972,6 +973,21 @@ pub struct ParamRename {
     pub ruling: String,
 }
 
+/// A C-16 constant-value ruling: one Reference module constant whose
+/// effective value is a governed override of its extracted spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstantOverride {
+    /// `module:Name` of the Reference constant.
+    pub symbol: String,
+    /// The spelling the front doors resolve instead of the extracted
+    /// default — itself an expression over already-resolved constants.
+    pub spelling: String,
+    /// The Appendix C row this ruling comes from.
+    pub ruling: String,
+    /// Free-text note.
+    pub note: Option<String>,
+}
+
 /// One config key's binding into the Rust config types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
@@ -1163,6 +1179,8 @@ pub struct Schema {
     pub renames: BTreeMap<String, Rename>,
     /// C-9 parameter renames.
     pub param_renames: Vec<ParamRename>,
+    /// C-16 constant-value rulings, by `module:Name`.
+    pub constant_overrides: BTreeMap<String, ConstantOverride>,
     /// Config-key bindings, in emission order.
     pub bindings: Vec<Binding>,
     /// Adjudicated semantic tiers for config keys; absent keys are honestly
@@ -1416,6 +1434,49 @@ impl Schema {
                 canonical: f[2].clone(),
                 ruling: f[3].clone(),
             });
+        }
+
+        let mut constant_identities = BTreeMap::new();
+        for row in ov.typed("constants", 4)? {
+            let f = &row.fields;
+            let symbol = schema
+                .symbols
+                .iter()
+                .find(|s| s.key() == f[0])
+                .ok_or_else(|| SchemaError::DanglingOverlay {
+                    section: "constants",
+                    key: f[0].clone(),
+                })?;
+            if symbol.kind != SymbolKind::Constant {
+                return Err(SchemaError::DanglingOverlay {
+                    section: "constants",
+                    key: f[0].clone(),
+                });
+            }
+            if f[1].is_empty() {
+                return Err(SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "spelling",
+                    found: f[1].clone(),
+                });
+            }
+            record_identity(
+                &mut constant_identities,
+                ov.file,
+                row.line,
+                "constants",
+                f[0].clone(),
+            )?;
+            schema.constant_overrides.insert(
+                f[0].clone(),
+                ConstantOverride {
+                    symbol: f[0].clone(),
+                    spelling: f[1].clone(),
+                    ruling: f[2].clone(),
+                    note: opt(&f[3]).map(str::to_owned),
+                },
+            );
         }
 
         for row in ov.typed("optional_config", 3)? {
