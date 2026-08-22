@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	851c7e5eaad26f0730b543b95e6e67fb0d50aab6e4a0bd4520616987d74876d8
+ledger_reviewed_digest	6fe2e3c34c80a6084df383052ba62f91f78a4447172839ab87f57510b4fece28
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -193,6 +193,7 @@ OOT-COMPLEX-SCRIPT	complex-script shaping, bidi, and mark positioning	tiered	Lat
 OOT-EXOTIC-MEDIA-MESH	exotic image, media, and mesh formats	tiered	Owned native codecs and the OBJ subset cover the governed core; other media routes through the one ffmpeg boundary where applicable	A corpus-ranked format cannot use the declared native set or ffmpeg capability and has an owned bounded-parser design
 OOT-IMAGE-ASSET-INPUT	ImageMobject input acquisition and decode	tiered	Local PNG and JPEG are native; implicit URL downloads are replaced by the host AssetFetcher boundary and other PIL formats have no silent substitute	A corpus-ranked input requires a host-wired AssetFetcher or an owned budgeted decoder with malformed-input Gauntlet evidence
 OOT-MATPLOTLIB-COLORMAPS	matplotlib named colormap tables	tiered	The bundled 3b1b colormap and caller-provided color-map functions are supported without importing matplotlib into the sovereign wheel	A corpus-ranked scene requires another named map and its audited immutable table is added to fmn-core with fixture-backed interpolation evidence
+OOT-PARTIAL-MOVIE-PIPES	SceneFileWriter partial movie pipes	tiered	The disabled branch stays the exact silent no-op; subdivide_output segmentation is owned by the native Reel boundary, never a Python-side ffmpeg pipe	A corpus-ranked scene requires per-animation partial files and the negotiated ffmpeg boundary v2 exposes a segmentation mode
 OOT-PRISMIFY-FAMILY	Prismify over VMobject families	tiered	The native extrusion consumes one live point buffer; silently flattening or discarding child geometry would corrupt source-unedited group semantics	Marionette exposes a bounded identity-preserving family-value extraction contract and the portal proves nested extrusion topology
 OOT-USE-WINDING-FILL	VMobject.use_winding_fill	excluded	The Reference flag is a documented no-op and analytic nonzero winding has no alternate earclip mode	Pinned-Reference evidence shows observable semantics beyond the accepted no-op
 OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL faces keep certified layout closed while variation and color tables remain outside fmd-font's audited surface	Corpus-ranked demand plus upstream bounded parsing and cross-platform layout fixtures
@@ -721,6 +722,21 @@ manimlib.mobject.three_dimensions:Prismify.__init__	tiered	OOT-PRISMIFY-FAMILY	c
 manimlib.mobject.types.vectorized_mobject:VMobject.get_joint_type	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	returns the live typed native joint uniform code
 manimlib.mobject.types.vectorized_mobject:VMobject.set_joint_type	same	scripts/manim_ref/manimlib/mobject/types/vectorized_mobject.py	crates/fmn-python/tests/bridge.py	maps the exact public names to the typed native uniform recurses in family order and rejects unknown names before mutation
 
+manimlib.mobject.mobject:Mobject.affects_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	marks the receiver data changed after each decorated call exactly as the Reference wrapper
+manimlib.mobject.mobject:Mobject.affects_family_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	marks every pointful family member data changed after the decorated call
+manimlib.mobject.mobject:Mobject.get_ancestors	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	walks the maintained parent back-edges highest first deduped with the extended outside-parent rule
+manimlib.mobject.mobject:Mobject.get_updaters	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns the live host updater list
+manimlib.mobject.mobject:Mobject.has_updaters	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	answers by walking the live family so every call observes current truth without a cache to invalidate
+manimlib.mobject.mobject:Mobject.init_updaters	improved	BN-07	crates/fmn-python/tests/bridge.py	stays idempotent instead of discarding updaters registered before an explicit late call
+manimlib.mobject.mobject:Mobject.insert_updater	improved	BN-07	crates/fmn-python/tests/bridge.py	inserts at the requested index and precisely refuses non-callable updaters before mutation
+manimlib.mobject.mobject:Mobject.is_changing	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	combines the animating flag with the live family updater walk
+manimlib.mobject.mobject:Mobject.match_updaters	improved	BN-07	crates/fmn-python/tests/bridge.py	copies the source list without aliasing and precisely refuses non-Mobject sources
+manimlib.mobject.mobject:Mobject.note_changed_data	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	flags the receiver and recurses along real parent edges when asked
+manimlib.mobject.mobject:Mobject.note_changed_family	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	honors the upward recursion contract while the engine derives family and boxes lazily from the live graph
+manimlib.mobject.mobject:Mobject.refresh_has_updater_status	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	kept as the public protocol step since has_updaters walks the live family directly
+manimlib.mobject.mobject:Mobject.set_animating_status	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	covers the requested family and every ancestor so parents report changing while children animate
+manimlib.scene.scene_file_writer:SceneFileWriter.begin_animation	tiered	OOT-PARTIAL-MOVIE-PIPES	crates/fmn-python/tests/bridge.py	keeps the disabled branch the exact silent no-op and names the native Reel segmentation capability for subdivide_output mode
+manimlib.scene.scene_file_writer:SceneFileWriter.end_animation	tiered	OOT-PARTIAL-MOVIE-PIPES	crates/fmn-python/tests/bridge.py	mirrors begin_animation refusing the Python-side pipe close the sovereign pipeline owns
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

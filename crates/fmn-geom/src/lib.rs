@@ -67,7 +67,6 @@ pub use svg::{
 };
 pub use vec::Mat3;
 
-/// Errors from the geometry kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeomError {
     /// A point run that would leave the shared-anchor layout with a nonzero
@@ -149,6 +148,10 @@ pub enum GeomError {
         /// The declared budget.
         budget: usize,
     },
+    /// A rectangle-like builder received a width or height that was not a
+    /// positive, finite number — the degenerate or garbage extent would
+    /// silently emit an invisible or unbounded shape.
+    InvalidExtent,
 }
 
 impl std::fmt::Display for GeomError {
@@ -202,6 +205,9 @@ impl std::fmt::Display for GeomError {
             ),
             Self::ArcComponentsAboveBudget { count, budget } => {
                 write!(f, "arc component count {count} exceeds the {budget} budget")
+            }
+            Self::InvalidExtent => {
+                write!(f, "rectangle extent must be positive and finite")
             }
         }
     }

@@ -1362,6 +1362,13 @@ impl ColorSliders {
     /// # Errors
     /// [`SliderError::Geometry`] if the rectangle refuses either dimension.
     pub fn rect_size(mut self, width: f64, height: f64) -> Result<Self, SliderError> {
+        // A color-swatch rectangle must stay visible; degenerate or garbage
+        // extents would silently hide the slider's own state mark.
+        for extent in [width, height] {
+            if !extent.is_finite() || extent <= 0.0 {
+                return Err(SliderError::Geometry(GeomError::InvalidExtent));
+            }
+        }
         self.rect_width = width;
         self.rect_height = height;
         self.color_box = self.build_color_box()?;
