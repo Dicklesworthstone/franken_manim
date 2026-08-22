@@ -2416,6 +2416,49 @@ class Mobject(_BridgeMobject):
     def render(self, ctx, camera_uniforms):
         self._refuse_glsl_surface("render")
 
+    # ------------------------------------------------------------------
+    # Submobject structure and placement odds and ends (Reference
+    # mobject.py:498-516, 1440-1452, 1893-1901). The live submobject list
+    # owns parent back-edges, so replacement and insertion only close with
+    # the family-change notification.
+
+    def replace_submobject(self, index, new_submob):
+        if not isinstance(new_submob, _BridgeMobject):
+            raise TypeError("submobjects must be Mobject instances")
+        self.submobjects[index] = new_submob
+        self.note_changed_family()
+        return self
+
+    def insert_submobject(self, index, new_submob):
+        self.submobjects.insert(index, new_submob)
+        self.note_changed_family()
+        return self
+
+    def push_self_into_submobjects(self):
+        copy = self.copy()
+        copy.set_submobjects([])
+        self.resize_points(0)
+        self.add(copy)
+        return self
+
+    def throw_error_if_no_points(self):
+        if not self.has_points():
+            message = "Cannot call Mobject.{caller} for a Mobject with no points"
+            caller_name = _sys._getframe(1).f_code.co_name
+            raise Exception(message.format(caller=caller_name))
+
+    def put_start_on(self, point):
+        self.shift(point - self.get_start())
+        return self
+
+    def put_end_on(self, point):
+        self.shift(point - self.get_end())
+        return self
+
+    def get_z_index_reference_point(self):
+        z_index_group = getattr(self, "z_index_group", self)
+        return z_index_group.get_center()
+
     def generate_target(self, use_deepcopy=False):
         self.target = self.copy(deep=use_deepcopy)
         self.target.saved_state = self.saved_state

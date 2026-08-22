@@ -18678,3 +18678,66 @@ for surface_name, call in (
         assert "OOT-ARBITRARY-GLSL" in str(error), surface_name
     else:
         raise AssertionError("GLSL surface did not refuse: " + surface_name)
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: submobject structure and placement odds and ends.
+structure_parent = Mobject()
+first_kid = Mobject()
+second_kid = Mobject()
+structure_parent.add(first_kid)
+structure_parent.replace_submobject(0, second_kid)
+assert structure_parent.submobjects == [second_kid]
+assert first_kid.parents == []
+assert second_kid.parents == [structure_parent]
+try:
+    structure_parent.replace_submobject(0, "not a mobject")
+except TypeError:
+    pass
+else:
+    raise AssertionError("replace_submobject accepted a non-Mobject")
+
+inserted = Mobject()
+structure_parent.insert_submobject(0, inserted)
+assert structure_parent.submobjects == [inserted, second_kid]
+assert inserted.parents == [structure_parent]
+
+# push_self_into_submobjects moves this mobject's own geometry into one copy.
+pushed = manimlib.Dot()
+pushed.push_self_into_submobjects()
+assert pushed.get_num_points() == 0
+assert len(pushed.submobjects) == 1
+assert pushed.submobjects[0].get_num_points() > 0
+
+# throw_error_if_no_points names the immediate calling frame.
+pointless = Mobject()
+
+
+def _points_consumer(mob):
+    mob.throw_error_if_no_points()
+
+
+try:
+    _points_consumer(pointless)
+except Exception as error:
+    assert "_points_consumer" in str(error)
+else:
+    raise AssertionError("a pointless mobject passed the points refusal")
+
+# put_start_on / put_end_on shift by the live endpoint delta.
+segment = manimlib.Line(manimlib.LEFT, manimlib.RIGHT)
+segment.put_start_on(10 * manimlib.RIGHT)
+assert np.allclose(segment.get_start(), 10 * manimlib.RIGHT)
+assert np.allclose(segment.get_end(), 12 * manimlib.RIGHT)
+segment.put_end_on(manimlib.ORIGIN)
+assert np.allclose(segment.get_end(), manimlib.ORIGIN)
+
+# The z-index reference rides the declared group when present.
+z_mob = Mobject()
+z_mob.move_to([1.0, 2.0, 3.0])
+assert np.allclose(z_mob.get_z_index_reference_point(), z_mob.get_center())
+z_group = Mobject()
+z_member = Mobject(z_group)
+z_member.z_index_group = z_group
+z_group.move_to([9.0, 9.0, 9.0])
+assert np.allclose(z_member.get_z_index_reference_point(), z_group.get_center())
