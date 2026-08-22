@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	82a202f8a7f4be94aa24ed7878d73d382e342f78306d52fa3802f13628849e4e
+ledger_reviewed_digest	4fcf30d1dbda7839794dc4c57bb5ca748d93d2fc7943e6934e2a7a6e354f4191
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -869,6 +869,17 @@ manimlib.mobject.mobject:Mobject.match_y	same	scripts/manim_ref/manimlib/mobject
 manimlib.mobject.mobject:Mobject.match_z	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	aligns the directed edge to the donor or point depth coordinate
 manimlib.mobject.mobject:Mobject.match_coord	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	aligns the directed edge to the donor or point coordinate by dimension
 manimlib.mobject.mobject:Mobject.get_pieces	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	returns childless partial copies over one linspace slice of the point run each
+manimlib.mobject.mobject:Mobject.shift	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	translates every point record with family-affine propagation
+manimlib.mobject.mobject:Mobject.scale	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	scales about the center by default honoring about_point about_edge and the min_scale_factor collapse clamp
+manimlib.mobject.mobject:Mobject.rotate	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	turns through the deterministic rotation matrix about the resolved pivot
+manimlib.mobject.mobject:Mobject.rotate_about_origin	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	origin-pivoted rotate spelling
+manimlib.mobject.mobject:Mobject.flip	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	half turn about the named axis mirroring the other two coordinates
+manimlib.mobject.mobject:Mobject.stretch	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	applies one axis factor about the box center
+manimlib.mobject.mobject:Mobject.move_to	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	lands the chosen edge on a donor or raw target
+manimlib.mobject.mobject:Mobject.next_to	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	places beside a donor or raw point with buff along direction honoring aligned_edge and submobject alignment
+manimlib.mobject.mobject:Mobject.put_start_and_end_on	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	rescales rotates and shifts the run onto the segment with zero-length targets collapsing through min_scale_factor
+manimlib.mobject.mobject:Mobject.replace	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	takes the donor place matching one dimension or stretching all three
+manimlib.mobject.mobject:Mobject.surround	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	wraps the donor box with the requested margin centered on it
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

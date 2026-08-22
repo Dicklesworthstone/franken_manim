@@ -18997,3 +18997,126 @@ assert all(isinstance(piece, manimlib.Square) for piece in pieces)
 assert all(len(piece.submobjects) == 0 for piece in pieces)
 assert np.allclose(pieces[0].get_start(), pieced.get_start())
 assert np.allclose(pieces[-1].get_end(), pieced.get_end())
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the transform family — shift, scale, rotate, flip, stretch,
+# placement, replacement, and surrounding.
+
+# shift translates the whole family; children ride along unchanged.
+shifter = manimlib.Square(side_length=1.0)
+rider = manimlib.Dot().move_to([0.25, 0.0, 0.0])
+shifter.add(rider)
+shifter.shift([2.0, -3.0, 0.5])
+assert np.allclose(shifter.get_center(), [2.0, -3.0, 0.5])
+assert np.allclose(rider.get_center(), [2.25, -3.0, 0.5])
+
+# scale defaults to about the center and honours about_point/about_edge;
+# the min_scale_factor clamp keeps collapse-from-zero finite.
+scaler = manimlib.Square(side_length=2.0)
+scaler.scale(3.0)
+assert scaler.get_width() == 6.0
+assert np.allclose(scaler.get_center(), [0.0, 0.0, 0.0])
+pinned = manimlib.Square(side_length=2.0)
+anchor = pinned.get_corner(manimlib.DL).copy()
+pinned.scale(2.0, about_point=anchor)
+assert np.allclose(pinned.get_corner(manimlib.DL), anchor)
+assert pinned.get_width() == 4.0
+hinged = manimlib.Square(side_length=2.0)
+hinged.scale(2.0, about_edge=manimlib.LEFT)
+assert hinged.get_left()[0] == -1.0
+assert hinged.get_width() == 4.0
+tiny = manimlib.Square(side_length=2.0)
+tiny.scale(0.0)
+assert 0.0 < tiny.get_width() < 1e-6
+
+# rotate turns in-plane about the box center by default and about a caller
+# point when given; rotate_about_origin is the origin-pivoted spelling.
+spinner = manimlib.Rectangle(width=4.0, height=1.0)
+spinner.rotate(manimlib.PI / 2.0)
+assert np.allclose([spinner.get_width(), spinner.get_height()], [1.0, 4.0])
+offset = manimlib.Rectangle(width=4.0, height=1.0).move_to([3.0, 0.0, 0.0])
+offset.rotate(manimlib.PI / 2.0, about_point=manimlib.ORIGIN)
+assert np.allclose(offset.get_center(), [0.0, 3.0, 0.0])
+assert np.allclose([offset.get_width(), offset.get_height()], [1.0, 4.0])
+origin_turn = manimlib.Rectangle(width=4.0, height=1.0).move_to([3.0, 0.0, 0.0])
+origin_turn.rotate_about_origin(manimlib.PI / 2.0)
+assert np.allclose(origin_turn.get_center(), [0.0, 3.0, 0.0])
+
+# flip rotates half a turn about the named axis, mirroring the OTHER two
+# coordinates through the family box's axis plane.
+sideways = manimlib.VGroup(manimlib.Dot().move_to([2.0, 1.0, 0.0]),
+                           manimlib.Dot().move_to([-2.0, -1.0, 0.0]))
+east_dot, west_dot = sideways[0], sideways[1]
+sideways.flip(manimlib.UP)
+assert np.allclose(east_dot.get_center(), [-2.0, 1.0, 0.0])
+assert np.allclose(west_dot.get_center(), [2.0, -1.0, 0.0])
+sideways.flip(manimlib.RIGHT)
+assert np.allclose(east_dot.get_center(), [-2.0, -1.0, 0.0])
+assert np.allclose(west_dot.get_center(), [2.0, 1.0, 0.0])
+
+# stretch applies one axis factor about the box center.
+stretched = manimlib.Rectangle(width=4.0, height=1.0)
+stretched.stretch(2.0, 1)
+assert np.allclose([stretched.get_width(), stretched.get_height()], [4.0, 2.0])
+
+# move_to lands the chosen edge on the target.
+mover = manimlib.Square(side_length=2.0)
+mover.move_to([10.0, 20.0, 0.0])
+assert np.allclose(mover.get_center(), [10.0, 20.0, 0.0])
+mover.move_to([0.0, 0.0, 0.0], aligned_edge=manimlib.RIGHT)
+assert mover.get_right()[0] == 0.0
+assert np.allclose(mover.get_center(), [-1.0, 0.0, 0.0])
+
+# next_to places beside a donor or raw point with buff along direction,
+# honouring aligned_edge.
+donor = manimlib.Square(side_length=2.0).move_to([0.0, 0.0, 0.0])
+neighbor = manimlib.Square(side_length=1.0)
+neighbor.next_to(donor, manimlib.RIGHT, buff=0.5)
+assert neighbor.get_left()[0] == 1.5
+assert neighbor.get_y() == 0.0
+point_neighbor = manimlib.Square(side_length=1.0)
+point_neighbor.next_to([5.0, 9.0, 0.0], manimlib.DOWN, buff=0.25)
+assert np.allclose(point_neighbor.get_top(), [5.0, 8.75, 0.0])
+aligned_neighbor = manimlib.Square(side_length=1.0).shift([-30.0, 30.0, 0.0])
+aligned_neighbor.next_to(donor, manimlib.UP, buff=1.0, aligned_edge=manimlib.LEFT)
+assert aligned_neighbor.get_bottom()[1] == 2.0
+assert aligned_neighbor.get_left()[0] == -1.0
+
+# put_start_and_end_on rescales and rotates the run onto the segment;
+# coincident endpoints are a loud refusal exactly as documented.
+segment = manimlib.Line(start=[0.0, 0.0, 0.0], end=[1.0, 0.0, 0.0])
+segment.put_start_and_end_on([0.0, 0.0, 0.0], [3.0, 4.0, 0.0])
+assert np.allclose(segment.get_start(), [0.0, 0.0, 0.0])
+assert np.allclose(segment.get_end(), [3.0, 4.0, 0.0])
+# put_start_and_end_on rescales and rotates the run onto the segment; a
+# zero-length target collapses through min_scale_factor instead of raising.
+segment = manimlib.Line(start=[0.0, 0.0, 0.0], end=[1.0, 0.0, 0.0])
+segment.put_start_and_end_on([0.0, 0.0, 0.0], [3.0, 4.0, 0.0])
+assert np.allclose(segment.get_start(), [0.0, 0.0, 0.0])
+assert np.allclose(segment.get_end(), [3.0, 4.0, 0.0])
+collapsed = manimlib.Line(start=[-1.0, 0.0, 0.0], end=[1.0, 0.0, 0.0])
+collapsed.put_start_and_end_on([2.0, 0.0, 0.0], [2.0, 0.0, 0.0])
+assert np.allclose(collapsed.get_start(), [2.0, 0.0, 0.0])
+residue = float(np.linalg.norm(collapsed.get_end() - collapsed.get_start()))
+assert 0.0 < residue < 1e-6
+vacated = manimlib.Square(side_length=4.0).move_to([-5.0, 5.0, 0.0])
+taker = manimlib.Square(side_length=1.0)
+taker.replace(vacated)
+assert taker.get_width() == 4.0
+assert taker.get_height() == 4.0
+assert taker.get_x() == vacated.get_x()
+stretch_taker = manimlib.Square(side_length=1.0)
+wide_donor = manimlib.Rectangle(width=8.0, height=2.0).move_to([1.0, -1.0, 0.0])
+stretch_taker.replace(wide_donor, stretch=True)
+assert np.allclose(
+    [stretch_taker.get_width(), stretch_taker.get_height()], [8.0, 2.0]
+)
+
+# surround wraps the donor with a buff margin on every side.
+wrapped = manimlib.Square(side_length=2.0)
+wrapper = manimlib.Square(side_length=0.5)
+wrapper.surround(wrapped, buff=0.75)
+assert wrapper.get_width() == 3.5
+assert wrapper.get_height() == 3.5
+assert np.allclose(wrapper.get_center(), wrapped.get_center())
