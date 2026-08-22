@@ -2233,6 +2233,127 @@ class Mobject(_BridgeMobject):
     def remove_key_release_listner(self, callback):
         return self.remove_event_listner(EventType.KeyReleaseEvent, callback)
 
+    # ------------------------------------------------------------------
+    # Shading, depth-test, clip-plane, and uniform family (Reference
+    # mobject.py:1450-1490, 158, 1865, 1909-1978) over the engine's typed
+    # uniform lanes. The shader-wrapper bookkeeping the decorator names has
+    # no analytic-render counterpart, so it is the same protocol no-op as
+    # refresh_has_updater_status.
+
+    @staticmethod
+    def affects_shader_info_id(func):
+        @_functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            result = func(self, *args, **kwargs)
+            self.refresh_shader_wrapper_id()
+            return result
+
+        return wrapper
+
+    def refresh_shader_wrapper_id(self):
+        return self
+
+    def get_uniforms(self):
+        return self.uniforms
+
+    def set_uniforms(self, uniforms):
+        for key, value in uniforms.items():
+            if isinstance(value, _np.ndarray):
+                value = value.copy()
+            self.uniforms[key] = value
+        return self
+
+    @affects_shader_info_id
+    def set_uniform(self, recurse=True, **new_uniforms):
+        for mob in self.get_family(recurse):
+            for key, value in new_uniforms.items():
+                mob.uniforms[key] = value
+        return self
+
+    def lock_uniforms(self, keys):
+        if self.has_updaters():
+            return self
+        self.locked_uniform_keys = set(keys)
+        return self
+
+    def get_shading(self):
+        return list(self.uniforms["shading"])
+
+    def set_shading(self, reflectiveness=None, gloss=None, shadow=None, recurse=True):
+        for mob in self.get_family(recurse):
+            shading = list(mob.uniforms["shading"])
+            for index, value in enumerate((reflectiveness, gloss, shadow)):
+                if value is not None:
+                    shading[index] = value
+            mob.uniforms["shading"] = shading
+        return self
+
+    def get_reflectiveness(self):
+        return self.get_shading()[0]
+
+    def get_gloss(self):
+        return self.get_shading()[1]
+
+    def get_shadow(self):
+        return self.get_shading()[2]
+
+    def set_reflectiveness(self, reflectiveness, recurse=True):
+        return self.set_shading(reflectiveness=reflectiveness, recurse=recurse)
+
+    def set_gloss(self, gloss, recurse=True):
+        return self.set_shading(gloss=gloss, recurse=recurse)
+
+    def set_shadow(self, shadow, recurse=True):
+        return self.set_shading(shadow=shadow, recurse=recurse)
+
+    @affects_shader_info_id
+    def fix_in_frame(self, recurse=True):
+        self.set_uniform(recurse, is_fixed_in_frame=1.0)
+        return self
+
+    @affects_shader_info_id
+    def unfix_from_frame(self, recurse=True):
+        self.set_uniform(recurse, is_fixed_in_frame=0.0)
+        return self
+
+    def is_fixed_in_frame(self):
+        return bool(self.uniforms["is_fixed_in_frame"])
+
+    @affects_shader_info_id
+    def apply_depth_test(self, recurse=True):
+        for mob in self.get_family(recurse):
+            mob.uniforms["depth_test"] = True
+        return self
+
+    @affects_shader_info_id
+    def deactivate_depth_test(self, recurse=True):
+        for mob in self.get_family(recurse):
+            mob.uniforms["depth_test"] = False
+        return self
+
+    def set_clip_plane(self, vect, threshold, recurse=True):
+        return self.set_clip_planes((vect, threshold), recurse=recurse)
+
+    def set_clip_planes(self, *vect_threshold_pairs, recurse=True):
+        planes = [[0.0, 0.0, 0.0, 0.0] for _ in range(4)]
+        for n, (vect, threshold) in enumerate(vect_threshold_pairs[:4]):
+            planes[n] = [*vect, threshold]
+        for mob in self.get_family(recurse):
+            mob.uniforms["clip_planes"] = planes
+        return self
+
+    def deactivate_clip_plane(self, recurse=True):
+        return self.set_clip_planes(recurse=recurse)
+
+    def clip_to_box(self, box, recurse=True):
+        return self.set_clip_planes(
+            (_RIGHT, -box.get_x(_FMN_ROOT.LEFT)),
+            (_LEFT, box.get_x(_FMN_ROOT.RIGHT)),
+            (_UP, -box.get_y(_FMN_ROOT.DOWN)),
+            (_DOWN, box.get_y(_FMN_ROOT.UP)),
+            recurse=recurse,
+        )
+
     def generate_target(self, use_deepcopy=False):
         self.target = self.copy(deep=use_deepcopy)
         self.target.saved_state = self.saved_state

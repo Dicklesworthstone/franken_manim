@@ -18550,3 +18550,84 @@ init_host.init_event_listners()
 init_host.add_key_press_listner(lambda mob, event_data: None)
 init_host.init_event_listners()
 assert len(init_host.get_event_listners()) == 1
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: Mobject shading, depth-test, clip-plane, and uniform family.
+shading_mob = Mobject()
+assert shading_mob.get_shading() == [0.0, 0.0, 0.0]
+shading_mob.set_gloss(0.25)
+assert shading_mob.get_gloss() == 0.25
+assert shading_mob.get_shading() == [0.0, 0.25, 0.0]
+shading_mob.set_reflectiveness(0.5, recurse=False)
+shading_mob.set_shadow(0.75)
+assert shading_mob.get_reflectiveness() == 0.5
+assert shading_mob.get_shadow() == 0.75
+
+shading_parent = Mobject()
+shading_child = Mobject()
+shading_parent.add(shading_child)
+shading_parent.set_gloss(0.4)
+assert shading_child.get_gloss() == 0.4
+shading_child.set_reflectiveness(0.9)
+assert shading_child.get_reflectiveness() == 0.9
+assert shading_parent.get_reflectiveness() == 0.0
+
+# set_uniform fans out over the requested family and lands in engine state.
+uniform_parent = Mobject()
+uniform_child = Mobject()
+uniform_parent.add(uniform_child)
+uniform_parent.set_uniform(recurse=True, anti_alias_width=2.5)
+assert uniform_child.uniforms["anti_alias_width"] == 2.5
+uniform_parent.set_uniforms({"anti_alias_width": 1.5})
+assert uniform_parent.uniforms["anti_alias_width"] == 1.5
+assert uniform_child.uniforms["anti_alias_width"] == 2.5
+assert uniform_parent.get_uniforms() is uniform_parent.uniforms
+
+# lock_uniforms records the keys only when no updaters are registered.
+locked_mob = Mobject()
+locked_mob.lock_uniforms(["anti_alias_width"])
+assert locked_mob.locked_uniform_keys == {"anti_alias_width"}
+locked_mob.add_updater(lambda mob: None)
+locked_mob.lock_uniforms(["is_fixed_in_frame"])
+assert locked_mob.locked_uniform_keys == {"anti_alias_width"}
+
+# Frame pinning and depth test route through the typed uniform lanes.
+pinned = Mobject()
+assert not pinned.is_fixed_in_frame()
+pinned.fix_in_frame()
+assert pinned.is_fixed_in_frame()
+pinned.unfix_from_frame()
+assert not pinned.is_fixed_in_frame()
+
+depth_mob = Mobject()
+depth_mob.apply_depth_test()
+assert bool(depth_mob.uniforms["depth_test"]) is True
+depth_mob.deactivate_depth_test()
+assert bool(depth_mob.uniforms["depth_test"]) is False
+
+# Clip planes: single plane, multiple planes, deactivation, box clipping.
+clip_mob = Mobject()
+clip_mob.set_clip_plane([1.0, 0.0, 0.0], -2.0)
+assert clip_mob.uniforms["clip_planes"][0] == [1.0, 0.0, 0.0, -2.0]
+clip_mob.set_clip_planes(
+    ([1.0, 0.0, 0.0], -1.0), ([0.0, 1.0, 0.0], -2.0)
+)
+planes_now = clip_mob.uniforms["clip_planes"]
+assert planes_now[0] == [1.0, 0.0, 0.0, -1.0]
+assert planes_now[1] == [0.0, 1.0, 0.0, -2.0]
+assert planes_now[3] == [0.0, 0.0, 0.0, 0.0]
+clip_mob.deactivate_clip_plane()
+assert all(plane == [0.0, 0.0, 0.0, 0.0] for plane in clip_mob.uniforms["clip_planes"])
+
+box_source = manimlib.Square(side_length=2.0).move_to([5.0, -3.0, 0.0])
+clipped = manimlib.Dot().clip_to_box(box_source)
+box_planes = clipped.uniforms["clip_planes"]
+left_edge = box_source.get_x(manimlib.LEFT)
+right_edge = box_source.get_x(manimlib.RIGHT)
+bottom_edge = box_source.get_y(manimlib.DOWN)
+top_edge = box_source.get_y(manimlib.UP)
+assert box_planes[0] == [1.0, 0.0, 0.0, -left_edge]
+assert box_planes[1] == [-1.0, 0.0, 0.0, right_edge]
+assert box_planes[2] == [0.0, 1.0, 0.0, -bottom_edge]
+assert box_planes[3] == [0.0, -1.0, 0.0, top_edge]
