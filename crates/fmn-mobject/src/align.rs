@@ -471,14 +471,12 @@ impl Stage {
         let (lower_index, lower_residue) = if max_index <= 0 {
             (0, 0.0)
         } else {
-            bezier::integer_interpolate(0, max_index, a)
-                .map_err(|_| StageError::SchemaMismatch)?
+            bezier::integer_interpolate(0, max_index, a).map_err(|_| StageError::SchemaMismatch)?
         };
         let (upper_index, upper_residue) = if max_index <= 0 {
             (0, 0.0)
         } else {
-            bezier::integer_interpolate(0, max_index, b)
-                .map_err(|_| StageError::SchemaMismatch)?
+            bezier::integer_interpolate(0, max_index, b).map_err(|_| StageError::SchemaMismatch)?
         };
         let lower_index = usize::try_from(lower_index).map_err(|_| StageError::SchemaMismatch)?;
         let upper_index = usize::try_from(upper_index).map_err(|_| StageError::SchemaMismatch)?;
