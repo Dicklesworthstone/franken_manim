@@ -20006,3 +20006,44 @@ _titled = manimlib.SampleSpace()
 assert _titled.add_title() is None and _titled.title.get_center()[1] > _titled.get_center()[1]
 _titled.add_label("S")
 assert _titled.label == "S"
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the de-TeX'd Brace family.
+
+_braced = manimlib.Square(side_length=2.0)
+_brace = manimlib.Brace(_braced, manimlib.DOWN)
+assert np.allclose(_brace.get_direction(), [0.0, -1.0, 0.0])
+assert np.isclose(_brace.get_width(), 2.0)
+assert _brace.get_tip()[1] < _braced.get_bottom()[1]
+
+_up_brace = manimlib.Brace(_braced, manimlib.UP)
+assert np.allclose(_up_brace.get_direction(), [0.0, 1.0, 0.0])
+
+# set_initial_width returns self and reaches the requested extent both
+# growing and shrinking.
+assert _brace.set_initial_width(3.0) is _brace
+assert np.isclose(_brace.get_width(), 3.0)
+_shrink = manimlib.Brace(manimlib.Square(side_length=2.0), manimlib.DOWN)
+_shrink.set_initial_width(1.2)
+assert np.isclose(_shrink.get_width(), 1.2)
+
+# get_text returns Text placed on the braced side of the tip.
+_label = _brace.get_text("hello")
+assert isinstance(_label, manimlib.Text)
+assert _label.get_top()[1] < _brace.get_tip()[1]
+
+# get_tex places a Tex mobject the same way.
+_tex_label = _brace.get_tex("x")
+assert isinstance(_tex_label, manimlib.Tex)
+assert _tex_label.get_top()[1] < _brace.get_tip()[1]
+
+# put_at_tip honours an explicit mobject and buff.
+_moved = manimlib.Dot()
+_brace.put_at_tip(_moved, buff=0.3)
+assert _moved.get_bottom()[1] < _brace.get_tip()[1]
+
+# LineBrace spans its line with a perpendicular direction.
+_line_brace = manimlib.LineBrace(manimlib.Line(start=[-2, 0, 0], end=[2, 0, 0]))
+assert np.isclose(_line_brace.get_width(), 4.0)
+assert np.isclose(abs(_line_brace.get_direction()[1]), 1.0)

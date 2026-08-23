@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	8454173a52c1b19f5143ed79be71b6d733aaf045a7649d87fbb4879d486ddae9
+ledger_reviewed_digest	e40a278e387fd0178ba47f23220a406fe4f1083848e637b4f148753761b8b5ee
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1077,6 +1077,13 @@ manimlib.mobject.svg.svg_mobject:SVGMobject.polygon_to_mobject	same	scripts/mani
 manimlib.mobject.svg.svg_mobject:SVGMobject.polyline_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the open polyline over lifted xy vertices
 manimlib.mobject.svg.svg_mobject:ET	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical ElementTree module now that origins record the full object path
 manimlib.mobject.svg.svg_mobject:SVGMobject.mobjects_from_svg	tiered	OOT-SVGELEMENTS-PARSER	crates/fmn-python/tests/bridge.py	dispatches over parsed svgelements element types; the native document processor owns that parse so the seam stays parser-coupled
+manimlib.mobject.svg.brace:Brace.__init__	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	builds the de-TeX'd parametric brace against the target edge with the requested direction and buff
+manimlib.mobject.svg.brace:Brace.get_direction	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	returns the unit vector from the family center to the tip
+manimlib.mobject.svg.brace:Brace.get_tip	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	returns the live tip point on the braced side of the target
+manimlib.mobject.svg.brace:Brace.put_at_tip	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	places a mobject beside the tip along the rounded direction with buff
+manimlib.mobject.svg.brace:Brace.get_text	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	builds Text at the tip through the put_at_tip surface
+manimlib.mobject.svg.brace:Brace.set_initial_width	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	reaches the requested extent growing or shrinking over the native width control
+manimlib.mobject.svg.brace:LineBrace	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	is the authored brace along an arbitrary segment with perpendicular direction over the native path model
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
