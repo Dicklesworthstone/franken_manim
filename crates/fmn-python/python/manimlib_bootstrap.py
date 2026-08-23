@@ -70,6 +70,7 @@ _GREEN = "#83C167"
 _GREEN_E = "#699C52"
 _RED = "#FC6255"
 _RED_E = "#CF5044"
+_MAROON_B = "#EC92AB"
 _YELLOW = "#FFFF00"
 _BLUE = "#58C4DD"
 _BLUE_A = "#C7E9F1"
@@ -5748,6 +5749,123 @@ class SampleSpace(Rectangle):
         if fixed_in_frame:
             self.fix_in_frame()
         self.default_label_scale_val = default_label_scale_val
+
+    def add_title(self, title="Sample space", buff=None):
+        if buff is None:
+            buff = _MED_SMALL_BUFF
+        title_mob = TexText(title)
+        if title_mob.get_width() > self.get_width():
+            title_mob.set_width(self.get_width())
+        title_mob.next_to(self, _UP, buff=buff)
+        self.title = title_mob
+        self.add(title_mob)
+
+    def add_label(self, label):
+        self.label = label
+
+    def complete_p_list(self, p_list):
+        new_p_list = _listify(p_list)
+        remainder = 1.0 - sum(new_p_list)
+        if abs(remainder) > 1e-4:
+            new_p_list.append(remainder)
+        return new_p_list
+
+    def get_division_along_dimension(self, p_list, dim, colors, vect):
+        p_list = self.complete_p_list(p_list)
+        colors = _color_gradient(colors, len(p_list))
+        direction = _np.asarray(vect, dtype=float)
+        last_point = self.get_edge_center(-direction)
+        parts = VGroup()
+        for factor, color in zip(p_list, colors):
+            part = SampleSpace()
+            part.set_fill(color, 1)
+            part.replace(self, stretch=True)
+            part.stretch(factor, dim)
+            part.move_to(last_point, -direction)
+            last_point = part.get_edge_center(direction)
+            parts.add(part)
+        return parts
+
+    def get_horizontal_division(self, p_list, colors=None, vect=None):
+        if colors is None:
+            colors = [_GREEN_E, _BLUE_E]
+        if vect is None:
+            vect = _DOWN
+        return self.get_division_along_dimension(p_list, 1, colors, vect)
+
+    def get_vertical_division(self, p_list, colors=None, vect=None):
+        if colors is None:
+            colors = [_MAROON_B, _YELLOW]
+        if vect is None:
+            vect = _RIGHT
+        return self.get_division_along_dimension(p_list, 0, colors, vect)
+
+    def divide_horizontally(self, *args, **kwargs):
+        self.horizontal_parts = self.get_horizontal_division(*args, **kwargs)
+        self.add(self.horizontal_parts)
+
+    def divide_vertically(self, *args, **kwargs):
+        self.vertical_parts = self.get_vertical_division(*args, **kwargs)
+        self.add(self.vertical_parts)
+
+    def get_subdivision_braces_and_labels(self, parts, labels, direction, buff=None):
+        if buff is None:
+            buff = _SMALL_BUFF
+        label_mobs = VGroup()
+        braces = VGroup()
+        for label, part in zip(labels, parts):
+            brace = Brace(part, direction, buff=buff)
+            if isinstance(label, Mobject):
+                label_mob = label
+            else:
+                label_mob = Tex(label)
+                label_mob.scale(self.default_label_scale_val)
+            label_mob.next_to(brace, direction, buff)
+            braces.add(brace)
+            label_mobs.add(label_mob)
+        parts.braces = braces
+        parts.labels = label_mobs
+        parts.label_kwargs = {
+            "labels": label_mobs.copy(),
+            "direction": direction,
+            "buff": buff,
+        }
+        return VGroup(parts.braces, parts.labels)
+
+    def get_side_braces_and_labels(self, labels, direction=None, **kwargs):
+        if direction is None:
+            direction = _LEFT
+        assert hasattr(self, "horizontal_parts")
+        parts = self.horizontal_parts
+        return self.get_subdivision_braces_and_labels(
+            parts, labels, direction, **kwargs
+        )
+
+    def get_top_braces_and_labels(self, labels, **kwargs):
+        assert hasattr(self, "vertical_parts")
+        parts = self.vertical_parts
+        return self.get_subdivision_braces_and_labels(parts, labels, _UP, **kwargs)
+
+    def get_bottom_braces_and_labels(self, labels, **kwargs):
+        assert hasattr(self, "vertical_parts")
+        parts = self.vertical_parts
+        return self.get_subdivision_braces_and_labels(parts, labels, _DOWN, **kwargs)
+
+    def add_braces_and_labels(self):
+        for attr in "horizontal_parts", "vertical_parts":
+            if not hasattr(self, attr):
+                continue
+            parts = getattr(self, attr)
+            for subattr in "braces", "labels":
+                if hasattr(parts, subattr):
+                    self.add(getattr(parts, subattr))
+
+    def __getitem__(self, index):
+        if hasattr(self, "horizontal_parts"):
+            return self.horizontal_parts[index]
+        elif hasattr(self, "vertical_parts"):
+            return self.vertical_parts[index]
+        return self.split()[index]
 
 
 class BarChart(VGroup):
@@ -19726,16 +19844,17 @@ def _install_schema_surface():
                 value = _placeholder_function(module_name, qualified)
             else:
                 try:
-                    origin = _importlib.import_module(_origin)
-                    # A leaked module imported under its own basename (for
-                    # example `import random`) is the module, not a same-named
-                    # attribute such as `random.random`.
-                    value = (
-                        origin
-                        if qualified == _origin.rsplit(".", 1)[-1]
-                        else getattr(origin, qualified, origin)
-                    )
-                except (ImportError, ValueError):
+                    # Origins are full object paths since the extractor
+                    # fix: a bare module ("io") or module-attribute
+                    # ("pathlib.Path", "xml.etree.ElementTree").
+                    if "." in _origin:
+                        parent, _, leaf = _origin.rpartition(".")
+                        value = getattr(
+                            _importlib.import_module(parent), leaf
+                        )
+                    else:
+                        value = _importlib.import_module(_origin)
+                except (ImportError, ValueError, AttributeError):
                     value = _placeholder_function(module_name, qualified)
             setattr(module, qualified, value)
 

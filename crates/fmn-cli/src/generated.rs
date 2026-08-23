@@ -486,7 +486,7 @@ pub const FLAG_SPECS: &[FlagSpec] = &[
         value_type: None,
         status: FlagStatus::Same,
         source: FlagSource::Reference,
-        help: "Native scene source or compiled artifact; use fmn-python for .py/.pyw",
+        help: "Path to file holding the python code for the scene",
     },
     FlagSpec {
         options: &["scene_names"],

@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	70362494009755fdc1819aac2b2d4f2f836ab01a420b084463cfa4ceeac87fda
+ledger_reviewed_digest	8454173a52c1b19f5143ed79be71b6d733aaf045a7649d87fbb4879d486ddae9
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -214,6 +214,7 @@ OOT-PARTIAL-MOVIE-PIPES	SceneFileWriter partial movie pipes	tiered	The disabled 
 OOT-PRISMIFY-FAMILY	Prismify over VMobject families	tiered	The native extrusion consumes one live point buffer; silently flattening or discarding child geometry would corrupt source-unedited group semantics	Marionette exposes a bounded identity-preserving family-value extraction contract and the portal proves nested extrusion topology
 OOT-USE-WINDING-FILL	VMobject.use_winding_fill	excluded	The Reference flag is a documented no-op and analytic nonzero winding has no alternate earclip mode	Pinned-Reference evidence shows observable semantics beyond the accepted no-op
 OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL faces keep certified layout closed while variation and color tables remain outside fmd-font's audited surface	Corpus-ranked demand plus upstream bounded parsing and cross-platform layout fixtures
+OOT-SVGELEMENTS-PARSER	svgelements object interop on the svg seams (mobjects_from_svg dispatch and raw transform-string parsing)	tiered	The Reference's third-party parser is deliberately unshipped; Chisel's hardened native processor owns document parsing end to end, and the exposed seams accept duck-typed attribute protocols instead	User files whose SVG features only svgelements accepts need named refusals from the native parser, or a corpus-ranked demand for direct se-object interop with fuzz evidence
 
 # ---------------------------------------------------------------------------
 # [status] — the §16.1 semantic tier, per symbol.
@@ -677,6 +678,19 @@ manimlib.mobject.number_line:NumberLine.get_tick_range	same	scripts/manim_ref/ma
 manimlib.mobject.number_line:NumberLine.get_unit_size	same	scripts/manim_ref/manimlib/mobject/number_line.py	crates/fmn-python/tests/bridge.py	measures live geometry length over the declared range width
 manimlib.mobject.matrix:TexMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass whose scalar sources use the bundled fmd-math entry and delimiter engine
 manimlib.mobject.matrix:TexMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves string grid configuration font and style forwarding and live Tex entry identity without an external TeX toolchain
+manimlib.mobject.probability:SampleSpace.add_braces_and_labels	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	attaches every ruled brace and label group retained by the divided parts
+manimlib.mobject.probability:SampleSpace.add_label	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	retains the plain string label under the pinned attribute
+manimlib.mobject.probability:SampleSpace.add_title	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	places the width-clamped title above the frame through native text and retains it
+manimlib.mobject.probability:SampleSpace.complete_p_list	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	appends the exact remainder past the declared epsilon tolerance
+manimlib.mobject.probability:SampleSpace.divide_horizontally	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	retains the horizontal division group on the instance after composing it
+manimlib.mobject.probability:SampleSpace.divide_vertically	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	retains the vertical division group on the instance after composing it
+manimlib.mobject.probability:SampleSpace.get_bottom_braces_and_labels	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	subdivides the retained vertical parts with downward braces and labels
+manimlib.mobject.probability:SampleSpace.get_division_along_dimension	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	composes completed-probability gradient-colored SampleSpace parts stretched along one dimension from the shared edge
+manimlib.mobject.probability:SampleSpace.get_horizontal_division	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	delegates the dimension-one division with the pinned default colors and downward direction
+manimlib.mobject.probability:SampleSpace.get_side_braces_and_labels	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	asserts the horizontal parts then subdivides toward the declared side direction
+manimlib.mobject.probability:SampleSpace.get_subdivision_braces_and_labels	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	pairs braces and scaled labels per part while retaining the re-runnable kwargs triple
+manimlib.mobject.probability:SampleSpace.get_top_braces_and_labels	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	subdivides the retained vertical parts with upward braces and labels
+manimlib.mobject.probability:SampleSpace.get_vertical_division	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	delegates the dimension-zero division with the pinned default colors and rightward direction
 manimlib.mobject.shape_matchers:BackgroundRectangle	same	scripts/manim_ref/manimlib/mobject/shape_matchers.py	crates/fmn-python/tests/bridge.py	is an authored SurroundingRectangle subclass over Atlas geometry rather than an import-only generated shell
 manimlib.mobject.shape_matchers:BackgroundRectangle.__init__	same	scripts/manim_ref/manimlib/mobject/shape_matchers.py	crates/fmn-python/tests/bridge.py	preserves camera-color default no-stroke plate style original opacity and configurable matcher buff
 manimlib.mobject.shape_matchers:BackgroundRectangle.get_fill_color	same	scripts/manim_ref/manimlib/mobject/shape_matchers.py	crates/fmn-python/tests/bridge.py	returns the constructor's locked camera-background color independently of the internal black fill record
@@ -1061,6 +1075,8 @@ manimlib.mobject.svg.svg_mobject:SVGMobject.rect_to_mobject	same	scripts/manim_r
 manimlib.mobject.svg.svg_mobject:SVGMobject.ellipse_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the circle stretched to the ellipse extents at its center
 manimlib.mobject.svg.svg_mobject:SVGMobject.polygon_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the closed polygon over lifted xy vertices
 manimlib.mobject.svg.svg_mobject:SVGMobject.polyline_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the open polyline over lifted xy vertices
+manimlib.mobject.svg.svg_mobject:ET	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical ElementTree module now that origins record the full object path
+manimlib.mobject.svg.svg_mobject:SVGMobject.mobjects_from_svg	tiered	OOT-SVGELEMENTS-PARSER	crates/fmn-python/tests/bridge.py	dispatches over parsed svgelements element types; the native document processor owns that parse so the seam stays parser-coupled
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

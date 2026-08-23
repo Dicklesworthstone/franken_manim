@@ -195,7 +195,11 @@ class Module:
                     if alias.name == "*":
                         self.star_imports.append(source)
                     else:
-                        self.bindings[alias.asname or alias.name] = source
+                        # The binding refers to the imported OBJECT, so the
+                        # origin is the full object path (module plus the
+                        # imported name), not the source module alone.
+                        bound = alias.asname or alias.name
+                        self.bindings[bound] = f"{source}.{alias.name}"
 
 
 def load_modules() -> dict[str, Module]:

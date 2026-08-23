@@ -19707,13 +19707,12 @@ _rect_only = (
 )
 assert np.isclose(_svg_module.get_svg_content_height(_rect_only), 10.0)
 
-# Path and io bind to the identical objects; ET binds to the parent
-# package (schema origin records "xml.etree" — extractor imprecision
-# tracked for the full-path fix); se stays a loud refusal because
-# svgelements is deliberately unshipped.
+# Path, io, and ET bind to the identical objects now that leaked-import
+# origins record the full object path; se stays a loud refusal because
+# svgelements is deliberately unshipped (OOT-SVGELEMENTS-PARSER).
 assert _svg_module.Path is importlib.import_module("pathlib").Path
 assert _svg_module.io is importlib.import_module("io")
-assert type(_svg_module.ET).__name__ == "module"
+assert _svg_module.ET is importlib.import_module("xml.etree.ElementTree")
 try:
     _svg_module.se("anything")
 except NotImplementedError:
@@ -19972,3 +19971,38 @@ _textures = manimlib.ThreeDModel.__dict__["get_textures_from_mtl"](
     None, str(_mtl_path / "model.obj")
 )
 assert _textures["matA"].endswith("texA.png") and _textures["matB"] is None
+
+
+# ---------------------------------------------------------------------------
+# fm-g6cj: the SampleSpace probability shelf over native Rectangle parts.
+
+_ss = manimlib.SampleSpace()
+assert _ss.complete_p_list([0.25, 0.25]) == [0.25, 0.25, 0.5]
+assert _ss.complete_p_list([0.5, 0.5]) == [0.5, 0.5]
+
+_horiz = _ss.get_horizontal_division([0.7])
+assert sorted(round(p.get_height(), 6) for p in _horiz) == [0.9, 2.1]
+_vert = _ss.get_vertical_division([0.5, 0.25])
+assert sorted(round(p.get_width(), 6) for p in _vert) == [0.75, 0.75, 1.5]
+_vcolors = [p.get_fill_color() for p in _vert]
+assert _vcolors[0] == "#EC92AB" and _vcolors[-1] == "#FFFF00"
+assert all(isinstance(p, manimlib.SampleSpace) for p in _vert)
+
+_ss.divide_horizontally([0.6])
+assert hasattr(_ss, "horizontal_parts")
+_side = _ss.get_side_braces_and_labels(["P(A)", "B"])
+assert len(_side) == 2
+_ss.divide_vertically([0.3])
+_top = _ss.get_top_braces_and_labels(["X", "Y"])
+assert len(_top) == 2
+_bottom = _ss.get_bottom_braces_and_labels(["U"])
+assert len(_bottom) == 2
+_before = len(_ss.submobjects)
+_ss.add_braces_and_labels()
+assert len(_ss.submobjects) > _before
+assert _ss[0] is not None
+
+_titled = manimlib.SampleSpace()
+assert _titled.add_title() is None and _titled.title.get_center()[1] > _titled.get_center()[1]
+_titled.add_label("S")
+assert _titled.label == "S"

@@ -18,10 +18,10 @@ wildcard_exports	663
 
 [symbols]
 # module	name	kind	origin	exported	detail
-manimlib	PackageNotFoundError	leaked_import	importlib.metadata	1	-
-manimlib	TYPE_CHECKING	leaked_import	typing	1	-
+manimlib	PackageNotFoundError	leaked_import	importlib.metadata.PackageNotFoundError	1	-
+manimlib	TYPE_CHECKING	leaked_import	typing.TYPE_CHECKING	1	-
 manimlib	__version__	constant	defined	0	version('manimgl')
-manimlib	version	leaked_import	importlib.metadata	1	-
+manimlib	version	leaked_import	importlib.metadata.version	1	-
 manimlib.__main__	main	function	defined	0	-
 manimlib.__main__	run_scenes	function	defined	0	-
 manimlib.animation.animation	Animation	class	defined	1	object
@@ -50,8 +50,8 @@ manimlib.animation.animation	Animation.update_mobjects	method	defined	0	-
 manimlib.animation.animation	Animation.update_rate_info	method	defined	0	-
 manimlib.animation.animation	DEFAULT_ANIMATION_LAG_RATIO	constant	defined	1	0
 manimlib.animation.animation	DEFAULT_ANIMATION_RUN_TIME	constant	defined	1	1.0
-manimlib.animation.animation	annotations	leaked_import	__future__	1	-
-manimlib.animation.animation	deepcopy	leaked_import	copy	1	-
+manimlib.animation.animation	annotations	leaked_import	__future__.annotations	1	-
+manimlib.animation.animation	deepcopy	leaked_import	copy.deepcopy	1	-
 manimlib.animation.animation	prepare_animation	function	defined	1	-
 manimlib.animation.composition	AnimationGroup	class	defined	1	Animation
 manimlib.animation.composition	AnimationGroup.__init__	method	defined	0	-
@@ -65,7 +65,7 @@ manimlib.animation.composition	AnimationGroup.interpolate	method	defined	0	-
 manimlib.animation.composition	AnimationGroup.update_mobjects	method	defined	0	-
 manimlib.animation.composition	AnimationType	constant	defined	1	Union[Animation, _AnimationBuilder]
 manimlib.animation.composition	DEFAULT_LAGGED_START_LAG_RATIO	constant	defined	1	0.05
-manimlib.animation.composition	Iterable	leaked_import	typing	1	-
+manimlib.animation.composition	Iterable	leaked_import	typing.Iterable	1	-
 manimlib.animation.composition	LaggedStart	class	defined	1	AnimationGroup
 manimlib.animation.composition	LaggedStart.__init__	method	defined	0	-
 manimlib.animation.composition	LaggedStartMap	class	defined	1	LaggedStart
@@ -76,7 +76,7 @@ manimlib.animation.composition	Succession.begin	method	defined	0	-
 manimlib.animation.composition	Succession.finish	method	defined	0	-
 manimlib.animation.composition	Succession.interpolate	method	defined	0	-
 manimlib.animation.composition	Succession.update_mobjects	method	defined	0	-
-manimlib.animation.creation	ABC	leaked_import	abc	1	-
+manimlib.animation.creation	ABC	leaked_import	abc.ABC	1	-
 manimlib.animation.creation	AddTextWordByWord	class	defined	1	ShowIncreasingSubsets
 manimlib.animation.creation	AddTextWordByWord.__init__	method	defined	0	-
 manimlib.animation.creation	AddTextWordByWord.clean_up_from_scene	method	defined	0	-
@@ -107,7 +107,7 @@ manimlib.animation.creation	Write	class	defined	1	DrawBorderThenFill
 manimlib.animation.creation	Write.__init__	method	defined	0	-
 manimlib.animation.creation	Write.compute_lag_ratio	method	defined	0	-
 manimlib.animation.creation	Write.compute_run_time	method	defined	0	-
-manimlib.animation.creation	abstractmethod	leaked_import	abc	1	-
+manimlib.animation.creation	abstractmethod	leaked_import	abc.abstractmethod	1	-
 manimlib.animation.creation	np	leaked_import	numpy	1	-
 manimlib.animation.fading	Fade	class	defined	1	Transform
 manimlib.animation.fading	Fade.__init__	method	defined	0	-
@@ -285,7 +285,7 @@ manimlib.animation.transform	TransformFromCopy.replace_mobject_with_target_in_sc
 manimlib.animation.transform	_MethodAnimation	class	defined	0	MoveToTarget
 manimlib.animation.transform	_MethodAnimation.__init__	method	defined	0	-
 manimlib.animation.transform	inspect	leaked_import	inspect	1	-
-manimlib.animation.transform_matching_parts	SequenceMatcher	leaked_import	difflib	1	-
+manimlib.animation.transform_matching_parts	SequenceMatcher	leaked_import	difflib.SequenceMatcher	1	-
 manimlib.animation.transform_matching_parts	TransformMatchingParts	class	defined	1	AnimationGroup
 manimlib.animation.transform_matching_parts	TransformMatchingParts.__init__	method	defined	0	-
 manimlib.animation.transform_matching_parts	TransformMatchingParts.add_transform	method	defined	0	-
@@ -333,7 +333,7 @@ manimlib.camera.camera	Camera.init_light_source	method	defined	0	-
 manimlib.camera.camera	Camera.refresh_uniforms	method	defined	0	-
 manimlib.camera.camera	Camera.resize_frame_shape	method	defined	0	-
 manimlib.camera.camera	Camera.use_window_fbo	method	defined	0	-
-manimlib.camera.camera	Image	leaked_import	PIL	1	-
+manimlib.camera.camera	Image	leaked_import	PIL.Image	1	-
 manimlib.camera.camera	ThreeDCamera	class	defined	1	Camera
 manimlib.camera.camera	ThreeDCamera.__init__	method	defined	0	-
 manimlib.camera.camera	gl	leaked_import	OpenGL.GL	1	-
@@ -661,7 +661,7 @@ manimlib.mobject.functions	ParametricCurve.get_point_from_function	method	define
 manimlib.mobject.functions	ParametricCurve.get_t_func	method	defined	0	-
 manimlib.mobject.functions	ParametricCurve.get_x_range	method	defined	0	-
 manimlib.mobject.functions	ParametricCurve.init_points	method	defined	0	-
-manimlib.mobject.functions	plot_isoline	leaked_import	isosurfaces	1	-
+manimlib.mobject.functions	plot_isoline	leaked_import	isosurfaces.plot_isoline	1	-
 manimlib.mobject.geometry	AnnularSector	class	defined	1	VMobject
 manimlib.mobject.geometry	AnnularSector.__init__	method	defined	0	-
 manimlib.mobject.geometry	Annulus	class	defined	1	VMobject
@@ -838,7 +838,7 @@ manimlib.mobject.interactive	LinearNumberSlider.slider_on_mouse_drag	method	defi
 manimlib.mobject.interactive	MotionMobject	class	defined	1	Mobject
 manimlib.mobject.interactive	MotionMobject.__init__	method	defined	0	-
 manimlib.mobject.interactive	MotionMobject.mob_on_mouse_drag	method	defined	0	-
-manimlib.mobject.interactive	PygletWindowKeys	leaked_import	pyglet.window	1	-
+manimlib.mobject.interactive	PygletWindowKeys	leaked_import	pyglet.window.key	1	-
 manimlib.mobject.interactive	Textbox	class	defined	1	ControlMobject
 manimlib.mobject.interactive	Textbox.__init__	method	defined	0	-
 manimlib.mobject.interactive	Textbox.active_anim	method	defined	0	-
@@ -874,7 +874,7 @@ manimlib.mobject.matrix	MobjectMatrix.__init__	method	defined	0	-
 manimlib.mobject.matrix	MobjectMatrix.element_to_mobject	method	defined	0	-
 manimlib.mobject.matrix	TexMatrix	class	defined	1	Matrix
 manimlib.mobject.matrix	TexMatrix.__init__	method	defined	0	-
-manimlib.mobject.mobject	Generic	leaked_import	typing	1	-
+manimlib.mobject.mobject	Generic	leaked_import	typing.Generic	1	-
 manimlib.mobject.mobject	Group	class	defined	1	Mobject,Generic[SubmobjectType]
 manimlib.mobject.mobject	Group.__init__	method	defined	0	-
 manimlib.mobject.mobject	Mobject	class	defined	1	object
@@ -1141,7 +1141,7 @@ manimlib.mobject.mobject	Point.get_location	method	defined	0	-
 manimlib.mobject.mobject	Point.get_width	method	defined	0	-
 manimlib.mobject.mobject	Point.set_location	method	defined	0	-
 manimlib.mobject.mobject	SubmobjectType	constant	defined	1	TypeVar('SubmobjectType', bound='Mobject')
-manimlib.mobject.mobject	TypeVar	leaked_import	typing	1	-
+manimlib.mobject.mobject	TypeVar	leaked_import	typing.TypeVar	1	-
 manimlib.mobject.mobject	_AnimationBuilder	class	defined	0	-
 manimlib.mobject.mobject	_AnimationBuilder.__init__	method	defined	0	-
 manimlib.mobject.mobject	_AnimationBuilder.build	method	defined	0	-
@@ -1156,7 +1156,7 @@ manimlib.mobject.mobject	override_animate	function	defined	1	-
 manimlib.mobject.mobject	pickle	leaked_import	pickle	1	-
 manimlib.mobject.mobject	random	leaked_import	random	1	-
 manimlib.mobject.mobject	sys	leaked_import	sys	1	-
-manimlib.mobject.mobject	wraps	leaked_import	functools	1	-
+manimlib.mobject.mobject	wraps	leaked_import	functools.wraps	1	-
 manimlib.mobject.mobject_update_utils	always	function	defined	1	-
 manimlib.mobject.mobject_update_utils	always_redraw	function	defined	1	-
 manimlib.mobject.mobject_update_utils	always_rotate	function	defined	1	-
@@ -1199,7 +1199,7 @@ manimlib.mobject.numbers	Integer	class	defined	1	DecimalNumber
 manimlib.mobject.numbers	Integer.__init__	method	defined	0	-
 manimlib.mobject.numbers	Integer.get_value	method	defined	0	-
 manimlib.mobject.numbers	char_to_cahced_mob	function	defined	1	-
-manimlib.mobject.numbers	lru_cache	leaked_import	functools	1	-
+manimlib.mobject.numbers	lru_cache	leaked_import	functools.lru_cache	1	-
 manimlib.mobject.probability	BarChart	class	defined	1	VGroup
 manimlib.mobject.probability	BarChart.__init__	method	defined	0	-
 manimlib.mobject.probability	BarChart.add_axes	method	defined	0	-
@@ -1226,7 +1226,7 @@ manimlib.mobject.shape_matchers	BackgroundRectangle.__init__	method	defined	0	-
 manimlib.mobject.shape_matchers	BackgroundRectangle.get_fill_color	method	defined	0	-
 manimlib.mobject.shape_matchers	BackgroundRectangle.pointwise_become_partial	method	defined	0	-
 manimlib.mobject.shape_matchers	BackgroundRectangle.set_style	method	defined	0	-
-manimlib.mobject.shape_matchers	Color	leaked_import	colour	1	-
+manimlib.mobject.shape_matchers	Color	leaked_import	colour.Color	1	-
 manimlib.mobject.shape_matchers	Cross	class	defined	1	VGroup
 manimlib.mobject.shape_matchers	Cross.__init__	method	defined	0	-
 manimlib.mobject.shape_matchers	SurroundingRectangle	class	defined	1	Rectangle
@@ -1397,12 +1397,12 @@ manimlib.mobject.svg.string_mobject	StringMobject.set_parts_color	method	defined
 manimlib.mobject.svg.string_mobject	StringMobject.set_parts_color_by_dict	method	defined	0	-
 manimlib.mobject.svg.string_mobject	StringMobject.span_contains	method	defined	0	-
 manimlib.mobject.svg.string_mobject	StringMobject.substr_to_path_count	method	defined	0	-
-manimlib.mobject.svg.string_mobject	cdist	leaked_import	scipy.spatial.distance	1	-
-manimlib.mobject.svg.string_mobject	linear_sum_assignment	leaked_import	scipy.optimize	1	-
+manimlib.mobject.svg.string_mobject	cdist	leaked_import	scipy.spatial.distance.cdist	1	-
+manimlib.mobject.svg.string_mobject	linear_sum_assignment	leaked_import	scipy.optimize.linear_sum_assignment	1	-
 manimlib.mobject.svg.string_mobject	re	leaked_import	re	1	-
-manimlib.mobject.svg.svg_mobject	ET	leaked_import	xml.etree	1	-
+manimlib.mobject.svg.svg_mobject	ET	leaked_import	xml.etree.ElementTree	1	-
 manimlib.mobject.svg.svg_mobject	PATH_TO_POINTS	constant	defined	1	{}
-manimlib.mobject.svg.svg_mobject	Path	leaked_import	pathlib	1	-
+manimlib.mobject.svg.svg_mobject	Path	leaked_import	pathlib.Path	1	-
 manimlib.mobject.svg.svg_mobject	SVGMobject	class	defined	1	VMobject
 manimlib.mobject.svg.svg_mobject	SVGMobject.__init__	method	defined	0	-
 manimlib.mobject.svg.svg_mobject	SVGMobject.apply_style_to_mobject	method	defined	0	-
@@ -1492,7 +1492,7 @@ manimlib.mobject.svg.text_mobject	Text.replace_for_matching	method	defined	0	-
 manimlib.mobject.svg.text_mobject	_Alignment	class	defined	0	-
 manimlib.mobject.svg.text_mobject	_Alignment.VAL_DICT	attribute	defined	0	{'LEFT': 0, 'CENTER': 1, 'RIGHT': 2}
 manimlib.mobject.svg.text_mobject	_Alignment.__init__	method	defined	0	-
-manimlib.mobject.svg.text_mobject	contextmanager	leaked_import	contextlib	1	-
+manimlib.mobject.svg.text_mobject	contextmanager	leaked_import	contextlib.contextmanager	1	-
 manimlib.mobject.svg.text_mobject	get_text_mob_scale_factor	function	defined	1	-
 manimlib.mobject.svg.text_mobject	manimpango	leaked_import	manimpango	1	-
 manimlib.mobject.svg.text_mobject	markup_to_svg	function	defined	1	-
@@ -1808,7 +1808,7 @@ manimlib.mobject.vector_field	move_along_vector_field	function	defined	1	-
 manimlib.mobject.vector_field	move_points_along_vector_field	function	defined	1	-
 manimlib.mobject.vector_field	move_submobjects_along_vector_field	function	defined	1	-
 manimlib.mobject.vector_field	ode_solution_points	function	defined	1	-
-manimlib.mobject.vector_field	solve_ivp	leaked_import	scipy.integrate	1	-
+manimlib.mobject.vector_field	solve_ivp	leaked_import	scipy.integrate.solve_ivp	1	-
 manimlib.mobject.vector_field	vectorize	function	defined	1	-
 manimlib.module_loader	Module	constant	defined	0	importlib.util.types.ModuleType
 manimlib.module_loader	ModuleLoader	class	defined	0	-
@@ -1883,12 +1883,12 @@ manimlib.scene.interactive_scene	UNSELECT_KEY	constant	defined	1	manim_config.ke
 manimlib.scene.interactive_scene	X_GRAB_KEY	constant	defined	1	manim_config.key_bindings.x_grab
 manimlib.scene.interactive_scene	Y_GRAB_KEY	constant	defined	1	manim_config.key_bindings.y_grab
 manimlib.scene.interactive_scene	Z_GRAB_KEY	constant	defined	1	manim_config.key_bindings.z_grab
-manimlib.scene.interactive_scene	get_ipython	leaked_import	IPython.core.getipython	1	-
+manimlib.scene.interactive_scene	get_ipython	leaked_import	IPython.core.getipython.get_ipython	1	-
 manimlib.scene.interactive_scene	pyperclip	leaked_import	pyperclip	1	-
 manimlib.scene.scene	EndScene	class	defined	1	Exception
-manimlib.scene.scene	ExitStack	leaked_import	contextlib	1	-
-manimlib.scene.scene	OrderedDict	leaked_import	collections	1	-
-manimlib.scene.scene	ProgressDisplay	leaked_import	tqdm.auto	1	-
+manimlib.scene.scene	ExitStack	leaked_import	contextlib.ExitStack	1	-
+manimlib.scene.scene	OrderedDict	leaked_import	collections.OrderedDict	1	-
+manimlib.scene.scene	ProgressDisplay	leaked_import	tqdm.auto.tqdm	1	-
 manimlib.scene.scene	Scene	class	defined	1	object
 manimlib.scene.scene	Scene.__init__	method	defined	0	-
 manimlib.scene.scene	Scene.add	method	defined	0	-
@@ -2077,7 +2077,7 @@ manimlib.shader_wrapper	VShaderWrapper.set_backstroke	method	defined	0	-
 manimlib.utils.bezier	CLOSED_THRESHOLD	constant	defined	1	0.001
 manimlib.utils.bezier	approx_smooth_quadratic_bezier_handles	function	defined	1	-
 manimlib.utils.bezier	bezier	function	defined	1	-
-manimlib.utils.bezier	curve_to_quadratic	leaked_import	fontTools.cu2qu.cu2qu	1	-
+manimlib.utils.bezier	curve_to_quadratic	leaked_import	fontTools.cu2qu.cu2qu.curve_to_quadratic	1	-
 manimlib.utils.bezier	diag_to_matrix	function	defined	1	-
 manimlib.utils.bezier	get_quadratic_approximation_of_cubic	function	defined	1	-
 manimlib.utils.bezier	get_smooth_cubic_bezier_handle_points	function	defined	1	-
@@ -2086,7 +2086,7 @@ manimlib.utils.bezier	integer_interpolate	function	defined	1	-
 manimlib.utils.bezier	interpolate	function	defined	1	-
 manimlib.utils.bezier	inverse_interpolate	function	defined	1	-
 manimlib.utils.bezier	is_closed	function	defined	1	-
-manimlib.utils.bezier	linalg	leaked_import	scipy	1	-
+manimlib.utils.bezier	linalg	leaked_import	scipy.linalg	1	-
 manimlib.utils.bezier	match_interpolate	function	defined	1	-
 manimlib.utils.bezier	mid	function	defined	1	-
 manimlib.utils.bezier	outer_interpolate	function	defined	1	-
@@ -2096,7 +2096,7 @@ manimlib.utils.bezier	quadratic_bezier_points_for_arc	function	defined	1	-
 manimlib.utils.bezier	set_array_by_interpolation	function	defined	1	-
 manimlib.utils.bezier	smooth_quadratic_path	function	defined	1	-
 manimlib.utils.cache	CACHE_SIZE	constant	defined	1	1000000000.0
-manimlib.utils.cache	Cache	leaked_import	diskcache	1	-
+manimlib.utils.cache	Cache	leaked_import	diskcache.Cache	1	-
 manimlib.utils.cache	_cache	constant	defined	0	Cache(get_cache_dir(), size_limit=CACHE_SIZE)
 manimlib.utils.cache	cache_on_disk	function	defined	1	-
 manimlib.utils.cache	clear_cache	function	defined	1	-
@@ -2110,17 +2110,17 @@ manimlib.utils.color	color_to_rgba	function	defined	1	-
 manimlib.utils.color	get_color_map	function	defined	1	-
 manimlib.utils.color	get_colormap_from_colors	function	defined	1	-
 manimlib.utils.color	get_colormap_list	function	defined	1	-
-manimlib.utils.color	hex2rgb	leaked_import	colour	1	-
+manimlib.utils.color	hex2rgb	leaked_import	colour.hex2rgb	1	-
 manimlib.utils.color	hex_to_int	function	defined	1	-
 manimlib.utils.color	hex_to_rgb	function	defined	1	-
 manimlib.utils.color	int_to_hex	function	defined	1	-
 manimlib.utils.color	interpolate_color	function	defined	1	-
 manimlib.utils.color	interpolate_color_by_hsl	function	defined	1	-
 manimlib.utils.color	invert_color	function	defined	1	-
-manimlib.utils.color	pyplot	leaked_import	matplotlib	1	-
+manimlib.utils.color	pyplot	leaked_import	matplotlib.pyplot	1	-
 manimlib.utils.color	random_bright_color	function	defined	1	-
 manimlib.utils.color	random_color	function	defined	1	-
-manimlib.utils.color	rgb2hex	leaked_import	colour	1	-
+manimlib.utils.color	rgb2hex	leaked_import	colour.rgb2hex	1	-
 manimlib.utils.color	rgb_to_color	function	defined	1	-
 manimlib.utils.color	rgb_to_hex	function	defined	1	-
 manimlib.utils.color	rgba_to_color	function	defined	1	-
@@ -2207,7 +2207,7 @@ manimlib.utils.sounds	play_sound	function	defined	1	-
 manimlib.utils.sounds	subprocess	leaked_import	subprocess	1	-
 manimlib.utils.sounds	threading	leaked_import	threading	1	-
 manimlib.utils.space_ops	R3_to_complex	function	defined	1	-
-manimlib.utils.space_ops	Rotation	leaked_import	scipy.spatial.transform	1	-
+manimlib.utils.space_ops	Rotation	leaked_import	scipy.spatial.transform.Rotation	1	-
 manimlib.utils.space_ops	angle_axis_from_quaternion	function	defined	1	-
 manimlib.utils.space_ops	angle_between_vectors	function	defined	1	-
 manimlib.utils.space_ops	angle_of_vector	function	defined	1	-
@@ -2218,7 +2218,7 @@ manimlib.utils.space_ops	complex_to_R3	function	defined	1	-
 manimlib.utils.space_ops	cross	function	defined	1	-
 manimlib.utils.space_ops	cross2d	function	defined	1	-
 manimlib.utils.space_ops	earclip_triangulation	function	defined	1	-
-manimlib.utils.space_ops	earcut	leaked_import	mapbox_earcut	1	-
+manimlib.utils.space_ops	earcut	leaked_import	mapbox_earcut.triangulate_float32	1	-
 manimlib.utils.space_ops	find_intersection	function	defined	1	-
 manimlib.utils.space_ops	get_closest_point_on_line	function	defined	1	-
 manimlib.utils.space_ops	get_dist	function	defined	1	-
@@ -2238,7 +2238,7 @@ manimlib.utils.space_ops	project_along_vector	function	defined	1	-
 manimlib.utils.space_ops	quaternion_conjugate	function	defined	1	-
 manimlib.utils.space_ops	quaternion_from_angle_axis	function	defined	1	-
 manimlib.utils.space_ops	quaternion_mult	function	defined	1	-
-manimlib.utils.space_ops	reduce	leaked_import	functools	1	-
+manimlib.utils.space_ops	reduce	leaked_import	functools.reduce	1	-
 manimlib.utils.space_ops	rotate_vector	function	defined	1	-
 manimlib.utils.space_ops	rotate_vector_2d	function	defined	1	-
 manimlib.utils.space_ops	rotation_about_z	function	defined	1	-
@@ -2261,8 +2261,8 @@ manimlib.utils.tex_file_writing	get_tex_config	function	defined	0	-
 manimlib.utils.tex_file_writing	get_tex_template_config	function	defined	0	-
 manimlib.utils.tex_file_writing	latex_to_svg	function	defined	1	-
 manimlib.utils.tex_to_symbol_count	TEX_TO_SYMBOL_COUNT	constant	defined	1	{'\\!': 0, '\\,': 0, '\\-': 0, '\\/': 0, '\\:': 0, '\\;': 0, '\\>': 0, '\\aa': 0, '\\AA': 0, '\\ae': 0, '\\AE': 0, '\\arccos': 6, '\\arcsin': 6, '\\arctan': 6, '\\arg': 3, '\\author': 0, '\\bf': 0, '\\bibliography': 0, '\\bibliographystyle': 0, '\\big': 0, '\\Big': 0, '\\bigodot': 4, '\\bigoplus': 5, '\\bigskip': 0, '\\bmod': 3, '\\boldmath': 0, '\\bottomfraction': 2, '\\bowtie': 2, '\\cal': 0, '\\cdots': 3, '\\centering': 0, '\\cite': 2, '\\circ': 1, '\\cong': 2, '\\contentsline': 0, '\\cos': 3, '\\cosh': 4, '\\cot': 3, '\\coth': 4, '\\csc': 3, '\\date': 0, '\\dblfloatpagefraction': 2, '\\dbltopfraction': 2, '\\ddots': 3, '\\deg': 3, '\\det': 3, '\\dim': 3, '\\displaystyle': 0, '\\div': 2, '\\doteq': 2, '\\dotfill': 0, '\\dots': 3, '\\emph': 0, '\\exp': 3, '\\fbox': 4, '\\floatpagefraction': 2, '\\flushbottom': 0, '\\footnotesize': 0, '\\footnotetext': 0, '\\frame': 2, '\\framebox': 4, '\\fussy': 0, '\\gcd': 3, '\\ghost': 0, '\\glossary': 0, '\\hfill': 0, '\\hom': 3, '\\hookleftarrow': 2, '\\hookrightarrow': 2, '\\hrulefill': 0, '\\huge': 0, '\\Huge': 0, '\\hyphenation': 0, '\\iff': 2, '\\Im': 2, '\\index': 0, '\\inf': 3, '\\it': 0, '\\ker': 3, '\\l': 0, '\\L': 0, '\\label': 0, '\\large': 0, '\\Large': 0, '\\LARGE': 0, '\\ldots': 3, '\\lefteqn': 0, '\\left': 0, '\\lg': 2, '\\lim': 3, '\\liminf': 6, '\\limsup': 6, '\\linebreak': 0, '\\ln': 2, '\\log': 3, '\\longleftarrow': 2, '\\Longleftarrow': 2, '\\longleftrightarrow': 2, '\\Longleftrightarrow': 2, '\\longmapsto': 3, '\\longrightarrow': 2, '\\Longrightarrow': 2, '\\makebox': 0, '\\mapsto': 2, '\\markright': 0, '\\mathds': 0, '\\mathcal': 0, '\\max': 3, '\\mbox': 0, '\\medskip': 0, '\\min': 3, '\\mit': 0, '\\models': 2, '\\ne': 2, '\\neq': 2, '\\newline': 0, '\\noindent': 0, '\\nolinebreak': 0, '\\nonumber': 0, '\\nopagebreak': 0, '\\normalmarginpar': 0, '\\normalsize': 0, '\\notin': 2, '\\o': 0, '\\O': 0, '\\obeycr': 0, '\\oe': 0, '\\OE': 0, '\\overbrace': 4, '\\pagebreak': 0, '\\pagenumbering': 0, '\\pageref': 2, '\\pmod': 5, '\\Pr': 2, '\\protect': 0, '\\qquad': 0, '\\quad': 0, '\\raggedbottom': 0, '\\raggedleft': 0, '\\raggedright': 0, '\\Re': 2, '\\ref': 2, '\\restorecr': 0, '\\reversemarginpar': 0, '\\right': 0, '\\rm': 0, '\\sc': 0, '\\scriptscriptstyle': 0, '\\scriptsize': 0, '\\scriptstyle': 0, '\\sec': 3, '\\sf': 0, '\\shortstack': 0, '\\sin': 3, '\\sinh': 4, '\\sl': 0, '\\sloppy': 0, '\\small': 0, '\\Small': 0, '\\smallskip': 0, '\\sqrt': 2, '\\ss': 0, '\\sup': 3, '\\tan': 3, '\\tanh': 4, '\\text': 0, '\\textbf': 0, '\\textfraction': 2, '\\textstyle': 0, '\\thicklines': 0, '\\thinlines': 0, '\\thinspace': 0, '\\tiny': 0, '\\title': 0, '\\today': 15, '\\topfraction': 2, '\\tt': 0, '\\typeout': 0, '\\unboldmath': 0, '\\underbrace': 6, '\\underline': 0, '\\value': 0, '\\vdots': 3, '\\vline': 0}
-manimlib.window	PygletWindow	leaked_import	moderngl_window.context.pyglet.window	1	-
-manimlib.window	Timer	leaked_import	moderngl_window.timers.clock	1	-
+manimlib.window	PygletWindow	leaked_import	moderngl_window.context.pyglet.window.Window	1	-
+manimlib.window	Timer	leaked_import	moderngl_window.timers.clock.Timer	1	-
 manimlib.window	Window	class	defined	1	PygletWindow
 manimlib.window	Window.__init__	method	defined	0	-
 manimlib.window	Window.cursor	attribute	defined	0	True
@@ -6773,7 +6773,7 @@ manimlib.window:Window.to_default_position	0	self	positional_or_keyword	-	-
 -t,--transparent	-	store_true	-	-	-	Render to a movie file with an alpha channel
 -v,--version	-	store_true	-	-	-	Display the version of manimgl
 -w,--write_file	-	store_true	-	-	-	Render the scene as a movie file
-file	-	store	'?'	-	-	Native scene source or compiled artifact; use fmn-python for .py/.pyw
+file	-	store	'?'	-	-	Path to file holding the python code for the scene
 scene_names	-	store	'*'	-	-	Name of the Scene class you want to see
 
 [config]
