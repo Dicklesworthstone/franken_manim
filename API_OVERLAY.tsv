@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	e40a278e387fd0178ba47f23220a406fe4f1083848e637b4f148753761b8b5ee
+ledger_reviewed_digest	c2d30ab3f230411d18cb47b530ffe3e26e238c0b0c924abb12f9201e0e90e19b
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -717,6 +717,20 @@ manimlib.utils.bezier:bezier	same	scripts/manim_ref/manimlib/utils/bezier.py	cra
 manimlib.utils.bezier:integer_interpolate	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	routes the clamped integer and residue calculation through Chisel's shared interpolation authority
 manimlib.utils.bezier:interpolate	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	preserves scalar and NumPy broadcasting under the exact affine expression
 manimlib.utils.bezier:inverse_interpolate	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	preserves NumPy true-division broadcasting and boundary values
+manimlib.utils.bezier:approx_smooth_quadratic_bezier_handles	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	routes the averaged parabola-handle approximation through Chisel's smoothing authority
+manimlib.utils.bezier:diag_to_matrix	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	reproduces the banded diagonal expansion exactly including the offset windowing
+manimlib.utils.bezier:get_quadratic_approximation_of_cubic	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	preserves the inflection-aware two-quadratic reduction with tangent intersection cut points
+manimlib.utils.bezier:get_smooth_cubic_bezier_handle_points	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	solves open and closed spline handles through Chisel's one banded and dense authority
+manimlib.utils.bezier:get_smooth_quadratic_bezier_path_through	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	composes smooth handles with the two-quad reduction across consecutive anchor pairs
+manimlib.utils.bezier:is_closed	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	compares first and last points under allclose
+manimlib.utils.bezier:match_interpolate	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	composes inverse then affine interpolation verbatim
+manimlib.utils.bezier:mid	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	returns the exact pairwise average
+manimlib.utils.bezier:outer_interpolate	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	preserves the outer-product reshape over scalar or array alphas
+manimlib.utils.bezier:partial_bezier_points	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	preserves the de Casteljau sub-curve construction including the a equals one branch
+manimlib.utils.bezier:partial_quadratic_bezier_points	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	preserves the closed-form quadratic sub-section with boundary short circuits
+manimlib.utils.bezier:quadratic_bezier_points_for_arc	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	reproduces the arc sampling grid with cosine-adjusted handle rows
+manimlib.utils.bezier:set_array_by_interpolation	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	writes the interpolated result into the caller array in place
+manimlib.utils.bezier:smooth_quadratic_path	same	scripts/manim_ref/manimlib/utils/bezier.py	crates/fmn-python/tests/bridge.py	routes the full rotation-aware quadratic spline through Chisel's error-bounded converter
 manimlib.utils.color:average_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	routes the Reference RMS sRGB average through fmn-core and preserves the empty-input exception
 manimlib.utils.color:color_gradient	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	routes RMS and HSL gradient sample positions through fmn-core and preserves zero, negative, and insufficient-stop behavior
 manimlib.utils.color:color_to_hex	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	coerces the public color then uses colour 0.1.5's exact uppercase long-hex half-boundary rule
@@ -737,6 +751,19 @@ manimlib.utils.paths:clockwise_path	same	scripts/manim_ref/manimlib/utils/paths.
 manimlib.utils.paths:counterclockwise_path	same	scripts/manim_ref/manimlib/utils/paths.py	crates/fmn-python/tests/bridge.py	returns the positive-pi public arc path factory
 manimlib.utils.paths:path_along_arc	same	scripts/manim_ref/manimlib/utils/paths.py	crates/fmn-python/tests/bridge.py	preserves scalar and per-point angle paths caller-array mutation zero-axis fallback and the exact straight-path threshold
 manimlib.utils.paths:straight_path	same	scripts/manim_ref/manimlib/utils/paths.py	crates/fmn-python/tests/bridge.py	preserves vectorized affine point interpolation and returns the same callable used by the near-zero arc branch
+manimlib.utils.iterables:adjacent_n_tuples	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	zips the n cyclic rotations into overlapping tuples
+manimlib.utils.iterables:adjacent_pairs	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	delegates the two-wide wraparound pairing window
+manimlib.utils.iterables:array_is_constant	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	reports all-equal rows with the empty-array false branch
+manimlib.utils.iterables:arrays_match	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	requires equal shapes and elementwise equality
+manimlib.utils.iterables:batch_by_property	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	preserves order while grouping consecutive items by property output
+manimlib.utils.iterables:cartesian_product	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	builds the stacked index grid over result dtype exactly as the pinned reference form
+manimlib.utils.iterables:hash_obj	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	normalizes dicts sets tuples lists and rgb-bearing colors before hashing
+manimlib.utils.iterables:list_difference_update	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	keeps membership-filtered order without set semantics
+manimlib.utils.iterables:list_update	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	removes duplicates from the first list only via ordered dedup of concatenation
+manimlib.utils.iterables:make_even	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	resamples both sequences to the longer length by strided indexing
+manimlib.utils.iterables:remove_list_redundancies	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	keeps the last occurrence while preserving order through reversed dict keys
+manimlib.utils.iterables:resize_with_interpolation	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	preserves constant and single-row repeats zero-length empties and linear boundary blends
+manimlib.utils.iterables:shuffled	same	scripts/manim_ref/manimlib/utils/iterables.py	crates/fmn-python/tests/bridge.py	shuffles a copied list in place under the host random module exactly as the pin
 manimlib.utils.simple_functions:binary_search	same	scripts/manim_ref/manimlib/utils/simple_functions.py	crates/fmn-python/tests/bridge.py	binds the existing monotonic-coordinate search including descending and unreachable-target behavior
 manimlib.utils.simple_functions:choose	same	scripts/manim_ref/manimlib/utils/simple_functions.py	crates/fmn-python/tests/bridge.py	returns the exact integer binomial coefficient through the standard-library authority
 manimlib.utils.simple_functions:clip	same	scripts/manim_ref/manimlib/utils/simple_functions.py	crates/fmn-python/tests/bridge.py	preserves ordered scalar lower and upper clamping without NumPy coercion
@@ -1084,6 +1111,8 @@ manimlib.mobject.svg.brace:Brace.put_at_tip	same	scripts/manim_ref/manimlib/mobj
 manimlib.mobject.svg.brace:Brace.get_text	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	builds Text at the tip through the put_at_tip surface
 manimlib.mobject.svg.brace:Brace.set_initial_width	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	reaches the requested extent growing or shrinking over the native width control
 manimlib.mobject.svg.brace:LineBrace	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	is the authored brace along an arbitrary segment with perpendicular direction over the native path model
+manimlib.utils.svg_export:_get_path_data	same	scripts/manim_ref/manimlib/utils/svg_export.py	crates/fmn-python/tests/bridge.py	builds svg path data from subpaths with y negation and handle-based linear detection
+manimlib.utils.svg_export:vmobject_to_svg	same	scripts/manim_ref/manimlib/utils/svg_export.py	crates/fmn-python/tests/bridge.py	emits one path per point-carrying family member in a frame-unit viewBox with resolved paints and optional file write
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

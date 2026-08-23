@@ -20047,3 +20047,82 @@ assert _moved.get_bottom()[1] < _brace.get_tip()[1]
 _line_brace = manimlib.LineBrace(manimlib.Line(start=[-2, 0, 0], end=[2, 0, 0]))
 assert np.isclose(_line_brace.get_width(), 4.0)
 assert np.isclose(abs(_line_brace.get_direction()[1]), 1.0)
+
+
+bz = importlib.import_module("manimlib.utils.bezier")
+it = importlib.import_module("manimlib.utils.iterables")
+
+
+# ---------------------------------------------------------------------------
+# fm-fo2m: the remaining bezier and iterables utility shelves.
+
+def _check(label, value):
+    assert value, "fm-fo2m %s -> %r" % (label, value)
+
+
+_bpts = [np.array(p, float) for p in [(0, 0, 0), (1, 2, 0), (3, 3, 0)]]
+_bez = bz.bezier(_bpts)
+_check("bernstein", np.allclose(_bez(0.5), [1.25, 1.75, 0.0]))
+_psub = bz.partial_bezier_points(_bpts, 0.25, 0.75)
+_rebez = bz.bezier(_psub)
+_check("partial endpoints",
+       np.allclose(_rebez(0.0), _bez(0.25)) and np.allclose(_rebez(1.0), _bez(0.75)))
+_pq = bz.partial_quadratic_bezier_points(_bpts[:3], 0.0, 0.5)
+_check("partial quadratic start", np.allclose(_pq[0], _bpts[0]))
+_check("midpoint", np.allclose(bz.mid(np.array([0., 0, 0]), np.array([2., 2, 0])), [1, 1, 0]))
+_check("closed true", bz.is_closed(np.array([[0., 0., 0.], [1., 1., 0.], [0., 0., 0.]])))
+_check("closed false", not bz.is_closed(np.array([[0., 0., 0.], [1., 1., 0.]])))
+_check("match interpolate", bz.match_interpolate(0, 10, 0, 100, 50) == 5.0)
+_arc = bz.quadratic_bezier_points_for_arc(np.pi / 2, 4)
+_check("arc shape/start", _arc.shape == (9, 3) and np.allclose(_arc[0], [1.0, 0.0, 0.0]))
+_oi = bz.outer_interpolate(np.array([0., 0, 0]), np.array([1., 1, 0]), np.array([0.0, 0.5, 1.0]))
+_check("outer interpolate shape", _oi.shape == (3, 3))
+_sai = bz.set_array_by_interpolation(
+    np.zeros((2, 3)), np.ones((2, 3)), np.full((2, 3), 2.0), 0.25
+)
+_check("set array by interpolation", np.allclose(_sai, 1.25))
+
+_anchors = np.array([[0., 0, 0], [1., 1, 0], [2., 0, 0], [3., 1, 0]])
+_h1s, _h2s = bz.get_smooth_cubic_bezier_handle_points(_anchors)
+_check("smooth handle shapes", _h1s.shape == (3, 3) and _h2s.shape == (3, 3))
+_apx = bz.approx_smooth_quadratic_bezier_handles(_anchors)
+_check("approx handle shape", _apx.shape == (3, 3))
+_sqpath = bz.smooth_quadratic_path(_anchors)
+_check("smooth path", _sqpath.shape[1] == 3 and len(_sqpath) >= 4)
+_qapprox = bz.get_quadratic_approximation_of_cubic(
+    _anchors[0:1], _h1s[0:1], _h2s[0:1], _anchors[1:2]
+)
+_check("quad approximation", _qapprox.shape == (5, 3))
+_through = bz.get_smooth_quadratic_bezier_path_through(_anchors)
+_check("path through", len(_through) > 0)
+_band = bz.diag_to_matrix((2, 1), np.array([
+    [0, 1, 1, 0, 0],
+    [2, 1, 0, 0, 0],
+    [1, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+], dtype=float))
+_check("diag to matrix", _band.shape == (5, 5))
+
+_check("remove redundancies", it.remove_list_redundancies([1, 2, 1, 3]) == [2, 1, 3])
+_check("list update", it.list_update([1, 2], [2, 3]) == [1, 2, 3])
+_check("list difference", it.list_difference_update([1, 2, 3], [2]) == [1, 3])
+_check("adjacent pairs", list(it.adjacent_pairs([1, 2, 3])) == [(1, 2), (2, 3), (3, 1)])
+_check("adjacent n", list(it.adjacent_n_tuples([1, 2, 3], 3)) == [(1, 2, 3), (2, 3, 1), (3, 1, 2)])
+_check("batch by property", len(it.batch_by_property([1, 1, 2, 3, 3], lambda x: x % 2)) == 3)
+_shuffled = it.shuffled([1, 2, 3])
+_check("shuffled preserves members", sorted(_shuffled) == [1, 2, 3])
+_rw = it.resize_with_interpolation(np.array([[0., 0.], [10., 10.]]), 3)
+_check("resize interpolation", _rw.shape == (3, 2) and np.allclose(_rw[1], [5., 5.]),
+       )
+_ra = it.resize_array(np.arange(6).reshape(2, 3), 4)
+_check("resize array", _ra.shape == (4, 3))
+_rpo = it.resize_preserving_order(np.arange(4), 6)
+_check("resize preserving order", _rpo.tolist() == [0, 0, 1, 2, 2, 3])
+_check("array is constant true/false",
+       it.array_is_constant(np.ones((2, 2))) and not it.array_is_constant(np.zeros(0)))
+_e1, _e2 = it.make_even([1, 2, 3, 4], [7, 8])
+_check("make even", len(_e1) == len(_e2) == 4)
+_check("arrays match", it.arrays_match(np.arange(3), np.arange(3)))
+_cp = it.cartesian_product(np.array([1, 2]), np.array([3, 4]))
+_check("cartesian product", _cp.shape == (4, 2))
+_check("hash obj", isinstance(it.hash_obj({"a": [1, 2]}), int))

@@ -4138,6 +4138,31 @@ impl BridgeMobject {
         })
     }
 
+    /// Chisel's quadratic handle approximation over an anchor sequence.
+    #[staticmethod]
+    fn _approx_smooth_quadratic_handles(points: Vec<[f64; 3]>) -> Vec<[f64; 3]> {
+        fmn_library::approx_smooth_quadratic_handles(&points)
+    }
+
+    /// Chisel's banded (open) and dense (closed) cubic-handle solver —
+    /// the one authority behind `get_smooth_cubic_bezier_handle_points`.
+    #[allow(clippy::type_complexity)]
+    #[staticmethod]
+    fn _smooth_cubic_handles(points: Vec<[f64; 3]>) -> PyResult<(Vec<[f64; 3]>, Vec<[f64; 3]>)> {
+        fmn_library::smooth_cubic_handles(&points).map_err(|error| {
+            PyValueError::new_err(format!("smooth cubic handles refused: {error}"))
+        })
+    }
+
+    /// Chisel's smooth quadratic spline: rotation handling, per-segment
+    /// error contract, and the one error-bounded cubic converter inside.
+    #[staticmethod]
+    fn _smooth_quadratic_path(points: Vec<[f64; 3]>, tolerance: f64) -> PyResult<Vec<[f64; 3]>> {
+        fmn_library::smooth_quadratic_path(&points, tolerance).map_err(|error| {
+            PyValueError::new_err(format!("smooth_quadratic_path refused: {error}"))
+        })
+    }
+
     /// `Arc(start_angle, angle, radius, arc_center)` over the arc shelf.
     #[allow(clippy::too_many_arguments)]
     fn _build_arc<'py>(

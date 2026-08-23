@@ -18,6 +18,7 @@ import functools as _functools
 import enum as _enum
 import xml.etree.ElementTree as _xml_etree
 import importlib as _importlib
+import random as _random
 import inspect as _inspect
 import itertools as _itertools
 import math as _math
@@ -81,6 +82,7 @@ _BLUE_E = "#1C758A"
 _DEFAULT_LIGHT_COLOR = "#BBBBBB"
 _ASPECT_RATIO = 16.0 / 9.0
 _FRAME_HEIGHT = 8.0
+_FRAME_WIDTH = _FRAME_HEIGHT * _ASPECT_RATIO
 
 # Function object -> catalog name, filled by _install_rate_functions;
 # Scene.play maps rate_func callables into the engine's named catalog.
@@ -6942,6 +6944,102 @@ def get_svg_content_height(svg_string):
     if len(all_points) == 0:
         raise ValueError("SVG has no content to measure")
     return float(all_points[:, 1].max() - all_points[:, 1].min())
+
+
+def _get_path_data(mob):
+    # Reference svg_export.py:73: SVG path data from one VMobject's
+    # subpaths, y negated for the svg coordinate system. Linear segments
+    # are detected when the handle sits on an anchor or the anchor
+    # midpoint.
+    subpaths = mob.get_subpaths()
+    if not subpaths:
+        return ""
+
+    parts = []
+    for subpath in subpaths:
+        a0 = subpath[0]
+        parts.append(f"M {a0[0]:.6g},{-a0[1]:.6g}")
+
+        for i in range(0, len(subpath) - 2, 2):
+            a_cur = subpath[i]
+            h = subpath[i + 1]
+            a_next = subpath[i + 2]
+            midpoint = 0.5 * (a_cur + a_next)
+            if _np.allclose(h, a_cur, atol=1e-4) or _np.allclose(
+                h, midpoint, atol=1e-4
+            ):
+                parts.append(f"L {a_next[0]:.6g},{-a_next[1]:.6g}")
+            else:
+                parts.append(
+                    f"Q {h[0]:.6g},{-h[1]:.6g} {a_next[0]:.6g},{-a_next[1]:.6g}"
+                )
+
+        if _np.allclose(subpath[-1], subpath[0], atol=1e-4):
+            parts.append("Z")
+
+    return " ".join(parts)
+
+
+def vmobject_to_svg(
+    vmobject,
+    filename=None,
+    pixel_width=1920,
+    pixel_height=1080,
+):
+    """Reference svg_export.py:8: the family as one SVG document.
+
+    Manim's y-up frame is flipped to svg's y-down by negating y values;
+    the viewBox uses frame units so relative positions survive, and the
+    pixel arguments set the rendered resolution.
+    """
+    fw = _FRAME_WIDTH
+    fh = _FRAME_HEIGHT
+    stroke_scale = pixel_width / fw
+
+    vb_x = -fw / 2
+    vb_y = -fh / 2
+
+    lines = [
+        '<svg xmlns="http://www.w3.org/2000/svg"',
+        f'     viewBox="{vb_x} {vb_y} {fw} {fh}"',
+        f'     width="{pixel_width}" height="{pixel_height}">',
+    ]
+
+    for mob in vmobject.family_members_with_points():
+        path_data = _get_path_data(mob)
+        if not path_data:
+            continue
+
+        fill_color = mob.get_fill_color()
+        fill_opacity = mob.get_fill_opacity()
+        stroke_color = mob.get_stroke_color()
+        stroke_opacity = mob.get_stroke_opacity()
+        stroke_width = mob.get_stroke_width() / stroke_scale
+
+        fill_str = fill_color if fill_opacity > 0 else "none"
+        stroke_str = (
+            stroke_color if (stroke_opacity > 0 and stroke_width > 0) else "none"
+        )
+
+        attrs = [f'd="{path_data}"', f'fill="{fill_str}"']
+        if fill_str != "none" and fill_opacity < 1:
+            attrs.append(f'fill-opacity="{fill_opacity:.6g}"')
+        attrs.append(f'stroke="{stroke_str}"')
+        if stroke_str != "none":
+            attrs.append(f'stroke-width="{stroke_width:.6g}"')
+            if stroke_opacity < 1:
+                attrs.append(f'stroke-opacity="{stroke_opacity:.6g}"')
+
+        lines.append(f'  <path {" ".join(attrs)}/>')
+
+    lines.append("</svg>")
+    svg_str = "\n".join(lines)
+
+    if filename is not None:
+        with open(filename, "w") as handle:
+            handle.write(svg_str)
+
+    return svg_str
 
 
 class SVGMobject(VMobject):
@@ -19727,6 +19825,14 @@ def _install_schema_surface():
             "manimlib.mobject.svg.svg_mobject",
             "get_svg_content_height",
         ): get_svg_content_height,
+        (
+            "manimlib.utils.svg_export",
+            "_get_path_data",
+        ): _get_path_data,
+        (
+            "manimlib.utils.svg_export",
+            "vmobject_to_svg",
+        ): vmobject_to_svg,
         ("manimlib.extract_scene", "get_scenes_to_render"): get_scenes_to_render,
         (
             "manimlib.extract_scene",
@@ -20123,11 +20229,182 @@ def _install_bezier_functions():
             int(start), int(end), float(alpha)
         )
 
+    def partial_bezier_points(points, a, b):
+        # Reference de Casteljau sub-section, verbatim.
+        if a == 1:
+            return [points[-1]] * len(points)
+        a_to_1 = [bezier(points[i:])(a) for i in range(len(points))]
+        end_prop = (b - a) / (1.0 - a)
+        return [bezier(a_to_1[: i + 1])(end_prop) for i in range(len(points))]
+
+    def partial_quadratic_bezier_points(points, a, b):
+        # Reference closed-form quadratic sub-section, verbatim.
+        if a == 1:
+            return 3 * [points[-1]]
+
+        def curve(t):
+            return (
+                points[0] * (1 - t) * (1 - t)
+                + 2 * points[1] * t * (1 - t)
+                + points[2] * t * t
+            )
+
+        h0 = curve(a) if a > 0 else points[0]
+        h2 = curve(b) if b < 1 else points[2]
+        h1_prime = (1 - a) * points[1] + a * points[2]
+        end_prop = (b - a) / (1.0 - a)
+        h1 = (1 - end_prop) * h0 + end_prop * h1_prime
+        return [h0, h1, h2]
+
+    def outer_interpolate(start, end, alpha):
+        result = _np.outer(1 - alpha, start) + _np.outer(alpha, end)
+        return result.reshape((*_np.shape(alpha), *_np.shape(start)))
+
+    def set_array_by_interpolation(arr, arr1, arr2, alpha, interp_func=None):
+        if interp_func is None:
+            interp_func = interpolate
+        arr[:] = interp_func(arr1, arr2, alpha)
+        return arr
+
+    def mid(start, end):
+        return (start + end) / 2.0
+
+    def match_interpolate(new_start, new_end, old_start, old_end, old_value):
+        return interpolate(
+            new_start,
+            new_end,
+            inverse_interpolate(old_start, old_end, old_value),
+        )
+
+    def is_closed(points):
+        return _np.allclose(points[0], points[-1])
+
+    def quadratic_bezier_points_for_arc(angle, n_components=8):
+        n_points = 2 * n_components + 1
+        angles = _np.linspace(0, angle, n_points)
+        points = _np.array(
+            [_np.cos(angles), _np.sin(angles), _np.zeros(n_points)]
+        ).T
+        theta = angle / n_components
+        points[1::2] /= _np.cos(theta / 2)
+        return points
+
+    def diag_to_matrix(l_and_u, diag):
+        # Reference scipy.linalg.solve_banded diagonal expansion, verbatim.
+        lower, upper = l_and_u
+        dim = diag.shape[1]
+        matrix = _np.zeros((dim, dim))
+        for i in range(lower + upper + 1):
+            _np.fill_diagonal(
+                matrix[max(0, i - upper):, max(0, upper - i):],
+                diag[i, max(0, upper - i):],
+            )
+        return matrix
+
+    def approx_smooth_quadratic_bezier_handles(points):
+        return _np.asarray(_BridgeMobject._approx_smooth_quadratic_handles(
+            [_vec3(point) for point in points]
+        ))
+
+    def get_smooth_cubic_bezier_handle_points(points):
+        firsts, seconds = _BridgeMobject._smooth_cubic_handles(
+            [_vec3(point) for point in _np.asarray(points, dtype=float)]
+        )
+        dim = _np.asarray(points, dtype=float).shape[-1]
+        empty = _np.zeros((0, dim))
+        if len(firsts) == 0:
+            return empty, empty
+        return _np.asarray(firsts), _np.asarray(seconds)
+
+    def get_quadratic_approximation_of_cubic(a0, h0, h1, a1):
+        # Reference inflection-aware two-quad reduction, verbatim NumPy.
+        a0 = _np.array(a0, ndmin=2)
+        h0 = _np.array(h0, ndmin=2)
+        h1 = _np.array(h1, ndmin=2)
+        a1 = _np.array(a1, ndmin=2)
+        T0 = h0 - a0
+        T1 = a1 - h1
+
+        def cross2d(left, right):
+            return left[..., 0] * right[..., 1] - left[..., 1] * right[..., 0]
+
+        has_infl = _np.ones(len(a0), dtype=bool)
+        p = h0 - a0
+        q = h1 - 2 * h0 + a0
+        r = a1 - 3 * h1 + 3 * h0 - a0
+        aa = cross2d(q, r)
+        bb = cross2d(p, r)
+        cc = cross2d(p, q)
+        disc = bb * bb - 4 * aa * cc
+        has_infl &= disc > 0
+        sqrt_disc = _np.sqrt(_np.abs(disc))
+        settings = _np.seterr(all="ignore")
+        ti_bounds = []
+        for sgn in [-1, +1]:
+            ti = (-bb + sgn * sqrt_disc) / (2 * aa)
+            ti[aa == 0] = (-cc / bb)[aa == 0]
+            ti[(aa == 0) & (bb == 0)] = 0
+            ti_bounds.append(ti)
+        ti_min, ti_max = ti_bounds
+        _np.seterr(**settings)
+        ti_min_in_range = has_infl & (0 < ti_min) & (ti_min < 1)
+        ti_max_in_range = has_infl & (0 < ti_max) & (ti_max < 1)
+        t_mid = 0.5 * _np.ones(len(a0))
+        t_mid[ti_min_in_range] = ti_min[ti_min_in_range]
+        t_mid[ti_max_in_range] = ti_max[ti_max_in_range]
+        m, n = a0.shape
+        t_mid = t_mid.repeat(n).reshape((m, n))
+        mid_point = bezier([a0, h0, h1, a1])(t_mid)
+        Tm = bezier([h0 - a0, h1 - h0, a1 - h1])(t_mid)
+        space_ops = _sys.modules["manimlib.utils.space_ops"]
+        i0 = space_ops.find_intersection(a0, T0, mid_point, Tm)
+        i1 = space_ops.find_intersection(a1, T1, mid_point, Tm)
+        rows, cols = _np.shape(a0)
+        result = _np.zeros((5 * rows, cols))
+        result[0::5] = a0
+        result[1::5] = i0
+        result[2::5] = mid_point
+        result[3::5] = i1
+        result[4::5] = a1
+        return result
+
+    def get_smooth_quadratic_bezier_path_through(points):
+        h0, h1 = get_smooth_cubic_bezier_handle_points(points)
+        a0 = points[:-1]
+        a1 = points[1:]
+        return get_quadratic_approximation_of_cubic(a0, h0, h1, a1)
+
+    def smooth_quadratic_path(anchors):
+        anchors = _np.asarray(anchors, dtype=float)
+        path = _BridgeMobject._smooth_quadratic_path(
+            [_vec3(point) for point in anchors],
+            1e9,
+        )
+        return _np.asarray(path)
+
     functions = {
         "bezier": bezier,
         "interpolate": interpolate,
         "inverse_interpolate": inverse_interpolate,
         "integer_interpolate": integer_interpolate,
+        "partial_bezier_points": partial_bezier_points,
+        "partial_quadratic_bezier_points": partial_quadratic_bezier_points,
+        "outer_interpolate": outer_interpolate,
+        "set_array_by_interpolation": set_array_by_interpolation,
+        "mid": mid,
+        "match_interpolate": match_interpolate,
+        "is_closed": is_closed,
+        "quadratic_bezier_points_for_arc": quadratic_bezier_points_for_arc,
+        "diag_to_matrix": diag_to_matrix,
+        "approx_smooth_quadratic_bezier_handles":
+            approx_smooth_quadratic_bezier_handles,
+        "get_smooth_cubic_bezier_handle_points":
+            get_smooth_cubic_bezier_handle_points,
+        "get_quadratic_approximation_of_cubic":
+            get_quadratic_approximation_of_cubic,
+        "get_smooth_quadratic_bezier_path_through":
+            get_smooth_quadratic_bezier_path_through,
+        "smooth_quadratic_path": smooth_quadratic_path,
     }
     module = _ensure_module("manimlib.utils.bezier")
     for name, function in functions.items():
@@ -20137,6 +20414,142 @@ def _install_bezier_functions():
 
 
 _install_bezier_functions()
+
+
+def _install_iterables_functions():
+    """The Reference's order-preserving list and array helpers
+    (manimlib/utils/iterables.py at the pin), Reference-verbatim."""
+
+    def remove_list_redundancies(lst):
+        return list(reversed(dict.fromkeys(reversed(lst))))
+
+    def list_update(l1, l2):
+        return remove_list_redundancies([*l1, *l2])
+
+    def list_difference_update(l1, l2):
+        return [e for e in l1 if e not in l2]
+
+    def adjacent_n_tuples(objects, n):
+        return zip(*[
+            [*objects[k:], *objects[:k]]
+            for k in range(n)
+        ])
+
+    def adjacent_pairs(objects):
+        return adjacent_n_tuples(objects, 2)
+
+    def batch_by_property(items, property_func):
+        batch_prop_pairs = []
+        curr_batch = []
+        curr_prop = None
+        for item in items:
+            prop = property_func(item)
+            if prop != curr_prop:
+                if len(curr_batch) > 0:
+                    batch_prop_pairs.append((curr_batch, curr_prop))
+                curr_prop = prop
+                curr_batch = [item]
+            else:
+                curr_batch.append(item)
+        if len(curr_batch) > 0:
+            batch_prop_pairs.append((curr_batch, curr_prop))
+        return batch_prop_pairs
+
+    def shuffled(iterable):
+        as_list = list(iterable)
+        _random.shuffle(as_list)
+        return as_list
+
+    def resize_array(nparray, length):
+        if len(nparray) == length:
+            return nparray
+        return _np.resize(nparray, (length, *nparray.shape[1:]))
+
+    def resize_preserving_order(nparray, length):
+        if len(nparray) == 0:
+            return _np.resize(nparray, length)
+        if len(nparray) == length:
+            return nparray
+        indices = _np.arange(length) * len(nparray) // length
+        return nparray[indices]
+
+    def array_is_constant(arr):
+        return len(arr) > 0 and (arr == arr[0]).all()
+
+    def resize_with_interpolation(nparray, length):
+        if len(nparray) == length:
+            return nparray
+        if len(nparray) == 1 or array_is_constant(nparray):
+            return nparray[:1].repeat(length, axis=0)
+        if length == 0:
+            return _np.zeros((0, *nparray.shape[1:]))
+        cont_indices = _np.linspace(0, len(nparray) - 1, length)
+        return _np.array([
+            (1 - a) * nparray[lh] + a * nparray[rh]
+            for ci in cont_indices
+            for lh, rh, a in [(int(ci), int(_np.ceil(ci)), ci % 1)]
+        ])
+
+    def make_even(iterable_1, iterable_2):
+        len1 = len(iterable_1)
+        len2 = len(iterable_2)
+        if len1 == len2:
+            return iterable_1, iterable_2
+        new_len = max(len1, len2)
+        return (
+            [iterable_1[(n * len1) // new_len] for n in range(new_len)],
+            [iterable_2[(n * len2) // new_len] for n in range(new_len)],
+        )
+
+    def arrays_match(arr1, arr2):
+        return arr1.shape == arr2.shape and (arr1 == arr2).all()
+
+    def cartesian_product(*arrays):
+        la = len(arrays)
+        dtype = _np.result_type(*arrays)
+        arr = _np.empty([len(a) for a in arrays] + [la], dtype=dtype)
+        for i, a in enumerate(_np.ix_(*arrays)):
+            arr[..., i] = a
+        return arr.reshape(-1, la)
+
+    def hash_obj(obj):
+        if isinstance(obj, dict):
+            return hash(tuple(sorted([
+                (hash_obj(k), hash_obj(v)) for k, v in obj.items()
+            ])))
+        if isinstance(obj, set):
+            return hash(tuple(sorted(hash_obj(e) for e in obj)))
+        if isinstance(obj, (tuple, list)):
+            return hash(tuple(hash_obj(e) for e in obj))
+        if hasattr(obj, "get_rgb"):
+            return hash(obj.get_rgb())
+        return hash(obj)
+
+    functions = {
+        "remove_list_redundancies": remove_list_redundancies,
+        "list_update": list_update,
+        "list_difference_update": list_difference_update,
+        "adjacent_n_tuples": adjacent_n_tuples,
+        "adjacent_pairs": adjacent_pairs,
+        "batch_by_property": batch_by_property,
+        "shuffled": shuffled,
+        "resize_array": resize_array,
+        "resize_preserving_order": resize_preserving_order,
+        "array_is_constant": array_is_constant,
+        "resize_with_interpolation": resize_with_interpolation,
+        "make_even": make_even,
+        "arrays_match": arrays_match,
+        "cartesian_product": cartesian_product,
+        "hash_obj": hash_obj,
+    }
+    module = _ensure_module("manimlib.utils.iterables")
+    for name, function in functions.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_iterables_functions()
 
 
 def _install_color_functions():

@@ -171,6 +171,7 @@ pub use fmn_geom::{
     bezier::integer_interpolate,
     earclip::triangulate as earclip_triangulate,
     path_boolean, rotation_matrix,
+    smoothing::{approx_smooth_quadratic_handles, smooth_cubic_handles, smooth_quadratic_path},
     space_ops::{
         angle_axis_from_quaternion, angle_between_vectors, angle_of_vector, find_intersection,
         get_closest_point_on_line, get_unit_normal, get_winding_number, is_inside_triangle,
