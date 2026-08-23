@@ -19720,3 +19720,53 @@ except NotImplementedError:
     pass
 else:
     raise AssertionError("unshipped svgelements must refuse loudly")
+
+
+# ---------------------------------------------------------------------------
+# fm-easc: the coordinate-system composition shelf over the live axes.
+
+_cs_axes = manimlib.Axes(x_range=(-4, 4, 1), y_range=(-2, 2, 1))
+_cs_graph = _cs_axes.get_graph(lambda x: x ** 2)
+assert np.allclose(_cs_axes.i2gp(2, _cs_graph), [2, 4, 0])
+assert abs(_cs_axes.slope_of_tangent(1.0, _cs_graph) - 2.0) < 0.05
+_tangent = _cs_axes.get_tangent_line(1.0, _cs_graph)
+assert np.allclose(_tangent.get_center(), [1.0, 1.0, 0.0], atol=0.3)
+_axis_labels = _cs_axes.get_axis_labels()
+assert len(_axis_labels) == 2
+_vline = _cs_axes.get_v_line([2, 1, 0])
+assert np.isclose(_vline.get_start()[0], 2)
+_hline = _cs_axes.get_h_line([2, 1, 0])
+assert np.isclose(_hline.get_start()[1], 1)
+_riemann = _cs_axes.get_riemann_rectangles(_cs_graph, x_range=(0, 2), dx=0.5)
+assert len(_riemann) == 4
+_area = _cs_axes.get_area_under_graph(_cs_graph, x_range=(0, 2))
+assert len(_area.get_points()) > 0
+_scatter = _cs_axes.get_scatterplot(np.array([1.0, 2.0]), np.array([1.0, 4.0]))
+assert _scatter is not None
+_glabel = _cs_axes.get_graph_label(_cs_graph, "x^2")
+assert _glabel is not None
+
+_plane = manimlib.NumberPlane(x_range=(-3, 3, 1), y_range=(-2, 2, 1))
+_majors, _minors = _plane.get_lines()
+assert len(_majors) > 0 and len(_minors) > 0
+# C-17: both unit sizes measure their own axis, so the default plane's
+# square aspect reports equal units instead of the pinned x-axis answer.
+assert abs(_plane.get_x_unit_size() - _plane.get_y_unit_size()) < 1e-6
+_pvec = _plane.get_vector([1, 1])
+assert np.allclose(_pvec.get_end(), [1.0, 1.0, 0.0])
+assert _plane.prepare_for_nonlinear_transform() is _plane
+
+_cplane = manimlib.ComplexPlane(x_range=(-3, 3, 1), y_range=(-2, 2, 1))
+_cdefaults = _cplane.get_default_coordinate_values()
+assert -2.0 in _cdefaults and 2j in _cdefaults
+assert np.isclose(_cplane.get_unit_size(), _plane.get_x_unit_size())
+
+_tdaxes = manimlib.ThreeDAxes()
+assert _tdaxes.add_axis_labels() is None and len(_tdaxes.axis_labels) == 3
+_surface = _tdaxes.get_parametric_surface(
+    lambda u, v: [u, v, u * v], u_range=(-1, 1), v_range=(-1, 1)
+)
+assert _surface.get_num_points() > 0
+_user_axis = _tdaxes.create_axis((-2, 2, 1), {}, None)
+assert np.allclose(_user_axis.n2p(0), [0.0, 0.0, 0.0])
+assert _tdaxes.get_z_axis() is _tdaxes.z_axis

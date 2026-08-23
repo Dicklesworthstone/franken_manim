@@ -5525,6 +5525,7 @@ class NumberLine(VMobject):
     def get_unit_vector(self):
         vect = self.get_vector()
         norm = float(_np.sqrt((vect * vect).sum()))
+        return vect / norm if norm > 0 else _np.zeros(3)
 
     def get_unit_size(self):
         # Reference number_line.py:158 over the LIVE geometry: rescaling
@@ -5871,6 +5872,19 @@ def _space_angle_of_vector(vector):
     )
 
 
+def _axis_get_projection(axis, point):
+    # Reference Line.get_projection: foot of the perpendicular onto the
+    # axis's live segment.
+    start = _np.asarray(axis.get_start(), dtype=float)
+    end = _np.asarray(axis.get_end(), dtype=float)
+    unit = end - start
+    norm = _space_get_norm(unit)
+    if norm == 0:
+        return start
+    unit = unit / norm
+    return start + float(_np.dot(_np.asarray(point, dtype=float) - start, unit)) * unit
+
+
 def _space_rotate_vector(vector, angle, axis=None):
     """Chisel's one rotation implementation over live vectors."""
     if axis is None:
@@ -5879,6 +5893,19 @@ def _space_rotate_vector(vector, angle, axis=None):
         _BridgeMobject._rotate_vector(_vec3(vector), float(angle), _vec3(axis))
     )
 
+def _axis_unit_size(axis, x_min, x_max):
+    # Reference number_line.py:158 over live geometry, expressed
+    # functionally because constructed axes are native proxies.
+    start = _np.asarray(axis.get_start(), dtype=float)
+    end = _np.asarray(axis.get_end(), dtype=float)
+    return float(_np.linalg.norm(end - start)) / (x_max - x_min)
+
+
+def _axis_tick_range(x_min, x_max, x_step, include_tip=False):
+    # Reference number_line.py:104 verbatim over range parts.
+    tick_max = x_max if include_tip else x_max + x_step
+    result = _np.arange(x_min, tick_max, x_step)
+    return result[result <= x_max]
 
 def _space_get_norm(vect):
     # manimlib/utils/space_ops.py get_norm, verbatim.
@@ -6076,7 +6103,7 @@ class CoordinateSystem:
         if color is None:
             color = _GREY_A
         axis = self.get_axis(index)
-        line = line_func(axis.get_projection(point), point)
+        line = line_func(_axis_get_projection(axis, point), point)
         line.set_stroke(color, stroke_width)
         return line
 
@@ -6191,7 +6218,12 @@ class CoordinateSystem:
                 )
             height_vect = self.i2gp(sample, graph) - self.c2p(sample, 0)
             rect = Rectangle(
-                width=self.x_axis.n2p(float(x1))[0] - self.x_axis.n2p(float(x0))[0],
+                width=_axis_number_to_point(
+                    self.x_axis, self.x_range[0], self.x_range[1], float(x1)
+                )[0]
+                - _axis_number_to_point(
+                    self.x_axis, self.x_range[0], self.x_range[1], float(x0)
+                )[0],
                 height=_space_get_norm(height_vect),
             )
             rect.positive = bool(height_vect[1] > 0)
@@ -6230,7 +6262,7 @@ class CoordinateSystem:
         sub_graph.add_line_to(sub_graph.get_start())
         sub_graph.set_stroke(width=0)
         sub_graph.set_fill(fill_color, fill_opacity)
-    return sub_graph
+        return sub_graph
 
 
 class Axes(VGroup, CoordinateSystem):
@@ -6287,6 +6319,16 @@ class Axes(VGroup, CoordinateSystem):
 
     def get_all_ranges(self):
         return [self.x_range, self.y_range]
+
+    def create_axis(self, range_terms, axis_config, length):
+        # Reference coordinate_systems.py:491 over the portal's native
+        # NumberLine builder, then the pinned origin shift.
+        config = dict(axis_config or {})
+        if length is not None:
+            config["width"] = float(length)
+        axis = NumberLine(tuple(float(v) for v in range_terms), **config)
+        axis.shift(-_np.array(axis.n2p(0), dtype=float))
+        return axis
 
     # CoordinateSystem mapping (coordinate_systems.py:501), verbatim over
     # each axis proxy's LIVE line geometry — exact after rescale/move.
@@ -6429,6 +6471,40 @@ class ThreeDAxes(Axes):
     def get_all_ranges(self):
         return [self.x_range, self.y_range, self.z_range]
 
+    def add_axis_labels(self, x_tex="x", y_tex="y", z_tex="z", font_size=24, buff=0.2):
+        labels = VGroup(
+            *(
+                Tex(tex, font_size=font_size)
+                for tex in [x_tex, y_tex, z_tex]
+            )
+        )
+        x_label, y_label, z_label = labels
+        z_label.rotate(_math.pi / 2, _RIGHT)
+        for label, axis in zip(labels, self):
+            vect = _np.round(
+                _np.asarray(axis.get_end(), dtype=float)
+                - _np.asarray(axis.get_start(), dtype=float)
+            )
+            norm = _space_get_norm(vect)
+            direction = vect / norm if norm > 0 else vect
+            label.next_to(axis, direction, buff=buff)
+            axis.add(label)
+        self.axis_labels = labels
+
+    def get_parametric_surface(self, func, color=None, opacity=0.9, **kwargs):
+        if color is None:
+            color = _BLUE_E
+        surface = ParametricSurface(func, color=color, opacity=opacity, **kwargs)
+        for dim, axis in zip(range(3), (self.x_axis, self.y_axis, self.z_axis)):
+            unit = _axis_unit_size(
+                axis,
+                (self.x_range, self.y_range, self.z_range)[dim][0],
+                (self.x_range, self.y_range, self.z_range)[dim][1],
+            )
+            surface.stretch(unit, dim, about_point=_ORIGIN)
+        surface.shift(self.get_origin())
+        return surface
+
 
 class NumberPlane(Axes):
     def __init__(
@@ -6485,7 +6561,6 @@ class NumberPlane(Axes):
         }
         label_axis_config.update(self._plane_params[2])
         label_y_axis_config = {"line_to_number_direction": _DL}
-        label_y_axis_config.update(self._plane_params[4])
         self._axes_params = (
             self._plane_params[0],
             self._plane_params[1],
@@ -6546,6 +6621,83 @@ class NumberPlane(Axes):
         )
 
 
+    def init_background_lines(self):
+        # Reference coordinate_systems.py:667. Construction already hangs
+        # the native line groups; this re-run composes fresh lines exactly
+        # as the pinned helper does for callers that rebuild them.
+        faded_style = dict(self._plane_params[6] or {})
+        if "stroke_color" not in faded_style:
+            faded_style["stroke_color"] = (self._plane_params[5] or {})[
+                "stroke_color"
+            ]
+        self.background_lines, self.faded_lines = self.get_lines()
+        self.background_lines.set_style(**(self._plane_params[5] or {}))
+        self.faded_lines.set_style(**faded_style)
+        self.add_to_back(self.faded_lines, self.background_lines)
+
+    def get_lines(self):
+        x_axis = self.get_x_axis()
+        y_axis = self.get_y_axis()
+        x_lines1, x_lines2 = self.get_lines_parallel_to_axis(x_axis, y_axis)
+        y_lines1, y_lines2 = self.get_lines_parallel_to_axis(y_axis, x_axis)
+        lines1 = VGroup(*x_lines1, *y_lines1)
+        lines2 = VGroup(*x_lines2, *y_lines2)
+        return lines1, lines2
+
+    def get_lines_parallel_to_axis(self, axis1, axis2):
+        ranges = self.get_all_ranges()
+        if axis2 is self.x_axis:
+            low, high, freq = ranges[0]
+        elif axis2 is self.y_axis:
+            low, high, freq = ranges[1]
+        else:
+            raise ValueError(
+                "get_lines_parallel_to_axis axis2 must be one of the plane axes"
+            )
+        ratio = self._plane_params[7]
+        line = Line(axis1.get_start(), axis1.get_end())
+        dense_freq = 1 + ratio
+        step = (1 / dense_freq) * freq
+        lines1 = VGroup()
+        lines2 = VGroup()
+        inputs = _np.arange(low, high + step, step)
+        for i, x in enumerate(inputs):
+            if abs(x) < 1e-8:
+                continue
+            new_line = line.copy()
+            new_line.shift(
+                _axis_number_to_point(axis2, low, high, float(x))
+                - _axis_number_to_point(axis2, low, high, 0.0)
+            )
+            if i % dense_freq == 0:
+                lines1.add(new_line)
+            else:
+                lines2.add(new_line)
+        return lines1, lines2
+
+    def get_x_unit_size(self):
+        return _axis_unit_size(self.x_axis, self.x_range[0], self.x_range[1])
+
+    def get_y_unit_size(self):
+        # C-17: the pinned helper returns the X-AXIS unit size here — an
+        # evident copy-paste defect that reports the wrong scale whenever
+        # the plane's aspect is not square. FrankenManim measures the
+        # axis the name names.
+        return _axis_unit_size(self.y_axis, self.y_range[0], self.y_range[1])
+
+    def get_vector(self, coords, **kwargs):
+        kwargs["buff"] = 0
+        return Arrow(self.c2p(0, 0), self.c2p(*coords), **kwargs)
+
+    def prepare_for_nonlinear_transform(self, num_inserted_curves=50):
+        for mob in self.family_members_with_points():
+            num_curves = mob.get_num_curves()
+            if num_inserted_curves > num_curves:
+                mob.insert_n_curves(num_inserted_curves - num_curves)
+            mob.make_smooth_after_applying_functions = True
+        return self
+
+
 class ComplexPlane(NumberPlane):
     # Reference ComplexPlane: complex numbers map through the 2D grid.
     def number_to_point(self, number):
@@ -6561,6 +6713,24 @@ class ComplexPlane(NumberPlane):
 
     def p2n(self, point):
         return self.point_to_number(point)
+
+    def get_unit_size(self):
+        return _axis_unit_size(self.x_axis, self.x_range[0], self.x_range[1])
+
+    def get_default_coordinate_values(self, skip_first=True):
+        x_step = self._plane_params[0][2]
+        y_step = self._plane_params[1][2]
+        x_numbers = list(
+            _axis_tick_range(self.x_range[0], self.x_range[1], x_step)
+        )
+        y_numbers = list(
+            _axis_tick_range(self.y_range[0], self.y_range[1], y_step)
+        )
+        if skip_first:
+            x_numbers = x_numbers[1:]
+            y_numbers = y_numbers[1:]
+        y_complex = [complex(0.0, float(y)) for y in y_numbers if y != 0]
+        return [*map(float, x_numbers), *y_complex]
 
     def _native_plane_specs(self):
         (x_range, y_range, axis_config, x_axis_config, y_axis_config,
@@ -6662,7 +6832,6 @@ class SVGMobject(VMobject):
     The native side reads the file under the processor's byte budget and
     parses it under the full accept/reject matrix — bombs, deep nesting,
     DOCTYPE, external references, and unsupported features are all *named*
-    refusals, never hangs or silent drops. The built family is the
     Reference's: one child per rendered shape in document order, each with
     its resolved SVG style; this constructor then applies the Reference's
     own post-passes (y-flip, style overrides, centring, height 2.0).
@@ -6753,7 +6922,6 @@ class SVGMobject(VMobject):
         # and attach the shape family, then apply the y-flip.
         specs = self._build_svg_mobject(_native_shell_factory, "", self.svg_string)
         _hang_native_children(self, specs)
-        self.flip(_RIGHT)
 
     @property
     def hash_seed(self):
@@ -6803,6 +6971,137 @@ class SVGMobject(VMobject):
         # Reference svg_mobject.py:322 is an explicit no-op at the pin;
         # text dispatch stays commented out there too.
         return None
+
+    def modify_xml_tree(self, element_tree):
+        # Reference svg_mobject.py:157 verbatim over stdlib ElementTree:
+        # wrap the document in a config-style group and a root-style group
+        # so downstream parsing sees the governed cascade order.
+        config_style_attrs = self.generate_config_style_dict()
+        style_keys = (
+            "fill",
+            "fill-opacity",
+            "stroke",
+            "stroke-opacity",
+            "stroke-width",
+            "style",
+        )
+        root = element_tree.getroot()
+        style_attrs = {
+            key: value for key, value in root.attrib.items() if key in style_keys
+        }
+        svg_xmlns = "{http://www.w3.org/2000/svg}"
+        new_root = _xml_etree.Element("svg")
+        config_style_node = _xml_etree.SubElement(
+            new_root, f"{svg_xmlns}g", config_style_attrs
+        )
+        root_style_node = _xml_etree.SubElement(
+            config_style_node, f"{svg_xmlns}g", style_attrs
+        )
+        root_style_node.extend(root)
+        return _xml_etree.ElementTree(new_root)
+
+    @staticmethod
+    def handle_transform(mob, matrix):
+        # Reference svg_mobject.py:268: the svgelements matrix layout is
+        # [a c e; b d f], applied as a 2D linear map plus translation.
+        mat = _np.array([[matrix.a, matrix.c], [matrix.b, matrix.d]])
+        vec = _np.array([matrix.e, matrix.f, 0.0])
+        mob.apply_matrix(mat)
+        mob.shift(vec)
+        return mob
+
+    @staticmethod
+    def apply_style_to_mobject(mob, shape):
+        # Reference svg_mobject.py:279: resolved paint server attributes.
+        mob.set_style(
+            stroke_width=shape.stroke_width,
+            stroke_color=shape.stroke.hexrgb,
+            stroke_opacity=shape.stroke.opacity,
+            fill_color=shape.fill.hexrgb,
+            fill_opacity=shape.fill.opacity,
+        )
+        return mob
+
+    def path_to_mobject(self, path, svg=None):
+        # Reference svg_mobject.py:290: a <use> reference builds from the
+        # referenced definition's geometry, with the use-site transform
+        # applied here at full precision.
+        objects = getattr(svg, "objects", {}) or {}
+        if path.id in objects:
+            ref_path = objects[path.id]
+            mob = VMobjectFromSVGPath(ref_path, **self.path_string_config)
+            if "transform" in path.values:
+                # The Reference builds se.Matrix from the raw transform
+                # string; without that parser, callers on this seam supply
+                # a pre-parsed Matrix-like (a b c d e f attributes).
+                matrix = path.values["transform"]
+                if not all(
+                    hasattr(matrix, attr) for attr in ("a", "b", "c", "d", "e", "f")
+                ):
+                    raise TypeError(
+                        "path_to_mobject <use> transforms need a pre-parsed "
+                        "Matrix-like in path.values['transform']"
+                    )
+                rotation = _np.array([[matrix.a, matrix.b], [matrix.c, matrix.d]])
+                translation = _np.array([[matrix.e, matrix.f]])
+                mob.apply_points_function(
+                    lambda points: _np.concatenate(
+                        [
+                            points[:, :2] @ rotation + translation,
+                            points[:, [2]],
+                        ],
+                        axis=1,
+                    ),
+                    about_point=None,
+                    about_edge=None,
+                    works_on_bounding_box=False,
+                )
+            return mob
+        return VMobjectFromSVGPath(path, **self.path_string_config)
+
+    def line_to_mobject(self, line):
+        # Reference svg_mobject.py:313.
+        return Line(
+            start=_convert_point_to_3d(line.x1, line.y1),
+            end=_convert_point_to_3d(line.x2, line.y2),
+        )
+
+    def rect_to_mobject(self, rect):
+        # Reference svg_mobject.py:320: rounded corners scale the height
+        # ratio before stretching back, then place by the rect center.
+        if rect.rx == 0 or rect.ry == 0:
+            mob = Rectangle(width=rect.width, height=rect.height)
+        else:
+            mob = RoundedRectangle(
+                width=rect.width,
+                height=rect.height * rect.rx / rect.ry,
+                corner_radius=rect.rx,
+            )
+            mob.stretch_to_fit_height(rect.height)
+        mob.shift(
+            _convert_point_to_3d(
+                rect.x + rect.width / 2, rect.y + rect.height / 2
+            )
+        )
+        return mob
+
+    def ellipse_to_mobject(self, ellipse):
+        # Reference svg_mobject.py:339.
+        mob = Circle(radius=ellipse.rx)
+        mob.stretch_to_fit_height(2 * ellipse.ry)
+        mob.shift(_convert_point_to_3d(ellipse.cx, ellipse.cy))
+        return mob
+
+    def polygon_to_mobject(self, polygon):
+        # Reference svg_mobject.py:349.
+        points = [_convert_point_to_3d(*point) for point in polygon]
+        return Polygon(*points)
+
+    def polyline_to_mobject(self, polyline):
+        # Reference svg_mobject.py:356.
+        points = [_convert_point_to_3d(*point) for point in polyline]
+        return Polyline(*points)
+
 
 
 class VMobjectFromSVGPath(VMobject):

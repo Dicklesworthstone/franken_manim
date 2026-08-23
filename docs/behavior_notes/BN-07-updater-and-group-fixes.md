@@ -1,6 +1,6 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17)
 
-**Status:** Draft (W3, fm-yra; W10, fm-23ev and fm-5wq.4.39). Consumed by Choreo (§9.1's
+**Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
 surface presents these semantics), and the Parity Ledger.
 
@@ -121,3 +121,22 @@ is unchanged.
 
 Locked by the actual-extension FunctionGraph coverage in
 `crates/fmn-python/tests/bridge.py` and the production Python PNG Gauntlet row.
+
+## C-17 — `NumberPlane.get_y_unit_size()` measures the y axis
+
+The pinned Reference's `get_y_unit_size` body reads
+`return self.get_x_axis().get_unit_size()`: a copy-paste defect that answers
+a y-axis query with the x-axis scale. On any plane whose x and y ranges or
+dimensions differ, the reported unit size is simply wrong.
+
+**FrankenManim:** the method measures the axis the name names, over live
+geometry (`axis length / (x_max − x_min)`), so rescaling or restretching the
+plane is reflected exactly.
+
+**Migration:** code that worked around the defect by calling
+`get_x_unit_size()` where it wanted the y scale can call `get_y_unit_size()`
+directly. Code on default square-aspect planes sees no change.
+
+Locked by the actual-extension bridge acceptance in
+`crates/fmn-python/tests/bridge.py` (equal-units assertion on a square-aspect
+plane alongside the x-axis measurement).

@@ -672,6 +672,7 @@ With output parity dropped, every known Reference defect is simply **fixed**; ea
 | C-14 | `Mobject.get_grid(width=…)` calls `set_height(width)`, so a width request changes the grid's height and generally produces the wrong width | fixed — `width` calls `set_width`; `height` remains independently height-setting (BN-07) |
 | C-15 | `FunctionGraph(function, color=…)` declares a color argument but never forwards it to `ParametricCurve`, so every explicit color request is silently ignored | fixed — the declared color styles the native graph; the default remains `YELLOW` (BN-07) |
 | C-16 | the frame-marker constants are frame-radius-scaled (`TOP = FRAME_Y_RADIUS * UP`, `BOTTOM`, `LEFT_SIDE`, `RIGHT_SIDE`) while `align_on_border` subtracts `buff * direction` unnormalized — so their only realistic use, as DIRECTION arguments to `to_edge`/`to_corner`, misplaces by a frame-radius factor no working scene can rely on (zero internal manimlib usage at the pin) | fixed — the four markers resolve to the unit directions through governed `[constants]` overlay rulings; frame-extent arithmetic keeps the unchanged `FRAME_*_RADIUS` spellings (BN-07) |
+| C-17 | `NumberPlane.get_y_unit_size()` returns `self.get_x_axis().get_unit_size()` — a copy-paste defect reporting the x-axis scale for a y-axis query, wrong whenever the plane's aspect is not square | fixed — measures the axis the name names over live geometry (BN-07) |
 
 ---
 

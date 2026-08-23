@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	2191a624846170988c87b247387a031f20603e1a43a2cf673cf7552a9d2e5847
+ledger_reviewed_digest	885ac1afac05762acd9ab5d847e7521a864cd0588833c0a7df09c7c217961b6a
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -281,6 +281,35 @@ manimlib.mobject.coordinate_systems:CoordinateSystem.get_y_axis	same	scripts/man
 manimlib.mobject.coordinate_systems:CoordinateSystem.i2gp	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	preserves the input_to_graph_point alias over metadata-backed and function-less graphs
 manimlib.mobject.coordinate_systems:CoordinateSystem.input_to_graph_point	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	uses retained functions directly and the pinned quick-curve binary-search fallback otherwise
 manimlib.mobject.coordinate_systems:CoordinateSystem.p2c	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the abbreviation to the concrete live inverse coordinate transform
+manimlib.mobject.coordinate_systems:CoordinateSystem.angle_of_tangent	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	measures the epsilon-separated secant angle through Chisel's planar angle kernel
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_area_under_graph	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	composes the partial-copy closure polygon with zeroed stroke and declared fill
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_axis_label	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	places the Tex label beside the axis edge with the declared buffer and optional on-screen shift
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_axis_labels	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	composes the x and y label pair into the retained axis_labels group
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_graph_label	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	searches in-bounds sample points from the right then places along the outward normal
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_h_line	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the horizontal dashed drop to the index-one axis projection
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_h_line_to_graph	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	routes the graph point through the horizontal dashed-line helper
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_line_from_axis_to_point	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	builds the declared dashed line from the perpendicular axis projection with styled stroke
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_riemann_rectangles	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	preserves left right center sampling gradient colors negative styling and per-rect positive flags
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_scatterplot	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	maps paired value arrays onto native DotCloud points
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_tangent_line	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	rotates and centers a fixed-width line by the tangent angle at the graph point
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_v_line	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	delegates the vertical dashed drop to the index-zero axis projection
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_v_line_to_graph	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	routes the graph point through the vertical dashed-line helper
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_x_axis_label	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	defaults to the RIGHT edge and DL direction beside the x axis
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_y_axis_label	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	defaults to the UP edge and DR direction beside the y axis
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_z_axis	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	indexes the third concrete axis exactly as the pinned base declares
+manimlib.mobject.coordinate_systems:CoordinateSystem.slope_of_tangent	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	takes the tangent of Chisel's measured angle under the same epsilon contract
+manimlib.mobject.coordinate_systems:Axes.create_axis	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	builds the native NumberLine over the requested range and shifts its zero to the origin
+manimlib.mobject.coordinate_systems:ComplexPlane.get_default_coordinate_values	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	returns tick values skipping the first with imaginary y entries and zeros dropped
+manimlib.mobject.coordinate_systems:ComplexPlane.get_unit_size	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	reports the live x-axis unit scale over the complex grid
+manimlib.mobject.coordinate_systems:NumberPlane.get_lines	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	pairs major and faded line groups across both axis directions
+manimlib.mobject.coordinate_systems:NumberPlane.get_lines_parallel_to_axis	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	walks the dense faded ratio grid skipping the axis itself and splitting majors from minors
+manimlib.mobject.coordinate_systems:NumberPlane.get_vector	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	draws the zero-buffer arrow between mapped plane coordinates
+manimlib.mobject.coordinate_systems:NumberPlane.get_x_unit_size	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	measures the x-axis live length per unit over its range
+manimlib.mobject.coordinate_systems:NumberPlane.get_y_unit_size	improved	BN-07	crates/fmn-python/tests/bridge.py	measures the y-axis live length per unit fixing the pinned copy-paste defect that answered from the x axis under C-17
+manimlib.mobject.coordinate_systems:NumberPlane.init_background_lines	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	recomposes styled background and faded groups behind the plane exactly as the pinned initializer
+manimlib.mobject.coordinate_systems:NumberPlane.prepare_for_nonlinear_transform	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	top-up-inserts curves across the family and enables post-application smoothing
+manimlib.mobject.coordinate_systems:ThreeDAxes.add_axis_labels	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	rotates z into place attaches each rounded-axis-direction label and retains the group
+manimlib.mobject.coordinate_systems:ThreeDAxes.get_parametric_surface	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	stretches the native surface per live axis units and seats it at the origin
 manimlib.mobject.functions:FunctionGraph	improved	BN-07	crates/fmn-python/tests/bridge.py	is an authored ParametricCurve subclass backed by Atlas sampling whose declared constructor color is no longer silently ignored under C-15
 manimlib.mobject.functions:FunctionGraph.__init__	improved	BN-07	crates/fmn-python/tests/bridge.py	preserves function and range metadata hidden discontinuity and smoothing options callback errors and native style while honoring explicit color
 manimlib.mobject.functions:ImplicitFunction	same	scripts/manim_ref/manimlib/mobject/functions.py	crates/fmn-python/tests/bridge.py	is an authored VMobject whose bounded Chisel zero-set extraction replaces the external isosurfaces mechanism without changing the public class contract
@@ -631,6 +660,8 @@ manimlib.mobject.matrix:Matrix.get_mob_matrix	same	scripts/manim_ref/manimlib/mo
 manimlib.mobject.matrix:Matrix.get_row	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable caller-visible row group and preserves the exact bounds refusal
 manimlib.mobject.matrix:Matrix.get_rows	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable top-to-bottom VGroup of live native row views
 manimlib.mobject.matrix:Matrix.set_column_colors	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	applies colors by zipped column order recursively over each live entry and returns the matrix
+manimlib.mobject.number_line:NumberLine.get_tick_range	same	scripts/manim_ref/manimlib/mobject/number_line.py	crates/fmn-python/tests/bridge.py	reproduces the pure range arithmetic including the tip-occupied endpoint rule
+manimlib.mobject.number_line:NumberLine.get_unit_size	same	scripts/manim_ref/manimlib/mobject/number_line.py	crates/fmn-python/tests/bridge.py	measures live geometry length over the declared range width
 manimlib.mobject.matrix:TexMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass whose scalar sources use the bundled fmd-math entry and delimiter engine
 manimlib.mobject.matrix:TexMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves string grid configuration font and style forwarding and live Tex entry identity without an external TeX toolchain
 manimlib.mobject.shape_matchers:BackgroundRectangle	same	scripts/manim_ref/manimlib/mobject/shape_matchers.py	crates/fmn-python/tests/bridge.py	is an authored SurroundingRectangle subclass over Atlas geometry rather than an import-only generated shell
