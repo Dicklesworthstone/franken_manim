@@ -16,6 +16,7 @@ import copy as _copy
 import difflib as _difflib
 import functools as _functools
 import enum as _enum
+import xml.etree.ElementTree as _xml_etree
 import importlib as _importlib
 import inspect as _inspect
 import itertools as _itertools
@@ -7027,7 +7028,7 @@ class SVGMobject(VMobject):
         # referenced definition's geometry, with the use-site transform
         # applied here at full precision.
         objects = getattr(svg, "objects", {}) or {}
-        if path.id in objects:
+        if getattr(path, "id", None) in objects:
             ref_path = objects[path.id]
             mob = VMobjectFromSVGPath(ref_path, **self.path_string_config)
             if "transform" in path.values:

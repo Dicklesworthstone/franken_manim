@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	885ac1afac05762acd9ab5d847e7521a864cd0588833c0a7df09c7c217961b6a
+ledger_reviewed_digest	3fa807301b903361994ac1e8daacf30cc3beb8107efebbc7e2c062e53ff6f253
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1039,6 +1039,15 @@ manimlib.mobject.svg.svg_mobject:_convert_point_to_3d	same	scripts/manim_ref/man
 manimlib.mobject.svg.svg_mobject:get_svg_content_height	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	measures the untransformed content extent in user units over the hardened parse
 manimlib.mobject.svg.svg_mobject:Path	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical pathlib Path the Reference imports
 manimlib.mobject.svg.svg_mobject:io	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib io module the Reference imports
+manimlib.mobject.svg.svg_mobject:SVGMobject.modify_xml_tree	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	wraps the document in config-style and root-style groups over stdlib ElementTree verbatim
+manimlib.mobject.svg.svg_mobject:SVGMobject.handle_transform	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	applies the svgelements matrix layout as a 2d linear map plus translation over any matrix-like
+manimlib.mobject.svg.svg_mobject:SVGMobject.apply_style_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	copies resolved paint attributes onto the mobject over any paint-server-like shape
+manimlib.mobject.svg.svg_mobject:SVGMobject.path_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds from referenced definitions on use with pre-parsed matrix-like transforms and refuses raw strings
+manimlib.mobject.svg.svg_mobject:SVGMobject.line_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the governed straight segment between the live endpoints
+manimlib.mobject.svg.svg_mobject:SVGMobject.rect_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds sharp or rounded rectangles with the corner ratio stretch and center placement
+manimlib.mobject.svg.svg_mobject:SVGMobject.ellipse_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the circle stretched to the ellipse extents at its center
+manimlib.mobject.svg.svg_mobject:SVGMobject.polygon_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the closed polygon over lifted xy vertices
+manimlib.mobject.svg.svg_mobject:SVGMobject.polyline_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the open polyline over lifted xy vertices
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

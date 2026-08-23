@@ -19770,3 +19770,153 @@ assert _surface.get_num_points() > 0
 _user_axis = _tdaxes.create_axis((-2, 2, 1), {}, None)
 assert np.allclose(_user_axis.n2p(0), [0.0, 0.0, 0.0])
 assert _tdaxes.get_z_axis() is _tdaxes.z_axis
+
+
+# ---------------------------------------------------------------------------
+# fm-a8mg: duck-typed svg converter seams.
+
+_svg_conv = manimlib.SVGMobject(
+    svg_string=(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+        '<rect x="0" y="0" width="10" height="10"/></svg>'
+    )
+)
+
+
+class _StubRect:
+    x, y, width, height, rx, ry = 1.0, 2.0, 30.0, 20.0, 0.0, 0.0
+
+
+_rect_mob = _svg_conv.rect_to_mobject(_StubRect())
+assert np.isclose(_rect_mob.get_width(), 30.0)
+assert np.isclose(_rect_mob.get_height(), 20.0)
+assert np.allclose(_rect_mob.get_center(), [16.0, 12.0, 0.0])
+
+
+class _StubRound:
+    x, y, width, height, rx, ry = 0.0, 0.0, 40.0, 40.0, 2.0, 4.0
+
+
+_round_mob = _svg_conv.rect_to_mobject(_StubRound())
+assert np.isclose(_round_mob.get_width(), 40.0)
+assert np.isclose(_round_mob.get_height(), 40.0)
+
+
+class _StubLine:
+    x1, y1, x2, y2 = 0.0, 0.0, 6.0, -8.0
+
+
+_line_mob = _svg_conv.line_to_mobject(_StubLine())
+assert np.allclose(_line_mob.get_start(), [0.0, 0.0, 0.0])
+assert np.allclose(_line_mob.get_end(), [6.0, -8.0, 0.0])
+
+
+class _StubEllipse:
+    rx, ry, cx, cy = 5.0, 2.5, 10.0, -4.0
+
+
+_ellipse_mob = _svg_conv.ellipse_to_mobject(_StubEllipse())
+assert np.isclose(_ellipse_mob.get_width(), 10.0)
+assert np.isclose(_ellipse_mob.get_height(), 5.0)
+assert np.allclose(_ellipse_mob.get_center(), [10.0, -4.0, 0.0])
+
+
+class _StubPoly:
+    def __iter__(self):
+        return iter([(0.0, 0.0), (4.0, 0.0), (0.0, 3.0)])
+
+
+_poly_mob = _svg_conv.polygon_to_mobject(_StubPoly())
+assert _poly_mob.get_num_curves() == 3
+_pl_mob = _svg_conv.polyline_to_mobject(_StubPoly())
+assert not np.allclose(_pl_mob.get_start(), _pl_mob.get_end())
+
+
+class _StubPaint:
+    class stroke:
+        hexrgb = "#123456"
+        opacity = 0.5
+
+    class fill:
+        hexrgb = "#ABCDEF"
+        opacity = 0.25
+
+    stroke_width = 6.0
+
+
+_painted = _svg_conv.apply_style_to_mobject(
+    manimlib.Square(side_length=1.0), _StubPaint()
+)
+assert _painted.get_stroke_color() == "#123456"
+assert abs(_painted.get_stroke_opacity() - 0.5) < 1e-6
+assert _painted.get_fill_color() == "#ABCDEF"
+assert abs(_painted.get_fill_opacity() - 0.25) < 1e-6
+assert np.isclose(_painted.get_stroke_width(), 6.0)
+
+
+class _StubMatrix:
+    a, b, c, d, e, f = 2.0, 0.0, 0.0, 3.0, 10.0, -5.0
+
+
+_transformed = manimlib.Square(side_length=1.0)
+_svg_conv.handle_transform(_transformed, _StubMatrix())
+assert np.isclose(_transformed.get_width(), 2.0)
+assert np.isclose(_transformed.get_height(), 3.0)
+
+_xml_tree = importlib.import_module("xml.etree.ElementTree").ElementTree(
+    importlib.import_module("xml.etree.ElementTree").fromstring(
+        '<svg width="10" height="10" fill="#FF0000"><rect x="0" y="0" width="4" height="4"/></svg>'
+    )
+)
+_new_tree = _svg_conv.modify_xml_tree(_xml_tree)
+_new_root = _new_tree.getroot()
+assert _new_root.tag == "svg"
+_groups = list(_new_root)
+assert len(_groups) == 1 and _groups[0].tag.endswith("g")
+_inner_groups = list(_groups[0])
+assert len(_inner_groups) == 1 and _inner_groups[0].attrib.get("fill") == "#FF0000"
+assert len(list(_inner_groups[0])) == 1
+
+
+class _StubDPath:
+    def d(self):
+        return "M 0 0 L 40 0"
+
+
+_direct_path = _svg_conv.path_to_mobject(_StubDPath())
+assert _direct_path.get_num_points() > 0
+
+
+class _StubSvg:
+    objects = {"ref1": _StubDPath()}
+
+
+class _StubUsePath:
+    id = "ref1"
+    values = {}
+
+
+_ref_mob = _svg_conv.path_to_mobject(_StubUsePath(), _StubSvg())
+assert _ref_mob.get_num_points() > 0
+
+
+class _StubUseTransformed:
+    id = "ref1"
+    values = {"transform": _StubMatrix()}
+
+
+_ref_shifted = _svg_conv.path_to_mobject(_StubUseTransformed(), _StubSvg())
+assert np.isclose(_ref_shifted.get_center()[0] - _ref_mob.get_center()[0], 30.0)
+
+
+class _StubUseRawString:
+    id = "ref1"
+    values = {"transform": "translate(5)"}
+
+
+try:
+    _svg_conv.path_to_mobject(_StubUseRawString(), _StubSvg())
+except TypeError:
+    pass
+else:
+    raise AssertionError("raw transform strings need the native pipeline")
