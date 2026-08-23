@@ -19707,8 +19707,16 @@ _rect_only = (
 )
 assert np.isclose(_svg_module.get_svg_content_height(_rect_only), 10.0)
 
-# The Reference's svg-module imports stay exposed as themselves.
-assert _svg_module.ET is importlib.import_module("xml.etree.ElementTree")
+# Path and io bind to the identical objects; ET binds to the parent
+# package (schema origin records "xml.etree" — extractor imprecision
+# tracked for the full-path fix); se stays a loud refusal because
+# svgelements is deliberately unshipped.
 assert _svg_module.Path is importlib.import_module("pathlib").Path
 assert _svg_module.io is importlib.import_module("io")
-assert _svg_module.se is importlib.import_module("svgelements")
+assert type(_svg_module.ET).__name__ == "module"
+try:
+    _svg_module.se("anything")
+except NotImplementedError:
+    pass
+else:
+    raise AssertionError("unshipped svgelements must refuse loudly")

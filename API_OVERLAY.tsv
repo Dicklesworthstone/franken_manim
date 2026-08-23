@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	8d8beda28128d54031d70a86c77ea18bfdac009ed3bfe279147456815cd6e277
+ledger_reviewed_digest	2191a624846170988c87b247387a031f20603e1a43a2cf673cf7552a9d2e5847
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -994,6 +994,20 @@ manimlib.mobject.mobject:wraps	same	scripts/manim_ref/manimlib/mobject/mobject.p
 manimlib.mobject.mobject:TypeVar	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical typing TypeVar factory the Reference imports
 manimlib.mobject.mobject:Generic	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical typing Generic base the Reference imports
 manimlib.mobject.mobject:SubmobjectType	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	resolves the generic spelling into a real TypeVar carrying the Reference's name
+manimlib.mobject.svg.svg_mobject:SVGMobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	is the authored user-file surface over Chisel's hardened document processor with the Reference's post-passes
+manimlib.mobject.svg.svg_mobject:SVGMobject.__init__	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds one child per rendered shape in document order then flips styles centers and scales exactly as the Reference constructor
+manimlib.mobject.svg.svg_mobject:SVGMobject.init_svg_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	rebuilds and re-attaches the shape family with the y-flip
+manimlib.mobject.svg.svg_mobject:SVGMobject.hash_seed	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	returns the class name svg_default path_string_config and svg_string tuple that keys the family cache
+manimlib.mobject.svg.svg_mobject:SVGMobject.mobjects_from_svg_string	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	returns a detached per-shape family in document order over the native parse
+manimlib.mobject.svg.svg_mobject:SVGMobject.file_name_to_svg_string	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	reads the source through the governed native reader with identical byte budget and refusals
+manimlib.mobject.svg.svg_mobject:SVGMobject.generate_config_style_dict	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	mirrors the seed-to-attribute conversion table verbatim over svg_default
+manimlib.mobject.svg.svg_mobject:SVGMobject.text_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	explicit no-op at the pin where text dispatch stays commented out
+manimlib.mobject.svg.svg_mobject:VMobjectFromSVGPath	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	is the authored single-path wrapper over the same hardened parser accepting any object exposing d
+manimlib.mobject.svg.svg_mobject:VMobjectFromSVGPath.__init__	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	validates path data applies joint and anti-alias configuration and resolves vmobject style defaults
+manimlib.mobject.svg.svg_mobject:_convert_point_to_3d	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	lifts an svg xy pair to a zero-z scene point
+manimlib.mobject.svg.svg_mobject:get_svg_content_height	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	measures the untransformed content extent in user units over the hardened parse
+manimlib.mobject.svg.svg_mobject:Path	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical pathlib Path the Reference imports
+manimlib.mobject.svg.svg_mobject:io	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib io module the Reference imports
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

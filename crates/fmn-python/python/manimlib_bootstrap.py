@@ -48,6 +48,8 @@ _DOWN = _np.array([0.0, -1.0, 0.0])
 _OUT = _np.array([0.0, 0.0, 1.0])
 _IN = _np.array([0.0, 0.0, -1.0])
 _DL = _LEFT + _DOWN
+_UL = _LEFT + _UP
+_DR = _RIGHT + _DOWN
 _ONES = _np.array([1.0, 1.0, 1.0])
 # manimlib/default_config.yml `sizes`: the Reference's default buffers.
 _DEFAULT_MOBJECT_TO_EDGE_BUFF = 0.5
@@ -5523,7 +5525,21 @@ class NumberLine(VMobject):
     def get_unit_vector(self):
         vect = self.get_vector()
         norm = float(_np.sqrt((vect * vect).sum()))
-        return vect / norm if norm > 0 else _np.zeros(3)
+
+    def get_unit_size(self):
+        # Reference number_line.py:158 over the LIVE geometry: rescaling
+        # or moving the axis changes the unit size exactly as measured.
+        return self.get_length() / (self.x_max - self.x_min)
+
+    def get_tick_range(self):
+        # Reference number_line.py:104: pure range arithmetic, ending at
+        # x_max unless the axis carries a tip that already occupies it.
+        if self._number_line_params[1].get("include_tip"):
+            tick_max = self.x_max
+        else:
+            tick_max = self.x_max + self.x_step
+        result = _np.arange(self.x_min, tick_max, self.x_step)
+        return result[result <= self.x_max]
 
     def add_numbers(self, x_values=None, excluding=None, font_size=24, **kwargs):
         # The Reference forwards **kwargs to get_number_mobject; the native
@@ -5845,6 +5861,30 @@ class BarChart(VGroup):
             bar.move_to(bar_bottom, _DOWN)
 
 
+def _space_angle_of_vector(vector):
+    """Chisel's planar angle kernel over any 2D/3D delta."""
+    values = _np.asarray(vector, dtype=float)
+    if values.size < 2:
+        raise ValueError("angle needs at least two components")
+    return _BridgeMobject._angle_of_vector(
+        (float(values[0]), float(values[1]), float(values[2]) if values.size > 2 else 0.0)
+    )
+
+
+def _space_rotate_vector(vector, angle, axis=None):
+    """Chisel's one rotation implementation over live vectors."""
+    if axis is None:
+        axis = _OUT
+    return _np.array(
+        _BridgeMobject._rotate_vector(_vec3(vector), float(angle), _vec3(axis))
+    )
+
+
+def _space_get_norm(vect):
+    # manimlib/utils/space_ops.py get_norm, verbatim.
+    return sum(x ** 2 for x in vect) ** 0.5
+
+
 class CoordinateSystem:
     """The Reference's coordinate-system mixin over live axis geometry.
 
@@ -5976,6 +6016,221 @@ class CoordinateSystem:
         if not jagged:
             graph.add_updater(lambda current: current.make_smooth(approx=True))
         return graph
+
+    def get_z_axis(self):
+        return self.get_axis(2)
+
+    # --- fm-easc: the composition shelf over the live axes. Every member
+    # is Reference-verbatim composition over already-native parts; no
+    # point math is re-derived here.
+
+    def get_x_axis_label(self, label_tex, edge=None, direction=None, **kwargs):
+        edge = _RIGHT if edge is None else edge
+        direction = _DL if direction is None else direction
+        return self.get_axis_label(
+            label_tex, self.get_x_axis(), edge, direction, **kwargs
+        )
+
+    def get_y_axis_label(self, label_tex, edge=None, direction=None, **kwargs):
+        edge = _UP if edge is None else edge
+        direction = _DR if direction is None else direction
+        return self.get_axis_label(
+            label_tex, self.get_y_axis(), edge, direction, **kwargs
+        )
+
+    def get_axis_label(
+        self,
+        label_tex,
+        axis,
+        edge,
+        direction,
+        buff=None,
+        ensure_on_screen=False,
+        **kwargs,
+    ):
+        if buff is None:
+            buff = _MED_SMALL_BUFF
+        label = Tex(label_tex, **kwargs)
+        label.next_to(axis.get_edge_center(edge), direction, buff=buff)
+        if ensure_on_screen:
+            label.shift_onto_screen(buff=_MED_SMALL_BUFF)
+        return label
+
+    def get_axis_labels(self, x_label_tex="x", y_label_tex="y", **kwargs):
+        self.axis_labels = VGroup(
+            self.get_x_axis_label(x_label_tex, **kwargs),
+            self.get_y_axis_label(y_label_tex, **kwargs),
+        )
+        return self.axis_labels
+
+    def get_line_from_axis_to_point(
+        self,
+        index,
+        point,
+        line_func=None,
+        color=None,
+        stroke_width=2,
+    ):
+        if line_func is None:
+            line_func = DashedLine
+        if color is None:
+            color = _GREY_A
+        axis = self.get_axis(index)
+        line = line_func(axis.get_projection(point), point)
+        line.set_stroke(color, stroke_width)
+        return line
+
+    def get_v_line(self, point, **kwargs):
+        return self.get_line_from_axis_to_point(0, point, **kwargs)
+
+    def get_h_line(self, point, **kwargs):
+        return self.get_line_from_axis_to_point(1, point, **kwargs)
+
+    def get_graph_label(
+        self,
+        graph,
+        label="f(x)",
+        x=None,
+        direction=None,
+        buff=None,
+        color=None,
+    ):
+        if direction is None:
+            direction = _RIGHT
+        if buff is None:
+            buff = _MED_SMALL_BUFF
+        if isinstance(label, str):
+            label = Tex(label)
+        if color is None:
+            label.match_color(graph)
+        if x is None:
+            max_y = _FRAME_Y_RADIUS - label.get_height()
+            max_x = _FRAME_X_RADIUS - label.get_width()
+            for x0 in _np.arange(*self.x_range)[::-1]:
+                pt = self.i2gp(x0, graph)
+                if abs(pt[0]) < max_x and abs(pt[1]) < max_y:
+                    x = x0
+                    break
+            if x is None:
+                x = self.x_range[1]
+        point = self.input_to_graph_point(x, graph)
+        angle = self.angle_of_tangent(x, graph)
+        normal = _space_rotate_vector(_RIGHT, angle + 90 * _DEG)
+        if normal[1] < 0:
+            normal = normal * -1
+        label.next_to(point, normal, buff=buff)
+        label.shift_onto_screen()
+        return label
+
+    def get_v_line_to_graph(self, x, graph, **kwargs):
+        return self.get_v_line(self.i2gp(x, graph), **kwargs)
+
+    def get_h_line_to_graph(self, x, graph, **kwargs):
+        return self.get_h_line(self.i2gp(x, graph), **kwargs)
+
+    def get_scatterplot(self, x_values, y_values, **dot_config):
+        return DotCloud(self.c2p(x_values, y_values), **dot_config)
+
+    def angle_of_tangent(self, x, graph, dx=1e-8):
+        p0 = self.input_to_graph_point(x, graph)
+        p1 = self.input_to_graph_point(x + dx, graph)
+        return _space_angle_of_vector(p1 - p0)
+
+    def slope_of_tangent(self, x, graph, **kwargs):
+        return _np.tan(self.angle_of_tangent(x, graph, **kwargs))
+
+    def get_tangent_line(self, x, graph, length=5, line_func=None):
+        if line_func is None:
+            line_func = Line
+        line = line_func(_LEFT, _RIGHT)
+        line.set_width(length)
+        line.rotate(self.angle_of_tangent(x, graph))
+        line.move_to(self.input_to_graph_point(x, graph))
+        return line
+
+    def get_riemann_rectangles(
+        self,
+        graph,
+        x_range=None,
+        dx=None,
+        input_sample_type="left",
+        stroke_width=1,
+        stroke_color=None,
+        fill_opacity=1,
+        colors=(_BLUE_D, _BLUE_B),
+        negative_color=None,
+        stroke_background=True,
+        show_signed_area=True,
+    ):
+        del show_signed_area  # accepted for signature fidelity
+        if stroke_color is None:
+            stroke_color = _BLACK
+        if negative_color is None:
+            negative_color = _RED
+        if colors == (_BLUE_D, _BLUE_B):
+            colors = (_BLUE_D, _BLUE_B)
+        if x_range is None:
+            x_range = self.x_range[:2]
+        if dx is None:
+            dx = self.x_range[2]
+        if len(x_range) < 3:
+            x_range = [*x_range, dx]
+        rects = []
+        xs = _np.arange(x_range[0], x_range[1] + dx, x_range[2])
+        for x0, x1 in zip(xs, xs[1:]):
+            if input_sample_type == "left":
+                sample = x0
+            elif input_sample_type == "right":
+                sample = x1
+            elif input_sample_type == "center":
+                sample = 0.5 * x0 + 0.5 * x1
+            else:
+                raise ValueError(
+                    "get_riemann_rectangles input_sample_type must be "
+                    "left, right, or center"
+                )
+            height_vect = self.i2gp(sample, graph) - self.c2p(sample, 0)
+            rect = Rectangle(
+                width=self.x_axis.n2p(float(x1))[0] - self.x_axis.n2p(float(x0))[0],
+                height=_space_get_norm(height_vect),
+            )
+            rect.positive = bool(height_vect[1] > 0)
+            rect.move_to(self.c2p(float(x0), 0), _DL if rect.positive else _UL)
+            rects.append(rect)
+        result = VGroup(*rects)
+        result.set_submobject_colors_by_gradient(*colors)
+        result.set_style(
+            stroke_width=stroke_width,
+            stroke_color=stroke_color,
+            fill_opacity=fill_opacity,
+            stroke_behind=stroke_background,
+        )
+        for rect in result:
+            if not rect.positive:
+                rect.set_fill(negative_color)
+        return result
+
+    def get_area_under_graph(self, graph, x_range=None, fill_color=None, fill_opacity=0.5):
+        if fill_color is None:
+            fill_color = _BLUE_D
+        if x_range is None:
+            x_range = [
+                self.x_axis.p2n(graph.get_start()),
+                self.x_axis.p2n(graph.get_end()),
+            ]
+        alpha_bounds = [
+            inverse_interpolate(*graph.x_range[:2], x)
+            for x in x_range
+        ]
+        sub_graph = graph.copy()
+        sub_graph.clear_updaters()
+        sub_graph.pointwise_become_partial(graph, *alpha_bounds)
+        sub_graph.add_line_to(self.c2p(x_range[1], 0))
+        sub_graph.add_line_to(self.c2p(x_range[0], 0))
+        sub_graph.add_line_to(sub_graph.get_start())
+        sub_graph.set_stroke(width=0)
+        sub_graph.set_fill(fill_color, fill_opacity)
+    return sub_graph
 
 
 class Axes(VGroup, CoordinateSystem):
