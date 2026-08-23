@@ -10705,6 +10705,8 @@ class Surface(Mobject):
     Concrete construction routes through the solid subclasses; the
     remaining Surface surface stays precise schema placeholders."""
 
+    dimension = 3
+
     def pointwise_become_partial(self, smobject, a, b, axis=None):
         assert isinstance(smobject, Surface)
         if axis is None:
@@ -10730,6 +10732,129 @@ class Surface(Mobject):
         else:
             self.deactivate_depth_test()
         return self
+
+    def uv_func(self, u, v):
+        # Reference surface.py:78 default; subclasses override.
+        return (u, v, 0.0)
+
+    def get_uv_grid(self):
+        nu, nv = self.resolution
+        u_range = _np.linspace(*self.u_range, nu)
+        v_range = _np.linspace(*self.v_range, nv)
+        U, V = _np.meshgrid(u_range, v_range, indexing="ij")
+        return _np.stack([U, V], axis=-1)
+
+    def uv_to_point(self, u, v):
+        nu, nv = self.resolution
+        verts_by_uv = _np.reshape(self.get_points(), (nu, nv, self.dimension))
+        u_lo, u_hi = self.u_range[:2]
+        v_lo, v_hi = self.v_range[:2]
+        alpha1 = min(1.0, max(0.0, (float(u) - u_lo) / (u_hi - u_lo)))
+        alpha2 = min(1.0, max(0.0, (float(v) - v_lo) / (v_hi - v_lo)))
+        scaled_u = alpha1 * (nu - 1)
+        scaled_v = alpha2 * (nv - 1)
+        u_int = int(scaled_u)
+        v_int = int(scaled_v)
+        u_int_plus = min(u_int + 1, nu - 1)
+        v_int_plus = min(v_int + 1, nv - 1)
+        a = verts_by_uv[u_int, v_int, :]
+        b = verts_by_uv[u_int, v_int_plus, :]
+        c = verts_by_uv[u_int_plus, v_int, :]
+        d = verts_by_uv[u_int_plus, v_int_plus, :]
+        u_res = scaled_u % 1
+        v_res = scaled_v % 1
+        return _interpolate(
+            _interpolate(a, b, v_res),
+            _interpolate(c, d, v_res),
+            u_res,
+        )
+
+    def compute_triangle_indices(self):
+        nu, nv = self.resolution
+        if nu == 0 or nv == 0:
+            self.triangle_indices = _np.zeros(0, dtype=int)
+            return self.triangle_indices
+        index_grid = _np.arange(nu * nv).reshape((nu, nv))
+        indices = _np.zeros(6 * (nu - 1) * (nv - 1), dtype=int)
+        indices[0::6] = index_grid[:-1, :-1].flatten()
+        indices[1::6] = index_grid[+1:, :-1].flatten()
+        indices[2::6] = index_grid[:-1, +1:].flatten()
+        indices[3::6] = index_grid[:-1, +1:].flatten()
+        indices[4::6] = index_grid[+1:, :-1].flatten()
+        indices[5::6] = index_grid[+1:, +1:].flatten()
+        self.triangle_indices = indices
+        return self.triangle_indices
+
+    def get_triangle_indices(self):
+        return self.triangle_indices
+
+    def get_unit_normals(self):
+        # Reference surface.py:171 over the live normal-seed records.
+        normals = (
+            _np.asarray(self.data["d_normal_point"], dtype=float)
+            - _np.asarray(self.data["point"], dtype=float)
+        )
+        norms = _np.sqrt((normals * normals).sum(axis=1))
+        norms[norms == 0] = 1
+        return normals / norms[:, _np.newaxis]
+
+    def get_partial_points_array(self, points, a, b, resolution, axis):
+        if len(points) == 0:
+            return points
+        nu, nv = resolution[:2]
+        points = points.reshape(resolution).copy()
+        max_index = resolution[axis] - 1
+
+        def bounded_integer_interpolate(alpha):
+            scaled = float(alpha) * max_index
+            index = max(0, min(int(scaled), max_index - 1))
+            return index, scaled - index
+
+        lower_index, lower_residue = bounded_integer_interpolate(a)
+        upper_index, upper_residue = bounded_integer_interpolate(b)
+        if axis == 0:
+            points[:lower_index] = _interpolate(
+                points[lower_index], points[lower_index + 1], lower_residue
+            )
+            points[upper_index + 1:] = _interpolate(
+                points[upper_index], points[upper_index + 1], upper_residue
+            )
+        else:
+            shape = (nu, 1, resolution[2])
+            points[:, :lower_index] = _interpolate(
+                points[:, lower_index],
+                points[:, lower_index + 1],
+                lower_residue,
+            ).reshape(shape)
+            points[:, upper_index + 1:] = _interpolate(
+                points[:, upper_index],
+                points[:, upper_index + 1],
+                upper_residue,
+            ).reshape(shape)
+        return points.reshape((nu * nv, *resolution[2:]))
+
+    def sort_faces_back_to_front(self, vect=None):
+        if vect is None:
+            vect = _OUT
+        tri_is = self.triangle_indices
+        points = self.get_points()
+        dots = _np.dot(points[tri_is[::3]], _np.asarray(vect, dtype=float).T)
+        indices = _np.argsort(dots)
+        for k in range(3):
+            tri_is[k::3] = tri_is[k::3][indices]
+        return self
+
+    def always_sort_to_camera(self, camera):
+        def updater(surface):
+            vect = camera.get_location() - surface.get_center()
+            surface.sort_faces_back_to_front(vect)
+        self.add_updater(updater)
+        return self
+
+    def color_by_uv_function(self, uv_to_color):
+        uv_grid = self.get_uv_grid().reshape(-1, 2)
+        colors = [uv_to_color(float(u), float(v)) for u, v in uv_grid]
+        return self.set_rgba_array_by_color(colors, recurse=False)
 
 
 class SGroup(Surface):
@@ -10764,6 +10889,18 @@ class TexturedSurface(Surface):
             "light/dark texture pair without changing the surface grid into "
             "an ImageQuad"
         )
+
+    def set_image_coords_by_uv_func(self, uv_func):
+        # Reference surface.py:353: resample im_coords over the wrapped
+        # uv surface grid with the reversed v direction.
+        nu, nv = self.uv_surface.resolution
+        values = _np.array([
+            uv_func(float(u), float(v))
+            for u in _np.linspace(0, 1, nu)
+            for v in _np.linspace(1, 0, nv)
+        ])
+        self.data["im_coords"][:] = values
+        return self
 
 
 class TexturedGeometry(TexturedSurface):
@@ -10806,6 +10943,37 @@ class ThreeDModel(Group):
         self.obj_file = str(path)
         self.height = float(height)
 
+    def get_textures_from_mtl(self, obj_filepath, suppress_warnings=True):
+        """Reference ThreeDModel.get_textures_from_mtl over Atlas's owned
+        OBJ-subset reader: extract {material name: texture path} from the
+        sibling .mtl named by the file's mtllib line. The pywavefront
+        dependency is deliberately unshipped; this reads only the
+        newmtl/map_Kd pairs the docstring contract names. Materials with
+        no texture map to None, exactly as the pinned helper."""
+        obj_path = _pathlib.Path(obj_filepath)
+        textures = {}
+        mtl_names = [
+            parts[1]
+            for line in obj_path.read_text().splitlines()
+            if (parts := line.split()) and parts[0] == "mtllib" and len(parts) > 1
+        ]
+        for mtl_name in mtl_names:
+            mtl_path = obj_path.parent / mtl_name
+            if not mtl_path.exists():
+                continue
+            current = None
+            for line in mtl_path.read_text().splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                if parts[0] == "newmtl":
+                    current = parts[1] if len(parts) > 1 else None
+                    textures.setdefault(current, None)
+                elif parts[0] in ("map_Kd", "map_Ka") and current is not None:
+                    if len(parts) > 1:
+                        textures[current] = str(mtl_path.parent / parts[-1])
+        return textures
+
     def copy(self, deep=False):
         return _copy_mobject_graph(
             self,
@@ -10822,6 +10990,7 @@ ThreeDModel.__init__.__annotations__["obj_file"] = str
 
 class ParametricSurface(Surface):
     def __init__(self, uv_func, u_range=(0, 1), v_range=(0, 1), **kwargs):
+        self.passed_uv_func = uv_func
         color = kwargs.pop("color", None)
         opacity = kwargs.pop("opacity", None)
         shading = kwargs.pop("shading", None)
@@ -10851,6 +11020,9 @@ class ParametricSurface(Surface):
         )
         _hang_native_children(self, specs)
         self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def uv_func(self, u, v):
+        return self.passed_uv_func(u, v)
 
 
 class Sphere(Surface):

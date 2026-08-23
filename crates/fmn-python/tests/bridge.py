@@ -19920,3 +19920,55 @@ except TypeError:
     pass
 else:
     raise AssertionError("raw transform strings need the native pipeline")
+
+
+# ---------------------------------------------------------------------------
+# fm-gqfu: the Surface UV/triangle shelf over native surface records.
+
+_surf = manimlib.ParametricSurface(
+    lambda u, v: [u, v, u * v], u_range=(0, 1), v_range=(0, 1), resolution=(11, 11)
+)
+assert _surf.passed_uv_func is not None
+assert _surf.uv_func(0.5, 0.25)[2] == 0.125
+_grid = _surf.get_uv_grid()
+assert _grid.shape == (11, 11, 2) and _grid[0, 0].tolist() == [0.0, 0.0]
+assert np.allclose(_surf.uv_to_point(0.5, 0.5), [0.5, 0.5, 0.25], atol=1e-9)
+_tri = _surf.compute_triangle_indices()
+assert _tri.shape == (600,) and _tri.max() == 120
+assert np.array_equal(_surf.get_triangle_indices(), _tri)
+assert _surf.get_unit_normals().shape == (121, 3)
+_surf.sort_faces_back_to_front(np.array([0.0, 0.0, 1.0]))
+_sorted = _surf.get_triangle_indices()
+assert set(_sorted.tolist()) <= set(range(121)) and len(_sorted) == 600
+
+
+def _surface_uv_color(u, v):
+    return "#FF0000" if u < 0.5 else "#0000FF"
+
+
+_surf.color_by_uv_function(_surface_uv_color)
+_rgba = _surf.data["rgba"]
+_reds = int(((_rgba[:, 0] > 0.9) & (_rgba[:, 2] < 0.1)).sum())
+_blues = int(((_rgba[:, 2] > 0.9) & (_rgba[:, 0] < 0.1)).sum())
+assert _reds == 55 and _blues == 66
+_partial = _surf.get_partial_points_array(
+    _surf.get_points(), 0.25, 0.75, (11, 11, 3), 0
+)
+assert _partial.shape == (121, 3)
+_surf.always_sort_to_camera(manimlib.Camera())
+
+try:
+    manimlib.TexturedSurface(_surf, "unused.png")
+    raise AssertionError("TexturedSurface must refuse while the texture-pair gap stands")
+except bridge_errors.CapabilityError:
+    pass
+assert callable(manimlib.TexturedSurface.set_image_coords_by_uv_func)
+
+_mtl_dir = tempfile.mkdtemp()
+_mtl_path = pathlib.Path(_mtl_dir)
+(_mtl_path / "model.obj").write_text("mtllib model.mtl\nv 0 0 0\n")
+(_mtl_path / "model.mtl").write_text("newmtl matA\nmap_Kd texA.png\nnewmtl matB\n")
+_textures = manimlib.ThreeDModel.__dict__["get_textures_from_mtl"](
+    None, str(_mtl_path / "model.obj")
+)
+assert _textures["matA"].endswith("texA.png") and _textures["matB"] is None
