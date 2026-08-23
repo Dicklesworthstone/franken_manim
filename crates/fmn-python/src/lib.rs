@@ -3579,7 +3579,9 @@ impl BridgeMobject {
             PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
         })?;
         String::from_utf8(contents).map_err(|error| {
-            PyOSError::new_err(format!("SVGMobject source {file_name:?} is not UTF-8: {error}"))
+            PyOSError::new_err(format!(
+                "SVGMobject source {file_name:?} is not UTF-8: {error}"
+            ))
         })
     }
 
