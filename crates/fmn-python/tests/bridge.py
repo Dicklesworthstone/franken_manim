@@ -19496,3 +19496,219 @@ _submobject_type = _mobj_module.SubmobjectType
 assert type(_submobject_type).__name__ == "TypeVar"
 assert _submobject_type.__name__ == "SubmobjectType"
 assert manimlib.SubmobjectType is _submobject_type
+
+
+# ---------------------------------------------------------------------------
+# fm-fnun: the remaining manimlib.utils.space_ops functions route through
+# fmn-geom's deterministic authorities; pure shape arithmetic stays
+# Reference-verbatim NumPy.
+
+_quat = space_utils.quaternion_from_angle_axis(np.pi / 3, [0.0, 1.0, 0.0])
+assert np.allclose(_quat, [0.0, np.sin(np.pi / 6), 0.0, np.cos(np.pi / 6)])
+_ang, _axis = space_utils.angle_axis_from_quaternion(_quat)
+assert np.isclose(_ang, np.pi / 3)
+assert np.allclose(_axis, [0.0, 1.0, 0.0])
+_double = space_utils.quaternion_mult(_quat, _quat)
+_dang, _daxis = space_utils.angle_axis_from_quaternion(_double)
+assert np.isclose(_dang, 2 * np.pi / 3) and np.allclose(_daxis, [0.0, 1.0, 0.0])
+assert np.allclose(space_utils.quaternion_mult(), [0.0, 0.0, 0.0, 1.0])
+assert np.allclose(
+    space_utils.quaternion_conjugate([1.0, 2.0, 3.0, 4.0]), [-1.0, -2.0, -3.0, 4.0]
+)
+
+_rm = space_utils.rotation_matrix(np.pi / 2, [0.0, 0.0, 1.0])
+assert np.allclose(_rm @ _rm.T, np.eye(3))
+assert np.allclose(_rm @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0])
+_rmt = space_utils.rotation_matrix_transpose(np.pi / 2, [0.0, 0.0, 1.0])
+assert np.allclose(_rmt, _rm.T)
+assert np.allclose(
+    space_utils.rotation_about_z(np.pi / 2), [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+)
+_qt = space_utils.rotation_matrix_transpose_from_quaternion(_quat)
+_qm = space_utils.rotation_matrix_from_quaternion(_quat)
+assert np.allclose(_qt, _qm.T) and np.allclose(_qt @ _qm, np.eye(3))
+_rb = space_utils.rotation_between_vectors(np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+assert np.allclose(_rb @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0], atol=1e-7)
+assert np.allclose(
+    space_utils.rotation_between_vectors(np.array([1.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])),
+    np.eye(3),
+)
+assert np.allclose(space_utils.z_to_vector(np.array([0.0, 0.0, 1.0])), np.eye(3))
+
+assert float(space_utils.cross2d(np.array([1.0, 2.0]), np.array([3.0, 4.0]))) == -2.0
+assert np.allclose(
+    space_utils.cross2d(np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([[5.0, 6.0], [7.0, 8.0]])),
+    [-4.0, -4.0],
+)
+assert space_utils.norm_squared([3, 4]) == 25
+_poly = np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [3.0, 4.0, 0.0]])
+assert np.isclose(space_utils.poly_line_length(_poly), 7.0)
+assert np.allclose(space_utils.project_along_vector([1.0, 2.0, 3.0], [0.0, 0.0, 1.0]), [1.0, 2.0, 0.0])
+assert np.allclose(space_utils.get_unit_normal([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0])
+# The Reference degeneracy branch: aligned-with-z inputs fall back to DOWN.
+assert np.allclose(space_utils.get_unit_normal([0.0, 0.0, 1.0], [0.0, 0.0, -1.0]), [0.0, -1.0, 0.0])
+
+assert space_utils.tri_area([0, 0], [4, 0], [0, 3]) == 6.0
+assert space_utils.tri_area(np.array([0.0, 0.0, 7.0]), np.array([4.0, 0.0, 7.0]), np.array([0.0, 3.0, 7.0])) == 6.0
+assert space_utils.is_inside_triangle([1, 1], [0, 0], [4, 0], [0, 3]) is True
+assert space_utils.is_inside_triangle([9, 9], [0, 0], [4, 0], [0, 3]) is False
+
+_hit = space_utils.line_intersection(((0.0, 0.0, 0.0), (2.0, 2.0, 0.0)), ((0.0, 2.0, 0.0), (2.0, 0.0, 0.0)))
+assert np.allclose(_hit, [1.0, 1.0, 0.0])
+try:
+    space_utils.line_intersection(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)), ((0.0, 1.0, 0.0), (1.0, 1.0, 0.0)))
+    raise AssertionError("line_intersection accepted parallel lines")
+except ValueError:
+    pass
+
+_fi = space_utils.find_intersection(
+    np.array([1.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0]),
+    np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 0.0]),
+)
+assert np.allclose(_fi, [1.0, 1.0, 0.0])
+_fib = space_utils.find_intersection(
+    np.array([[1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]),
+    np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
+    np.zeros((2, 3)),
+    np.array([[1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]),
+)
+assert np.allclose(_fib, [[1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]])
+
+_closest = space_utils.get_closest_point_on_line(np.array([4.0, 0.0]), np.array([0.0, 0.0]), np.array([2.0, 3.0]))
+assert np.allclose(_closest, [2.0, 0.0])
+_clamped = space_utils.get_closest_point_on_line(np.array([4.0, 0.0]), np.array([0.0, 0.0]), np.array([9.0, 0.0]))
+assert np.allclose(_clamped, [4.0, 0.0])
+
+_square = [np.array(p, dtype=float) for p in [(2, 0), (0, 2), (-2, 0), (0, -2)]]
+_wound = space_utils.get_winding_number(_square)
+assert abs(abs(_wound) - 1.0) < 1e-9, f"square winding number was {_wound!r}"
+# An open path away from the origin sweeps zero net angle.
+_open = space_utils.get_winding_number(
+    [np.array(p, dtype=float) for p in [(2, 0), (0, 2)]]
+)
+assert _open == 0.0
+
+_td = space_utils.thick_diagonal(4)
+assert _td.dtype == np.uint8 and _td.shape == (4, 4) and _td[0].tolist() == [1, 1, 0, 0]
+
+assert np.allclose(space_utils.complex_to_R3(3 + 4j), [3.0, 4.0, 0.0])
+assert space_utils.R3_to_complex([3, 4, 9]) == 3 + 4j
+_cf = space_utils.complex_func_to_R3_func(lambda w: w * 1j)
+assert np.allclose(_cf([1.0, 0.0, 5.0]), [0.0, 1.0, 0.0])
+
+# earclip_triangulation: exact-cover validity over the governed native
+# triangulator — square frame with a square hole.
+_everts = np.array([
+    [0.0, 0.0], [6.0, 0.0], [6.0, 6.0], [0.0, 6.0],
+    [2.0, 2.0], [4.0, 2.0], [4.0, 4.0], [2.0, 4.0],
+])
+_eidx = space_utils.earclip_triangulation(_everts, [4, 8])
+_etris = [tuple(_eidx[k:k + 3]) for k in range(0, len(_eidx), 3)]
+_earea = sum(
+    abs(space_utils.cross2d(_everts[list(t)][1] - _everts[list(t)][0], _everts[list(t)][2] - _everts[list(t)][0])) / 2
+    for t in _etris
+)
+assert all(i in range(8) for i in _eidx)
+assert np.isclose(_earea, 36.0 - 4.0), _earea
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the svg_mobject surface — construction, seams, and module fns.
+
+_svg_multi = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+    '<rect x="10" y="10" width="30" height="20" fill="#FF0000"/>'
+    '<circle cx="70" cy="25" r="10"/>'
+    '<line x1="10" y1="60" x2="50" y2="60" stroke="#0000FF"/>'
+    '<polygon points="60,50 90,50 75,80" fill="#FFFF00"/>'
+    '<polyline points="10,90 40,85 70,95" stroke="#FFFFFF" fill="none"/>'
+    '<path d="M 5 5 L 8 5 Q 11 2 14 5"/>'
+    "</svg>"
+)
+_svg_family = manimlib.SVGMobject(svg_string=_svg_multi)
+
+# One authored child per rendered shape in document order; the default
+# class height is 2.0 with the family centered.
+assert len(_svg_family.submobjects) == 6
+assert _svg_family.get_height() == 2.0
+assert np.allclose(_svg_family.get_center(), [0.0, 0.0, 0.0])
+_rect_child, _circle_child, _line_child, _poly_child, _pl_child, _path_child = (
+    _svg_family.submobjects
+)
+assert _rect_child.get_fill_color() == "#FF0000"
+assert abs(_rect_child.get_fill_opacity() - 1.0) < 1e-6
+assert np.isclose(
+    _rect_child.get_width() / _rect_child.get_height(), 30.0 / 20.0
+)
+assert np.isclose(_circle_child.get_width(), _circle_child.get_height())
+assert _poly_child.get_fill_color() == "#FFFF00"
+assert abs(_pl_child.get_fill_opacity() - 0.0) < 1e-6
+
+# Style overrides win over the document's own colors.
+_styled = manimlib.SVGMobject(svg_string=_svg_multi, color=manimlib.BLUE)
+_styled_rect = next(
+    child
+    for child in _styled.submobjects
+    if abs(child.get_width() / max(child.get_height(), 1e-9) - 1.5) < 0.05
+)
+assert _styled_rect.get_fill_color() == "#58C4DD"
+
+# hash_seed captures exactly the construction inputs.
+_same_seed = manimlib.SVGMobject(svg_string=_svg_multi).hash_seed
+assert _same_seed == _svg_family.hash_seed
+assert _same_seed[0] == "SVGMobject"
+assert _same_seed[3] == _svg_multi
+_other_seed = manimlib.SVGMobject(svg_string=_svg_multi.replace("30", "31")).hash_seed
+assert _other_seed != _same_seed
+
+# mobjects_from_svg_string returns a detached family in document order.
+_detached = _svg_family.mobjects_from_svg_string(_svg_multi)
+assert len(_detached) == 6
+assert all(child not in _svg_family.submobjects for child in _detached)
+
+# file_name_to_svg_string routes through the governed reader: content or a
+# typed refusal, never a silent substitute.
+_read_back = _svg_family.file_name_to_svg_string(
+    "/data/projects/franken_manim/crates/fmn-python/tests/chisel_sample.svg"
+)
+assert "<svg" in _read_back
+try:
+    _svg_family.file_name_to_svg_string("/nonexistent/definitely_absent.svg")
+except OSError:
+    pass
+else:
+    raise AssertionError("missing SVG source must refuse loudly")
+
+# generate_config_style_dict mirrors the Reference's seed-to-attr map;
+# with every seed None the dict is empty.
+assert _svg_family.generate_config_style_dict() == {}
+
+# text_to_mobject is the Reference's explicit no-op.
+assert _svg_family.text_to_mobject(None) is None
+
+# init_svg_mobject rebuilds and re-attaches the family (Reference
+# semantics; calling it twice doubles the children).
+_before = len(_svg_family.submobjects)
+_svg_family.init_svg_mobject()
+assert len(_svg_family.submobjects) == 2 * _before
+
+# VMobjectFromSVGPath accepts any object exposing the path data.
+_duck_path = manimlib.VMobjectFromSVGPath(type("_D", (), {"d": lambda self: "M 0 0 L 40 0"})())
+assert _duck_path.get_num_points() > 0
+
+# Module functions and constants carry the Reference identities.
+_svg_module = importlib.import_module("manimlib.mobject.svg.svg_mobject")
+assert np.allclose(_svg_module._convert_point_to_3d(3.0, 4.0), [3.0, 4.0, 0.0])
+assert isinstance(_svg_module.SVG_HASH_TO_MOB_MAP, dict)
+assert isinstance(_svg_module.PATH_TO_POINTS, dict)
+_rect_only = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="10">'
+    '<rect x="0" y="0" width="40" height="10"/></svg>'
+)
+assert np.isclose(_svg_module.get_svg_content_height(_rect_only), 10.0)
+
+# The Reference's svg-module imports stay exposed as themselves.
+assert _svg_module.ET is importlib.import_module("xml.etree.ElementTree")
+assert _svg_module.Path is importlib.import_module("pathlib").Path
+assert _svg_module.io is importlib.import_module("io")
+assert _svg_module.se is importlib.import_module("svgelements")

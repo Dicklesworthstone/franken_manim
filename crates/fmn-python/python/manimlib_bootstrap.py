@@ -6378,6 +6378,28 @@ def _refuse_unrouted(class_name, entries):
         )
 
 
+def _convert_point_to_3d(x, y):
+    # Reference svg_mobject.py:42.
+    return _np.array([x, y, 0.0])
+
+
+def get_svg_content_height(svg_string):
+    # Reference svg_mobject.py:33: the content extent of the document in
+    # user units, measured on a root-attribute-stripped parse. The
+    # hardened native parser supplies that box; no scaling is applied.
+    probe = SVGMobject.__new__(SVGMobject)
+    _install_live_state(probe)
+    specs = probe._build_svg_mobject(_native_shell_factory, "", svg_string)
+    for shell, child_specs in specs:
+        _hang_native_children(shell, child_specs)
+    all_points = _np.vstack(
+        [shell.get_points() for shell in (s for s, _ in specs) if shell.has_points()]
+    )
+    if len(all_points) == 0:
+        raise ValueError("SVG has no content to measure")
+    return float(all_points[:, 1].max() - all_points[:, 1].min())
+
+
 class SVGMobject(VMobject):
     """User SVG files through Chisel's hardened document processor
     (fm-5wq.4.50, G2 criterion 4).
@@ -6427,7 +6449,21 @@ class SVGMobject(VMobject):
             ],
         )
         _install_live_state(self)
+        # Reference __init__ (svg_mobject.py:96-107) keeps the exact
+        # construction inputs; hash_seed and the config-style surface read
+        # them back.
+        self.svg_default = dict(svg_default) if svg_default else {
+            "color": None,
+            "opacity": None,
+            "fill_color": None,
+            "fill_opacity": None,
+            "stroke_width": None,
+            "stroke_color": None,
+            "stroke_opacity": None,
+        }
+        self.path_string_config = dict(path_string_config or {})
         if svg_string:
+            self.svg_string = svg_string
             specs = self._build_svg_mobject(_native_shell_factory, "", svg_string)
         else:
             name = file_name or type(self).file_name
@@ -6436,6 +6472,7 @@ class SVGMobject(VMobject):
                 raise Exception(
                     "Must specify either a file_name or svg_string SVGMobject"
                 )
+            self.svg_string = self.file_name_to_svg_string(name)
             specs = self._build_svg_mobject(_native_shell_factory, name, None)
         _hang_native_children(self, specs)
         self.flip(_RIGHT)  # SVG y-down becomes scene y-up, the Reference's flip
@@ -6455,6 +6492,62 @@ class SVGMobject(VMobject):
             self.set_height(height)
         if width is not None:
             self.set_width(width)
+
+    def init_svg_mobject(self):
+        # Reference svg_mobject.py:120 over the native processor: rebuild
+        # and attach the shape family, then apply the y-flip.
+        specs = self._build_svg_mobject(_native_shell_factory, "", self.svg_string)
+        _hang_native_children(self, specs)
+        self.flip(_RIGHT)
+
+    @property
+    def hash_seed(self):
+        # Reference svg_mobject.py:132: the tuple that uniquely determines
+        # the built family; its hash keys SVG_HASH_TO_MOB_MAP.
+        return (
+            type(self).__name__,
+            self.svg_default,
+            self.path_string_config,
+            self.svg_string,
+        )
+
+    def mobjects_from_svg_string(self, svg_string):
+        # Reference mobjects_from_svg_string over Chisel's hardened
+        # document processor: one authored child per rendered shape in
+        # document order, detached from this instance's family.
+        specs = self._build_svg_mobject(_native_shell_factory, "", svg_string)
+        result = []
+        for shell, child_specs in specs:
+            _hang_native_children(shell, child_specs)
+            result.append(shell)
+        return result
+
+    def file_name_to_svg_string(self, file_name):
+        # Governed native reader: same byte budget and error surface as
+        # the constructor's own file path.
+        return self._read_svg_file(str(file_name))
+
+    def generate_config_style_dict(self):
+        # Reference svg_mobject.py:193 verbatim over svg_default.
+        keys_converting_dict = {
+            "fill": ("color", "fill_color"),
+            "fill-opacity": ("opacity", "fill_opacity"),
+            "stroke": ("color", "stroke_color"),
+            "stroke-opacity": ("opacity", "stroke_opacity"),
+            "stroke-width": ("stroke_width",),
+        }
+        result = {}
+        for svg_key, style_keys in keys_converting_dict.items():
+            for style_key in style_keys:
+                if self.svg_default[style_key] is None:
+                    continue
+                result[svg_key] = str(self.svg_default[style_key])
+        return result
+
+    def text_to_mobject(self, text):
+        # Reference svg_mobject.py:322 is an explicit no-op at the pin;
+        # text dispatch stays commented out there too.
+        return None
 
 
 class VMobjectFromSVGPath(VMobject):
@@ -18781,6 +18874,14 @@ def _install_schema_surface():
         ("manimlib.extract_scene", "scene_from_class"): scene_from_class,
         ("manimlib.extract_scene", "note_missing_scenes"): note_missing_scenes,
         ("manimlib.extract_scene", "prompt_user_for_choice"): prompt_user_for_choice,
+        (
+            "manimlib.mobject.svg.svg_mobject",
+            "_convert_point_to_3d",
+        ): _convert_point_to_3d,
+        (
+            "manimlib.mobject.svg.svg_mobject",
+            "get_svg_content_height",
+        ): get_svg_content_height,
         ("manimlib.extract_scene", "get_scenes_to_render"): get_scenes_to_render,
         (
             "manimlib.extract_scene",
@@ -19448,6 +19549,267 @@ def _install_space_ops():
             [rotate_vector(start_vect, k * angle) for k in range(n)]
         )
 
+    def _xy3(value):
+        """A two- or three-component sequence as engine (x, y, z); the
+        plane helpers accept the Reference's Vect2 spellings."""
+        values = _np.asarray(value, dtype=float)
+        if values.shape == (2,):
+            return (float(values[0]), float(values[1]), 0.0)
+        return _vec3(value)
+
+    def tri_area(a, b, c):
+        return _BridgeMobject._tri_area(
+            _xy3(a), _xy3(b), _xy3(c)
+        )
+
+    def is_inside_triangle(p, a, b, c):
+        return bool(
+            _BridgeMobject._is_inside_triangle(
+                _xy3(p), _xy3(a), _xy3(b), _xy3(c)
+            )
+        )
+
+    def get_winding_number(points):
+        return _BridgeMobject._get_winding_number(
+            [_xy3(point) for point in points]
+        )
+    # --- fm-fnun: the remaining space_ops surface. Rotation and
+    # quaternion members route through fmn-geom's scipy-exact authority
+    # via BridgeMobject seams; pure NumPy shape arithmetic stays
+    # Reference-verbatim in the skin where no batch authority exists.
+
+    def quaternion_mult(*quats):
+        return _np.array(_BridgeMobject._quaternion_mult(
+            [_np.asarray(quat, dtype=float).tolist() for quat in quats]
+        ))
+
+    def quaternion_from_angle_axis(angle, axis):
+        return _np.array(
+            _BridgeMobject._quaternion_from_angle_axis(
+                float(angle), _vec3(axis)
+            )
+        )
+
+    def angle_axis_from_quaternion(quat):
+        norm, axis = _BridgeMobject._angle_axis_from_quaternion(
+            _np.asarray(quat, dtype=float).tolist()
+        )
+        return float(norm), _np.array(axis)
+
+    def quaternion_conjugate(quaternion):
+        return _np.array(
+            _BridgeMobject._quaternion_conjugate(
+                _np.asarray(quaternion, dtype=float).tolist()
+            )
+        )
+
+    def rotation_matrix_transpose_from_quaternion(quat):
+        return _np.array(
+            _BridgeMobject._rotation_matrix_transpose_from_quaternion(
+                _np.asarray(quat, dtype=float).tolist()
+            )
+        )
+
+    def rotation_matrix_from_quaternion(quat):
+        return _np.array(
+            _BridgeMobject._rotation_matrix_from_quaternion(
+                _np.asarray(quat, dtype=float).tolist()
+            )
+        )
+
+    def rotation_matrix(angle, axis):
+        return _np.array(
+            _BridgeMobject._rotation_matrix(float(angle), _vec3(axis))
+        )
+
+    def rotation_matrix_transpose(angle, axis):
+        return _np.array(
+            _BridgeMobject._rotation_matrix_transpose(
+                float(angle), _vec3(axis)
+            )
+        )
+
+    def rotation_about_z(angle):
+        return _np.array(_BridgeMobject._rotation_about_z(float(angle)))
+
+    def rotation_between_vectors(v1, v2):
+        return _np.array(
+            _BridgeMobject._rotation_between_vectors(
+                _vec3(v1), _vec3(v2)
+            )
+        )
+
+    def z_to_vector(vector):
+        return _np.array(_BridgeMobject._z_to_vector(_vec3(vector)))
+
+    def cross2d(a, b):
+        if len(a.shape) == 2:
+            return a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1]
+        else:
+            return a[0] * b[1] - b[0] * a[1]
+
+    def norm_squared(vect):
+        return sum(x * x for x in vect)
+
+    def poly_line_length(points):
+        return _BridgeMobject._poly_line_length(
+            [_vec3(point) for point in points]
+        )
+
+    def project_along_vector(point, vector):
+        return _np.array(
+            _BridgeMobject._project_along_vector(
+                _vec3(point), _vec3(vector)
+            )
+        )
+
+    def get_unit_normal(v1, v2, tol=1e-6):
+        return _np.array(
+            _BridgeMobject._get_unit_normal(
+                _vec3(v1), _vec3(v2), float(tol)
+            )
+        )
+
+    def thick_diagonal(dim, thickness=2):
+        return _np.array(
+            _BridgeMobject._thick_diagonal(int(dim), int(thickness)),
+            dtype=_np.uint8,
+        )
+
+    def line_intersection(line1, line2):
+        point = _BridgeMobject._line_intersection(
+            (_vec3(line1[0]), _vec3(line1[1])),
+            (_vec3(line2[0]), _vec3(line2[1])),
+        )
+        return _np.array([point[0], point[1], 0.0])
+
+    def find_intersection(p0, v0, p1, v1, threshold=1e-5):
+        # Reference-verbatim: scalar or batched ray/line intersection,
+        # near-parallel denominators forced to infinity at the threshold.
+        p0 = _np.asarray(p0, dtype=float)
+        v0 = _np.asarray(v0, dtype=float)
+        p1 = _np.asarray(p1, dtype=float)
+        v1 = _np.asarray(v1, dtype=float)
+        d = len(p0.shape)
+        if d == 1:
+            is_3d = any(arr[2] for arr in (p0, v0, p1, v1))
+        else:
+            is_3d = any(z for arr in (p0, v0, p1, v1) for z in arr.T[2])
+        if not is_3d:
+            numer = _np.array(cross2d(v1, p1 - p0))
+            denom = _np.array(cross2d(v1, v0))
+        else:
+            cp1 = cross(v1, p1 - p0)
+            cp2 = cross(v1, v0)
+            numer = _np.array((cp1 * cp1).sum(d - 1))
+            denom = _np.array((cp1 * cp2).sum(d - 1))
+        denom[abs(denom) < threshold] = _np.inf
+        ratio = numer / denom
+        return p0 + (ratio * v0.T).T
+
+    def get_closest_point_on_line(a, b, p):
+        # Reference-verbatim clamp to segment ab over any dimension.
+        a = _np.asarray(a, dtype=float)
+        b = _np.asarray(b, dtype=float)
+        p = _np.asarray(p, dtype=float)
+        t = _np.dot(p - b, a - b) / _np.dot(a - b, a - b)
+        if t < 0:
+            t = 0
+        if t > 1:
+            t = 1
+        return (t * a) + ((1 - t) * b)
+
+    def complex_to_R3(complex_num):
+        return _np.array((complex_num.real, complex_num.imag, 0))
+
+    def R3_to_complex(point):
+        return complex(*point[:2])
+
+    def complex_func_to_R3_func(complex_func):
+        def result(p):
+            return complex_to_R3(complex_func(R3_to_complex(p)))
+        return result
+
+    def earclip_triangulation(verts, ring_ends):
+        """The pinned helper's ring-grouping contract over Chisel's
+        dependency-free triangulator: containment groups outer rings with
+        their holes exactly as space_ops.py does, then each group cuts
+        through the governed earclip authority. Index validity and exact
+        area cover are asserted by the bridge suite; triangle CHOICE is
+        the native algorithm's, deliberately not mapbox_earcut's."""
+        verts_array = _np.asarray(verts, dtype=float)
+        bounds = [0, *ring_ends]
+        rings = [
+            list(range(e0, e1))
+            for e0, e1 in zip(bounds[:-1], ring_ends)
+        ]
+        epsilon = 1e-6
+
+        def ring_xy(ring):
+            return [
+                [float(verts_array[i][0]), float(verts_array[i][1])]
+                for i in ring
+            ]
+
+        def is_in(point, ring_id):
+            relative = [vert - point for vert in verts_array[rings[ring_id]]]
+            return abs(abs(get_winding_number(relative)) - 1) < epsilon
+
+        def ring_area(ring_id):
+            ring = rings[ring_id]
+            s = 0
+            for i, j in zip(ring[1:], ring):
+                s += cross2d(verts_array[i], verts_array[j])
+            return abs(s) / 2
+
+        right = [max(verts_array[r, 0]) for r in rings]
+        left = [min(verts_array[r, 0]) for r in rings]
+        top = [max(verts_array[r, 1]) for r in rings]
+        bottom = [min(verts_array[r, 1]) for r in rings]
+        area = [ring_area(i) for i in range(len(rings))]
+
+        rings_sorted = list(range(len(rings)))
+        rings_sorted.sort(key=lambda x: area[x], reverse=True)
+
+        def is_in_fast(ring_a, ring_b):
+            return (
+                left[ring_b] <= left[ring_a] <= right[ring_a] <= right[ring_b]
+                and bottom[ring_b] <= bottom[ring_a] <= top[ring_a] <= top[ring_b]
+                and is_in(verts_array[rings[ring_a][0]], ring_b)
+            )
+
+        children = [[] for _ in rings]
+        for idx, i in enumerate(rings_sorted):
+            for j in rings_sorted[:idx][::-1]:
+                if is_in_fast(i, j):
+                    children[j].append(i)
+                    break
+
+        result = []
+        used = [False] * len(rings)
+        for i in rings_sorted:
+            if used[i]:
+                continue
+            group = list(rings[i])
+            group_ring_sizes = [len(group)]
+            holes = []
+            outer_xy = ring_xy(rings[i])
+            for j in children[i]:
+                used[j] = True
+                hole_xy = ring_xy(rings[j])
+                holes.append(hole_xy)
+                group.extend(rings[j])
+                group_ring_sizes.append(len(group))
+            triangles = _BridgeMobject._earclip_triangulate_group(
+                outer_xy, holes
+            )
+            result.extend(
+                group[index]
+                for triangle in triangles
+                for index in triangle
+            )
+        return result
+
     functions = {
         "get_norm": get_norm,
         "get_dist": get_dist,
@@ -19462,6 +19824,34 @@ def _install_space_ops():
         "angle_between_vectors": angle_between_vectors,
         "line_intersects_path": line_intersects_path,
         "compass_directions": compass_directions,
+        "quaternion_mult": quaternion_mult,
+        "quaternion_from_angle_axis": quaternion_from_angle_axis,
+        "angle_axis_from_quaternion": angle_axis_from_quaternion,
+        "quaternion_conjugate": quaternion_conjugate,
+        "rotation_matrix_transpose_from_quaternion":
+            rotation_matrix_transpose_from_quaternion,
+        "rotation_matrix_from_quaternion": rotation_matrix_from_quaternion,
+        "rotation_matrix": rotation_matrix,
+        "rotation_matrix_transpose": rotation_matrix_transpose,
+        "rotation_about_z": rotation_about_z,
+        "rotation_between_vectors": rotation_between_vectors,
+        "z_to_vector": z_to_vector,
+        "cross2d": cross2d,
+        "norm_squared": norm_squared,
+        "poly_line_length": poly_line_length,
+        "project_along_vector": project_along_vector,
+        "get_unit_normal": get_unit_normal,
+        "thick_diagonal": thick_diagonal,
+        "tri_area": tri_area,
+        "is_inside_triangle": is_inside_triangle,
+        "line_intersection": line_intersection,
+        "find_intersection": find_intersection,
+        "get_closest_point_on_line": get_closest_point_on_line,
+        "get_winding_number": get_winding_number,
+        "complex_to_R3": complex_to_R3,
+        "R3_to_complex": R3_to_complex,
+        "complex_func_to_R3_func": complex_func_to_R3_func,
+        "earclip_triangulation": earclip_triangulation,
     }
     module = _ensure_module("manimlib.utils.space_ops")
     for name, function in functions.items():

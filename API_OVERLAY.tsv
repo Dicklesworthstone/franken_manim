@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	07d033622959867bcc8ff0c1437640116977b997ad1256e2ed517ae547e9745c
+ledger_reviewed_digest	8d8beda28128d54031d70a86c77ea18bfdac009ed3bfe279147456815cd6e277
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -689,6 +689,32 @@ manimlib.utils.space_ops:angle_of_vector	same	scripts/manim_ref/manimlib/utils/s
 manimlib.utils.space_ops:compass_directions	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	rotates the start vector through Chisel's one rotation implementation at exact equal angular steps
 manimlib.utils.space_ops:cross	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	preserves scalar vectorized row and caller-owned output-array semantics
 manimlib.utils.space_ops:line_intersects_path	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes two- and three-dimensional inputs through Chisel's exact strict xy segment-path crossing predicate
+manimlib.utils.space_ops:R3_to_complex	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	keeps the first two components as the exact complex value
+manimlib.utils.space_ops:angle_axis_from_quaternion	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes the scipy rotvec split through fmn-geom and refuses zero-norm quaternions precisely where scipy raises
+manimlib.utils.space_ops:complex_func_to_R3_func	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	composes the exact complex round trip into a Vect3-valued callable
+manimlib.utils.space_ops:cross2d	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	preserves scalar and row-batched xy determinant shapes
+manimlib.utils.space_ops:earclip_triangulation	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	groups outer and hole rings by the pinned containment rule then cuts each group through Chisel's dependency-free triangulator with exact-cover area asserted
+manimlib.utils.space_ops:find_intersection	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	preserves scalar and batched rays the two-dimensional determinant branch the three-dimensional cross branch and the near-parallel threshold forcing
+manimlib.utils.space_ops:get_closest_point_on_line	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	preserves the projection clamp to segment endpoints over any dimension
+manimlib.utils.space_ops:get_unit_normal	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes the degeneracy-tolerant normal through Chisel including the z-axis plane fallback that returns DOWN
+manimlib.utils.space_ops:get_winding_number	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes the wrapped angular sum through Chisel for unit-turn winding counts
+manimlib.utils.space_ops:is_inside_triangle	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	applies Chisel's strict either-winding xy containment predicate
+manimlib.utils.space_ops:line_intersection	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	returns the z-zero crossing point and refuses parallel lines precisely as the pinned helper raises
+manimlib.utils.space_ops:norm_squared	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	keeps the component-wise quadratic sum verbatim
+manimlib.utils.space_ops:poly_line_length	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	sums consecutive segment norms through Chisel's bounded kernel
+manimlib.utils.space_ops:project_along_vector	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes the plane projection through Chisel's identity-minus-outer kernel
+manimlib.utils.space_ops:quaternion_conjugate	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	negates only the vector part in scipy scalar-last order
+manimlib.utils.space_ops:quaternion_from_angle_axis	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes the rotvec quaternion through fmn-geom's scipy-exact series including small-angle expansion
+manimlib.utils.space_ops:quaternion_mult	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	folds varargs left under scipy scalar-last Hamilton product with the empty-call identity
+manimlib.utils.space_ops:rotation_about_z	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	returns the closed-form z rotation matrix through Chisel
+manimlib.utils.space_ops:rotation_between_vectors	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	preserves the identity short circuit and the RIGHT and UP fallback axis chain
+manimlib.utils.space_ops:rotation_matrix	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes the angle-axis matrix through Chisel's scipy-exact rotvec kernel
+manimlib.utils.space_ops:rotation_matrix_from_quaternion	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	returns the transpose of the as_matrix spelling exactly as the pinned names define and refuses zero-norm quaternions
+manimlib.utils.space_ops:rotation_matrix_transpose	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	returns the exact transpose of the angle-axis matrix
+manimlib.utils.space_ops:rotation_matrix_transpose_from_quaternion	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	returns scipy as_matrix verbatim under the pinned naming quirk and refuses zero-norm quaternions
+manimlib.utils.space_ops:thick_diagonal	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	materializes the uint8 band mask through Chisel's bounded dimension checks
+manimlib.utils.space_ops:tri_area	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	applies the xy shoelace half-determinant to two- and three-component inputs alike
+manimlib.utils.space_ops:z_to_vector	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	delegates to the OUT-alignment rotation matrix through Chisel
 manimlib.scene.scene:Scene.get_time	improved	BN-02	crates/fmn-python/tests/bridge.py	exposes the native drift-free rational frame clock through the familiar float result
 manimlib.scene.scene:Scene.get_top_level_mobjects	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	keeps only placements appearing in exactly one current family, including duplicate-placement elimination
 manimlib.scene.scene:Scene.replace	same	docs/RENDER_ORDER.md	crates/fmn-python/tests/bridge.py	splices replacements into an exact top-level member slot and leaves absent sources untouched

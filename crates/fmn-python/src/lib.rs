@@ -3554,6 +3554,35 @@ impl BridgeMobject {
         install_native_tree(slf, factory, fmn_library::svg_document_mobject(&document))
     }
 
+    /// `SVGMobject.file_name_to_svg_string` over the same governed reader
+    /// the constructor uses: identical byte budget, identical error surface,
+    /// so the Python seam cannot read what the parser would refuse.
+    #[staticmethod]
+    fn _read_svg_file(file_name: &str) -> PyResult<String> {
+        let limits = fmn_library::svg::SvgLimits::default();
+        let metadata = std::fs::metadata(file_name).map_err(|error| {
+            PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
+        })?;
+        if !metadata.is_file() {
+            return Err(PyOSError::new_err(format!(
+                "SVGMobject source {file_name:?} is not a regular file"
+            )));
+        }
+        let bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+        if bytes > limits.max_bytes {
+            return Err(native_error(fmn_library::svg::SvgError::TooLarge {
+                bytes,
+                limit: limits.max_bytes,
+            }));
+        }
+        let contents = std::fs::read(file_name).map_err(|error| {
+            PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
+        })?;
+        String::from_utf8(contents).map_err(|error| {
+            PyOSError::new_err(format!("SVGMobject source {file_name:?} is not UTF-8: {error}"))
+        })
+    }
+
     /// `VMobjectFromSVGPath(path_obj)` over the same hardened Chisel path
     /// parser as `SVGMobject`. The wrapper contains exactly one path, whose
     /// native child becomes this proxy's root rather than an extra family
@@ -3938,6 +3967,173 @@ impl BridgeMobject {
     #[staticmethod]
     fn _line_intersects_path(start: [f64; 3], end: [f64; 3], path: Vec<[f64; 3]>) -> bool {
         fmn_library::line_intersects_path(start, end, &path)
+    }
+
+    // -------------------------------------------------------------------
+    // space_ops utility seams (fm-fnun): every remaining public
+    // `manimlib.utils.space_ops` function routes through fmn-geom's one
+    // deterministic authority (D4). The bootstrap performs only NumPy
+    // shape coercion and never re-derives the mathematics.
+    // -------------------------------------------------------------------
+
+    /// Reference varargs quaternion product, scipy scalar-last order.
+    #[staticmethod]
+    fn _quaternion_mult(quats: Vec<[f64; 4]>) -> [f64; 4] {
+        fmn_library::quaternion_mult(&quats)
+    }
+
+    /// Negate the vector part, keep the scalar part (scipy order).
+    #[staticmethod]
+    fn _quaternion_conjugate(quat: [f64; 4]) -> [f64; 4] {
+        fmn_library::quaternion_conjugate(quat)
+    }
+
+    /// `Rotation.from_rotvec(angle * normalize(axis)).as_quat()`.
+    #[staticmethod]
+    fn _quaternion_from_angle_axis(angle: f64, axis: [f64; 3]) -> [f64; 4] {
+        fmn_library::quaternion_from_angle_axis(angle, axis)
+    }
+
+    /// `Rotation.from_quat(quat).as_rotvec()` split into magnitude and
+    /// unit direction. A zero-norm quaternion is the precise refusal
+    /// scipy's `ValueError` names.
+    #[staticmethod]
+    fn _angle_axis_from_quaternion(quat: [f64; 4]) -> PyResult<(f64, [f64; 3])> {
+        fmn_library::angle_axis_from_quaternion(quat).ok_or_else(|| {
+            PyValueError::new_err("angle_axis_from_quaternion requires a nonzero-norm quaternion")
+        })
+    }
+
+    /// The four rotation-matrix members. `*_transpose_from_quaternion` is
+    /// scipy `as_matrix` verbatim (the pinned naming quirk); the plain
+    /// spellings are its transpose, exactly as `space_ops.py` defines
+    /// them. Zero-norm quaternions refuse precisely where scipy would.
+    #[staticmethod]
+    fn _rotation_matrix_transpose_from_quaternion(quat: [f64; 4]) -> PyResult<fmn_library::Mat3> {
+        fmn_library::rotation_matrix_transpose_from_quaternion(quat).ok_or_else(|| {
+            PyValueError::new_err("rotation matrix requires a nonzero-norm quaternion")
+        })
+    }
+
+    #[staticmethod]
+    fn _rotation_matrix_from_quaternion(quat: [f64; 4]) -> PyResult<fmn_library::Mat3> {
+        fmn_library::rotation_matrix_from_quaternion(quat).ok_or_else(|| {
+            PyValueError::new_err("rotation matrix requires a nonzero-norm quaternion")
+        })
+    }
+
+    #[staticmethod]
+    fn _rotation_matrix(angle: f64, axis: [f64; 3]) -> fmn_library::Mat3 {
+        fmn_library::rotation_matrix(angle, axis)
+    }
+
+    #[staticmethod]
+    fn _rotation_matrix_transpose(angle: f64, axis: [f64; 3]) -> fmn_library::Mat3 {
+        fmn_library::rotation_matrix_transpose(angle, axis)
+    }
+
+    #[staticmethod]
+    fn _rotation_about_z(angle: f64) -> fmn_library::Mat3 {
+        fmn_library::rotation_about_z(angle)
+    }
+
+    #[staticmethod]
+    fn _rotation_between_vectors(v1: [f64; 3], v2: [f64; 3]) -> fmn_library::Mat3 {
+        fmn_library::rotation_between_vectors(v1, v2)
+    }
+
+    #[staticmethod]
+    fn _z_to_vector(vector: [f64; 3]) -> fmn_library::Mat3 {
+        fmn_library::z_to_vector(vector)
+    }
+
+    /// Chisel's polyline length over the xy plane's z-padded points.
+    #[staticmethod]
+    fn _poly_line_length(points: Vec<[f64; 3]>) -> f64 {
+        fmn_library::poly_line_length(&points)
+    }
+
+    /// Chisel's degeneracy-aware normal with the Reference default
+    /// tolerance applied in the bootstrap.
+    #[staticmethod]
+    fn _get_unit_normal(v1: [f64; 3], v2: [f64; 3], tol: f64) -> [f64; 3] {
+        fmn_library::get_unit_normal(v1, v2, tol)
+    }
+
+    #[staticmethod]
+    fn _project_along_vector(point: [f64; 3], vector: [f64; 3]) -> [f64; 3] {
+        fmn_library::project_along_vector(point, vector)
+    }
+
+    /// Parallel lines are the precise refusal the Reference raises for;
+    /// the deterministic solver covers the rest.
+    #[staticmethod]
+    fn _line_intersection(
+        line1: ([f64; 3], [f64; 3]),
+        line2: ([f64; 3], [f64; 3]),
+    ) -> PyResult<[f64; 3]> {
+        fmn_library::line_intersection(line1, line2).ok_or_else(|| {
+            PyValueError::new_err("LineIntersectionException: Lines do not intersect")
+        })
+    }
+
+    #[staticmethod]
+    fn _find_intersection(
+        p0: [f64; 3],
+        v0: [f64; 3],
+        p1: [f64; 3],
+        v1: [f64; 3],
+        threshold: f64,
+    ) -> [f64; 3] {
+        fmn_library::find_intersection(p0, v0, p1, v1, threshold)
+    }
+
+    #[staticmethod]
+    fn _get_closest_point_on_line(a: [f64; 3], b: [f64; 3], p: [f64; 3]) -> [f64; 3] {
+        fmn_library::get_closest_point_on_line(a, b, p)
+    }
+
+    #[staticmethod]
+    fn _get_winding_number(points: Vec<[f64; 3]>) -> f64 {
+        fmn_library::get_winding_number(&points)
+    }
+
+    #[staticmethod]
+    fn _tri_area(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
+        fmn_library::tri_area(a, b, c)
+    }
+
+    #[staticmethod]
+    fn _is_inside_triangle(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> bool {
+        fmn_library::is_inside_triangle(p, a, b, c)
+    }
+
+    /// Bounded square mask as row-major rows; the bootstrap materializes
+    /// the Reference's uint8 ndarray from it.
+    #[staticmethod]
+    fn _thick_diagonal(dim: usize, thickness: usize) -> PyResult<Vec<Vec<i64>>> {
+        fmn_library::thick_diagonal(dim, thickness)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| row.iter().map(|&cell| i64::from(cell)).collect())
+                    .collect()
+            })
+            .map_err(|error| PyValueError::new_err(format!("thick_diagonal refused: {error}")))
+    }
+
+    /// One earcut group through Chisel's dependency-free triangulator:
+    /// outer ring plus already-grouped hole rings, triangle indices over
+    /// the flattened `[outer, holes…]` vertex order. Degenerate or
+    /// interfering geometry is the named refusal, never a degraded mesh.
+    #[staticmethod]
+    fn _earclip_triangulate_group(
+        outer: Vec<[f64; 2]>,
+        holes: Vec<Vec<[f64; 2]>>,
+    ) -> PyResult<Vec<[u32; 3]>> {
+        let hole_refs: Vec<&[[f64; 2]]> = holes.iter().map(Vec::as_slice).collect();
+        fmn_library::earclip_triangulate(&outer, &hole_refs).map_err(|error| {
+            PyValueError::new_err(format!("earclip_triangulation refused: {error}"))
+        })
     }
 
     /// `Arc(start_angle, angle, radius, arc_center)` over the arc shelf.
