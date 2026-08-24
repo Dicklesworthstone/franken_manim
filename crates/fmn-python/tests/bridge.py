@@ -20287,10 +20287,11 @@ _check("tracker value uniform mirrors writes",
 
 _et = manimlib.ExponentialValueTracker(1.0)
 _check("exponential round trip",
-       _et.get_value() == 1.0 and (_et.set_value(8.0), _et.get_value())[1] == 8.0)
+       _et.get_value() == 1.0
+       and np.isclose((_et.set_value(8.0), _et.get_value())[1], 8.0))
 _et.increment_value(1.0)
-_check("exponential increment multiplies by e in log space",
-       np.isclose(_et.get_value(), 8.0 * math.e))
+_check("exponential increment adds in linear space",
+       np.isclose(_et.get_value(), 9.0))
 
 _ct = vt_mod.ComplexValueTracker(complex(3, 4))
 _check("complex tracker round trip",

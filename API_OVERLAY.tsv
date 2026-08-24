@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	370c63a0a0ca6b3d6272b0749b767d7bd2c68f8876480206a02e5ed68bd483ed
+ledger_reviewed_digest	c13910f144058a19799333a8fc5a3ebe12b045fee755463083129b94716edcaf
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1146,7 +1146,7 @@ manimlib.mobject.numbers:Integer.get_value	same	scripts/manim_ref/manimlib/mobje
 manimlib.mobject.numbers:char_to_cahced_mob	same	scripts/manim_ref/manimlib/mobject/numbers.py	crates/fmn-python/tests/bridge.py	is the lru-cached template factory keeping the Reference spelling routing commands and i to Tex digits to Text
 manimlib.mobject.numbers:lru_cache	same	scripts/manim_ref/manimlib/mobject/numbers.py	crates/fmn-python/tests/bridge.py	binds functools.lru_cache under the module namespace exactly as the Reference leaks it
 manimlib.mobject.value_tracker:ExponentialValueTracker.get_value	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	exponentiates the log-space store so reads return the written magnitude
-manimlib.mobject.value_tracker:ExponentialValueTracker.set_value	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	stores the natural log of the written value keeping increments multiplicative in linear space
+manimlib.mobject.value_tracker:ExponentialValueTracker.set_value	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	stores the natural log of the linear value so reads decode through exp exactly as the Reference
 manimlib.mobject.value_tracker:ValueTracker	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	is the authored invisible scalar tracker over live native engine state surviving scene adoption
 manimlib.mobject.value_tracker:ValueTracker.__init__	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	seeds the engine tracker from a real scalar and refuses complex values toward ComplexValueTracker
 manimlib.mobject.value_tracker:ValueTracker.get_value	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	returns the live value cast through the declared float64 value type
