@@ -3,11 +3,11 @@
 //! `get_smooth_cubic_bezier_handle_points`, and `smooth_quadratic_path`
 //! (`manimlib/utils/bezier.py` @ `6199a00d`), computed in f64.
 //!
-//! The linear solves at the bottom of this file (banded for open paths,
-//! dense for closed) are **temporary owned implementations**: doctrine D4
-//! routes them through fsci-linalg, which becomes consumable once the
-//! SUITE.lock plumbing lands (fm-g2c). The migration bead depends on that
-//! work; the public functions here keep their signatures when it happens.
+//! The linear solves route through fsci-linalg per doctrine D4: banded
+//! elimination for open paths, dense solve for closed ones, both in Strict
+//! mode so refusal semantics match scipy's defaults (`check_finite`,
+//! singular systems refuse rather than return garbage). The public functions
+//! here kept their signatures across the migration.
 
 use crate::GeomError;
 use crate::cubic;
@@ -15,13 +15,12 @@ use crate::space_ops;
 use crate::vec;
 use fmn_core::types::Vec3;
 
-/// Maximum dimension of the temporary dense system used for a closed spline.
+/// Maximum dimension of the dense system used for a closed spline.
 ///
 /// A closed path with `a` anchors (including the repeated endpoint) has
 /// `2 * (a - 1)` unknown handles. Capping that dimension at 256 admits up to
-/// 129 anchors while bounding the current three dense solves to a fixed work
-/// budget. The future fsci-linalg migration may raise this only together with
-/// an equally explicit resource contract.
+/// 129 anchors while bounding the dense solves to a fixed work budget.
+/// Raising it requires an equally explicit resource contract.
 pub const MAX_CLOSED_SMOOTHING_DIMENSION: usize = 256;
 
 /// Maximum number of `f64` cells in a closed-smoothing dense matrix.
@@ -177,7 +176,7 @@ pub fn smooth_cubic_handles(anchors: &[Vec3]) -> Result<(Vec<Vec3>, Vec<Vec3>), 
         b[n - 1] = [0.0; 3];
         for dim in 0..3 {
             let mut rhs: Vec<f64> = b.iter().map(|row| row[dim]).collect();
-            solve_dense(&mut matrix.clone(), &mut rhs)?;
+            solve_dense(&matrix, &mut rhs)?;
             for (row, value) in solution.iter_mut().zip(rhs) {
                 row[dim] = value;
             }
@@ -284,135 +283,32 @@ fn band_to_dense(l: usize, u: usize, ab: &[Vec<f64>], n: usize) -> Vec<Vec<f64>>
     m
 }
 
-/// Banded Gaussian elimination with partial pivoting (the dgbsv scheme):
-/// solve `A x = b` in place, `A` given in band storage
-/// `ab[u + i - j][j] = A[i][j]`.
-///
-/// Temporary owned solver — migrates to fsci-linalg (see module docs).
+/// Banded solve of `A x = b` through fsci-linalg, `A` given in band storage
+/// `ab[u + i - j][j] = A[i][j]`, the solution written into `b`.
 fn solve_banded(l: usize, u: usize, ab: &[Vec<f64>], b: &mut [f64]) -> Result<(), GeomError> {
-    let n = b.len();
-    let width = 2 * l + u + 1;
-    // Working band with room for pivoting fill-in:
-    // w[l + u + i - j][j] = A[i][j].
-    let mut w = vec![vec![0.0; n]; width];
-    for (r, band_row) in ab.iter().enumerate().take(l + u + 1) {
-        for (j, &value) in band_row.iter().enumerate() {
-            let i = r as isize + j as isize - u as isize;
-            if (0..n as isize).contains(&i) {
-                // w row = l + u + i - j = r + l, always in range.
-                w[r + l][j] = value;
-            }
-        }
-    }
-
-    // Element A[i][j] lives at w[l + u + i - j][j]; callers keep j within
-    // [i - l, i + u + l] so the row index never leaves [0, 2l + u].
-    let idx = |i: usize, j: usize| -> (usize, usize) { (l + u + i - j, j) };
-
-    for k in 0..n {
-        let i_max = (k + l).min(n - 1);
-        // Partial pivot over rows k..=i_max in column k.
-        let mut piv_row = k;
-        let mut piv_val = {
-            let (r, c) = idx(k, k);
-            w[r][c].abs()
-        };
-        for i in k + 1..=i_max {
-            let (r, c) = idx(i, k);
-            if w[r][c].abs() > piv_val {
-                piv_val = w[r][c].abs();
-                piv_row = i;
-            }
-        }
-        if piv_val == 0.0 {
-            return Err(GeomError::SingularSystem);
-        }
-        let j_max = (k + u + l).min(n - 1);
-        if piv_row != k {
-            for j in k..=j_max {
-                let (r1, c1) = idx(piv_row, j);
-                let (r2, c2) = idx(k, j);
-                let tmp = w[r1][c1];
-                w[r1][c1] = w[r2][c2];
-                w[r2][c2] = tmp;
-            }
-            b.swap(piv_row, k);
-        }
-        let (rk, ck) = idx(k, k);
-        let pivot = w[rk][ck];
-        for i in k + 1..=i_max {
-            let (ri, ci) = idx(i, k);
-            let factor = w[ri][ci] / pivot;
-            if factor == 0.0 {
-                continue;
-            }
-            for j in k..=j_max {
-                let (r1, c1) = idx(k, j);
-                let (r2, c2) = idx(i, j);
-                w[r2][c2] -= factor * w[r1][c1];
-            }
-            b[i] -= factor * b[k];
-        }
-    }
-
-    // Back substitution.
-    for i in (0..n).rev() {
-        let j_max = (i + u + l).min(n - 1);
-        let mut sum = b[i];
-        #[allow(clippy::needless_range_loop)] // band indexing needs j itself
-        for j in i + 1..=j_max {
-            let (r, c) = idx(i, j);
-            sum -= w[r][c] * b[j];
-        }
-        let (r, c) = idx(i, i);
-        b[i] = sum / w[r][c];
-    }
+    let solved = fsci_linalg::solve_banded((l, u), ab, b, fsci_linalg::SolveOptions::default())
+        .map_err(solver_error)?;
+    b.copy_from_slice(&solved.x);
     Ok(())
 }
 
-/// Dense Gaussian elimination with partial pivoting, in place.
-///
-/// Temporary owned solver — migrates to fsci-linalg (see module docs).
-fn solve_dense(m: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), GeomError> {
-    let n = b.len();
-    for k in 0..n {
-        let mut piv_row = k;
-        let mut piv_val = m[k][k].abs();
-        for (i, row) in m.iter().enumerate().skip(k + 1) {
-            if row[k].abs() > piv_val {
-                piv_val = row[k].abs();
-                piv_row = i;
-            }
-        }
-        if piv_val == 0.0 {
-            return Err(GeomError::SingularSystem);
-        }
-        if piv_row != k {
-            m.swap(piv_row, k);
-            b.swap(piv_row, k);
-        }
-        let pivot = m[k][k];
-        for i in k + 1..n {
-            let factor = m[i][k] / pivot;
-            if factor == 0.0 {
-                continue;
-            }
-            let (upper_rows, lower_rows) = m.split_at_mut(i);
-            let pivot_row = &upper_rows[k];
-            for (j, cell) in lower_rows[0].iter_mut().enumerate().skip(k) {
-                *cell -= factor * pivot_row[j];
-            }
-            b[i] -= factor * b[k];
-        }
-    }
-    for i in (0..n).rev() {
-        let mut sum = b[i];
-        for j in i + 1..n {
-            sum -= m[i][j] * b[j];
-        }
-        b[i] = sum / m[i][i];
-    }
+/// Dense solve of `A x = b` through fsci-linalg, the solution written into
+/// `b`.
+fn solve_dense(m: &[Vec<f64>], b: &mut [f64]) -> Result<(), GeomError> {
+    let solved = fsci_linalg::solve(m, b, fsci_linalg::SolveOptions::default())
+        .map_err(solver_error)?;
+    b.copy_from_slice(&solved.x);
     Ok(())
+}
+
+/// Maps fsci-linalg refusals onto the smoothing error surface: a singular
+/// system keeps its established variant; every other refusal (non-finite
+/// coordinates above all) must not masquerade as singularity.
+fn solver_error(error: fsci_linalg::LinalgError) -> GeomError {
+    match error {
+        fsci_linalg::LinalgError::SingularMatrix => GeomError::SingularSystem,
+        _ => GeomError::SolverRefused,
+    }
 }
 
 #[cfg(test)]

@@ -48,6 +48,7 @@ fnp-dtype = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = 
 fnp-ndarray = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "8d7415dc48887efc8925b9c2536ceec1d0a2bb9c" }
 fnp-io = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "8d7415dc48887efc8925b9c2536ceec1d0a2bb9c" }
 fsci-integrate = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "5b1441b13a0997901ad2f9835c30072f87ca93b2" }
+fsci-linalg = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "5b1441b13a0997901ad2f9835c30072f87ca93b2" }
 ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "523aaf827faf538aa541126ee222fcd7af348410" }
 fmn-core = { path = "crates/fmn-core" }
 fmn-dmath = { path = "crates/fmn-dmath" }

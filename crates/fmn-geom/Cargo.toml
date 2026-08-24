@@ -9,6 +9,7 @@ description = "Chisel"
 [dependencies]
 fmn-core.workspace = true
 fmn-dmath.workspace = true
+fsci-linalg.workspace = true
 
 [lints]
 workspace = true

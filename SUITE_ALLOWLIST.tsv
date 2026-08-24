@@ -100,6 +100,7 @@ ft-kernel-metal	0.1.0	git+frankentorch@SUITE.lock	-	-	MIT+rider	no	no	Metal	no	e
 # fsci-* rev must equal the SUITE.lock frankenscipy pin (governed_closure
 # enforces); crates-io rows record the resolved feature set at that pin.
 fsci-integrate	0.1.0	git+frankenscipy@SUITE.lock	-	-	MIT+rider	no	no	no	no	forbid	runtime	W7 fields (§12.4, fm-2u6): StreamLines' adaptive RK45 with dense output for visual-quality stream geometry; rev must equal the SUITE.lock frankenscipy pin (governed_closure enforces)	fm	suite-lock-ritual
+fsci-linalg	0.1.0	git+frankenscipy@SUITE.lock	-	default	MIT+rider	no	no	no	no	forbid	runtime	W2 smoothing (fm-go7): banded + dense linear solves per doctrine D4; rev must equal the SUITE.lock frankenscipy pin (governed_closure enforces)	fm	suite-lock-ritual
 fsci-opt	0.1.0	git+frankenscipy@SUITE.lock	-	default	MIT+rider	no	no	no	no	forbid	runtime	fsci-integrate's pinned transitive: brentq event roots; same SUITE.lock frankenscipy pin	fm	suite-lock-ritual
 fsci-runtime	0.1.0	git+frankenscipy@SUITE.lock	-	default	MIT+rider	no	no	no	no	forbid	runtime	fsci-integrate's pinned transitive: RuntimeMode validation substrate; same SUITE.lock frankenscipy pin	fm	suite-lock-ritual
 approx	0.5.1	crates-io	cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6	std	Apache-2.0	no	no	no	no	expansion	runtime	nalgebra's float-approx substrate through the pinned fsci-integrate gateway	fm	with-frankenscipy-pin

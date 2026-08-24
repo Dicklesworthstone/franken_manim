@@ -728,6 +728,7 @@ version = "0.4.0"
 dependencies = [
  "fmn-core",
  "fmn-dmath",
+ "fsci-linalg",
 ]
 
 [[package]]
@@ -996,6 +997,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fsci-fft"
+version = "0.1.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5b1441b13a0997901ad2f9835c30072f87ca93b2#5b1441b13a0997901ad2f9835c30072f87ca93b2"
+dependencies = [
+ "fsci-runtime",
+]
+
+[[package]]
 name = "fsci-integrate"
 version = "0.1.0"
 source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5b1441b13a0997901ad2f9835c30072f87ca93b2#5b1441b13a0997901ad2f9835c30072f87ca93b2"
@@ -1003,6 +1012,18 @@ dependencies = [
  "fsci-opt",
  "fsci-runtime",
  "nalgebra",
+]
+
+[[package]]
+name = "fsci-linalg"
+version = "0.1.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5b1441b13a0997901ad2f9835c30072f87ca93b2#5b1441b13a0997901ad2f9835c30072f87ca93b2"
+dependencies = [
+ "fsci-fft",
+ "fsci-runtime",
+ "nalgebra",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -88,6 +88,9 @@ pub enum GeomError {
     },
     /// A smoothing solve hit a singular system.
     SingularSystem,
+    /// The smoothing solver refused the system for a reason other than
+    /// singularity (for example, non-finite anchor coordinates).
+    SolverRefused,
     /// Sizing a smoothing system from the supplied anchor count overflowed
     /// `usize` before allocation.
     SmoothingSizeOverflow {
@@ -167,6 +170,9 @@ impl std::fmt::Display for GeomError {
                 "need exactly one more anchor than handles (got {anchors} anchors, {handles} handles)"
             ),
             Self::SingularSystem => write!(f, "smoothing solve hit a singular linear system"),
+            Self::SolverRefused => {
+                write!(f, "smoothing solver refused the system")
+            }
             Self::SmoothingSizeOverflow { anchors } => write!(
                 f,
                 "smoothing system dimensions overflow usize for {anchors} anchors"
