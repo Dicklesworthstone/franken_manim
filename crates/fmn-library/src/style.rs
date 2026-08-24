@@ -133,6 +133,26 @@ fn write_rgba(buffer: &mut RecordBuffer, field: &str, color: Option<Srgb>, opaci
     if buffer.schema().offset(field).is_none() {
         return;
     }
+    // The fm-sjl path: a point-less entry has no rows to traverse, so the
+    // Reference writes the resolved values into `_data_defaults`, where
+    // growth from zero picks them up.
+    if buffer.is_empty() {
+        if let Some(base) = buffer.default_record(field) {
+            if base.len() == 4 {
+                let mut rgba = [base[0], base[1], base[2], base[3]];
+                if let Some(c) = color {
+                    rgba[0] = c.r as f32;
+                    rgba[1] = c.g as f32;
+                    rgba[2] = c.b as f32;
+                }
+                if let Some(a) = opacity {
+                    rgba[3] = a as f32;
+                }
+                buffer.write_default_record(field, &rgba);
+            }
+        }
+        return;
+    }
     for i in 0..buffer.len() {
         let Some(current) = buffer.read(i, field) else {
             continue;
@@ -153,6 +173,10 @@ fn write_rgba(buffer: &mut RecordBuffer, field: &str, color: Option<Srgb>, opaci
 #[allow(clippy::cast_possible_truncation)]
 fn write_scalar(buffer: &mut RecordBuffer, field: &str, value: f64) {
     if buffer.schema().offset(field).is_none() {
+        return;
+    }
+    if buffer.is_empty() {
+        buffer.write_default_record(field, &[value as f32]);
         return;
     }
     let column = vec![value as f32; buffer.len()];

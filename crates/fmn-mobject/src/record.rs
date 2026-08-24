@@ -302,6 +302,11 @@ pub struct RecordBuffer {
     schema: Arc<RecordSchema>,
     storage: Arc<Storage>,
     len: usize,
+    /// The Reference's `_data_defaults`: one phantom record that styling
+    /// writes land in while the buffer has no points, and that growth from
+    /// zero adopts wholesale (`resize_points`, mobject.py). Schema-generic:
+    /// exactly one stride of lanes, never counted by [`Self::len`].
+    defaults: Option<Box<[f32]>>,
     /// `locked_data_keys` (field indices): the copy-elision markers the
     /// animation engine consults (`lock_matching_data` skips these in
     /// `interpolate`, fm-cye). State only — locking never gates access.
@@ -322,6 +327,7 @@ impl RecordBuffer {
             schema: Arc::new(schema),
             storage: Storage::new(vec![0.0; lanes].into_boxed_slice(), n_fields),
             len,
+            defaults: None,
             locked: HashSet::new(),
         })
     }
@@ -523,6 +529,7 @@ impl RecordBuffer {
         if width == 0 || !values.len().is_multiple_of(width) {
             return false;
         }
+
         let n_records = values.len() / width;
         if n_records == 0 {
             return true;
@@ -542,6 +549,52 @@ impl RecordBuffer {
         self.storage
             .mark_written(field_index, first_record, first_record + n_records - 1);
         true
+    }
+    // ---------------------------------------------------------- defaults
+
+    /// The phantom record's lanes for `field` — what a style read would see
+    /// before any points exist. `None` when the schema lacks the field.
+    #[must_use]
+    pub fn default_record(&self, field: &str) -> Option<Vec<f32>> {
+        let off = self.schema.offset(field)?;
+        let width = self.schema.field_width(field)?;
+        let row = self.defaults.as_ref()?;
+        Some(row[off..off + width].to_vec())
+    }
+
+    /// Write `value` into the phantom record's lanes for `field`. The
+    /// Reference's styling-of-a-pointless-mobject path (mobject.py:1329):
+    /// the write is remembered until points arrive.
+    pub fn write_default_record(&mut self, field: &str, value: &[f32]) {
+        let (Some(off), Some(width)) = (self.schema.offset(field), self.schema.field_width(field))
+        else {
+            return;
+        };
+        if value.len() != width {
+            return;
+        }
+        let stride = self.schema.stride();
+        let row = self.defaults.get_or_insert_with(|| vec![0.0; stride].into_boxed_slice());
+        row[off..off + width].copy_from_slice(value);
+    }
+
+    /// Tile the phantom record across `cells` when growth starts from zero
+    /// (the `_data_defaults` adoption rule). A no-op without defaults or on
+    /// non-empty growth.
+    fn adopt_defaults_if_growing_from_zero(&self, cells: &mut [f32]) {
+        if self.len != 0 {
+            return;
+        }
+        let Some(row) = &self.defaults else {
+            return;
+        };
+        let stride = self.schema.stride();
+        if row.len() != stride || cells.len() % stride != 0 {
+            return;
+        }
+        for record in cells.chunks_exact_mut(stride) {
+            record.copy_from_slice(row);
+        }
     }
 
     /// Take (and clear) the dirty span of `field`: the inclusive record
@@ -611,6 +664,7 @@ impl RecordBuffer {
         let stride = self.schema.stride();
         let lanes = checked_lanes(new_len, stride)?;
         let mut cells = vec![0.0f32; lanes];
+        self.adopt_defaults_if_growing_from_zero(&mut cells);
         {
             let old = self.storage.cells.read().expect("storage lock poisoned");
             let keep = old.len().min(cells.len());
@@ -645,6 +699,7 @@ impl RecordBuffer {
                 .chunks_exact(stride)
                 .all(|record| record == &old[..stride]);
         let mut cells = vec![0.0f32; lanes];
+        self.adopt_defaults_if_growing_from_zero(&mut cells);
         if self.len == 1 || is_constant {
             for record in cells.chunks_exact_mut(stride) {
                 record.copy_from_slice(&old[..stride]);
@@ -692,6 +747,7 @@ impl RecordBuffer {
         let stride = self.schema.stride();
         let lanes = checked_lanes(new_len, stride)?;
         let mut cells = vec![0.0f32; lanes];
+        self.adopt_defaults_if_growing_from_zero(&mut cells);
         if self.len > 0 {
             let old = self.storage.copy_cells();
             for (i, record) in cells.chunks_exact_mut(stride).enumerate() {
@@ -783,14 +839,14 @@ impl RecordBuffer {
                 schema: Arc::clone(&self.schema),
                 storage: Storage::new(self.storage.copy_cells(), n_fields),
                 len: self.len,
-                locked: self.locked.clone(),
+                defaults: self.defaults.clone(),
             }
         } else {
             Self {
                 schema: Arc::clone(&self.schema),
                 storage: Arc::clone(&self.storage),
                 len: self.len,
-                locked: self.locked.clone(),
+                defaults: self.defaults.clone(),
             }
         }
     }
@@ -803,6 +859,7 @@ impl RecordBuffer {
             schema: Arc::clone(&self.schema),
             storage: Storage::new(self.storage.copy_cells(), n_fields),
             len: self.len,
+            defaults: self.defaults.clone(),
             locked: self.locked.clone(),
         }
     }

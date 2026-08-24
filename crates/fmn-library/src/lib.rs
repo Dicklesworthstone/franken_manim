@@ -80,6 +80,7 @@
 #![forbid(unsafe_code)]
 
 pub mod arc;
+pub mod boolean_ops;
 pub mod brace;
 pub mod controls;
 pub mod coords;

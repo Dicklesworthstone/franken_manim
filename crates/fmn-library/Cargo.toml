@@ -17,5 +17,9 @@ fmn-text.workspace = true
 fmn-tex.workspace = true
 fsci-integrate.workspace = true
 
+
+[dev-dependencies]
+fmn-hash.workspace = true
+
 [lints]
 workspace = true

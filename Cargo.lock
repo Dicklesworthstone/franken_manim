@@ -747,6 +747,7 @@ dependencies = [
  "fmn-core",
  "fmn-dmath",
  "fmn-geom",
+ "fmn-hash",
  "fmn-mobject",
  "fmn-tex",
  "fmn-text",
