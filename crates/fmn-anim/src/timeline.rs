@@ -298,11 +298,17 @@ impl TimelinePlan {
     /// so equal schedules always produce equal bytes on every platform.
     ///
     /// # Errors
-    /// [`SerialError`] if the document exceeds the container's limits.
+    /// [`SerialError`] when either table exceeds the `u32` count-field
+    /// width, or the document exceeds the container's limits.
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerialError> {
+        // Both wire counts are validated up front, so an over-wide schedule
+        // refuses whole instead of emitting bytes whose declared count
+        // disagrees with their payload.
+        let segment_count = wire_count(self.segments.len())?;
+        let label_count = wire_count(self.labels.len())?;
         let mut writer = Writer::new(TIMELINE_SCHEMA);
         writer.put_u32(self.fps);
-        writer.put_u32(u32::try_from(self.segments.len()).unwrap_or(u32::MAX));
+        writer.put_u32(segment_count);
         for segment in &self.segments {
             writer.put_u8(match segment.kind {
                 SegmentKind::Play => 0,
@@ -312,10 +318,15 @@ impl TimelinePlan {
             writer.put_i64(segment.base_frame);
             writer.put_i64(segment.n_frames);
         }
-        writer.put_u32(u32::try_from(self.labels.len()).unwrap_or(u32::MAX));
+        writer.put_u32(label_count);
         for label in &self.labels {
             writer.put_str(&label.name);
-            writer.put_u64(u64::try_from(label.segment).unwrap_or(u64::MAX));
+            writer.put_u64(
+                u64::try_from(label.segment).map_err(|_| SerialError::SizeLimit {
+                    limit: usize::try_from(u64::MAX).unwrap_or(usize::MAX),
+                    needed: label.segment,
+                })?,
+            );
             writer.put_i64(label.frame);
         }
         writer.finish()
@@ -725,4 +736,32 @@ fn nth_sample(clock: &RationalFrameClock, run_time: f64, n: i64) -> Result<Frame
             frame: n,
             total: segment.n_frames(),
         })
+}
+
+/// A collection length as this format's `u32` count field: a typed refusal
+/// when the schedule exceeds the wire width, never a saturated value.
+fn wire_count(needed: usize) -> Result<u32, SerialError> {
+    u32::try_from(needed).map_err(|_| SerialError::SizeLimit {
+        limit: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+        needed,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_above_the_wire_width_are_a_typed_refusal() {
+        let max = usize::try_from(u32::MAX).expect("32-bit width fits usize");
+        assert_eq!(wire_count(max), Ok(u32::MAX));
+        let one_over = max + 1;
+        assert_eq!(
+            wire_count(one_over),
+            Err(SerialError::SizeLimit {
+                limit: max,
+                needed: one_over
+            })
+        );
+    }
 }
