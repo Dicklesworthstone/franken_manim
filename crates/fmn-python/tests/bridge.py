@@ -20284,6 +20284,8 @@ _check("tracker increment returns none like reference",
 _check("tracker value uniform mirrors writes",
        _t.uniforms["value"].dtype == np.float64
        and _t.uniforms["value"][0] == 10.0)
+
+_et = manimlib.ExponentialValueTracker(1.0)
 _check("exponential round trip",
        _et.get_value() == 1.0 and (_et.set_value(8.0), _et.get_value())[1] == 8.0)
 _et.increment_value(1.0)

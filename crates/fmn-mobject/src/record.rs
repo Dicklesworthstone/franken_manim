@@ -840,6 +840,7 @@ impl RecordBuffer {
                 storage: Storage::new(self.storage.copy_cells(), n_fields),
                 len: self.len,
                 defaults: self.defaults.clone(),
+                locked: self.locked.clone(),
             }
         } else {
             Self {
@@ -847,6 +848,7 @@ impl RecordBuffer {
                 storage: Arc::clone(&self.storage),
                 len: self.len,
                 defaults: self.defaults.clone(),
+                locked: self.locked.clone(),
             }
         }
     }
