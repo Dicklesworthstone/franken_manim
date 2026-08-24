@@ -169,7 +169,6 @@ coverage are both exact their resolved areas agree.
 canonical analytic path and is byte-identical under all three.
 
 ---
-
 ## 5. Findings
 
 Numbered L1…L8 for the look study. (The F-series belongs to the accelerator
@@ -390,6 +389,7 @@ Verdicts in §16.3's vocabulary:
 | `gradient_fills` | **different-but-fine (Behavior-Noted)** | This now runs through production Lumen's §10.2 field. The Reference's hard **diagonal seam** comes from per-vertex colour interpolated across its triangle fan; ours is the smooth, true-arclength boundary ramp extended by mean value coordinates. Gradient direction, opacity, stroke ramp, and capture registration agree. The smoother, subdivision-stable field is the deliberate BN-06 behavior fm-5oi landed. G1 PASS 2026-08-20: visual side-by-side by `GreenPeak` under ADR-0018; no regression candidate. |
 | `lighting_3d` | **at-least-as-good** | The integrated Lumen path uses the exact capture inputs: `Sphere(radius=2)`, the Reference's `(101, 51)` UV grid and parameterization, BLUE_E, and `frame.reorient(20, 70)`. Silhouette, light direction, and retained Gouraud shading coincide closely. Whole-frame normalized RMSE is **0.00212857** and normalized SSIM distortion is **0.000145104**; these are smoke alarms, not gates. |
 | `text_sample` | **different-but-fine** (Behavior-Noted, ratification pending) | The capture scene rebuilt on Scribe: `Text(…, font_size=60)` over the italic `Text(…, font_size=32)`, body `next_to(title, DOWN, buff=0.5)`, group centred, laid out by fmn-text over the bundled Computer Modern regular + italic faces and rendered by production Lumen. The face itself is the deliberate D-08/BN-05 divergence — the capture went through Pango to the host's default (a mono face on the capture box); ours is the sovereign bundled default, identical on every machine. What must correspond, and does: centring and `next_to` spacing, the 60/32 size ratio, the regular/italic contrast (true italic faces, not a shear), the em dash, and the AA edge character. Whole-frame normalized RMSE is **0.08914188** — it sees the intentional font change, so it is registered as a smoke alarm only. |
+| `math_formula` | **different-but-fine** (Behavior-Noted BN-05, ratification pending) | The capture scene rebuilt on Scribe: `Tex(r"e^{i\pi} + 1 = 0", font_size=96)` centred, laid out by fmd-math over the bundled Computer Modern and rendered by production Lumen — the capture went through real LaTeX + dvisvgm on the capture box, so this is the native-typesetting claim tested against the genuine article. What must correspond, and does: the string, the face (Computer Modern both sides), the display scale (ink heights 123 vs 125 px), and exact bounding-box centring (both ink centres sit at (960, 540)). Where BN-05's metrics-differ-from-LaTeX divergence shows: fmd-math's inter-atom spacing is tighter — total advance 585 px vs 625 px (6.4 % narrower) — so glyph registration drifts up to ~20 px toward the ends while the centre holds. Smoke alarms, not gates: whole-frame normalized RMSE **0.05328678**, global SSIM **0.395720620**, symmetric chamfer edge distance **5.847 px** — the same regime as the accepted `text_sample` row (0.08914188 / 0.345615765 / 6.404 px): thin shifted strokes on a dark frame, the metrics seeing the registration drift, not the style. |
 
 The production gradient panel is reproduced with:
 
@@ -431,7 +431,25 @@ Its Rgba16F framebuffer SHA-256 is
 the committed canonical PNG SHA-256 is
 `8f175ae968fcc0aeaa30e1595b492b9d24d5d59d287362efb2346fc7c0fec143`.
 
-One honest limit on this gallery, now that all six captured scenes are
+The math panel (fm-gjl7) is reproduced with:
+
+```bash
+cargo run --release \
+  --manifest-path spikes/g0-8-accelerator/Cargo.toml \
+  --bin g0_2_look -- docs/g0/g0-2-renders --math-only
+```
+
+Its committed canonical PNG SHA-256 is
+`39f17d2f5775da04d1f64e4f661081d77a5f135d41a7c14ad3039c8af12be4e0`.
+The Reference side was captured in supplement mode on 2026-08-23
+(`gallery/reference_captures/math_formula.png`, SHA-256
+`c2eb1124091572f076c6badb10ba8716aff7d84a6f05751df5b0b7534d20807c`,
+recorded in `PROVENANCE.json` `supplements`), because the panel postdates
+the 2026-07-25 capture set; existing captures are never re-made.
+
+ [.gitignore#5AD6]
+
+One honest limit on this gallery, now that all seven captured scenes are
 rendered: **registration is close, not pixel-exact** for the four analytic
 panels: they are placed from bounding boxes measured off the captures, which
 include stroke extent, so shapes can sit a few pixels off. This is an aesthetic

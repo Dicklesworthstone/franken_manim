@@ -169,6 +169,10 @@ spikes/g0-5-python-ext/py/*.so
 # never committed.
 /gallery/reference_captures/
 
+# Reference-capture residue: manim's Tex runs leave a LaTeX working dir here
+# during scripts/capture_reference_imagery.py; never committed.
+/latex_cache/
+
 # fm-ntp fuzz harness (ADR-0003): build dir + crash artifacts stay local;
 # the corpus and Cargo.lock are committed and governed.
 /fuzz/target

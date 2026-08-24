@@ -23,6 +23,8 @@ context (a real GPU or EGL/OSMesa headless). Missing pieces fail with a
 named capability error below, never a partial capture.
 
 Usage:  python scripts/capture_reference_imagery.py [--out DIR]
+        (supplement mode: PNGs already on disk are never re-captured or
+         overwritten; PROVENANCE.json is merged, never replaced)
 
 The recipe that worked (recorded for the record, NOT to be maintained — D-16):
 a Mesa/llvmpipe software GL 4.5 core context under a virtual X server, which
@@ -42,6 +44,7 @@ import os
 import platform
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REF = os.path.join(HERE, "manim_ref")
@@ -56,6 +59,7 @@ CAPTURE_IDS = [
     "glow",
     "lighting_3d",
     "text_sample",
+    "math_formula",
 ]
 
 
@@ -174,6 +178,14 @@ def build_scenes(m):
         body.next_to(title, m.DOWN, buff=0.5)
         s.add(m.VGroup(title, body).center())
 
+    def math_formula(s):
+        # The fm-gjl7 panel: Euler's identity at the native panel's scale
+        # (font_size=96, display-style default alignment), centred — the
+        # exact string the fmn side renders via fmd-math in
+        # spikes/g0-8-accelerator/src/bin/g0_2_look.rs.
+        tex = m.Tex(r"e^{i\pi} + 1 = 0", font_size=96)
+        s.add(tex.center())
+
     return [
         ("gradient_fills", gradient_fills),
         ("self_intersections", self_intersections),
@@ -181,6 +193,7 @@ def build_scenes(m):
         ("glow", glow),
         ("lighting_3d", lighting_3d),
         ("text_sample", text_sample),
+        ("math_formula", math_formula),
     ]
 
 
@@ -213,8 +226,8 @@ def check_liveness(rendered) -> None:
       1. every frame carries more than one distinct pixel value, and
       2. no two frames are identical.
 
-    Both are properties of the *calibration set*, not of any particular
-    renderer: these six scenes have deliberately different content, so
+    Both are properties of the *captured set*, not of any particular
+    renderer: these scenes have deliberately different content, so
     two matching frames mean the content never reached the framebuffer.
     """
     import numpy as np
@@ -252,6 +265,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=DEFAULT_OUT)
     args = ap.parse_args()
+    out = args.out
 
     m = import_reference()
     gl = gl_identity()
@@ -260,27 +274,58 @@ def main() -> None:
     if ids != CAPTURE_IDS:
         fail("inventory-drift", f"scene ids {ids} != inventory {CAPTURE_IDS}")
 
-    # Render every scene into memory first, then validate, then write: the
-    # capture is all-or-nothing, so nothing reaches disk until the whole set
-    # has passed the liveness checks below.
-    rendered = []
+    # Supplement semantics (fm-gjl7): a PNG already on disk is a settled
+    # capture from the recorded 2026-07-25 session; it is never re-rendered
+    # or overwritten. Only MISSING panels render, only they are written, and
+    # PROVENANCE.json is merged — the original record stays byte-identical
+    # and the supplement session is appended under "supplements".
+    manifest_path = os.path.join(out, "PROVENANCE.json")
+    existing: dict = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            existing = json.load(f)
+        if existing.get("manifest") != "fmn-reference-capture v1":
+            fail(
+                "manifest-schema",
+                f"unexpected manifest kind {existing.get('manifest')!r}",
+            )
+
+    targets = []
     for sid, populate in scenes:
+        path = os.path.join(out, f"{sid}.png")
+        if os.path.exists(path):
+            if sid not in existing.get("captures", {}):
+                fail(
+                    "orphan-capture",
+                    f"{path} exists but has no PROVENANCE.json entry",
+                )
+            continue
+        targets.append((sid, populate))
+    if not targets:
+        print("Nothing to capture: every panel already exists. Exiting.")
+        return
+
+    # Render every target scene into memory first, then validate, then
+    # write: the capture is all-or-nothing, so nothing reaches disk until
+    # the whole target set has passed the liveness checks below.
+    rendered = []
+    for sid, populate in targets:
         scene = m.Scene()  # windowless: Scene.get_image() reads the file fbo
         populate(scene)
         # THE DRAW. `camera.get_image()` only READS the framebuffer; without
         # a capture pass into it, every scene yields the same cleared frame.
-        # This is a silent-garbage failure mode — six identical transparent
-        # PNGs that the harness once reported as six successful captures —
-        # so the draw is explicit here and asserted by check_liveness().
+        # This is a silent-garbage failure mode — identical transparent PNGs
+        # that the harness once reported as successful captures — so the
+        # draw is explicit here and asserted by check_liveness().
         scene.update_frame(force_draw=True)
         rendered.append((sid, scene.get_image()))
 
     check_liveness(rendered)
 
-    os.makedirs(args.out, exist_ok=True)
+    os.makedirs(out, exist_ok=True)
     captures = {}
     for sid, image in rendered:
-        path = os.path.join(args.out, f"{sid}.png")
+        path = os.path.join(out, f"{sid}.png")
         image.save(path)
         with open(path, "rb") as f:
             captures[sid] = hashlib.sha256(f.read()).hexdigest()
@@ -291,36 +336,67 @@ def main() -> None:
             import importlib.metadata as md
 
             return md.version(name)
+
         except Exception:
             return "absent"
 
-    provenance = {
-        "manifest": "fmn-reference-capture v1",
-        "reference": {"repo": "3b1b/manim", "commit": ref_commit()},
-        "environment": {
-            "python": sys.version,
-            "platform": platform.platform(),
-            "gl": gl,
-            "packages": {
-                p: pkg_version(p)
-                for p in [
-                    "numpy",
-                    "scipy",
-                    "moderngl",
-                    "PyOpenGL",
-                    "pillow",
-                    "manimpango",
-                    "fonttools",
-                ]
-            },
+    environment = {
+        "python": sys.version,
+        "platform": platform.platform(),
+        "gl": gl,
+        "packages": {
+            p: pkg_version(p)
+            for p in [
+                "numpy",
+                "scipy",
+                "moderngl",
+                "PyOpenGL",
+                "pillow",
+                "manimpango",
+                "fonttools",
+            ]
         },
-        "policy": (
-            "§15.3 fixture policy: private gallery fixtures; captures are "
-            "kept forever; the environment above is recorded, not maintained"
-        ),
-        "captures": captures,
     }
-    manifest_path = os.path.join(args.out, "PROVENANCE.json")
+
+    if existing:
+        merged = dict(existing)
+        recorded = merged.get("captures", {})
+        for sid, digest in captures.items():
+            if sid in recorded:
+                fail(
+                    "capture-collision",
+                    f"{sid} already has a recorded capture; existing "
+                    "captures are never replaced",
+                )
+            recorded[sid] = digest
+        merged["captures"] = recorded
+        merged.setdefault("supplements", []).append(
+            {
+                "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "ids": sorted(captures),
+                "reason": (
+                    "fm-gjl7: the math_formula panel postdates the "
+                    "2026-07-25 capture set; same pinned Reference commit, "
+                    "environment recorded per session, nothing re-captured"
+                ),
+                "reference": {"repo": "3b1b/manim", "commit": ref_commit()},
+                "environment": environment,
+            }
+        )
+        provenance = merged
+    else:
+        provenance = {
+            "manifest": "fmn-reference-capture v1",
+            "reference": {"repo": "3b1b/manim", "commit": ref_commit()},
+            "environment": environment,
+            "policy": (
+                "§15.3 fixture policy: private gallery fixtures; captures "
+                "are kept forever; the environment above is recorded, not "
+                "maintained"
+            ),
+            "captures": captures,
+        }
+
     with open(manifest_path, "w") as f:
         json.dump(provenance, f, indent=2, sort_keys=True)
         f.write("\n")

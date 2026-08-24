@@ -308,7 +308,7 @@ fn committed_manifest_parses_and_round_trips_byte_for_byte() {
     let path = committed_manifest_path();
     let text = std::fs::read_to_string(&path).expect("committed manifest");
     let manifest = GalleryManifest::parse(&text).expect("the committed manifest parses");
-    assert_eq!(manifest.revision, 2, "the committed manifest revision");
+    assert_eq!(manifest.revision, 3, "the committed manifest revision");
     assert_eq!(
         manifest.rows.len(),
         7,
@@ -319,7 +319,8 @@ fn committed_manifest_parses_and_round_trips_byte_for_byte() {
         text,
         "the committed manifest must be in canonical form"
     );
-    // The seeded verdicts are the G1 verdict sheet, not fresh judgments.
+    // The seeded verdicts are the G1 verdict sheet plus the fm-gjl7 drafted
+    // math verdict, not fresh judgments.
     let verdict = |panel: &str| {
         manifest
             .row(panel)
@@ -331,7 +332,7 @@ fn committed_manifest_parses_and_round_trips_byte_for_byte() {
     assert_eq!(verdict("glow"), Verdict::AtLeastAsGood);
     assert_eq!(verdict("gradient_fills"), Verdict::DifferentButFine);
     assert_eq!(verdict("lighting_3d"), Verdict::AtLeastAsGood);
-    assert_eq!(verdict("math_formula"), Verdict::ReferenceCaptureMissing);
+    assert_eq!(verdict("math_formula"), Verdict::DifferentButFine);
 }
 
 #[test]
