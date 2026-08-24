@@ -172,3 +172,84 @@ fn apply_wave_nudges_mid_animation_and_settles() {
     anim.finish(&mut stage);
     assert_close(&coords(&stage, mob, 1), &[0.0; 5], 1e-4);
 }
+
+// --------------------------------------- fm-jh7: surrounding family + Broadcast
+use fmn_anim::{
+    animation_on_surrounding_rectangle, broadcast, flash_around, restore,
+    show_creation_then_destruction_around, show_creation_then_fade_around,
+    show_passing_flash_around,
+};
+
+#[test]
+fn flash_around_wiring_carries_the_reference_defaults() {
+    let mut stage = Stage::new();
+    let path = vmob(
+        &mut stage,
+        &[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+        ],
+    );
+    let flash = flash_around(path, 1.0, 0.0);
+    assert_eq!(flash.state().config.name, "FlashAround");
+    assert!(flash.state().config.remover, "the flash removes its path");
+    assert_eq!(flash.state().mobject(), path, "the sweep rides the path");
+}
+
+#[test]
+fn animation_on_surrounding_rectangle_carries_one_member() {
+    let mut stage = Stage::new();
+    let rect = vmob(&mut stage, &[[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]);
+    let inner = Box::new(show_creation_then_destruction(rect));
+    let group = animation_on_surrounding_rectangle(&mut stage, inner).expect("one-member group");
+    assert_eq!(group.state().config.name, "AnimationOnSurroundingRectangle");
+    assert_eq!(group.animations().len(), 1);
+}
+
+#[test]
+fn the_around_variants_name_and_wrap_their_rect_animation() {
+    let mut stage = Stage::new();
+    let rect = vmob(&mut stage, &[[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]);
+
+    let flash = show_passing_flash_around(&mut stage, rect, 1.0).expect("flash around");
+    assert_eq!(flash.state().config.name, "ShowPassingFlashAround");
+    assert_eq!(flash.animations().len(), 1);
+
+    let destruction =
+        show_creation_then_destruction_around(&mut stage, rect).expect("destruction around");
+    assert_eq!(
+        destruction.state().config.name,
+        "ShowCreationThenDestructionAround"
+    );
+    assert_eq!(destruction.animations().len(), 1);
+
+    let fade = show_creation_then_fade_around(&mut stage, rect, 0.0, true).expect("fade around");
+    assert_eq!(fade.state().config.name, "ShowCreationThenFadeAround");
+    assert_eq!(fade.animations().len(), 1);
+}
+
+#[test]
+fn broadcast_wires_the_lagged_restores_with_reference_defaults() {
+    let mut stage = Stage::new();
+    let mut restores: Vec<Box<dyn Animation>> = Vec::new();
+    for index in 0..3 {
+        let circle = vmob(
+            &mut stage,
+            &[
+                [f64::from(index), 0.0, 0.0],
+                [f64::from(index) + 1.0, 0.0, 0.0],
+            ],
+        );
+        stage.save_state(circle).expect("saved for the restore");
+        restores.push(Box::new(restore(&stage, circle).expect("restore member")));
+    }
+    let group = broadcast(&mut stage, restores, 3.0, 0.2, true).expect("broadcast");
+    assert_eq!(group.state().config.name, "Broadcast");
+    assert_eq!(group.state().config.run_time, 3.0);
+    assert_eq!(group.state().config.lag_ratio, 0.2);
+    assert!(group.state().config.remover);
+    assert_eq!(group.animations().len(), 3);
+}

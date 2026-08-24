@@ -475,3 +475,126 @@ pub fn apply_wave(stage: &Stage, mobject: Mob, direction: Vec3, amplitude: f64) 
     anim.state_mut().config.run_time = 1.0;
     anim
 }
+
+// --------------------------------------------- the surrounding rectangle
+// family (fm-jh7)
+
+/// `FlashAround` (indication.py:255) wiring: a [`VShowPassingFlash`] over
+/// the caller-built surrounding path with the Reference's `__init__`
+/// defaults — `time_width = 1.0`, `taper_width = 0.0` (overriding the
+/// generic passing-flash window), `remover`. The path VALUE-side work —
+/// building `SurroundingRectangle(mobject, buff)` / `Underline`, the
+/// `insert_n_curves(100)` resample, the null-curve strip, and the
+/// `stroke_width = 4.0` / `color = YELLOW` styling — lives with the
+/// geometry tier that owns those types (the `focus_on` doctrine: Choreo
+/// wires, the library draws).
+#[must_use]
+pub fn flash_around(path: Mob, time_width: f64, taper_width: f64) -> VShowPassingFlash {
+    let mut flash = VShowPassingFlash::new(path)
+        .with_time_width(time_width)
+        .with_taper_width(taper_width);
+    flash.state_mut().config.name = "FlashAround".to_owned();
+    flash
+}
+
+/// `AnimationOnSurroundingRectangle` (indication.py:299): one member — the
+/// caller's animation of their surrounding rectangle — carried by an
+/// [`AnimationGroup`]. The Reference's rect updater
+/// (`r.move_to(mobject)`) is scene-updater wiring (W9/portal), the same
+/// caller-supplied split as `Flash`'s lines.
+///
+/// # Errors
+/// [`AnimError::EmptyComposition`] or the Stage errors reported while
+/// assembling the member container.
+pub fn animation_on_surrounding_rectangle(
+    stage: &mut Stage,
+    rect_animation: Box<dyn Animation>,
+) -> Result<AnimationGroup, AnimError> {
+    let mut group = AnimationGroup::new(stage, vec![rect_animation])?;
+    group.state_mut().config.name = "AnimationOnSurroundingRectangle".to_owned();
+    Ok(group)
+}
+
+/// `ShowPassingFlashAround` (indication.py:320): the surrounding rectangle
+/// under a passing flash. Reference default `time_width = 1.0` flows from
+/// `FlashAround`'s kwargs; the caller pins what their rectangle animation
+/// needs.
+///
+/// # Errors
+/// Group build errors, as [`animation_on_surrounding_rectangle`].
+pub fn show_passing_flash_around(
+    stage: &mut Stage,
+    rect: Mob,
+    time_width: f64,
+) -> Result<AnimationGroup, AnimError> {
+    let inner = Box::new(crate::creation::show_passing_flash(rect, time_width));
+    let mut group = animation_on_surrounding_rectangle(stage, inner)?;
+    group.state_mut().config.name = "ShowPassingFlashAround".to_owned();
+    Ok(group)
+}
+
+/// `ShowCreationThenDestructionAround` (indication.py:324): the surrounding
+/// rectangle under [`show_creation_then_destruction`].
+///
+/// # Errors
+/// Group build errors, as [`animation_on_surrounding_rectangle`].
+pub fn show_creation_then_destruction_around(
+    stage: &mut Stage,
+    rect: Mob,
+) -> Result<AnimationGroup, AnimError> {
+    let inner = Box::new(show_creation_then_destruction(rect));
+    let mut group = animation_on_surrounding_rectangle(stage, inner)?;
+    group.state_mut().config.name = "ShowCreationThenDestructionAround".to_owned();
+    Ok(group)
+}
+
+/// `ShowCreationThenFadeAround` (indication.py:328): the surrounding
+/// rectangle created and then faded, as one group member — the Reference's
+/// `ShowCreationThenFadeOut` composition (`ShowCreation` then `FadeOut`,
+/// no shift, no scale) carried by
+/// [`animation_on_surrounding_rectangle`], default `remover`.
+///
+/// # Errors
+/// [`AnimError::StaleHandle`] for a dead `rect`, or group build errors as
+/// [`animation_on_surrounding_rectangle`].
+pub fn show_creation_then_fade_around(
+    stage: &mut Stage,
+    rect: Mob,
+    lag_ratio: f64,
+    remover: bool,
+) -> Result<AnimationGroup, AnimError> {
+    let members: Vec<Box<dyn Animation>> = vec![
+        Box::new(crate::creation::show_creation(rect)),
+        Box::new(crate::fading::fade_out(stage, rect, Vec3::default(), 1.0)?),
+    ];
+    let inner = Box::new(show_creation_then_fade_out(
+        stage, members, lag_ratio, remover,
+    )?);
+    let mut group = animation_on_surrounding_rectangle(stage, inner)?;
+    group.state_mut().config.name = "ShowCreationThenFadeAround".to_owned();
+    Ok(group)
+}
+
+/// `Broadcast` (specialized.py:11): a [`crate::composition::LaggedStart`]
+/// over caller-built `Restore` members — the styled circles that grow from
+/// their saved state are Atlas/portal geometry (the `focus_on` doctrine:
+/// Choreo wires, the library draws). Reference defaults:
+/// `run_time = 3.0`, `lag_ratio = 0.2`, `remover = true`.
+///
+/// # Errors
+/// [`AnimError::EmptyComposition`] for no members, or the Stage errors
+/// reported while assembling the member container.
+pub fn broadcast(
+    stage: &mut Stage,
+    restores: Vec<Box<dyn Animation>>,
+    run_time: f64,
+    lag_ratio: f64,
+    remover: bool,
+) -> Result<AnimationGroup, AnimError> {
+    let mut group = crate::composition::lagged_start(stage, restores)?;
+    group.state_mut().config.name = "Broadcast".to_owned();
+    group.state_mut().config.run_time = run_time;
+    group.state_mut().config.lag_ratio = lag_ratio;
+    group.state_mut().config.remover = remover;
+    Ok(group)
+}

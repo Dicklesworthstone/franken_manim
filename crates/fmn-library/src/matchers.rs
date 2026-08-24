@@ -291,10 +291,72 @@ pub fn exmark(color: Srgb) -> VMobject {
     VMobject::from_path(&path).with_style(Style::default().fill(color, 1.0).stroke(color, 0.0, 1.0))
 }
 
+// -------------------------------------------------- flash conveniences
+// (fm-jh7: the Reference's FlashAround/FlashUnder end to end — the
+// geometry tier owns the path types, so the value-side pipeline lives
+// here and Choreo's wiring consumes the finished handle)
+
+fn processed_flash_path(path: &VMobject, stroke_width: f64, color: Srgb) -> VMobject {
+    let mut quad = path
+        .path()
+        .expect("a surrounding path is always a valid QuadPath");
+    quad.insert_n_curves(100)
+        .expect("resampling a four-curve rectangle or a nine-curve underline never fails");
+    let points = quad.points_without_null_curves(1e-9);
+    VMobject::from_points(points).with_style(
+        Style::default()
+            .stroke(color, stroke_width, 1.0)
+            .fill(color, 0.0),
+    )
+}
+
+/// `FlashAround(mobject, buff=SMALL_BUFF, stroke_width=4.0, color=YELLOW)`
+/// (indication.py:255), end to end: build the surrounding rectangle over
+/// `target`'s extent, run the Reference's resample-and-strip pipeline,
+/// style it, add it to the stage, and return the [`VShowPassingFlash`]
+/// with the Reference defaults (`time_width = 1.0`, `taper_width = 0.0`,
+/// `remover`).
+#[must_use]
+pub fn flash_around(
+    stage: &mut fmn_mobject::Stage,
+    target: &VMobject,
+    buff: f64,
+    stroke_width: f64,
+    color: Srgb,
+) -> fmn_anim::indication::VShowPassingFlash {
+    let path = processed_flash_path(
+        &SurroundingRectangle::new(target)
+            .buff(buff)
+            .color(color)
+            .build(),
+        stroke_width,
+        color,
+    );
+    let mob = stage.add(path);
+    fmn_anim::indication::flash_around(mob, 1.0, 0.0)
+}
+
+/// `FlashUnder(mobject, buff=SMALL_BUFF, stroke_width=4.0, color=YELLOW)`
+/// (indication.py:279): [`flash_around`] over an [`underline`] path (the
+/// Reference's `FlashUnder` overrides only `get_path`).
+#[must_use]
+pub fn flash_under(
+    stage: &mut fmn_mobject::Stage,
+    target: &VMobject,
+    buff: f64,
+    stroke_width: f64,
+    color: Srgb,
+) -> fmn_anim::indication::VShowPassingFlash {
+    let path = processed_flash_path(&underline(target, color, buff, 1.2), stroke_width, color);
+    let mob = stage.add(path);
+    fmn_anim::indication::flash_around(mob, 1.0, 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fmn_core::constants::{GREEN, RED};
+    use fmn_anim::Animation as _;
+    use fmn_core::constants::{GREEN, RED, YELLOW};
 
     fn box_of(w: f64, h: f64) -> VMobject {
         crate::poly::Rectangle::new()
@@ -515,5 +577,34 @@ mod tests {
             (peak - 6.0).abs() < 1e-4,
             "peaks at the declared width, got {peak}"
         );
+    }
+
+    #[test]
+    fn flash_around_and_flash_under_build_dense_processed_sweeps() {
+        let mut stage = fmn_mobject::Stage::new();
+        let target = box_of(2.0, 1.0);
+
+        let around = flash_around(&mut stage, &target, SMALL_BUFF, 4.0, YELLOW);
+        assert_eq!(around.state().config.name, "FlashAround");
+        assert!(around.state().config.remover);
+        let around_points = stage
+            .get(around.state().mobject())
+            .expect("the sweep was added")
+            .buffer
+            .len();
+        assert!(around_points >= 100, "resampled dense, got {around_points}");
+
+        let under = flash_under(&mut stage, &target, SMALL_BUFF, 4.0, YELLOW);
+        assert_eq!(under.state().config.name, "FlashAround");
+        let under_points = stage
+            .get(under.state().mobject())
+            .expect("the sweep was added")
+            .buffer
+            .len();
+        assert!(under_points >= 100, "resampled dense, got {under_points}");
+
+        // The two sweeps ride different handles — each convenience added its
+        // own processed path.
+        assert_ne!(around.state().mobject(), under.state().mobject());
     }
 }
