@@ -20174,3 +20174,126 @@ _check("lingering front loads", np.isclose(rf.lingering(0.4), 0.5) and rf.linger
 _check("exponential decay half life",
        rf.exponential_decay(0.0) == 0.0
        and np.isclose(rf.exponential_decay(0.1), 1.0 - math.exp(-1.0)))
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the numbers + value-tracker shelf.
+
+functools = importlib.import_module("functools")
+numbers_mod = importlib.import_module("manimlib.mobject.numbers")
+vt_mod = importlib.import_module("manimlib.mobject.value_tracker")
+
+_check("numbers module leaked lru_cache",
+       numbers_mod.lru_cache is functools.lru_cache)
+_check("char cache identity",
+       numbers_mod.char_to_cahced_mob("7") is numbers_mod.char_to_cahced_mob("7"))
+_check("char cache routes digits to Text",
+       isinstance(numbers_mod.char_to_cahced_mob("3"), manimlib.Text))
+_check("char cache routes i and commands to Tex",
+       isinstance(numbers_mod.char_to_cahced_mob("i"), manimlib.Tex)
+       and isinstance(numbers_mod.char_to_cahced_mob(r"\circ"), manimlib.Tex))
+
+_dn = manimlib.DecimalNumber(3.14159, num_decimal_places=3)
+_check("decimal get_value", _dn.get_value() == 3.14159)
+_check("decimal num_string/tex",
+       _dn.num_string == "3.142" and _dn.get_tex() == "3.142")
+_check("decimal formatter default", _dn.get_formatter() == "{:,.3f}")
+_check("decimal formatter overrides",
+       _dn.get_formatter(include_sign=True, group_with_commas=False)
+       == "{:+.3f}"
+       and _dn.get_formatter(num_decimal_places=0) == "{:,d}")
+_check("decimal complex formatter string",
+       _dn.get_complex_formatter()
+       == "{0.real:,.3f}{0.imag:+,.3f}i")
+_check("decimal font accessor",
+       _dn.get_font_size() == 48.0 and _dn.font_size == 48.0)
+_check("char_to_mob member",
+       isinstance(_dn.char_to_mob("5"), manimlib.Text))
+
+_neg = manimlib.DecimalNumber(-0.001, num_decimal_places=2)
+_check("negative zero clamp drops sign", _neg.num_string == "0.00")
+_signed = manimlib.DecimalNumber(-0.001, num_decimal_places=2, include_sign=True)
+_check("negative zero clamp keeps plus", _signed.num_string == "+0.00")
+_commas = manimlib.DecimalNumber(1234567.891)
+_check("comma grouping default", _commas.num_string == "1,234,567.89")
+_intfmt = manimlib.DecimalNumber(42.7, num_decimal_places=0)
+_check("zero places formats integer string", _intfmt.num_string == "42")
+_en = manimlib.DecimalNumber(-5.0, num_decimal_places=1)
+_check("en dash replacement", _en.num_string == "–5.0")
+
+_imag = manimlib.DecimalNumber(complex(0, 2.5))
+_check("imag-only construction value", _imag.get_value() == complex(0, 2.5))
+_check("imag-only num string", _imag.num_string == "2.50i")
+_general_refused = False
+try:
+    manimlib.DecimalNumber(complex(1.0, 2.0))
+except NotImplementedError:
+    _general_refused = True
+_check("general complex refuses by BN-08 name", _general_refused)
+_switch_refused = False
+try:
+    manimlib.DecimalNumber(1.0).set_value(complex(0.0, 1.0))
+except NotImplementedError:
+    _switch_refused = True
+_check("real display refuses imaginary switch", _switch_refused)
+
+_grow = manimlib.DecimalNumber(1.0, num_decimal_places=2)
+_family_before = len([sm for sm in _grow.get_family() if sm.has_points()])
+_left_before = _grow.get_edge_center(manimlib.LEFT).copy()
+_grew = _grow.set_value(12345.68)
+_check("set_value returns self live",
+       _grew is _grow and _grow.get_value() == 12345.68
+       and _grow.num_string == "12,345.68")
+_check("glyph family grows across rebuild",
+       len([sm for sm in _grow.get_family() if sm.has_points()])
+       > _family_before)
+_check("edge reseat holds the left edge",
+       np.allclose(_grow.get_edge_center(manimlib.LEFT), _left_before))
+_check("increment chains fluently",
+       _grow.increment_value(0.32) is _grow
+       and np.isclose(_grow.get_value(), 12346.0)
+       and _grow.num_string == "12,346.00")
+
+_a = manimlib.DecimalNumber(1.0, num_decimal_places=1, font_size=48)
+_b = manimlib.DecimalNumber(3.0, num_decimal_places=1, font_size=60)
+_mid = manimlib.DecimalNumber(1.0, num_decimal_places=1, font_size=48)
+_mid.interpolate(_a, _b, 0.25)
+_check("interpolate lerps font size",
+       np.isclose(_mid.font_size, 51.0) and _mid.get_font_size() == _mid.font_size)
+
+_gi = manimlib.Integer(7)
+_check("integer value type", _gi.get_value() == 7 and isinstance(_gi.get_value(), int))
+_check("integer rounds through numpy",
+       manimlib.Integer(3.7).get_value() == 4
+       and manimlib.Integer(2.5).get_value() == 2
+       and manimlib.Integer(3.5).get_value() == 4)
+_kwarg_refused = False
+try:
+    manimlib.Integer(1, bogus_knob=3)
+except NotImplementedError:
+    _kwarg_refused = True
+_check("integer subclasses decimal",
+       issubclass(manimlib.Integer, manimlib.DecimalNumber))
+
+_t = manimlib.ValueTracker(4)
+_check("tracker init/get", _t.get_value() == 4.0
+       and isinstance(_t.get_value(), float))
+_check("tracker set fluent", _t.set_value(9) is _t and _t.get_value() == 9.0)
+_check("tracker increment returns none like reference",
+       _t.increment_value(1) is None and _t.get_value() == 10.0)
+_check("tracker value uniform mirrors writes",
+       _t.uniforms["value"].dtype == np.float64
+       and _t.uniforms["value"][0] == 10.0)
+_check("exponential round trip",
+       _et.get_value() == 1.0 and (_et.set_value(8.0), _et.get_value())[1] == 8.0)
+_et.increment_value(1.0)
+_check("exponential increment multiplies by e in log space",
+       np.isclose(_et.get_value(), 8.0 * math.e))
+
+_ct = vt_mod.ComplexValueTracker(complex(3, 4))
+_check("complex tracker round trip",
+       _ct.get_value() == complex(3, 4)
+       and (_ct.set_value(1 + 2j), _ct.get_value())[1] == complex(1, 2))
+_check("complex tracker uniform dtype",
+       _ct.uniforms["value"].dtype == np.complex128
+       and _ct.uniforms["value"][0] == complex(1, 2))

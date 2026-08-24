@@ -9954,6 +9954,20 @@ class OldTexText(OldTex):
         super().__init__(*tex_strings, arg_separator=arg_separator, **kwargs)
 
 
+
+_FUNCTOOLS_LRU_CACHE = _importlib.import_module("functools").lru_cache
+
+
+@_FUNCTOOLS_LRU_CACHE(maxsize=None)
+def char_to_cahced_mob(char, **text_config):
+    """The Reference's per-character template cache, verbatim including
+    the Reference's own "cahced" spelling (numbers.py:22). LaTeX-command
+    characters and the imaginary unit route through Tex; everything else
+    through Text."""
+    if "\\" in char or char == "i":
+        return Tex(char, **text_config)
+    return Text(char, **text_config)
+
 class DecimalNumber(VMobject):
     """The Reference's DecimalNumber over the de-TeX'd native numbers
     shelf. `set_value` uses the rebuild pattern: the split-family proxy
@@ -10016,8 +10030,6 @@ class DecimalNumber(VMobject):
                     "native complex formatter (BN-08 excludes it)"
                 )
             unit = "i"
-        build_value = self._reduced_build_value(number)
-        self.number = number if isinstance(number, complex) else build_value
         self.font_size = float(font_size)
         self.edge_to_fix = _np.array(_vec3(edge_to_fix))
         self._decimal_params = (
@@ -10036,10 +10048,10 @@ class DecimalNumber(VMobject):
             float(fill_opacity),
             float(fill_border_width),
         )
-        specs = self._build_decimal_number(
-            _native_shell_factory, build_value, *self._decimal_params
-        )
-        _hang_native_children(self, specs)
+        # The Reference's __init__ tail IS set_submobjects_from_number
+        # (numbers.py:66); routing through the shared seam keeps num_string,
+        # number, and the glyph children from one code path.
+        self.set_submobjects_from_number(number)
         _apply_vmobject_style_kwargs(self, kwargs)
 
     def _reduced_build_value(self, value):
@@ -10093,40 +10105,61 @@ class DecimalNumber(VMobject):
     def get_value(self):
         return self.number
 
-    def set_value(self, number):
-        # Reference set_value (numbers.py:207): style from the first
-        # pointful member, fresh glyphs, re-seat the fixed edge. Works
-        # LIVE in both proxy states: the fresh glyph shells build in a
-        # scratch nursery and set_submobjects adopts them — the same
-        # adoption-on-attach seam Scene-bound families already use — so a
-        # bound number mutates in place, digit-count changes included.
+    def _formatter_config(self):
+        """The four formatter-driving knobs as stored in the native
+        parameter tuple (fm-5wq.4 keeps the tuple the single source of
+        truth; the Reference exposes them as attributes)."""
+        params = self._decimal_params
+        return {
+            "num_decimal_places": int(params[0]),
+            "min_total_width": int(params[1]),
+            "include_sign": bool(params[2]),
+            "group_with_commas": bool(params[3]),
+        }
+
+    def set_submobjects_from_number(self, number):
+        # The Reference's rebuild seam (numbers.py:82), named identically:
+        # record the value and its string, then populate glyph children.
+        # The fm-5wq.4.92 scratch-build/adopt mechanics are unchanged —
+        # extracting them here only names the step set_value shares with
+        # __init__.
         original = number
         number = self._reduced_build_value(number)
-        move_to_point = self.get_edge_center(self.edge_to_fix)
+        self.number = original if isinstance(original, complex) else number
+        self.num_string = self.get_num_string(original)
         donor = next(
             (sm for sm in self.submobjects if sm.has_points()), None
         )
         style = donor.get_style() if donor is not None else None
         params = list(self._decimal_params)
         params[9] = float(self.font_size)  # scale side effects track here
-        scratch = VMobject.__new__(VMobject)
-        _install_live_state(scratch)
-        specs = scratch._build_decimal_number(
-            _native_shell_factory, number, *params
-        )
-        _hang_native_children(scratch, specs)
-        if scratch.n_records() != 0:
-            # fm-5wq.4.92: root-level records (the background rectangle's
-            # geometry lives on the root) cannot ride set_submobjects, but
-            # the live-state become seam replaces them: align_family pads
-            # the two families, then per-member data assignment rewrites
-            # the root's own records and every glyph child in place, in
-            # both proxy states — the fm-p107 upgrade this branch used to
-            # await.
-            self.become(scratch)
+        if len(self.submobjects) == 0:
+            # Fresh construction: the shells hang straight onto self.
+            # Family adoption (the branch below) needs an attached arena
+            # handle, which a pre-init mobject does not have yet — the
+            # suite caught exactly that (StaleHandleError on __init__).
+            specs = self._build_decimal_number(
+                _native_shell_factory, number, *params
+            )
+            _hang_native_children(self, specs)
         else:
-            self.set_submobjects(list(scratch.submobjects))
-        self.move_to(move_to_point, self.edge_to_fix)
+            scratch = VMobject.__new__(VMobject)
+            _install_live_state(scratch)
+            specs = scratch._build_decimal_number(
+                _native_shell_factory, number, *params
+            )
+            _hang_native_children(scratch, specs)
+            if scratch.n_records() != 0:
+                # fm-5wq.4.92: root-level records (the background
+                # rectangle's geometry lives on the root) cannot ride
+                # set_submobjects, but the live-state become seam replaces
+                # them: align_family pads the two families, then per-member
+                # data assignment rewrites the root's own records and every
+                # glyph child in place, in both proxy states — the fm-p107
+                # upgrade this branch used to await.
+                self.become(scratch)
+            else:
+                self.set_submobjects(list(scratch.submobjects))
         if style is not None:
             # fm-5wq.4.92: the donor style is a GLYPH's; restyle the glyph
             # children only, so the root's background-rectangle records
@@ -10134,8 +10167,103 @@ class DecimalNumber(VMobject):
             # unchanged (its root carries no records to spare).
             for child in self.submobjects:
                 child.set_style(**style)
-        self.number = original if isinstance(original, complex) else number
+
+    def set_value(self, number):
+        # Reference set_value (numbers.py:207): fresh glyphs through the
+        # shared rebuild seam, then re-seat the fixed edge.
+        move_to_point = self.get_edge_center(self.edge_to_fix)
+        self.set_submobjects_from_number(number)
+        self.move_to(move_to_point, self.edge_to_fix)
         return self
+
+    def get_num_string(self, number):
+        # Reference formula (numbers.py:126) with BN-08's complex-formatter
+        # exclusion kept precise: hide-zero reductions format exactly like
+        # the native f64 path; a general complex refuses by name.
+        formatter = self.get_formatter()
+        if isinstance(number, complex):
+            if self.hide_zero_components_on_complex and number.imag == 0:
+                if self._complex_imag_mode:
+                    raise NotImplementedError(
+                        "DecimalNumber cannot switch an imaginary display "
+                        "to a real value; the native complex formatter is "
+                        "deliberately absent (BN-08)"
+                    )
+                number = number.real
+            elif (
+                self.hide_zero_components_on_complex and number.real == 0
+            ):
+                if not self._complex_imag_mode:
+                    raise NotImplementedError(
+                        "DecimalNumber cannot switch a real display to an "
+                        "imaginary value; the native complex formatter is "
+                        "deliberately absent (BN-08)"
+                    )
+                number = number.imag
+                formatter = formatter + "i"
+            else:
+                raise NotImplementedError(
+                    "DecimalNumber over a general complex value awaits "
+                    "the native complex formatter; fmn-library's numbers "
+                    "shelf deliberately formats f64 only (BN-08)"
+                )
+        if self._decimal_params[0] == 0 and isinstance(number, float):
+            number = int(number)
+        num_string = formatter.format(number)
+
+        rounded_num = _np.round(number, self._decimal_params[0])
+        if num_string.startswith("-") and rounded_num == 0:
+            if self._decimal_params[2]:
+                num_string = "+" + num_string[1:]
+            else:
+                num_string = num_string[1:]
+        return num_string.replace("-", "–")
+
+    def char_to_mob(self, char):
+        return char_to_cahced_mob(char, **getattr(self, "text_config", {}))
+
+    def interpolate(
+        self, mobject1, mobject2, alpha, path_func=None
+    ):
+        super().interpolate(mobject1, mobject2, alpha, path_func)
+        if hasattr(mobject1, "font_size") and hasattr(mobject2, "font_size"):
+            self.font_size = _interpolate(
+                mobject1.font_size, mobject2.font_size, alpha
+            )
+
+    def get_font_size(self):
+        return self.font_size
+
+    def get_formatter(self, **kwargs):
+        """Reference builder (numbers.py:160): instance configuration
+        first, keyword overrides on top."""
+        config = self._formatter_config()
+        config.update(kwargs)
+        ndp = config["num_decimal_places"]
+        return "".join([
+            "{",
+            config.get("field_name", ""),
+            ":",
+            "+" if config["include_sign"] else "",
+            "0" + str(config.get("min_total_width", ""))
+            if config.get("min_total_width")
+            else "",
+            "," if config["group_with_commas"] else "",
+            f".{ndp}f" if ndp > 0 else "d",
+            "}",
+        ])
+
+    def get_complex_formatter(self, **kwargs):
+        """The string matches the Reference exactly; formatting a general
+        complex THROUGH it remains BN-08's named refusal (get_num_string)."""
+        return "".join([
+            self.get_formatter(field_name="0.real"),
+            self.get_formatter(field_name="0.imag", include_sign=True),
+            "i",
+        ])
+
+    def get_tex(self):
+        return self.num_string
 
     def _handle_scale_side_effects(self, scale_factor):
         self.font_size *= scale_factor
@@ -12060,12 +12188,33 @@ class ValueTracker(Mobject):
                 + " holds a scalar; use ComplexValueTracker for complex values"
             )
         self._init_value_tracker(type(self)._tracker_kind, float(value), 0.0)
+        self.init_uniforms()
+
+    def init_uniforms(self):
+        # Reference override (value_tracker.py:31): a typed "value"
+        # uniform beside the base's. Engine tracker state stays
+        # authoritative; this mirror refreshes on every write.
+        super().init_uniforms()
+        self.uniforms["value"] = _np.array(
+            [self.value_type(self._tracker_value())],
+            dtype=self.value_type,
+        )
+
+    def _refresh_value_uniform(self):
+        if isinstance(getattr(self, "uniforms", None), _LiveUniforms) and (
+            "value" in self.uniforms
+        ):
+            self.uniforms["value"] = _np.array(
+                [self.value_type(self._tracker_value())],
+                dtype=self.value_type,
+            )
 
     def get_value(self):
         return self.value_type(self._tracker_value())
 
     def set_value(self, value):
         self._set_tracker_value(float(value))
+        self._refresh_value_uniform()
         return self
 
     def increment_value(self, d_value):
@@ -12086,6 +12235,25 @@ class ComplexValueTracker(ValueTracker):
             setattr(self, key, val)
         value = complex(value)
         self._init_value_tracker(2, value.real, value.imag)
+        self.init_uniforms()
+
+    def init_uniforms(self):
+        # The same Reference "value" uniform, typed for complex storage —
+        # seeded from the live pair, not the real part alone.
+        Mobject.init_uniforms(self)
+        re, im = self._tracker_complex_value()
+        self.uniforms["value"] = _np.array(
+            [complex(re, im)], dtype=self.value_type,
+        )
+
+    def _refresh_value_uniform(self):
+        if isinstance(getattr(self, "uniforms", None), _LiveUniforms) and (
+            "value" in self.uniforms
+        ):
+            re, im = self._tracker_complex_value()
+            self.uniforms["value"] = _np.array(
+                [complex(re, im)], dtype=self.value_type,
+            )
 
     def get_value(self):
         re, im = self._tracker_complex_value()
@@ -12094,6 +12262,7 @@ class ComplexValueTracker(ValueTracker):
     def set_value(self, value):
         value = complex(value)
         self._set_tracker_complex_value(value.real, value.imag)
+        self._refresh_value_uniform()
         return self
 
 
@@ -19546,6 +19715,8 @@ def _install_schema_surface():
         ("manimlib.mobject.types.point_cloud_mobject", "PGroup"): PGroup,
         ("manimlib.mobject.numbers", "DecimalNumber"): DecimalNumber,
         ("manimlib.mobject.numbers", "Integer"): Integer,
+        ("manimlib.mobject.numbers", "char_to_cahced_mob"): char_to_cahced_mob,
+        ("manimlib.mobject.numbers", "lru_cache"): _FUNCTOOLS_LRU_CACHE,
         ("manimlib.mobject.matrix", "Matrix"): Matrix,
         ("manimlib.mobject.matrix", "DecimalMatrix"): DecimalMatrix,
         ("manimlib.mobject.matrix", "IntegerMatrix"): IntegerMatrix,
