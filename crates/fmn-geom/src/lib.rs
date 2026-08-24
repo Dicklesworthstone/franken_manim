@@ -63,7 +63,7 @@ pub use space_ops::{
 };
 pub use svg::{
     DEFAULT_SVG_TOLERANCE, LineCap, LineJoin, Paint, SvgDocument, SvgError, SvgLimits, SvgShape,
-    SvgStyle,
+    SvgStyle, emit_path_data, emit_svg, emit_svg_document,
 };
 pub use vec::Mat3;
 

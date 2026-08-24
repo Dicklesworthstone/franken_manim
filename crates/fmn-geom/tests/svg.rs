@@ -373,3 +373,87 @@ fn custom_budgets_bite() {
         Err(SvgError::TooManyCommands { .. })
     ));
 }
+
+// ---------------------------------------------------- export round-trip
+
+/// fm-ek1 acceptance: `emit_svg_document` is the importer's inverse for the
+/// whole accepted corpus — parse → emit → parse recovers the same resolved
+/// SHAPES (structural equality via the deterministic dump), and the
+/// emitter is idempotent (emit ∘ parse ∘ emit == emit, byte for byte).
+///
+/// The comparison clears `view_box` on both sides: resolved shapes are
+/// already in post-viewBox user space, and the emitter deliberately does
+/// not re-emit the record (re-import would apply the mapping twice), so
+/// the round-tripped document carries `view_box: None` by design.
+#[test]
+fn every_golden_case_round_trips_through_the_emitter() {
+    for (name, source) in CASES {
+        let doc = match SvgDocument::parse(source.as_bytes()) {
+            Ok(doc) => doc,
+            Err(e) => {
+                fail(format!("golden case {name} must parse: {e}"));
+                continue;
+            }
+        };
+        let emitted = fmn_geom::emit_svg_document(&doc);
+        let reparsed = match SvgDocument::parse(emitted.as_bytes()) {
+            Ok(doc) => doc,
+            Err(e) => {
+                fail(format!(
+                    "case {name}: emitted bytes must re-parse: {e}\n{emitted}"
+                ));
+                continue;
+            }
+        };
+        let original = SvgDocument {
+            view_box: None,
+            ..doc.clone()
+        };
+        assert_eq!(
+            dump(&original),
+            dump(&reparsed),
+            "case {name}: round-trip drifted from the resolved document"
+        );
+        // Idempotence: emitting the re-parsed document reproduces the same
+        // bytes, so export is a fixed point after one cycle.
+        let re_emitted = fmn_geom::emit_svg_document(&reparsed);
+        assert_eq!(
+            emitted, re_emitted,
+            "case {name}: emitter is not idempotent after one round-trip"
+        );
+    }
+}
+/// An open subpath stays open and a closed subpath stays closed across the
+/// round-trip — closure is stroke-visible, so the emitter must not flip it.
+#[test]
+fn closure_state_survives_the_round_trip() {
+    let open_source = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><path d=\"M1 1 Q 2 0 3 1\" fill=\"none\" stroke=\"#ff0000\"/></svg>";
+    let closed_source = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><path d=\"M1 1 Q 2 0 3 1 Q 2 2 1 1 Z\" fill=\"#00ff00\"/></svg>";
+    for (label, source, expect_closed) in [
+        ("open", open_source.as_slice(), false),
+        ("closed", closed_source.as_slice(), true),
+    ] {
+        let doc = SvgDocument::parse(source).expect("fixture parses");
+        assert_eq!(doc.shapes.len(), 1);
+        let emitted = fmn_geom::emit_svg_document(&doc);
+        let round = SvgDocument::parse(emitted.as_bytes()).expect("emitted re-parses");
+        assert_eq!(
+            doc.shapes[0].path.subpaths().len(),
+            round.shapes[0].path.subpaths().len()
+        );
+        let original_points = doc.shapes[0].path.points();
+        let round_points = round.shapes[0].path.points();
+        assert_eq!(
+            original_points.len(),
+            round_points.len(),
+            "{label}: point-count drift across the round-trip"
+        );
+        for (a, b) in original_points.iter().zip(round_points.iter()) {
+            assert!((a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12);
+        }
+        // The closure state shows in the re-emitted `d`: a closed subpath
+        // ends with Z, an open one does not.
+        let d_is_closed = emitted.contains("Z</svg") || emitted.contains("Z\"");
+        assert_eq!(d_is_closed, expect_closed, "{label}: closure flag drifted");
+    }
+}

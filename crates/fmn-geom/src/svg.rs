@@ -2783,6 +2783,193 @@ fn collect_ids<'tree>(el: &'tree Element, ids: &mut HashMap<String, &'tree Eleme
     }
 }
 
+// ------------------------------------------------------------------ emit
+
+/// Format one coordinate or scalar: Rust's shortest round-trip
+/// representation, so re-parsing recovers the exact `f64` (SVG's exponent
+/// notation covers the extreme magnitudes).
+fn emit_number(value: f64) -> String {
+    // Normalize -0.0 so emitted documents are stable byte-for-byte.
+    let value = if value == 0.0 { 0.0 } else { value };
+    format!("{value}")
+}
+
+/// `#rrggbb`, the hex form the importer's own color grammar accepts.
+fn emit_paint(paint: &Paint) -> String {
+    match paint {
+        Paint::Color(color) => {
+            let channel = |c: f64| ((c * 255.0).round().clamp(0.0, 255.0)) as u8;
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                channel(color.r),
+                channel(color.g),
+                channel(color.b)
+            )
+        }
+    }
+}
+
+/// One subpath's `d` fragment: `M`, one `Q` per shared-anchor curve, and
+/// `Z` when the subpath closes on its own start. The importer's
+/// `close_path` is a no-op on an already-closed subpath, so `Z` re-imports
+/// without adding a segment; an open subpath emits no `Z` and stays open.
+///
+/// # Panics
+/// Never in practice: a shared-anchor slice has odd length by
+/// construction, and the walk steps two from the first handle.
+fn emit_subpath_data(subpath: &[Vec3]) -> String {
+    let mut out = String::new();
+    let first = subpath[0];
+    out.push_str(&format!(
+        "M {} {}",
+        emit_number(first[0]),
+        emit_number(first[1])
+    ));
+    let last_index = subpath.len() - 1;
+    let mut index = 1;
+    while index < last_index {
+        let handle = subpath[index];
+        let anchor = subpath[index + 1];
+        out.push_str(&format!(
+            " Q {} {} {} {}",
+            emit_number(handle[0]),
+            emit_number(handle[1]),
+            emit_number(anchor[0]),
+            emit_number(anchor[1])
+        ));
+        index += 2;
+    }
+    let last = subpath[last_index];
+    let tolerance = 1e-9;
+    let closed = (first[0] - last[0]).abs() <= tolerance && (first[1] - last[1]).abs() <= tolerance;
+    if closed {
+        out.push('Z');
+    }
+    out
+}
+
+/// The `d` attribute payload for one resolved shape path.
+///
+/// Subpath breaks (the shared-anchor null-curve encoding) are already
+/// subpath boundaries, so each fragment is one `M`-rooted contour.
+#[must_use]
+pub fn emit_path_data(path: &QuadPath) -> String {
+    let mut out = String::new();
+    for subpath in path.subpaths() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&emit_subpath_data(subpath));
+    }
+    out
+}
+
+/// The presentation attributes for one resolved style, in a fixed order so
+/// emitted documents are deterministic. Every attribute is written
+/// explicitly — the round-trip never depends on the importer's defaults.
+fn emit_style_attributes(style: &SvgStyle) -> String {
+    let mut out = String::new();
+    let mut attribute = |name: &str, value: String| {
+        out.push_str(&format!(" {name}=\"{value}\""));
+    };
+    attribute(
+        "fill",
+        match &style.fill {
+            None => "none".to_owned(),
+            Some(paint) => emit_paint(paint),
+        },
+    );
+    attribute("fill-opacity", emit_number(style.fill_opacity));
+    attribute(
+        "fill-rule",
+        match style.fill_rule {
+            FillRule::NonZero => "nonzero",
+            FillRule::EvenOdd => "evenodd",
+        }
+        .to_owned(),
+    );
+    attribute(
+        "stroke",
+        match &style.stroke {
+            None => "none".to_owned(),
+            Some(paint) => emit_paint(paint),
+        },
+    );
+    attribute("stroke-width", emit_number(style.stroke_width));
+    attribute("stroke-opacity", emit_number(style.stroke_opacity));
+    attribute("stroke-linecap", style.line_cap.to_string());
+    attribute("stroke-linejoin", style.line_join.to_string());
+    attribute("stroke-miterlimit", emit_number(style.miter_limit));
+    if !style.stroke_dasharray.is_empty() {
+        let values: Vec<String> = style
+            .stroke_dasharray
+            .iter()
+            .map(|d| emit_number(*d))
+            .collect();
+        attribute("stroke-dasharray", values.join(" "));
+        attribute("stroke-dashoffset", emit_number(style.stroke_dashoffset));
+    }
+    attribute("opacity", emit_number(style.opacity));
+    out
+}
+
+/// Emit one resolved document back to SVG bytes.
+///
+/// The inverse of [`SvgDocument::parse`] for the accepted subset: shapes
+/// serialize as `<path>` elements carrying the full resolved style, so
+/// `parse(emit(document))` recovers the same geometry and style within
+/// 8-bit color rounding (the documented fidelity limit; gradients are
+/// already refused on import, so none can reach the emitter).
+///
+/// The document's `view_box` record is deliberately NOT re-emitted: the
+/// resolved shapes are already in the post-`viewBox`/`preserveAspectRatio`
+/// user space, so a re-emitted `viewBox` would make re-import apply the
+/// mapping a second time. The emitted document's geometry IS the final
+/// user space; re-parsing maps nothing.
+#[must_use]
+pub fn emit_svg_document(document: &SvgDocument) -> String {
+    emit_svg(&document.shapes, document.width, document.height, None)
+}
+
+/// Emit resolved shapes as an SVG document with the given viewport.
+///
+/// A `view_box` here is a caller decision about the emitted coordinate
+/// system — [`emit_svg_document`] deliberately passes `None`, because its
+/// shapes are already in final user space.
+#[must_use]
+pub fn emit_svg(
+    shapes: &[SvgShape],
+    width: f64,
+    height: f64,
+    view_box: Option<[f64; 4]>,
+) -> String {
+    let mut out = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\"");
+    out.push_str(&format!(
+        " width=\"{}\" height=\"{}\"",
+        emit_number(width),
+        emit_number(height)
+    ));
+    if let Some([x, y, w, h]) = view_box {
+        out.push_str(&format!(
+            " viewBox=\"{} {} {} {}\"",
+            emit_number(x),
+            emit_number(y),
+            emit_number(w),
+            emit_number(h)
+        ));
+    }
+    out.push_str(">\n");
+    for shape in shapes {
+        out.push_str(&format!(
+            "<path d=\"{}\"{}/>\n",
+            emit_path_data(&shape.path),
+            emit_style_attributes(&shape.style)
+        ));
+    }
+    out.push_str("</svg>\n");
+    out
+}
+
 // ------------------------------------------------------------------ tests
 
 #[cfg(test)]
