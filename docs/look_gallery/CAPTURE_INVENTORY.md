@@ -35,7 +35,7 @@ kept in lockstep by the script's inventory check). One still per scene.
 | `glow` | GlowDot falloff at three radii/colors | **captured** |
 | `lighting_3d` | 3D sphere under the Reference lighting model, oblique camera | **captured** |
 | `text_sample` | Pango text rendering (regular + italic) for the native-text comparison | **captured** |
-| `math_formula` | Euler's identity for the native fmd-math comparison | **missing — not present in the 2026-07-25 capture set or its `PROVENANCE.json`; no aesthetic verdict is possible until a private Reference capture is supplied** |
+| `math_formula` | Euler's identity for the native fmd-math comparison | **captured** (supplement session 2026-08-23, below) |
 
 ## Capture record
 
@@ -72,3 +72,20 @@ maintained (D-16).
    8-unit frame, cutting `auto` and `no_joint` off-screen in a scene whose
    entire purpose is showing every joint type. The stack is now fitted to
    the frame height.
+
+**Supplement session — `math_formula` (fm-gjl7), 2026-08-23.** The panel
+postdated the 2026-07-25 set; the capture harness now supports supplement
+semantics (PNGs already on disk are never re-rendered or overwritten, and
+`PROVENANCE.json` is merged with the session appended under `supplements` —
+the original record stays byte-identical). Same machine and same llvmpipe GL
+identity as the base session; per-session closure recorded in the manifest:
+CPython 3.13.1 (uv-managed), numpy 2.5.2, scipy 1.18.1, moderngl 5.12.0,
+PyOpenGL 3.1.10, manimpango 0.6.1, pillow 12.3.0, fonttools 4.63.0. The
+scene renders `Tex(r"e^{i\pi} + 1 = 0", font_size=96)` centred — the exact
+string and scale of the native panel in
+`spikes/g0-8-accelerator/src/bin/g0_2_look.rs`. sha256
+`c2eb1124091572f076c6badb10ba8716aff7d84a6f05751df5b0b7534d20807c`.
+Environment note: the run needed `texlive-fonts-extra` (`dsfont.sty`) and
+`texlive-science` (`physics.sty`) installed for the Reference's default TeX
+template; this is the recorded capture machine's dependency closure, not a
+maintained environment (D-16).
