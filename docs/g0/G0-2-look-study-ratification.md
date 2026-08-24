@@ -498,3 +498,58 @@ affect any constant decided above.
 - **The lighting is Gouraud, per-vertex** (§3). §12 decides whether to keep
   that or evaluate per-fragment; keeping the look may not require keeping the
   interpolation.
+
+## 9. Delegated ratification (ADR-0018) — 2026-08-24
+
+Both pending rows (`text_sample`, `math_formula`) are **ratified as
+`different-but-fine`** by delegated fresh-eyes review under ADR-0018, with
+the delegate's two concrete defect claims raised, pixel-verified, and
+**refuted** — recorded here so the ratification is auditable, not a rubber
+stamp.
+
+**Protocol.** The delegate reviewed BLIND: both panels of each pair were
+copied to neutral labels `X`/`Y` (assignment fixed by a recorded seeded draw,
+`docs/g0/ratification-mapping-2026-08-24.json`, seed 20260824) before the delegate saw anything, and the
+prompt named neither pipeline's provenance. Delegate: the Antigravity CLI
+agent (`agy --print`, Gemini 3.x Pro-class), 2026-08-24, host
+`sensedemobox`. Evidence viewed: the actual 1920×1080 panels —
+`text_sample_{X,Y}.png` and `math_formula_{X,Y}.png` under the review
+scratch — byte-identical to the committed fixtures (SHA-256s in
+`docs/g0/ratification-mapping-2026-08-24.json`; fmn text `8f175ae9…`, Reference text `e65ffc3b…`, fmn math
+`39f17d2f…`, Reference math `c2eb1124…`). Grok Build was tried first as the
+G1-precedent delegate and was unavailable (usage balance exhausted, HTTP
+402); the Gemini CLI was deprecated (IneligibleTierError); Antigravity ran.
+
+**Blind findings, decoded against the mapping.** The delegate ranked the
+Reference capture first on BOTH pairs — a taste preference that is itself
+the `different-but-fine` content, not a regression finding — and raised two
+specific defect claims:
+
+1. *"fmn math panel clips the top of the exponent `i`, removing its dot."*
+   **Refuted at pixel level.** The fmn dot is a whole glyph: rows above the
+   binarized ink top carry a smooth anti-aliasing ramp (`279 462 447 225` at
+   row 477, rising to full ink at 478), and the dot core is 7 px against the
+   capture's 9 px — exactly the render's overall ~2 % smaller scale (ink
+   heights 123 vs 125 px). A clip would show full-intensity pixels cut flat
+   with no AA ramp above.
+2. *"The Reference capture clips descenders flat (p, y, comma); the fmn text
+   shows wide math-mode-style letter spacing."* **Both halves refuted.**
+   Full-resolution crops of the capture's subtitle band show every descender
+   intact (the commas, the `p` of "kept"); and the fmn subtitle is normal
+   Computer Modern *italic* — cohesive cursive letterforms with ordinary word
+   spacing, not isolated letters. The face difference (Consolas-oblique
+   capture vs bundled CM italic) is the documented BN-05 divergence, and the
+   delegate's preference for the capture's face on pair 1 is the same
+   recorded taste call the drafted verdict already carries.
+
+**Verdicts.** `text_sample`: **different-but-fine (BN-05), ratified** —
+layout, size ratio, true-italic contrast, em dash, and AA character
+correspond; the face is the deliberate sovereign-font divergence and the
+blind delegate's preference for the capture face is noted, not overruled.
+`math_formula`: **different-but-fine (BN-05), ratified** — same face both
+sides, identical ink centring, the 6.4 % tighter inter-atom advance is the
+recorded metrics divergence, and the delegate's sole defect claim dissolved
+under magnification. Neither panel is a regression; no correction bead is
+required. Reviewer-of-record for this ratification: the in-session swarm
+(ox-alpha session, 2026-08-24) executing ADR-0018's machinery; the
+program owner retains the standing right to re-open any ratified row.
