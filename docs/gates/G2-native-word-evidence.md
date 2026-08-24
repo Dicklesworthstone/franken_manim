@@ -198,3 +198,28 @@ above traces to a closed bead, a committed artifact with a stated hash or
 path, or a named commit — and every claim that would require a fresh test
 run or a human verdict is labeled as pending rather than counted. The gate
 bead `fm-i1q` remains open; only the program owner's process closes it.
+
+## Post-marshal updates (2026-08-24)
+
+Recorded after the snapshot above so the marshal's rows stay as-written;
+fold these into the next re-marshal. Full detail in the `fm-i1q` comment
+thread.
+
+1. **Criterion 4 (SVGMobject) is now green.** `fm-5wq.4.50` closed: portal
+   `SVGMobject` constructs a real VMobject family through Chisel's hardened
+   document processor, covered by `tests/bridge.py` (embedded and executed
+   by the `fmn-python` cargo suite).
+2. **Criterion 2's binds are no longer only code-first.** Fresh run at HEAD
+   (`cargo test -p fmn-python -p fmn-conformance`, 2026-08-24): all suites
+   ok, 0 failed, including the span-map/TMT/indication portal binds.
+3. **Criterion 1's math half now has capture + verdict + ratification.** The
+   missing Reference capture exists (supplement session 2026-08-23,
+   `PROVENANCE.json` supplements); the fixture row is settled
+   `different-but-fine` (BN-05), ratified 2026-08-24 by delegated blind
+   review per ADR-0018 (`docs/g0/G0-2-look-study-ratification.md` §9;
+   `text_sample` ratified the same day, beads `fm-6ppv`/`fm-jrmc` closed).
+   Blocker 3 of "What still blocks G2" is resolved.
+4. **The one remaining blocker is item 1**: pinned-host PG-1(G2)/PG-7
+   observations (`fm-inr`). The rig and target baselines are complete; the
+   `Baseline` schema enforces bare-metal + isolation qualification, so a
+   shared-host number cannot satisfy the rows by construction.

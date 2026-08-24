@@ -528,10 +528,12 @@ specific defect claims:
 1. *"fmn math panel clips the top of the exponent `i`, removing its dot."*
    **Refuted at pixel level.** The fmn dot is a whole glyph: rows above the
    binarized ink top carry a smooth anti-aliasing ramp (`279 462 447 225` at
-   row 477, rising to full ink at 478), and the dot core is 7 px against the
-   capture's 9 px — exactly the render's overall ~2 % smaller scale (ink
-   heights 123 vs 125 px). A clip would show full-intensity pixels cut flat
-   with no AA ramp above.
+   row 477, rising to full ink at 478). The dot core reads 7 px against the
+   capture's 9 px at the same binarization threshold — somewhat smaller than
+   the render's overall ~2 % scale difference alone would predict, as
+   expected when thresholding erodes a small feature's anti-aliased edge on
+   both sides; the decisive point is the ramp itself, which a hard clip
+   cannot leave behind.
 2. *"The Reference capture clips descenders flat (p, y, comma); the fmn text
    shows wide math-mode-style letter spacing."* **Both halves refuted.**
    Full-resolution crops of the capture's subtitle band show every descender
