@@ -180,8 +180,8 @@ def build_scenes(m):
 
     def math_formula(s):
         # The fm-gjl7 panel: Euler's identity at the native panel's scale
-        # (font_size=96, display-style default alignment), centred — the
-        # exact string the fmn side renders via fmd-math in
+        # (font_size=96, the Reference's default template alignment),
+        # centred — the exact string the fmn side renders via fmd-math in
         # spikes/g0-8-accelerator/src/bin/g0_2_look.rs.
         tex = m.Tex(r"e^{i\pi} + 1 = 0", font_size=96)
         s.add(tex.center())
@@ -268,7 +268,6 @@ def main() -> None:
     out = args.out
 
     m = import_reference()
-    gl = gl_identity()
     scenes = build_scenes(m)
     ids = [sid for sid, _ in scenes]
     if ids != CAPTURE_IDS:
@@ -304,6 +303,8 @@ def main() -> None:
     if not targets:
         print("Nothing to capture: every panel already exists. Exiting.")
         return
+
+    gl = gl_identity()
 
     # Render every target scene into memory first, then validate, then
     # write: the capture is all-or-nothing, so nothing reaches disk until
@@ -375,9 +376,11 @@ def main() -> None:
                 "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "ids": sorted(captures),
                 "reason": (
-                    "fm-gjl7: the math_formula panel postdates the "
-                    "2026-07-25 capture set; same pinned Reference commit, "
-                    "environment recorded per session, nothing re-captured"
+                    "supplement capture of "
+                    + ", ".join(sorted(captures))
+                    + "; these panels postdate the 2026-07-25 base set, "
+                    "same pinned Reference commit, environment recorded "
+                    "per session, nothing re-captured"
                 ),
                 "reference": {"repo": "3b1b/manim", "commit": ref_commit()},
                 "environment": environment,

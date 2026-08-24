@@ -31,18 +31,15 @@ a lock-graph walk — the **VERIFIED (mechanical)** evidence class.
 |---|---|---|
 | `fmn-wasm`, `fmn-anim`, `fmn-cache`, `fmn-codec`, `fmn-config`, `fmn-core`, `fmn-dmath`, `fmn-frame`, `fmn-geom`, `fmn-hash`, `fmn-mobject`, `fmn-platform`, `fmn-render`, `fmn-scene` | **VERIFIED (build)** | `scripts/check_wasm_package.sh` runs wasm-pack 0.15.0 over the actual `fmn-wasm` cdylib; `scripts/check.sh` also compiles the render-axis crates directly for `wasm32-unknown-unknown` |
 
-fmn-geom now enters with its doctrine-D4 solver gateway: `fsci-linalg` 0.1.0,
-its pinned frankenscipy siblings `fsci-fft` 0.1.0 and `fsci-runtime` 0.1.0, and
-the nalgebra/serde stack they pin (`nalgebra` 0.34.2, `nalgebra-macros` 0.3.0,
-`simba` 0.9.1, `matrixmultiply` 0.3.11, `wide` 0.7.33, `safe_arch` 0.7.4,
-`approx` 0.5.1, `num-complex` 0.4.6, `num-rational` 0.4.2, `num-bigint` 0.4.8,
-`num-integer` 0.1.46, `num-traits` 0.2.19, `paste` 1.0.15, `typenum` 1.20.1,
-`rawpointer` 0.2.1, `bytemuck` 1.25.2, `serde` 1.0.229, `serde_core` 1.0.229,
-`serde_derive` 1.0.229, `serde_json` 1.0.151), alongside the pre-existing
-`wasm-bindgen` 0.2.127 family, `bumpalo` 3.20.3, `cfg-if` 1.0.4,
-`once_cell` 1.21.4, `proc-macro2` 1.0.107, `quote` 1.0.47, `syn` 2.0.119, and
-`unicode-ident` 1.0.24. The exact versions, checksums, features, licenses,
-proc-macro/build-script posture, and unsafe reviews are admitted by
+fmn-geom now enters with its doctrine-D4 solver gateway: the pinned
+frankenscipy crates `fsci-linalg` 0.1.0, `fsci-fft` 0.1.0, and `fsci-runtime`
+0.1.0 (the last bringing its audit-ledger blake3 hashing chain), plus their
+transitive numeric and serialization stacks (`nalgebra` 0.34.2 with the
+`simba`/`matrixmultiply`/`wide`/`safe_arch`/`approx`/num-* chain, `serde`
+1.0.229 with derive, `serde_json` 1.0.151 with `preserve_order`, and the
+wasm-bindgen family already listed above). The complete admission — exact
+versions, checksums, features, licenses, proc-macro/build-script posture, and
+unsafe reviews for every package this gateway adds — is enforced row-by-row by
 `SUITE_ALLOWLIST.tsv`; `workspace_closure_is_exactly_the_governed_universe`
 checks the primary and auxiliary locks on every `cargo test` run.
 

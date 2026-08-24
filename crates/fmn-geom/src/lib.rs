@@ -171,7 +171,7 @@ impl std::fmt::Display for GeomError {
             ),
             Self::SingularSystem => write!(f, "smoothing solve hit a singular linear system"),
             Self::SolverRefused => {
-                write!(f, "smoothing solver refused the system")
+                write!(f, "smoothing solver refused the linear system")
             }
             Self::SmoothingSizeOverflow { anchors } => write!(
                 f,
