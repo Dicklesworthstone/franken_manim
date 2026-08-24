@@ -20126,3 +20126,51 @@ _check("arrays match", it.arrays_match(np.arange(3), np.arange(3)))
 _cp = it.cartesian_product(np.array([1, 2]), np.array([3, 4]))
 _check("cartesian product", _cp.shape == (4, 2))
 _check("hash obj", isinstance(it.hash_obj({"a": [1, 2]}), int))
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the Reference easing shelf (manimlib.utils.rate_functions).
+
+rf = importlib.import_module("manimlib.utils.rate_functions")
+assert manimlib.smooth is rf.smooth and manimlib.linear is rf.linear
+
+_check("linear identity", rf.linear(0.25) == 0.25 and rf.linear(0.0) == 0.0
+       and rf.linear(1.0) == 1.0)
+_check("smooth endpoints", rf.smooth(0.0) == 0.0 and rf.smooth(1.0) == 1.0)
+_check("smooth midpoint", np.isclose(rf.smooth(0.5), 0.5))
+_check("smooth quintic value", np.isclose(rf.smooth(0.25), 0.103515625))
+_check("rush into first half",
+       np.isclose(rf.rush_into(0.5), 0.20703125) and np.isclose(rf.rush_into(1.0), 1.0))
+_check("rush from second half",
+       np.isclose(rf.rush_from(0.0), 0.0) and np.isclose(rf.rush_from(0.5), 0.79296875))
+_check("slow into quarter circle", np.isclose(rf.slow_into(0.5), math.sqrt(0.75)))
+_check("double smooth branches",
+       np.isclose(rf.double_smooth(0.25), 0.25) and np.isclose(rf.double_smooth(0.75), 0.75))
+_check("there and back turns at the midpoint",
+       rf.there_and_back(0.0) == 0.0 and rf.there_and_back(1.0) == 0.0
+       and np.isclose(rf.there_and_back(0.25), 0.5)
+       and np.isclose(rf.there_and_back(0.75), 0.5))
+_check("there and back with pause plateau",
+       rf.there_and_back_with_pause(0.5) == 1.0
+       and np.isclose(rf.there_and_back_with_pause(0.2), 0.68256)
+       and np.isclose(rf.there_and_back_with_pause(0.9), 0.16308))
+_check("running start dips negative then lands",
+       rf.running_start(0.0) == 0.0 and rf.running_start(1.0) == 1.0
+       and rf.running_start(0.12) < 0.0)
+_check("overshoot exceeds one then settles",
+       rf.overshoot(0.0) == 0.0 and rf.overshoot(1.0) == 1.0
+       and np.isclose(rf.overshoot(0.8), 1.12128))
+_check("not quite there scales proportion",
+       np.isclose(rf.not_quite_there()(1.0), 0.7)
+       and np.isclose(rf.not_quite_there(proportion=0.3)(1.0), 0.3))
+_check("wiggle rides sine over there-and-back",
+       np.isclose(rf.wiggle(0.25), 0.5) and np.isclose(rf.wiggle(0.75), -0.5))
+_squished = rf.squish_rate_func(lambda t: t, 0.4, 0.6)
+_check("squish clamps outside band",
+       _squished(0.2) == 0.0 and _squished(0.8) == 1.0 and np.isclose(_squished(0.5), 0.5))
+_check("squish degenerate band returns edge",
+       rf.squish_rate_func(lambda t: t, 0.4, 0.4)(0.7) == 0.4)
+_check("lingering front loads", np.isclose(rf.lingering(0.4), 0.5) and rf.lingering(0.9) == 1.0)
+_check("exponential decay half life",
+       rf.exponential_decay(0.0) == 0.0
+       and np.isclose(rf.exponential_decay(0.1), 1.0 - math.exp(-1.0)))

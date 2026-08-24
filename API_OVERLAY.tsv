@@ -1113,6 +1113,21 @@ manimlib.mobject.svg.brace:Brace.set_initial_width	same	scripts/manim_ref/maniml
 manimlib.mobject.svg.brace:LineBrace	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	is the authored brace along an arbitrary segment with perpendicular direction over the native path model
 manimlib.utils.svg_export:_get_path_data	same	scripts/manim_ref/manimlib/utils/svg_export.py	crates/fmn-python/tests/bridge.py	builds svg path data from subpaths with y negation and handle-based linear detection
 manimlib.utils.svg_export:vmobject_to_svg	same	scripts/manim_ref/manimlib/utils/svg_export.py	crates/fmn-python/tests/bridge.py	emits one path per point-carrying family member in a frame-unit viewBox with resolved paints and optional file write
+manimlib.utils.rate_functions:double_smooth	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	composes two smooth halves meeting exactly at one half at the midpoint
+manimlib.utils.rate_functions:exponential_decay	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	rises as one minus the exponential with the given half life and starts at zero
+manimlib.utils.rate_functions:linear	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	is the identity easing including exact endpoint values
+manimlib.utils.rate_functions:lingering	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	squishes the identity into the first eighty percent of the animation
+manimlib.utils.rate_functions:not_quite_there	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	wraps a rate function scaled by the fixed proportion with smooth default
+manimlib.utils.rate_functions:overshoot	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	rides the quintic Bernstein pull past one before settling at one
+manimlib.utils.rate_functions:running_start	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	rides the sixth-degree Bernstein pull below zero before landing at one
+manimlib.utils.rate_functions:rush_from	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	mirrors rush_into through the second half starting at zero
+manimlib.utils.rate_functions:rush_into	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	doubles smooth over the first half reaching one at the end
+manimlib.utils.rate_functions:slow_into	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	eases along the unit quarter circle from zero to one
+manimlib.utils.rate_functions:smooth	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	is the quintic smoothstep with pinned endpoints and midpoint one half
+manimlib.utils.rate_functions:squish_rate_func	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	remaps into the a-to-b band clamps outside it and returns a on degenerate bands
+manimlib.utils.rate_functions:there_and_back	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	smooths up the first half and back down the second returning to zero
+manimlib.utils.rate_functions:there_and_back_with_pause	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	holds one across the middle pause-ratio band between smoothed ramps
+manimlib.utils.rate_functions:wiggle	same	scripts/manim_ref/manimlib/utils/rate_functions.py	crates/fmn-python/tests/bridge.py	multiplies there-and-back by the sine of wiggles half cycles
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
