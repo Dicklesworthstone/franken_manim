@@ -1,12 +1,12 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-derived 2026-08-21 (wasm32 render-axis check + node smoke green on this host) against the exact lock identities below.
+**Status:** re-derived 2026-08-24 (wasm32 render-axis check + node smoke green on this host; smoke digest unchanged at `1f248a71347b82aa`) against the exact lock identities below, after fm-go7 routed fmn-geom smoothing solves through fsci-linalg.
 The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes, forcing this audit to be re-run instead of leaving a
 plausible but stale “current pins” claim behind.
 
 - `SUITE.lock` SHA-256: `ed186d765192e0afebf046beeaea310b2bbd68511c2fd7ee9a9637b4dfe0612f`
-- `Cargo.lock` SHA-256: `9af1520af2cb474ea7859135f2621c4b419142430d44a868651bde58cde5ac1d`
+- `Cargo.lock` SHA-256: `ea8260571407cc100f63d27c687370500332305db38e464bbbf3c528d544d9d0`
 
 Method labels are deliberately narrow:
 
@@ -20,18 +20,28 @@ Method labels are deliberately narrow:
 
 ## Shipped serial and shared-memory graphs
 
+The workspace crate set below is unchanged; the tree derivation command
 `cargo tree -p fmn-wasm --target wasm32-unknown-unknown --edges normal
---locked` resolves the current package to these workspace crates:
+--locked` currently aborts on a malformed upstream fixture
+(`asupersync@c48399f` `tests/fixtures/migration_readiness_planner/malformed/Cargo.toml`),
+so this re-derivation used actual wasm32 compilation of every listed crate plus
+a lock-graph walk — the **VERIFIED (mechanical)** evidence class.
 
 | workspace packages | verdict | executable evidence |
 |---|---|---|
 | `fmn-wasm`, `fmn-anim`, `fmn-cache`, `fmn-codec`, `fmn-config`, `fmn-core`, `fmn-dmath`, `fmn-frame`, `fmn-geom`, `fmn-hash`, `fmn-mobject`, `fmn-platform`, `fmn-render`, `fmn-scene` | **VERIFIED (build)** | `scripts/check_wasm_package.sh` runs wasm-pack 0.15.0 over the actual `fmn-wasm` cdylib; `scripts/check.sh` also compiles the render-axis crates directly for `wasm32-unknown-unknown` |
 
-The only external packages in that wasm tree are `wasm-bindgen` 0.2.127,
-`wasm-bindgen-macro` 0.2.127, `wasm-bindgen-macro-support` 0.2.127,
-`wasm-bindgen-shared` 0.2.127, `bumpalo` 3.20.3, `cfg-if` 1.0.4,
-`once_cell` 1.21.4, `proc-macro2` 1.0.107, `quote` 1.0.47, `syn` 2.0.119,
-and `unicode-ident` 1.0.24. The exact versions, checksums, features, licenses,
+fmn-geom now enters with its doctrine-D4 solver gateway: `fsci-linalg` 0.1.0,
+its pinned frankenscipy siblings `fsci-fft` 0.1.0 and `fsci-runtime` 0.1.0, and
+the nalgebra/serde stack they pin (`nalgebra` 0.34.2, `nalgebra-macros` 0.3.0,
+`simba` 0.9.1, `matrixmultiply` 0.3.11, `wide` 0.7.33, `safe_arch` 0.7.4,
+`approx` 0.5.1, `num-complex` 0.4.6, `num-rational` 0.4.2, `num-bigint` 0.4.8,
+`num-integer` 0.1.46, `num-traits` 0.2.19, `paste` 1.0.15, `typenum` 1.20.1,
+`rawpointer` 0.2.1, `bytemuck` 1.25.2, `serde` 1.0.229, `serde_core` 1.0.229,
+`serde_derive` 1.0.229, `serde_json` 1.0.151), alongside the pre-existing
+`wasm-bindgen` 0.2.127 family, `bumpalo` 3.20.3, `cfg-if` 1.0.4,
+`once_cell` 1.21.4, `proc-macro2` 1.0.107, `quote` 1.0.47, `syn` 2.0.119, and
+`unicode-ident` 1.0.24. The exact versions, checksums, features, licenses,
 proc-macro/build-script posture, and unsafe reviews are admitted by
 `SUITE_ALLOWLIST.tsv`; `workspace_closure_is_exactly_the_governed_universe`
 checks the primary and auxiliary locks on every `cargo test` run.

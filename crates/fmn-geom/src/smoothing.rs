@@ -295,8 +295,8 @@ fn solve_banded(l: usize, u: usize, ab: &[Vec<f64>], b: &mut [f64]) -> Result<()
 /// Dense solve of `A x = b` through fsci-linalg, the solution written into
 /// `b`.
 fn solve_dense(m: &[Vec<f64>], b: &mut [f64]) -> Result<(), GeomError> {
-    let solved = fsci_linalg::solve(m, b, fsci_linalg::SolveOptions::default())
-        .map_err(solver_error)?;
+    let solved =
+        fsci_linalg::solve(m, b, fsci_linalg::SolveOptions::default()).map_err(solver_error)?;
     b.copy_from_slice(&solved.x);
     Ok(())
 }
