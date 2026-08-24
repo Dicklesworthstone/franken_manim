@@ -591,7 +591,7 @@ impl RecordBuffer {
             return;
         };
         let stride = self.schema.stride();
-        if row.len() != stride || cells.len() % stride != 0 {
+        if row.len() != stride || !cells.len().is_multiple_of(stride) {
             return;
         }
         for record in cells.chunks_exact_mut(stride) {

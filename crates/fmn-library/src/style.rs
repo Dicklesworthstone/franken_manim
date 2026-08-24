@@ -137,19 +137,19 @@ fn write_rgba(buffer: &mut RecordBuffer, field: &str, color: Option<Srgb>, opaci
     // Reference writes the resolved values into `_data_defaults`, where
     // growth from zero picks them up.
     if buffer.is_empty() {
-        if let Some(base) = buffer.default_record(field) {
-            if base.len() == 4 {
-                let mut rgba = [base[0], base[1], base[2], base[3]];
-                if let Some(c) = color {
-                    rgba[0] = c.r as f32;
-                    rgba[1] = c.g as f32;
-                    rgba[2] = c.b as f32;
-                }
-                if let Some(a) = opacity {
-                    rgba[3] = a as f32;
-                }
-                buffer.write_default_record(field, &rgba);
+        if let Some(base) = buffer.default_record(field)
+            && base.len() == 4
+        {
+            let mut rgba = [base[0], base[1], base[2], base[3]];
+            if let Some(c) = color {
+                rgba[0] = c.r as f32;
+                rgba[1] = c.g as f32;
+                rgba[2] = c.b as f32;
             }
+            if let Some(a) = opacity {
+                rgba[3] = a as f32;
+            }
+            buffer.write_default_record(field, &rgba);
         }
         return;
     }
@@ -494,6 +494,92 @@ mod tests {
     }
 
     #[test]
+    fn styling_a_pointless_entry_is_remembered_by_growth() {
+        let mut stage = Stage::new();
+        let mob = stage.add(VMobject::new());
+        assert_eq!(stage.get(mob).unwrap().buffer.len(), 0);
+
+        // The Reference's mobject.py:1329 path: the write lands in
+        // `_data_defaults`, not in any row.
+        stage.set_fill(mob, Some(BLUE), Some(0.5), None, false);
+        stage.set_stroke(mob, Some(RED), Some(9.0), None, None, false);
+        assert_eq!(stage.get(mob).unwrap().buffer.len(), 0);
+
+        // `resize_points` growing from zero adopts the defaults wholesale.
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .resize(4)
+            .expect("growth within allocation limits");
+        let fills = stage
+            .get(mob)
+            .unwrap()
+            .buffer
+            .read_column("fill_rgba")
+            .unwrap();
+        for rgba in fills.as_chunks::<4>().0 {
+            assert!(close(f64::from(rgba[0]), BLUE.r));
+            assert!(close(f64::from(rgba[3]), 0.5));
+        }
+        let widths = stage
+            .get(mob)
+            .unwrap()
+            .buffer
+            .read_column("stroke_width")
+            .unwrap();
+        assert!(widths.iter().all(|w| close(f64::from(*w), 9.0)));
+    }
+
+    #[test]
+    fn copies_carry_the_defaults() {
+        let mut stage = Stage::new();
+        let mob = stage.add(VMobject::new());
+        stage.set_color(mob, RED, Some(1.0), false);
+
+        // `copy()` semantics: an independent buffer that still remembers.
+        let copied = stage.get(mob).unwrap().buffer.deep_clone();
+        let mut grown = copied;
+        grown.resize(2).expect("growth within allocation limits");
+        for rgba in grown.read_column("fill_rgba").unwrap().as_chunks::<4>().0 {
+            assert!(close(f64::from(rgba[0]), RED.r));
+        }
+
+        // The saved-state snapshot clone carries them too (§8.3).
+        let snapshotted = stage.get(mob).unwrap().buffer.snapshot_clone();
+        let mut grown = snapshotted;
+        grown.resize(3).expect("growth within allocation limits");
+        let strokes = grown.read_column("stroke_rgba").unwrap();
+        assert!(!strokes.as_chunks::<4>().0.is_empty());
+        for rgba in strokes.as_chunks::<4>().0 {
+            assert!(close(f64::from(rgba[3]), 1.0));
+        }
+    }
+
+    #[test]
+    fn vgroup_styled_before_children_gain_geometry() {
+        let mut stage = Stage::new();
+        let group = stage.add(
+            VMobject::new()
+                .with_child(VMobject::new())
+                .with_child(VMobject::new()),
+        );
+        let children = stage.get(group).unwrap().submobjects().to_vec();
+        stage.set_color(group, BLUE, None, true);
+
+        for child in &children {
+            stage
+                .get_mut(*child)
+                .unwrap()
+                .buffer
+                .resize(3)
+                .expect("growth within allocation limits");
+            assert_color(stage.get_stroke_color(*child), BLUE);
+            assert_color(stage.get_fill_color(*child), BLUE);
+        }
+    }
+
+    #[test]
     fn has_fill_and_has_stroke_read_the_records() {
         let mut stage = Stage::new();
         let outline = stage.add(VMobject::from_points(vec![
@@ -525,14 +611,5 @@ mod tests {
         stage.set_backstroke(mob, WHITE, 3.0);
         assert!(stage.get(mob).unwrap().uniforms().stroke_behind);
         assert!(close(stage.get_stroke_width(mob).unwrap(), 3.0));
-    }
-
-    #[test]
-    fn styling_a_pointless_mobject_is_a_documented_no_op() {
-        // fm-sjl: the Reference would remember this in _data_defaults.
-        let mut stage = Stage::new();
-        let empty = stage.add(VMobject::new());
-        stage.set_color(empty, RED, None, true);
-        assert_eq!(stage.get_stroke_color(empty), None);
     }
 }
