@@ -574,7 +574,9 @@ impl RecordBuffer {
             return;
         }
         let stride = self.schema.stride();
-        let row = self.defaults.get_or_insert_with(|| vec![0.0; stride].into_boxed_slice());
+        let row = self
+            .defaults
+            .get_or_insert_with(|| vec![0.0; stride].into_boxed_slice());
         row[off..off + width].copy_from_slice(value);
     }
 
