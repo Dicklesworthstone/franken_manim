@@ -10,11 +10,13 @@
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
-    DL, DR, GREEN_E, GREY_B, GREY_E, LEFT, ORIGIN, OUT, RED_E, RIGHT, TAU, UL, UP, UR, WHITE,
+    BLACK, DL, DR, GREEN_E, GREY_B, GREY_E, LEFT, ORIGIN, OUT, RED_E, RIGHT, TAU, UL, UP, UR, WHITE,
 };
 use fmn_core::types::Vec3;
+use fmn_mobject::{Mob, Stage};
 
 use crate::arc::{AnnularSector, Circle, Dot};
+use crate::boolean_ops::BooleanMobjectError;
 use crate::line::Line;
 use crate::poly::Rectangle;
 use crate::style::Style;
@@ -202,4 +204,311 @@ pub fn dartboard_with_palettes(
     ]);
     board = v_group([board, bullseyes]);
     Ok(board.scaled_about(3.0, ORIGIN))
+}
+
+// ------------------------------------------------ tranche 2 (fm-3kr):
+// Speedometer, Piano, Piano3D
+
+/// The needle pivot of a [`speedometer`] build: the arc's center — the
+/// origin for the Reference defaults.
+#[must_use]
+pub fn speedometer_pivot() -> Vec3 {
+    ORIGIN
+}
+
+/// `Speedometer` (drawings.py:111): the gauge arc, `num_ticks` tick lines
+/// with `Integer(10·index)` labels, and the yellow triangular needle
+/// pre-rotated to the zero-velocity position. Child order:
+/// `[arc, (tick, label)×num_ticks, needle]` — the needle is LAST, so
+/// needle wiring can find it positionally.
+///
+/// The Reference overrides `get_center` to subtract the as-constructed
+/// box center (callers read positions relative to the pivot); here the
+/// pivot is simply [`speedometer_pivot`] and the geometry is faithful.
+///
+/// # Errors
+/// [`TextMobjectError`] from the tick labels or the arc.
+pub fn speedometer(book: &fmn_text::FontBook) -> Result<VMobject, crate::text::TextMobjectError> {
+    speedometer_with(
+        book,
+        4.0 * std::f64::consts::PI / 3.0,
+        8,
+        0.2,
+        0.1,
+        0.8,
+        fmn_core::color::Srgb::from_rgb8(0xFF, 0xFF, 0x00),
+    )
+}
+
+/// [`speedometer`] with the full constructor surface.
+///
+/// # Errors
+/// As [`speedometer`].
+pub fn speedometer_with(
+    book: &fmn_text::FontBook,
+    arc_angle: f64,
+    num_ticks: usize,
+    tick_length: f64,
+    needle_width: f64,
+    needle_height: f64,
+    needle_color: Srgb,
+) -> Result<VMobject, crate::text::TextMobjectError> {
+    let start_angle = std::f64::consts::FRAC_PI_2 + arc_angle / 2.0;
+    let end_angle = std::f64::consts::FRAC_PI_2 - arc_angle / 2.0;
+    let arc = crate::arc::Arc::new()
+        .start_angle(start_angle)
+        .angle(-arc_angle)
+        .build()
+        .map_err(|e| crate::text::TextMobjectError::Geometry {
+            what: format!("speedometer arc: {e}"),
+        })?;
+    let mut members: Vec<VMobject> = Vec::with_capacity(1 + 2 * num_ticks + 1);
+    members.push(arc);
+    for index in 0..num_ticks {
+        let angle = start_angle
+            + (end_angle - start_angle) * f64::from(index as u32)
+                / f64::from(num_ticks.saturating_sub(1) as u32).max(1.0);
+        let vect = [angle.cos(), angle.sin(), 0.0];
+        let inner = [
+            (1.0 - tick_length) * vect[0],
+            (1.0 - tick_length) * vect[1],
+            0.0,
+        ];
+        members.push(
+            Line::new(vect, inner)
+                .build()
+                .expect("a straight tick never fails"),
+        );
+        let label = crate::numbers::Integer::new(f64::from(index as u32) * 10.0)
+            .build(book)?
+            .into_vmob()
+            .with_height(tick_length, true)
+            .moved_to([
+                (1.0 + tick_length) * vect[0],
+                (1.0 + tick_length) * vect[1],
+                0.0,
+            ]);
+        members.push(label);
+    }
+    // The needle: the LEFT/UP/RIGHT triangle fitted to the needle box,
+    // rotated so it points along the zero-velocity start angle.
+    let needle = crate::poly::Polygon::new([LEFT, UP, RIGHT])
+        .style(
+            Style::default()
+                .fill(needle_color, 1.0)
+                .stroke(needle_color, 0.0, 1.0),
+        )
+        .build();
+    let (w, h) = needle.extent().map_or((1.0, 1.0), |(min, max)| {
+        ((max[0] - min[0]).max(1e-9), (max[1] - min[1]).max(1e-9))
+    });
+    let needle = needle
+        .scaled_about(needle_width / w, ORIGIN)
+        .scaled_about(needle_height / h, ORIGIN)
+        .rotated_about(start_angle - std::f64::consts::FRAC_PI_2, OUT, ORIGIN);
+    members.push(needle);
+    Ok(v_group(members))
+}
+
+/// `move_needle_to_velocity` (drawings.py:180): rotate the needle child of
+/// a [`speedometer`] build to the velocity proportion of the gauge
+/// (`max_velocity = 10 × (num_ticks − 1)`), about the pivot.
+///
+/// # Errors
+/// [`fmn_mobject::StageError::StaleHandle`] for a dead needle.
+pub fn move_needle_to_velocity(
+    stage: &mut Stage,
+    needle: Mob,
+    arc_angle: f64,
+    num_ticks: usize,
+    velocity: f64,
+) -> Result<(), fmn_mobject::StageError> {
+    let max_velocity = 10.0 * f64::from(num_ticks.saturating_sub(1) as u32).max(1.0);
+    let proportion = (velocity / max_velocity).clamp(0.0, 1.0);
+    let start_angle = std::f64::consts::FRAC_PI_2 + arc_angle / 2.0;
+    let target = start_angle - arc_angle * proportion;
+    let pivot = speedometer_pivot();
+    let tip = stage.get_center(needle);
+    let current = f64::atan2(tip[1] - pivot[1], tip[0] - pivot[0]);
+    stage.rotate(needle, target - current, OUT, Some(pivot), None);
+    Ok(())
+}
+
+/// A built [`piano`]: the keyboard plus which final child indices are the
+/// black keys (the Piano3D elevation needs them).
+#[derive(Debug, Clone)]
+pub struct PianoBuild {
+    /// The keyboard, fitted to the total width.
+    pub vmob: VMobject,
+    /// Child indices of the black keys, in child order.
+    pub black_key_indices: Vec<usize>,
+}
+
+/// `Piano` (drawings.py:593): `n_white_keys` white keys, black keys at the
+/// octave positions the pattern skips, each neighboring white key notched
+/// by a boolean difference against the enlarged black key — the
+/// Reference's `wk.become(Difference(wk, big_bk))` running on the
+/// certified Chisel kernel. Keys sort by x, all but the last
+/// point-reverse, and the keyboard fits to `total_width`.
+///
+/// # Errors
+/// [`BooleanMobjectError`] from the boolean notching or the key geometry.
+pub fn piano() -> Result<VMobject, BooleanMobjectError> {
+    Ok(piano_with(
+        52,
+        &[0, 2, 3, 5, 6],
+        7,
+        (0.15, 1.0),
+        (0.1, 0.66),
+        0.02,
+        WHITE,
+        GREY_E,
+        13.0,
+    )?
+    .vmob)
+}
+
+/// [`piano`] with the full constructor surface, returning the black-key
+/// child indices for the Piano3D elevation.
+///
+/// # Errors
+/// [`BooleanMobjectError`] from the boolean notching or the key geometry.
+#[allow(clippy::too_many_arguments)]
+pub fn piano_with(
+    n_white_keys: usize,
+    black_pattern: &[usize],
+    white_keys_per_octave: usize,
+    white_key_dims: (f64, f64),
+    black_key_dims: (f64, f64),
+    key_buff: f64,
+    white_key_color: Srgb,
+    black_key_color: Srgb,
+    total_width: f64,
+) -> Result<PianoBuild, BooleanMobjectError> {
+    let white_style = Style::default()
+        .fill(white_key_color, 1.0)
+        .stroke(white_key_color, 0.0, 1.0);
+    let black_style = Style::default()
+        .fill(black_key_color, 1.0)
+        .stroke(black_key_color, 0.0, 1.0);
+    let (ww, wh) = white_key_dims;
+    let (bw, bh) = black_key_dims;
+    let mut white_keys: Vec<VMobject> = Vec::with_capacity(n_white_keys);
+    for i in 0..n_white_keys {
+        let x = f64::from(i as u32) * (ww + key_buff);
+        white_keys.push(
+            crate::poly::Rectangle::new()
+                .width(ww)
+                .height(wh)
+                .style(white_style)
+                .build()
+                .expect("a piano key builds: pure geometry")
+                .moved_to([x + ww / 2.0, 0.0, 0.0]),
+        );
+    }
+    let mut black_keys: Vec<VMobject> = Vec::new();
+    for i in 0..n_white_keys.saturating_sub(1) {
+        if black_pattern.contains(&(i % white_keys_per_octave)) {
+            continue;
+        }
+        let top1 = white_keys[i]
+            .bbox_point(UP)
+            .expect("a white key has an extent");
+        let top2 = white_keys[i + 1]
+            .bbox_point(UP)
+            .expect("a white key has an extent");
+        let midpoint = [0.5 * (top1[0] + top2[0]), 0.5 * (top1[1] + top2[1]), 0.0];
+        let black = crate::poly::Rectangle::new()
+            .width(bw)
+            .height(bh)
+            .style(black_style)
+            .build()
+            .expect("a piano key builds: pure geometry")
+            .moved_to_aligned(midpoint, UP);
+        // The enlarged cutter, then the notch (Difference(wk, big_bk)).
+        let (gw, gh) = black
+            .extent()
+            .map_or((bw, bh), |(min, max)| (max[0] - min[0], max[1] - min[1]));
+        let big_black = black
+            .clone()
+            .scaled_about((gw + key_buff) / gw.max(1e-9), ORIGIN)
+            .stretched_about((gh + key_buff) / gh.max(1e-9), 1, ORIGIN)
+            .moved_to_aligned(midpoint, UP);
+        white_keys[i] = crate::boolean_ops::difference(&white_keys[i], &big_black)?
+            .into_mobject()
+            .map_style(move |_| white_style);
+        black_keys.push(black);
+    }
+    // sort_keys: one x-sorted child list, tracking which are black.
+    let mut all: Vec<(VMobject, bool)> = white_keys
+        .into_iter()
+        .map(|key| (key, false))
+        .chain(black_keys.into_iter().map(|key| (key, true)))
+        .collect();
+    all.sort_by(|a, b| {
+        a.0.center_point()[0]
+            .partial_cmp(&b.0.center_point()[0])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    // self[:-1].reverse_points(): every key except the LAST in x order.
+    let last = all.len().saturating_sub(1);
+    let mut keyboard: Vec<VMobject> = Vec::with_capacity(all.len());
+    let mut black_key_indices: Vec<usize> = Vec::new();
+    for (index, (key, is_black)) in all.into_iter().enumerate() {
+        if is_black {
+            black_key_indices.push(index);
+        }
+        keyboard.push(if index == last {
+            key
+        } else {
+            key.reversed_points()
+        });
+    }
+    Ok(PianoBuild {
+        vmob: v_group(keyboard).with_width(total_width, true),
+        black_key_indices,
+    })
+}
+
+/// `Piano3D` (drawings.py:657): every 2D key extruded through
+/// [`crate::solids::Prismify`], stroked black, shaded `(1.0, 0.2, 0.2)`,
+/// depth-tested, with the black keys elevated along OUT and recolored.
+///
+/// # Errors
+/// [`fmn_geom::GeomError`] from the 2D piano or the extrusions.
+pub fn piano_3d() -> Result<VMobject, BooleanMobjectError> {
+    let build = piano_with(
+        52,
+        &[0, 2, 3, 5, 6],
+        7,
+        (0.15, 1.0),
+        (0.1, 0.66),
+        0.001,
+        fmn_core::constants::GREY_A,
+        GREY_E,
+        13.0,
+    )?;
+    let black: std::collections::HashSet<usize> = build.black_key_indices.iter().copied().collect();
+    let keys: Vec<VMobject> = build
+        .vmob
+        .children()
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let mut extruded = crate::solids::Prismify::new(key.clone()).depth(0.1).build();
+            if black.contains(&index) {
+                extruded = extruded
+                    .shifted(fmn_core::constants::OUT.map(|c| c * 0.05))
+                    .map_style_deep(|style| style.color(BLACK));
+            }
+            extruded
+        })
+        .collect();
+    Ok(v_group(keys)
+        .map_style_deep(|style| style.stroke(BLACK, 0.25, 1.0))
+        .with_uniforms(fmn_mobject::Uniforms {
+            shading: [1.0, 0.2, 0.2],
+            depth_test: true,
+            ..fmn_mobject::Uniforms::default()
+        }))
 }
