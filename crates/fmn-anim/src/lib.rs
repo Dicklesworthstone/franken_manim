@@ -109,7 +109,7 @@ pub use purity::{
     ImpureEffect, Purity, SegmentKind, SegmentReport, classify_play, classify_wait,
     reconstruct_pure_frame,
 };
-pub use rotation::{Rotating, rotate, rotate_default};
+pub use rotation::{Rotating, clock_passes_time, rotate, rotate_default};
 pub use timeline::{
     Label, PlannedSegment, Step, TIMELINE_SCHEMA, Timeline, TimelineError, TimelinePlan,
 };

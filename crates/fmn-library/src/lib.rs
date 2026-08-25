@@ -82,8 +82,10 @@
 pub mod arc;
 pub mod boolean_ops;
 pub mod brace;
+pub mod code;
 pub mod controls;
 pub mod coords;
+pub mod drawings;
 pub mod fields;
 pub mod graphs;
 pub mod image;

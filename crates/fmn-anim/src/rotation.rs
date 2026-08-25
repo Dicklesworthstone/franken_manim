@@ -7,12 +7,14 @@
 //! about the box center.
 
 use fmn_core::constants::{OUT, PI, TAU};
+use fmn_core::rate;
 use fmn_core::types::Vec3;
 use fmn_mobject::{Mob, Stage};
 
 use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, time_spanned_alpha,
 };
+use crate::composition::AnimationGroup;
 
 /// `Rotating` (rotation.py:17): Reference defaults `angle = TAU`,
 /// `axis = OUT`, `run_time = 5`, `rate_func = linear`.
@@ -146,4 +148,47 @@ pub fn rotate(mobject: Mob, angle: f64) -> Rotating {
 #[must_use]
 pub fn rotate_default(mobject: Mob) -> Rotating {
     rotate(mobject, PI)
+}
+
+/// `ClockPassesTime` (drawings.py:323): the clock's hands rotate about the
+/// clock's center — the hour hand `hours_passed` twelfths of a turn
+/// clockwise (negative angle), the minute hand twelve times that — as one
+/// [`AnimationGroup`] over the clock (`group=clock` in the Reference).
+/// Reference defaults: `run_time = 5.0`, `hours_passed = 12.0`, linear.
+///
+/// `clock` is the built [`crate::drawings`-style] clock family's handle;
+/// `hour_hand` and `minute_hand` are its children 1 and 2 (the documented
+/// child order). Geometry construction stays in the library tier; this is
+/// the wiring.
+///
+/// # Errors
+/// [`AnimError::StaleHandle`] for any dead handle, or the Stage errors
+/// reported while assembling the member container.
+pub fn clock_passes_time(
+    stage: &mut Stage,
+    clock: Mob,
+    hour_hand: Mob,
+    minute_hand: Mob,
+    run_time: f64,
+    hours_passed: f64,
+) -> Result<AnimationGroup, AnimError> {
+    let center = stage.get_center(clock);
+    let hour_radians = -hours_passed * 2.0 * PI / 12.0;
+    let hour_rot = Box::new(
+        Rotating::new(hour_hand)
+            .with_angle(hour_radians)
+            .with_axis(OUT)
+            .with_about_point(center),
+    );
+    let minute_rot = Box::new(
+        Rotating::new(minute_hand)
+            .with_angle(12.0 * hour_radians)
+            .with_axis(OUT)
+            .with_about_point(center),
+    );
+    let mut group =
+        AnimationGroup::new(stage, vec![hour_rot, minute_rot])?.with_name("ClockPassesTime");
+    group.state_mut().config.run_time = run_time;
+    group.state_mut().config.rate_func = RateFunc::Base(rate::linear);
+    Ok(group)
 }
