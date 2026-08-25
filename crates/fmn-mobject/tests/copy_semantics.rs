@@ -910,3 +910,37 @@ fn copy_of_stale_handle_is_refused() {
         "a stale source must be rejected before the destination changes"
     );
 }
+
+/// `install` replaces content and subtree over the SAME handle — crossing
+/// exactly the family-shape refusal that `become_mobject` raises, which is
+/// why the numbers family (fm-jh7) needs it: a digit-count change reshapes
+/// the family. Identity-linked state survives; content-shaped state is
+/// replaced.
+#[test]
+fn install_replaces_content_and_subtree_over_the_same_handle() {
+    let mut stage = Stage::new();
+    let parent = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    let old_child = stage.add(Mobject::from_points(&[[1.0; 3]]));
+    stage.attach(parent, old_child).expect("attach");
+    let updater_id = stage
+        .add_updater(parent, |_stage, _mob| {}, false)
+        .expect("updater registered");
+
+    // The replacement has a different record count AND a different child
+    // count — become_mobject would refuse both.
+    let mut replacement = Mobject::from_points(&[[5.0; 3], [6.0; 3], [7.0; 3]]).with_z_index(3);
+    replacement
+        .submobjects
+        .push(Mobject::from_points(&[[8.0; 3]]));
+    stage.install(parent, replacement).expect("install");
+
+    let entry = stage.get(parent).expect("handle survives");
+    assert_eq!(entry.buffer.len(), 3, "records replaced from the value");
+    assert_eq!(stage.z_index(parent), 3, "z-index replaced");
+    assert!(!stage.contains(old_child), "old subtree deleted");
+    assert_eq!(entry.submobjects().len(), 1, "value children attached");
+    assert!(
+        stage.updater_ids(parent).contains(&updater_id),
+        "identity-linked updaters survive the install"
+    );
+}

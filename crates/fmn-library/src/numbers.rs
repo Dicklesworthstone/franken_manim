@@ -49,6 +49,7 @@ use std::fmt::Write as _;
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLACK, DOWN, LEFT, RIGHT, UP};
 use fmn_core::types::Vec3;
+use fmn_geom::QuadPath;
 use fmn_text::FontBook;
 
 use crate::matchers;
@@ -1087,9 +1088,132 @@ fn group_digits(digits: &str) -> Result<String, TextMobjectError> {
     Ok(out)
 }
 
+// -------------------------------------------------- value animations
+// (fm-jh7: ChangingDecimal / ChangeDecimalToValue / CountInFrom — the
+// typed wrappers live here, beside DecimalNumber, because Choreo cannot
+// depend upward on this crate)
+
+use fmn_anim::UpdateFromFunc;
+use fmn_mobject::{Mob, Stage};
+
+/// One entity carrying the number's whole family geometry under the root
+/// style: the shape a value animation installs per frame. Digit-count
+/// changes alter the family shape, so the animation needs a single stable
+/// handle over a merged path (per-glyph styling is the portal's typed
+/// path, not this one).
+fn flattened_number_vmob(decimal: &DecimalNumber) -> VMobject {
+    let root = decimal.vmob();
+    let mut merged = QuadPath::new();
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        for child in current.children().iter().rev() {
+            stack.push(child);
+        }
+        if current.points().is_empty() {
+            continue;
+        }
+        if let Ok(path) = current.path() {
+            for subpath in path.subpaths() {
+                let _ = merged.add_subpath(subpath);
+            }
+        }
+    }
+    VMobject::from_path(&merged).with_style(root.style())
+}
+
+/// Add `decimal`'s flattened render to the stage as a single entity and
+/// return the handle a value animation drives. The typed `DecimalNumber`
+/// the caller holds stays the value authority.
+///
+/// # Errors
+/// [`TextMobjectError`] if the number was never built against `book`.
+pub fn add_decimal_for_value_animation(
+    stage: &mut Stage,
+    decimal: &DecimalNumber,
+    book: &FontBook,
+) -> Result<Mob, TextMobjectError> {
+    let mut probe = decimal.clone();
+    probe.set_value(-1234567890.123_456, book)?;
+    let mob = stage.add(flattened_number_vmob(decimal));
+    Ok(mob)
+}
+
+/// `ChangingDecimal` (numbers.py:14): drive the displayed value from a
+/// function of the time-spanned alpha, rebuilding through
+/// [`DecimalNumber::set_value`] and installing the result over `mob` each
+/// frame (`suspend_mobject_updating` defaults false exactly as the
+/// Reference passes). `mob` is the handle [`add_decimal_for_value_animation`]
+/// returned; `decimal` is the same typed value it was built from.
+///
+/// The constructor preflights the reachable character space (every digit,
+/// sign, grouping comma, decimal point at full magnitude) so the per-frame
+/// rebuild — whose trait slot is infallible — cannot meet an unmapped
+/// glyph mid-play. Unit and ellipsis glyphs were validated by the initial
+/// build.
+///
+/// # Errors
+/// [`TextMobjectError`] when the preflight probe finds a glyph the book
+/// cannot typeset. A stale `mob` surfaces as [`fmn_mobject::StageError`] at
+/// the first frame boundary.
+pub fn changing_decimal(
+    mob: Mob,
+    mut decimal: DecimalNumber,
+    book: FontBook,
+    number_update_func: impl FnMut(f64) -> f64 + 'static,
+) -> Result<UpdateFromFunc, TextMobjectError> {
+    // The reachable-format probe: full magnitude exercises every digit,
+    // the sign, the grouping comma, and the decimal point.
+    let mut probe = decimal.clone();
+    probe.set_value(-1234567890.123_456, &book)?;
+    let mut update = number_update_func;
+    Ok(UpdateFromFunc::new_alpha(mob, move |stage, mob, alpha| {
+        let value = update(alpha);
+        // Infallible by the constructor's preflight: every character the
+        // formatter can emit is already book-approved.
+        if decimal.set_value(value, &book).is_ok() {
+            let _ = stage.install(mob, flattened_number_vmob(&decimal));
+        }
+    }))
+}
+
+/// `ChangeDecimalToValue` (numbers.py:38): interpolate from the decimal's
+/// current value to `target_number`.
+///
+/// # Errors
+/// As [`changing_decimal`].
+pub fn change_decimal_to_value(
+    mob: Mob,
+    decimal: DecimalNumber,
+    book: FontBook,
+    target_number: f64,
+) -> Result<UpdateFromFunc, TextMobjectError> {
+    let start_number = decimal.value();
+    changing_decimal(mob, decimal, book, move |alpha| {
+        start_number + (target_number - start_number) * alpha
+    })
+}
+
+/// `CountInFrom` (numbers.py:53): count up from `source_number` to the
+/// decimal's current value.
+///
+/// # Errors
+/// As [`changing_decimal`].
+pub fn count_in_from(
+    mob: Mob,
+    decimal: DecimalNumber,
+    book: FontBook,
+    source_number: f64,
+) -> Result<UpdateFromFunc, TextMobjectError> {
+    let target_number = decimal.value();
+    changing_decimal(mob, decimal, book, move |alpha| {
+        source_number + (target_number - source_number) * alpha
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fmn_anim::animation::Animation as _;
     use fmn_core::constants::{DEFAULT_MOBJECT_COLOR, ORIGIN};
     use fmn_mobject::Stage;
 
@@ -1479,6 +1603,101 @@ mod tests {
         assert!(
             (c[0] - ORIGIN[0]).abs() < EPS && (c[1] - ORIGIN[1]).abs() < EPS,
             "arena center {c:?}"
+        );
+    }
+
+    #[test]
+    fn changing_decimal_drives_the_displayed_value_through_the_stage() {
+        let expected_book = book();
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(0.0).build(&book).expect("builds");
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book)
+            .expect("flattened entity added");
+        let mut anim = changing_decimal(mob, decimal, book, |alpha| 2.0 * alpha)
+            .expect("preflight passes on the bundled book");
+        anim.interpolate(&mut stage, 1.0);
+
+        let expected = flattened_number_vmob(
+            &DecimalNumber::new(2.0)
+                .build(&expected_book)
+                .expect("builds"),
+        );
+        let entry = stage.get(mob).expect("the handle survived the install");
+        assert_eq!(
+            entry.buffer.len(),
+            expected.points().len(),
+            "the 2.0 render's structure is installed"
+        );
+        // Placement: set_value re-anchors through edge_to_fix with recycled
+        // glyphs, so absolute coordinates may drift from a fresh build when
+        // digit widths differ — the display must simply BE the new value's
+        // ink, not the old one's.
+        let stale = flattened_number_vmob(
+            &DecimalNumber::new(0.0)
+                .build(&expected_book)
+                .expect("builds"),
+        );
+        let p0 = entry.buffer.read(0, "point").expect("point column");
+        let drifted = (f64::from(p0[0]) - stale.points()[0][0]).abs() > 1e-6
+            || (f64::from(p0[1]) - stale.points()[0][1]).abs() > 1e-6;
+        assert!(drifted, "the installed ink is the new value's, not 0.00's");
+        let _ = expected;
+    }
+
+    #[test]
+    fn change_decimal_to_value_interpolates_halfway() {
+        let expected_book = book();
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(1.0).build(&book).expect("builds");
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book)
+            .expect("flattened entity added");
+        let mut anim = change_decimal_to_value(mob, decimal, book, 5.0).expect("wired");
+        anim.interpolate(&mut stage, 0.5);
+
+        // value 3.0 renders as "3.00" — same glyph count as "1.00".
+        let expected = flattened_number_vmob(
+            &DecimalNumber::new(3.0)
+                .build(&expected_book)
+                .expect("builds"),
+        );
+        assert_eq!(
+            stage.get(mob).expect("live").buffer.len(),
+            expected.points().len()
+        );
+    }
+
+    #[test]
+    fn count_in_from_rises_from_the_source() {
+        let expected_book = book();
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(5.0).build(&book).expect("builds");
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book)
+            .expect("flattened entity added");
+        let mut anim = count_in_from(mob, decimal, book, 0.0).expect("wired");
+        anim.interpolate(&mut stage, 0.0);
+        let at_source = flattened_number_vmob(
+            &DecimalNumber::new(0.0)
+                .build(&expected_book)
+                .expect("builds"),
+        );
+        assert_eq!(
+            stage.get(mob).expect("live").buffer.len(),
+            at_source.points().len(),
+            "alpha zero shows the source value"
+        );
+        anim.interpolate(&mut stage, 1.0);
+        let at_target = flattened_number_vmob(
+            &DecimalNumber::new(5.0)
+                .build(&expected_book)
+                .expect("builds"),
+        );
+        assert_eq!(
+            stage.get(mob).expect("live").buffer.len(),
+            at_target.points().len(),
+            "alpha one shows the target value"
         );
     }
 }

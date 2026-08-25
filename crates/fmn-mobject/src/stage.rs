@@ -1265,6 +1265,72 @@ impl Stage {
         Ok(())
     }
 
+    /// Install a value mobject over an existing handle.
+    ///
+    /// The handle survives — scene-list membership, updaters, suspension,
+    /// animating status, tracker, target, and pins are identity-linked
+    /// runtime state this method deliberately preserves — while everything
+    /// content-shaped is replaced from the value: buffer, uniforms,
+    /// z-index, semantic shape slot, render primitive, image, and the child
+    /// subtree (old children are detached and deleted with their subtrees;
+    /// the value's children are added and attached, mirroring
+    /// [`Stage::add`]). The shape-keyed `save_state` copy is cleared as
+    /// stale, and placement resets to identity because the value's
+    /// geometry is authoritative.
+    ///
+    /// This is the primitive structurally-changing rebuilds need (the
+    /// numbers family's `set_value` crossing a digit count, fm-jh7):
+    /// [`Stage::become_mobject`] requires both families to match shape,
+    /// which a value rebuild does not guarantee.
+    ///
+    /// # Errors
+    ///
+    /// [`StageError::StaleHandle`] for a dead `mob`, a deferred delete for
+    /// a pinned old child, or the attach errors reported while wiring the
+    /// value's children.
+    pub fn install(&mut self, mob: Mob, mobject: impl Into<Mobject>) -> Result<(), StageError> {
+        let Mobject {
+            buffer,
+            uniforms,
+            z_index,
+            shape,
+            render_primitive,
+            image,
+            submobjects,
+            defaults_row,
+        } = mobject.into();
+        drop(defaults_row);
+        let old_children: Vec<Mob> = self
+            .get(mob)
+            .ok_or(StageError::StaleHandle)?
+            .submobjects
+            .clone();
+        for child in old_children {
+            self.detach(mob, child);
+            self.delete(child)?;
+        }
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        entry.buffer = buffer;
+        entry.uniforms = uniforms;
+        entry.z_index = z_index;
+        entry.shape = ShapeSlot {
+            tag: shape,
+            point_revision: entry.buffer.field_revision("point"),
+        };
+        entry.render_primitive = render_primitive;
+        entry.image_revision = u64::from(image.is_some());
+        entry.image = image;
+        entry.placement = Placement::IDENTITY;
+        entry.placement_revision = 0;
+        entry.saved_state = None;
+        self.invalidate_family_caches(mob);
+        for child in submobjects {
+            let child_mob = self.add(child);
+            self.attach(mob, child_mob)?;
+        }
+        Ok(())
+    }
+
     /// Cross-stage transfer under the two-scene policy: content moves by the
     /// same copy-category rules as [`Stage::copy_family_mapped`], never by
     /// handle. The family is traversed iteratively and each DAG member is
