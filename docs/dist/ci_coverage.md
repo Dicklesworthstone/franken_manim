@@ -24,14 +24,14 @@ step re-running the Windows watch items (§17.4/§17.6):
 pass on Windows — *functional* coverage. A Windows break fails the commit
 that caused it.
 
-**What this does not promise:** bit-certification. windows-x86-64 is **not**
-a member of the certified matrix (`../INPUT_CLOSURE.md` §5 — the frozen
-G0-6 list is linux-x86-64, linux-aarch64, macos-aarch64), and this job being
-green changes nothing about that. Whether Windows ever joins the certified
-matrix is **OQ-6, a separate declared decision taken after G0-6's data —
-not assumed, not implied, and not widened by CI configuration.** Adding a
-platform to the certified list is an ADR, because the list *is* the promise
-`--reproducible` makes.
+**What this does not promise:** bit-certification. windows-x86-64 is **out of**
+the certified matrix — **ADR-0019** ruled it out until bit-identity is measured
+on a native Windows host (`../INPUT_CLOSURE.md` §5 — the certified list is
+linux-x86-64, linux-aarch64, macos-aarch64), and this job being green changes
+nothing about that. Rejoining takes one successor ADR backed by native-hardware
+measurement (fmn-dmath vectors, fm-ig3-style corpus hashes, an MSVC object-code
+FMA audit). Adding a platform to the certified list is an ADR, because the
+list *is* the promise `--reproducible` makes.
 
 ## The certified-matrix CI legs
 

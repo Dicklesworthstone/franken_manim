@@ -478,6 +478,7 @@ A few honest boundaries:
 - **Typography has an honest fringe.** CFF/CFF2 and variable fonts, complex-script shaping (Arabic, Indic), bidi, and color glyphs are tiered out with revisit triggers. Latin/Greek/Cyrillic text and mathematical typesetting are first-class.
 - **Arbitrary GLSL is out of the compatibility claim.** `set_color_by_code` and custom shader folders are excluded (a short list of corpus-specific native adapters exists for the gallery). A restricted interpreter is banked as a future decision, on demonstrated demand.
 - **GPU acceleration is an annex, not the engine.** Metal (now) and CUDA (via the frankentorch upstream ledger) accelerate `standard`-mode rendering and Studio preview only. Certified output is CPU-defined, permanently.
+- **Windows renders functionally, never bit-certifiably.** windows-x86-64 builds and passes CI, but ADR-0019 rules it out of the certified matrix until bit-identity is measured on native Windows hardware. `--reproducible` promises bits on linux-x86-64, linux-aarch64, and macos-aarch64 only.
 - **Python scenes are Python programs.** They may import real NumPy and do I/O; certification claims apply to the native engine and to Python scenes only as far as the input closure captures them.
 
 ## FAQ

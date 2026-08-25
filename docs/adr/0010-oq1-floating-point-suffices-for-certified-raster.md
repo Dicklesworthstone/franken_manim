@@ -102,5 +102,7 @@ so they are hereby binding on W5 rather than incidental:
   *arithmetic*. It is not evidence about an aarch64 Linux *machine*. The G0-6
   note carries this, and W1's CI matrix (fm-sol) should replace it with real
   hardware when any is available.
-- **windows-x86-64 is unaffected**, and remains OQ-6's separate declared
-  decision — see `docs/INPUT_CLOSURE.md` for the frozen matrix.
+- **windows-x86-64 is unaffected** by this ruling. Its matrix membership was
+  OQ-6's separate declared decision — now resolved by **ADR-0019**: out of the
+  certified matrix until measured on native Windows hardware. See
+  `docs/INPUT_CLOSURE.md` §5 for the frozen list.

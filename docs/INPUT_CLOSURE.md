@@ -105,7 +105,7 @@ across the matrix.
 | **linux-x86-64** | **certified** | measured bit-identical, G0-6; **re-measured on the engine's corpus, fm-ig3** |
 | **linux-aarch64** | **certified** | measured bit-identical, G0-6 (qemu-user; see the caveat below); **re-measured, fm-ig3** |
 | **macos-aarch64** | **certified** | measured bit-identical, G0-6; **re-measured, fm-ig3** |
-| windows-x86-64 | **functional CI only** | bit-certification is **OQ-6**, a separate declared decision owned post-W1 |
+| windows-x86-64 | **out of the certified matrix** (ADR-0019) | functional CI only; bit-certification ruled out until measured on native Windows hardware — revisit trigger named in the ADR |
 
 Adding a platform to the certified list is an ADR, not a CI-config change: the
 list *is* the promise `--reproducible` makes, and widening it silently would

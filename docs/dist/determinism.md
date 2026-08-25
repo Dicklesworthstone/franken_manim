@@ -68,8 +68,9 @@ discipline). `--clear-cache` is always safe to run
   equivalence is proven per tier by the engine-equivalence harness. Two
   artifacts at different tiers are two certified identities (the tier is in
   the closure, C3/C7).
-- **windows-x86-64 bit-certification.** Windows is functional from W1;
-  joining the certified matrix is a separate declared decision (§16.7).
+- **windows-x86-64 bit-certification.** Windows is functional from W1 and ruled
+  out of the certified matrix by ADR-0019 until measured on native Windows
+  hardware; one successor ADR reopens the question with that evidence.
 - **Python scenes' own side effects.** Python scenes are Python programs:
   certification covers them only as far as the closure captures them (§15.5).
   Scene code that reads the network, the clock, or unlisted files steps

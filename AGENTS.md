@@ -123,7 +123,7 @@ Dependency edges point strictly downward per §19; feature axes `wasm`, `accel-a
 ## Determinism Contract (the short version)
 
 - **`standard`**: deterministic given a seed on a given build/platform; best-effort across platforms; fast paths, SIMD tiers, FMA, annex engines all allowed — always labeled, never silent.
-- **`certified`** (`--reproducible`): the content-hashed input closure (§16.7) ⇒ bit-identical raw frames, canonical PNGs, and WAV across the certified matrix (linux-x86-64, linux-aarch64, macos-aarch64; windows-x86-64 pending its declared decision). fmn-dmath transcendentals only; canonical raster arithmetic; the scalar path is the definition every SIMD tier must match bit-for-bit. ffmpeg products are excluded from certification **by construction**.
+- **`certified`** (`--reproducible`): the content-hashed input closure (§16.7) ⇒ bit-identical raw frames, canonical PNGs, and WAV across the certified matrix (linux-x86-64, linux-aarch64, macos-aarch64; windows-x86-64 excluded by ADR-0019). fmn-dmath transcendentals only; canonical raster arithmetic; the scalar path is the definition every SIMD tier must match bit-for-bit. ffmpeg products are excluded from certification **by construction**.
 - Thread-count-independent output is verified at {1,4,16} threads per commit and {32,96}+ weekly (PG-5).
 - Every adaptive choice (`standard`-only autotuning, annex selection) is journaled; `certified` runs its fixed declared configuration.
 

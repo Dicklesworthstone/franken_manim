@@ -42,7 +42,7 @@ improvised feature sets are supported tiers.
 | linux-x86-64 | portable, x86-64-v3, x86-64-v4 | **Certified matrix member** (§16.7) |
 | linux-aarch64 | portable (≡ aarch64-neon) | **Certified matrix member** |
 | macos-aarch64 | aarch64-neon | **Certified matrix member** |
-| windows-x86-64 | portable, x86-64-v3 | Functional from W1; bit-certification is a separate declared decision (§16.7) — not in the certified matrix |
+| windows-x86-64 | portable, x86-64-v3 | Functional from W1; **out of the certified matrix** per ADR-0019 (revisit trigger in that ADR) |
 
 On AArch64 the portable and NEON tiers coincide (NEON is the baseline), so one
 artifact serves both names.

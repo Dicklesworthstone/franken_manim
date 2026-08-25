@@ -7,7 +7,7 @@ stays in the crates and is linked, not duplicated.
 | Document | Content |
 |---|---|
 | [install_matrix.md](install_matrix.md) | Install matrix (platform × SIMD build tier), the tier explanation, and artifact selection |
-| [ci_coverage.md](ci_coverage.md) | CI lanes per platform, the exact Windows promise (functional now; bit-cert is OQ-6), the PG-5 cadences, and the R22 time budgets |
+| [ci_coverage.md](ci_coverage.md) | CI lanes per platform, the exact Windows promise (functional now; bit-cert ruled out by ADR-0019), the PG-5 cadences, and the R22 time budgets |
 | [determinism.md](determinism.md) | The certified-determinism user guide: what `--reproducible` promises, requires, and excludes |
 | [ffmpeg_optional.md](ffmpeg_optional.md) | The ffmpeg-optional posture: native sinks, the capability error, what needs ffmpeg |
 | [cache_config_conventions.md](cache_config_conventions.md) | Per-platform cache/config directory conventions (replacing appdirs/diskcache), `--clear-cache` and `fmn doctor` behavior, the migration-note policy |
