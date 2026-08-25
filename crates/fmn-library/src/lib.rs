@@ -90,6 +90,7 @@ pub mod fields;
 pub mod graphs;
 pub mod image;
 pub mod line;
+pub mod markdown;
 pub mod matchers;
 pub mod matrix;
 pub mod numbers;
