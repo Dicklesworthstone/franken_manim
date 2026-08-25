@@ -20433,6 +20433,7 @@ except scene_mod.EndScene:
 _check("end-at gate raises EndScene", _ended)
 
 _3d = manimlib.ThreeDScene()
+_plain_sq = manimlib.Square()
 _3d.add(_plain_sq)
 _nodt = manimlib.Square()
 _3d.add(_nodt, set_depth_test=False)
@@ -20441,3 +20442,192 @@ _check("three d add applies depth test",
        and "depth_test" in _nodt.uniforms
        and bool(_nodt.uniforms["depth_test"]) is False
        and any(m is _plain_sq for m in _3d.mobjects))
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: Scene tranche B — interaction, capability, and time surface.
+def _raises(fn, exc_type):
+    try:
+        fn()
+    except exc_type:
+        return True
+    except Exception:
+        return False
+    return False
+
+
+_tb = manimlib.Scene()
+_check("wait refuses unknown kwargs",
+       _raises(lambda: _tb.wait(frobnicate=1), NotImplementedError))
+_check("wait stop condition must be callable",
+       _raises(lambda: _tb.wait(0.1, stop_condition=42), TypeError))
+_check("wait_until delegates with max time",
+       _raises(lambda: _tb.wait_until("not callable", 0.1), TypeError))
+_sounds = []
+_tb._add_sound = (
+    lambda f, off, gain, g2b: _sounds.append((f, off, gain, g2b))
+)
+_tb.add_sound("boom.ogg", time_offset=2, gain=0.5)
+_check("add_sound converts and delegates",
+       _sounds == [("boom.ogg", 2.0, 0.5, None)])
+
+_cap = manimlib.Scene()
+_check("interact returns headless", _cap.interact() is None)
+_check("embed returns headless",
+       _cap.embed(close_scene_on_exit=False) is None)
+_check("focus tolerates no window", _cap.focus() is None)
+_check("window accessors are none headless",
+       _cap.get_window() is None and _cap.is_window_closing() is False)
+_cap.quit_interaction = True
+_check("quit flag drives window closing", _cap.is_window_closing() is True)
+_presenter = manimlib.Scene(presenter_mode=True)
+_check("hold loop refuses presenter without host",
+       _raises(_presenter.hold_loop, Exception))
+_plain_hold = manimlib.Scene()
+_plain_hold.hold_loop()
+_check("hold loop arms presenter latch outside presenter mode",
+       _plain_hold.hold_on_wait is True)
+_show_refused = False
+try:
+    manimlib.Scene().show()
+except Exception as error:
+    _show_refused = "viewer" in str(error)
+_check("show refuses toward host viewer", _show_refused)
+_rec_refused = False
+_quit_scene = manimlib.Scene()
+_undo_calls = []
+_redo_calls = []
+_quit_scene.undo = lambda: _undo_calls.append(1)
+_quit_scene.redo = lambda: _redo_calls.append(1)
+_quit_scene.on_key_press(ord("z"), 2)
+_check("ctrl z wires undo", len(_undo_calls) == 1 and len(_redo_calls) == 0)
+_quit_scene.on_key_press(ord("z"), 3)
+_check("ctrl shift z wires redo past the reference ordering bug",
+       len(_redo_calls) == 1)
+_quit_scene2 = manimlib.Scene()
+_quit_scene2.on_key_press(ord("q"), 2)
+_check("quit chord raises quit interaction",
+       _quit_scene2.quit_interaction is True
+       and _quit_scene2.is_window_closing() is True)
+_ev = manimlib.Scene()
+_frame_before = _ev.frame.get_center().copy()
+_ev.on_mouse_motion([3.0, 4.0, 0.0], [0.1, 0.0, 0.0])
+_ev.on_mouse_drag([5.0, 5.0, 0.0], [1.0, 0.0, 0.0], 0, 0)
+raise AssertionError(
+    "DEBUG drag: pan=%r dp=%s fc=%s fb=%s"
+    % (
+        _ev.drag_to_pan,
+        _ev.mouse_drag_point.get_center(),
+        _ev.frame.get_center(),
+        _frame_before,
+    )
+)
+_check("hover point tracks motion",
+       np.allclose(_ev.mouse_point.get_center(), [3.0, 4.0, 0.0]))
+_check("drag point tracks drags and pans frame",
+       np.allclose(_ev.mouse_drag_point.get_center(), [5.0, 5.0, 0.0])
+       and not np.allclose(_ev.frame.get_center(), _frame_before))
+_check("press release scroll key-release stay live headless",
+       _ev.mouse_point is not None)
+_space_scene = manimlib.Scene(presenter_mode=True)
+_space_scene.on_key_press(ord(" "), 0)
+_check("space clears presenter hold", _space_scene.hold_on_wait is False)
+_check("invalid symbol exits early",
+       _quit_scene2.on_key_press(0x110000, 0) is None)
+
+_bg = manimlib.Scene()
+_bg.set_background_color("#112233", 0.5)
+_check("background color lands on camera",
+       np.allclose(_bg.camera.background_rgba,
+                   [0x11 / 255.0, 0x22 / 255.0, 0x33 / 255.0, 0.5]))
+_floor = manimlib.Scene()
+_floor.set_floor_plane("xz")
+_check("floor plane accepts xz", _floor.frame is not None)
+_check("floor plane refuses others",
+       _raises(lambda: _floor.set_floor_plane("yz"), Exception))
+_resize = manimlib.Scene()
+_resize.on_resize(1280, 720)
+_check("resize reaches camera pixel shape", True)
+
+_tskip = manimlib.Scene()
+_tskip.force_skipping()
+with _tskip.temp_skip():
+    pass
+_check("temp skip restores prior skipping", _tskip.skip_animations is True)
+_trevert = manimlib.Scene()
+with _trevert.temp_skip():
+    pass
+_check("temp skip clears when previously live", _trevert.skip_animations is False)
+_tbar = manimlib.Scene()
+with _tbar.temp_progress_bar():
+    _inside = _tbar.show_animation_progress
+_check("temp progress bar restores",
+       _inside is True and _tbar.show_animation_progress is False)
+_combo = manimlib.Scene()
+_stack = _combo.temp_config_change(skip=True, progress_bar=True)
+with _stack:
+    _combo_state = (_combo.skip_animations, _combo.show_animation_progress)
+_check("config change composes contexts",
+       _combo_state == (True, True)
+       and _combo.skip_animations is False
+       and _combo.show_animation_progress is False)
+
+_prog = manimlib.Scene()
+_prog.skip_animations = True
+_check("skipped progression collapses to one tick",
+       list(_prog.get_time_progression(2.0)) == [2.0])
+_live_prog = manimlib.Scene()
+_ticks = list(_live_prog.get_time_progression(1.0))
+_check("live progression steps at camera fps",
+       len(_ticks) == 30 and np.isclose(_ticks[-1], 1.0))
+
+class _StubAnim:
+    def __init__(self, run_time):
+        self.run_time = run_time
+        self.calls = []
+        self.mobject = None
+
+    def get_run_time(self):
+        return self.run_time
+
+    def update_mobjects(self, dt):
+        self.calls.append(("update", dt))
+
+    def interpolate(self, alpha):
+        self.calls.append(("interp", alpha))
+
+    def begin(self):
+        self.calls.append(("begin",))
+
+
+_rt_a = _StubAnim(1.0)
+_rt_b = _StubAnim(2.0)
+_check("run time takes the max", np.isclose(_live_prog.get_run_time([_rt_a, _rt_b]), 2.0))
+_aprog = list(_live_prog.get_animation_time_progression([_rt_b]))
+_check("animation progression matches fps grid", len(_aprog) == 60)
+_wprog = list(_live_prog.get_wait_time_progression(0.5))
+_check("wait progression halves the grid", len(_wprog) == 15)
+
+_pre = manimlib.Scene()
+_pre.pre_play()
+_pre.post_play()
+_check("pre post play increment plays once", _pre.num_plays == 1)
+_begun = manimlib.Scene()
+_begin_anim = _StubAnim(1.0)
+_begun.begin_animations([_begin_anim])
+_check("begin animations starts each", ("begin",) in _begin_anim.calls)
+_march = manimlib.Scene()
+_march_anim = _StubAnim(0.5)
+_frames = [0]
+_march.update_frame = lambda dt=0, force_draw=False: _frames.__setitem__(0, _frames[0] + 1)
+_march.progress_through_animations([_march_anim])
+_check("progress marches interpolate over frames",
+       _frames[0] >= 1
+       and any(kind == "interp" for kind, _ in _march_anim.calls))
+
+_rm = manimlib.Scene()
+_rm_sq = manimlib.Square()
+_rm.add(_rm_sq)
+_rm.remove(_rm_sq)
+_check("remove drops membership",
+       all(m is not _rm_sq for m in _rm.mobjects))
