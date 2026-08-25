@@ -29,6 +29,12 @@ libfuzzer-sys = "=0.4.13"
 [dependencies.fmn-codec]
 path = "../crates/fmn-codec"
 
+[dependencies.fmn-cache]
+path = "../crates/fmn-cache"
+
+[dependencies.fmn-hash]
+path = "../crates/fmn-hash"
+
 # Prevent this from accidentally linking arbitrary code in release builds.
 [profile.release]
 debug = false
@@ -49,5 +55,17 @@ doc = false
 [[bin]]
 name = "decode_jpeg"
 path = "fuzz_targets/decode_jpeg.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_entry_envelope"
+path = "fuzz_targets/decode_entry_envelope.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "namespace_and_object_paths"
+path = "fuzz_targets/namespace_and_object_paths.rs"
 test = false
 doc = false

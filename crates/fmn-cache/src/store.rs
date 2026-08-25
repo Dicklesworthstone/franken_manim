@@ -1933,7 +1933,7 @@ impl Store {
 /// on purpose: lowercase alphanumerics, `-`, `_`, first byte alphanumeric,
 /// at most 64 bytes. No dots ever, so no `.`/`..`; no separators; no
 /// platform-magic names.
-fn validate_namespace_name(name: &str) -> Result<(), CacheError> {
+pub fn validate_namespace_name(name: &str) -> Result<(), CacheError> {
     let reject = |reason: &'static str| {
         Err(CacheError::InvalidNamespace {
             name: name.to_owned(),
@@ -1997,12 +1997,21 @@ impl Namespace {
     pub fn version(&self) -> u32 {
         self.version
     }
+}
+/// The traversal-safe object path relative to a namespace's objects
+/// directory: `<hh>/<hex…>`, derived from digest hex only. Pure by design —
+/// the fm-tdp fuzz target asserts the invariant (exactly two components,
+/// both lowercase hex, lengths 2 and 62) over arbitrary digests.
+pub fn object_relative_path(digest: &Digest) -> PathBuf {
+    let hex = digest.to_hex();
+    PathBuf::from(&hex[..2]).join(&hex[2..])
+}
 
-    /// The object path for an address: `objects/<hh>/<hex…>`, derived from
-    /// digest hex only — the traversal protection.
+impl Namespace {
+    /// The object path for an address: `<objects_dir>/<hh>/<hex…>`,
+    /// derived from digest hex only — the traversal protection.
     fn object_path(&self, digest: &Digest) -> PathBuf {
-        let hex = digest.to_hex();
-        self.objects_dir.join(&hex[..2]).join(&hex[2..])
+        self.objects_dir.join(object_relative_path(digest))
     }
 
     // ------------------------------------------------------------------

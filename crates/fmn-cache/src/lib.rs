@@ -89,10 +89,12 @@ mod entry;
 mod key;
 mod store;
 
+pub use entry::{Corrupt, EntryKind, decode as decode_entry_envelope};
 pub use key::{CacheKey, KeyBuilder};
 pub use store::{
     CacheClearAuthorization, CacheClearOutcome, CacheRootError, DEFAULT_CACHE_LEAF, EvictOutcome,
-    EvictReport, Namespace, NamespacePolicy, Pin, Store, StoreConfig, resolve_host_cache_root,
+    EvictReport, Namespace, NamespacePolicy, Pin, Store, StoreConfig, object_relative_path,
+    resolve_host_cache_root, validate_namespace_name,
 };
 
 use fmn_platform::fs::FsError;

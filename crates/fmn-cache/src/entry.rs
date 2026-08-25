@@ -18,7 +18,7 @@ const ENTRY_SCHEMA: Schema = Schema::new(*b"FMNC", 1, 1, 0);
 /// How an entry is addressed; recorded in the envelope and checked on read so
 /// a keyed entry can never satisfy a blob lookup or vice versa.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum EntryKind {
+pub enum EntryKind {
     /// Addressed by the digest of canonical key material.
     Keyed = 1,
     /// Addressed by the digest of the payload itself (self-certifying).
@@ -29,7 +29,7 @@ pub(crate) enum EntryKind {
 /// identically by the store (evict + miss), so the payloads are read by the
 /// tests and by `Debug`, not by production code paths.
 #[derive(Debug)]
-pub(crate) enum Corrupt {
+pub enum Corrupt {
     /// Framing, checksum, or size-limit failure in the envelope.
     Envelope(#[cfg_attr(not(test), allow(dead_code))] SerialError),
     /// The envelope decodes but its kind byte is not a known [`EntryKind`].
@@ -49,7 +49,7 @@ impl From<SerialError> for Corrupt {
 }
 
 /// Encode `payload` as an entry stored at `address`.
-pub(crate) fn encode(
+pub fn encode(
     kind: EntryKind,
     address: &Digest,
     payload: &[u8],
@@ -65,7 +65,7 @@ pub(crate) fn encode(
 /// Decode an entry read from the path for `address`, verifying the envelope
 /// checksum, the recorded kind, the recorded address, and — for blobs — the
 /// payload's self-certification. Returns the payload.
-pub(crate) fn decode(
+pub fn decode(
     bytes: &[u8],
     kind: EntryKind,
     address: &Digest,
