@@ -599,6 +599,29 @@ impl RecordBuffer {
         }
     }
 
+    /// Whether a phantom record exists (`has_defaults` for the persist
+    /// format's presence flag).
+    #[must_use]
+    pub fn has_defaults(&self) -> bool {
+        self.defaults.is_some()
+    }
+
+    /// The phantom record's full lane run, stride-long when present.
+    #[must_use]
+    pub fn defaults_row(&self) -> Option<&[f32]> {
+        self.defaults.as_deref()
+    }
+
+    /// Install a phantom record read back from a snapshot. The row must be
+    /// exactly one stride; otherwise the call is a silent no-op, matching
+    /// the other format-defensive accessors here.
+    pub fn restore_defaults_row(&mut self, row: &[f32]) {
+        if row.len() != self.schema.stride() {
+            return;
+        }
+        self.defaults = Some(row.to_vec().into_boxed_slice());
+    }
+
     /// Take (and clear) the dirty span of `field`: the inclusive record
     /// range written since the last take. Feeds §10.8's dirty bounds.
     pub fn take_dirty_span(&mut self, field: &str) -> Option<(usize, usize)> {

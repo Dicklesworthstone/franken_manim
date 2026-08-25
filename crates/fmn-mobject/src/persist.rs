@@ -51,16 +51,16 @@ use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn, UpdaterId};
 use crate::uniforms::{JointType, Uniforms};
 use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, RenderPrimitive};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.6.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.7.
 ///
-/// Minor 1.1 appended the per-entry semantic shape tag (§10.8); a 1.0
-/// stream decodes with no tag, which is exactly what `General` means. Minor
-/// 1.2 appended `z_index`; minor 1.3 preserves the monotonic updater-id
-/// cursor, including identities removed before the snapshot. Minor 1.4 appends
-/// the object→world placement table from fm-7if. Minor 1.5 appends durable
-/// renderer primitive/topology identity. Minor 1.6 appends immutable image
-/// descriptors and RGBA8 bytes.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 6);
+/// Minor history: 1.1 appended the shape tag; 1.2 appended `z_index`; 1.3
+/// preserves the monotonic updater-id cursor, including identities removed
+/// before the snapshot; 1.4 appended the object→world placement table
+/// (fm-7if); 1.5 appended durable renderer primitive/topology identity;
+/// 1.6 appended immutable image descriptors and RGBA8 bytes; **1.7 appends
+/// the per-buffer `_data_defaults` phantom record** (fm-laky): one
+/// presence bool and, when set, exactly one stride of f32 lanes.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 7);
 
 /// The scene-state envelope: magic `FMNA`, schema id 2, version 2.0.
 ///
@@ -500,6 +500,20 @@ fn put_buffer(w: &mut Writer, buffer: &RecordBuffer) -> Result<(), SerialError> 
     w.put_u16(count_u16(locked.len())?);
     for name in locked {
         w.put_str(name);
+    }
+    // Minor 1.7: the `_data_defaults` phantom record. Appended, never
+    // interleaved — a pre-1.7 reader of this stream refuses under Strict
+    // (NewerMinor), and this reader defaults older streams to no row.
+    match buffer.defaults_row() {
+        Some(row) => {
+            w.put_bool(true);
+            for &lane in row {
+                w.put_f32(lane);
+            }
+        }
+        None => {
+            w.put_bool(false);
+        }
     }
     Ok(())
 }
@@ -1127,7 +1141,8 @@ impl Snapshot {
                 let pointlike_refs: Vec<&str> = pointlike.iter().map(String::as_str).collect();
                 let schema = RecordSchema::new(&field_refs, &aligned_refs, &pointlike_refs)
                     .map_err(|_| PersistError::Malformed("record schema stride overflows usize"))?;
-                preflight_record_payload(&r, len, schema.stride(), &mut budget)?;
+                let stride = schema.stride();
+                preflight_record_payload(&r, len, stride, &mut budget)?;
                 let mut buffer = RecordBuffer::new(schema, len)
                     .map_err(|_| PersistError::Malformed("record buffer sizing overflows usize"))?;
                 for (name, width) in &fields {
@@ -1148,6 +1163,21 @@ impl Snapshot {
                 let locked = get_names(&mut r, &mut budget, "locked key names")?;
                 if !locked.is_empty() {
                     buffer.lock_data(locked.iter().map(String::as_str));
+                }
+                // Minor 1.7: the `_data_defaults` phantom record. Older
+                // streams have no section; the reader defaults to no row,
+                // exactly as the 1.1/1.2 branches do for their fields.
+                if r.version().1 >= 7 && r.get_bool()? {
+                    preflight_record_payload(&r, 1, stride, &mut budget)?;
+                    budget.charge(
+                        stride.saturating_mul(std::mem::size_of::<f32>()),
+                        "record defaults staging",
+                    )?;
+                    let mut row = Vec::with_capacity(stride);
+                    for _ in 0..stride {
+                        row.push(r.get_f32()?);
+                    }
+                    buffer.restore_defaults_row(&row);
                 }
                 // --- graph + state
                 let n_sub = r.get_u32()? as usize;
@@ -1707,5 +1737,90 @@ mod tests {
         let bytes = snapshot.to_bytes().unwrap();
         let decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
         assert_eq!(decoded.snapshot.slots.len(), DEPTH);
+    }
+    #[test]
+    fn defaults_row_round_trips_and_is_adopted_on_growth() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let field = stage.get(mob).unwrap().buffer.schema().fields()[0]
+            .name
+            .clone();
+        let width = stage
+            .get(mob)
+            .unwrap()
+            .buffer
+            .schema()
+            .field_width(&field)
+            .expect("first schema field has a width");
+        let values: Vec<f32> = (0..width).map(|i| 1.0 + 0.5 * i as f32).collect();
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .write_default_record(&field, &values);
+        assert!(stage.get(mob).unwrap().buffer.has_defaults());
+
+        let bytes = stage.snapshot().to_bytes().unwrap();
+        let mut decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
+        let restored = entry_mut(&mut decoded.snapshot, mob);
+        assert!(restored.buffer.has_defaults());
+        let row = restored.buffer.defaults_row().unwrap();
+        assert_eq!(&row[..values.len()], &values[..]);
+        assert!(row[values.len()..].iter().all(|lane| *lane == 0.0));
+
+        // The whole point of the row: growth from zero adopts it.
+        let mut grown = restored.buffer.deep_clone();
+        grown.resize(2).unwrap();
+        let expected: Vec<f32> = values
+            .iter()
+            .copied()
+            .chain(values.iter().copied())
+            .collect();
+        assert_eq!(grown.read_column(&field).unwrap(), expected);
+    }
+
+    #[test]
+    fn buffers_without_defaults_round_trip_without_the_section() {
+        let mut stage = Stage::new();
+        let empty = stage.add(Mobject::new());
+        let filled = stage.add(Mobject::new());
+        let field = stage.get(filled).unwrap().buffer.schema().fields()[0]
+            .name
+            .clone();
+        let width = stage
+            .get(filled)
+            .unwrap()
+            .buffer
+            .schema()
+            .field_width(&field)
+            .expect("first schema field has a width");
+        stage
+            .get_mut(filled)
+            .unwrap()
+            .buffer
+            .resize(2)
+            .expect("growth within allocation limits");
+        let column = vec![0.25; 2 * width];
+        stage
+            .get_mut(filled)
+            .unwrap()
+            .buffer
+            .write_range(&field, 0, &column);
+
+        assert!(!stage.get(empty).unwrap().buffer.has_defaults());
+        assert!(!stage.get(filled).unwrap().buffer.has_defaults());
+
+        let bytes = stage.snapshot().to_bytes().unwrap();
+        let mut decoded = Snapshot::from_bytes(&bytes, &stage).unwrap();
+        assert!(
+            !entry_mut(&mut decoded.snapshot, empty)
+                .buffer
+                .has_defaults()
+        );
+        assert!(
+            !entry_mut(&mut decoded.snapshot, filled)
+                .buffer
+                .has_defaults()
+        );
     }
 }
