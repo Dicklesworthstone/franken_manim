@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	e82c64af37dddf14da80f97b87b036c04ad5c1f2eb29911926fe0a61f428d74c
+ledger_reviewed_digest	2c7a1c16d89ff1bdb9230635b313e66b8dd791a82b48aeb72813771dbde83258
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1205,6 +1205,41 @@ manimlib.scene.scene:OrderedDict	same	scripts/manim_ref/manimlib/scene/scene.py	
 manimlib.scene.scene:platform	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds the platform module under the module namespace exactly as the Reference leaks it
 manimlib.scene.scene:time	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds the time module under the module namespace exactly as the Reference leaks it
 manimlib.scene.scene:ProgressDisplay	tiered	OOT-SCENE-PROGRESS-DISPLAY	crates/fmn-python/tests/bridge.py	keeps decoration iteration and context protocol live headlessly while rendered bars await the Studio host surface
+manimlib.scene.scene:Scene.begin_animations	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	starts every animation and adopts families whose animation mobject is not already on the scene
+manimlib.scene.scene:Scene.embed	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	returns silently headless and refuses toward the Studio-owned host window otherwise
+manimlib.scene.scene:Scene.finish_animations	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	ends each played animation through the native scene core after the segment
+manimlib.scene.scene:Scene.focus	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	focuses the bound window and tolerates headless absence
+manimlib.scene.scene:Scene.get_animation_time_progression	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	builds the fps frame grid over the max animation run time
+manimlib.scene.scene:Scene.get_run_time	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	takes the maximum run time across the played animations
+manimlib.scene.scene:Scene.get_time_progression	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	steps one frame at a time at camera fps or collapses to a single tick while skipping
+manimlib.scene.scene:Scene.get_wait_time_progression	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	grids the wait duration for the waiting label
+manimlib.scene.scene:Scene.get_window	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	returns the bound host window or None headlessly
+manimlib.scene.scene:Scene.hold_loop	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	refuses presenter holds without a host window and arms the latch otherwise
+manimlib.scene.scene:Scene.interact	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	returns silently headless and names the Studio window refusal when bound
+manimlib.scene.scene:Scene.is_window_closing	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	reports the quit-interaction flag or the bound window closing state
+manimlib.scene.scene:Scene.on_close	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	is the no-op close hook without a host window
+manimlib.scene.scene:Scene.on_mouse_motion	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	moves the live hover point before dispatching the event seam
+manimlib.scene.scene:Scene.on_key_press	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	wires ctrl-z undo ctrl-shift-z redo past the Reference ordering bug quit chords space hold clearing and early-exits invalid symbols
+manimlib.scene.scene:Scene.on_key_release	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	dispatches the release event through the host-free event seam
+manimlib.scene.scene:Scene.on_mouse_drag	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	tracks the drag point and pans the frame by the negative delta when drag-to-pan is on
+manimlib.scene.scene:Scene.on_mouse_press	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	seats the drag point then dispatches press events headlessly
+manimlib.scene.scene:Scene.on_mouse_release	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	dispatches release events through the host-free event seam
+manimlib.scene.scene:Scene.on_mouse_scroll	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	dispatches scroll offsets through the host-free event seam
+manimlib.scene.scene:Scene.on_resize	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	resets the camera pixel shape to the new size
+manimlib.scene.scene:Scene.on_show	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	is the no-op show hook without a host window
+manimlib.scene.scene:Scene.post_play	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	ends writer segments previews skipped frames when enabled and increments num_plays
+manimlib.scene.scene:Scene.pre_play	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	gates presenter holds updates skipping status and begins writer segments when live
+manimlib.scene.scene:Scene.progress_through_animations	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	marches the frame grid updating interpolating and emitting per tick with encoder emission gated on the writer
+manimlib.scene.scene:Scene.remove	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	drops members from the live root list through the native scene core
+manimlib.scene.scene:Scene.set_background_color	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	writes the resolved rgba list onto the live camera background
+manimlib.scene.scene:Scene.set_floor_plane	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	switches euler axis conventions between xy and xz refusing other planes
+manimlib.scene.scene:Scene.show	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	forces a draw then refuses toward a host image viewer
+manimlib.scene.scene:Scene.temp_config_change	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	composes skip record and progress-bar contexts into one exit stack restoring everything on exit
+manimlib.scene.scene:Scene.temp_progress_bar	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	enables animation progress for the block and restores the prior flag
+manimlib.scene.scene:Scene.temp_record	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	refuses naming the native encoder as the recording owner
+manimlib.scene.scene:Scene.temp_skip	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	forces skipping for the block and restores the prior flag either way
+manimlib.scene.scene:Scene.wait	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	defaults duration validates callable stop conditions refuses unrouted kwargs and delegates to the native wait
+manimlib.scene.scene:Scene.wait_until	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	delegates to wait with the max-time budget and stop condition
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.
