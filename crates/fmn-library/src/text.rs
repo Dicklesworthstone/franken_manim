@@ -24,6 +24,7 @@ use fmn_core::constants::DEFAULT_MOBJECT_COLOR;
 use fmn_core::types::Vec3;
 use fmn_geom::QuadPath;
 use fmn_mobject::Mobject;
+use fmn_text::maps::CharOverrides;
 use fmn_text::{
     Align, Decoration, FontBook, LineBreaker, PlacedTextGlyph, StyleMaps, TextError, TextLayout,
     TextRequest, glyph_quadpath, layout_text,
@@ -204,6 +205,7 @@ pub struct Text<'a> {
     indent: f64,
     line_spacing: f64,
     maps: StyleMaps<'a>,
+    overrides: CharOverrides<'a>,
     font_size: f64,
     font_size_for_unit_height: f64,
     style: Style,
@@ -226,6 +228,7 @@ impl<'a> Text<'a> {
             indent: 0.0,
             line_spacing: 1.0,
             maps: StyleMaps::default(),
+            overrides: &[],
             font_size: DEFAULT_FONT_SIZE,
             font_size_for_unit_height: DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
             style: text_style(),
@@ -321,6 +324,15 @@ impl<'a> Text<'a> {
         self
     }
 
+    /// Positional per-character overrides (fm-u8y) — the Code channel:
+    /// index-aligned with the source's `chars()`, applied after every map,
+    /// so a keyword inside an identifier can never bleed.
+    #[must_use]
+    pub fn char_overrides(mut self, overrides: CharOverrides<'a>) -> Self {
+        self.overrides = overrides;
+        self
+    }
+
     /// text→font family (`t2f`); a family the book lacks is the named
     /// [`TextError::FontUnavailable`], never a silent substitution.
     #[must_use]
@@ -378,6 +390,7 @@ impl<'a> Text<'a> {
             indent: self.indent,
             line_spacing: self.line_spacing,
             maps: self.maps.clone(),
+            overrides: self.overrides,
         };
         let layout = layout_text(book, &req)?;
         let scale = calibrate(book, self.font_size, self.font_size_for_unit_height)?;

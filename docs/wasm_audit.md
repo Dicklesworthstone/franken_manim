@@ -1,12 +1,12 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-derived 2026-08-24 (wasm32 render-axis check + node smoke green on this host; smoke digest unchanged at `1f248a71347b82aa`) against the exact lock identities below, after fm-go7 routed fmn-geom smoothing solves through fsci-linalg.
+**Status:** re-derived 2026-08-25 (wasm32 render-axis check + node smoke green on this host; smoke digest unchanged at `1f248a71347b82aa`) after fm-u8y admitted the pinned franken_markdown highlighter and the fmn CLI consumed its pre-authorized clap row — both outside the wasm tree, re-proven by the same two gates.
 The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes, forcing this audit to be re-run instead of leaving a
 plausible but stale “current pins” claim behind.
 
 - `SUITE.lock` SHA-256: `ed186d765192e0afebf046beeaea310b2bbd68511c2fd7ee9a9637b4dfe0612f`
-- `Cargo.lock` SHA-256: `ea8260571407cc100f63d27c687370500332305db38e464bbbf3c528d544d9d0`
+- `Cargo.lock` SHA-256: `2acfec633cc4df5c5464ed907c0f183f1b920363b20546c8fa75facd17843141`
 
 Method labels are deliberately narrow:
 

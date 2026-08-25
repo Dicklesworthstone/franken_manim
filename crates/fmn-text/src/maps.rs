@@ -136,3 +136,88 @@ pub fn sample_gradient(stops: &[Srgb], t: f64) -> Srgb {
         }
     }
 }
+
+/// A positional per-character override (fm-u8y): `Some` fields win over
+/// everything the maps produced. Index-aligned with the source's chars.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CharOverride<'a> {
+    /// Fill colour for the character.
+    pub color: Option<Srgb>,
+    /// Font family for the character (the Code mobject's typewriter).
+    pub family: Option<&'a str>,
+}
+
+/// The positional channel: one entry per source char, empty to disable.
+pub type CharOverrides<'a> = &'a [CharOverride<'a>];
+
+/// Apply the positional overrides in place. Byte-offset bookkeeping is the
+/// caller's (`Code` translates fmd's byte spans before calling); here an
+/// override at char *i* touches exactly char *i*, so a keyword inside an
+/// identifier can never bleed. Chars past the slice keep their mapped style.
+pub fn apply_overrides(chars: &mut [StyledChar], overrides: CharOverrides<'_>) {
+    if overrides.is_empty() {
+        return;
+    }
+    for (c, over) in chars.iter_mut().zip(overrides) {
+        if let Some(color) = over.color {
+            c.style.color = Some(color);
+            c.style.gradient = None;
+        }
+        if let Some(family) = over.family {
+            c.style.family = Some(family.to_owned());
+        }
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+    use crate::markup::plain_chars;
+
+    fn styled(source: &str, overrides: CharOverrides<'_>) -> Vec<Srgb> {
+        let mut chars = plain_chars(source);
+        apply_maps(&mut chars, source, &StyleMaps::default());
+        apply_overrides(&mut chars, overrides);
+        chars
+            .into_iter()
+            .map(|c| c.style.color.unwrap_or(Srgb::from_rgb8(255, 255, 255)))
+            .collect()
+    }
+
+    #[test]
+    fn positional_overrides_never_bleed_into_identifiers() {
+        // The t2c failure mode: colouring "in" would also colour the "in"
+        // inside "int". Positional overrides touch exact indices only.
+        let source = "int in";
+        let mut over: Vec<CharOverride<'_>> =
+            source.chars().map(|_| CharOverride::default()).collect();
+        // Colour ONLY the standalone "in" (chars 4..6): the same substring
+        // inside "int" must stay untouched.
+        for slot in &mut over[4..6] {
+            slot.color = Some(Srgb::from_rgb8(200, 0, 0));
+        }
+        let colors = styled(source, &over);
+        assert!(
+            colors[..4]
+                .iter()
+                .all(|c| *c == Srgb::from_rgb8(255, 255, 255))
+        );
+        assert!(
+            colors[4..6]
+                .iter()
+                .all(|c| *c == Srgb::from_rgb8(200, 0, 0))
+        );
+    }
+
+    #[test]
+    fn family_override_lands_on_the_named_chars() {
+        let source = "ab";
+        let mut over: Vec<CharOverride<'_>> =
+            source.chars().map(|_| CharOverride::default()).collect();
+        over[1].family = Some("CM Typewriter");
+        let mut chars = plain_chars(source);
+        apply_overrides(&mut chars, &over);
+        assert!(chars[0].style.family.is_none());
+        assert_eq!(chars[1].style.family.as_deref(), Some("CM Typewriter"));
+    }
+}

@@ -61,6 +61,11 @@ pub struct TextRequest<'a> {
     pub line_spacing: f64,
     /// The `t2c`-family maps.
     pub maps: crate::maps::StyleMaps<'a>,
+    /// Positional per-character overrides (fm-u8y): index-aligned with the
+    /// source's `chars()`, applied after the maps. The wire the Code
+    /// mobject's token spans ride — positional, so substrings inside
+    /// identifiers can never bleed.
+    pub overrides: crate::maps::CharOverrides<'a>,
 }
 
 impl<'a> TextRequest<'a> {
@@ -78,6 +83,7 @@ impl<'a> TextRequest<'a> {
             indent: 0.0,
             line_spacing: 1.0,
             maps: crate::maps::StyleMaps::default(),
+            overrides: &[],
         }
     }
 
@@ -211,6 +217,7 @@ pub fn layout_text(book: &FontBook, req: &TextRequest<'_>) -> Result<TextLayout,
         crate::markup::plain_chars(req.text)
     };
     crate::maps::apply_maps(&mut chars, req.text, &req.maps);
+    crate::maps::apply_overrides(&mut chars, req.overrides);
     let items = crate::shape::shape(book, &chars, req.ligatures)?;
     let lines = break_lines(&items, req);
     place(book, &items, &lines, req)

@@ -26,6 +26,7 @@ fn digest(vmob: &VMobject) -> String {
     sha256(&bytes).to_hex()
 }
 
+#[allow(dead_code)] // tranche-reserved: used by the upcoming family tests
 fn count_family(vmob: &VMobject) -> usize {
     let mut count = 1;
     for child in vmob.children() {

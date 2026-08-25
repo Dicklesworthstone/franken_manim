@@ -45,6 +45,7 @@ asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "c
 fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "82588865c453b175cb1263b36e30f5b9b1941a2e", features = ["bundled-faces"] }
 fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "82588865c453b175cb1263b36e30f5b9b1941a2e" }
 fnp-dtype = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "8d7415dc48887efc8925b9c2536ceec1d0a2bb9c" }
+franken_markdown = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "82588865c453b175cb1263b36e30f5b9b1941a2e" }
 fnp-ndarray = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "8d7415dc48887efc8925b9c2536ceec1d0a2bb9c" }
 fnp-io = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "8d7415dc48887efc8925b9c2536ceec1d0a2bb9c" }
 fsci-integrate = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "5b1441b13a0997901ad2f9835c30072f87ca93b2" }
