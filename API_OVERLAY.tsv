@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	c13910f144058a19799333a8fc5a3ebe12b045fee755463083129b94716edcaf
+ledger_reviewed_digest	e82c64af37dddf14da80f97b87b036c04ad5c1f2eb29911926fe0a61f428d74c
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -215,6 +215,7 @@ OOT-PRISMIFY-FAMILY	Prismify over VMobject families	tiered	The native extrusion 
 OOT-USE-WINDING-FILL	VMobject.use_winding_fill	excluded	The Reference flag is a documented no-op and analytic nonzero winding has no alternate earclip mode	Pinned-Reference evidence shows observable semantics beyond the accepted no-op
 OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL faces keep certified layout closed while variation and color tables remain outside fmd-font's audited surface	Corpus-ranked demand plus upstream bounded parsing and cross-platform layout fixtures
 OOT-SVGELEMENTS-PARSER	svgelements object interop on the svg seams (mobjects_from_svg dispatch and raw transform-string parsing)	tiered	The Reference's third-party parser is deliberately unshipped; Chisel's hardened native processor owns document parsing end to end, and the exposed seams accept duck-typed attribute protocols instead	User files whose SVG features only svgelements accepts need named refusals from the native parser, or a corpus-ranked demand for direct se-object interop with fuzz evidence
+OOT-SCENE-PROGRESS-DISPLAY	ProgressDisplay rendered progress bars	tiered	The headless portal keeps the full consumption protocol (decoration iteration context) live while on-screen bar rendering awaits a host presentation surface; Studio owns interactive presentation	A corpus-ranked scene requires headless progress semantics or the Studio TUI binds a host progress surface
 
 # ---------------------------------------------------------------------------
 # [status] — the §16.1 semantic tier, per symbol.
@@ -1153,6 +1154,57 @@ manimlib.mobject.value_tracker:ValueTracker.get_value	same	scripts/manim_ref/man
 manimlib.mobject.value_tracker:ValueTracker.increment_value	same	scripts/manim_ref/manimlib/mobject/numbers.py	crates/fmn-python/tests/bridge.py	adds through set_value returning None exactly as the Reference does
 manimlib.mobject.value_tracker:ValueTracker.init_uniforms	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	seeds a typed value uniform beside the base uniforms with engine state authoritative and mirrored on every write
 manimlib.mobject.value_tracker:ValueTracker.set_value	same	scripts/manim_ref/manimlib/mobject/value_tracker.py	crates/fmn-python/tests/bridge.py	writes the engine state refreshes the uniform mirror and preserves the fluent receiver
+manimlib.scene.scene:EndScene	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	is the control-flow exception the end-at animation gate raises through the portal
+manimlib.scene.scene:Scene	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	is the authored headless scene over the native stage with deterministic seeded randomness by default
+manimlib.scene.scene:Scene.__init__	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	seeds both random modules applies constructor overrides and builds frame pointer state and stacks without a host window
+manimlib.scene.scene:Scene.add	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	extends the live root list and registers every added family member in the id registry
+manimlib.scene.scene:Scene.clear	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	drops all live roots so restore paths can rebuild exact membership
+manimlib.scene.scene:Scene.construct	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	is the callable no-op default hook subclasses override
+manimlib.scene.scene:Scene.default_camera_config	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	exposes the empty camera configuration dictionary as a class attribute
+manimlib.scene.scene:Scene.default_file_writer_config	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	exposes the empty file writer configuration dictionary as a class attribute
+manimlib.scene.scene:Scene.drag_to_pan	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	defaults drag-to-pan on per instance with constructor override
+manimlib.scene.scene:Scene.emit_frame	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	stays silent while skipping and otherwise names the native encoder capability refusal
+manimlib.scene.scene:Scene.force_skipping	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	remembers the prior flag forces skipping on and preserves the fluent receiver
+manimlib.scene.scene:Scene.get_group	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	returns a VGroup for all-VMobject inputs and Group once point clouds join
+manimlib.scene.scene:Scene.get_image	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	refuses toward native Lumen capture naming run and render as the PNG path
+manimlib.scene.scene:Scene.i2g	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	resolves ids to a group skipping unknown keys
+manimlib.scene.scene:Scene.i2m	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	resolves one registered id to its live mobject
+manimlib.scene.scene:Scene.id_to_mobject	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	returns the registered member for an identity key or None
+manimlib.scene.scene:Scene.ids_to_group	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	groups every resolved id through get_group semantics
+manimlib.scene.scene:Scene.increment_time	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	advances the engine clock by the float delta
+manimlib.scene.scene:Scene.max_num_saved_states	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	evicts the oldest checkpoint beyond the configured history cap
+manimlib.scene.scene:Scene.pan_sensitivity	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	defaults to one half with live constructor override
+manimlib.scene.scene:Scene.play	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	returns immediately without protos and otherwise drives the six-step contract through Choreo
+manimlib.scene.scene:Scene.point_to_mobject	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	scans the search set back to front for containment within the buffer
+manimlib.scene.scene:Scene.random_seed	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	honors the constructor seed seeding both random modules deterministically
+manimlib.scene.scene:Scene.restore_state	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	rewinds captured members through the checkpoint while refusing non-state arguments
+manimlib.scene.scene:Scene.revert_to_original_skipping_status	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	restores the remembered skipping flag and keeps the fluent receiver
+manimlib.scene.scene:Scene.samples	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	defaults sample count zero on the base scene class
+manimlib.scene.scene:Scene.save_state	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	pushes a fresh checkpoint onto the undo stack under the cap returning self
+manimlib.scene.scene:Scene.scroll_sensitivity	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	defaults to twenty with live constructor override
+manimlib.scene.scene:Scene.setup	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	is the callable no-op default setup hook
+manimlib.scene.scene:Scene.should_update_mobjects	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	reports true exactly when updaters or the always-update set are live
+manimlib.scene.scene:Scene.stop_skipping	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	marks the virtual animation start time and turns skipping off
+manimlib.scene.scene:Scene.tear_down	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	is the callable no-op default teardown hook
+manimlib.scene.scene:Scene.update_frame	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	advances time and mobjects silently under skipping while windowed capture refuses toward Studio
+manimlib.scene.scene:Scene.update_mobjects	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	dispatches the float dt to every live updater holder
+manimlib.scene.scene:Scene.update_skipping_status	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	stops skipping at the start gate and raises EndScene at the end gate
+manimlib.scene.scene:Scene.undo	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	no-ops on an empty stack otherwise rewinds the popped checkpoint onto the redo stack
+manimlib.scene.scene:SceneState	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	is the authored checkpoint identity over Proscenium canonical native state
+manimlib.scene.scene:SceneState.__init__	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	copies changed members reuses identical ones from the previous stack entry and snapshots bytes
+manimlib.scene.scene:SceneState.mobjects_match	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	compares capture dictionaries refusing non-state arguments
+manimlib.scene.scene:SceneState.n_changes	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	counts members whose captures differ between two states
+manimlib.scene.scene:SceneState.restore_scene	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	rewinds same-scene checkpoints byte-faithfully preserving later-added live members
+manimlib.scene.scene:ThreeDScene	same	scripts/manim_ref/manimlib/scene/three_d_scene.py	crates/fmn-python/tests/bridge.py	is the authored three-d subclass with reoriented default frame and depth-tested adds
+manimlib.scene.scene:ThreeDScene.add	same	scripts/manim_ref/manimlib/scene/three_d_scene.py	crates/fmn-python/tests/bridge.py	applies depth tests and flattens strokes on VMobject adds per the Reference flags
+manimlib.scene.scene:ThreeDScene.always_depth_test	same	scripts/manim_ref/manimlib/scene/three_d_scene.py	crates/fmn-python/tests/bridge.py	is the True class flag gating add-time depth application
+manimlib.scene.scene:ThreeDScene.default_frame_orientation	same	scripts/manim_ref/manimlib/scene/three_d_scene.py	crates/fmn-python/tests/bridge.py	pins the minus-thirty seventy degree orientation tuple applied at construction
+manimlib.scene.scene:ThreeDScene.samples	same	scripts/manim_ref/manimlib/scene/three_d_scene.py	crates/fmn-python/tests/bridge.py	raises sample count to four on the three-d class
+manimlib.scene.scene:ExitStack	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds contextlib ExitStack under the module namespace exactly as the Reference leaks it
+manimlib.scene.scene:OrderedDict	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds collections OrderedDict under the module namespace exactly as the Reference leaks it
+manimlib.scene.scene:platform	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds the platform module under the module namespace exactly as the Reference leaks it
+manimlib.scene.scene:time	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds the time module under the module namespace exactly as the Reference leaks it
+manimlib.scene.scene:ProgressDisplay	tiered	OOT-SCENE-PROGRESS-DISPLAY	crates/fmn-python/tests/bridge.py	keeps decoration iteration and context protocol live headlessly while rendered bars await the Studio host surface
 # ---------------------------------------------------------------------------
 # [flag_binding] — rulings and generated-parser identities for every extracted
 # Reference flag.

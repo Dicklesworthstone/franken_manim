@@ -20300,3 +20300,144 @@ _check("complex tracker round trip",
 _check("complex tracker uniform dtype",
        _ct.uniforms["value"].dtype == np.complex128
        and _ct.uniforms["value"][0] == complex(1, 2))
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the Scene state + lifecycle shelf, tranche A.
+
+scene_mod = importlib.import_module("manimlib.scene.scene")
+_check("scene stdlib leaks bound identically",
+       scene_mod.ExitStack is importlib.import_module("contextlib").ExitStack
+       and scene_mod.OrderedDict is importlib.import_module("collections").OrderedDict
+       and type(scene_mod.platform).__name__ == "module"
+       and type(scene_mod.time).__name__ == "module")
+_pd = scene_mod.ProgressDisplay(range(3))
+_check("progress display iterates headless",
+       list(iter(_pd)) == [0, 1, 2])
+_pd_ctx = scene_mod.ProgressDisplay()
+_check("progress display context protocol",
+       _pd_ctx.__enter__() is _pd_ctx and _pd_ctx.__exit__(None, None, None) is False)
+_pd_dec = scene_mod.ProgressDisplay()(lambda x: x * 2)
+_check("progress display decorates", _pd_dec(21) == 42)
+
+_sc = manimlib.Scene()
+_check("scene defaults",
+       _sc.pan_sensitivity == 0.5 and _sc.scroll_sensitivity == 20.0
+       and _sc.drag_to_pan is True and _sc.max_num_saved_states == 50
+       and _sc.samples == 0
+       and isinstance(_sc.default_camera_config, dict)
+       and isinstance(_sc.default_file_writer_config, dict))
+_seeded = manimlib.Scene(random_seed=7)
+_check("scene seeds declared rng", _seeded.random_seed == 7)
+_check("lifecycle hooks callable no-ops",
+       _seeded.setup() is None and _seeded.construct() is None
+       and _seeded.tear_down() is None
+       and manimlib.Scene.render is manimlib.Scene.run)
+_empty = manimlib.Scene()
+_check("play without protos is a none", _empty.play() is None)
+
+_sq = manimlib.Square()
+_sc.add(_sq)
+_key = id(_sq)
+_check("add registers id family",
+       any(m is _sq for m in _sc.mobjects) and _sc.i2m(_key) is _sq)
+_tri = manimlib.Triangle()
+_tri.shift([6.0, 0.0, 0.0])
+_sc.add(_tri)
+_grp = _sc.i2g(id(_sq), id(_tri), 12345)
+_check("i2g builds vmgroup skipping unknown ids",
+       isinstance(_grp, manimlib.VGroup) and len(_grp) == 2)
+_pm = manimlib.DotCloud([[0.0, 0.0, 0.0]])
+_check("get group falls back to mixed group",
+       isinstance(_sc.get_group(_sq, _pm), manimlib.Group))
+_hit = _sc.point_to_mobject(_sq.get_center())
+_check("point to mobject hits and misses",
+       _hit is _sq and _sc.point_to_mobject([9.0, 9.0, 0.0]) is None)
+
+_s0 = _sc.get_state()
+_sq.shift([1.5, -0.5, 0.0])
+_s1 = _sc.get_state()
+_check("state sees the data change",
+       (not _s0.mobjects_match(_s1)) and _s1.n_changes(_s0) >= 1)
+_sc.restore_state(_s0)
+_check("checkpoint rewind restores captured geometry",
+       np.allclose(_sq.get_center(), [0.0, 0.0, 0.0]))
+_circ = manimlib.Circle()
+_sc.add(_circ)
+_sc.save_state()
+_check("save then rewind keeps later member data live",
+       _sc.undo() is None
+       and any(m is _circ for m in _sc.mobjects))
+_bad_target = False
+try:
+    _sc.restore_state("not a state")
+except TypeError:
+    _bad_target = True
+_s0_again = _sc.get_state()
+_check("fresh capture matches itself",
+       _s0_again.mobjects_match(_s0_again)
+       and _s0_again.n_changes(_s0_again) == 0)
+_bad_source = False
+try:
+    manimlib.SceneState("not a scene")
+except TypeError:
+    _bad_source = True
+_check("state machinery types refuse by name",
+       _bad_target and _bad_source)
+_capped = manimlib.Scene(max_num_saved_states=2)
+_capped.save_state()
+_capped.save_state()
+_capped.save_state()
+_check("history respects the cap",
+       len(_capped.undo_stack) <= _capped.max_num_saved_states)
+
+_sk = manimlib.Scene()
+_was = _sk.skip_animations
+_check("force skipping flips and reverts",
+       _sk.force_skipping() is _sk and _sk.skip_animations is True
+       and _sk.revert_to_original_skipping_status().skip_animations is _was)
+_t0 = _sk.get_time()
+_sk.force_skipping()
+_sk.update_frame(0.5)
+_check("skipped update still advances time",
+       np.isclose(_sk.get_time() - _t0, 0.5))
+_check("emit frame silent while skipping", _sk.emit_frame() is None)
+_img_refused = False
+try:
+    manimlib.Scene().get_image()
+except Exception as error:
+    _img_refused = "Lumen" in str(error)
+_check("get image refuses toward native capture", _img_refused)
+
+_upd = manimlib.Scene()
+_marker = manimlib.Square()
+_marker.add_updater(lambda mob: None)
+_upd.add(_marker)
+_check("should update mobjects sees updaters",
+       _upd.should_update_mobjects() is True
+       and manimlib.Scene().should_update_mobjects() is False)
+
+_gated = manimlib.Scene(start_at_animation_number=2)
+_gated.skip_animations = True
+_gated.num_plays = 2
+_gated.update_skipping_status()
+_check("start-at gate stops skipping at the gate",
+       _gated.skip_animations is False)
+_ended = False
+_end_sc = manimlib.Scene(end_at_animation_number=1)
+try:
+    _end_sc.num_plays = 1
+    _end_sc.update_skipping_status()
+except scene_mod.EndScene:
+    _ended = True
+_check("end-at gate raises EndScene", _ended)
+
+_3d = manimlib.ThreeDScene()
+_3d.add(_plain_sq)
+_nodt = manimlib.Square()
+_3d.add(_nodt, set_depth_test=False)
+_check("three d add applies depth test",
+       bool(_plain_sq.uniforms["depth_test"]) is True
+       and "depth_test" in _nodt.uniforms
+       and bool(_nodt.uniforms["depth_test"]) is False
+       and any(m is _plain_sq for m in _3d.mobjects))

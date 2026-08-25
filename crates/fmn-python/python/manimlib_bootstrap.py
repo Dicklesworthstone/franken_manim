@@ -13727,6 +13727,36 @@ class ThreeDCamera(Camera):
         super().__init__(samples=samples, **kwargs)
 
 
+class ProgressDisplay:
+    """The Reference's leaked scene.py name (utils.progress_display).
+    The headless portal preserves the full consumption protocol —
+    decoration, iteration, and context management all work — while the
+    rendered bar itself awaits a host presentation surface
+    (OOT-SCENE-PROGRESS-DISPLAY; Studio owns on-screen progress)."""
+
+    def __init__(self, iterable=None, total=None, **kwargs):
+        self.iterable = iterable
+        self.total = total
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def __call__(self, function):
+        functools_mod = _importlib.import_module("functools")
+
+        @functools_mod.wraps(function)
+        def wrapper(*args, **kwargs):
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+
 class Scene(_SceneCore):
     pan_sensitivity = 0.5
     scroll_sensitivity = 20
@@ -20015,6 +20045,19 @@ def _install_schema_surface():
     for (module_name, name), function in special_functions.items():
         function.__module__ = module_name
         setattr(_ensure_module(module_name), name, function)
+
+    # The Reference's stdlib leaks into manimlib.scene.scene (scene.py's
+    # own imports). Bound verbatim by identity — they ARE the stdlib
+    # objects, so the class table's __module__ rewrite must not touch
+    # them (immutable types refuse it).
+    _scene_module = _ensure_module("manimlib.scene.scene")
+    _scene_module.ExitStack = _contextlib.ExitStack
+    _scene_module.OrderedDict = (
+        _importlib.import_module("collections").OrderedDict
+    )
+    _scene_module.ProgressDisplay = ProgressDisplay
+    _scene_module.platform = _importlib.import_module("platform")
+    _scene_module.time = _importlib.import_module("time")
 
     class_rows = [
         row for row in rows if row[2] == "class" and "." not in row[1]
