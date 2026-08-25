@@ -20629,3 +20629,123 @@ _rm.add(_rm_sq)
 _rm.remove(_rm_sq)
 _check("remove drops membership",
        all(m is not _rm_sq for m in _rm.mobjects))
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the interactive control widgets, tranche A.
+
+_interactive = importlib.import_module("manimlib.mobject.interactive")
+_ctrl_child = manimlib.Dot()
+_ctrl = _interactive.ControlMobject(5, _ctrl_child)
+_check("control base holds tracker value",
+       _ctrl.get_value() == 5.0
+       and any(m is _ctrl_child for m in _ctrl.get_family()))
+_ctrl_kwargs_refused = False
+try:
+    _interactive.ControlMobject(1, bogus=2)
+except TypeError:
+    _ctrl_kwargs_refused = True
+_check("control base refuses kwargs", _ctrl_kwargs_refused)
+_ctrl_bad_child = False
+try:
+    _interactive.ControlMobject(1, "not a mobject")
+except TypeError:
+    _ctrl_bad_child = True
+_check("control base refuses non-mobject children", _ctrl_bad_child)
+_ctrl_anim_calls = []
+_ctrl.assert_value = lambda value: _ctrl_anim_calls.append(("assert", value))
+_ctrl.set_value_anim = (
+    lambda value: _ctrl_anim_calls.append(("anim", value))
+)
+_ctrl.set_value(7)
+_check("control set value routes hooks in order",
+       _ctrl_anim_calls == [("assert", 7), ("anim", 7)]
+       and _ctrl.get_value() == 7.0)
+
+_cb = manimlib.Checkbox(True)
+_check("checkbox starts checked",
+       bool(_cb.get_value()) is True and isinstance(_cb.get_value(), np.bool_))
+_cb.toggle_value()
+_check("checkbox toggles to unchecked",
+       bool(_cb.get_value()) is False)
+_press_result = _cb.on_mouse_press(_cb, {})
+_check("checkbox press toggles and returns False",
+       _press_result is False and bool(_cb.get_value()) is True)
+_cb_assert_refused = False
+try:
+    _cb.set_value(1)
+except AssertionError:
+    _cb_assert_refused = True
+_check("checkbox refuses non-bool values", _cb_assert_refused)
+_check("checkbox mark builders return pointful mobjects",
+       isinstance(_cb.get_checkmark(), manimlib.VMobject)
+       and _cb.get_checkmark().has_points()
+       and isinstance(_cb.get_cross(), manimlib.VMobject))
+_cb_kwarg_refused = False
+try:
+    manimlib.Checkbox(True, rect_kwargs=dict(bogus=1))
+except TypeError as error:
+    _cb_kwarg_refused = "rect_kwargs.bogus" in str(error)
+_check("checkbox names nested kwarg refusals", _cb_kwarg_refused)
+
+_edb = manimlib.EnableDisableButton(False)
+_check("enable disable starts disabled",
+       bool(_edb.get_value()) is False)
+_edb.on_mouse_press(_edb, {})
+_check("enable disable press toggles", bool(_edb.get_value()) is True)
+_edb_anim_box = None
+_edb_orig_anim = _edb.set_value_anim
+_edb.set_value_anim = lambda value: None
+_edb.set_value(False)
+_edb.set_value_anim = _edb_orig_anim
+_check("enable disable accepts bool writes", bool(_edb.get_value()) is False)
+
+_clicks = []
+_btn_body = manimlib.Square(side_length=0.4)
+_btn = manimlib.Button(_btn_body, lambda mob: _clicks.append(mob))
+_btn_forwarded = _btn.mob_on_mouse_press(_btn_body, {})
+_check("button forwards pressed child and returns False",
+       _btn_forwarded is False and _clicks == [_btn_body])
+
+_mot_body = manimlib.Square(side_length=0.3)
+_mot = manimlib.MotionMobject(_mot_body)
+_drag_result = _mot.mob_on_mouse_drag(_mot_body, {"point": [2.0, 3.0, 0.0]})
+_check("motion drag moves body and returns False",
+       _drag_result is False
+       and np.allclose(_mot_body.get_center(), [2.0, 3.0, 0.0]))
+
+_slider = manimlib.LinearNumberSlider(
+    value=5, min_value=0, max_value=10, step=1
+)
+_check("slider holds initial value", float(_slider.get_value()) == 5.0)
+_slider_oob = False
+try:
+    _slider.set_value(11)
+except AssertionError:
+    _slider_oob = True
+_check("slider refuses out of range by assertion", _slider_oob)
+_axis_start, _axis_end = _slider.slider_axis.get_start_and_end()
+_low = _slider.get_value_from_point(_axis_start)
+_high = _slider.get_value_from_point(_axis_end + [10.0, 0.0, 0.0])
+_mid_snap = _slider.get_value_from_point(
+    [_axis_start[0] + 0.53 * (_axis_end[0] - _axis_start[0]),
+     _axis_start[1], 0.0]
+)
+_check("slider maps axis ends clamped to range",
+       float(_low) == 0.0 and float(_high) == 10.0)
+_check("slider ceils onto the step grid", float(_mid_snap) == 6.0)
+_slider_drag_value = []
+_orig_slider_set = _slider.set_value
+
+
+def _recording_set(value):
+    _slider_drag_value.append(value)
+    _orig_slider_set(value)
+
+
+_slider.set_value = _recording_set
+_slider.slider_on_mouse_drag(
+    _slider, {"point": [_axis_start[0], _axis_start[1], 0.0]}
+)
+_check("slider drag re-seats from point and records",
+       float(_slider.get_value()) == 0.0 and len(_slider_drag_value) == 1)

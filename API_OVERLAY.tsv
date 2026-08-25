@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	2c7a1c16d89ff1bdb9230635b313e66b8dd791a82b48aeb72813771dbde83258
+ledger_reviewed_digest	1e6a87bbfb3e380988edd1985fa6de236a40154ad1d607b3ed426bcddf465dfc
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1205,6 +1205,36 @@ manimlib.scene.scene:OrderedDict	same	scripts/manim_ref/manimlib/scene/scene.py	
 manimlib.scene.scene:platform	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds the platform module under the module namespace exactly as the Reference leaks it
 manimlib.scene.scene:time	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds the time module under the module namespace exactly as the Reference leaks it
 manimlib.scene.scene:ProgressDisplay	tiered	OOT-SCENE-PROGRESS-DISPLAY	crates/fmn-python/tests/bridge.py	keeps decoration iteration and context protocol live headlessly while rendered bars await the Studio host surface
+manimlib.mobject.interactive:Button	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the authored clickable composition over the native arbitrary-mobject button builder
+manimlib.mobject.interactive:EnableDisableButton	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the authored enabled-disabled box over a live bool tracker with native colored rebuilds
+manimlib.mobject.interactive:LinearNumberSlider	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is Atlas's native linear-number control over a live value tracker with bar handle and axis parts
+manimlib.mobject.interactive:LinearNumberSlider.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	builds the native slider validating nested rounded-rect and circle kwargs by name
+manimlib.mobject.interactive:MotionMobject	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the authored draggable wrapper whose composition comes from Atlas's native builder
+manimlib.mobject.interactive:MotionMobject.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	asserts the wrapped mobject adopts it natively and registers the no-op updater
+manimlib.mobject.interactive:Button.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	wraps the visual mobject stores the click callback and adopts the child
+manimlib.mobject.interactive:Button.mob_on_mouse_press	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	forwards the pressed child to on_click and returns False
+manimlib.mobject.interactive:Checkbox	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is Atlas's native checkbox composition over a live bool tracker
+manimlib.mobject.interactive:Checkbox.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	builds box plus mark content natively validating bool value and nested kwargs by name
+manimlib.mobject.interactive:Checkbox.assert_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	refuses non-bool writes by assertion
+manimlib.mobject.interactive:Checkbox.get_checkmark	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	returns the native true-state mark content
+manimlib.mobject.interactive:Checkbox.get_cross	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	returns the native false-state mark content
+manimlib.mobject.interactive:Checkbox.on_mouse_press	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	toggles through the pressed mobject and returns False
+manimlib.mobject.interactive:Checkbox.set_value_anim	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	becomes the checkmark or cross matching the written bool
+manimlib.mobject.interactive:Checkbox.toggle_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	writes the negated bool through set_value
+manimlib.mobject.interactive:ControlMobject	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the tracker-first control base with fixed-frame composition over adopted children
+manimlib.mobject.interactive:ControlMobject.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	seeds the engine tracker validates Mobject children refuses kwargs and registers the no-op updater fixed in frame
+manimlib.mobject.interactive:ControlMobject.assert_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the base no-op validation hook subclasses override
+manimlib.mobject.interactive:ControlMobject.set_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	composes assert then animate then the live tracker write preserving the fluent receiver
+manimlib.mobject.interactive:ControlMobject.set_value_anim	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the base no-op presentation hook subclasses override
+manimlib.mobject.interactive:EnableDisableButton.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	builds the native enabled-disabled box detecting custom enable and disable colors
+manimlib.mobject.interactive:EnableDisableButton.assert_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	refuses non-bool writes by assertion under its own class name
+manimlib.mobject.interactive:EnableDisableButton.on_mouse_press	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	toggles through the pressed mobject and returns False
+manimlib.mobject.interactive:EnableDisableButton.set_value_anim	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	rebuilds the colored box for the written state in place
+manimlib.mobject.interactive:LinearNumberSlider.assert_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	asserts the written value stays within min and max bounds
+manimlib.mobject.interactive:LinearNumberSlider.get_value_from_point	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	projects the point onto the axis clamps proportions and snaps to the step grid with boundary tolerance
+manimlib.mobject.interactive:LinearNumberSlider.slider_on_mouse_drag	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	writes the value decoded from the dragged point and returns False
+manimlib.mobject.interactive:LinearNumberSlider.set_value_anim	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	moves the handle along the axis to the proportional position of the written value
+manimlib.mobject.interactive:MotionMobject.mob_on_mouse_drag	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	moves the wrapped body to the event point and returns False
 manimlib.scene.scene:Scene.begin_animations	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	starts every animation and adopts families whose animation mobject is not already on the scene
 manimlib.scene.scene:Scene.embed	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	returns silently headless and refuses toward the Studio-owned host window otherwise
 manimlib.scene.scene:Scene.finish_animations	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	ends each played animation through the native scene core after the segment
