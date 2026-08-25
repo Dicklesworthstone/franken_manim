@@ -1,9 +1,10 @@
 //! The drawings shelf, geometry-native tranche (fm-3kr, §12.7): `Clock`,
 //! `DieFace`, and `Dartboard` — pure Marionette + Chisel compositions, no
 //! new mechanisms (the shelf's quality bar). The asset-backed census
-//! classes (Lightbulb, VideoIcon/VideoSeries, the Bubble family,
-//! VectorizedEarth) load Reference-repo SVG files and wait on fm-7lx1's
-//! bundled-asset ruling; they are deliberately absent here.
+//! VectorizedEarth) load Reference-repo SVG files and are governed by
+//! ADR-0020: those assets never ship — classes resolve user-supplied files,
+//! refusing by name otherwise. They are deliberately absent here until
+//! fm-3kr tranche 3 lands the resolver families.
 //!
 //! Self-goldens: one bit-locked point digest per class in
 //! `tests/drawings.rs`, the fm-6l6 pattern.
