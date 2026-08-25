@@ -20749,3 +20749,97 @@ _slider.slider_on_mouse_drag(
 )
 _check("slider drag re-seats from point and records",
        float(_slider.get_value()) == 0.0 and len(_slider_drag_value) == 1)
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the interactive widgets, tranche B.
+
+_tbx = manimlib.Textbox("hello")
+_check("textbox holds string state",
+       _tbx.get_value() == "hello" and isinstance(_tbx.get_value(), str))
+_tbx_str_refused = False
+try:
+    _tbx.set_value(42)
+except TypeError:
+    _tbx_str_refused = True
+_check("textbox refuses non-string writes", _tbx_str_refused)
+_tbx.set_value("world")
+_check("textbox set value rewrites text",
+       _tbx.get_value() == "world" and _tbx.text.has_points())
+_tbx_nonstr_update = False
+try:
+    _tbx.update_text(None)
+except TypeError:
+    _tbx_nonstr_update = True
+_check("textbox update refuses non-strings", _tbx_nonstr_update)
+_was_active = _tbx.isActive
+_tbx.active_anim(True)
+_check("active anim previews without committing",
+       _tbx.isActive is _was_active)
+_press_tb = _tbx.box_on_mouse_press(_tbx, {})
+_check("box press flips active and returns False",
+       _press_tb is False and _tbx.isActive is not _was_active)
+_inactive_tb = manimlib.Textbox("x")
+_inactive_tb.isActive = False
+_check("inactive textbox ignores keys",
+       _inactive_tb.on_key_press(_inactive_tb, {"symbol": ord("a"), "modifiers": 0})
+       is None
+       and _inactive_tb.get_value() == "x")
+_active_tb = manimlib.Textbox("ab", isInitiallyActive=True)
+_active_tb.on_key_press(
+    _active_tb, {"symbol": ord("C"), "modifiers": 1}
+)
+_check("shifted alnum appends uppercase",
+       _active_tb.get_value() == "abC")
+_active_tb.on_key_press(_active_tb, {"symbol": 0xFF08, "modifiers": 0})
+_check("backspace removes last character", _active_tb.get_value() == "ab")
+_empty_tb = manimlib.Textbox("", isInitiallyActive=True)
+_empty_tb.on_key_press(_empty_tb, {"symbol": 0xFF08, "modifiers": 0})
+_check("backspace on empty stays empty", _empty_tb.get_value() == "")
+
+_cs = manimlib.ColorSliders()
+_rgba = _cs.get_value()
+_check("color sliders default rgba shape",
+       _rgba.shape == (4,) and float(_rgba[0]) == 1.0
+       and float(_rgba[3]) == 1.0)
+_cs.set_value(255, 0, 0, 0.5)
+_check("color sliders write components",
+       np.allclose(_cs.get_value(), [1.0, 0.0, 0.0, 0.5]))
+_check("picked color hex and opacity",
+       _cs.get_picked_color() == "#FF0000"
+       and _cs.get_picked_opacity() == 0.5)
+
+_panel_cb = manimlib.Checkbox(True)
+_panel_edb = manimlib.EnableDisableButton(True)
+_panel = manimlib.ControlPanel(_panel_cb, _panel_edb)
+_panel.open_panel()
+_check("open panel keeps controls reachable",
+       any(m is _panel_cb for m in _panel_cb.get_family()))
+_bad_control = False
+try:
+    manimlib.ControlPanel("not a control")
+except TypeError:
+    _bad_control = True
+_check("panel refuses non-control members", _bad_control)
+_extra = manimlib.Checkbox(False)
+_panel.add_controls(_extra)
+_panel.remove_controls(_extra)
+_drag_panel = _panel.panel_opener_on_mouse_drag(_panel.panel_opener, {"point": [0.0, 1.0, 0.0]})
+_scroll_panel = _panel.panel_on_mouse_scroll(
+    _panel, {"offset": np.array([0.0, 1.0, 0.0])}
+)
+_check("panel drag and scroll return False",
+       _drag_panel is False and _scroll_panel is False)
+_closed = _panel.close_panel()
+_check("close panel rebuilds closed", _closed is None or _closed is _panel)
+
+_iscene_mod = importlib.import_module("manimlib.scene.interactive_scene")
+_kb_keys = {"grab": "g", "color": "c", "cursor": "k"}
+_check("interactive key constants bind pinned bindings",
+       _iscene_mod.GRAB_KEY == _kb_keys["grab"]
+       and _iscene_mod.COLOR_KEY == _kb_keys["color"]
+       and _iscene_mod.CURSOR_KEY == _kb_keys["cursor"])
+_check("arrow symbols and modifier mask match pyglet",
+       sorted(_iscene_mod.ARROW_SYMBOLS) == [0xFF51, 0xFF52, 0xFF53, 0xFF54]
+       and isinstance(_iscene_mod.ALL_MODIFIERS, int)
+       and _iscene_mod.ALL_MODIFIERS >= 1)

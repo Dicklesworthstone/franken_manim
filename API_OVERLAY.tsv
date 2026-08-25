@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	1e6a87bbfb3e380988edd1985fa6de236a40154ad1d607b3ed426bcddf465dfc
+ledger_reviewed_digest	b46ab1626fd1a402739e8a96361c7fcaa552e99e829f76509833b36f1ea9e4ec
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -216,6 +216,7 @@ OOT-USE-WINDING-FILL	VMobject.use_winding_fill	excluded	The Reference flag is a 
 OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL faces keep certified layout closed while variation and color tables remain outside fmd-font's audited surface	Corpus-ranked demand plus upstream bounded parsing and cross-platform layout fixtures
 OOT-SVGELEMENTS-PARSER	svgelements object interop on the svg seams (mobjects_from_svg dispatch and raw transform-string parsing)	tiered	The Reference's third-party parser is deliberately unshipped; Chisel's hardened native processor owns document parsing end to end, and the exposed seams accept duck-typed attribute protocols instead	User files whose SVG features only svgelements accepts need named refusals from the native parser, or a corpus-ranked demand for direct se-object interop with fuzz evidence
 OOT-SCENE-PROGRESS-DISPLAY	ProgressDisplay rendered progress bars	tiered	The headless portal keeps the full consumption protocol (decoration iteration context) live while on-screen bar rendering awaits a host presentation surface; Studio owns interactive presentation	A corpus-ranked scene requires headless progress semantics or the Studio TUI binds a host progress surface
+OOT-PYGLET-WINDOW-KEYS	PygletWindowKeys leaked key namespace	excluded	pyglet is the refused GUI dependency; the portal binds each pinned key constant individually instead of the window-key class	A host integration needs a key symbol outside the individually bound pinned constants, or Studio defines its own key-surface adapter
 
 # ---------------------------------------------------------------------------
 # [status] — the §16.1 semantic tier, per symbol.
@@ -1205,6 +1206,32 @@ manimlib.scene.scene:OrderedDict	same	scripts/manim_ref/manimlib/scene/scene.py	
 manimlib.scene.scene:platform	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds the platform module under the module namespace exactly as the Reference leaks it
 manimlib.scene.scene:time	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	binds the time module under the module namespace exactly as the Reference leaks it
 manimlib.scene.scene:ProgressDisplay	tiered	OOT-SCENE-PROGRESS-DISPLAY	crates/fmn-python/tests/bridge.py	keeps decoration iteration and context protocol live headlessly while rendered bars await the Studio host surface
+manimlib.mobject.interactive:Checkbox.on_mouse_press	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	toggles through the pressed mobject and returns False
+manimlib.mobject.interactive:ColorSliders.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	builds the four-channel slider bank and checkerboard swatch validating nested kwargs by name
+manimlib.mobject.interactive:ColorSliders.get_picked_color	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	renders the first three channels as a hex string
+manimlib.mobject.interactive:ColorSliders.get_picked_opacity	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	returns the alpha channel as a plain float
+manimlib.mobject.interactive:ColorSliders.get_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	presents byte channels over 255 beside the raw alpha
+manimlib.mobject.interactive:ColorSliders.set_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	rebuilds swatch sliders and native components from the typed channels
+manimlib.mobject.interactive:ControlPanel	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is Atlas's native grey panel opener tab and controls column composition
+manimlib.mobject.interactive:ControlPanel.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	builds panel opener tab and controls column refusing non-control members
+manimlib.mobject.interactive:ControlPanel.add_controls	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	extends the controls column then relayouts against the opener
+manimlib.mobject.interactive:ControlPanel.close_panel	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	rebuilds the composition closed through the native parts
+manimlib.mobject.interactive:ControlPanel.move_panel_and_controls_to_panel_opener	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	relayouts controls against the opener position
+manimlib.mobject.interactive:ControlPanel.open_panel	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	rebuilds the composition open through the native parts
+manimlib.mobject.interactive:ControlPanel.panel_on_mouse_scroll	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	scrolls the controls column by ten times the vertical offset returning False
+manimlib.mobject.interactive:ControlPanel.panel_opener_on_mouse_drag	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	matches the opener to the dragged point then relayouts returning False
+manimlib.mobject.interactive:ControlPanel.remove_controls	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	removes from the controls column then relayouts against the opener
+manimlib.mobject.interactive:PygletWindowKeys	excluded	OOT-PYGLET-WINDOW-KEYS	crates/fmn-python/tests/bridge.py	the pyglet key namespace is the refused GUI leak; individual pinned key constants bind instead
+manimlib.mobject.interactive:Textbox.active_anim	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	previews the recolored box for the requested state without committing the flag
+manimlib.mobject.interactive:Textbox.box_on_mouse_press	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	flips activation rebuilds the box and returns False
+manimlib.mobject.interactive:Textbox.on_key_press	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	appends shifted alphanumerics space tab and backspace edits only while active
+manimlib.mobject.interactive:Textbox.set_value_anim	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	routes presentation writes through update_text
+manimlib.mobject.interactive:Textbox.update_text	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	rebuilds the live text candidate for the written string refusing non-strings
+manimlib.scene.interactive_scene:ALL_MODIFIERS	same	scripts/manim_ref/manimlib/scene/interactive_scene.py	crates/fmn-python/tests/bridge.py	binds the pinned modifier set for selection gestures
+manimlib.scene.interactive_scene:ARROW_SYMBOLS	same	scripts/manim_ref/manimlib/scene/interactive_scene.py	crates/fmn-python/tests/bridge.py	binds the published pyglet arrow key integers as the panning vocabulary
+manimlib.scene.interactive_scene:COLOR_KEY	same	scripts/manim_ref/manimlib/scene/interactive_scene.py	crates/fmn-python/tests/bridge.py	binds the pinned color key constant
+manimlib.scene.interactive_scene:CURSOR_KEY	same	scripts/manim_ref/manimlib/scene/interactive_scene.py	crates/fmn-python/tests/bridge.py	binds the pinned cursor key constant
+manimlib.scene.interactive_scene:GRAB_KEY	same	scripts/manim_ref/manimlib/scene/interactive_scene.py	crates/fmn-python/tests/bridge.py	binds the pinned grab key constant
 manimlib.mobject.interactive:Button	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the authored clickable composition over the native arbitrary-mobject button builder
 manimlib.mobject.interactive:EnableDisableButton	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the authored enabled-disabled box over a live bool tracker with native colored rebuilds
 manimlib.mobject.interactive:LinearNumberSlider	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is Atlas's native linear-number control over a live value tracker with bar handle and axis parts
@@ -1218,8 +1245,9 @@ manimlib.mobject.interactive:Checkbox.__init__	same	scripts/manim_ref/manimlib/m
 manimlib.mobject.interactive:Checkbox.assert_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	refuses non-bool writes by assertion
 manimlib.mobject.interactive:Checkbox.get_checkmark	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	returns the native true-state mark content
 manimlib.mobject.interactive:Checkbox.get_cross	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	returns the native false-state mark content
-manimlib.mobject.interactive:Checkbox.on_mouse_press	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	toggles through the pressed mobject and returns False
 manimlib.mobject.interactive:Checkbox.set_value_anim	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	becomes the checkmark or cross matching the written bool
+manimlib.mobject.interactive:Textbox	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the FontBook-backed string control keeping value as portal string state while Atlas owns box and text
+manimlib.mobject.interactive:Textbox.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	validates string value and nested kwargs builds native parts and pins text to the box
 manimlib.mobject.interactive:Checkbox.toggle_value	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	writes the negated bool through set_value
 manimlib.mobject.interactive:ControlMobject	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the tracker-first control base with fixed-frame composition over adopted children
 manimlib.mobject.interactive:ControlMobject.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	seeds the engine tracker validates Mobject children refuses kwargs and registers the no-op updater fixed in frame
