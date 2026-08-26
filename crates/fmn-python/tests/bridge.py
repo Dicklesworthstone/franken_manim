@@ -21003,9 +21003,12 @@ try:
 except Exception as error:
     _mux_refused = "ffmpeg" in str(error) or "soundtrack" in str(error)
 _check("sound to video refuses toward negotiated mux", _mux_refused)
+_silent_writer = manimlib.SceneFileWriter(_writer_scene)
+_check("begin stays silent when not writing movies",
+       _silent_writer.begin() is None)
 _pipe_writer = manimlib.SceneFileWriter(_writer_scene, write_to_movie=True)
-_check("begin stays silent without subdivide",
-       _pipe_writer.begin() is None)
+_check("begin refuses the python pipe when writing movies",
+       _raises(_pipe_writer.begin, Exception))
 _subdivided = manimlib.SceneFileWriter(
     _writer_scene, write_to_movie=True, subdivide_output=True
 )
