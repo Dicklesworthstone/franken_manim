@@ -1032,10 +1032,17 @@ pub fn laptop() -> VMobject {
         .rotated_about(open_angle, RIGHT, [0.0, screen_bottom, 0.0]);
 
     // Hinge axis across the body's top OUT corners.
-    let axis = Line::new(
-        body.bbox_point([UP[0] + LEFT[0], UP[1] + LEFT[1], OUT[2]]),
-        body.bbox_point([UP[0] + RIGHT[0], UP[1] + RIGHT[1], OUT[2]]),
-    )
+    // Compile-repair (GrayForest, fm-n64 session): `bbox_point` yields an
+    // Option; the hinge corners of a built body always exist.
+    let axis = {
+        let ul = body
+            .bbox_point([UP[0] + LEFT[0], UP[1] + LEFT[1], OUT[2]])
+            .expect("body UL corner exists");
+        let ur = body
+            .bbox_point([UP[0] + RIGHT[0], UP[1] + RIGHT[1], OUT[2]])
+            .expect("body UR corner exists");
+        Line::new(ul, ur)
+    }
     .style(Style::default().stroke(BLACK, 2.0, 1.0))
     .build()
     .expect("a straight axis never fails");
