@@ -127,7 +127,7 @@ fn self_goldens_lock_each_class_s_canonical_output() {
             println!("DRAWINGS_GOLDEN {name} {digest}");
         }
     }
-    let expected: [(&str, &str); 6] = [
+    let expected: [(&str, &str); 7] = [
         (
             "clock",
             "8ef9fe99145e3b8b371cf5af95af4d526615b50faf108de35b34e03123bb400f",
@@ -152,6 +152,7 @@ fn self_goldens_lock_each_class_s_canonical_output() {
             "piano_3d",
             "8e62f98b0fcf17256c8e988c1135c37a1b8d056eb2c2ecf5c95647f6a9da7fdd",
         ),
+        ("laptop", "PENDING_LAPTOP"),
     ];
     for ((name, actual), (expected_name, expected_hash)) in cases.iter().zip(expected.iter()) {
         assert_eq!(expected_name, name);
@@ -284,7 +285,9 @@ fn unreadable_asset_roots_refuse_by_name() {
         DrawingsAssetError::UnreadableAsset { reason, .. } => {
             assert!(reason.contains("not a regular file"), "{reason}");
         }
-        other => fail(format!("directory decoy must refuse as unreadable, got {other:?}")),
+        other => fail(format!(
+            "directory decoy must refuse as unreadable, got {other:?}"
+        )),
     }
 }
 

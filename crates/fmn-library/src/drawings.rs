@@ -919,3 +919,126 @@ pub fn vectorized_earth(root: Option<&std::path::Path>) -> Result<VMobject, Draw
     let document = resolve_drawings_svg("VectorizedEarth", "earth", root)?;
     vectorized_earth_from_document(&document)
 }
+
+/// `Laptop` (drawings.py:163) — the last geometry-native census class: a
+/// `VCube` body stretched to `body_dimensions` and fitted to `width`, a
+/// keyboard of staggered black squares on the OUT face, a screen plate
+/// (the Reference copies the keyboard-bearing body, squashes its depth to
+/// `screen_thickness`, and mounts a black screen rectangle at
+/// `screen_width_to_screen_plate_width`), hinged `open_angle` about the
+/// plate's bottom edge, and the black hinge axis across the body's top
+/// OUT corners.
+///
+/// Top-level child order — `[body, screen_plate, axis]` — with the screen
+/// as the plate's last child, matching the Reference's attribute surface.
+///
+/// The screen-plate copy faithfully includes the keyboard (the Reference's
+/// `screen_plate = body.copy()` runs after `body.add(keyboard)`); its
+/// depth squash therefore carries the keyboard's — replicated, not
+/// corrected, because the sequence is the Reference's observable
+/// construction and appears in no defect register.
+#[must_use]
+pub fn laptop() -> VMobject {
+    let body_dimensions = [4.0, 3.0, 0.05];
+    let screen_thickness = 0.01;
+    let keyboard_width_to_body_width = 0.9;
+    let keyboard_height_to_body_height = 0.5;
+    let screen_width_to_screen_plate_width = 0.9;
+    let open_angle = std::f64::consts::FRAC_PI_4;
+    let key_style = Style::default().fill(BLACK, 1.0).stroke(BLACK, 0.0, 1.0);
+
+    // Body: VCube(1) stretched per dimension, fitted to width 3, shaded,
+    // faces sorted by z with the +z face refilled to the body color.
+    let mut body = crate::solids::VCube::new(1.0).build();
+    for (dim, factor) in body_dimensions.iter().enumerate() {
+        let center = body.center_point();
+        body = body.stretched_about(*factor, dim, center);
+    }
+    body = body.with_width(3.0, true);
+    body = body.map_style_deep(|style| style.fill(fmn_core::constants::GREY, 1.0));
+    let mut faces: Vec<VMobject> = body.children().to_vec();
+    faces.sort_by(|a, b| {
+        a.center_point()[2]
+            .partial_cmp(&b.center_point()[2])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(top) = faces.last_mut() {
+        *top = top
+            .clone()
+            .map_style(|style| style.fill(fmn_core::constants::GREY_B, 1.0));
+    }
+    let body_width = body.length_over_dim(0);
+    let body_height = body.length_over_dim(1);
+    let body = v_group(faces);
+
+    // Keyboard: staggered rows of black squares on the OUT face.
+    let mut rows: Vec<VMobject> = Vec::new();
+    for y in 0..4 {
+        let keys_in_row = 12 - y % 2;
+        let row: Vec<VMobject> = (0..keys_in_row)
+            .map(|_| crate::poly::Square::new().style(key_style).build())
+            .collect();
+        rows.push(VMobject::arranged(
+            row,
+            RIGHT,
+            fmn_core::constants::SMALL_BUFF,
+            UP,
+        ));
+    }
+    let keyboard = VMobject::arranged(rows, DOWN, fmn_core::constants::MED_SMALL_BUFF, UP)
+        .with_width(keyboard_width_to_body_width * body_width, true)
+        .with_height(keyboard_height_to_body_height * body_height, true)
+        .moved_to([
+            body.center_point()[0],
+            body.center_point()[1],
+            body.center_point()[2]
+                + body_dimensions[2] * 0.5
+                + 0.1 * fmn_core::constants::SMALL_BUFF,
+        ])
+        .shifted([0.0, fmn_core::constants::MED_SMALL_BUFF, 0.0]);
+    let body = body.with_child(keyboard);
+
+    // Screen plate: the keyboard-bearing body copied, depth squashed to the
+    // screen thickness, with the black screen rectangle mounted on OUT.
+    let mut screen_plate = body.clone();
+    let squash = screen_thickness / body_dimensions[2];
+    let plate_center = screen_plate.center_point();
+    screen_plate = screen_plate.stretched_about(squash, 2, plate_center);
+    let (pw, ph) = screen_plate
+        .extent()
+        .map_or((1.0, 1.0), |(min, max)| (max[0] - min[0], max[1] - min[1]));
+    let plate_center = screen_plate.center_point();
+    let screen = crate::poly::Rectangle::new()
+        .style(Style::default().fill(BLACK, 1.0).stroke(BLACK, 0.0, 1.0))
+        .build()
+        .expect("a screen rectangle builds: pure geometry")
+        .with_width(pw, true)
+        .with_height(ph, true)
+        .moved_to(plate_center)
+        .scaled_about(screen_width_to_screen_plate_width, plate_center)
+        .shifted([
+            0.0,
+            0.0,
+            0.1 * fmn_core::constants::SMALL_BUFF + squash * body_dimensions[2] * 0.5,
+        ]);
+    let screen_bottom = screen.extent().map_or(0.0, |(min, _)| min[1]);
+    let screen_plate = screen_plate
+        .with_child(screen)
+        .moved_to([
+            body.center_point()[0],
+            body.center_point()[1] + body_height * 0.5,
+            body.center_point()[2],
+        ])
+        .rotated_about(open_angle, RIGHT, [0.0, screen_bottom, 0.0]);
+
+    // Hinge axis across the body's top OUT corners.
+    let axis = Line::new(
+        body.bbox_point([UP[0] + LEFT[0], UP[1] + LEFT[1], OUT[2]]),
+        body.bbox_point([UP[0] + RIGHT[0], UP[1] + RIGHT[1], OUT[2]]),
+    )
+    .style(Style::default().stroke(BLACK, 2.0, 1.0))
+    .build()
+    .expect("a straight axis never fails");
+
+    v_group([body, screen_plate, axis])
+}
