@@ -260,10 +260,15 @@ impl NetworkGraph {
         &self,
         shells: &[Vec<String>],
     ) -> Result<BTreeMap<String, Vec3>, NetworkGraphError> {
+        let known: BTreeSet<&str> = self.labels.iter().map(String::as_str).collect();
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         let mut duplicated: Vec<String> = Vec::new();
+        // Membership first: a foreign label is the primary defect.
         for shell in shells {
             for label in shell {
+                if !known.contains(label.as_str()) {
+                    return Err(NetworkGraphError::UnknownNode(label.clone()));
+                }
                 if !seen.insert(label.as_str()) {
                     duplicated.push(label.clone());
                 }
@@ -280,14 +285,6 @@ impl NetworkGraph {
                 duplicated,
                 missing,
             });
-        }
-        let known: BTreeSet<&str> = self.labels.iter().map(String::as_str).collect();
-        for shell in shells {
-            for label in shell {
-                if !known.contains(label.as_str()) {
-                    return Err(NetworkGraphError::UnknownNode(label.clone()));
-                }
-            }
         }
         let mut positions = BTreeMap::new();
         let ring_count = shells.len().max(1) as f64;
@@ -379,10 +376,12 @@ impl NetworkGraph {
             .graph
             .edges_ordered_borrowed()
             .into_iter()
-            .filter_map(|(from, to, _)| match (index_of.get(from), index_of.get(to)) {
-                (Some(&a), Some(&b)) => Some((a, b)),
-                _ => None,
-            })
+            .filter_map(
+                |(from, to, _)| match (index_of.get(from), index_of.get(to)) {
+                    (Some(&a), Some(&b)) => Some((a, b)),
+                    _ => None,
+                },
+            )
             .collect();
 
         let iterations = iterations.max(1);

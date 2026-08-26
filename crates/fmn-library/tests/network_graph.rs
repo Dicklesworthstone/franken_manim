@@ -3,9 +3,9 @@
 //! rule, partition/BFS refusals, and one bit-locked self-golden.
 
 use fmn_hash::sha256;
-use fnx_classes::digraph::Graph;
+use fnx_classes::Graph;
 
-use fmn_library::network_graph::{GraphLayout, NetworkGraph, DEFAULT_SPRING_IDEAL_EDGE};
+use fmn_library::network_graph::{DEFAULT_SPRING_IDEAL_EDGE, GraphLayout, NetworkGraph};
 
 /// A 5-cycle plus a chord — small enough to inspect, rich enough to have
 /// two BFS levels and a non-trivial edge set.
@@ -14,7 +14,14 @@ fn sample_graph() -> Graph {
     for label in ["a", "b", "c", "d", "e"] {
         graph.add_node(label);
     }
-    for (u, v) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e"), ("e", "a"), ("b", "d")] {
+    for (u, v) in [
+        ("a", "b"),
+        ("b", "c"),
+        ("c", "d"),
+        ("d", "e"),
+        ("e", "a"),
+        ("b", "d"),
+    ] {
         graph
             .add_edge(u, v)
             .unwrap_or_else(|error| fail(format!("edge {u}-{v}: {error}")));
@@ -24,8 +31,8 @@ fn sample_graph() -> Graph {
 
 /// Fail with a message. UBS bans literal `panic!`/`unreachable!`; test
 /// refusals go through [`std::panic::panic_any`] like the svg suite's.
-fn fail(message: String) {
-    std::panic::panic_any(message);
+fn fail(message: String) -> ! {
+    std::panic::panic_any(message)
 }
 
 fn position_digest(network: &NetworkGraph) -> String {
@@ -96,23 +103,19 @@ fn shell_partition_is_enforced_by_name() {
 #[test]
 fn breadth_first_levels_expand_in_sorted_order() {
     let network = NetworkGraph::new(sample_graph())
-        .laid_out(&GraphLayout::BreadthFirst {
-            root: "a".into(),
-        })
+        .laid_out(&GraphLayout::BreadthFirst { root: "a".into() })
         .unwrap_or_else(|error| fail(format!("{error}")));
-    // Level radii are level_index / depth; depth = 2 here (a; b,e; c,d).
-    let radius_of = |label: &str| network.position(label).expect("laid out")[0];
     let center = |label: &str| {
         let p = network.position(label).expect("laid out");
         (p[0] * p[0] + p[1] * p[1]).sqrt()
     };
+    let _radius_of = |label: &str| network.position(label).map(|p| p[0]);
     // Level 0 sits at the origin ring (radius 0).
     assert!(center("a") < 1e-12);
     // Levels 1 and 2 sit on their rings; sorted expansion puts b before e
     // on level 1's arc (angle order matches sorted labels).
     assert!(center("b") > center("a"));
     assert!(center("c") > center("b"));
-    let _ = radius_of("unused");
 }
 
 #[test]
@@ -151,7 +154,9 @@ fn built_family_paints_edges_under_vertices() {
     let network = NetworkGraph::new(sample_graph())
         .laid_out(&GraphLayout::Circular)
         .unwrap_or_else(|error| fail(format!("{error}")));
-    let family = network.build().unwrap_or_else(|error| fail(format!("{error}")));
+    let family = network
+        .build()
+        .unwrap_or_else(|error| fail(format!("{error}")));
     // Six edges then five dots: [edges…, vertices…].
     assert_eq!(family.children().len(), 6 + 5);
 }
@@ -169,8 +174,9 @@ fn self_golden_locks_the_canonical_build() {
     let network = NetworkGraph::new(star)
         .laid_out(&GraphLayout::BreadthFirst { root: "hub".into() })
         .unwrap_or_else(|error| fail(format!("{error}")));
-    let family = network.build().unwrap_or_else(|error| fail(format!("{error}")));
-    let golden = "GOLDEN_PLACEHOLDER";
+    let family = network
+        .build()
+        .unwrap_or_else(|error| fail(format!("{error}")));
     let mut bytes = Vec::new();
     let mut stack = vec![&family];
     while let Some(current) = stack.pop() {
@@ -183,8 +189,9 @@ fn self_golden_locks_the_canonical_build() {
             stack.push(child);
         }
     }
-    let actual = sha256(&bytes).to_hex();
-    if golden.starts_with("GOLDEN_PLACEHOLDER") {
-        fail(format!("SELF GOLDEN SEED network_graph star: {actual}"));
-    }
+    assert_eq!(
+        sha256(&bytes).to_hex(),
+        "7d014dc243ce2e1362f41037514bdb7aabc2870f266e45b94da39aeb018e8282",
+        "the canonical star build drifted"
+    );
 }
