@@ -20843,3 +20843,87 @@ _check("arrow symbols and modifier mask match pyglet",
        sorted(_iscene_mod.ARROW_SYMBOLS) == [0xFF51, 0xFF52, 0xFF53, 0xFF54]
        and isinstance(_iscene_mod.ALL_MODIFIERS, int)
        and _iscene_mod.ALL_MODIFIERS >= 1)
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the CameraFrame surface.
+
+_cf = manimlib.Scene().frame
+_check("frame default shape and aspect",
+       np.isclose(_cf.get_width(), 14.222222222222221)
+       and np.isclose(_cf.get_height(), 8.0)
+       and np.isclose(_cf.get_aspect_ratio(),
+                      _cf.get_width() / _cf.get_height()))
+_check("frame centers at origin by default",
+       np.allclose(_cf.get_center(), [0.0, 0.0, 0.0]))
+
+_cf.set_theta(0.5)
+_check("set theta reads back", np.isclose(_cf.get_theta(), 0.5))
+_cf.increment_theta(0.25)
+_check("increment theta accumulates", np.isclose(_cf.get_theta(), 0.75))
+_cf.set_phi(1.0)
+_cf.set_gamma(-0.25)
+_eulers = _cf.get_euler_angles()
+_check("euler triple reads all axes",
+       np.allclose(_eulers, [0.75, 1.0, -0.25]))
+_cf.increment_phi(0.5)
+_cf.increment_gamma(0.25)
+_check("increment phi gamma independent",
+       np.isclose(_cf.get_phi(), 1.5) and np.isclose(_cf.get_gamma(), 0.0))
+
+_reoriented = _cf.reorient(
+    theta_degrees=-30, phi_degrees=70, gamma_degrees=10,
+    center=[1.0, 2.0, 3.0], height=10.0,
+)
+_check("reorient returns self in degrees",
+       _reoriented is _cf
+       and np.isclose(_cf.get_theta(), -30 * math.pi / 180)
+       and np.isclose(_cf.get_phi(), 70 * math.pi / 180)
+       and np.allclose(_cf.get_center(), [1.0, 2.0, 3.0])
+       and np.isclose(_cf.get_height(), 10.0))
+
+_cf.set_focal_distance(20.0)
+_check("focal distance round trip", np.isclose(_cf.get_focal_distance(), 20.0))
+_cf.set_field_of_view(0.5)
+_check("field of view round trip",
+       np.isclose(_cf.get_field_of_view(), 0.5))
+_impl = _cf.get_implied_camera_location()
+_check("implied camera location is finite triple",
+       _impl.shape == (3,) and bool(np.isfinite(_impl).all()))
+
+_view = _cf.get_view_matrix()
+_inv = _cf.get_inv_view_matrix()
+_rot = _cf.get_inverse_camera_rotation_matrix()
+_check("view matrices invert cleanly",
+       _view.shape == (4, 4) and _inv.shape == (4, 4)
+       and np.allclose(_view @ _inv, np.eye(4), atol=1e-9))
+_check("inverse rotation matrix is three by three", _rot.shape == (3, 3))
+
+_fixed = _cf.to_fixed_frame_point([1.0, 2.0, 3.0])
+_round = _cf.from_fixed_frame_point(_fixed)
+_check("fixed frame points round trip", np.allclose(_round, [1.0, 2.0, 3.0]))
+
+_orient_before = _cf.get_orientation().copy()
+_rotated = _cf.rotate(math.pi / 2)
+_check("rotate changes orientation returns self",
+       _rotated is _cf
+       and not np.allclose(_cf.get_orientation(), _orient_before))
+
+_cf.make_orientation_default()
+_default_orient = _cf.get_orientation().copy()
+_cf.set_theta(2.5)
+_back = _cf.to_default_state()
+_check("to default state restores blessed orientation",
+       _back is not None and np.allclose(_cf.get_orientation(), _default_orient))
+_axes = _cf.set_euler_axes("zxy")
+_check("euler axes accept alternate sequence", _axes is None)
+_cf.set_euler_axes("zxz")
+
+_cf_copy_target = manimlib.Scene().frame
+_cf_copy_target.set_theta(1.0)
+_cf_copy_target.make_orientation_default()
+_copied = _cf_copy_target.copy()
+_copied.set_theta(3.0)
+_check("copy isolates camera core state",
+       np.isclose(_cf_copy_target.get_theta(), 1.0)
+       and np.isclose(_copied.get_theta(), 3.0))

@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	b46ab1626fd1a402739e8a96361c7fcaa552e99e829f76509833b36f1ea9e4ec
+ledger_reviewed_digest	cfa75aae06efad9e7e60cde18723ea251751980f5672b05c3c894cfecfb7a520
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1232,6 +1232,43 @@ manimlib.scene.interactive_scene:ARROW_SYMBOLS	same	scripts/manim_ref/manimlib/s
 manimlib.scene.interactive_scene:COLOR_KEY	same	scripts/manim_ref/manimlib/scene/interactive_scene.py	crates/fmn-python/tests/bridge.py	binds the pinned color key constant
 manimlib.scene.interactive_scene:CURSOR_KEY	same	scripts/manim_ref/manimlib/scene/interactive_scene.py	crates/fmn-python/tests/bridge.py	binds the pinned cursor key constant
 manimlib.scene.interactive_scene:GRAB_KEY	same	scripts/manim_ref/manimlib/scene/interactive_scene.py	crates/fmn-python/tests/bridge.py	binds the pinned grab key constant
+manimlib.camera.camera_frame:CameraFrame	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	is the authored camera frame whose authoritative state lives in one engine core
+manimlib.camera.camera_frame:CameraFrame.__init__	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	builds the core from frame shape center point fovy euler axes and z index
+manimlib.camera.camera_frame:CameraFrame.from_fixed_frame_point	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	inverts the fixed-frame mapping completing the round trip with to_fixed_frame_point
+manimlib.camera.camera_frame:CameraFrame.get_aspect_ratio	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	reports width over height from the engine shape
+manimlib.camera.camera_frame:CameraFrame.get_center	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the engine center as a numpy triple
+manimlib.camera.camera_frame:CameraFrame.get_euler_angles	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the theta phi gamma triple in radians in the active axis order
+manimlib.camera.camera_frame:CameraFrame.get_field_of_view	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	reads the vertical field of view from the engine
+manimlib.camera.camera_frame:CameraFrame.get_focal_distance	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	reads the focal distance from the engine
+manimlib.camera.camera_frame:CameraFrame.get_gamma	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the third euler angle
+manimlib.camera.camera_frame:CameraFrame.get_height	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the shape height
+manimlib.camera.camera_frame:CameraFrame.get_implied_camera_location	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	computes the finite eye point implied by orientation and focal distance
+manimlib.camera.camera_frame:CameraFrame.get_inv_view_matrix	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	inverts the live view matrix exactly
+manimlib.camera.camera_frame:CameraFrame.get_inverse_camera_rotation_matrix	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	scales the view rotation block by the frame scale for the Reference convention
+manimlib.camera.camera_frame:CameraFrame.get_orientation	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the quaternion orientation array
+manimlib.camera.camera_frame:CameraFrame.get_phi	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the second euler angle
+manimlib.camera.camera_frame:CameraFrame.get_scale	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the engine uniform scale
+manimlib.camera.camera_frame:CameraFrame.get_shape	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the width height pair from the engine
+manimlib.camera.camera_frame:CameraFrame.get_theta	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the first euler angle
+manimlib.camera.camera_frame:CameraFrame.get_view_matrix	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the always-current four by four view matrix
+manimlib.camera.camera_frame:CameraFrame.get_width	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	returns the shape width
+manimlib.camera.camera_frame:CameraFrame.increment_euler_angles	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	adds unit-scaled deltas to all three angles at once
+manimlib.camera.camera_frame:CameraFrame.increment_gamma	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	adds to gamma alone through the euler family returning self
+manimlib.camera.camera_frame:CameraFrame.increment_phi	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	adds to phi alone through the euler family returning self
+manimlib.camera.camera_frame:CameraFrame.increment_theta	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	adds to theta alone through the euler family returning self
+manimlib.camera.camera_frame:CameraFrame.make_orientation_default	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	blesses the current orientation for later to_default_state restores
+manimlib.camera.camera_frame:CameraFrame.reorient	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	applies degree-based angles optional center move and optional height in one fluent call
+manimlib.camera.camera_frame:CameraFrame.rotate	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	rotates about the out axis ignoring point-function kwargs like the Reference
+manimlib.camera.camera_frame:CameraFrame.set_euler_angles	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	writes only the provided angles scaling degrees or radians by the units argument
+manimlib.camera.camera_frame:CameraFrame.set_euler_axes	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	switches the euler axis sequence such as zxz and zxy
+manimlib.camera.camera_frame:CameraFrame.set_field_of_view	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	writes the vertical field of view returning self
+manimlib.camera.camera_frame:CameraFrame.set_focal_distance	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	writes the focal distance returning self
+manimlib.camera.camera_frame:CameraFrame.set_gamma	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	writes gamma alone preserving other axes
+manimlib.camera.camera_frame:CameraFrame.set_orientation	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	writes quaternion or array orientations into the engine
+manimlib.camera.camera_frame:CameraFrame.set_phi	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	writes phi alone preserving other axes
+manimlib.camera.camera_frame:CameraFrame.set_theta	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	writes theta alone preserving other axes
+manimlib.camera.camera_frame:CameraFrame.to_default_state	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	restores the blessed default orientation state
+manimlib.camera.camera_frame:CameraFrame.to_fixed_frame_point	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	maps scene points into the fixed frame completing the round trip with from_fixed_frame_point
 manimlib.mobject.interactive:Button	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the authored clickable composition over the native arbitrary-mobject button builder
 manimlib.mobject.interactive:EnableDisableButton	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the authored enabled-disabled box over a live bool tracker with native colored rebuilds
 manimlib.mobject.interactive:LinearNumberSlider	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is Atlas's native linear-number control over a live value tracker with bar handle and axis parts
