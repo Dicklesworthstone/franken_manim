@@ -17,6 +17,7 @@ fmn-text.workspace = true
 fmn-tex.workspace = true
 fsci-integrate.workspace = true
 franken_markdown.workspace = true
+fnx-classes.workspace = true
 
 
 [dev-dependencies]

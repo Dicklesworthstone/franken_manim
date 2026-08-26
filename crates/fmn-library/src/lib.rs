@@ -92,6 +92,7 @@ pub mod image;
 pub mod line;
 pub mod markdown;
 pub mod matchers;
+pub mod network_graph;
 pub mod matrix;
 pub mod numbers;
 pub mod obj_model;
