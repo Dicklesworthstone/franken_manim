@@ -2114,7 +2114,9 @@ fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
             "spring determinism broke: replay_equal={replay_equal} seeds_diverge={seeds_diverge}"
         )));
     }
-    ctx.event(LogEvent::new("e2e.network_graph.spring_determinism").field("seed", "6244836703"));
+    ctx.event(
+        LogEvent::new("e2e.network_graph.spring_determinism").field("seed", 0x005f_3759df_u64),
+    );
     ctx.counter("spring_replay_equal", replay_equal);
     ctx.counter("spring_seeds_diverge", seeds_diverge);
     Ok(RunOutcome::ok()
