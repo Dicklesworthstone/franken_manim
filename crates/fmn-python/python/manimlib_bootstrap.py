@@ -19260,7 +19260,6 @@ class SceneFileWriter:
 
     def init_movie_file_path(self):
         return self.get_movie_file_path()
-
     def init_audio(self):
         # Reference initializes a pyglet-backed silent segment here. Audio
         # assembly is the Reel boundary (BN-14); the portal tracks intent
@@ -19369,6 +19368,31 @@ class SceneFileWriter:
             "SceneFileWriter movie encode is the ffmpeg Reel boundary; "
             "use native PNG/y4m output or the fmn CLI"
         )
+
+
+
+
+def _install_utils_shaders():
+    """The Reference's utils.shaders names, bound as precise refusals
+    (OOT-MODERNGL-SHADER-SURFACE): imports stay source-compatible while
+    every entry point names Lumen as the rasterization owner."""
+    module = _ensure_module("manimlib.utils.shaders")
+
+    def _refused(name):
+        def unavailable(*args, **kwargs):
+            del args, kwargs
+            raise _CapabilityError(
+                name + " is the moderngl shader surface; Lumen owns "
+                "rasterization and custom GLSL is outside the "
+                "compatibility claim (OOT-MODERNGL-SHADER-SURFACE)"
+            )
+        return unavailable
+
+    module.get_shader_code_from_file = _refused("get_shader_code_from_file")
+    module.get_colormap_code = _refused("get_colormap_code")
+    module.get_shader_program = _refused("get_shader_program")
+    module.image_path_to_texture = _refused("image_path_to_texture")
+    module.set_program_uniform = _refused("set_program_uniform")
 
 
 class LatexError(Exception):
@@ -19597,6 +19621,9 @@ def _ensure_module(name):
         setattr(parent, child_name, module)
     return module
 
+
+
+_install_utils_shaders()
 
 def _base_names(detail):
     result = []

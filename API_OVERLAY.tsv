@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	8da5a29f3c4c21560b2620d02812335adaf00d2362729dc6d304dcbbc0c8977d
+ledger_reviewed_digest	c9bc18031e943677b887681a7e790959e30add3aa8e34d45d98b7ce82764c641
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -217,6 +217,7 @@ OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL
 OOT-SVGELEMENTS-PARSER	svgelements object interop on the svg seams (mobjects_from_svg dispatch and raw transform-string parsing)	tiered	The Reference's third-party parser is deliberately unshipped; Chisel's hardened native processor owns document parsing end to end, and the exposed seams accept duck-typed attribute protocols instead	User files whose SVG features only svgelements accepts need named refusals from the native parser, or a corpus-ranked demand for direct se-object interop with fuzz evidence
 OOT-SCENE-PROGRESS-DISPLAY	ProgressDisplay rendered progress bars	tiered	The headless portal keeps the full consumption protocol (decoration iteration context) live while on-screen bar rendering awaits a host presentation surface; Studio owns interactive presentation	A corpus-ranked scene requires headless progress semantics or the Studio TUI binds a host progress surface
 OOT-PYGLET-WINDOW-KEYS	PygletWindowKeys leaked key namespace	excluded	pyglet is the refused GUI dependency; the portal binds each pinned key constant individually instead of the window-key class	A host integration needs a key symbol outside the individually bound pinned constants, or Studio defines its own key-surface adapter
+OOT-MODERNGL-SHADER-SURFACE	ShaderWrapper VShaderWrapper and utils.shaders program surface	excluded	The Reference moderngl program pipeline is the refused GPU dependency; Lumen owns rasterization and analytic coverage replaces every shader path	A G4a allowlisted scene needs shader-program behavior no audited native adapter can express and OQ-8 is reopened by ADR
 
 # ---------------------------------------------------------------------------
 # [status] — the §16.1 semantic tier, per symbol.
@@ -1360,6 +1361,46 @@ manimlib.mobject.interactive:LinearNumberSlider.get_value_from_point	same	script
 manimlib.mobject.interactive:LinearNumberSlider.slider_on_mouse_drag	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	writes the value decoded from the dragged point and returns False
 manimlib.mobject.interactive:LinearNumberSlider.set_value_anim	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	moves the handle along the axis to the proportional position of the written value
 manimlib.mobject.interactive:MotionMobject.mob_on_mouse_drag	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	moves the wrapped body to the event point and returns False
+manimlib.shader_wrapper:ShaderWrapper	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	construction refuses naming Lumen as the rasterization owner
+manimlib.shader_wrapper:ShaderWrapper.__init__	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	refuses every argument combination before any program state exists
+manimlib.shader_wrapper:ShaderWrapper.add_texture	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.bind_to_mobject_uniforms	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.generate_vaos	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.get_id	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.init_program	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.init_program_code	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.init_textures	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.init_vertex_objects	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.num_clip_planes	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.pre_render	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.read_in	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.refresh_id	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.release	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.release_textures	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.render	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.replace_code	excluded	OOT-ARBITRARY-GLSL	crates/fmn-python/tests/bridge.py	custom GLSL substitution is the named exclusion for shader code rewrite
+manimlib.shader_wrapper:ShaderWrapper.set_ctx_clip_plane	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.set_ctx_depth_test	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:ShaderWrapper.update_program_uniforms	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	is the fill and stroke program wrapper refusing at construction like its base
+manimlib.shader_wrapper:VShaderWrapper.__init__	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	refuses every argument combination before any program state exists
+manimlib.shader_wrapper:VShaderWrapper.generate_vaos	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.get_fill_canvas	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.init_program	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.init_program_code	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.init_vertex_objects	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.refresh_id	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.render	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.render_fill	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.render_stroke	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.replace_code_program	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.shader_wrapper:VShaderWrapper.set_backstroke	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	unreachable behind the construction refusal
+manimlib.utils.shaders:get_colormap_code	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	bound as a precise refusal naming Lumen and the out-of-tier surface
+manimlib.utils.shaders:get_shader_code_from_file	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	bound as a precise refusal naming Lumen and the out-of-tier surface
+manimlib.utils.shaders:get_shader_program	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	bound as a precise refusal naming Lumen and the out-of-tier surface
+manimlib.utils.shaders:image_path_to_texture	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	bound as a precise refusal naming Lumen and the out-of-tier surface
+manimlib.utils.shaders:set_program_uniform	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	bound as a precise refusal naming Lumen and the out-of-tier surface
+manimlib.utils.shaders:PROGRAM_UNIFORM_MIRRORS	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	the data constant of the refused program surface stays unbound with its family
 manimlib.scene.scene:Scene.begin_animations	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	starts every animation and adopts families whose animation mobject is not already on the scene
 manimlib.scene.scene:Scene.embed	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	returns silently headless and refuses toward the Studio-owned host window otherwise
 manimlib.scene.scene:Scene.finish_animations	same	scripts/manim_ref/manimlib/scene/scene.py	crates/fmn-python/tests/bridge.py	ends each played animation through the native scene core after the segment

@@ -19395,8 +19395,6 @@ assert np.allclose(builder_src.get_center(), [2.0, 0.0, 0.0])
 # fm-5wq.4: schema attributes, init seams, wag, Point/Group, and the
 # continuous bounding box.
 
-# The record-schema class attributes carry the Reference identities; the
-# render primitive keeps the familiar numeric value without moderngl.
 assert manimlib.Mobject.render_primitive == 5
 assert manimlib.Square.render_primitive == 5
 assert manimlib.Mobject().data.dtype.names == ("point", "rgba")
@@ -21005,6 +21003,42 @@ _check("headless queries stay live",
        _cam.use_window_fbo() is False
        and _cam.init_frame() is None
        and _cam.init_light_source() is None)
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the refused moderngl shader surface (OOT-MODERNGL-SHADER-SURFACE).
+
+_shaders = importlib.import_module("manimlib.utils.shaders")
+_sw_mod = importlib.import_module("manimlib.shader_wrapper")
+_shader_fns = (
+    "get_shader_code_from_file",
+    "get_colormap_code",
+    "get_shader_program",
+    "image_path_to_texture",
+    "set_program_uniform",
+)
+_shader_results = {
+    name: _raises(getattr(_shaders, name), Exception)
+    for name in _shader_fns
+}
+_check("shaders module entry points refuse toward lumen",
+       all(_shader_results.values()))
+_shader_msgs = []
+for _sname in _shader_fns:
+    try:
+        getattr(_shaders, _sname)()
+    except Exception as error:
+        _shader_msgs.append(str(error))
+_check("shader refusals name the out of tier surface",
+       all("OOT-MODERNGL-SHADER-SURFACE" in msg for msg in _shader_msgs))
+_check("wrapper construction refuses naming lumen",
+       _raises(lambda: _sw_mod.ShaderWrapper(None, None), Exception))
+_vw = None
+try:
+    _sw_mod.VShaderWrapper(None, None)
+except Exception as error:
+    _vw = "Lumen" in str(error)
+_check("v shader wrapper refuses naming lumen", bool(_vw))
 # ---------------------------------------------------------------------------
 # fm-5wq.4: the SceneFileWriter write surface.
 
