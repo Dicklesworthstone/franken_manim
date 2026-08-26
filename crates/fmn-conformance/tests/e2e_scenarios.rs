@@ -1989,6 +1989,198 @@ fn lifecycle_journal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
         .with_counter("journal_mismatch_detected", 1))
 }
 
+// ---------------------------------------------------------------------------
+// fm-3kr / fm-n64 enhanced-surface lifecycle drills
+// ---------------------------------------------------------------------------
+
+/// The drawings shelf's asset-backed families refuse by name (ADR-0020):
+/// every default constructor surfaces `AssetNotShipped` naming its class
+/// and file — never a placeholder build.
+fn drawings_asset_refusals_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::drawings::{
+        DrawingsAssetError, double_speech_bubble, lightbulb, old_speech_bubble, vectorized_earth,
+        video_icon,
+    };
+
+    let refusals = [
+        (
+            "Lightbulb",
+            lightbulb(None).err().map(|error| (error, "lightbulb")),
+        ),
+        (
+            "VideoIcon",
+            video_icon(None).err().map(|error| (error, "video_icon")),
+        ),
+        (
+            "OldSpeechBubble",
+            old_speech_bubble(None, None, fmn_core::constants::LEFT, 1.0)
+                .err()
+                .map(|error| (error, "Bubbles_speech.svg")),
+        ),
+        (
+            "DoubleSpeechBubble",
+            double_speech_bubble(None, None, fmn_core::constants::LEFT, 1.0)
+                .err()
+                .map(|error| (error, "Bubbles_double_speech.svg")),
+        ),
+        (
+            "VectorizedEarth",
+            vectorized_earth(None).err().map(|error| (error, "earth")),
+        ),
+    ];
+    let mut named = 0_u64;
+    for (class, outcome) in &refusals {
+        match outcome {
+            Some((
+                DrawingsAssetError::AssetNotShipped {
+                    class: named_class,
+                    asset: named_asset,
+                },
+                asset,
+            )) => {
+                if named_class != class || named_asset != asset {
+                    return Err(fail(format!(
+                        "{class} refused but named {named_class}/{named_asset}"
+                    )));
+                }
+                named += 1;
+            }
+            other => {
+                return Err(fail(format!(
+                    "{class} must refuse by policy, got {other:?}"
+                )));
+            }
+        }
+    }
+    ctx.event(LogEvent::new("e2e.drawings.asset_refusal").field("named", named));
+    ctx.counter("asset_refusals_named", named);
+    Ok(RunOutcome::ok().with_counter("asset_refusals_named", named))
+}
+
+/// NetworkGraph determinism drill: the same graph + seed replays a
+/// bit-identical position digest twice, and a different seed diverges —
+/// the OQ-5 kernel rules exercised through the public surface.
+fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::network_graph::{GraphLayout, NetworkGraph};
+
+    let nodes: Vec<&str> = (0..7)
+        .map(|i| match i {
+            0 => "a",
+            1 => "b",
+            2 => "c",
+            3 => "d",
+            4 => "e",
+            5 => "f",
+            _ => "g",
+        })
+        .collect();
+    let edges = [
+        ("a", "b"),
+        ("b", "c"),
+        ("c", "d"),
+        ("d", "e"),
+        ("e", "f"),
+        ("f", "g"),
+        ("g", "a"),
+        ("b", "f"),
+    ];
+    let build = |seed: u64| -> Result<String, ScenarioError> {
+        let network = NetworkGraph::from_edge_list(&nodes, &edges)
+            .laid_out(&GraphLayout::Spring {
+                seed,
+                iterations: 40,
+                ideal_edge: 1.0,
+            })
+            .map_err(|error| fail(format!("spring layout: {error}")))?;
+        let mut bytes = Vec::new();
+        for label in network.nodes() {
+            let point = network
+                .position(label)
+                .ok_or_else(|| fail(format!("unpositioned {label}")))?;
+            bytes.extend_from_slice(label.as_bytes());
+            bytes.extend_from_slice(&point[0].to_bits().to_le_bytes());
+            bytes.extend_from_slice(&point[1].to_bits().to_le_bytes());
+        }
+        Ok(sha256(&bytes).to_hex())
+    };
+
+    let first = build(0x5f3759df)?;
+    let second = build(0x5f3759df)?;
+    let divergent = build(0x5f3759de)?;
+    let replay_equal = u64::from(first == second);
+    let seeds_diverge = u64::from(first != divergent);
+    if replay_equal != 1 || seeds_diverge != 1 {
+        return Err(fail(format!(
+            "spring determinism broke: replay_equal={replay_equal} seeds_diverge={seeds_diverge}"
+        )));
+    }
+    ctx.event(LogEvent::new("e2e.network_graph.spring_determinism").field("seed", "6244836703"));
+    ctx.counter("spring_replay_equal", replay_equal);
+    ctx.counter("spring_seeds_diverge", seeds_diverge);
+    Ok(RunOutcome::ok()
+        .with_counter("spring_replay_equal", replay_equal)
+        .with_counter("spring_seeds_diverge", seeds_diverge))
+}
+
+/// CSV → TableMobject end-to-end through the suite's frame parser and
+/// Scribe: insertion-order headers survive, the null cell renders empty,
+/// and two builds of the same table hash identically.
+fn data_table_csv_roundtrip_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    const CSV: &str = "region,score,active\nwest,3.5,true\neast,,false\nnorth,7,true\n";
+    let table = fmn_library::data_mobjects::TableMobject::from_csv(CSV, ',')
+        .map_err(|error| fail(format!("csv ingest: {error}")))?;
+
+    let header_count = table.headers().len() as u64;
+    let row_count = table.rows().len() as u64;
+    let order_preserved = u64::from(table.headers() == ["region", "score", "active"]);
+    let null_cell_empty = u64::from(table.rows()[1][1].is_empty());
+    if header_count != 3 || row_count != 3 || order_preserved != 1 || null_cell_empty != 1 {
+        return Err(fail(format!(
+            "csv round-trip broke: headers={header_count} rows={row_count}              order={order_preserved} null={null_cell_empty}"
+        )));
+    }
+
+    let book =
+        fmn_text::FontBook::bundled().map_err(|error| fail(format!("bundled fonts: {error}")))?;
+    let first = table
+        .build(&book)
+        .map_err(|error| fail(format!("table build: {error}")))?;
+    let second = table
+        .build(&book)
+        .map_err(|error| fail(format!("table rebuild: {error}")))?;
+    let digest_of = |root: &VMobject| {
+        let mut bytes = Vec::new();
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            for point in current.points() {
+                bytes.extend_from_slice(&point[0].to_bits().to_le_bytes());
+                bytes.extend_from_slice(&point[1].to_bits().to_le_bytes());
+                bytes.extend_from_slice(&point[2].to_bits().to_le_bytes());
+            }
+            for child in current.children() {
+                stack.push(child);
+            }
+        }
+        sha256(&bytes).to_hex()
+    };
+    let builds_identical = u64::from(digest_of(&first) == digest_of(&second));
+    if builds_identical != 1 {
+        return Err(fail("two builds of one table diverged"));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.data_table.roundtrip")
+            .field("headers", header_count)
+            .field("rows", row_count),
+    );
+    ctx.counter("data_table_headers", header_count);
+    ctx.counter("data_table_rows", row_count);
+    Ok(RunOutcome::ok()
+        .with_counter("data_table_headers", header_count)
+        .with_counter("data_table_rows", row_count)
+        .with_counter("data_table_builds_identical", builds_identical))
+}
+
 /// Bounded E2E registration for PG-5's user-visible definition surface.
 ///
 /// The release-perf producer remains the authoritative complete-corpus proof
@@ -3119,6 +3311,68 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             LogExpect::event_order(e2e::spans::EXECUTION_PLAN, e2e::spans::RENDER_FRAME),
         ],
     ));
+
+    // ------------------------------------------------------------------
+    // fm-3kr / fm-n64 enhanced-surface drills: refusal policy by name,
+    // spring-kernel determinism, CSV→Table round-trip.
+    // ------------------------------------------------------------------
+    specs.push(
+        spec(
+            "drawings.asset_refusals_named.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(drawings_asset_refusals_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("asset_refusals_named", 5),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.drawings.asset_refusal",
+                vec![FieldPred::u64_eq("named", 5)],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "network_graph.spring_seed_determinism.v1",
+            ScenarioClass::DeterminismDrill,
+            Surface::RustApi,
+            Invocation::new(network_graph_layout_determinism_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("spring_replay_equal", 1),
+                counter_eq("spring_seeds_diverge", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.network_graph.spring_determinism",
+                vec![FieldPred::u64_eq("seed", 0x005f_3759df)],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "data_table.csv_roundtrip.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(data_table_csv_roundtrip_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("data_table_headers", 3),
+                counter_eq("data_table_rows", 3),
+                counter_eq("data_table_builds_identical", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.data_table.roundtrip",
+                vec![
+                    FieldPred::u64_eq("headers", 3),
+                    FieldPred::u64_eq("rows", 3),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
 
     // ------------------------------------------------------------------
     // Deliberately-injected regression drills: one per seeded class. The

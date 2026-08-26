@@ -150,6 +150,24 @@ pub struct NetworkGraph {
 }
 
 impl NetworkGraph {
+    /// Build from a node list plus an edge list — the constructor callers
+    /// use when they own plain data (tests, CSV columns, bindings) rather
+    /// than an existing [`Graph`]. Nodes are inserted in the given order;
+    /// every edge endpoint is pre-inserted so the strict graph accepts it.
+    #[must_use]
+    pub fn from_edge_list(nodes: &[&str], edges: &[(&str, &str)]) -> Self {
+        let mut graph = Graph::strict();
+        for label in nodes {
+            graph.add_node(*label);
+        }
+        for (from, to) in edges {
+            graph
+                .add_edge(*from, *to)
+                .expect("from_edge_list pre-adds every endpoint");
+        }
+        Self::new(graph)
+    }
+
     /// Wrap an undirected graph; positions are unset until a layout runs.
     #[must_use]
     pub fn new(graph: Graph) -> Self {
