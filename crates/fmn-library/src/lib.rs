@@ -85,6 +85,7 @@ pub mod brace;
 pub mod code;
 pub mod controls;
 pub mod coords;
+pub mod data_mobjects;
 pub mod drawings;
 pub mod fields;
 pub mod graphs;

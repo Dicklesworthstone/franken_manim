@@ -18,6 +18,8 @@ fmn-tex.workspace = true
 fsci-integrate.workspace = true
 franken_markdown.workspace = true
 fnx-classes.workspace = true
+fp-frame.workspace = true
+fp-types.workspace = true
 
 
 [dev-dependencies]

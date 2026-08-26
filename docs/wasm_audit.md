@@ -1,12 +1,12 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-derived 2026-08-26 (wasm32 render-axis check + node smoke green on this host; smoke digest unchanged at `1f248a71347b82aa`) after fm-n64 tranche 1 admitted fnx-classes (+ fnx-runtime, rustc-hash) into the workspace closure for the enhanced-tier NetworkGraph — consumed by fmn-library only, which is not in fmn-wasm's dependency graph, so the wasm tree is unchanged; re-proven by the same two gates under the new lock.
+**Status:** re-derived 2026-08-26 (wasm32 render-axis check + node smoke green on this host; smoke digest unchanged at `1f248a71347b82aa`) after fm-n64 tranche 2 admitted fp-frame (+fp-columnar/fp-index/fp-runtime/fp-types and their registry transitives) alongside the earlier fnx-classes admission (+ fnx-runtime, rustc-hash) into the workspace closure for the enhanced-tier NetworkGraph — consumed by fmn-library only, which is not in fmn-wasm's dependency graph, so the wasm tree is unchanged; re-proven by the same two gates under the new lock.
 The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes, forcing this audit to be re-run instead of leaving a
 plausible but stale “current pins” claim behind.
 
 - `SUITE.lock` SHA-256: `ed186d765192e0afebf046beeaea310b2bbd68511c2fd7ee9a9637b4dfe0612f`
-- `Cargo.lock` SHA-256: `5c2313c6d86df372652d93ed50f835de193ea9c4ed2a6819dd5509fa039cf6ca`
+- `Cargo.lock` SHA-256: `15eb56d6412bceb7c9f722f9ced79c5c3630d187c7f3c077b1070cb7c81b54c7`
 
 Method labels are deliberately narrow:
 
