@@ -144,3 +144,34 @@ fn private_dir_prefixes_are_exactly_the_policy_set() {
         ]
     );
 }
+
+#[test]
+fn planted_reference_asset_basenames_are_caught() {
+    // ADR-0020's basename tooth: every realistic leak form of the
+    // Reference-derived drawings assets trips, wherever it hides.
+    let leaks = path_violations(&[
+        "assets/lightbulb.svg".to_owned(),
+        "npm/pkg/Bubbles_speech.svg".to_owned(),
+        "dist/earth".to_owned(),
+        "wasm-smoke/pkg/VIDEO_ICON.SVG".to_owned(),
+    ]);
+    assert_eq!(
+        leaks.len(),
+        4,
+        "every drawings-asset basename form must trip: {leaks:?}"
+    );
+    assert!(
+        leaks.iter().all(|leak| leak.detail.contains("ADR-0020")),
+        "each finding must name its policy: {leaks:?}"
+    );
+
+    // Names that merely share a substring or stem must not trip.
+    let clean = path_violations(&[
+        "docs/adr/0020-reference-drawings-assets-stay-unbundled.md".to_owned(),
+        "crates/fmn-library/src/drawings.rs".to_owned(),
+    ]);
+    assert!(
+        clean.is_empty(),
+        "ordinary source must never trip the asset tooth: {clean:?}"
+    );
+}

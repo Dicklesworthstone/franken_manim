@@ -69,6 +69,23 @@ pub const PRIVATE_FIXTURE_DIRS: &[&str] = &[
     "scripts/videos_ref/",
 ];
 
+/// The Reference-derived drawings assets by basename, lowercased (ADR-0020,
+/// landed with fm-3kr tranche 3): the default art of `Lightbulb`,
+/// `VideoIcon`/`VideoSeries`, the three Bubble bodies, and
+/// `VectorizedEarth`. The classes take user-supplied files and the bytes
+/// never ship — so a tracked or staged file carrying one of these names is
+/// itself the leak. Matched case-insensitively on basename, with and
+/// without the `.svg` suffix (the Reference's `file_name`s appear in both
+/// forms across its loaders).
+pub const REFERENCE_ASSET_BASENAMES: &[&str] = &[
+    "lightbulb",
+    "video_icon",
+    "bubbles_speech.svg",
+    "bubbles_double_speech.svg",
+    "bubbles_thought.svg",
+    "earth",
+];
+
 /// The distributable-surface staging trees scanned in addition to the
 /// git-tracked set: `dist/` (the bundle staging this bead introduces) and
 /// the wheel/npm staging locations as they appear. Missing trees are
@@ -375,12 +392,29 @@ pub fn parse_denominator(text: &str) -> Result<Vec<Digest>, LeakError> {
 }
 
 /// Tooth 1: every repository-relative path that falls under a
-/// private-fixture directory.
+/// private-fixture directory, or carries a Reference-derived drawings
+/// asset basename (ADR-0020).
 #[must_use]
 pub fn path_violations(rel_paths: &[String]) -> Vec<Leak> {
     let mut leaks = Vec::new();
     for path in rel_paths {
         let normalized = path.replace('\\', "/");
+        let basename = normalized.rsplit('/').next().unwrap_or(&normalized);
+        let lowercase = basename.to_ascii_lowercase();
+        let stem = lowercase.strip_suffix(".svg").unwrap_or(&lowercase);
+        if REFERENCE_ASSET_BASENAMES
+            .iter()
+            .any(|name| *name == lowercase || *name == stem)
+        {
+            leaks.push(Leak {
+                kind: LeakKind::PrivatePathShipped,
+                path: normalized.clone(),
+                detail: format!(
+                    "Reference-derived drawings asset '{basename}' must never \
+                     ship — the classes take user-supplied files (ADR-0020)"
+                ),
+            });
+        }
         for dir in PRIVATE_FIXTURE_DIRS {
             let dir = dir.trim_end_matches('/');
             if normalized == dir || normalized.starts_with(&format!("{dir}/")) {

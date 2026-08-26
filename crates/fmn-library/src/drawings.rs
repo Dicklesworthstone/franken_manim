@@ -9,9 +9,13 @@
 //! Self-goldens: one bit-locked point digest per class in
 //! `tests/drawings.rs`, the fm-6l6 pattern.
 
-use fmn_core::color::Srgb;
+use std::fmt;
+
+use fmn_core::color::{Srgb, color_gradient};
 use fmn_core::constants::{
-    BLACK, DL, DR, GREEN_E, GREY_B, GREY_E, LEFT, ORIGIN, OUT, RED_E, RIGHT, TAU, UL, UP, UR, WHITE,
+    BLACK, BLUE_A, BLUE_B, BLUE_C, BLUE_D, DL, DOWN, DR, FRAME_WIDTH, GREEN, GREEN_E, GREEN_SCREEN,
+    GREY_B, GREY_E, LEFT, MED_LARGE_BUFF, MED_SMALL_BUFF, ORIGIN, OUT, RED_E, RIGHT, TAU, UL, UP,
+    UR, WHITE, YELLOW,
 };
 use fmn_core::types::Vec3;
 use fmn_mobject::{Mob, Stage};
@@ -21,6 +25,7 @@ use crate::boolean_ops::BooleanMobjectError;
 use crate::line::Line;
 use crate::poly::Rectangle;
 use crate::style::Style;
+use crate::svg::{SvgDocument, SvgError, svg_document_mobject};
 use crate::vmobject::{VMobject, v_group};
 
 /// drawings.py:309's tick direction: `cos(angle)·UP + sin(angle)·RIGHT`.
@@ -512,4 +517,405 @@ pub fn piano_3d() -> Result<VMobject, BooleanMobjectError> {
             depth_test: true,
             ..fmn_mobject::Uniforms::default()
         }))
+}
+
+// ------------------------------------------------ tranche 3 (fm-3kr): the
+// asset-backed families under ADR-0020
+
+/// Why an asset-backed drawings family could not be built.
+///
+/// ADR-0020: the Reference-derived SVG assets (`lightbulb`, `video_icon`,
+/// the Bubble bodies, `earth`) are CC BY-NC-SA video-content derivatives and
+/// never ship. Every family therefore resolves its body through
+/// [`resolve_drawings_svg`], which either reads a user-supplied file from an
+/// explicit root or refuses with [`DrawingsAssetError::AssetNotShipped`] —
+/// naming the class, the missing file, and the remedy. No silent
+/// substitution, no placeholder art.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DrawingsAssetError {
+    /// The default asset is not part of any shipped artifact. Supply your
+    /// own legally obtained copy of `asset` through a drawings asset root.
+    AssetNotShipped {
+        /// The drawings class whose default body was requested.
+        class: &'static str,
+        /// The Reference's `file_name` for that class's body.
+        asset: &'static str,
+    },
+    /// The user-supplied root could not be read as a regular file there.
+    UnreadableAsset {
+        /// The joined path attempted.
+        path: String,
+        /// The underlying refusal, verbatim.
+        reason: String,
+    },
+    /// The user-supplied SVG refused Chisel's hardened document processor;
+    /// every [`SvgError`] variant is already a named refusal.
+    Svg(SvgError),
+    /// A geometry primitive behind a composite family refused construction.
+    Geometry(String),
+}
+
+impl fmt::Display for DrawingsAssetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AssetNotShipped { class, asset } => write!(
+                f,
+                "{class} does not bundle '{asset}': Reference-derived drawings \
+                 assets never ship (CC BY-NC-SA, docs/adr/0020); point \
+                 `root` at your own copy of the 3b1b asset"
+            ),
+            Self::UnreadableAsset { path, reason } => {
+                write!(f, "drawings asset root cannot supply {path:?}: {reason}")
+            }
+            Self::Svg(error) => write!(f, "drawings asset SVG refused: {error}"),
+            Self::Geometry(detail) => {
+                write!(f, "drawings family geometry refused: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DrawingsAssetError {}
+
+impl From<SvgError> for DrawingsAssetError {
+    fn from(error: SvgError) -> Self {
+        Self::Svg(error)
+    }
+}
+
+/// The one policy chokepoint every asset-backed family resolves through:
+/// `root` absent means [`DrawingsAssetError::AssetNotShipped`]; `root`
+/// present means read `<root>/<asset>[.svg]` as a regular file and parse it
+/// under the hardened document processor's default budgets.
+///
+/// # Errors
+/// [`DrawingsAssetError`] per the policy above.
+pub fn resolve_drawings_svg(
+    class: &'static str,
+    asset: &'static str,
+    root: Option<&std::path::Path>,
+) -> Result<SvgDocument, DrawingsAssetError> {
+    let Some(root) = root else {
+        return Err(DrawingsAssetError::AssetNotShipped { class, asset });
+    };
+    let file = if asset.ends_with(".svg") {
+        asset.to_owned()
+    } else {
+        format!("{asset}.svg")
+    };
+    let path = root.join(file);
+    let metadata =
+        std::fs::metadata(&path).map_err(|error| DrawingsAssetError::UnreadableAsset {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    if !metadata.is_file() {
+        return Err(DrawingsAssetError::UnreadableAsset {
+            path: path.display().to_string(),
+            reason: "not a regular file".to_owned(),
+        });
+    }
+    let bytes = std::fs::read(&path).map_err(|error| DrawingsAssetError::UnreadableAsset {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    })?;
+    Ok(SvgDocument::parse(&bytes)?)
+}
+
+/// Family width/height from the corner points along the axes.
+fn family_extents(vmob: &VMobject) -> (f64, f64) {
+    let right = vmob.bbox_point(RIGHT);
+    let left = vmob.bbox_point(LEFT);
+    let up = vmob.bbox_point(UP);
+    let down = vmob.bbox_point(DOWN);
+    (
+        right.map_or(0.0, |p| p[0]) - left.map_or(0.0, |p| p[0]),
+        up.map_or(0.0, |p| p[1]) - down.map_or(0.0, |p| p[1]),
+    )
+}
+
+/// Mirror a family across its own vertical centre line (the horizontal
+/// `flip()` of the Reference; no native flip exists — this is a −1 stretch
+/// about the family centre).
+fn mirrored_horizontally(vmob: VMobject) -> VMobject {
+    let center = vmob.center_point();
+    vmob.stretched_about(-1.0, 0, center)
+}
+
+/// `Lightbulb`'s body over a user-supplied document (ADR-0020): styled to
+/// the Reference defaults — yellow outline, no fill — then sized to
+/// `height`.
+///
+/// Behavior Note: the Reference's `insert_n_curves(25)` refines its fixed
+/// 8-curve-per-path import; here curve density follows Chisel's adaptive
+/// tolerance at import time, so no refinement pass exists.
+#[must_use]
+pub fn lightbulb_from_document(document: &SvgDocument) -> VMobject {
+    svg_document_mobject(document)
+        .map_style_deep(|style| style.fill(YELLOW, 0.0).stroke(YELLOW, 3.0, 1.0))
+        .with_height(1.0, false)
+}
+
+/// [`Lightbulb`](lightbulb_from_document) resolving its body through
+/// [`resolve_drawings_svg`] (`asset = "lightbulb"`).
+///
+/// # Errors
+/// [`DrawingsAssetError`] — by policy when `root` is [`None`].
+pub fn lightbulb(root: Option<&std::path::Path>) -> Result<VMobject, DrawingsAssetError> {
+    let document = resolve_drawings_svg("Lightbulb", "lightbulb", root)?;
+    Ok(lightbulb_from_document(&document))
+}
+
+/// `VideoIcon`'s body over a user-supplied document: recolored to the
+/// Reference default `BLUE_A` (stroke and fill together, widths preserved)
+/// then sized to `width`.
+#[must_use]
+pub fn video_icon_from_document(document: &SvgDocument) -> VMobject {
+    svg_document_mobject(document)
+        .map_style_deep(|style| style.color(BLUE_A))
+        .with_width(1.2, false)
+}
+
+/// [`VideoIcon`](video_icon_from_document) resolving its body through
+/// [`resolve_drawings_svg`] (`asset = "video_icon"`).
+///
+/// # Errors
+/// [`DrawingsAssetError`] — by policy when `root` is [`None`].
+pub fn video_icon(root: Option<&std::path::Path>) -> Result<VMobject, DrawingsAssetError> {
+    let document = resolve_drawings_svg("VideoIcon", "video_icon", root)?;
+    Ok(video_icon_from_document(&document))
+}
+
+/// `VideoSeries` over a user-supplied VideoIcon document: `num_videos`
+/// icons arranged `RIGHT`, set to `width`, then colored along
+/// `gradient_colors` exactly as the Reference orders the three steps.
+#[must_use]
+pub fn video_series_from_document(
+    document: &SvgDocument,
+    num_videos: usize,
+    gradient_colors: &[Srgb],
+    width: f64,
+) -> VMobject {
+    let series = VMobject::arranged(
+        std::iter::repeat_with(|| video_icon_from_document(document)).take(num_videos),
+        RIGHT,
+        MED_SMALL_BUFF,
+        ORIGIN,
+    )
+    .with_width(width, false);
+    let colors = color_gradient(gradient_colors, num_videos);
+    v_group(
+        series
+            .children()
+            .iter()
+            .cloned()
+            .zip(colors)
+            .map(|(child, color)| child.map_style_deep(move |style| style.color(color))),
+    )
+}
+
+/// [`VideoSeries`](video_series_from_document) resolving its icon body
+/// through [`resolve_drawings_svg`] (`asset = "video_icon"`), with the
+/// Reference defaults: eleven videos in a `BLUE_B → BLUE_D` gradient across
+/// the frame width minus `MED_LARGE_BUFF`.
+///
+/// # Errors
+/// [`DrawingsAssetError`] — by policy when `root` is [`None`].
+pub fn video_series(root: Option<&std::path::Path>) -> Result<VMobject, DrawingsAssetError> {
+    let document = resolve_drawings_svg("VideoIcon", "video_icon", root)?;
+    Ok(video_series_from_document(
+        &document,
+        11,
+        &[BLUE_B, BLUE_D],
+        FRAME_WIDTH - MED_LARGE_BUFF,
+    ))
+}
+
+/// `Bubble.bubble_center_adjustment_factor` (drawings.py:356).
+const BUBBLE_CENTER_ADJUSTMENT_FACTOR: f64 = 0.125;
+
+/// `Bubble.get_body` over a user-supplied document: mirror when `direction`
+/// points rightward, stretch to `(content width + min(buff, content
+/// height), 1.35 × (content height + buff))`, move onto the content, then
+/// drop by the adjustment factor of the *resized* height — the Reference's
+/// exact order.
+#[must_use]
+fn bubble_body_from_document(
+    document: &SvgDocument,
+    content: &VMobject,
+    direction: Vec3,
+    buff: f64,
+) -> VMobject {
+    let mut body = svg_document_mobject(document);
+    if direction[0] > 0.0 {
+        body = mirrored_horizontally(body);
+    }
+    let (content_width, content_height) = family_extents(content);
+    let target_width = content_width + buff.min(content_height);
+    let target_height = 1.35 * (content_height + buff);
+    body.with_width(target_width, true)
+        .with_height(target_height, true)
+        .moved_to(content.center_point())
+        .shifted([0.0, -BUBBLE_CENTER_ADJUSTMENT_FACTOR * target_height, 0.0])
+        .map_style_deep(|style| style.fill(BLACK, 0.8).stroke(WHITE, 3.0, 1.0))
+}
+
+/// One speech/thought bubble over a user-supplied body document. `content`
+/// of [`None`] uses the Reference's invisible `Rectangle(3, 2)` filler;
+/// otherwise the given mobject is cloned into the group after the body,
+/// the Reference's child order.
+///
+/// # Errors
+/// [`DrawingsAssetError::Geometry`] if the filler rectangle refuses.
+pub fn bubble_with(
+    body_document: &SvgDocument,
+    content: Option<&VMobject>,
+    direction: Vec3,
+    buff: f64,
+) -> Result<VMobject, DrawingsAssetError> {
+    let owned_content;
+    let content = match content {
+        Some(given) => given,
+        None => {
+            owned_content = Rectangle::new()
+                .width(3.0)
+                .height(2.0)
+                .build()
+                .map_err(|error| DrawingsAssetError::Geometry(error.to_string()))?
+                .map_style_deep(|style| style.fill(BLACK, 0.0).stroke(BLACK, 0.0, 1.0));
+            &owned_content
+        }
+    };
+    let body = bubble_body_from_document(body_document, content, direction, buff);
+    Ok(v_group([body, content.clone()]))
+}
+
+macro_rules! drawings_bubble_family {
+    ($(#[$doc:meta])* $name:ident, $class:literal, $asset:literal) => {
+        $(#[$doc])*
+        ///
+        /// # Errors
+        /// [`DrawingsAssetError`] — by policy when `root` is [`None`].
+        pub fn $name(
+            root: Option<&std::path::Path>,
+            content: Option<&VMobject>,
+            direction: Vec3,
+            buff: f64,
+        ) -> Result<VMobject, DrawingsAssetError> {
+            let document = resolve_drawings_svg($class, $asset, root)?;
+            bubble_with(&document, content, direction, buff)
+        }
+    };
+}
+
+drawings_bubble_family!(
+    /// `OldSpeechBubble` (`asset = "Bubbles_speech.svg"`).
+    old_speech_bubble,
+    "OldSpeechBubble",
+    "Bubbles_speech.svg"
+);
+drawings_bubble_family!(
+    /// `DoubleSpeechBubble` (`asset = "Bubbles_double_speech.svg"`).
+    double_speech_bubble,
+    "DoubleSpeechBubble",
+    "Bubbles_double_speech.svg"
+);
+
+/// `OldThoughtBubble.get_body`'s extra step: the mirrored/stretched body's
+/// shapes sorted by ascending y before the group forms.
+///
+/// # Errors
+/// [`DrawingsAssetError`] — by policy when `root` is [`None`].
+pub fn old_thought_bubble(
+    root: Option<&std::path::Path>,
+    content: Option<&VMobject>,
+    direction: Vec3,
+    buff: f64,
+) -> Result<VMobject, DrawingsAssetError> {
+    let document = resolve_drawings_svg("OldThoughtBubble", "Bubbles_thought.svg", root)?;
+    let owned_content;
+    let content = match content {
+        Some(given) => given,
+        None => {
+            owned_content = Rectangle::new()
+                .width(3.0)
+                .height(2.0)
+                .build()
+                .map_err(|error| DrawingsAssetError::Geometry(error.to_string()))?
+                .map_style_deep(|style| style.fill(BLACK, 0.0).stroke(BLACK, 0.0, 1.0));
+            &owned_content
+        }
+    };
+    let mut body = bubble_body_from_document(&document, content, direction, buff);
+    let mut ordered: Vec<VMobject> = body.children().to_vec();
+    ordered.sort_by(|a, b| a.center_point()[1].total_cmp(&b.center_point()[1]));
+    // `map_children` is the only child-replacing hook; drain the sorted
+    // clones through it one-for-one.
+    let mut supply = ordered.into_iter();
+    body = body.map_children(|_| supply.next().expect("one replacement per child"));
+    Ok(v_group([body, content.clone()]))
+}
+
+/// `OldThoughtBubble.make_green_screen`: fill the thought cloud's last
+/// shape (the body's highest child after the y-sort) solid
+/// [`GREEN_SCREEN`], returning the reassembled bubble.
+#[must_use]
+pub fn bubble_make_green_screen(bubble: &VMobject) -> VMobject {
+    v_group(bubble.children().iter().enumerate().map(|(index, child)| {
+        if index != 0 {
+            return child.clone();
+        }
+        let last = child.children().len().saturating_sub(1);
+        let mut position = 0usize;
+        child.clone().map_children(move |shape| {
+            let is_last = position == last;
+            position += 1;
+            if is_last {
+                shape.map_style_deep(|style| style.fill(GREEN_SCREEN, 1.0))
+            } else {
+                shape
+            }
+        })
+    }))
+}
+
+/// `VectorizedEarth` over a user-supplied document: the imported globe at
+/// `height`, backed by a green-outlined, blue-filled circle stretched to
+/// the family's extents and placed behind it (the Reference's
+/// `circle.replace(self)` + `add_to_back`).
+///
+/// Behavior Note: as with [`lightbulb_from_document`], the Reference's
+/// `insert_n_curves(20)` has no counterpart — import density is adaptive.
+///
+/// # Errors
+/// [`DrawingsAssetError::Geometry`] if the backing circle refuses.
+pub fn vectorized_earth_from_document(
+    document: &SvgDocument,
+) -> Result<VMobject, DrawingsAssetError> {
+    let globe = svg_document_mobject(document).with_height(2.0, false);
+    let center = globe.center_point();
+    let (half_width, half_height) = {
+        let (width, height) = family_extents(&globe);
+        (width / 2.0, height / 2.0)
+    };
+    let backdrop = Circle::new()
+        .radius(1.0)
+        .arc_center(ORIGIN)
+        .style(Style::default().fill(BLUE_C, 1.0).stroke(GREEN, 3.0, 1.0))
+        .build()
+        .stretched_about(half_width.max(half_height), 0, ORIGIN)
+        .stretched_about(half_width.max(half_height), 1, ORIGIN)
+        .moved_to(center);
+    Ok(v_group([backdrop, globe]))
+}
+
+/// [`VectorizedEarth`](vectorized_earth_from_document) resolving its body
+/// through [`resolve_drawings_svg`] (`asset = "earth"`), Reference-default
+/// `height = 2.0` applied inside.
+///
+/// # Errors
+/// [`DrawingsAssetError`] — by policy when `root` is [`None`].
+pub fn vectorized_earth(root: Option<&std::path::Path>) -> Result<VMobject, DrawingsAssetError> {
+    let document = resolve_drawings_svg("VectorizedEarth", "earth", root)?;
+    vectorized_earth_from_document(&document)
 }
