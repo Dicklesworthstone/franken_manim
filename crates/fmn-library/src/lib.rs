@@ -100,6 +100,7 @@ pub mod obj_model;
 pub mod planes;
 pub mod pointcloud;
 pub mod poly;
+pub mod probability;
 pub mod solids;
 pub mod special_tex;
 pub mod style;
