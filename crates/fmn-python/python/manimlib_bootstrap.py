@@ -13651,6 +13651,85 @@ class Camera:
     def get_location(self):
         return tuple(self.frame.get_implied_camera_location())
 
+    def init_context(self):
+        # The Reference creates a moderngl context here; Lumen owns
+        # rasterization and the GPU context is outside the portal.
+        raise _CapabilityError(
+            "Camera.init_context requires a moderngl context; "
+            "Lumen owns rasterization for the sovereign pipeline"
+        )
+
+    def init_fbo(self):
+        raise _CapabilityError(
+            "Camera.init_fbo requires the OpenGL FBO surface; "
+            "Lumen owns rasterization for the sovereign pipeline"
+        )
+
+    def init_frame(self):
+        # The frame is constructed in __init__ and shared by identity;
+        # nothing left to initialize (Reference parity hook).
+        return None
+
+    def init_light_source(self):
+        # The light source is constructed in __init__ from the pinned
+        # position; Reference parity hook kept as a no-op.
+        return None
+
+    def use_window_fbo(self):
+        # Headless scenes never render into a window framebuffer; a bound
+        # window is Studio-owned and would set this through its own path.
+        return False
+
+    def blit(self, **kwargs):
+        del kwargs
+        raise _CapabilityError(
+            "Camera.blit is the OpenGL framebuffer blit; "
+            "Lumen owns rasterization for the sovereign pipeline"
+        )
+
+    def clear(self):
+        raise _CapabilityError(
+            "Camera.clear is the OpenGL framebuffer clear; "
+            "Lumen owns rasterization for the sovereign pipeline"
+        )
+
+    def capture(self):
+        raise _CapabilityError(
+            "Camera.capture requires a Lumen capture generation; "
+            "call Scene.run/render for native PNG output"
+        )
+
+    def get_image(self):
+        raise _CapabilityError(
+            "Camera.get_image requires a Lumen capture generation; "
+            "call Scene.run/render for native PNG output"
+        )
+
+    def get_fbo(self):
+        raise _CapabilityError(
+            "Camera.get_fbo is the OpenGL framebuffer handle; "
+            "Lumen owns rasterization for the sovereign pipeline"
+        )
+
+    def get_texture(self):
+        raise _CapabilityError(
+            "Camera.get_texture is the OpenGL texture handle; "
+            "Lumen owns rasterization for the sovereign pipeline"
+        )
+
+    def get_raw_fbo_data(self, dtype):
+        del dtype
+        raise _CapabilityError(
+            "Camera.get_raw_fbo_data is the OpenGL readback; "
+            "native PNG/y4m output or the fmn CLI owns capture bytes"
+        )
+
+    def get_pixel_array(self):
+        raise _CapabilityError(
+            "Camera.get_pixel_array requires a Lumen capture generation; "
+            "call Scene.run/render for native PNG output"
+        )
+
     def reset_pixel_shape(self, new_width=None, new_height=None):
         width, height = self.get_pixel_shape()
         if new_width is not None:
@@ -13661,11 +13740,9 @@ class Camera:
         height = int(height)
         if width <= 0 or height <= 0:
             raise ValueError(
-                "Camera.reset_pixel_shape requires positive pixel "
-                f"dimensions, got ({width}, {height})"
+                "reset_pixel_shape expects positive pixel dimensions; got "
+                + f"{width}x{height}"
             )
-        # default_pixel_shape stays the constructor resolution; only the
-        # live pixel shape changes, and the frame follows its aspect.
         self._core.set_pixel_shape(width, height)
         self.resize_frame_shape()
 

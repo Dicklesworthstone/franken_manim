@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	b9ab144d51aa27e7990f864d93175068e387937ad7efb2ce78686d1cf743bbbf
+ledger_reviewed_digest	8da5a29f3c4c21560b2620d02812335adaf00d2362729dc6d304dcbbc0c8977d
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1269,6 +1269,35 @@ manimlib.camera.camera_frame:CameraFrame.set_phi	same	scripts/manim_ref/manimlib
 manimlib.camera.camera_frame:CameraFrame.set_theta	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	writes theta alone preserving other axes
 manimlib.camera.camera_frame:CameraFrame.to_default_state	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	restores the blessed default orientation state
 manimlib.camera.camera_frame:CameraFrame.to_fixed_frame_point	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	maps scene points into the fixed frame completing the round trip with from_fixed_frame_point
+manimlib.camera.camera:Camera	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	is the authored capture-camera surface over Lumen's native core sharing one live frame identity
+manimlib.camera.camera:Camera.__init__	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	builds the native core from validated config refusing unrouted window and legacy pixel knobs by name
+manimlib.camera.camera:Camera.blit	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses the framebuffer blit naming Lumen as the rasterization owner
+manimlib.camera.camera:Camera.capture	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses toward Lumen capture generation naming run and render for native png output
+manimlib.camera.camera:Camera.clear	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses the framebuffer clear naming Lumen as the rasterization owner
+manimlib.camera.camera:Camera.get_aspect_ratio	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	divides pixel width by height
+manimlib.camera.camera:Camera.get_fbo	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses the framebuffer handle naming Lumen as the rasterization owner
+manimlib.camera.camera:Camera.get_frame_center	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	delegates to the shared live frame center
+manimlib.camera.camera:Camera.get_frame_height	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	delegates to the shared live frame height
+manimlib.camera.camera:Camera.get_frame_shape	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	pairs the live frame width and height
+manimlib.camera.camera:Camera.get_frame_width	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	delegates to the shared live frame width
+manimlib.camera.camera:Camera.get_image	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses toward Lumen capture generation naming run and render for native png output
+manimlib.camera.camera:Camera.get_location	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	returns the implied camera location as a tuple
+manimlib.camera.camera:Camera.get_pixel_height	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	returns the second engine pixel shape entry
+manimlib.camera.camera:Camera.get_pixel_shape	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	returns the engine pixel shape tuple
+manimlib.camera.camera:Camera.get_pixel_size	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	divides frame width by pixel width
+manimlib.camera.camera:Camera.get_pixel_width	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	returns the first engine pixel shape entry
+manimlib.camera.camera:Camera.get_raw_fbo_data	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses the opengl readback naming native png y4m output or the fmn cli as capture owners
+manimlib.camera.camera:Camera.get_texture	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses the texture handle naming Lumen as the rasterization owner
+manimlib.camera.camera:Camera.init_context	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses the moderngl context naming Lumen as the rasterization owner
+manimlib.camera.camera:Camera.init_fbo	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses the fbo setup naming Lumen as the rasterization owner
+manimlib.camera.camera:Camera.init_frame	same	scripts_manim_ref_manimlib_camera_camera	crates/fmn-python/tests/bridge.py	is the parity no-op hook since the shared frame is constructed in init
+manimlib.camera.camera:Camera.init_light_source	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	is the parity no-op hook since the light source is constructed in init
+manimlib.camera.camera:Camera.refresh_uniforms	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refreshes the uniform dictionary headlessly
+manimlib.camera.camera:Camera.get_pixel_array	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refuses raw array access toward Lumen capture generation naming run and render
+manimlib.camera.camera:Camera.resize_frame_shape	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	reseats the frame shape from pixels with the fixed-dimension option preserved
+manimlib.camera.camera:Camera.use_window_fbo	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	reports false headlessly with window-bound truth owned by Studio
+manimlib.camera.camera:ThreeDCamera.__init__	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	defaults four samples through the shared constructor
+manimlib.camera.camera:ThreeDCamera	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	is the authored four-sample camera subclass for three-d scenes
 manimlib.scene.scene_file_writer:SceneFileWriter	same	scripts/manim_ref/manimlib/scene/scene_file_writer.py	crates/fmn-python/tests/bridge.py	is the authored write-surface constructor recording scene and encode knobs without mkdir or ffmpeg
 manimlib.scene.scene_file_writer:SceneFileWriter.__init__	same	scripts/manim_ref/manimlib/scene/scene_file_writer.py	crates/fmn-python/tests/bridge.py	validates the scene subject records every encode knob and resolves initial image and movie paths
 manimlib.scene.scene_file_writer:SceneFileWriter.add_audio_segment	same	scripts/manim_ref/manimlib/scene/scene_file_writer.py	crates/fmn-python/tests/bridge.py	refuses toward the Reel audio boundary while Scene.add_sound records natively

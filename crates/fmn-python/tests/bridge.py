@@ -20925,6 +20925,86 @@ _check("copy isolates camera core state",
        and np.isclose(_copied.get_theta(), 3.0))
 
 
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the Camera capture surface over Lumen's native core.
+
+_cam = manimlib.Camera()
+_check("camera default pixel shape",
+       _cam.get_pixel_shape() == (1920, 1080)
+       and _cam.get_pixel_width() == 1920 and _cam.get_pixel_height() == 1080)
+_check("camera pixel size and aspect",
+       np.isclose(_cam.get_pixel_size(), 14.222222222222221 / 1920)
+       and np.isclose(_cam.get_aspect_ratio(), 1920 / 1080))
+_check("camera frame getters",
+       np.isclose(_cam.get_frame_width(), 14.222222222222221)
+       and np.isclose(_cam.get_frame_height(), 8.0)
+       and len(_cam.get_frame_shape()) == 2
+       and np.allclose(_cam.get_frame_center(), [0.0, 0.0, 0.0]))
+_check("camera location is finite triple",
+       len(_cam.get_location()) == 3
+       and bool(np.isfinite(_cam.get_location()).all()))
+_check("camera light source pinned position",
+       np.allclose(_cam.light_source_position, [-10.0, 10.0, 10.0]))
+
+_cam.reset_pixel_shape(1280, 720)
+_check("reset pixel shape updates and resizes frame",
+       _cam.get_pixel_shape() == (1280, 720)
+       and np.isclose(_cam.get_frame_width(), 1280 * _cam.get_pixel_size())
+       or np.isclose(_cam.get_frame_height(), 720 * _cam.get_pixel_size()))
+_bad_shape = False
+try:
+    _cam.reset_pixel_shape(0, -5)
+except ValueError:
+    _bad_shape = True
+_check("reset refuses non-positive shape", _bad_shape)
+_cam.refresh_uniforms()
+_check("refresh uniforms runs headless", _cam.uniforms is not None)
+
+_uint = _cam.convert_pixel_array(np.full((720, 1280, 4), 255, dtype=np.uint8))
+_check("convert pixel array keeps uint8",
+       _uint.dtype == np.uint8 and _uint.max() == 255)
+_center_space = _cam.pixel_coords_to_space_coords(640, 360)
+_check("pixel center maps near origin",
+       bool(np.allclose(_center_space[:2], [0.0, 0.0], atol=1e-6)))
+
+_3dcam = manimlib.ThreeDCamera()
+_check("three d camera samples four", _3dcam.samples == 4)
+
+_gl_refused = {
+    "init_context": lambda: _cam.init_context(),
+    "init_fbo": lambda: _cam.init_fbo(),
+    "blit": lambda: _cam.blit(),
+    "clear": lambda: _cam.clear(),
+    "get_fbo": lambda: _cam.get_fbo(),
+    "get_texture": lambda: _cam.get_texture(),
+    "get_raw_fbo_data": lambda: _cam.get_raw_fbo_data(np.uint8),
+}
+_gl_results = {name: _raises(fn, Exception) for name, fn in _gl_refused.items()}
+_check("gl surface refuses toward lumen", all(_gl_results.values()))
+_capture_refused = False
+try:
+    _cam.capture()
+except Exception as error:
+    _capture_refused = "Lumen" in str(error) and "run" in str(error)
+_img_refused = False
+try:
+    _cam.get_image()
+except Exception as error:
+    _img_refused = "Lumen" in str(error)
+_check("capture and get image refuse toward native png",
+       _capture_refused and _img_refused)
+_px_refused = False
+try:
+    _cam.get_pixel_array()
+except Exception as error:
+    _px_refused = "Lumen" in str(error)
+_check("pixel array access refuses toward native png", _px_refused)
+_check("headless queries stay live",
+       _cam.use_window_fbo() is False
+       and _cam.init_frame() is None
+       and _cam.init_light_source() is None)
 # ---------------------------------------------------------------------------
 # fm-5wq.4: the SceneFileWriter write surface.
 
