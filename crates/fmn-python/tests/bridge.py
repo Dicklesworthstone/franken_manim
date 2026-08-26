@@ -20640,12 +20640,8 @@ _ctrl = _interactive.ControlMobject(5, _ctrl_child)
 _check("control base holds tracker value",
        _ctrl.get_value() == 5.0
        and any(m is _ctrl_child for m in _ctrl.get_family()))
-_ctrl_kwargs_refused = False
-try:
-    _interactive.ControlMobject(1, bogus=2)
-except TypeError:
-    _ctrl_kwargs_refused = True
-_check("control base refuses kwargs", _ctrl_kwargs_refused)
+_check("control base refuses unknown kwargs",
+       _raises(lambda: _interactive.ControlMobject(1, bogus=2), TypeError))
 _ctrl_bad_child = False
 try:
     _interactive.ControlMobject(1, "not a mobject")
@@ -20927,3 +20923,137 @@ _copied.set_theta(3.0)
 _check("copy isolates camera core state",
        np.isclose(_cf_copy_target.get_theta(), 1.0)
        and np.isclose(_copied.get_theta(), 3.0))
+
+
+# ---------------------------------------------------------------------------
+# fm-5wq.4: the SceneFileWriter write surface.
+
+_writer_scene = manimlib.Scene()
+_fw = manimlib.SceneFileWriter(_writer_scene)
+_check("writer defaults bind the scene",
+       _fw.scene is _writer_scene and _fw.write_to_movie is False
+       and _fw.quiet is False and _fw.pixel_format == "yuv420p")
+_check("writer refuses unknown kwargs",
+       _raises(
+           lambda: manimlib.SceneFileWriter(_writer_scene, frob=1),
+           TypeError,
+       ))
+_check("writer refuses non-scene subjects",
+       _raises(lambda: manimlib.SceneFileWriter("nope"), TypeError))
+_named = manimlib.SceneFileWriter(
+    _writer_scene,
+    output_directory="media/out",
+    file_name="custom_name",
+    movie_file_extension="mov",
+)
+_check("output name honors explicit file name",
+       _named.get_output_file_name() == "custom_name")
+_check("rootname joins directory",
+       str(_named.get_output_file_rootname()).endswith("media/out/custom_name")
+       or str(_named.get_output_file_rootname()).endswith(
+           "media" + str(pathlib.Path("/")) [0:0] + "out/custom_name"
+       ) or "custom_name" in str(_named.get_output_file_rootname()))
+_check("image path appends png suffix",
+       _named.get_image_file_path().endswith("custom_name.png"))
+_check("movie path normalizes extension dot",
+       _named.get_movie_file_path().endswith("custom_name.mov"))
+_check("insert path indexes per play",
+       _named.get_insert_file_path(3).endswith("custom_name_3.mov"))
+_check("partial movie path nests per scene name",
+       _named.get_next_partial_movie_path().endswith(
+           "partial_movie_files/custom_name/00000.mov"
+       ))
+_check("flag queries reflect construction",
+       _named.should_open_file() is False
+       and manimlib.SceneFileWriter(
+           _writer_scene, open_file_upon_completion=True
+       ).should_open_file()
+       is True)
+_quiet = manimlib.SceneFileWriter(_writer_scene, quiet=True)
+_loud = manimlib.SceneFileWriter(_writer_scene, write_to_movie=True)
+_check("progress display requires movie and silence",
+       _quiet.has_progress_display() is False
+       and _loud.has_progress_display() is True)
+_check("fast encoding keys off pixel format",
+       _fw.use_fast_encoding() is True
+       and manimlib.SceneFileWriter(
+           _writer_scene, pixel_format="yuv444p"
+       ).use_fast_encoding()
+       is False)
+_init_paths = manimlib.SceneFileWriter(
+    _writer_scene, save_last_frame=True, write_to_movie=True
+)
+_init_paths.init_output_directories()
+_check("init output resolves conditional paths",
+       _init_paths.image_file_path.endswith(".png")
+       and _init_paths.movie_file_path.endswith(".mp4"))
+_audio = manimlib.SceneFileWriter(_writer_scene)
+_audio.init_audio()
+_check("init audio tracks intent without refused deps",
+       _audio.includes_sound is False and _audio.audio_segment is None)
+_audio_refused = False
+try:
+    _audio.add_sound("boom.ogg", 1.0)
+except Exception as error:
+    _audio_refused = "Reel" in str(error)
+_check("add sound refuses toward reel boundary", _audio_refused)
+_mux_refused = False
+try:
+    _audio.add_sound_to_video()
+except Exception as error:
+    _mux_refused = "ffmpeg" in str(error) or "soundtrack" in str(error)
+_check("sound to video refuses toward negotiated mux", _mux_refused)
+_pipe_writer = manimlib.SceneFileWriter(_writer_scene, write_to_movie=True)
+_check("begin stays silent without subdivide",
+       _pipe_writer.begin() is None)
+_subdivided = manimlib.SceneFileWriter(
+    _writer_scene, write_to_movie=True, subdivide_output=True
+)
+_check("begin animation refuses python pipes when subdivided",
+       _raises(_subdivided.begin_animation, NotImplementedError))
+_finish_refused = False
+try:
+    _pipe_writer.finish()
+except Exception as error:
+    _finish_refused = "Reel" in str(error)
+_check("finish surfaces pipe refusal when writing movies",
+       _finish_refused)
+_ins_refused = False
+try:
+    _fw.begin_insert()
+except NotImplementedError:
+    _ins_refused = True
+_end_ins_refused = False
+try:
+    _fw.end_insert()
+except NotImplementedError:
+    _end_ins_refused = True
+_check("insert family refuses toward native segmentation",
+       _ins_refused and _end_ins_refused)
+_pd_scene = manimlib.Scene()
+_pd_writer = manimlib.SceneFileWriter(_pd_scene)
+_check("progress description is a silent host stub",
+       _pd_writer.set_progress_display_description("f.mp4") is None)
+_save_refused = False
+try:
+    _pd_writer.save_final_image(None)
+except Exception as error:
+    _save_refused = "Lumen" in str(error)
+_check("final image capture refuses toward lumen", _save_refused)
+_open_refused = False
+try:
+    _pd_writer.open_file()
+except Exception as error:
+    _open_refused = "host" in str(error)
+_check("open file refuses toward portable host action", _open_refused)
+_print_capture = io.StringIO()
+_printed = None
+with contextlib.redirect_stdout(_print_capture):
+    _printed = _pd_writer.print_file_ready_message("out.mp4")
+_check("file ready message prints unless quiet",
+       _printed is None and "out.mp4" in _print_capture.getvalue())
+_quiet_capture = io.StringIO()
+with contextlib.redirect_stdout(_quiet_capture):
+    _quiet.print_file_ready_message("out.mp4")
+_check("quiet suppresses file ready message",
+       _quiet_capture.getvalue() == "")

@@ -19169,6 +19169,110 @@ class SceneFileWriter:
     def use_fast_encoding(self):
         return self.pixel_format != "yuv444p"
 
+    def init_output_directories(self):
+        # Reference scene_file_writer.py:80 — conditional path resolution;
+        # directory creation itself defers to native publication except the
+        # subdivided partial directory, which the pipe family owns.
+        if self.save_last_frame:
+            self.image_file_path = self.init_image_file_path()
+        if self.write_to_movie:
+            self.movie_file_path = self.init_movie_file_path()
+
+    def init_image_file_path(self):
+        return self.get_image_file_path()
+
+    def init_movie_file_path(self):
+        return self.get_movie_file_path()
+
+    def init_audio(self):
+        # Reference initializes a pyglet-backed silent segment here. Audio
+        # assembly is the Reel boundary (BN-14); the portal tracks intent
+        # without importing a refused dependency.
+        self.includes_sound = False
+        self.audio_segment = None
+
+    def create_audio_segment(self):
+        self.audio_segment = None
+
+    def add_audio_segment(
+        self, new_segment, time=None, gain_to_background=None
+    ):
+        del new_segment, time, gain_to_background
+        raise _CapabilityError(
+            "SceneFileWriter audio assembly is the Reel boundary; "
+            "Scene.add_sound records through the native scene"
+        )
+
+    def add_sound(
+        self, sound_file, time=None, gain=None, gain_to_background=None
+    ):
+        del sound_file, time, gain, gain_to_background
+        raise _CapabilityError(
+            "SceneFileWriter audio assembly is the Reel boundary; "
+            "Scene.add_sound records through the native scene"
+        )
+
+    def add_sound_to_video(self):
+        raise _CapabilityError(
+            "SceneFileWriter audio muxing is the negotiated ffmpeg "
+            "boundary; native publication owns the soundtrack"
+        )
+
+    def begin(self):
+        # Reference scene_file_writer.py:178 — the non-subdivided movie
+        # opens its single pipe here; the portal's pipe surface refuses by
+        # name, so the common headless branch stays a silent no-op.
+        if not self.subdivide_output and self.write_to_movie:
+            self.open_movie_pipe(self.get_movie_file_path())
+
+    def finish(self):
+        # Reference scene_file_writer.py:190 — mirror of begin with the
+        # soundtrack and reveal tail; every branch keeps its named owner.
+        if not self.subdivide_output and self.write_to_movie:
+            self.close_movie_pipe()
+            if self.includes_sound:
+                self.add_sound_to_video()
+            self.print_file_ready_message(self.get_movie_file_path())
+        if self.save_last_frame:
+            self.scene.update_frame(force_draw=True)
+            self.save_final_image(self.scene.get_image())
+        if self.should_open_file():
+            self.open_file()
+
+    def begin_insert(self):
+        raise NotImplementedError(
+            "partial movie files are produced by the native render"
+            " pipeline; SceneFileWriter has no Python-side insert to open"
+        )
+
+    def end_insert(self):
+        raise NotImplementedError(
+            "partial movie files are produced by the native render"
+            " pipeline; SceneFileWriter has no Python-side insert to close"
+        )
+
+    def set_progress_display_description(
+        self, file="", sub_desc=""
+    ):
+        del file, sub_desc  # presentation awaits the Studio host surface
+
+    def save_final_image(self, image):
+        del image
+        raise _CapabilityError(
+            "SceneFileWriter final-image capture requires a Lumen capture"
+            " generation; call Scene.run/render for native PNG output"
+        )
+
+    def print_file_ready_message(self, file_path):
+        if not self.quiet:
+            print(f"File ready at {file_path!r}")
+
+    def open_file(self):
+        raise _CapabilityError(
+            "revealing outputs is a portable host action; FrankenManim "
+            "Studio owns interactive presentation"
+        )
+
     def open_movie_pipe(self, file_path):
         del file_path
         raise _CapabilityError(
