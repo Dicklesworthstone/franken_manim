@@ -879,12 +879,17 @@ fn create_private_directory(path: &Path) -> Result<(), std::io::Error> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn create_private_directory(path: &Path) -> Result<(), std::io::Error> {
+    std::fs::create_dir(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn create_private_directory(path: &Path) -> Result<(), std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         format!(
-            "cannot prove a private ffmpeg workdir ACL for {} through safe std",
+            "cannot prove a private ffmpeg workdir for {} on this target",
             path.display()
         ),
     ))
@@ -1979,15 +1984,13 @@ fn cleanup_workdir(limits: &JobLimits, workdir: &OwnedWorkdir) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use fmn_platform::process::{FfmpegLocator as _, ScriptedRunner, StdFfmpegLocator};
 
     #[test]
     fn private_copy_path_substitution_is_rejected_before_the_runner() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let source_path = std::env::current_exe().expect("current native test executable");
         let executable = StdFfmpegLocator::default()
             .locate_ffmpeg(&source_path)
@@ -2001,8 +2004,12 @@ mod tests {
         // RCH and other build harnesses may point TMPDIR into a transferred
         // checkout whose shared ancestor is intentionally group-writable. The
         // production boundary must reject that tree, so exercise the private
-        // copy invariant under Unix's sticky temporary root instead.
-        let session = ToolSession::create(Path::new("/tmp")).expect("claim a private test session");
+        // copy invariant under Unix's sticky temporary root or Windows temp dir instead.
+        #[cfg(unix)]
+        let temp_root = PathBuf::from("/tmp");
+        #[cfg(windows)]
+        let temp_root = std::env::temp_dir();
+        let session = ToolSession::create(&temp_root).expect("claim a private test session");
         let tool = FfmpegTool {
             executable,
             path: canonical_path,
@@ -2030,14 +2037,19 @@ mod tests {
                         ),
                     }
                 })?;
-                std::fs::set_permissions(bound, std::fs::Permissions::from_mode(0o500)).map_err(
-                    |error| BoundaryError::Workdir {
-                        detail: format!(
-                            "permission private-copy replacement {}: {error}",
-                            bound.display()
-                        ),
-                    },
-                )
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(bound, std::fs::Permissions::from_mode(0o500)).map_err(
+                        |error| BoundaryError::Workdir {
+                            detail: format!(
+                                "permission private-copy replacement {}: {error}",
+                                bound.display()
+                            ),
+                        },
+                    )?;
+                }
+                Ok(())
             })
             .expect_err("the reopened private pathname must be re-attested before the runner");
 

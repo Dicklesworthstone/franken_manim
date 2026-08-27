@@ -150,12 +150,14 @@ is no fallback to probing or executing the mutable configured path.
 On Unix, missing workdir-parent components and every claimed directory are
 created as mode `0700`. A canonical ancestor writable by group/other is
 accepted only when it has the sticky bit (as `/tmp` normally does).
-Parent-directory (`..`) components are refused before creation. The current
-non-Unix implementation fails earlier with `Workdir`, before any executable
-probe, because safe `std` cannot prove a private directory ACL there. A future
-Windows host capability must also account for application-directory loader
-lookup when it enables private-copy execution. This is separate from the
-process mechanism's own fail-closed requirement for complete process-tree
+Parent-directory (`..`) components are refused before creation. On Windows,
+private directories are created in the caller's or temp tree and identified by
+volume serial number and file index; application-directory loader lookup is
+isolated by relocating `fmn-bound-ffmpeg.exe` into the dedicated private workdir so
+it cannot resolve untrusted sibling DLLs from the source executable folder. Other
+non-Unix/non-Windows targets fail earlier with `Workdir`, before any executable
+probe, because safe `std` cannot prove a private directory ACL there. This is separate
+from the process mechanism's own fail-closed requirement for complete process-tree
 cancellation.
 
 Safe `std` does not expose a portable execute-by-handle primitive or
@@ -184,12 +186,9 @@ This exact-image capability makes a loader rejection a typed spawn failure,
 not an opportunity to try an interpreter. It does not recast the versioned
 native-container parser as proof of complete loader equivalence, and it does
 not widen the trusted-ancestry filesystem bound above. The paired tranches
-`fm-x4pp` and `fm-2sxz` are completed provenance: their native functional suite
-proved the no-interpreter mechanism on linux-x86-64 glibc,
-linux-aarch64 musl, macos-aarch64, and windows-x86-64 MSVC. That Windows result
-proves the process substrate; the full ffmpeg boundary still refuses earlier at
-private-workdir establishment on non-Unix, whose ACL and
-application-directory loader policy remain open under `fm-8foa`.
+`fm-x4pp`, `fm-2sxz`, and `fm-8foa` complete provenance: their native functional suite
+proved the no-interpreter mechanism and private-workdir capability on linux-x86-64 glibc,
+linux-aarch64 musl, macos-aarch64, and windows-x86-64 MSVC.
 
 ## 3. Optionality
 

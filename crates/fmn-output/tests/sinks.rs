@@ -8,7 +8,7 @@ use fmn_codec::{
 };
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_hash::{Sha256, sha256};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use fmn_output::{
     ColorDescription, Container, EncoderCapabilities, EncoderChoice, FfmpegSink, FfmpegSinkConfig,
     FfmpegTool, JobLimits, VideoJob, WireFormat,
@@ -24,20 +24,20 @@ use fmn_platform::fs::{
     ATOMIC_DIRECTORY_COMPLETE_LEAF, AtomicDirectoryWriter, AtomicFileWriter, FileSystem, FsError,
     FsNodeKind, PreparedAtomicDirectory, PreparedAtomicFile, VirtualFs,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use fmn_platform::process::{
     ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
     ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
 };
 use fmn_platform::profile::{ProfilePath, ProfileRecorder};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::Duration;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1216,7 +1216,7 @@ fn wav_publication_is_native_atomic_and_preflight_bounded() {
     assert_eq!(fs.read(&destination).expect("old WAV"), b"old-wav");
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod ffmpeg_boundary {
     use super::*;
 
@@ -1484,6 +1484,46 @@ mod ffmpeg_boundary {
             *bytes.last_mut().expect("entry byte") = 0xc3;
             return bytes;
         }
+        #[cfg(windows)]
+        {
+            const PE_OFFSET: usize = 0x80;
+            const OPTIONAL_BYTES: usize = 0xf0;
+            const HEADER_BYTES: usize = 0x200;
+            const IMAGE_BYTES: usize = 0x400;
+
+            let mut bytes = vec![0_u8; IMAGE_BYTES];
+            bytes[..2].copy_from_slice(b"MZ");
+            bytes[0x3c..0x40].copy_from_slice(&(PE_OFFSET as u32).to_le_bytes());
+            bytes[PE_OFFSET..PE_OFFSET + 4].copy_from_slice(b"PE\0\0");
+            let coff = PE_OFFSET + 4;
+            let machine = if cfg!(target_arch = "x86_64") {
+                0x8664_u16
+            } else {
+                0xaa64_u16
+            };
+            bytes[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
+            bytes[coff + 2..coff + 4].copy_from_slice(&1_u16.to_le_bytes());
+            bytes[coff + 16..coff + 18].copy_from_slice(&(OPTIONAL_BYTES as u16).to_le_bytes());
+            bytes[coff + 18..coff + 20].copy_from_slice(&0x0002_u16.to_le_bytes());
+            let optional = coff + 20;
+            bytes[optional..optional + 2].copy_from_slice(&0x020b_u16.to_le_bytes());
+            bytes[optional + 16..optional + 20].copy_from_slice(&0x1000_u32.to_le_bytes());
+            bytes[optional + 24..optional + 32]
+                .copy_from_slice(&0x0000_0001_4000_0000_u64.to_le_bytes());
+            bytes[optional + 32..optional + 36].copy_from_slice(&0x1000_u32.to_le_bytes());
+            bytes[optional + 36..optional + 40].copy_from_slice(&0x200_u32.to_le_bytes());
+            bytes[optional + 56..optional + 60].copy_from_slice(&0x2000_u32.to_le_bytes());
+            bytes[optional + 60..optional + 64].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+            bytes[optional + 68..optional + 70].copy_from_slice(&3_u16.to_le_bytes());
+            let section = optional + OPTIONAL_BYTES;
+            bytes[section..section + 5].copy_from_slice(b".text");
+            bytes[section + 8..section + 12].copy_from_slice(&1_u32.to_le_bytes());
+            bytes[section + 12..section + 16].copy_from_slice(&0x1000_u32.to_le_bytes());
+            bytes[section + 16..section + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+            bytes[section + 20..section + 24].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+            bytes[section + 36..section + 40].copy_from_slice(&0x6000_0020_u32.to_le_bytes());
+            return bytes;
+        }
         #[allow(unreachable_code)]
         std::fs::read(std::env::current_exe().expect("current test executable"))
             .expect("read current native test executable")
@@ -1493,9 +1533,13 @@ mod ffmpeg_boundary {
         // Build harnesses may point TMPDIR into a transferred checkout whose
         // shared ancestor is intentionally group-writable. The boundary must
         // reject that tree, so create security fixtures under Unix's sticky
-        // temporary root. macOS serves /tmp through /private/tmp; resolve the
-        // root so runner outcomes match what the boundary canonicalizes to.
+        // temporary root or Windows temp directory. macOS serves /tmp through
+        // /private/tmp; resolve the root so runner outcomes match what the
+        // boundary canonicalizes to.
+        #[cfg(unix)]
         let tmp = PathBuf::from("/tmp");
+        #[cfg(windows)]
+        let tmp = std::env::temp_dir();
         let tmp = tmp.canonicalize().unwrap_or(tmp);
         let path = tmp.join(format!(
             "fmn-sinks-test-{}-{}-{tag}",
@@ -1515,7 +1559,11 @@ mod ffmpeg_boundary {
 
     fn fake_tool(tag: &str) -> (PathBuf, FfmpegTool, Arc<PublishingRunner>) {
         let root = scratch(tag);
-        let path = root.join("ffmpeg");
+        let path = if cfg!(windows) {
+            root.join("ffmpeg.exe")
+        } else {
+            root.join("ffmpeg")
+        };
         let mut fixture = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1526,9 +1574,12 @@ mod ffmpeg_boundary {
             .expect("write fake tool");
         fixture.sync_all().expect("sync fake tool");
         drop(fixture);
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("mark fake tool executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("mark fake tool executable");
+        }
         let runner = Arc::new(PublishingRunner::default());
         use fmn_platform::process::{FfmpegLocator as _, StdFfmpegLocator};
         let executable = StdFfmpegLocator::default()

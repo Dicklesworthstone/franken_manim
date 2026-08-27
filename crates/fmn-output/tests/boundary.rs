@@ -5,27 +5,27 @@
 //! flag (FFMPEG_PROTOCOL.md §6).
 
 use std::path::Path;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::PathBuf;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-#[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+#[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
 use std::time::Duration;
 
 use fmn_frame::ColorRange;
-#[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+#[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
 use fmn_hash::sha256;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use fmn_output::{Boundary, BoundaryError, EncoderCapabilities, FfmpegTool, JobLimits};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat, negotiate};
-#[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+#[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
 use fmn_platform::process::{
     ProcessCancellation, ProcessError, ProcessMechanism, ProcessSpec, ProcessStdinLimits,
     RunningProcess,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use fmn_platform::process::{
     ProcessOutcome, ProcessRunner, ProcessTermination, ScriptedRunner, StdProcessRunner,
 };
@@ -43,7 +43,7 @@ fn job(wire: WireFormat, container: Container, encoder: EncoderChoice) -> VideoJ
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 static DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Serialize the real process-boundary tests.
@@ -54,10 +54,10 @@ static DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 /// creating enough concurrent subprocess and pipe pressure to obscure the
 /// supervision contract being measured. [`scratch`] carries the guard for the
 /// complete test body.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 static SPAWN_GATE: Mutex<()> = Mutex::new(());
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn create_private_test_directory(path: &Path) {
     std::fs::create_dir(path).unwrap();
     #[cfg(unix)]
@@ -69,7 +69,7 @@ fn create_private_test_directory(path: &Path) {
 }
 
 /// A fresh private scratch dir for one test, plus the spawn gate.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn scratch(tag: &str) -> (PathBuf, MutexGuard<'static, ()>) {
     // A panicking test poisons the mutex; the gate protects a file-system
     // race, not an invariant, so a poisoned gate is still a usable gate.
@@ -77,9 +77,13 @@ fn scratch(tag: &str) -> (PathBuf, MutexGuard<'static, ()>) {
     // Build harnesses may point TMPDIR into a transferred checkout whose
     // shared ancestor is intentionally group-writable. The boundary must
     // reject that tree, so create security fixtures under Unix's sticky
-    // temporary root. macOS serves /tmp through /private/tmp; resolve the root
-    // up front so scripted-runner outcomes use the paths the boundary sees.
+    // temporary root or the Windows temp directory. macOS serves /tmp through
+    // /private/tmp; resolve the root up front so scripted-runner outcomes use
+    // the paths the boundary sees.
+    #[cfg(unix)]
     let tmp = PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let tmp = std::env::temp_dir();
     let tmp = tmp.canonicalize().unwrap_or(tmp);
     let dir = tmp.join(format!(
         "fmn-boundary-test-{}-{}-{tag}",
@@ -324,7 +328,7 @@ fn concat_and_transcode_shapes() {
     assert!(argv.windows(2).any(|w| w == ["-c:v", "png"]));
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn private_ffmpeg_boundary_fails_closed_without_a_provable_directory_acl() {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -347,7 +351,7 @@ fn private_ffmpeg_boundary_fails_closed_without_a_provable_directory_acl() {
     assert!(matches!(
         error,
         fmn_output::BoundaryError::Workdir { ref detail }
-            if detail.contains("cannot prove a private ffmpeg workdir ACL")
+            if detail.contains("cannot prove a private ffmpeg workdir")
     ));
     assert!(
         runner.runs().is_empty(),
@@ -357,11 +361,19 @@ fn private_ffmpeg_boundary_fails_closed_without_a_provable_directory_acl() {
 
 // ---- the ScriptedRunner contract suite -----------------------------
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod private_boundary {
     use super::*;
 
     const FAKE_VERSION: &str = "ffmpeg version 7.1-fake Copyright (c) fake";
+
+    fn bound_tool_leaf() -> &'static str {
+        if cfg!(windows) {
+            "fmn-bound-ffmpeg.exe"
+        } else {
+            "fmn-bound-ffmpeg"
+        }
+    }
 
     fn native_tool_bytes() -> Vec<u8> {
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -447,6 +459,46 @@ mod private_boundary {
             *bytes.last_mut().expect("entry byte") = 0xc3;
             return bytes;
         }
+        #[cfg(windows)]
+        {
+            const PE_OFFSET: usize = 0x80;
+            const OPTIONAL_BYTES: usize = 0xf0;
+            const HEADER_BYTES: usize = 0x200;
+            const IMAGE_BYTES: usize = 0x400;
+
+            let mut bytes = vec![0_u8; IMAGE_BYTES];
+            bytes[..2].copy_from_slice(b"MZ");
+            bytes[0x3c..0x40].copy_from_slice(&(PE_OFFSET as u32).to_le_bytes());
+            bytes[PE_OFFSET..PE_OFFSET + 4].copy_from_slice(b"PE\0\0");
+            let coff = PE_OFFSET + 4;
+            let machine = if cfg!(target_arch = "x86_64") {
+                0x8664_u16
+            } else {
+                0xaa64_u16
+            };
+            bytes[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
+            bytes[coff + 2..coff + 4].copy_from_slice(&1_u16.to_le_bytes());
+            bytes[coff + 16..coff + 18].copy_from_slice(&(OPTIONAL_BYTES as u16).to_le_bytes());
+            bytes[coff + 18..coff + 20].copy_from_slice(&0x0002_u16.to_le_bytes());
+            let optional = coff + 20;
+            bytes[optional..optional + 2].copy_from_slice(&0x020b_u16.to_le_bytes());
+            bytes[optional + 16..optional + 20].copy_from_slice(&0x1000_u32.to_le_bytes());
+            bytes[optional + 24..optional + 32]
+                .copy_from_slice(&0x0000_0001_4000_0000_u64.to_le_bytes());
+            bytes[optional + 32..optional + 36].copy_from_slice(&0x1000_u32.to_le_bytes());
+            bytes[optional + 36..optional + 40].copy_from_slice(&0x200_u32.to_le_bytes());
+            bytes[optional + 56..optional + 60].copy_from_slice(&0x2000_u32.to_le_bytes());
+            bytes[optional + 60..optional + 64].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+            bytes[optional + 68..optional + 70].copy_from_slice(&3_u16.to_le_bytes());
+            let section = optional + OPTIONAL_BYTES;
+            bytes[section..section + 5].copy_from_slice(b".text");
+            bytes[section + 8..section + 12].copy_from_slice(&1_u32.to_le_bytes());
+            bytes[section + 12..section + 16].copy_from_slice(&0x1000_u32.to_le_bytes());
+            bytes[section + 16..section + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+            bytes[section + 20..section + 24].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+            bytes[section + 36..section + 40].copy_from_slice(&0x6000_0020_u32.to_le_bytes());
+            return bytes;
+        }
         #[allow(unreachable_code)]
         std::fs::read(std::env::current_exe().expect("current test executable"))
             .expect("read current native test executable")
@@ -454,9 +506,12 @@ mod private_boundary {
 
     fn write_native_tool(path: &Path) {
         std::fs::write(path, native_tool_bytes()).expect("write native executable fixture");
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .expect("mark native fixture executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                .expect("mark native fixture executable");
+        }
     }
 
     fn resolve_tool(
@@ -478,18 +533,30 @@ mod private_boundary {
     #[test]
     fn scripts_and_post_selection_native_to_script_swaps_cannot_issue_a_tool() {
         use fmn_platform::process::{FfmpegLocator as _, FfmpegLocatorError, StdFfmpegLocator};
-        use std::os::unix::fs::PermissionsExt as _;
 
         let (dir, _gate) = scratch("typed-token-native-image");
-        let script = dir.join("ffmpeg-script");
+        let script = if cfg!(windows) {
+            dir.join("ffmpeg-script.bat")
+        } else {
+            dir.join("ffmpeg-script")
+        };
         std::fs::write(&script, b"#!/bin/sh\necho 'ffmpeg version spoof'\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert!(matches!(
             StdFfmpegLocator::default().locate_ffmpeg(&script),
             Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
+                | Err(FfmpegLocatorError::NotFfmpeg(..))
         ));
 
-        let selected = dir.join("ffmpeg-selected");
+        let selected = if cfg!(windows) {
+            dir.join("ffmpeg-selected.exe")
+        } else {
+            dir.join("ffmpeg-selected")
+        };
         write_native_tool(&selected);
         let executable = StdFfmpegLocator::default()
             .locate_ffmpeg(&selected)
@@ -510,7 +577,11 @@ mod private_boundary {
         use fmn_platform::process::{FfmpegLocator as _, StdFfmpegLocator};
 
         let (dir, _gate) = scratch("malformed-private-copy");
-        let selected = dir.join("ffmpeg-selected");
+        let selected = if cfg!(windows) {
+            dir.join("ffmpeg-selected.exe")
+        } else {
+            dir.join("ffmpeg-selected")
+        };
         write_native_tool(&selected);
         let executable = StdFfmpegLocator::default()
             .locate_ffmpeg(&selected)
@@ -531,7 +602,11 @@ mod private_boundary {
 
     /// Write a fake tool file and script its `-version` probe.
     fn scripted_tool(dir: &Path) -> (PathBuf, ScriptedRunner) {
-        let tool_path = dir.join("ffmpeg");
+        let tool_path = if cfg!(windows) {
+            dir.join("ffmpeg.exe")
+        } else {
+            dir.join("ffmpeg")
+        };
         write_native_tool(&tool_path);
         let mut runner = ScriptedRunner::new();
         runner.script(
@@ -563,13 +638,13 @@ mod private_boundary {
     ) -> PathBuf {
         session_root(dir, session_sequence)
             .join(format!("fmn-probe-{}-{probe_sequence}", std::process::id()))
-            .join("fmn-bound-ffmpeg")
+            .join(bound_tool_leaf())
     }
 
     fn bound_tool(dir: &Path, sequence: u64) -> PathBuf {
         session_root(dir, 0)
             .join(format!("fmn-job-{}-{sequence}", std::process::id()))
-            .join("fmn-bound-ffmpeg")
+            .join(bound_tool_leaf())
     }
 
     fn first_bound_tool(dir: &Path) -> PathBuf {
@@ -625,7 +700,11 @@ mod private_boundary {
     #[test]
     fn successful_non_ffmpeg_version_banner_is_refused() {
         let (dir, _gate) = scratch("wrong-version-banner");
-        let tool_path = dir.join("custom-tool-name");
+        let tool_path = if cfg!(windows) {
+            dir.join("custom-tool-name.exe")
+        } else {
+            dir.join("custom-tool-name")
+        };
         write_native_tool(&tool_path);
         let mut runner = ScriptedRunner::new();
         runner.script(
@@ -649,7 +728,11 @@ mod private_boundary {
     #[test]
     fn version_banner_requires_strict_utf8_only_on_the_first_line() {
         let (dir, _gate) = scratch("version-banner-utf8");
-        let tool_path = dir.join("custom-tool-name");
+        let tool_path = if cfg!(windows) {
+            dir.join("custom-tool-name.exe")
+        } else {
+            dir.join("custom-tool-name")
+        };
         write_native_tool(&tool_path);
         let mut runner = ScriptedRunner::new();
         runner.script(
@@ -669,7 +752,11 @@ mod private_boundary {
     #[test]
     fn non_utf8_version_banner_is_refused() {
         let (dir, _gate) = scratch("non-utf8-version-banner");
-        let tool_path = dir.join("custom-tool-name");
+        let tool_path = if cfg!(windows) {
+            dir.join("custom-tool-name.exe")
+        } else {
+            dir.join("custom-tool-name")
+        };
         write_native_tool(&tool_path);
         let mut runner = ScriptedRunner::new();
         runner.script(
@@ -692,7 +779,11 @@ mod private_boundary {
     #[test]
     fn control_bearing_version_banner_is_refused() {
         let (dir, _gate) = scratch("control-version-banner");
-        let tool_path = dir.join("custom-tool-name");
+        let tool_path = if cfg!(windows) {
+            dir.join("custom-tool-name.exe")
+        } else {
+            dir.join("custom-tool-name")
+        };
         write_native_tool(&tool_path);
         let mut runner = ScriptedRunner::new();
         runner.script(
@@ -715,7 +806,11 @@ mod private_boundary {
     #[test]
     fn non_relocatable_ffmpeg_is_a_named_capability_refusal() {
         let (dir, _gate) = scratch("non-relocatable");
-        let tool_path = dir.join("ffmpeg");
+        let tool_path = if cfg!(windows) {
+            dir.join("ffmpeg.exe")
+        } else {
+            dir.join("ffmpeg")
+        };
         write_native_tool(&tool_path);
         let mut runner = ScriptedRunner::new();
         runner.script(
@@ -749,7 +844,11 @@ mod private_boundary {
         std::fs::create_dir(&collision).unwrap();
         let sentinel = collision.join("foreign");
         std::fs::write(&sentinel, b"not ours").unwrap();
-        let tool_path = dir.join("ffmpeg");
+        let tool_path = if cfg!(windows) {
+            dir.join("ffmpeg.exe")
+        } else {
+            dir.join("ffmpeg")
+        };
         write_native_tool(&tool_path);
         let mut runner = ScriptedRunner::new();
         runner.script(
@@ -793,7 +892,11 @@ mod private_boundary {
     #[test]
     fn parent_directory_components_are_refused_before_creation() {
         let (dir, _gate) = scratch("parent-component");
-        let tool_path = dir.join("ffmpeg");
+        let tool_path = if cfg!(windows) {
+            dir.join("ffmpeg.exe")
+        } else {
+            dir.join("ffmpeg")
+        };
         write_native_tool(&tool_path);
         let runner = ScriptedRunner::new();
         let requested = dir.join("must-not-create/../work");
@@ -888,7 +991,7 @@ mod private_boundary {
                 .join(format!("fmn-job-{}-1", std::process::id()))
                 .as_path()
         );
-        assert_eq!(runs[1].program, workdir.join("fmn-bound-ffmpeg"));
+        assert_eq!(runs[1].program, workdir.join(bound_tool_leaf()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -980,7 +1083,7 @@ mod private_boundary {
         drop(stream);
 
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"not ours");
-        assert!(displaced.join("fmn-bound-ffmpeg").is_file());
+        assert!(displaced.join(bound_tool_leaf()).is_file());
     }
 
     const ENCODERS_LISTING: &str = "Encoders:\n V..... = Video\n ------\n V....D libx264              H.264 (x264)\n V....D libx265              H.265 (x265)\n V....D qtrle                QuickTime RLE\n V....D h264_nvenc           NVIDIA NVENC H.264\n A....D aac                  AAC audio\n";
@@ -1050,7 +1153,7 @@ mod private_boundary {
         let private_dir = spec.program.parent().unwrap();
         assert!(private_dir.starts_with(&dir));
         assert_eq!(spec.env[2].1, private_dir.display().to_string());
-        assert_eq!(spec.program, private_dir.join("fmn-bound-ffmpeg"));
+        assert_eq!(spec.program, private_dir.join(bound_tool_leaf()));
         // The payload rides stdin, whole.
         assert_eq!(
             spec.stdin.as_ref().unwrap().len(),
@@ -1294,26 +1397,33 @@ mod private_boundary {
 
     // ---- the fake-ffmpeg sandbox suite (real StdProcessRunner) ---------
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     fn copy_native_ffmpeg(dir: &Path, name: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let source = std::env::var_os("CARGO_BIN_EXE_fmn-ffmpeg-test-fixture")
             .map(PathBuf::from)
             .expect("Cargo exposes the native ffmpeg fixture");
-        let path = dir.join(name);
+        let leaf = if cfg!(windows) && !name.to_ascii_lowercase().ends_with(".exe") {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        };
+        let path = dir.join(leaf);
         std::fs::copy(source, &path).expect("copy native ffmpeg fixture");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         path
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     fn set_native_fixture_mode(dir: &Path, mode: &str) {
         std::fs::write(dir.join(".fmn-native-ffmpeg-mode"), mode)
             .expect("write native fixture mode");
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     struct SourceSwappingRunner {
         source: PathBuf,
         replacement: Vec<u8>,
@@ -1321,7 +1431,7 @@ mod private_boundary {
         swap_on_version: bool,
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     impl ProcessRunner for SourceSwappingRunner {
         fn mechanism(&self) -> ProcessMechanism {
             StdProcessRunner.mechanism()
@@ -1349,13 +1459,13 @@ mod private_boundary {
         }
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     struct TransientSourceSwappingRunner {
         source: PathBuf,
         replacement: Vec<u8>,
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     impl ProcessRunner for TransientSourceSwappingRunner {
         fn mechanism(&self) -> ProcessMechanism {
             StdProcessRunner.mechanism()
@@ -1403,7 +1513,7 @@ mod private_boundary {
     }
 
     /// Resolve a fake tool that answers the `-version` probe.
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     fn real_tool(dir: &Path) -> (FfmpegTool, StdProcessRunner) {
         let runner = StdProcessRunner;
         let path = copy_native_ffmpeg(dir, "fake-ffmpeg");
@@ -1411,7 +1521,7 @@ mod private_boundary {
         (tool, runner)
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn transient_source_swap_cannot_select_the_version_probe_executable() {
         let (dir, _gate) = scratch("transient-version-substitution");
@@ -1430,19 +1540,19 @@ mod private_boundary {
         assert_eq!(std::fs::read(&source).unwrap(), original);
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn version_probe_detects_substitution_during_execution() {
         let (dir, _gate) = scratch("version-substitution");
         let source = copy_native_ffmpeg(&dir, "fake-ffmpeg");
         let runner = SourceSwappingRunner {
-        source: source.clone(),
-        replacement:
-            b"#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffmpeg version evil'; exit 0; fi\nexit 1\n"
-                .to_vec(),
-        swapped: std::sync::atomic::AtomicBool::new(false),
-        swap_on_version: true,
-    };
+            source: source.clone(),
+            replacement:
+                b"#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffmpeg version evil'; exit 0; fi\nexit 1\n"
+                    .to_vec(),
+            swapped: std::sync::atomic::AtomicBool::new(false),
+            swap_on_version: true,
+        };
 
         let error =
             resolve_tool(&source, &runner, &dir).expect_err("version substitution must fail");
@@ -1452,18 +1562,18 @@ mod private_boundary {
         ));
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn encoder_probe_detects_substitution_during_execution() {
         let (dir, _gate) = scratch("probe-substitution");
         let source = copy_native_ffmpeg(&dir, "fake-ffmpeg");
         let tool = resolve_tool(&source, &StdProcessRunner, &dir).unwrap();
         let runner = SourceSwappingRunner {
-        source,
-        replacement: b"#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffmpeg version evil'; exit 0; fi\nif [ \"$2\" = \"-encoders\" ]; then echo 'Encoders:'; echo ' ------'; echo ' V....D libx264 fake'; exit 0; fi\nexit 1\n".to_vec(),
-        swapped: std::sync::atomic::AtomicBool::new(false),
-        swap_on_version: false,
-    };
+            source,
+            replacement: b"#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffmpeg version evil'; exit 0; fi\nif [ \"$2\" = \"-encoders\" ]; then echo 'Encoders:'; echo ' ------'; echo ' V....D libx264 fake'; exit 0; fi\nexit 1\n".to_vec(),
+            swapped: std::sync::atomic::AtomicBool::new(false),
+            swap_on_version: false,
+        };
 
         let error =
             EncoderCapabilities::probe(&tool, &runner).expect_err("probe substitution must fail");
@@ -1473,7 +1583,7 @@ mod private_boundary {
         ));
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn sandbox_publishes_atomically_and_pins_the_environment() {
         let (dir, _gate) = scratch("sandbox");
@@ -1527,7 +1637,7 @@ mod private_boundary {
         );
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn prepared_commit_refuses_a_replaced_job_directory() {
         let (dir, _gate) = scratch("prepared-workdir-replacement");
@@ -1574,7 +1684,7 @@ mod private_boundary {
         assert!(!destination.exists());
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn spawn_executes_the_bound_copy_when_the_source_is_replaced() {
         let (dir, _gate) = scratch("spawn-binding");
@@ -1618,9 +1728,15 @@ mod private_boundary {
         assert_eq!(provenance.tool_path, source_identity);
         assert_eq!(provenance.tool_sha256_hex, source_sha256);
         assert_ne!(provenance.bound_tool_path, provenance.tool_path);
+        #[cfg(unix)]
         assert_eq!(
             provenance.process_mechanism,
             "posix_spawn.absolute_path.new_process_group"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            provenance.process_mechanism,
+            "create_process_w.explicit_application.atomic_job_list"
         );
         assert_eq!(provenance.process_policy_version, 1);
         assert_eq!(
@@ -1644,7 +1760,7 @@ mod private_boundary {
         assert!(!second_destination.exists());
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn sandbox_timeout_separates_setup_from_tree_kill_and_leaves_destination_untouched() {
         let (dir, _gate) = scratch("timeout");
@@ -1695,7 +1811,7 @@ mod private_boundary {
         assert!(!destination.exists());
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn sandbox_refuses_oversized_artifacts() {
         let (dir, _gate) = scratch("oversize");
@@ -1728,7 +1844,7 @@ mod private_boundary {
         assert!(!destination.exists());
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn sandbox_failed_job_preserves_existing_destination() {
         let (dir, _gate) = scratch("failkeep");
@@ -1758,7 +1874,7 @@ mod private_boundary {
         assert_eq!(std::fs::read(&destination).unwrap(), b"the old render");
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn two_stage_mux_runs_both_stages_and_copies_video() {
         let (dir, _gate) = scratch("mux");
@@ -1797,7 +1913,7 @@ mod private_boundary {
         assert!(!lines[1].contains("libx264"), "stage 2 must not re-encode");
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn audio_transcode_uses_the_fake_capability_and_publishes_wav() {
         let (dir, _gate) = scratch("audio-transcode");
@@ -1834,7 +1950,7 @@ mod private_boundary {
         );
     }
 
-    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[cfg(all(any(unix, windows), feature = "ffmpeg-test-fixture"))]
     #[test]
     fn concat_writes_a_list_and_copies_streams() {
         let (dir, _gate) = scratch("concat");
