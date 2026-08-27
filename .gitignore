@@ -182,3 +182,5 @@ spikes/g0-5-python-ext/py/*.so
 .skill-loop-progress.md
 .skill-loop-progress-*.md
 
+# br doctor per-run artifacts
+.doctor/
