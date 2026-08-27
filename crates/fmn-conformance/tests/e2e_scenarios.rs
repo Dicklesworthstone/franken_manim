@@ -2124,6 +2124,79 @@ fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
         .with_counter("spring_seeds_diverge", seeds_diverge))
 }
 
+/// NeuralNetworkMobject end-to-end drill (fm-74z): introspects an MLP with
+/// explicit weights and biases, executes forward pass activation, attaches
+/// live training updaters on stage, and proves segment purity classification
+/// demoting to stateful under W4PURITY.
+fn neural_network_live_training_and_purity_run(
+    ctx: &mut RunCtx,
+) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::purity::{ImpureEffect, Purity, classify_wait};
+    use fmn_library::neural_network::NeuralNetworkMobject;
+    use fmn_mobject::Stage;
+
+    let layer_sizes = [2, 3, 1];
+    let weights = vec![
+        vec![vec![0.5, -0.5, 1.0], vec![-1.0, 1.0, 0.0]],
+        vec![vec![1.5], vec![-0.5], vec![0.5]],
+    ];
+    let biases = vec![vec![0.1, -0.1, 0.0], vec![0.2]];
+
+    let mut net = NeuralNetworkMobject::introspect_mlp(&layer_sizes, &weights, &biases)
+        .map_err(|error| fail(format!("mlp introspection: {error}")))?;
+
+    let out = net
+        .feed_forward(&[0.5, 0.8])
+        .map_err(|error| fail(format!("feed forward: {error}")))?;
+    let feed_forward_matches = u64::from(!out.is_empty() && out[0] > 0.0 && out[0] < 1.0);
+
+    let built = net
+        .build()
+        .map_err(|error| fail(format!("net build: {error}")))?;
+    let mut stage = Stage::new();
+    let handle = stage.add(built);
+    stage
+        .add_to_scene(handle)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+
+    let initial_purity = classify_wait(&stage, false);
+    let initially_pure = u64::from(initial_purity.is_pure());
+
+    stage
+        .add_updater(
+            handle,
+            |_stage, _mob| {
+                // simulated live training update
+            },
+            false,
+        )
+        .map_err(|error| fail(format!("add updater: {error}")))?;
+
+    let post_purity = classify_wait(&stage, false);
+    let purity_is_stateful = u64::from(matches!(
+        post_purity,
+        Purity::Stateful(ref effs) if effs.contains(&ImpureEffect::SceneUpdater)
+    ));
+
+    if feed_forward_matches != 1 || initially_pure != 1 || purity_is_stateful != 1 {
+        return Err(fail(format!(
+            "neural network e2e broken: feed_forward={feed_forward_matches} pure_init={initially_pure} stateful={purity_is_stateful}"
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.neural_network.live_training")
+            .field("layers", 3_u64)
+            .field("stateful", 1_u64),
+    );
+    ctx.counter("feed_forward_matches", feed_forward_matches);
+    ctx.counter("purity_is_stateful", purity_is_stateful);
+
+    Ok(RunOutcome::ok()
+        .with_counter("feed_forward_matches", feed_forward_matches)
+        .with_counter("purity_is_stateful", purity_is_stateful))
+}
+
 /// CSV → TableMobject end-to-end through the suite's frame parser and
 /// Scribe: insertion-order headers survive, the null cell renders empty,
 /// and two builds of the same table hash identically.
@@ -3349,6 +3422,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![LogExpect::span_present(
                 "e2e.network_graph.spring_determinism",
                 vec![FieldPred::u64_eq("seed", 0x005f_3759df)],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "neural_network.live_training_and_purity.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(neural_network_live_training_and_purity_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("feed_forward_matches", 1),
+                counter_eq("purity_is_stateful", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.neural_network.live_training",
+                vec![
+                    FieldPred::u64_eq("layers", 3),
+                    FieldPred::u64_eq("stateful", 1),
+                ],
             )],
         )
         .tier(Tier::Fast),
