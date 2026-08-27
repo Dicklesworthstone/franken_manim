@@ -156,7 +156,7 @@ pub fn rotate_default(mobject: Mob) -> Rotating {
 /// [`AnimationGroup`] over the clock (`group=clock` in the Reference).
 /// Reference defaults: `run_time = 5.0`, `hours_passed = 12.0`, linear.
 ///
-/// `clock` is the built [`crate::drawings`-style] clock family's handle;
+/// `clock` is the built `drawings`-style clock family's handle;
 /// `hour_hand` and `minute_hand` are its children 1 and 2 (the documented
 /// child order). Geometry construction stays in the library tier; this is
 /// the wiring.

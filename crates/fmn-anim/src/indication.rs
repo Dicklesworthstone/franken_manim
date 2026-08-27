@@ -575,7 +575,7 @@ pub fn show_creation_then_fade_around(
     Ok(group)
 }
 
-/// `Broadcast` (specialized.py:11): a [`crate::composition::LaggedStart`]
+/// `Broadcast` (specialized.py:11): a [`crate::composition::lagged_start`]
 /// over caller-built `Restore` members — the styled circles that grow from
 /// their saved state are Atlas/portal geometry (the `focus_on` doctrine:
 /// Choreo wires, the library draws). Reference defaults:

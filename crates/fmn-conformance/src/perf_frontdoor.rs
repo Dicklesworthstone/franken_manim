@@ -1735,7 +1735,7 @@ mod tests {
             // serialize the process-local RecordBuffer revision — decode
             // rebinds liveness to the reconstructed buffer, so durable bytes
             // carry semantic state only.
-            "e12bc3142110fe88afd8aeb077a409dc4c789ee22fcfffef45785c77dd6d9d0c"
+            "ed12fc15473669b403b8d1f0e85032483bae4f2e5661534f7d54f015acda3108"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);

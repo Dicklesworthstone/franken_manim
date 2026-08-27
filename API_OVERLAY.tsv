@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	c9bc18031e943677b887681a7e790959e30add3aa8e34d45d98b7ce82764c641
+ledger_reviewed_digest	27e003b283eb4e2e1fdf5830fa6bdd8b586599700434976c5279dfa61a643212
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -416,6 +416,8 @@ manimlib.mobject.svg.tex_mobject:Tex.set_color_by_tex_to_color_map	same	scripts/
 manimlib.mobject.svg.tex_mobject:Tex.tex_environment	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact align-star class default while native fmd-math owns layout
 manimlib.mobject.svg.tex_mobject:TexText	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	is an authored Tex subclass selecting fmd-math text-mainland mode rather than a schema-generated shell
 manimlib.mobject.svg.tex_mobject:TexText.tex_environment	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact empty-environment class override
+manimlib.mobject.svg.text_mobject:Code	same	crates/fmn-library/src/code.rs	crates/fmn-python/tests/bridge.py	is an authored MarkupText subclass binding fmd syntax highlighting over CM Typewriter with line numbers gutter
+manimlib.mobject.svg.text_mobject:Code.__init__	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	constructs highlighted code over Scribe text with font size and color style
 manimlib.mobject.svg.text_mobject:MarkupText.get_part_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the requested identity-preserving native text occurrence
 manimlib.mobject.svg.text_mobject:MarkupText.get_parts_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	selects repeated regex range and Unicode text occurrences through Scribe glyph provenance
 manimlib.mobject.svg.text_mobject:MarkupText.get_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the original plain or markup source string
@@ -681,6 +683,13 @@ manimlib.mobject.number_line:NumberLine.get_tick_range	same	scripts/manim_ref/ma
 manimlib.mobject.number_line:NumberLine.get_unit_size	same	scripts/manim_ref/manimlib/mobject/number_line.py	crates/fmn-python/tests/bridge.py	measures live geometry length over the declared range width
 manimlib.mobject.matrix:TexMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass whose scalar sources use the bundled fmd-math entry and delimiter engine
 manimlib.mobject.matrix:TexMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves string grid configuration font and style forwarding and live Tex entry identity without an external TeX toolchain
+manimlib.mobject.probability:BarChart	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	is an authored VGroup subclass over native line ticks, gradient-colored rectangle bars, and Scribe labels
+manimlib.mobject.probability:BarChart.__init__	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	preserves the exact value series, geometry dimensions, tick configuration, gradient styling, and automatic max value derivation
+manimlib.mobject.probability:BarChart.add_axes	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	builds the bounded coordinate axes, tick mark segments, and scaled Scribe labels along the y-axis
+manimlib.mobject.probability:BarChart.add_bars	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	constructs the height-scaled rectangle bars with gradient color progression and optional label placement
+manimlib.mobject.probability:BarChart.change_bar_values	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	updates bar heights to new values while maintaining bottom edge anchor positions
+manimlib.mobject.probability:SampleSpace	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	is an authored Rectangle subclass over unit-probability geometry, division layouts, and subdivision braces
+manimlib.mobject.probability:SampleSpace.__init__	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	preserves default dimensions, styling options, and label scale values
 manimlib.mobject.probability:SampleSpace.add_braces_and_labels	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	attaches every ruled brace and label group retained by the divided parts
 manimlib.mobject.probability:SampleSpace.add_label	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	retains the plain string label under the pinned attribute
 manimlib.mobject.probability:SampleSpace.add_title	same	scripts/manim_ref/manimlib/mobject/probability.py	crates/fmn-python/tests/bridge.py	places the width-clamped title above the frame through native text and retains it

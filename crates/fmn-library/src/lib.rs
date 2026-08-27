@@ -112,6 +112,7 @@ pub mod vmobject;
 
 pub use arc::{AnnularSector, Annulus, Arc, ArcBetweenPoints, Circle, Dot, Ellipse};
 pub use brace::{Brace, BraceLabel, line_brace};
+pub use code::{Code, CodeTheme};
 pub use controls::{
     Button, Checkbox, ColorSliders, ControlMob, ControlMobject, ControlPanel, ControlPanelMobject,
     EnableDisableButton, LinearNumberSlider, MotionMobject, ScalarControl, SliderError, Textbox,
@@ -136,6 +137,7 @@ pub use graphs::{
 };
 pub use image::{DEFAULT_IMAGE_HEIGHT, ImageError, ImageMobject};
 pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow};
+pub use markdown::{LaidBlock, Markdown, MarkdownMobject, heading_factor};
 pub use matchers::{
     SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
 };

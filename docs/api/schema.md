@@ -29,17 +29,17 @@ Generated from `API_SCHEMA.tsv` (extracted from the pinned Reference) and `API_O
 
 ## Parity Ledger coverage
 
-The single Ledger contains 2483 rows: 2276 Python symbols, 34 Reference CLI flags, 20 FrankenManim-native CLI flags, 4 CLI commands, and 149 config keys. Its reviewed-identity ratchet is `c9bc18031e943677b887681a7e790959e30add3aa8e34d45d98b7ce82764c641`.
+The single Ledger contains 2483 rows: 2276 Python symbols, 34 Reference CLI flags, 20 FrankenManim-native CLI flags, 4 CLI commands, and 149 config keys. Its reviewed-identity ratchet is `27e003b283eb4e2e1fdf5830fa6bdd8b586599700434976c5279dfa61a643212`.
 
 ## Semantic tiers (§16.1)
 
 | Status | Ledger rows |
 |---|---|
-| same | 1062 |
+| same | 1071 |
 | improved | 131 |
 | tiered | 15 |
 | excluded | 50 |
-| unreviewed | 1225 |
+| unreviewed | 1216 |
 
 `unreviewed` is the honest default for a surface nobody has adjudicated yet; it is the number the Parity Ledger ratchets down. Every improved row resolves to a Behavior Note; every tiered or excluded row resolves to `docs/api/out_of_tier.tsv`.
 

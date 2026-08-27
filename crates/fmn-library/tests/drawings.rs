@@ -130,7 +130,7 @@ fn self_goldens_lock_each_class_s_canonical_output() {
     let expected: [(&str, &str); 7] = [
         (
             "clock",
-            "8ef9fe99145e3b8b371cf5af95af4d526615b50faf108de35b34e03123bb400f",
+            "2cbcdbb030cd6a2280ef4e2d873031458d0c3874c9a8858ae0b4300fb51a78c1",
         ),
         (
             "die_face",
@@ -142,7 +142,7 @@ fn self_goldens_lock_each_class_s_canonical_output() {
         ),
         (
             "speedometer",
-            "51f1ca809a55c122dd69be9844df9c0071e1ae6d099e9db9eb6caffd154eee04",
+            "2d99fe1c318856ade256a1d324e18e939c54f61f0a5c176febde73cf288b4672",
         ),
         (
             "piano",

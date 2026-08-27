@@ -1,5 +1,5 @@
 //! The enhanced-tier network-graph mobjects (§12.5-12.6 leapfrog #7,
-//! fm-n64): [`NetworkGraph`] renders an [`fnx_classes::digraph::Graph`] —
+//! fm-n64): [`NetworkGraph`] renders an [`fnx_classes::Graph`] —
 //! string-labeled vertices, undirected edges — as a detached [`VMobject`]
 //! family laid out by one of four **fmn-owned deterministic kernels**.
 //!
@@ -17,7 +17,7 @@
 //!
 //! ## The determinism rules (binding on this module)
 //!
-//! * **Node order** is always [`fnx_classes::digraph::Graph::nodes_ordered`]
+//! * **Node order** is always [`fnx_classes::Graph::nodes_ordered`]
 //!   — insertion-ordered, never hash order. Every kernel indexes positions
 //!   by that vector.
 //! * **Circular** — pure function of node count: angle `i·τ/n` in `f64`
@@ -270,7 +270,7 @@ impl NetworkGraph {
             .iter()
             .cloned()
             .zip(Self::circular_angles(n))
-            .map(|(label, theta)| (label, [theta.cos(), theta.sin(), 0.0]))
+            .map(|(label, theta)| (label, [fmn_dmath::cos(theta), fmn_dmath::sin(theta), 0.0]))
             .collect()
     }
 
@@ -312,7 +312,14 @@ impl NetworkGraph {
             let radius = 1.0 - ring_index as f64 / (ring_count + 1.0);
             let n = shell.len().max(1);
             for (label, theta) in shell.iter().cloned().zip(Self::circular_angles(n)) {
-                positions.insert(label, [radius * theta.cos(), radius * theta.sin(), 0.0]);
+                positions.insert(
+                    label,
+                    [
+                        radius * fmn_dmath::cos(theta),
+                        radius * fmn_dmath::sin(theta),
+                        0.0,
+                    ],
+                );
             }
         }
         Ok(positions)
@@ -357,7 +364,14 @@ impl NetworkGraph {
             };
             let n = level.len().max(1);
             for (label, theta) in level.iter().cloned().zip(Self::circular_angles(n)) {
-                positions.insert(label, [radius * theta.cos(), radius * theta.sin(), 0.0]);
+                positions.insert(
+                    label,
+                    [
+                        radius * fmn_dmath::cos(theta),
+                        radius * fmn_dmath::sin(theta),
+                        0.0,
+                    ],
+                );
             }
         }
         Ok(positions)

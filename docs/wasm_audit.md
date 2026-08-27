@@ -6,7 +6,7 @@ either authority changes, forcing this audit to be re-run instead of leaving a
 plausible but stale “current pins” claim behind.
 
 - `SUITE.lock` SHA-256: `ed186d765192e0afebf046beeaea310b2bbd68511c2fd7ee9a9637b4dfe0612f`
-- `Cargo.lock` SHA-256: `15eb56d6412bceb7c9f722f9ced79c5c3630d187c7f3c077b1070cb7c81b54c7`
+- `Cargo.lock` SHA-256: `bc392046ce8a0639f6417a103db1b7b6c496066b3fbc5688ad2999f5111c0f4c`
 
 Method labels are deliberately narrow:
 

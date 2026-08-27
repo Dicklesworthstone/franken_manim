@@ -313,7 +313,7 @@ fn processed_flash_path(path: &VMobject, stroke_width: f64, color: Srgb) -> VMob
 /// `FlashAround(mobject, buff=SMALL_BUFF, stroke_width=4.0, color=YELLOW)`
 /// (indication.py:255), end to end: build the surrounding rectangle over
 /// `target`'s extent, run the Reference's resample-and-strip pipeline,
-/// style it, add it to the stage, and return the [`VShowPassingFlash`]
+/// style it, add it to the stage, and return the [`fmn_anim::indication::VShowPassingFlash`]
 /// with the Reference defaults (`time_width = 1.0`, `taper_width = 0.0`,
 /// `remover`).
 #[must_use]

@@ -30,9 +30,11 @@ use crate::vmobject::{VMobject, v_group};
 
 /// drawings.py:309's tick direction: `cos(angle)·UP + sin(angle)·RIGHT`.
 fn tick_direction(angle: f64) -> Vec3 {
+    let cos = fmn_dmath::cos(angle);
+    let sin = fmn_dmath::sin(angle);
     [
-        angle.cos() * UP[0] + angle.sin() * RIGHT[0],
-        angle.cos() * UP[1] + angle.sin() * RIGHT[1],
+        cos * UP[0] + sin * RIGHT[0],
+        cos * UP[1] + sin * RIGHT[1],
         0.0,
     ]
 }
@@ -233,7 +235,7 @@ pub fn speedometer_pivot() -> Vec3 {
 /// pivot is simply [`speedometer_pivot`] and the geometry is faithful.
 ///
 /// # Errors
-/// [`TextMobjectError`] from the tick labels or the arc.
+/// [`crate::text::TextMobjectError`] from the tick labels or the arc.
 pub fn speedometer(book: &fmn_text::FontBook) -> Result<VMobject, crate::text::TextMobjectError> {
     speedometer_with(
         book,
@@ -274,7 +276,7 @@ pub fn speedometer_with(
         let angle = start_angle
             + (end_angle - start_angle) * f64::from(index as u32)
                 / f64::from(num_ticks.saturating_sub(1) as u32).max(1.0);
-        let vect = [angle.cos(), angle.sin(), 0.0];
+        let vect = [fmn_dmath::cos(angle), fmn_dmath::sin(angle), 0.0];
         let inner = [
             (1.0 - tick_length) * vect[0],
             (1.0 - tick_length) * vect[1],
@@ -335,7 +337,7 @@ pub fn move_needle_to_velocity(
     let target = start_angle - arc_angle * proportion;
     let pivot = speedometer_pivot();
     let tip = stage.get_center(needle);
-    let current = f64::atan2(tip[1] - pivot[1], tip[0] - pivot[0]);
+    let current = fmn_dmath::atan2(tip[1] - pivot[1], tip[0] - pivot[0]);
     stage.rotate(needle, target - current, OUT, Some(pivot), None);
     Ok(())
 }

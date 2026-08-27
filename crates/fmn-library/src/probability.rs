@@ -2,7 +2,7 @@
 //! ports the Reference's `mobject/probability.py` `SampleSpace` — the base
 //! rectangle, p-list completion, horizontal/vertical divisions, and
 //! brace-and-label subdivisions — through Scribe text and this crate's
-//! parametric [`Brace`](crate::brace::Brace).
+//! parametric [`Brace`].
 //!
 //! Geometry conventions are the Reference's, constant for constant:
 //!
@@ -10,7 +10,7 @@
 //!   bands from the **top** edge downward; a vertical division
 //!   (`vect = RIGHT`) stacks from the **left** edge rightward. The first
 //!   band carries `p_list[0]`, not the remainder — only
-//!   [`complete_p_list`] appends the leftover slice.
+//!   `complete_p_list` appends the leftover slice.
 //! * Band fills run through [`fmn_core::color::color_gradient`] over the
 //!   caller's anchors at the completed list length; strokes stay the base
 //!   rectangle's 0.5-wide `GREY_B`.
@@ -39,7 +39,7 @@ const P_LIST_EPSILON: f64 = 1e-8;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProbabilityError {
     /// A probability outside `[0, 1]`, or a list whose completion overflows
-    /// past zero within [`P_LIST_EPSILON`].
+    /// past zero within `P_LIST_EPSILON`.
     BadProbability {
         /// The offending value.
         value: f64,
@@ -187,8 +187,8 @@ impl SampleSpace {
 
     /// `get_horizontal_division`: bands stacked from the top edge downward,
     /// colored along `colors`. The Reference defaults are
-    /// [`GREEN_E`](fmn_core::constants::GREEN_E) →
-    /// [`BLUE_E`](fmn_core::constants::BLUE_E).
+    /// [`GREEN_E`] →
+    /// [`BLUE_E`].
     ///
     /// # Errors
     /// [`ProbabilityError`] for bad probabilities or refused geometry.
@@ -202,8 +202,8 @@ impl SampleSpace {
 
     /// `get_vertical_division`: bands stacked from the left edge rightward,
     /// colored along `colors`. The Reference defaults are
-    /// [`MAROON_B`](fmn_core::constants::MAROON_B) →
-    /// [`YELLOW`](fmn_core::constants::YELLOW).
+    /// [`MAROON_B`] →
+    /// [`YELLOW`].
     ///
     /// # Errors
     /// [`ProbabilityError`] for bad probabilities or refused geometry.
