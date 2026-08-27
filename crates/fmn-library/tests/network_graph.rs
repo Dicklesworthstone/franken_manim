@@ -195,3 +195,42 @@ fn self_golden_locks_the_canonical_build() {
         "the canonical star build drifted"
     );
 }
+
+#[test]
+fn layout_transition_animates_between_circular_and_spring() {
+    use fmn_anim::{Animation, Transform};
+    use fmn_mobject::Stage;
+
+    let g = sample_graph();
+    let circular = NetworkGraph::new(g.clone())
+        .laid_out(&GraphLayout::Circular)
+        .unwrap_or_else(|error| fail(format!("{error}")))
+        .build()
+        .unwrap_or_else(|error| fail(format!("{error}")));
+
+    let spring = NetworkGraph::new(g)
+        .laid_out(&GraphLayout::Spring {
+            seed: 0x12345678,
+            iterations: 20,
+            ideal_edge: DEFAULT_SPRING_IDEAL_EDGE,
+        })
+        .unwrap_or_else(|error| fail(format!("{error}")))
+        .build()
+        .unwrap_or_else(|error| fail(format!("{error}")));
+
+    let mut stage = Stage::new();
+    let m1 = stage.add(circular);
+    let m2 = stage.add(spring);
+
+    let mut transform = Transform::new(m1, m2);
+    transform.begin(&mut stage);
+
+    // Interpolate to alpha=0.5
+    transform.interpolate(&mut stage, 0.5);
+    let mob = stage.get(m1).expect("m1 in stage");
+    assert!(!mob.points().is_empty());
+
+    // Interpolate to finish at alpha=1.0
+    transform.finish(&mut stage);
+}
+
