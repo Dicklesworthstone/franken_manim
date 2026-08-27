@@ -2040,14 +2040,13 @@ mod tests {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt as _;
-                    std::fs::set_permissions(bound, std::fs::Permissions::from_mode(0o500)).map_err(
-                        |error| BoundaryError::Workdir {
+                    std::fs::set_permissions(bound, std::fs::Permissions::from_mode(0o500))
+                        .map_err(|error| BoundaryError::Workdir {
                             detail: format!(
                                 "permission private-copy replacement {}: {error}",
                                 bound.display()
                             ),
-                        },
-                    )?;
+                        })?;
                 }
                 Ok(())
             })

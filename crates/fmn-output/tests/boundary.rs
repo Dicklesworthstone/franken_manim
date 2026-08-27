@@ -488,7 +488,8 @@ mod private_boundary {
             bytes[optional + 32..optional + 36].copy_from_slice(&0x1000_u32.to_le_bytes());
             bytes[optional + 36..optional + 40].copy_from_slice(&0x200_u32.to_le_bytes());
             bytes[optional + 56..optional + 60].copy_from_slice(&0x2000_u32.to_le_bytes());
-            bytes[optional + 60..optional + 64].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+            bytes[optional + 60..optional + 64]
+                .copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
             bytes[optional + 68..optional + 70].copy_from_slice(&3_u16.to_le_bytes());
             let section = optional + OPTIONAL_BYTES;
             bytes[section..section + 5].copy_from_slice(b".text");
@@ -549,7 +550,6 @@ mod private_boundary {
         assert!(matches!(
             StdFfmpegLocator::default().locate_ffmpeg(&script),
             Err(FfmpegLocatorError::UnsupportedExecutableFormat { .. })
-                | Err(FfmpegLocatorError::NotFfmpeg(..))
         ));
 
         let selected = if cfg!(windows) {

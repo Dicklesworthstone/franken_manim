@@ -123,6 +123,7 @@ pub use coords::{
     Axes, AxisConfig, CoordinateSystem, CoordsError, NumberLine, RiemannConfig, Slider,
     UnitInterval, create_axis,
 };
+pub use data_mobjects::{BarChart, DataMobjectError, TableMobject};
 pub use fields::{
     AnimatedBoundary, AnimatedStreamLines, FieldError, IntegratorTune, STREAM_LINES_SUBSTREAM,
     StreamLineMeta, StreamLineStyle, StreamLines, StreamLinesMobject, StreamSolution,
@@ -151,6 +152,10 @@ pub use neural_network::{
     DEFAULT_NEURON_SPACING, DEFAULT_SYNAPSE_STROKE_WIDTH, LayerKind, LayerSpec,
     NeuralNetworkConfig, NeuralNetworkError, NeuralNetworkMobject,
 };
+pub use network_graph::{
+    DEFAULT_SPRING_IDEAL_EDGE, DEFAULT_SPRING_ITERATIONS, GraphLayout, NetworkGraph,
+    NetworkGraphError,
+};
 pub use numbers::{DEFAULT_MAX_NUMBER_CHARACTERS, DecimalNumber, Integer};
 pub use obj_model::{
     DEFAULT_MODEL_HEIGHT, MODEL_SHADING, ObjCorner, ObjError, ObjLimits, ObjMesh, ThreeDModel,
@@ -162,6 +167,7 @@ pub use pointcloud::{
     glow_dot, glow_dots, glow_falloff, glow_layers, p_group, rim_coverage, true_dot,
 };
 pub use poly::{ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, Square, TipStyle};
+pub use probability::{ProbabilityError, SampleSpace};
 pub use solids::{
     CUBE_SHADING, Cone, Cube, Cylinder, Disk3D, Dodecahedron, Line3D, MESH_NORMAL_NUDGE,
     MESH_RESOLUTION, MeshError, ParametricSurface, Prism, Prismify, SGroup, SURFACE_COLOR,

@@ -180,3 +180,45 @@ fn public_runner_preserves_normal_early_termination() {
     assert_eq!(completed.report().play_count, 0);
     assert_eq!(sink.captures, 0);
 }
+
+#[test]
+fn public_prelude_constructs_expanded_mobjects() {
+    let book = FontBook::bundled().expect("bundled fonts");
+
+    let code = Code::new("fn main() {}").language("rust").build(&book);
+    assert!(code.is_ok());
+
+    let md = Markdown::new("# Header\n\nText").build(&book);
+    assert!(md.is_ok());
+
+    let table = TableMobject::from_csv("a,b\n1,2", ',').unwrap().build(&book);
+    assert!(table.is_ok());
+
+    let chart = BarChart::new(vec![1.0, 2.0, 3.0]).build(&book);
+    assert!(chart.is_ok());
+
+    let space = SampleSpace::new().build();
+    assert!(space.is_ok());
+
+    let graph = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "b")])
+        .laid_out(&GraphLayout::Circular)
+        .unwrap()
+        .build();
+    assert!(graph.is_ok());
+
+    let brace = Brace::new().build();
+    assert!(!brace.points().is_empty());
+
+    let dec = DecimalNumber::new(3.14159).build(&book);
+    assert!(dec.is_ok());
+
+    let int_mob = Integer::new(42.0).build(&book);
+    assert!(int_mob.is_ok());
+
+    let sphere = Sphere::new(1.0).build();
+    assert!(!sphere.vertices.is_empty());
+
+    let cube = Cube::new(1.0).build();
+    assert!(!cube.surfaces.is_empty());
+}
+

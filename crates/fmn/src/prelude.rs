@@ -16,9 +16,12 @@ pub use fmn_core::constants::*;
 pub use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 pub use fmn_core::types::{Record, Semantic, Vec3};
 pub use fmn_library::{
-    Annulus, Arc, ArcBetweenPoints, Arrow, Circle, DashedLine, Dot, Ellipse, Line, MarkupText,
-    Polygon, Rectangle, RegularPolygon, Square, Style, Tex, TexMobject, TexText, Text, TextMobject,
-    VMobject, VStyle,
+    Annulus, Arc, ArcBetweenPoints, Arrow, BarChart, Brace, BraceLabel, Circle, Code, CodeTheme,
+    ComplexPlane, Cube, Cylinder, DashedLine, DecimalNumber, Dot, Ellipse, GraphLayout, Integer,
+    Line, Markdown, MarkdownMobject, MarkupText, NetworkGraph, NumberLine, NumberPlane,
+    ParametricCurve, Polygon, Rectangle, RegularPolygon, SampleSpace, Sphere, Square, StreamLines,
+    Style, SurroundingRectangle, TableMobject, Tex, TexMobject, TexText, Text, TextMobject,
+    ThreeDAxes, ThreeDModel, VMobject, VStyle, VectorField,
 };
 pub use fmn_mobject::{
     AnimBuilder, AnimateArgs, AnimateError, Mob, Mobject, PosTarget, StageError,
