@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	27e003b283eb4e2e1fdf5830fa6bdd8b586599700434976c5279dfa61a643212
+ledger_reviewed_digest	9d460a38f42207e817e1fd7ed1a5ca1676bcd4a4012a665e6b95dfa97957bc33
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -235,10 +235,122 @@ OOT-MODERNGL-SHADER-SURFACE	ShaderWrapper VShaderWrapper and utils.shaders progr
 #
 # symbol	status	evidence	tests	notes
 [status]
+manimlib.constants:ASPECT_RATIO	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	computes the default frame aspect ratio from the default pixel dimensions
+manimlib.constants:BLACK	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the black color constant matching the pinned palette
+manimlib.constants:BLUE	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median blue color constant alias for BLUE_C
+manimlib.constants:BLUE_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest blue shade matching the pinned palette
+manimlib.constants:BLUE_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium blue shade matching the pinned palette
+manimlib.constants:BLUE_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median blue shade matching the pinned palette
+manimlib.constants:BLUE_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark blue shade matching the pinned palette
+manimlib.constants:BLUE_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest blue shade matching the pinned palette
+manimlib.constants:BOLD	same	crates/fmn-text/src/lib.rs	crates/fmn-conformance/tests/api_schema.rs	defines the bold font weight constant
 manimlib.constants:BOTTOM	improved	BN-07	crates/fmn-python/tests/bridge.py	resolves to the unit DOWN direction per C-16, so to_edge and align_on_border receive a direction instead of a frame-radius-scaled marker
+manimlib.constants:COLORMAP_3B1B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the four anchor colors of the 3Blue1Brown colormap
+manimlib.constants:DARK_BROWN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the dark brown color constant matching the pinned palette
+manimlib.constants:DEFAULT_LIGHT_COLOR	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the default light color constant GREY_B
+manimlib.constants:DEFAULT_MOBJECT_COLOR	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the default mobject color constant WHITE
+manimlib.constants:DEFAULT_MOBJECT_TO_EDGE_BUFF	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the default buffer for positioning mobjects relative to the frame edge
+manimlib.constants:DEFAULT_MOBJECT_TO_MOBJECT_BUFF	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the default buffer for positioning mobjects adjacent to each other
+manimlib.constants:DEFAULT_PIXEL_HEIGHT	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the default 1080p frame height in pixels
+manimlib.constants:DEFAULT_PIXEL_WIDTH	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the default 1080p frame width in pixels
+manimlib.constants:DEFAULT_RESOLUTION	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the default resolution pair (1920, 1080)
+manimlib.constants:DEFAULT_STROKE_WIDTH	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the default VMobject stroke width in stroke units
+manimlib.constants:DEFAULT_VMOBJECT_FILL_COLOR	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the default VMobject fill color constant GREY_C
+manimlib.constants:DEFAULT_VMOBJECT_STROKE_COLOR	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the default VMobject stroke color constant GREY_A
+manimlib.constants:DEG	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines one degree in radians (TAU / 360)
+manimlib.constants:DEGREES	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the degrees angle unit alias for DEG
+manimlib.constants:DL	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the down-left diagonal direction vector (DOWN + LEFT)
+manimlib.constants:DOWN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit downward direction vector [0, -1, 0]
+manimlib.constants:DR	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the down-right diagonal direction vector (DOWN + RIGHT)
+manimlib.constants:FRAME_HEIGHT	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the standard 8.0 scene-height coordinate units
+manimlib.constants:FRAME_SHAPE	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the scene dimension pair (FRAME_WIDTH, FRAME_HEIGHT)
+manimlib.constants:FRAME_WIDTH	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	computes the scene width in coordinate units from height and aspect ratio
+manimlib.constants:FRAME_X_RADIUS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines half the frame width in scene coordinates
+manimlib.constants:FRAME_Y_RADIUS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines half the frame height in scene coordinates
+manimlib.constants:GOLD	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median gold color constant alias for GOLD_C
+manimlib.constants:GOLD_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest gold shade matching the pinned palette
+manimlib.constants:GOLD_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium gold shade matching the pinned palette
+manimlib.constants:GOLD_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median gold shade matching the pinned palette
+manimlib.constants:GOLD_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark gold shade matching the pinned palette
+manimlib.constants:GOLD_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest gold shade matching the pinned palette
+manimlib.constants:GREEN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median green color constant alias for GREEN_C
+manimlib.constants:GREEN_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest green shade matching the pinned palette
+manimlib.constants:GREEN_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium green shade matching the pinned palette
+manimlib.constants:GREEN_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median green shade matching the pinned palette
+manimlib.constants:GREEN_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark green shade matching the pinned palette
+manimlib.constants:GREEN_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest green shade matching the pinned palette
+manimlib.constants:GREEN_SCREEN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the chroma-key green color constant #00FF00
+manimlib.constants:GREY	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median grey color constant alias for GREY_C
+manimlib.constants:GREY_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest grey shade matching the pinned palette
+manimlib.constants:GREY_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium grey shade matching the pinned palette
+manimlib.constants:GREY_BROWN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the grey-brown color constant matching the pinned palette
+manimlib.constants:GREY_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median grey shade matching the pinned palette
+manimlib.constants:GREY_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark grey shade matching the pinned palette
+manimlib.constants:GREY_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest grey shade matching the pinned palette
+manimlib.constants:IN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit direction vector into the screen [0, 0, -1]
+manimlib.constants:ITALIC	same	crates/fmn-text/src/lib.rs	crates/fmn-conformance/tests/api_schema.rs	defines the italic font slant constant
+manimlib.constants:LARGE_BUFF	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the large 1.0 spacing buffer
+manimlib.constants:LEFT	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit leftward direction vector [-1, 0, 0]
 manimlib.constants:LEFT_SIDE	improved	BN-07	crates/fmn-python/tests/bridge.py	resolves to the unit LEFT direction per C-16, matching the unit-diagonal UL/UR/DL/DR convention for direction-argument use
+manimlib.constants:LIGHT_BROWN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light brown color constant matching the pinned palette
+manimlib.constants:LIGHT_PINK	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light pink color constant matching the pinned palette
+manimlib.constants:MANIM_COLORS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	enumerates all standard color palette values in order
+manimlib.constants:MAROON	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median maroon color constant alias for MAROON_C
+manimlib.constants:MAROON_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest maroon shade matching the pinned palette
+manimlib.constants:MAROON_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium maroon shade matching the pinned palette
+manimlib.constants:MAROON_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median maroon shade matching the pinned palette
+manimlib.constants:MAROON_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark maroon shade matching the pinned palette
+manimlib.constants:MAROON_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest maroon shade matching the pinned palette
+manimlib.constants:MED_LARGE_BUFF	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the medium-large 0.5 spacing buffer
+manimlib.constants:MED_SMALL_BUFF	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the medium-small 0.25 spacing buffer
+manimlib.constants:NORMAL	same	crates/fmn-text/src/lib.rs	crates/fmn-conformance/tests/api_schema.rs	defines the normal font weight and style constant
+manimlib.constants:NULL_POINTS	same	crates/fmn-mobject/src/lib.rs	crates/fmn-conformance/tests/api_schema.rs	defines the single-point origin array representing null points
+manimlib.constants:OBLIQUE	same	crates/fmn-text/src/lib.rs	crates/fmn-conformance/tests/api_schema.rs	defines the oblique font slant constant
+manimlib.constants:ORANGE	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the orange color constant matching the pinned palette
+manimlib.constants:ORIGIN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the three-dimensional scene origin vector [0, 0, 0]
+manimlib.constants:OUT	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit direction vector out of the screen [0, 0, 1]
+manimlib.constants:PI	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the circular constant pi
+manimlib.constants:PINK	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the pink color constant matching the pinned palette
+manimlib.constants:PURE_BLUE	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the pure primary blue color constant #0000FF
+manimlib.constants:PURE_GREEN	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the pure primary green color constant #00FF00
+manimlib.constants:PURE_RED	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the pure primary red color constant #FF0000
+manimlib.constants:PURPLE	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median purple color constant alias for PURPLE_C
+manimlib.constants:PURPLE_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest purple shade matching the pinned palette
+manimlib.constants:PURPLE_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium purple shade matching the pinned palette
+manimlib.constants:PURPLE_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median purple shade matching the pinned palette
+manimlib.constants:PURPLE_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark purple shade matching the pinned palette
+manimlib.constants:PURPLE_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest purple shade matching the pinned palette
+manimlib.constants:RADIANS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit radian multiplier 1.0
+manimlib.constants:RED	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median red color constant alias for RED_C
+manimlib.constants:RED_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest red shade matching the pinned palette
+manimlib.constants:RED_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium red shade matching the pinned palette
+manimlib.constants:RED_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median red shade matching the pinned palette
+manimlib.constants:RED_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark red shade matching the pinned palette
+manimlib.constants:RED_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest red shade matching the pinned palette
+manimlib.constants:RIGHT	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit rightward direction vector [1, 0, 0]
 manimlib.constants:RIGHT_SIDE	improved	BN-07	crates/fmn-python/tests/bridge.py	resolves to the unit RIGHT direction per C-16, matching the unit-diagonal UL/UR/DL/DR convention for direction-argument use
+manimlib.constants:SMALL_BUFF	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the small 0.1 spacing buffer
+manimlib.constants:TAU	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the one-turn circular constant tau (2 * PI)
+manimlib.constants:TEAL	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median teal color constant alias for TEAL_C
+manimlib.constants:TEAL_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest teal shade matching the pinned palette
+manimlib.constants:TEAL_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium teal shade matching the pinned palette
+manimlib.constants:TEAL_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median teal shade matching the pinned palette
+manimlib.constants:TEAL_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark teal shade matching the pinned palette
+manimlib.constants:TEAL_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest teal shade matching the pinned palette
 manimlib.constants:TOP	improved	BN-07	crates/fmn-python/tests/bridge.py	resolves to the unit UP direction per C-16, so to_edge and align_on_border receive a direction instead of a frame-radius-scaled marker
+manimlib.constants:UL	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the up-left diagonal direction vector (UP + LEFT)
+manimlib.constants:UP	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit upward direction vector [0, 1, 0]
+manimlib.constants:UR	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the up-right diagonal direction vector (UP + RIGHT)
+manimlib.constants:WHITE	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the white color constant matching the pinned palette
+manimlib.constants:X_AXIS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit X-axis direction vector [1, 0, 0]
+manimlib.constants:YELLOW	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median yellow color constant alias for YELLOW_C
+manimlib.constants:YELLOW_A	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the lightest yellow shade matching the pinned palette
+manimlib.constants:YELLOW_B	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the light-medium yellow shade matching the pinned palette
+manimlib.constants:YELLOW_C	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the median yellow shade matching the pinned palette
+manimlib.constants:YELLOW_D	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the medium-dark yellow shade matching the pinned palette
+manimlib.constants:YELLOW_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest yellow shade matching the pinned palette
+manimlib.constants:Y_AXIS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit Y-axis direction vector [0, 1, 0]
+manimlib.constants:Z_AXIS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit Z-axis direction vector [0, 0, 1]
 manimlib.mobject.geometry:Line	improved	BN-09	crates/fmn-python/tests/bridge.py	is the authored TipableVMobject subclass whose constructor uses Atlas's governed straight or curved geometry and preserves the declared Reference MRO
 manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
 manimlib.mobject.geometry:Line.get_angle	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	computes the planar bearing from virtual-dispatched live endpoints through Atlas geometry
