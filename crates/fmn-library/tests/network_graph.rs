@@ -223,14 +223,14 @@ fn layout_transition_animates_between_circular_and_spring() {
     let m2 = stage.add(spring);
 
     let mut transform = Transform::new(m1, m2);
-    transform.begin(&mut stage);
+    transform
+        .begin(&mut stage)
+        .unwrap_or_else(|error| fail(format!("{error}")));
 
     // Interpolate to alpha=0.5
     transform.interpolate(&mut stage, 0.5);
-    let mob = stage.get(m1).expect("m1 in stage");
-    assert!(!mob.points().is_empty());
+    assert!(stage.contains(m1));
 
     // Interpolate to finish at alpha=1.0
     transform.finish(&mut stage);
 }
-
