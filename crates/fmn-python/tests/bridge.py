@@ -19628,9 +19628,19 @@ rotated = space_utils.rotate_vector([1.0, 0.0, 0.0], np.pi / 2, [0.0, 0.0, 1.0])
 assert np.allclose(rotated, [0.0, 1.0, 0.0], atol=1e-7)
 assert np.allclose(space_utils.rotate_vector_2d([1.0, 0.0], np.pi / 2), [0.0, 1.0], atol=1e-7)
 # Reference space_ops leaked mapbox earcut, scipy Rotation, and the
-# functools/operator aliases. They are not part of the public API.
-for leaked in ("Rotation", "earcut", "op", "reduce"):
-    assert not hasattr(space_utils, leaked), leaked
+# functools/operator aliases. They refuse by the named OOT identities.
+for leaked, oot in (
+    ("Rotation", "OOT-LEAKED-SCIPY-IMPORT"),
+    ("earcut", "OOT-LEAKED-EARCUT-IMPORT"),
+    ("op", "OOT-LEAKED-SPACEOPS-STDLIB"),
+    ("reduce", "OOT-LEAKED-SPACEOPS-STDLIB"),
+):
+    try:
+        getattr(space_utils, leaked)()
+    except NotImplementedError as error:
+        assert oot in str(error), (leaked, error)
+    else:
+        raise AssertionError(f"{leaked} was callable without a named exclusion")
 _cf = space_utils.complex_func_to_R3_func(lambda w: w * 1j)
 assert np.allclose(_cf([1.0, 0.0, 5.0]), [0.0, 1.0, 0.0])
 

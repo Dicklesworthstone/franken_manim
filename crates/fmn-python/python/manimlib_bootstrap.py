@@ -21638,6 +21638,35 @@ def _install_space_ops():
         if not hasattr(_FMN_MODULE, name):
             setattr(_FMN_MODULE, name, function)
 
+    def _excluded_leak(name, oot):
+        def refused(*_args, **_kwargs):
+            raise NotImplementedError(
+                f"manimlib.utils.space_ops.{name} is excluded ({oot})"
+            )
+
+        refused.__name__ = name
+        return refused
+
+    _leak_roots = {
+        "scipy",
+        "mapbox_earcut",
+        "functools",
+        "operator",
+        "manimlib",
+    }
+    for name, oot in (
+        ("Rotation", "OOT-LEAKED-SCIPY-IMPORT"),
+        ("earcut", "OOT-LEAKED-EARCUT-IMPORT"),
+        ("op", "OOT-LEAKED-SPACEOPS-STDLIB"),
+        ("reduce", "OOT-LEAKED-SPACEOPS-STDLIB"),
+    ):
+        leak = _excluded_leak(name, oot)
+        setattr(module, name, leak)
+        current = getattr(_FMN_MODULE, name, None)
+        root = getattr(current, "__module__", "")
+        if current is None or root.split(".", 1)[0] in _leak_roots:
+            setattr(_FMN_MODULE, name, leak)
+
 
 _install_space_ops()
 
