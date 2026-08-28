@@ -211,7 +211,7 @@ fn public_prelude_constructs_expanded_mobjects() {
     let brace = Brace::new().build();
     assert!(!brace.points().is_empty());
 
-    let dec = DecimalNumber::new(3.14159).build(&book);
+    let dec = DecimalNumber::new(std::f64::consts::PI).build(&book);
     assert!(dec.is_ok());
 
     let int_mob = Integer::new(42.0).build(&book);
