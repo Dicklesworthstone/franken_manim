@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	cbe4832ea8813a9a7c51668b3612e965e21e6db86d95d9da4349a07862faffb7
+ledger_reviewed_digest	66b82c1f410d0204b15640ea51d9d00df9bb667e74ec5b109ac3d90880d19844
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -192,6 +192,155 @@ render.threads	RenderConfig	threads	thread_policy
 #
 # path	status	evidence	tests	notes
 [config_status]
+camera	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the camera configuration namespace mapping resolution, fps, and background properties
+camera.background_color	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the camera background color string hex representation
+camera.background_opacity	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the camera background opacity float value
+camera.fps	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the nominal camera frame rate integer
+camera.resolution	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the camera pixel resolution (width, height) tuple
+colors	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named color palette map
+colors.black	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for black
+colors.blue_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for blue_a
+colors.blue_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for blue_b
+colors.blue_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for blue_c
+colors.blue_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for blue_d
+colors.blue_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for blue_e
+colors.dark_brown	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for dark_brown
+colors.gold_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for gold_a
+colors.gold_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for gold_b
+colors.gold_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for gold_c
+colors.gold_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for gold_d
+colors.gold_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for gold_e
+colors.green_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for green_a
+colors.green_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for green_b
+colors.green_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for green_c
+colors.green_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for green_d
+colors.green_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for green_e
+colors.green_screen	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for green_screen
+colors.grey_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for grey_a
+colors.grey_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for grey_b
+colors.grey_brown	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for grey_brown
+colors.grey_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for grey_c
+colors.grey_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for grey_d
+colors.grey_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for grey_e
+colors.light_brown	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for light_brown
+colors.light_pink	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for light_pink
+colors.maroon_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for maroon_a
+colors.maroon_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for maroon_b
+colors.maroon_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for maroon_c
+colors.maroon_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for maroon_d
+colors.maroon_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for maroon_e
+colors.orange	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for orange
+colors.pink	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for pink
+colors.pure_blue	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for pure_blue
+colors.pure_green	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for pure_green
+colors.pure_red	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for pure_red
+colors.purple_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for purple_a
+colors.purple_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for purple_b
+colors.purple_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for purple_c
+colors.purple_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for purple_d
+colors.purple_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for purple_e
+colors.red_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for red_a
+colors.red_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for red_b
+colors.red_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for red_c
+colors.red_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for red_d
+colors.red_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for red_e
+colors.teal_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for teal_a
+colors.teal_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for teal_b
+colors.teal_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for teal_c
+colors.teal_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for teal_d
+colors.teal_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for teal_e
+colors.white	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for white
+colors.yellow_a	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for yellow_a
+colors.yellow_b	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for yellow_b
+colors.yellow_c	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for yellow_c
+colors.yellow_d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for yellow_d
+colors.yellow_e	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named palette hex color value for yellow_e
+determinism	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the determinism configuration namespace
+determinism.mode	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the engine determinism mode (standard or certified)
+determinism.seed	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the global base seed for deterministic pseudorandom generation
+directories	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the file and asset directories configuration namespace
+directories.base	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the base assets directory path
+directories.cache	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the directory path for cache artifacts
+directories.mirror_module_path	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls whether output paths mirror python module hierarchy
+directories.removed_mirror_prefix	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	specifies directory prefix to strip when mirroring module paths
+directories.subdirs	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the map of output subdirectory names for assets and renders
+directories.subdirs.data	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output subdirectory name for data
+directories.subdirs.downloads	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output subdirectory name for downloads
+directories.subdirs.latex_cache	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output subdirectory name for latex_cache
+directories.subdirs.output	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output subdirectory name for output
+directories.subdirs.raster_images	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output subdirectory name for raster_images
+directories.subdirs.sounds	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output subdirectory name for sounds
+directories.subdirs.three_d_models	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output subdirectory name for three_d_models
+directories.subdirs.vector_images	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output subdirectory name for vector_images
+embed	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the interactive embedding configuration namespace
+embed.autoreload	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls scene autoreload behavior on file modification
+embed.exception_mode	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	specifies exception verbosity mode during interactive embed
+file_writer	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the video and frame output configuration namespace
+file_writer.ffmpeg_bin	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the ffmpeg binary executable name or path
+file_writer.gamma	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the display gamma correction factor
+file_writer.pixel_format	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output video pixel format string
+file_writer.saturation	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the color saturation adjustment factor
+file_writer.video_codec	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the video compression codec name
+ignore_manimlib_modules_on_reload	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls whether manimlib internal modules are skipped during reload
+key_bindings	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the interactive scene key binding configuration namespace
+key_bindings.color	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive color action
+key_bindings.cursor	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive cursor action
+key_bindings.grab	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive grab action
+key_bindings.information	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive information action
+key_bindings.pan	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive pan action
+key_bindings.pan_3d	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive pan_3d action
+key_bindings.quit	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive quit action
+key_bindings.reset	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive reset action
+key_bindings.resize	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive resize action
+key_bindings.select	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive select action
+key_bindings.unselect	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive unselect action
+key_bindings.x_grab	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive x_grab action
+key_bindings.y_grab	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive y_grab action
+key_bindings.z_grab	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the key character binding for interactive z_grab action
+log_level	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the logging output severity threshold level
+mobject	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the mobject default appearance configuration namespace
+mobject.default_light_color	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default light source color for 3D mobjects
+mobject.default_mobject_color	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default base mobject color string
+render	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the rendering execution and rasterizer configuration namespace
+render.aa	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the antialiasing policy setting
+render.engine	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the execution engine backend selector
+render.threads	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the thread allocation policy for rendering
+resolution_options	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the named resolution preset options map
+resolution_options.4k	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the (width, height) pixel tuple for 4k resolution preset
+resolution_options.high	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the (width, height) pixel tuple for high resolution preset
+resolution_options.low	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the (width, height) pixel tuple for low resolution preset
+resolution_options.med	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the (width, height) pixel tuple for med resolution preset
+scene	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the scene animation and playback configuration namespace
+scene.default_wait_time	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default duration in seconds for scene wait calls
+scene.leave_progress_bars	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls whether animation progress bars persist after completion
+scene.preview_while_skipping	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls preview rendering during fast-forward frame skipping
+scene.show_animation_progress	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls display of terminal progress bars during animation
+sizes	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the spatial dimensions and layout buffer configuration namespace
+sizes.default_mobject_to_edge_buff	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default spatial layout dimension for default_mobject_to_edge_buff
+sizes.default_mobject_to_mobject_buff	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default spatial layout dimension for default_mobject_to_mobject_buff
+sizes.frame_height	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default spatial layout dimension for frame_height
+sizes.large_buff	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default spatial layout dimension for large_buff
+sizes.med_large_buff	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default spatial layout dimension for med_large_buff
+sizes.med_small_buff	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default spatial layout dimension for med_small_buff
+sizes.small_buff	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default spatial layout dimension for small_buff
+tex	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the TeX math typesetting configuration namespace
+tex.font_size_for_unit_height	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the scaling reference font size for unit height in TeX
+tex.template	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the active TeX preamble template name
+text	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the plain text typesetting configuration namespace
+text.alignment	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default horizontal text alignment string
+text.font	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default font family name for text mobjects
+text.font_size_for_unit_height	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the scaling reference font size for unit height in text
+universal_import_line	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the import statement header injected into interactive sessions
+vmobject	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the vectorized mobject styling default configuration namespace
+vmobject.default_fill_color	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default fill color string for VMobjects
+vmobject.default_stroke_color	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default stroke color string for VMobjects
+vmobject.default_stroke_width	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the default stroke width float for VMobjects
+window	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the interactive preview window configuration namespace
+window.full_screen	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls whether preview window opens in full screen mode
+window.monitor_index	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	specifies target display monitor index for window placement
+window.position	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	specifies optional (x, y) screen pixel coordinates for window
+window.position_string	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	specifies mnemonic screen position string for window placement
+window.size	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	specifies optional (width, height) preview window dimensions
 
 # ---------------------------------------------------------------------------
 # [out_of_tier] — the honest fringe (§16.6).
@@ -210,6 +359,7 @@ OOT-COMPLEX-SCRIPT	complex-script shaping, bidi, and mark positioning	tiered	Lat
 OOT-EXOTIC-MEDIA-MESH	exotic image, media, and mesh formats	tiered	Owned native codecs and the OBJ subset cover the governed core; other media routes through the one ffmpeg boundary where applicable	A corpus-ranked format cannot use the declared native set or ffmpeg capability and has an owned bounded-parser design
 OOT-IMAGE-ASSET-INPUT	ImageMobject input acquisition and decode	tiered	Local PNG and JPEG are native; implicit URL downloads are replaced by the host AssetFetcher boundary and other PIL formats have no silent substitute	A corpus-ranked input requires a host-wired AssetFetcher or an owned budgeted decoder with malformed-input Gauntlet evidence
 OOT-LEAKED-PATHOPS-IMPORT	pathops module-level leaked import	excluded	Third-party skia-pathops dependency is not part of manimlib's public API surface	None; sovereign curve-boolean pipeline is authoritative
+OOT-LEAKED-PIL-IMPORT	leaked PIL/Pillow Image symbol imported into camera module namespace	excluded	Pillow dependency is not part of manimlib's public API surface	None; native image codec pipeline is authoritative
 OOT-LEAKED-SCIPY-IMPORT	leaked scipy/numpy symbols imported into module namespaces	excluded	Upstream module namespaces leaked foreign library imports that do not belong to manimlib's public API surface	A scene explicitly depends on the leaked symbol and it is bound to the appropriate FrankenSuite crate
 OOT-MATPLOTLIB-COLORMAPS	matplotlib named colormap tables	tiered	The bundled 3b1b colormap and caller-provided color-map functions are supported without importing matplotlib into the sovereign wheel	A corpus-ranked scene requires another named map and its audited immutable table is added to fmn-core with fixture-backed interpolation evidence
 OOT-MODERNGL-SHADER-SURFACE	ShaderWrapper VShaderWrapper and utils.shaders program surface	excluded	The Reference moderngl program pipeline is the refused GPU dependency; Lumen owns rasterization and analytic coverage replaces every shader path	A G4a allowlisted scene needs shader-program behavior no audited native adapter can express and OQ-8 is reopened by ADR
@@ -547,8 +697,11 @@ manimlib.camera.camera:Camera.init_light_source	same	scripts/manim_ref/manimlib/
 manimlib.camera.camera:Camera.refresh_uniforms	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refreshes the uniform dictionary headlessly
 manimlib.camera.camera:Camera.resize_frame_shape	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	reseats the frame shape from pixels with the fixed-dimension option preserved
 manimlib.camera.camera:Camera.use_window_fbo	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	reports false headlessly with window-bound truth owned by Studio
+manimlib.camera.camera:Image	excluded	OOT-LEAKED-PIL-IMPORT	crates/fmn-python/tests/bridge.py	leaked PIL Image import is refused as third-party dependency
 manimlib.camera.camera:ThreeDCamera	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	is the authored four-sample camera subclass for three-d scenes
 manimlib.camera.camera:ThreeDCamera.__init__	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	defaults four samples through the shared constructor
+manimlib.camera.camera:gl	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	leaked OpenGL import is refused in favor of Lumen
+manimlib.camera.camera:moderngl	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	leaked moderngl import is refused in favor of Lumen
 manimlib.camera.camera_frame:CameraFrame	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	is the authored camera frame whose authoritative state lives in one engine core
 manimlib.camera.camera_frame:CameraFrame.__init__	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	builds the core from frame shape center point fovy euler axes and z index
 manimlib.camera.camera_frame:CameraFrame.add_ambient_rotation	same	scripts/manim_ref/manimlib/camera/camera_frame.py	crates/fmn-python/tests/bridge.py	runs the frame updater before drawable-root updaters on play and wait samples including camera-only animation and zero-dt epilogues
@@ -703,6 +856,26 @@ manimlib.constants:YELLOW_D	same	crates/fmn-core/src/constants.rs	crates/fmn-cor
 manimlib.constants:YELLOW_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest yellow shade matching the pinned palette
 manimlib.constants:Y_AXIS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit Y-axis direction vector [0, 1, 0]
 manimlib.constants:Z_AXIS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit Z-axis direction vector [0, 0, 1]
+manimlib.event_handler:EVENT_DISPATCHER	same	scripts/manim_ref/manimlib/event_handler/__init__.py	crates/fmn-python/tests/bridge.py	global singleton EventDispatcher instance
+manimlib.event_handler.event_dispatcher:EventDispatcher	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	central event dispatcher managing listeners, mouse positions, and key states
+manimlib.event_handler.event_dispatcher:EventDispatcher.__init__	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	initializes empty listener set and zeroed mouse and key tracking state
+manimlib.event_handler.event_dispatcher:EventDispatcher.add_listner	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	registers an event listener
+manimlib.event_handler.event_dispatcher:EventDispatcher.dispatch	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	dispatches events to registered listeners and updates tracking state
+manimlib.event_handler.event_dispatcher:EventDispatcher.get_listners_count	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	returns total count of registered listeners
+manimlib.event_handler.event_dispatcher:EventDispatcher.get_mouse_drag_point	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	returns current mouse drag location Point mobject
+manimlib.event_handler.event_dispatcher:EventDispatcher.get_mouse_point	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	returns current mouse position Point mobject
+manimlib.event_handler.event_dispatcher:EventDispatcher.is_key_pressed	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	returns true if given key symbol is currently depressed
+manimlib.event_handler.event_dispatcher:EventDispatcher.remove_listner	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	unregisters an event listener
+manimlib.event_handler.event_listner:EventListener	same	scripts/manim_ref/manimlib/event_handler/event_listner.py	crates/fmn-python/tests/bridge.py	pairs a mobject target, event type filter, and callback handler
+manimlib.event_handler.event_listner:EventListener.__init__	same	scripts/manim_ref/manimlib/event_handler/event_listner.py	crates/fmn-python/tests/bridge.py	validates mobject type and stores callback configuration
+manimlib.event_handler.event_type:EventType	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	enum of supported window, keyboard, and mouse event categories
+manimlib.event_handler.event_type:EventType.KeyPressEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	key press event string constant
+manimlib.event_handler.event_type:EventType.KeyReleaseEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	key release event string constant
+manimlib.event_handler.event_type:EventType.MouseDragEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	mouse drag event string constant
+manimlib.event_handler.event_type:EventType.MouseMotionEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	mouse motion event string constant
+manimlib.event_handler.event_type:EventType.MousePressEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	mouse press event string constant
+manimlib.event_handler.event_type:EventType.MouseReleaseEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	mouse release event string constant
+manimlib.event_handler.event_type:EventType.MouseScrollEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	mouse scroll event string constant
 manimlib.mobject.boolean_ops:Difference	same	crates/fmn-geom/src/boolean/mod.rs	crates/fmn-python/tests/bridge.py	computes boolean difference between vmobjects via Chisel curve-boolean pipeline
 manimlib.mobject.boolean_ops:Difference.__init__	same	crates/fmn-geom/src/boolean/mod.rs	crates/fmn-python/tests/bridge.py	constructs difference between vmobjects
 manimlib.mobject.boolean_ops:Exclusion	same	crates/fmn-geom/src/boolean/mod.rs	crates/fmn-python/tests/bridge.py	computes symmetric difference / XOR between vmobjects via Chisel curve-boolean pipeline
