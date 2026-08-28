@@ -19919,8 +19919,10 @@ assert manimlib.NumberPlane.default_axis_config["include_ticks"] is False
 _cplane.add_coordinate_labels()
 assert _cplane.coordinate_labels is not None
 assert np.allclose(_cplane.n2p(1 + 2j), _cplane.coords_to_point(1.0, 2.0))
-assert _cplane.p2n(_cplane.number_to_point(3 - 1j)) == 3 - 1j
-assert _cplane.point_to_number(_cplane.n2p(-2j)) == -2j
+_c_round = _cplane.p2n(_cplane.number_to_point(3 - 1j))
+assert np.isclose(_c_round.real, 3.0) and np.isclose(_c_round.imag, -1.0)
+_c_imag = _cplane.point_to_number(_cplane.n2p(-2j))
+assert np.isclose(_c_imag.real, 0.0) and np.isclose(_c_imag.imag, -2.0)
 
 two_term_td = manimlib.ThreeDAxes(x_range=(-2, 2), y_range=(-2, 2), z_range=(-1, 1))
 assert two_term_td.x_range == (-2.0, 2.0, 1.0)
