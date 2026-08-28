@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	66b82c1f410d0204b15640ea51d9d00df9bb667e74ec5b109ac3d90880d19844
+ledger_reviewed_digest	a8441b0c69ee2da4b146ae50ca9fa985fc909d9747405181dd33e935244233bb
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -856,7 +856,6 @@ manimlib.constants:YELLOW_D	same	crates/fmn-core/src/constants.rs	crates/fmn-cor
 manimlib.constants:YELLOW_E	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	resolves the darkest yellow shade matching the pinned palette
 manimlib.constants:Y_AXIS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit Y-axis direction vector [0, 1, 0]
 manimlib.constants:Z_AXIS	same	crates/fmn-core/src/constants.rs	crates/fmn-core/tests/parity.rs	defines the unit Z-axis direction vector [0, 0, 1]
-manimlib.event_handler:EVENT_DISPATCHER	same	scripts/manim_ref/manimlib/event_handler/__init__.py	crates/fmn-python/tests/bridge.py	global singleton EventDispatcher instance
 manimlib.event_handler.event_dispatcher:EventDispatcher	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	central event dispatcher managing listeners, mouse positions, and key states
 manimlib.event_handler.event_dispatcher:EventDispatcher.__init__	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	initializes empty listener set and zeroed mouse and key tracking state
 manimlib.event_handler.event_dispatcher:EventDispatcher.add_listner	same	scripts/manim_ref/manimlib/event_handler/event_dispatcher.py	crates/fmn-python/tests/bridge.py	registers an event listener
@@ -876,6 +875,7 @@ manimlib.event_handler.event_type:EventType.MouseMotionEvent	same	scripts/manim_
 manimlib.event_handler.event_type:EventType.MousePressEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	mouse press event string constant
 manimlib.event_handler.event_type:EventType.MouseReleaseEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	mouse release event string constant
 manimlib.event_handler.event_type:EventType.MouseScrollEvent	same	scripts/manim_ref/manimlib/event_handler/event_type.py	crates/fmn-python/tests/bridge.py	mouse scroll event string constant
+manimlib.event_handler:EVENT_DISPATCHER	same	scripts/manim_ref/manimlib/event_handler/__init__.py	crates/fmn-python/tests/bridge.py	global singleton EventDispatcher instance
 manimlib.mobject.boolean_ops:Difference	same	crates/fmn-geom/src/boolean/mod.rs	crates/fmn-python/tests/bridge.py	computes boolean difference between vmobjects via Chisel curve-boolean pipeline
 manimlib.mobject.boolean_ops:Difference.__init__	same	crates/fmn-geom/src/boolean/mod.rs	crates/fmn-python/tests/bridge.py	constructs difference between vmobjects
 manimlib.mobject.boolean_ops:Exclusion	same	crates/fmn-geom/src/boolean/mod.rs	crates/fmn-python/tests/bridge.py	computes symmetric difference / XOR between vmobjects via Chisel curve-boolean pipeline
@@ -1485,12 +1485,104 @@ manimlib.mobject.svg.brace:BraceText	improved	BN-08	crates/fmn-python/tests/brid
 manimlib.mobject.svg.brace:BraceText.label_constructor	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	exposes TexText as the text-mode label constructor
 manimlib.mobject.svg.brace:LineBrace	same	scripts/manim_ref/manimlib/mobject/svg/brace.py	crates/fmn-python/tests/bridge.py	is the authored brace along an arbitrary segment with perpendicular direction over the native path model
 manimlib.mobject.svg.brace:LineBrace.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	builds the native parametric brace while preserving the Reference flatten-and-restore transform around the translated line centre
+manimlib.mobject.svg.drawings:Bubble	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	is the base class for speech and thought bubble containers enclosing content mobjects
+manimlib.mobject.svg.drawings:Bubble.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes the bubble with optional content, buff, direction, and stroke and fill styling
+manimlib.mobject.svg.drawings:Bubble.add_content	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	places a mobject inside the bubble body and resizes the bubble contour to fit
+manimlib.mobject.svg.drawings:Bubble.bubble_center_adjustment_factor	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	adjusts the center alignment offset of content within the bubble
+manimlib.mobject.svg.drawings:Bubble.clear	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	removes internal content mobjects from the bubble container
+manimlib.mobject.svg.drawings:Bubble.file_name	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	stores the default SVG asset identifier for the bubble geometry
+manimlib.mobject.svg.drawings:Bubble.flip	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	mirrors the bubble pointer tip across the designated spatial axis
+manimlib.mobject.svg.drawings:Bubble.get_body	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	constructs or extracts the enclosing body mobject of the bubble
+manimlib.mobject.svg.drawings:Bubble.get_bubble_center	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	returns the geometric center coordinate of the bubble body interior
+manimlib.mobject.svg.drawings:Bubble.get_tip	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	returns the coordinate of the bubble pointer tip vertex
+manimlib.mobject.svg.drawings:Bubble.move_tip_to	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	translates the bubble so its pointer tip lands at the target point
+manimlib.mobject.svg.drawings:Bubble.pin_to	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	pins the bubble tip to a target mobject boundary with auto-flip alignment
+manimlib.mobject.svg.drawings:Bubble.position_mobject_inside	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	centers and scales internal content within the bubble interior
+manimlib.mobject.svg.drawings:Bubble.resize_to_content	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	adjusts the bubble perimeter dimensions to tightly enclose the content mobject
+manimlib.mobject.svg.drawings:Bubble.write	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	instantiates a Text or Tex mobject from input string and adds it to the bubble
 manimlib.mobject.svg.drawings:Checkmark	improved	BN-08	crates/fmn-library/src/matchers.rs#tests	uses Atlas's paired native drawn mark without an implicit TeX or pifont subprocess while preserving the preset-string MRO
 manimlib.mobject.svg.drawings:Checkmark.default_color	same	scripts/manim_ref/manimlib/mobject/svg/drawings.py	crates/fmn-python/tests/bridge.py	retains the exact GREEN preset on the authored native drawn class
 manimlib.mobject.svg.drawings:Checkmark.tex	same	scripts/manim_ref/manimlib/mobject/svg/drawings.py	crates/fmn-python/tests/bridge.py	retains the exact public preset string for selectors and introspection
+manimlib.mobject.svg.drawings:Clock	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws an analog clock face with hour and minute hands
+manimlib.mobject.svg.drawings:Clock.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes Clock with circle face, tick marks, and hour and minute hands
+manimlib.mobject.svg.drawings:ClockPassesTime	same	crates/fmn-anim/src/rotation.rs	crates/fmn-anim/tests/movement.rs	animates clock hands spinning forward across a specified elapsed time interval
+manimlib.mobject.svg.drawings:ClockPassesTime.__init__	same	crates/fmn-anim/src/rotation.rs	crates/fmn-anim/tests/movement.rs	initializes ClockPassesTime animation with run_time and hours_passed
+manimlib.mobject.svg.drawings:Dartboard	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a standard dartboard with radial scoring sectors and concentric bullseye rings
+manimlib.mobject.svg.drawings:Dartboard.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes Dartboard with radius, concentric ring radii, and sector alternating colors
+manimlib.mobject.svg.drawings:Dartboard.n_sectors	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	defines the number of radial scoring sectors on the dartboard
+manimlib.mobject.svg.drawings:Dartboard.radius	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	stores the outer radius of the dartboard mobject
+manimlib.mobject.svg.drawings:DieFace	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a single face of a gaming die with numbered pip dots
+manimlib.mobject.svg.drawings:DieFace.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes DieFace with side length, corner radius, and pip dot configuration for value 1 to 6
+manimlib.mobject.svg.drawings:DoubleSpeechBubble	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a speech bubble with two pointer tails for multiple speakers
+manimlib.mobject.svg.drawings:DoubleSpeechBubble.file_name	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	names the double speech bubble vector asset identifier
 manimlib.mobject.svg.drawings:Exmark	improved	BN-08	crates/fmn-library/src/matchers.rs#tests	uses Atlas's paired native drawn mark without an implicit TeX or pifont subprocess while preserving the preset-string MRO
 manimlib.mobject.svg.drawings:Exmark.default_color	same	scripts/manim_ref/manimlib/mobject/svg/drawings.py	crates/fmn-python/tests/bridge.py	retains the exact RED preset on the authored native drawn class
 manimlib.mobject.svg.drawings:Exmark.tex	same	scripts/manim_ref/manimlib/mobject/svg/drawings.py	crates/fmn-python/tests/bridge.py	retains the exact public preset string for selectors and introspection
+manimlib.mobject.svg.drawings:Laptop	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a laptop computer illustration mobject with screen and keyboard
+manimlib.mobject.svg.drawings:Laptop.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes Laptop illustration with screen and base components
+manimlib.mobject.svg.drawings:Lightbulb	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws an idea lightbulb vector illustration mobject
+manimlib.mobject.svg.drawings:Lightbulb.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes Lightbulb vector illustration with filament, bulb glass, and base screw
+manimlib.mobject.svg.drawings:Lightbulb.file_name	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	names the lightbulb vector asset identifier
+manimlib.mobject.svg.drawings:OldSpeechBubble	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws the legacy speech bubble vector shape
+manimlib.mobject.svg.drawings:OldSpeechBubble.file_name	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	names the legacy speech bubble asset identifier
+manimlib.mobject.svg.drawings:OldThoughtBubble	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws the legacy thought bubble vector shape with green screen cutout
+manimlib.mobject.svg.drawings:OldThoughtBubble.file_name	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	names the legacy thought bubble asset identifier
+manimlib.mobject.svg.drawings:OldThoughtBubble.get_body	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	extracts the body mobject of the legacy thought bubble
+manimlib.mobject.svg.drawings:OldThoughtBubble.make_green_screen	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	adds a green screen chroma key background inside the thought bubble
+manimlib.mobject.svg.drawings:Piano	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws an interactive musical piano keyboard with white and black keys
+manimlib.mobject.svg.drawings:Piano.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes Piano with octave count, key dimensions, and chromatic key layouts
+manimlib.mobject.svg.drawings:Piano.add_black_keys	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	generates and positions the raised black keys across the keyboard layout
+manimlib.mobject.svg.drawings:Piano.add_white_keys	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	generates and positions the flat white keys across the keyboard layout
+manimlib.mobject.svg.drawings:Piano.sort_keys	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	orders key mobjects chromatically by pitch frequency
+manimlib.mobject.svg.drawings:Piano3D	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a 3D perspective musical piano keyboard mobject
+manimlib.mobject.svg.drawings:Piano3D.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes Piano3D with extruded key depths and 3D surface shaders
+manimlib.mobject.svg.drawings:SpeechBubble	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a rounded speech bubble with pointer tail
+manimlib.mobject.svg.drawings:SpeechBubble.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes SpeechBubble with pointer tip offset and rounded rectangle body
+manimlib.mobject.svg.drawings:SpeechBubble.get_body	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	returns the rounded rectangle body of the speech bubble
+manimlib.mobject.svg.drawings:Speedometer	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws an automotive speedometer gauge with radial velocity ticks and needle pointer
+manimlib.mobject.svg.drawings:Speedometer.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes Speedometer with dial arc, tick labels, and rotatable needle
+manimlib.mobject.svg.drawings:Speedometer.get_center	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	returns the rotation center pivot of the speedometer gauge
+manimlib.mobject.svg.drawings:Speedometer.get_needle_angle	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	calculates the needle angular deflection corresponding to velocity
+manimlib.mobject.svg.drawings:Speedometer.get_needle_tip	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	returns the tip coordinate of the speedometer needle
+manimlib.mobject.svg.drawings:Speedometer.move_needle_to_velocity	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	animates needle rotation directly to indicate a target velocity
+manimlib.mobject.svg.drawings:Speedometer.rotate_needle	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	rotates speedometer needle through a delta angle about the dial center
+manimlib.mobject.svg.drawings:ThoughtBubble	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a cloud-shaped thought bubble with trailing circular dots
+manimlib.mobject.svg.drawings:ThoughtBubble.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes ThoughtBubble with cloud perimeter lobes and pointer dots
+manimlib.mobject.svg.drawings:ThoughtBubble.get_body	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	returns the cloud-lobed body of the thought bubble
+manimlib.mobject.svg.drawings:VectorizedEarth	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a stylized vectorized globe planet Earth mobject
+manimlib.mobject.svg.drawings:VectorizedEarth.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes VectorizedEarth with continent outlines and ocean base
+manimlib.mobject.svg.drawings:VectorizedEarth.file_name	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	names the Earth vector asset identifier
+manimlib.mobject.svg.drawings:VideoIcon	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws a multimedia video player icon mobject
+manimlib.mobject.svg.drawings:VideoIcon.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes VideoIcon with screen frame and play triangle
+manimlib.mobject.svg.drawings:VideoIcon.file_name	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	names the video icon vector asset identifier
+manimlib.mobject.svg.drawings:VideoSeries	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	draws an array sequence of VideoIcon mobjects arranged horizontally
+manimlib.mobject.svg.drawings:VideoSeries.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes VideoSeries with num_videos count and horizontal spacing
+manimlib.mobject.svg.old_tex_mobject:OldTex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	is the legacy multi-string TeX formula mobject using dvisvgm-style segment slicing
+manimlib.mobject.svg.old_tex_mobject:OldTex.__init__	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	initializes OldTex with TeX string expressions and alignment configuration
+manimlib.mobject.svg.old_tex_mobject:OldTex.break_up_by_substrings	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	breaks up formula mobject into submobjects corresponding to specified substrings
+manimlib.mobject.svg.old_tex_mobject:OldTex.break_up_tex_strings	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	tokenizes TeX input strings into individual glyph chunks
+manimlib.mobject.svg.old_tex_mobject:OldTex.get_part_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	finds the first submobject part matching the given TeX substring expression
+manimlib.mobject.svg.old_tex_mobject:OldTex.get_parts_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	finds all submobject parts matching the given TeX substring expression
+manimlib.mobject.svg.old_tex_mobject:OldTex.index_of_part	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	returns the family index of a specific submobject part
+manimlib.mobject.svg.old_tex_mobject:OldTex.index_of_part_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	returns the index of the first submobject part matching the TeX substring
+manimlib.mobject.svg.old_tex_mobject:OldTex.set_bstroke	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	sets background stroke width and color on all formula glyphs
+manimlib.mobject.svg.old_tex_mobject:OldTex.set_color_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	colors all submobjects matching the specified TeX substring
+manimlib.mobject.svg.old_tex_mobject:OldTex.set_color_by_tex_to_color_map	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	applies a dictionary mapping TeX substrings to corresponding colors
+manimlib.mobject.svg.old_tex_mobject:OldTex.slice_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	extracts a sub-family slice between specified TeX substring delimiters
+manimlib.mobject.svg.old_tex_mobject:OldTex.sort_alphabetically	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	sorts formula submobjects alphabetically by their TeX strings
+manimlib.mobject.svg.old_tex_mobject:OldTexText	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	is the legacy text-mode TeX mobject rendering standard text in LaTeX font
+manimlib.mobject.svg.old_tex_mobject:OldTexText.__init__	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	initializes OldTexText with text strings wrapped in text mode
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	renders a single contiguous TeX string expression into vector glyphs
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.__init__	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	initializes SingleStringTex with TeX string expression
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.balance_braces	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	balances unclosed curly braces in partial TeX substring expressions
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.get_modified_expression	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	applies brace balancing and special string modifications to TeX input
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.get_svg_string_by_content	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	generates SVG glyph path string for the given TeX content
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.get_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	returns the raw TeX string expression
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.get_tex_file_body	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	wraps expression in document preamble and environment body
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.hash_seed	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	computes content hash seed for caching formula layout
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.height	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	stores the default bounding height of the rendered formula
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.modify_special_strings	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	replaces double-character sequences and special TeX macros
+manimlib.mobject.svg.old_tex_mobject:SingleStringTex.organize_submobjects_left_to_right	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	sorts rendered glyph submobjects by their horizontal x coordinate
 manimlib.mobject.svg.special_tex:BulletedList	improved	BN-08	crates/fmn-library/src/special_tex.rs#tests	uses bundled Scribe text and native list composition without constructing an itemize or enumerate TeX document
 manimlib.mobject.svg.special_tex:BulletedList.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves item order labels spacing alignment font and style forwarding through the native family builder without an external typesetting tool
 manimlib.mobject.svg.special_tex:BulletedList.fade_all_but	same	scripts/manim_ref/manimlib/mobject/svg/special_tex.py	crates/fmn-python/tests/bridge.py	mutates the live native item family with the exact selected-opacity and label-height scaling rule while preserving child identities
@@ -1500,28 +1592,57 @@ manimlib.mobject.svg.special_tex:TexTextFromPresetString.default_color	same	scri
 manimlib.mobject.svg.special_tex:TexTextFromPresetString.tex	same	scripts/manim_ref/manimlib/mobject/svg/special_tex.py	crates/fmn-python/tests/bridge.py	retains the exact empty preset class default
 manimlib.mobject.svg.special_tex:Title	improved	BN-08	crates/fmn-library/src/special_tex.rs#tests	uses bundled Scribe part layout plus a native Line underline instead of an implicit TexText render
 manimlib.mobject.svg.special_tex:Title.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves isolated part topology frame-top placement optional underline fixed or matched width independent underline style and live underline identity
+manimlib.mobject.svg.string_mobject:StringMobject	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	is the abstract base class for string-based markup and formula vector mobjects
+manimlib.mobject.svg.string_mobject:StringMobject.__init__	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	initializes StringMobject with string content, configured items, and parser settings
+manimlib.mobject.svg.string_mobject:StringMobject.assign_labels_by_color	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	assigns structural span labels to submobjects using temporary color encoding
+manimlib.mobject.svg.string_mobject:StringMobject.build_groups	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	groups contiguous glyph submobjects into logical word and symbol spans
 manimlib.mobject.svg.string_mobject:StringMobject.build_parts_from_indices_lists	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	builds identity-preserving nested VGroups from native glyph ordinals
 manimlib.mobject.svg.string_mobject:StringMobject.find_spans_by_selector	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	preserves string regex half-open range iterable negative-index and invalid-selector behavior in Python character coordinates
+manimlib.mobject.svg.string_mobject:StringMobject.get_attr_dict_from_command_pair	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	parses markup attributes between matching opening and closing command tags
+manimlib.mobject.svg.string_mobject:StringMobject.get_command_flag	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	extracts command flag identifier from regex match object
+manimlib.mobject.svg.string_mobject:StringMobject.get_command_matches	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	finds all regex command matches within the formatted string
+manimlib.mobject.svg.string_mobject:StringMobject.get_command_string	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	formats an attribute dictionary into a markup command string
+manimlib.mobject.svg.string_mobject:StringMobject.get_configured_items	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	returns list of configured substring styling and color items
+manimlib.mobject.svg.string_mobject:StringMobject.get_content	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	returns the processed string content ready for typesetting
+manimlib.mobject.svg.string_mobject:StringMobject.get_content_prefix_and_suffix	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	returns standard prefix and suffix strings enclosing the formatted content
+manimlib.mobject.svg.string_mobject:StringMobject.get_group_part_items	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	collects submobject groups corresponding to tagged markup spans
+manimlib.mobject.svg.string_mobject:StringMobject.get_specified_part_items	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	extracts submobjects belonging to explicitly specified substring selectors
+manimlib.mobject.svg.string_mobject:StringMobject.get_specified_substrings	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	extracts all explicitly targeted substring spans
 manimlib.mobject.svg.string_mobject:StringMobject.get_string	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	returns the original source string retained by the native-backed family
 manimlib.mobject.svg.string_mobject:StringMobject.get_submob_indices_list_by_span	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	maps a Python character span to every fully contained native glyph using exact UTF-8 source provenance
 manimlib.mobject.svg.string_mobject:StringMobject.get_submob_indices_lists_by_selector	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	returns one nonempty native glyph-ordinal list per selected occurrence in selector order
+manimlib.mobject.svg.string_mobject:StringMobject.get_svg_string	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	produces SVG vector markup string representing the full rendered text
+manimlib.mobject.svg.string_mobject:StringMobject.get_svg_string_by_content	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	generates SVG vector markup for the given raw string content
+manimlib.mobject.svg.string_mobject:StringMobject.get_symbol_substrings	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	tokenizes string into individual symbol and character substrings
 manimlib.mobject.svg.string_mobject:StringMobject.height	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact None class default
+manimlib.mobject.svg.string_mobject:StringMobject.mobjects_from_svg_string	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	parses SVG string into submobject vector paths with preserved span metadata
+manimlib.mobject.svg.string_mobject:StringMobject.parse	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	parses formatted input string into shaped glyph paths and styling spans
+manimlib.mobject.svg.string_mobject:StringMobject.rearrange_submobjects_by_positions	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	re-indexes glyph submobjects by their visual horizontal positions
+manimlib.mobject.svg.string_mobject:StringMobject.replace_for_content	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	replaces command markup tags with content-specific representations
+manimlib.mobject.svg.string_mobject:StringMobject.replace_for_matching	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	replaces markup tags with standardized placeholders for substring matching
 manimlib.mobject.svg.string_mobject:StringMobject.select_part	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	returns the requested identity-preserving occurrence group
 manimlib.mobject.svg.string_mobject:StringMobject.select_parts	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	selects every occurrence directly from retained native source spans without the Reference's second colored SVG
 manimlib.mobject.svg.string_mobject:StringMobject.select_unisolated_substring	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	selects an unisolated string or regex through complete native span provenance rather than path-count inference
 manimlib.mobject.svg.string_mobject:StringMobject.set_parts_color	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected live glyph family in place and returns the original proxy
 manimlib.mobject.svg.string_mobject:StringMobject.set_parts_color_by_dict	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order over live native glyph families
 manimlib.mobject.svg.string_mobject:StringMobject.span_contains	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	preserves inclusive containment over half-open source spans
+manimlib.mobject.svg.string_mobject:StringMobject.substr_to_path_count	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	counts vector path components generated for a given substring
+manimlib.mobject.svg.string_mobject:cdist	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	is a module-internal import bound in the Python module namespace
+manimlib.mobject.svg.string_mobject:linear_sum_assignment	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	is a module-internal import bound in the Python module namespace
+manimlib.mobject.svg.string_mobject:re	same	scripts/manim_ref/manimlib/mobject/svg/string_mobject.py	crates/fmn-python/tests/bridge.py	is a module-internal import bound in the Python module namespace
 manimlib.mobject.svg.svg_mobject:ET	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical ElementTree module now that origins record the full object path
+manimlib.mobject.svg.svg_mobject:PATH_TO_POINTS	same	crates/fmn-geom/src/svg/mod.rs	crates/fmn-geom/tests/svg.rs	caches parsed bezier curve point arrays keyed by SVG path string
 manimlib.mobject.svg.svg_mobject:Path	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical pathlib Path the Reference imports
 manimlib.mobject.svg.svg_mobject:SVGMobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	is the authored user-file surface over Chisel's hardened document processor with the Reference's post-passes
 manimlib.mobject.svg.svg_mobject:SVGMobject.__init__	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds one child per rendered shape in document order then flips styles centers and scales exactly as the Reference constructor
 manimlib.mobject.svg.svg_mobject:SVGMobject.apply_style_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	copies resolved paint attributes onto the mobject over any paint-server-like shape
 manimlib.mobject.svg.svg_mobject:SVGMobject.ellipse_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the circle stretched to the ellipse extents at its center
+manimlib.mobject.svg.svg_mobject:SVGMobject.file_name	same	crates/fmn-geom/src/svg/mod.rs	crates/fmn-geom/tests/svg.rs	stores the source SVG file path or asset identifier
 manimlib.mobject.svg.svg_mobject:SVGMobject.file_name_to_svg_string	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	reads the source through the governed native reader with identical byte budget and refusals
 manimlib.mobject.svg.svg_mobject:SVGMobject.generate_config_style_dict	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	mirrors the seed-to-attribute conversion table verbatim over svg_default
 manimlib.mobject.svg.svg_mobject:SVGMobject.handle_transform	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	applies the svgelements matrix layout as a 2d linear map plus translation over any matrix-like
 manimlib.mobject.svg.svg_mobject:SVGMobject.hash_seed	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	returns the class name svg_default path_string_config and svg_string tuple that keys the family cache
+manimlib.mobject.svg.svg_mobject:SVGMobject.height	same	crates/fmn-geom/src/svg/mod.rs	crates/fmn-geom/tests/svg.rs	defines the default target height scaling for imported SVG documents
 manimlib.mobject.svg.svg_mobject:SVGMobject.init_svg_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	rebuilds and re-attaches the shape family with the y-flip
 manimlib.mobject.svg.svg_mobject:SVGMobject.line_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the governed straight segment between the live endpoints
 manimlib.mobject.svg.svg_mobject:SVGMobject.mobjects_from_svg	tiered	OOT-SVGELEMENTS-PARSER	crates/fmn-python/tests/bridge.py	dispatches over parsed svgelements element types; the native document processor owns that parse so the seam stays parser-coupled
@@ -1532,26 +1653,82 @@ manimlib.mobject.svg.svg_mobject:SVGMobject.polygon_to_mobject	same	scripts/mani
 manimlib.mobject.svg.svg_mobject:SVGMobject.polyline_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds the open polyline over lifted xy vertices
 manimlib.mobject.svg.svg_mobject:SVGMobject.rect_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	builds sharp or rounded rectangles with the corner ratio stretch and center placement
 manimlib.mobject.svg.svg_mobject:SVGMobject.text_to_mobject	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	explicit no-op at the pin where text dispatch stays commented out
+manimlib.mobject.svg.svg_mobject:SVGMobject.width	same	crates/fmn-geom/src/svg/mod.rs	crates/fmn-geom/tests/svg.rs	defines the optional target width scaling for imported SVG documents
+manimlib.mobject.svg.svg_mobject:SVG_HASH_TO_MOB_MAP	same	crates/fmn-geom/src/svg/mod.rs	crates/fmn-geom/tests/svg.rs	caches parsed SVGMobject vector structures keyed by document content hash
 manimlib.mobject.svg.svg_mobject:VMobjectFromSVGPath	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	is the authored single-path wrapper over the same hardened parser accepting any object exposing d
 manimlib.mobject.svg.svg_mobject:VMobjectFromSVGPath.__init__	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	validates path data applies joint and anti-alias configuration and resolves vmobject style defaults
+manimlib.mobject.svg.svg_mobject:VMobjectFromSVGPath.handle_arc	same	crates/fmn-geom/src/svg/mod.rs	crates/fmn-geom/tests/svg.rs	converts SVG elliptical arc path commands into quadratic bezier approximations
+manimlib.mobject.svg.svg_mobject:VMobjectFromSVGPath.handle_commands	same	crates/fmn-geom/src/svg/mod.rs	crates/fmn-geom/tests/svg.rs	dispatches SVG path drawing commands into Chisel quad path builders
+manimlib.mobject.svg.svg_mobject:VMobjectFromSVGPath.init_points	same	crates/fmn-geom/src/svg/mod.rs	crates/fmn-geom/tests/svg.rs	parses path data string and populates quadratic bezier curve control points
 manimlib.mobject.svg.svg_mobject:_convert_point_to_3d	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	lifts an svg xy pair to a zero-z scene point
 manimlib.mobject.svg.svg_mobject:get_svg_content_height	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	measures the untransformed content extent in user units over the hardened parse
 manimlib.mobject.svg.svg_mobject:io	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib io module the Reference imports
+manimlib.mobject.svg.svg_mobject:se	same	scripts/manim_ref/manimlib/mobject/svg/svg_mobject.py	crates/fmn-python/tests/bridge.py	is a module-internal import bound in the Python module namespace
+manimlib.mobject.svg.tex_mobject:Tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	renders LaTeX mathematical formulas into native quad path vector mobjects via fmd-math
+manimlib.mobject.svg.tex_mobject:Tex.__init__	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	initializes Tex formula with expression string, color mapping, and font size
+manimlib.mobject.svg.tex_mobject:Tex.get_attr_dict_from_command_pair	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	extracts styling attributes from matching opening and closing TeX macro delimiters
+manimlib.mobject.svg.tex_mobject:Tex.get_color_command	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	generates TeX color macro command string for color styling
+manimlib.mobject.svg.tex_mobject:Tex.get_command_flag	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	identifies command flag from TeX macro regex match
+manimlib.mobject.svg.tex_mobject:Tex.get_command_matches	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	finds all styled TeX macro occurrences in formula string
+manimlib.mobject.svg.tex_mobject:Tex.get_command_string	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	constructs TeX formatting command string from attribute dictionary
+manimlib.mobject.svg.tex_mobject:Tex.get_configured_items	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	returns list of configured substring color and style items
+manimlib.mobject.svg.tex_mobject:Tex.get_content_prefix_and_suffix	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	wraps expression in math mode delimiters and document preamble
 manimlib.mobject.svg.tex_mobject:Tex.get_part_by_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	returns the requested occurrence from the identity-preserving VGroup selected through native UTF-8 source spans
 manimlib.mobject.svg.tex_mobject:Tex.get_parts_by_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	selects string regex range iterable repeated and Unicode occurrences through fmd-math layout provenance rather than render-and-align heuristics
+manimlib.mobject.svg.tex_mobject:Tex.get_svg_string_by_content	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	layouts formula and generates vector SVG string via fmd-math
+manimlib.mobject.svg.tex_mobject:Tex.get_symbol_substrings	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	tokenizes TeX formula into individual mathematical symbols and glyphs
 manimlib.mobject.svg.tex_mobject:Tex.get_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	returns the normalized source string retained by the native typeset family
+manimlib.mobject.svg.tex_mobject:Tex.make_number_changeable	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	binds a numerical substring in the formula to a dynamic DecimalNumber controller
+manimlib.mobject.svg.tex_mobject:Tex.replace_for_content	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	replaces markup command placeholders with LaTeX formatting commands
+manimlib.mobject.svg.tex_mobject:Tex.replace_for_matching	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	strips formatting macros to expose clean text for substring matching
 manimlib.mobject.svg.tex_mobject:Tex.set_color_by_tex	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected native-span family in place and returns the original Tex proxy including through the animate builder
 manimlib.mobject.svg.tex_mobject:Tex.set_color_by_tex_to_color_map	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order over the live native-backed family
+manimlib.mobject.svg.tex_mobject:Tex.substr_to_path_count	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	counts vector glyph paths produced for the given TeX substring
 manimlib.mobject.svg.tex_mobject:Tex.tex_environment	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact align-star class default while native fmd-math owns layout
 manimlib.mobject.svg.tex_mobject:TexText	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	is an authored Tex subclass selecting fmd-math text-mainland mode rather than a schema-generated shell
 manimlib.mobject.svg.tex_mobject:TexText.tex_environment	same	scripts/manim_ref/manimlib/mobject/svg/tex_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact empty-environment class override
+manimlib.mobject.svg.tex_mobject:get_tex_mob_scale_factor	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	computes default scale multiplier converting TeX point sizes to scene world units
 manimlib.mobject.svg.text_mobject:Code	same	crates/fmn-library/src/code.rs	crates/fmn-python/tests/bridge.py	is an authored MarkupText subclass binding fmd syntax highlighting over CM Typewriter with line numbers gutter
 manimlib.mobject.svg.text_mobject:Code.__init__	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	constructs highlighted code over Scribe text with font size and color style
+manimlib.mobject.svg.text_mobject:DEFAULT_CANVAS_HEIGHT	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	defines the default virtual canvas height for Pango text shaping
+manimlib.mobject.svg.text_mobject:DEFAULT_CANVAS_WIDTH	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	defines the default virtual canvas width for Pango text shaping
+manimlib.mobject.svg.text_mobject:DEFAULT_LINE_SPACING_SCALE	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	defines the default 0.6 line spacing multiplier between consecutive text lines
+manimlib.mobject.svg.text_mobject:MarkupText	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	renders Pango-style HTML/XML markup formatted text into vector glyph mobjects
+manimlib.mobject.svg.text_mobject:MarkupText.MARKUP_ENTITY_DICT	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	maps special markup characters to their XML entity representations
+manimlib.mobject.svg.text_mobject:MarkupText.MARKUP_TAGS	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	defines supported markup styling tags (b, i, u, s, tt, sub, sup, big, small)
+manimlib.mobject.svg.text_mobject:MarkupText.__init__	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	initializes MarkupText with markup string, font attributes, alignment, and gradient
+manimlib.mobject.svg.text_mobject:MarkupText.escape_markup_char	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	escapes special characters into XML entities
+manimlib.mobject.svg.text_mobject:MarkupText.get_attr_dict_from_command_pair	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	extracts font and styling attributes from markup tag pair
+manimlib.mobject.svg.text_mobject:MarkupText.get_command_flag	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	identifies command flag from markup tag match
+manimlib.mobject.svg.text_mobject:MarkupText.get_command_matches	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	finds all opening and closing markup tags in text
+manimlib.mobject.svg.text_mobject:MarkupText.get_command_string	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	formats attribute dictionary into opening or closing markup tag
+manimlib.mobject.svg.text_mobject:MarkupText.get_configured_items	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	returns configured substring styling dictionaries
+manimlib.mobject.svg.text_mobject:MarkupText.get_content_prefix_and_suffix	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	wraps markup string in root container tags
 manimlib.mobject.svg.text_mobject:MarkupText.get_part_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the requested identity-preserving native text occurrence
 manimlib.mobject.svg.text_mobject:MarkupText.get_parts_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	selects repeated regex range and Unicode text occurrences through Scribe glyph provenance
+manimlib.mobject.svg.text_mobject:MarkupText.get_svg_string_by_content	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	shapes markup text and outputs SVG path data via fmd-font
 manimlib.mobject.svg.text_mobject:MarkupText.get_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	returns the original plain or markup source string
+manimlib.mobject.svg.text_mobject:MarkupText.replace_for_content	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	normalizes markup tags for typesetting content
+manimlib.mobject.svg.text_mobject:MarkupText.replace_for_matching	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	strips markup tags to expose pure text for substring matching
 manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	colors every selected native glyph family in place and returns the original text proxy
 manimlib.mobject.svg.text_mobject:MarkupText.set_color_by_text_to_color_map	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	applies selector color entries in mapping order including constructor t2c maps
+manimlib.mobject.svg.text_mobject:MarkupText.unescape_markup_char	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	replaces XML entities with literal characters
+manimlib.mobject.svg.text_mobject:Text	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	renders plain text strings into vector glyph mobjects using bundled sovereign fonts
+manimlib.mobject.svg.text_mobject:Text.__init__	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	initializes Text mobject with font_size, font family, line_spacing, and styling maps
+manimlib.mobject.svg.text_mobject:Text.get_command_flag	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	extracts command flag from text formatting matches
+manimlib.mobject.svg.text_mobject:Text.get_command_matches	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	finds substring styling tag boundaries
+manimlib.mobject.svg.text_mobject:Text.replace_for_content	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	prepares raw text content for font shaping
+manimlib.mobject.svg.text_mobject:Text.replace_for_matching	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	normalizes text for substring position matching
+manimlib.mobject.svg.text_mobject:_Alignment	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	encapsulates horizontal text alignment policy (LEFT, CENTER, RIGHT)
+manimlib.mobject.svg.text_mobject:_Alignment.VAL_DICT	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	maps alignment names LEFT, CENTER, RIGHT to integer enums
+manimlib.mobject.svg.text_mobject:_Alignment.__init__	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	initializes _Alignment with alignment string
+manimlib.mobject.svg.text_mobject:contextmanager	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	is a module-internal import bound in the Python module namespace
+manimlib.mobject.svg.text_mobject:get_text_mob_scale_factor	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	computes default scale multiplier converting text point sizes to scene world units
+manimlib.mobject.svg.text_mobject:manimpango	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	is a module-internal import bound in the Python module namespace
+manimlib.mobject.svg.text_mobject:markup_to_svg	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	converts markup text string into SVG path markup via native font shaping
+manimlib.mobject.svg.text_mobject:pygments	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	is a module-internal import bound in the Python module namespace
+manimlib.mobject.svg.text_mobject:register_font	same	crates/fmn-text/src/lib.rs	crates/fmn-text/tests/text_layout.rs	registers a user font outline face into the typography font registry
+manimlib.mobject.svg.text_mobject:tempfile	same	scripts/manim_ref/manimlib/mobject/svg/text_mobject.py	crates/fmn-python/tests/bridge.py	is a module-internal import bound in the Python module namespace
 manimlib.mobject.three_dimensions:Cone	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	is an authored Cylinder subclass over Atlas's non-centered tapered surface authority
 manimlib.mobject.three_dimensions:Cone.__init__	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	preserves range forwarding height radius axis resolution style and the pinned impossible positional-forwarding refusal
 manimlib.mobject.three_dimensions:Cone.uv_func	same	scripts/manim_ref/manimlib/mobject/three_dimensions.py	crates/fmn-python/tests/bridge.py	uses the exact object-space taper sampled by the native cone builder
