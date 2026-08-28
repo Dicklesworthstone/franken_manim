@@ -191,7 +191,9 @@ fn public_prelude_constructs_expanded_mobjects() {
     let md = Markdown::new("# Header\n\nText").build(&book);
     assert!(md.is_ok());
 
-    let table = TableMobject::from_csv("a,b\n1,2", ',').unwrap().build(&book);
+    let table = TableMobject::from_csv("a,b\n1,2", ',')
+        .unwrap()
+        .build(&book);
     assert!(table.is_ok());
 
     let chart = BarChart::new(vec![1.0, 2.0, 3.0]).build(&book);
@@ -216,9 +218,8 @@ fn public_prelude_constructs_expanded_mobjects() {
     assert!(int_mob.is_ok());
 
     let sphere = Sphere::new(1.0).build();
-    assert!(!sphere.vertices.is_empty());
+    assert!(!sphere.points().is_empty());
 
     let cube = Cube::new(1.0).build();
-    assert!(!cube.surfaces.is_empty());
+    assert!(!cube.children().is_empty());
 }
-

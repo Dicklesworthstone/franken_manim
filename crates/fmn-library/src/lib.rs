@@ -147,14 +147,14 @@ pub use matrix::{
     DEFAULT_MAX_MATRIX_ENTRIES, DecimalMatrix, IntegerMatrix, Matrix, MatrixError, MatrixMobject,
     MobjectMatrix, TexMatrix,
 };
+pub use network_graph::{
+    DEFAULT_SPRING_IDEAL_EDGE, DEFAULT_SPRING_ITERATIONS, GraphLayout, NetworkGraph,
+    NetworkGraphError,
+};
 pub use neural_network::{
     DEFAULT_LAYER_SPACING, DEFAULT_MAX_DISPLAYED_NEURONS, DEFAULT_NEURON_RADIUS,
     DEFAULT_NEURON_SPACING, DEFAULT_SYNAPSE_STROKE_WIDTH, LayerKind, LayerSpec,
     NeuralNetworkConfig, NeuralNetworkError, NeuralNetworkMobject,
-};
-pub use network_graph::{
-    DEFAULT_SPRING_IDEAL_EDGE, DEFAULT_SPRING_ITERATIONS, GraphLayout, NetworkGraph,
-    NetworkGraphError,
 };
 pub use numbers::{DEFAULT_MAX_NUMBER_CHARACTERS, DecimalNumber, Integer};
 pub use obj_model::{
