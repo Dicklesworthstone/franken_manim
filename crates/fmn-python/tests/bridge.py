@@ -19518,6 +19518,62 @@ assert type(_submobject_type).__name__ == "TypeVar"
 assert _submobject_type.__name__ == "SubmobjectType"
 assert manimlib.SubmobjectType is _submobject_type
 
+_vm_mod = importlib.import_module("manimlib.mobject.types.vectorized_mobject")
+assert type(getattr(_vm_mod, "SubVmobjectType")).__name__ == "TypeVar"
+assert _vm_mod.SubVmobjectType.__name__ == "SubVmobjectType"
+assert issubclass(manimlib.VGroup, manimlib.VMobject)
+group = manimlib.VGroup(manimlib.Square(), manimlib.Circle())
+assert len(group) == 2
+
+style_square = manimlib.Square()
+assert style_square.set_fill(manimlib.BLUE, opacity=0.5) is style_square
+assert style_square.has_fill()
+assert style_square.get_fill_opacity() > 0
+assert style_square.set_stroke(manimlib.YELLOW, width=3.0, opacity=1.0) is style_square
+assert style_square.has_stroke()
+assert np.isclose(style_square.get_stroke_width(), 3.0)
+assert style_square.set_opacity(0.25) is style_square
+assert np.isclose(style_square.get_fill_opacity(), 0.25)
+assert np.isclose(style_square.get_stroke_opacity(), 0.25)
+style_square.set_anti_alias_width(2.5)
+assert np.isclose(style_square.get_anti_alias_width(), 2.5)
+style_square.set_flat_stroke(True)
+assert style_square.get_flat_stroke() is True
+style_square.set_scale_stroke_with_zoom(True)
+assert style_square.get_scale_stroke_with_zoom() is True
+style_square.set_backstroke(width=2)
+assert bool(style_square.uniforms["stroke_behind"]) is True
+copied_style = manimlib.Square()
+assert copied_style.match_style(style_square) is copied_style
+assert np.isclose(copied_style.get_fill_opacity(), style_square.get_fill_opacity())
+style_dict = style_square.get_style()
+assert "fill_rgba" in style_dict and "stroke_width" in style_dict
+faded = manimlib.Square().set_fill(manimlib.RED, opacity=1.0)
+faded.fade(0.5)
+assert np.isclose(faded.get_fill_opacity(), 0.5)
+assert faded.get_group_class() is manimlib.VGroup
+assert manimlib.VMobject.data_dtype[0][0] == "point"
+assert "auto" in manimlib.VMobject.joint_type_map
+assert manimlib.VMobject.pre_function_handle_to_anchor_scale_factor == 0.01
+assert manimlib.Square().rotate(np.pi / 2) is not None
+wide = manimlib.Square().stretch(2.0, 0)
+plain = manimlib.Square()
+assert wide.get_width() > plain.get_width()
+depth_on = manimlib.Square().apply_depth_test()
+assert bool(depth_on.uniforms["depth_test"]) is True
+depth_off = manimlib.Square().apply_depth_test().deactivate_depth_test()
+assert bool(depth_off.uniforms["depth_test"]) is False
+try:
+    manimlib.Square().replace_shader_code("old", "new")
+    raise AssertionError("replace_shader_code did not refuse")
+except NotImplementedError as error:
+    assert "OOT-ARBITRARY-GLSL" in str(error)
+try:
+    manimlib.Square().init_shader_wrapper(None)
+    raise AssertionError("init_shader_wrapper did not refuse")
+except NotImplementedError as error:
+    assert "OOT-ARBITRARY-GLSL" in str(error)
+
 
 # ---------------------------------------------------------------------------
 # fm-fnun: the remaining manimlib.utils.space_ops functions route through

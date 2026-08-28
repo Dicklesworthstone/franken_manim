@@ -3172,6 +3172,31 @@ class VMobject(Mobject):
     def get_group_class(self):
         return getattr(_FMN_ROOT, "VGroup", VMobject)
 
+    def init_colors(self):
+        self.set_stroke(
+            color=self.stroke_color,
+            width=self.stroke_width,
+            opacity=self.stroke_opacity,
+            behind=self.stroke_behind,
+        )
+        self.set_fill(
+            color=self.fill_color,
+            opacity=self.fill_opacity,
+            border_width=self.fill_border_width,
+        )
+        self.set_flat_stroke(self.flat_stroke)
+        return self
+
+    def set_scale_stroke_with_zoom(self, scale_stroke_with_zoom=True, recurse=True):
+        flag = bool(scale_stroke_with_zoom)
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.scale_stroke_with_zoom = flag
+            mob.uniforms["scale_stroke_with_zoom"] = flag
+        return self
+
+    def get_scale_stroke_with_zoom(self):
+        return bool(self.uniforms["scale_stroke_with_zoom"])
+
     def set_points(self, points):
         if len(points) != 0 and len(points) % 2 != 1:
             raise AssertionError
