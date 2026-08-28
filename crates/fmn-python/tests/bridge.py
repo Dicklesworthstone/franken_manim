@@ -27,6 +27,7 @@ import types
 import weakref
 import zlib
 
+import numbers
 import numpy as np
 
 import manimlib
@@ -19873,6 +19874,79 @@ assert _surface.get_num_points() > 0
 _user_axis = _tdaxes.create_axis((-2, 2, 1), {}, None)
 assert np.allclose(_user_axis.n2p(0), [0.0, 0.0, 0.0])
 assert _tdaxes.get_z_axis() is _tdaxes.z_axis
+
+# Remaining coordinate_systems shelf: classes, two-term ranges, complex
+# number mapping, abstract CoordinateSystem, and ThreeDAxes.get_graph.
+cs_mod = importlib.import_module("manimlib.mobject.coordinate_systems")
+assert cs_mod.DEFAULT_X_RANGE == (-8.0, 8.0, 1.0)
+assert cs_mod.DEFAULT_Y_RANGE == (-4.0, 4.0, 1.0)
+assert cs_mod.EPSILON == 1e-8
+assert cs_mod.full_range_specifier((-2, 2)) == (-2, 2, 1)
+assert cs_mod.full_range_specifier((-2, 2, 0.5)) == (-2, 2, 0.5)
+assert manimlib.full_range_specifier is cs_mod.full_range_specifier
+assert cs_mod.numbers is numbers
+assert issubclass(cs_mod.CoordinateSystem, abc.ABC)
+try:
+    cs_mod.CoordinateSystem()
+except TypeError:
+    pass
+else:
+    raise AssertionError("CoordinateSystem must stay abstract")
+
+two_term_axes = manimlib.Axes(x_range=(-2, 2), y_range=(-1, 1))
+assert two_term_axes.x_range == (-2.0, 2.0, 1.0)
+assert two_term_axes.y_range == (-1.0, 1.0, 1.0)
+assert two_term_axes.get_axes() is two_term_axes.axes
+assert two_term_axes.get_all_ranges() == [two_term_axes.x_range, two_term_axes.y_range]
+assert np.allclose(
+    two_term_axes.coords_to_point(1.0, 0.5),
+    two_term_axes.c2p(1.0, 0.5),
+)
+assert np.allclose(
+    two_term_axes.point_to_coords(two_term_axes.c2p(1.0, 0.5)),
+    [1.0, 0.5],
+)
+assert two_term_axes.add_coordinate_labels() is two_term_axes
+assert manimlib.Axes.default_axis_config == {}
+assert manimlib.Axes.default_x_axis_config == {}
+assert manimlib.Axes.default_y_axis_config["line_to_number_direction"] is not None
+
+two_term_plane = manimlib.NumberPlane(x_range=(-3, 3), y_range=(-2, 2))
+assert two_term_plane.x_range == (-3.0, 3.0, 1.0)
+assert two_term_plane.get_axes() is two_term_plane.axes
+assert manimlib.NumberPlane.default_axis_config["include_ticks"] is False
+
+_cplane.add_coordinate_labels()
+assert _cplane.coordinate_labels is not None
+assert np.allclose(_cplane.n2p(1 + 2j), _cplane.coords_to_point(1.0, 2.0))
+assert _cplane.p2n(_cplane.number_to_point(3 - 1j)) == 3 - 1j
+assert _cplane.point_to_number(_cplane.n2p(-2j)) == -2j
+
+two_term_td = manimlib.ThreeDAxes(x_range=(-2, 2), y_range=(-2, 2), z_range=(-1, 1))
+assert two_term_td.x_range == (-2.0, 2.0, 1.0)
+assert two_term_td.z_range == (-1.0, 1.0, 1.0)
+assert two_term_td.get_all_ranges() == [
+    two_term_td.x_range,
+    two_term_td.y_range,
+    two_term_td.z_range,
+]
+assert manimlib.ThreeDAxes.dimension == 3
+_td_graph = _tdaxes.get_graph(
+    lambda u, v: u + v,
+    u_range=(0.0, 1.0),
+    v_range=(0.0, 1.0),
+    resolution=(3, 3),
+)
+assert isinstance(_td_graph, manimlib.ParametricSurface)
+assert not isinstance(_td_graph, functions.ParametricCurve)
+assert _td_graph.get_num_points() > 0
+assert np.allclose(_td_graph.u_range[:2], [0.0, 1.0])
+assert np.allclose(_td_graph.v_range[:2], [0.0, 1.0])
+# On default unit axes the (1, 0, func=1) sample sits at c2p(1, 0, 1).
+assert np.allclose(
+    _td_graph.uv_func(1.0, 0.0),
+    [1.0, 0.0, 1.0],
+)
 
 
 # ---------------------------------------------------------------------------

@@ -6156,7 +6156,20 @@ def _space_get_norm(vect):
     return sum(x ** 2 for x in vect) ** 0.5
 
 
-class CoordinateSystem:
+def full_range_specifier(range_args):
+    # Reference coordinate_systems.py:48. Two-term ranges get a unit step;
+    # already-complete triples (and longer sequences) pass through.
+    if len(range_args) == 2:
+        return (*range_args, 1)
+    return range_args
+
+
+# Schema install later copies exported names onto this module and would
+# otherwise overwrite the real function with the parity-surface placeholder.
+_FULL_RANGE_SPECIFIER = full_range_specifier
+
+
+class CoordinateSystem(_abc.ABC):
     """The Reference's coordinate-system mixin over live axis geometry.
 
     Concrete axes own their construction in Atlas; this layer owns the
@@ -6172,14 +6185,16 @@ class CoordinateSystem:
         y_range=(-4.0, 4.0, 1.0),
         num_sampled_graph_points_per_tick=5,
     ):
-        self.x_range = tuple(x_range) if len(x_range) == 3 else (*x_range, 1)
-        self.y_range = tuple(y_range) if len(y_range) == 3 else (*y_range, 1)
+        self.x_range = _FULL_RANGE_SPECIFIER(x_range)
+        self.y_range = _FULL_RANGE_SPECIFIER(y_range)
         self.num_sampled_graph_points_per_tick = num_sampled_graph_points_per_tick
 
+    @_abc.abstractmethod
     def coords_to_point(self, *coords):
         del coords
         raise NotImplementedError("CoordinateSystem.coords_to_point is abstract")
 
+    @_abc.abstractmethod
     def point_to_coords(self, point):
         del point
         raise NotImplementedError("CoordinateSystem.point_to_coords is abstract")
@@ -6510,6 +6525,10 @@ class CoordinateSystem:
 
 
 class Axes(VGroup, CoordinateSystem):
+    default_axis_config = dict()
+    default_x_axis_config = dict()
+    default_y_axis_config = dict(line_to_number_direction=_LEFT)
+
     def __init__(
         self,
         x_range=(-8.0, 8.0, 1.0),
@@ -6534,8 +6553,8 @@ class Axes(VGroup, CoordinateSystem):
             )
         _install_live_state(self)
         self._axes_params = (
-            tuple(float(v) for v in x_range),
-            tuple(float(v) for v in y_range),
+            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(x_range)),
+            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(y_range)),
             dict(axis_config or {}),
             dict(x_axis_config or {}),
             dict(y_axis_config or {}),
@@ -6638,6 +6657,9 @@ class Axes(VGroup, CoordinateSystem):
 
 
 class ThreeDAxes(Axes):
+    dimension = 3
+    default_z_axis_config = dict()
+
     def __init__(
         self,
         x_range=(-6.0, 6.0, 1.0),
@@ -6677,8 +6699,8 @@ class ThreeDAxes(Axes):
             )
         _install_live_state(self)
         self._axes_params = (
-            tuple(float(v) for v in x_range),
-            tuple(float(v) for v in y_range),
+            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(x_range)),
+            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(y_range)),
             dict(axis_config or {}),
             dict(x_axis_config or {}),
             dict(y_axis_config or {}),
@@ -6686,11 +6708,12 @@ class ThreeDAxes(Axes):
             None if width is None else float(width),
             float(unit_size),
         )
+        z_terms = tuple(float(v) for v in _FULL_RANGE_SPECIFIER(z_range))
         specs = self._build_three_d_axes(
             _native_shell_factory,
             self._axes_params[0],
             self._axes_params[1],
-            tuple(float(v) for v in z_range),
+            z_terms,
             self._axes_params[2],
             self._axes_params[3],
             self._axes_params[4],
@@ -6706,7 +6729,7 @@ class ThreeDAxes(Axes):
         self.axes = VGroup(self.x_axis, self.y_axis, self.z_axis)
         self.x_range = self._axes_params[0]
         self.y_range = self._axes_params[1]
-        self.z_range = tuple(float(v) for v in z_range)
+        self.z_range = z_terms
         self.dimension = 3
 
     def get_z_axis(self):
@@ -6735,6 +6758,43 @@ class ThreeDAxes(Axes):
             axis.add(label)
         self.axis_labels = labels
 
+    def get_graph(
+        self,
+        func,
+        color=None,
+        opacity=0.9,
+        u_range=None,
+        v_range=None,
+        **kwargs,
+    ):
+        # Reference coordinate_systems.py:585. z = func(u, v) is sampled as
+        # a ParametricSurface, then the live axis basis maps it into scene
+        # space. This shadows CoordinateSystem.get_graph (a 2D curve).
+        if color is None:
+            color = _BLUE_E
+        u_range = u_range or self.x_range[:2]
+        v_range = v_range or self.y_range[:2]
+        ranges = (self.x_range, self.y_range, self.z_range)
+        axes = (self.x_axis, self.y_axis, self.z_axis)
+        matrix = _np.array(
+            [
+                _axis_number_to_point(axis, rng[0], rng[1], 1.0)
+                - _axis_number_to_point(axis, rng[0], rng[1], 0.0)
+                for axis, rng in zip(axes, ranges)
+            ]
+        ).T
+        surface = ParametricSurface(
+            lambda u, v: [u, v, func(u, v)],
+            u_range=u_range,
+            v_range=v_range,
+            color=color,
+            opacity=opacity,
+            **kwargs,
+        )
+        surface.apply_matrix(matrix, about_point=_ORIGIN)
+        surface.shift(self.c2p(0, 0, 0))
+        return surface
+
     def get_parametric_surface(self, func, color=None, opacity=0.9, **kwargs):
         if color is None:
             color = _BLUE_E
@@ -6751,6 +6811,16 @@ class ThreeDAxes(Axes):
 
 
 class NumberPlane(Axes):
+    default_axis_config = dict(
+        color=_WHITE,
+        stroke_width=2,
+        include_ticks=False,
+        include_tip=False,
+        line_to_number_buff=_SMALL_BUFF,
+        line_to_number_direction=_DL,
+    )
+    default_y_axis_config = dict(line_to_number_direction=_DL)
+
     def __init__(
         self,
         x_range=(-8.0, 8.0, 1.0),
@@ -6779,8 +6849,8 @@ class NumberPlane(Axes):
         _install_live_state(self)
         self.make_smooth_after_applying_functions = make_smooth_after_applying_functions
         self._plane_params = (
-            tuple(float(v) for v in x_range),
-            tuple(float(v) for v in y_range),
+            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(x_range)),
+            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(y_range)),
             dict(axis_config or {}),
             dict(x_axis_config or {}),
             dict(y_axis_config or {}),
@@ -6795,16 +6865,9 @@ class NumberPlane(Axes):
         # Preserve NumberPlane's class defaults in that shared shell path,
         # then layer the caller's ordinary axis configs over them in the
         # same order as the native NumberPlane builder.
-        label_axis_config = {
-            "color": _WHITE,
-            "stroke_width": 2.0,
-            "include_ticks": False,
-            "include_tip": False,
-            "line_to_number_buff": _SMALL_BUFF,
-            "line_to_number_direction": _DL,
-        }
+        label_axis_config = dict(self.default_axis_config)
         label_axis_config.update(self._plane_params[2])
-        label_y_axis_config = {"line_to_number_direction": _DL}
+        label_y_axis_config = dict(self.default_y_axis_config)
         self._axes_params = (
             self._plane_params[0],
             self._plane_params[1],
@@ -22040,6 +22103,16 @@ _install_vector_field_functions()
 
 
 _install_schema_surface()
+
+
+def _install_coordinate_system_helpers():
+    """Overwrite the schema placeholder for full_range_specifier."""
+    module = _ensure_module("manimlib.mobject.coordinate_systems")
+    module.full_range_specifier = _FULL_RANGE_SPECIFIER
+    _FMN_MODULE.full_range_specifier = _FULL_RANGE_SPECIFIER
+
+
+_install_coordinate_system_helpers()
 
 
 def _portal_cli_emit(code, identity, kind, message, robot, **fields):
