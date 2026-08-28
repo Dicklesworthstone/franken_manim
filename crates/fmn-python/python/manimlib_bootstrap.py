@@ -5488,7 +5488,14 @@ class Vector(Arrow):
         super().__init__(_ORIGIN, direction, buff=buff, **kwargs)
 
 
-class NumberLine(VMobject):
+class NumberLine(Line):
+    """Reference `NumberLine(Line)` over Atlas's native coords builder.
+
+    Construction does not call `Line.__init__`: the native NumberLine owns
+    the axis, ticks, and optional tip as one family. `Line` remains in the
+    MRO so `isinstance(line, Line)` matches the pinned class.
+    """
+
     def __init__(self, x_range=(-8, 8, 1), **kwargs):
         _install_live_state(self)
         parts = [float(v) for v in x_range]
@@ -5496,11 +5503,41 @@ class NumberLine(VMobject):
             parts.append(1.0)
         self.x_range = tuple(parts)
         self.x_min, self.x_max, self.x_step = parts
-        self._number_line_params = (self.x_range, dict(kwargs))
+        config = dict(kwargs)
+        self._number_line_params = (self.x_range, config)
+        self.tick_size = float(config.get("tick_size", 0.1))
+        self.longer_tick_multiple = float(config.get("longer_tick_multiple", 1.5))
+        self.tick_offset = float(config.get("tick_offset", 0.0))
+        self.include_tip = bool(config.get("include_tip", False))
+        self.include_ticks = bool(config.get("include_ticks", True))
+        spacing = config.get("big_tick_spacing")
+        if spacing is not None:
+            spacing = float(spacing)
+            self.big_tick_numbers = list(
+                _np.arange(self.x_min, self.x_max + spacing, spacing)
+            )
+        else:
+            self.big_tick_numbers = list(config.get("big_tick_numbers") or [])
+        direction = config.get("line_to_number_direction", _DOWN)
+        self.line_to_number_direction = _np.array(_vec3(direction), dtype=float)
+        self.line_to_number_buff = float(
+            config.get("line_to_number_buff", _MED_SMALL_BUFF)
+        )
+        decimal_config = config.get("decimal_number_config")
+        self.decimal_number_config = dict(
+            decimal_config
+            if decimal_config is not None
+            else dict(num_decimal_places=0, font_size=36)
+        )
+        self.numbers_to_exclude = config.get("numbers_to_exclude")
         specs = self._build_number_line(
             _native_shell_factory, self.x_range, dict(kwargs)
         )
         _hang_native_children(self, specs)
+        if self.include_ticks and self.submobjects:
+            self.ticks = self.submobjects[-1]
+        else:
+            self.ticks = VGroup()
 
     # The coordinate mapping reads the proxy's LIVE line geometry (its own
     # first/last points), so a rescaled, moved, or even stretched line maps
@@ -5545,6 +5582,67 @@ class NumberLine(VMobject):
             tick_max = self.x_max + self.x_step
         result = _np.arange(self.x_min, tick_max, self.x_step)
         return result[result <= self.x_max]
+
+    def get_tick(self, x, size=None):
+        # Reference number_line.py:122 — a short Line, rotated onto the
+        # axis, seated at n2p(x), and styled like the parent.
+        if size is None:
+            size = self.tick_size
+        result = Line(size * _DOWN, size * _UP)
+        result.rotate(self.get_angle())
+        result.move_to(self.number_to_point(x))
+        result.match_style(self)
+        return result
+
+    def add_ticks(self):
+        ticks = VGroup()
+        big = _np.asarray(self.big_tick_numbers, dtype=float)
+        for x in self.get_tick_range():
+            size = self.tick_size
+            if big.size and _np.isclose(big, x).any():
+                size *= self.longer_tick_multiple
+            ticks.add(self.get_tick(x, size))
+        self.add(ticks)
+        self.ticks = ticks
+        return self
+
+    def get_tick_marks(self):
+        return self.ticks
+
+    def get_number_mobject(
+        self,
+        x,
+        direction=None,
+        buff=None,
+        unit=1.0,
+        unit_tex="",
+        **number_config,
+    ):
+        # Reference number_line.py:161 over the live DecimalNumber class.
+        config = dict(self.decimal_number_config)
+        config.update(number_config)
+        if direction is None:
+            direction = self.line_to_number_direction
+        if buff is None:
+            buff = self.line_to_number_buff
+        if unit_tex:
+            config["unit"] = unit_tex
+        num_mob = DecimalNumber(x / unit, **config)
+        num_mob.next_to(self.number_to_point(x), direction=direction, buff=buff)
+        direction = _np.asarray(direction, dtype=float)
+        if x < 0 and direction[0] == 0:
+            num_mob.shift(num_mob[0].get_width() * _LEFT / 2)
+        if abs(x) == unit and unit_tex:
+            center = num_mob.get_center()
+            if x > 0:
+                num_mob.remove(num_mob[0])
+            else:
+                num_mob.remove(num_mob[1])
+                num_mob[0].next_to(
+                    num_mob[1], _LEFT, buff=num_mob[0].get_width() / 4
+                )
+            num_mob.move_to(center)
+        return num_mob
 
     def add_numbers(self, x_values=None, excluding=None, font_size=24, **kwargs):
         # The Reference forwards **kwargs to get_number_mobject; the native

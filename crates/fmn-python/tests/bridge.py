@@ -12079,6 +12079,29 @@ precise_labels = precise_label_line.add_numbers(
 assert precise_labels.get_width() > integer_labels.get_width()
 assert precise_label_line.numbers is precise_labels
 
+# NumberLine is a Line in the Reference MRO. Constructor ticks land as the
+# last native child; get_tick / add_ticks / get_number_mobject are the
+# remaining public surface over that family.
+assert issubclass(manimlib.NumberLine, manimlib.Line)
+tick_line = manimlib.NumberLine(x_range=(-2.0, 2.0, 1.0), tick_size=0.1)
+assert isinstance(tick_line, manimlib.Line)
+marks = tick_line.get_tick_marks()
+assert marks is tick_line.ticks
+assert len(marks) == 5
+zero_tick = tick_line.get_tick(0.0)
+assert np.allclose(zero_tick.get_center(), tick_line.n2p(0.0), atol=1e-6)
+assert np.isclose(zero_tick.get_height(), 0.2, atol=1e-6)
+bare_line = manimlib.NumberLine(x_range=(0.0, 1.0, 1.0), include_ticks=False)
+assert len(bare_line.get_tick_marks()) == 0
+bare_line.add_ticks()
+assert len(bare_line.get_tick_marks()) == 2
+label = tick_line.get_number_mobject(1.0, font_size=24)
+assert isinstance(label, manimlib.DecimalNumber)
+assert np.isclose(label.get_value(), 1.0)
+assert issubclass(manimlib.UnitInterval, manimlib.NumberLine)
+unit = manimlib.UnitInterval()
+assert np.allclose(unit.x_range[:2], [0.0, 1.0])
+
 # Slider is an authored portal class over Atlas's existing slider builder,
 # not the schema-generated constructor refusal. The builder owns the initial
 # family and layout; the portal binds those parts to the live ValueTracker.
@@ -19591,6 +19614,23 @@ assert _td.dtype == np.uint8 and _td.shape == (4, 4) and _td[0].tolist() == [1, 
 
 assert np.allclose(space_utils.complex_to_R3(3 + 4j), [3.0, 4.0, 0.0])
 assert space_utils.R3_to_complex([3, 4, 9]) == 3 + 4j
+assert np.isclose(space_utils.get_norm([3.0, 4.0, 0.0]), 5.0)
+assert np.isclose(space_utils.get_dist([0.0, 0.0, 0.0], [3.0, 4.0, 0.0]), 5.0)
+assert np.allclose(space_utils.normalize([0.0, 4.0, 0.0]), [0.0, 1.0, 0.0])
+assert np.allclose(space_utils.normalize([0.0, 0.0, 0.0], fall_back=[1.0, 0.0, 0.0]), [1.0, 0.0, 0.0])
+assert np.allclose(
+    space_utils.normalize_along_axis(np.array([[3.0, 0.0], [0.0, 4.0]]), 1),
+    [[1.0, 0.0], [0.0, 1.0]],
+)
+assert np.allclose(space_utils.center_of_mass([[0.0, 0.0, 0.0], [2.0, 4.0, 6.0]]), [1.0, 2.0, 3.0])
+assert np.allclose(space_utils.midpoint([0.0, 0.0, 0.0], [2.0, 4.0, 6.0]), [1.0, 2.0, 3.0])
+rotated = space_utils.rotate_vector([1.0, 0.0, 0.0], np.pi / 2, [0.0, 0.0, 1.0])
+assert np.allclose(rotated, [0.0, 1.0, 0.0], atol=1e-7)
+assert np.allclose(space_utils.rotate_vector_2d([1.0, 0.0], np.pi / 2), [0.0, 1.0], atol=1e-7)
+# Reference space_ops leaked mapbox earcut, scipy Rotation, and the
+# functools/operator aliases. They are not part of the public API.
+for leaked in ("Rotation", "earcut", "op", "reduce"):
+    assert not hasattr(space_utils, leaked), leaked
 _cf = space_utils.complex_func_to_R3_func(lambda w: w * 1j)
 assert np.allclose(_cf([1.0, 0.0, 5.0]), [0.0, 1.0, 0.0])
 
