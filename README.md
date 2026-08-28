@@ -268,7 +268,7 @@ provenance, opener, output, or worker contracts have not landed
 fmn-python scene.py SquareToCircle -o                 # write and open
 fmn-python scene.py --write_all                       # every scene in the file
 fmn-python scene.py SquareToCircle -so                # skip to the end, show final frame
-fmn-python scene.py SquareToCircle --uhd --transparent --vcodec prores_ks
+fmn-python scene.py SquareToCircle --uhd --transparent --vcodec prores_ks   # 1.0 target — unrecognized today (exit 2); the other rows below are capability refusals (exit 4)
 
 # Certified determinism: the whole input closure content-hashed, bits promised
 fmn-python scene.py SquareToCircle --reproducible     # + sidecar provenance manifest
