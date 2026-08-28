@@ -21991,6 +21991,10 @@ def _install_mobject_functions():
         mobject.add_updater(update)
         return mobject
 
+    def cycle_animation(animation, **kwargs):
+        # mobject_update_utils.py:120: cycle=True on the same updater driver.
+        return turn_animation_into_updater(animation, cycle=True, **kwargs)
+
     functions = {
         "always_redraw": always_redraw,
         "assert_is_mobject_method": assert_is_mobject_method,
@@ -21999,6 +22003,7 @@ def _install_mobject_functions():
         "always_shift": always_shift,
         "always_rotate": always_rotate,
         "turn_animation_into_updater": turn_animation_into_updater,
+        "cycle_animation": cycle_animation,
     }
     module = _ensure_module("manimlib.mobject.mobject_update_utils")
     for name, function in functions.items():

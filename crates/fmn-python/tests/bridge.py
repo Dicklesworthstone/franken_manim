@@ -15888,6 +15888,21 @@ rotating_scene.play(specialized_animation.Delay(run_time=2.0 / 30.0))
 assert len(rotation_samples) >= 2
 assert not np.allclose(rotation_samples[0], rotation_samples[-1])
 
+# cycle_animation is turn_animation_into_updater(..., cycle=True): the
+# updater stays after one run_time instead of finishing and popping.
+cycle_decimal = manimlib.DecimalNumber(0.0)
+cycle_anim = numbers_animation.ChangeDecimalToValue(
+    cycle_decimal, 4.0, run_time=2.0 / 30.0
+)
+assert update_utils.cycle_animation(cycle_anim) is cycle_decimal
+assert manimlib.cycle_animation is update_utils.cycle_animation
+cycle_scene = Scene()
+cycle_scene.add(cycle_decimal)
+cycle_scene.play(specialized_animation.Delay(run_time=5.0 / 30.0))
+assert len(cycle_decimal.get_updaters()) >= 1
+# Two-and-a-half cycles of a 2-frame run_time lands mid-ramp, not parked at 4.
+assert 0.25 < cycle_decimal.get_value() < 3.75
+
 for helper, invalid in (
     (update_utils.always_shift, None),
     (update_utils.always_rotate, "not a mobject"),

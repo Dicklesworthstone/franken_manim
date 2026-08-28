@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	d5d8b546c04434e4f2b38d7baac1fe541f838171cbaae7d9e53aa59c9c235355
+ledger_reviewed_digest	f67751f08fe62f862c131271ff179847abd46d8c540895ee666d47f385a81226
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -889,6 +889,15 @@ manimlib.mobject.boolean_ops:Union.__init__	same	crates/fmn-geom/src/boolean/mod
 manimlib.mobject.boolean_ops:_convert_skia_path_to_vmobject	excluded	OOT-SKIAPATH-INTERNAL	crates/fmn-geom/src/boolean/mod.rs	Reference skia-pathops C extension conversion helper is replaced by Chisel's sovereign curve-boolean pipeline
 manimlib.mobject.boolean_ops:_convert_vmobject_to_skia_path	excluded	OOT-SKIAPATH-INTERNAL	crates/fmn-geom/src/boolean/mod.rs	Reference skia-pathops C extension conversion helper is replaced by Chisel's sovereign curve-boolean pipeline
 manimlib.mobject.boolean_ops:pathops	excluded	OOT-LEAKED-PATHOPS-IMPORT	crates/fmn-geom/src/boolean/mod.rs	third-party skia-pathops dependency is not part of manimlib's public API surface
+manimlib.mobject.changing:AnimatedBoundary	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	is the authored VGroup of two stroke copies that cycle a growing and fading outline
+manimlib.mobject.changing:AnimatedBoundary.__init__	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	copies the outlined VMobject twice, stores the color cycle, and registers the dt updater
+manimlib.mobject.changing:AnimatedBoundary.full_family_become_partial	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	zips pointful family members and applies pointwise_become_partial over the declared alpha window
+manimlib.mobject.changing:AnimatedBoundary.update_boundary_copies	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	advances the altered-rate clock and restyles the growing and fading copies through the color cycle
+manimlib.mobject.changing:TracedPath	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	is the authored VMobject path grown from a traced-point callable every frame
+manimlib.mobject.changing:TracedPath.__init__	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	stores the callable window and stroke config then registers update_path as a dt updater
+manimlib.mobject.changing:TracedPath.update_path	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	appends the traced point, trims the finite window, and rebuilds a smooth stroke
+manimlib.mobject.changing:TracingTail	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	is the finite-window tracer over a mobject center or point-returning callable with tapered stroke
+manimlib.mobject.changing:TracingTail.__init__	same	scripts/manim_ref/manimlib/mobject/changing.py	crates/fmn-python/tests/bridge.py	routes a bound mobject onto the native tracer and a callable onto TracedPath's Python updater with the tail tapers
 manimlib.mobject.coordinate_systems:Axes	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	is the authored VGroup+CoordinateSystem pair over Atlas's native two-axis builder
 manimlib.mobject.coordinate_systems:Axes.__init__	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	builds live x and y NumberLine children from the two-or-three-term range surface and optional width height unit_size configs
 manimlib.mobject.coordinate_systems:Axes.add_coordinate_labels	same	scripts/manim_ref/manimlib/mobject/coordinate_systems.py	crates/fmn-python/tests/bridge.py	hangs native DecimalNumber shells on each axis through the declared values excluding list and font_size
@@ -1453,6 +1462,14 @@ manimlib.mobject.mobject:pickle	same	scripts/manim_ref/manimlib/mobject/mobject.
 manimlib.mobject.mobject:random	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib random module the Reference imports
 manimlib.mobject.mobject:sys	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical stdlib sys module the Reference imports
 manimlib.mobject.mobject:wraps	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical functools wraps decorator the Reference imports
+manimlib.mobject.mobject_update_utils:always	same	scripts/manim_ref/manimlib/mobject/mobject_update_utils.py	crates/fmn-python/tests/bridge.py	registers a bound method as a per-frame updater with the supplied fixed arguments
+manimlib.mobject.mobject_update_utils:always_redraw	same	scripts/manim_ref/manimlib/mobject/mobject_update_utils.py	crates/fmn-python/tests/bridge.py	builds a mobject from the callable and becomes a fresh rebuild every frame
+manimlib.mobject.mobject_update_utils:always_rotate	same	scripts/manim_ref/manimlib/mobject/mobject_update_utils.py	crates/fmn-python/tests/bridge.py	adds a dt-scaled rotate updater with the declared rate and forwarded rotate kwargs
+manimlib.mobject.mobject_update_utils:always_shift	same	scripts/manim_ref/manimlib/mobject/mobject_update_utils.py	crates/fmn-python/tests/bridge.py	adds a dt-scaled shift updater along the declared direction and rate
+manimlib.mobject.mobject_update_utils:assert_is_mobject_method	same	scripts/manim_ref/manimlib/mobject/mobject_update_utils.py	crates/fmn-python/tests/bridge.py	asserts the argument is a bound Mobject method with the Reference's bare asserts
+manimlib.mobject.mobject_update_utils:cycle_animation	same	scripts/manim_ref/manimlib/mobject/mobject_update_utils.py	crates/fmn-python/tests/bridge.py	drives a Python animation as a looping updater by forwarding cycle=True
+manimlib.mobject.mobject_update_utils:f_always	same	scripts/manim_ref/manimlib/mobject/mobject_update_utils.py	crates/fmn-python/tests/bridge.py	registers a bound method as an updater whose arguments are generated each frame
+manimlib.mobject.mobject_update_utils:turn_animation_into_updater	same	scripts/manim_ref/manimlib/mobject/mobject_update_utils.py	crates/fmn-python/tests/bridge.py	drives a Python interpolate_mobject animation as a persistent updater and pops it at completion unless cycling
 manimlib.mobject.number_line:NumberLine	same	scripts/manim_ref/manimlib/mobject/number_line.py	crates/fmn-python/tests/bridge.py	is the Line-subclass number axis over Atlas's native coords builder including constructor ticks
 manimlib.mobject.number_line:NumberLine.__init__	same	scripts/manim_ref/manimlib/mobject/number_line.py	crates/fmn-python/tests/bridge.py	builds the native axis, optional tip, and tick family from the Reference keyword surface
 manimlib.mobject.number_line:NumberLine.add_numbers	same	scripts/manim_ref/manimlib/mobject/number_line.py	crates/fmn-python/tests/bridge.py	hangs DecimalNumber labels through Atlas's native label builder and stores the group on .numbers
