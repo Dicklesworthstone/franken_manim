@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	107a7309687b9abedf15f7c0654e52fa24c644c641f6a7bbe5f49b0278f7184c
+ledger_reviewed_digest	44dff7ad5943d2a58121c5e6d755142996e7e23052a9c2da8cc04add8659a7fc
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1895,9 +1895,19 @@ manimlib.mobject.types.image_mobject:ImageMobject.render_primitive	same	scripts/
 manimlib.mobject.types.image_mobject:ImageMobject.set_color	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	is the exact unconditional no-op including the optional opacity and recurse arguments
 manimlib.mobject.types.image_mobject:ImageMobject.set_opacity	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	interpolates scalar or sequence opacity across the six live records and optionally recurses
 manimlib.mobject.types.image_mobject:ImageMobject.shader_folder	same	scripts/manim_ref/manimlib/mobject/types/image_mobject.py	crates/fmn-python/tests/bridge.py	exposes the exact image shader-folder marker without admitting custom GLSL
+manimlib.mobject.types.point_cloud_mobject:PGroup	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	is the authored PMobject family container that grafts live PMobject proxies in argument order
+manimlib.mobject.types.point_cloud_mobject:PGroup.__init__	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	installs a native empty parent and refuses non-PMobject members
+manimlib.mobject.types.point_cloud_mobject:PMobject	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	is the authored unordered point-cloud Mobject over Marionette point and rgba records
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_point	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	delegates one point and optional rgba color or opacity through the exact multi-point record append
 manimlib.mobject.types.point_cloud_mobject:PMobject.add_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	uses the authoritative base append semantics then applies explicit rgba or color and opacity only to the appended tail
+manimlib.mobject.types.point_cloud_mobject:PMobject.filter_out	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	drops family members' points whose condition is true and keeps every record lane of the survivors
+manimlib.mobject.types.point_cloud_mobject:PMobject.ingest_submobjects	improved	BN-18	crates/fmn-python/tests/bridge.py	vstacks the family in preorder then consumes children so ingested points are not double-drawn
+manimlib.mobject.types.point_cloud_mobject:PMobject.match_colors	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	resamples another cloud's rgba run onto this point count by linear interpolation
+manimlib.mobject.types.point_cloud_mobject:PMobject.point_from_proportion	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	returns the live point at int(alpha times n minus one)
+manimlib.mobject.types.point_cloud_mobject:PMobject.pointwise_become_partial	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	replaces live records with the contiguous integer slice of another cloud
+manimlib.mobject.types.point_cloud_mobject:PMobject.set_color_by_gradient	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	writes the resampled color ramp onto every rgba row at unit alpha
 manimlib.mobject.types.point_cloud_mobject:PMobject.set_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	canonicalizes empty input and preserves the point-cloud record width across base point replacement
+manimlib.mobject.types.point_cloud_mobject:PMobject.sort_points	same	scripts/manim_ref/manimlib/mobject/types/point_cloud_mobject.py	crates/fmn-python/tests/bridge.py	stable-sorts each pointful family member by the caller key keeping every record lane attached
 manimlib.mobject.types.surface:ParametricSurface	same	scripts/manim_ref/manimlib/mobject/types/surface.py	crates/fmn-python/tests/bridge.py	is an authored Surface subclass that retains the constructor uv callable under the familiar override point
 manimlib.mobject.types.surface:ParametricSurface.__init__	same	scripts/manim_ref/manimlib/mobject/types/surface.py	crates/fmn-python/tests/bridge.py	installs the native sampled grid from the caller uv function ranges resolution and style
 manimlib.mobject.types.surface:ParametricSurface.uv_func	same	scripts/manim_ref/manimlib/mobject/types/surface.py	crates/fmn-python/tests/bridge.py	returns the retained constructor callable under the familiar override point

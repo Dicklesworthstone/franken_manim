@@ -10511,6 +10511,23 @@ class Integer(DecimalNumber):
         return int(_np.round(super().get_value()))
 
 
+def _pmobject_write_records(mob, rows):
+    rows = _np.asarray(rows)
+    if rows.ndim == 0:
+        rows = rows.reshape(0)
+    mob.resize_points(len(rows))
+    if len(rows) == 0:
+        return mob
+    target = mob.data
+    if getattr(rows.dtype, "names", None) and rows.dtype.names:
+        for name in target.dtype.names:
+            if name in rows.dtype.names:
+                target[name][:] = rows[name]
+    else:
+        target[:] = rows
+    return mob
+
+
 class PMobject(Mobject):
     """The point-cloud base over Marionette's live RecordBuffer."""
 
@@ -10546,9 +10563,76 @@ class PMobject(Mobject):
         rgbas = None if rgba is None else [rgba]
         return self.add_points([point], rgbas, color, opacity)
 
+    def set_color_by_gradient(self, *colors):
+        n_points = self.get_num_points()
+        ramp = _color_gradient(colors, n_points)
+        self.data["rgba"][:] = [_color_to_rgba(color) for color in ramp]
+        return self
+
+    def match_colors(self, pmobject):
+        source = _np.asarray(pmobject.data["rgba"])
+        if len(source) == 0:
+            return self
+        self.data["rgba"][:] = _resize_with_interpolation(
+            source, self.get_num_points()
+        )
+        return self
+
+    def filter_out(self, condition):
+        for mob in self.family_members_with_points():
+            points = mob.get_points()
+            keep = ~_np.apply_along_axis(condition, 1, points)
+            _pmobject_write_records(mob, _np.asarray(mob.data)[keep])
+        return self
+
+    def sort_points(self, function=lambda p: p[0]):
+        for mob in self.family_members_with_points():
+            indices = _np.argsort(
+                _np.apply_along_axis(function, 1, mob.get_points())
+            )
+            _pmobject_write_records(mob, _np.asarray(mob.data)[indices])
+        return self
+
+    def ingest_submobjects(self):
+        # BN-18: vstack the family, then consume children. The Reference
+        # keeps the submobjects after the vstack and double-draws them.
+        chunks = []
+        target_dtype = self.data.dtype
+        for member in self.get_family():
+            src = _np.asarray(member.data)
+            if len(src) == 0:
+                continue
+            if src.dtype == target_dtype:
+                chunks.append(src.copy())
+                continue
+            seed = _np.array(self._style_data()[:1])
+            converted = _np.repeat(seed, len(src), axis=0)
+            for name in target_dtype.names:
+                if name in src.dtype.names:
+                    converted[name] = src[name]
+            chunks.append(converted)
+        stacked = (
+            _np.concatenate(chunks)
+            if chunks
+            else _np.empty(0, dtype=target_dtype)
+        )
+        _pmobject_write_records(self, stacked)
+        if self.submobjects:
+            self.clear()
+        return self
+
     def point_from_proportion(self, alpha):
         points = self.get_points()
         return points[int(float(alpha) * (len(points) - 1))]
+
+    def pointwise_become_partial(self, pmobject, a, b):
+        n_points = pmobject.get_num_points()
+        lower = int(float(a) * n_points)
+        upper = int(float(b) * n_points)
+        _pmobject_write_records(
+            self, _np.asarray(pmobject.data)[lower:upper].copy()
+        )
+        return self
 
 
 class PGroup(PMobject):
@@ -11406,6 +11490,7 @@ class Surface(Mobject):
                 self.normal_nudge,
             )
             _hang_native_children(self, specs)
+        self.set_z_index(z_index)
         self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
 

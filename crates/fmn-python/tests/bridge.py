@@ -5358,6 +5358,69 @@ pgroup.shift(manimlib.UP)
 assert np.allclose(pgroup_left.get_center(), [-1.0, 1.0, 0.0])
 assert np.allclose(pgroup_right.get_center(), [1.0, 1.0, 0.0])
 
+# fm-5wq.4: remaining PMobject family mutations over live records.
+assert point_cloud_mobjects.PMobject.__bases__ == (manimlib.Mobject,)
+cloud_a = manimlib.DotCloud(
+    [[0.0, 1.0, 0.0], [2.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+    radius=0.05,
+)
+assert np.allclose(
+    cloud_a.point_from_proportion(0.0), [0.0, 1.0, 0.0]
+)
+assert np.allclose(
+    cloud_a.point_from_proportion(1.0), [1.0, 0.0, 0.0]
+)
+assert cloud_a.sort_points() is cloud_a
+assert np.allclose(
+    cloud_a.get_points(),
+    [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+)
+assert cloud_a.filter_out(lambda p: p[0] > 1.5) is cloud_a
+assert np.allclose(
+    cloud_a.get_points(),
+    [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+)
+assert cloud_a.set_color_by_gradient("#FF0000", "#0000FF") is cloud_a
+assert np.allclose(cloud_a.data["rgba"][0, :3], [1.0, 0.0, 0.0], atol=1e-5)
+assert np.allclose(cloud_a.data["rgba"][-1, :3], [0.0, 0.0, 1.0], atol=1e-5)
+assert np.allclose(cloud_a.data["rgba"][:, 3], [1.0, 1.0])
+cloud_b = manimlib.DotCloud(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+    radius=0.05,
+)
+assert cloud_b.match_colors(cloud_a) is cloud_b
+assert np.allclose(cloud_b.data["rgba"][0, :3], [1.0, 0.0, 0.0], atol=1e-5)
+assert np.allclose(cloud_b.data["rgba"][-1, :3], [0.0, 0.0, 1.0], atol=1e-5)
+partial = manimlib.DotCloud([[9.0, 9.0, 0.0]], radius=0.05)
+assert partial.pointwise_become_partial(cloud_b, 0.25, 0.75) is partial
+assert partial.n_records() == 2
+assert np.allclose(
+    partial.get_points(),
+    [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+)
+left_cloud = manimlib.DotCloud([[-1.0, 0.0, 0.0]], radius=0.05)
+right_cloud = manimlib.DotCloud([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], radius=0.05)
+ingest_group = point_cloud_mobjects.PGroup(left_cloud, right_cloud)
+assert ingest_group.get_num_points() == 0
+assert ingest_group.ingest_submobjects() is ingest_group
+assert ingest_group.get_num_points() == 3
+assert list(ingest_group.submobjects) == []
+assert np.allclose(
+    ingest_group.get_points(),
+    [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+)
+empty_color_source = manimlib.DotCloud([[0.0, 0.0, 0.0]], radius=0.05)
+empty_color_source.resize_points(0)
+color_dest = manimlib.DotCloud([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], radius=0.05)
+before_rgba = color_dest.data["rgba"].copy()
+assert color_dest.match_colors(empty_color_source) is color_dest
+assert np.array_equal(color_dest.data["rgba"], before_rgba)
+
+back_surface = manimlib.Surface(resolution=(2, 2), z_index=-1)
+front_surface = manimlib.Surface(resolution=(2, 2), z_index=1)
+surface_order_scene = Scene().add(front_surface, back_surface)
+assert surface_order_scene.get_mobjects() == [back_surface, front_surface]
+
 failed_pgroup = point_cloud_mobjects.PGroup.__new__(
     point_cloud_mobjects.PGroup
 )
