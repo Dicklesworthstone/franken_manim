@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	f67751f08fe62f862c131271ff179847abd46d8c540895ee666d47f385a81226
+ledger_reviewed_digest	003757bb5dc23fe30df29a1385bc0f0d7046c19aad54c9c8ca757f5c0d8908d6
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1034,6 +1034,9 @@ manimlib.mobject.geometry:CurvedArrow	improved	BN-03	crates/fmn-python/tests/bri
 manimlib.mobject.geometry:CurvedArrow.__init__	improved	BN-03	crates/fmn-python/tests/bridge.py	builds one checked signed arc and trims it by true length to the native end-tip base
 manimlib.mobject.geometry:CurvedDoubleArrow	improved	BN-03	crates/fmn-python/tests/bridge.py	is an authored CurvedArrow subclass retaining identity-addressable native tips at both ends
 manimlib.mobject.geometry:CurvedDoubleArrow.__init__	improved	BN-03	crates/fmn-python/tests/bridge.py	attaches and true-length-trims both native tips while preserving the checked curved shaft
+manimlib.mobject.geometry:DEFAULT_ARROW_TIP_LENGTH	same	crates/fmn-library/src/poly.rs	crates/fmn-python/tests/bridge.py	exposes the exact geometry-module default arrow tip length of 0.35
+manimlib.mobject.geometry:DEFAULT_ARROW_TIP_WIDTH	same	crates/fmn-library/src/poly.rs	crates/fmn-python/tests/bridge.py	exposes the exact geometry-module default arrow tip width of 0.35
+manimlib.mobject.geometry:DEFAULT_DASH_LENGTH	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	exposes the exact geometry-module default dash length of 0.05
 manimlib.mobject.geometry:DEFAULT_DOT_RADIUS	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	exposes the exact geometry-module default radius of 0.08 despite the distinct DotCloud constant
 manimlib.mobject.geometry:DEFAULT_SMALL_DOT_RADIUS	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	exposes the exact small-dot radius of 0.04
 manimlib.mobject.geometry:DashedLine	improved	BN-03	crates/fmn-python/tests/bridge.py	is the authored Line subclass whose bounded native dash family is placed and counted by true arc length
@@ -1051,6 +1054,7 @@ manimlib.mobject.geometry:Elbow.__init__	same	scripts/manim_ref/manimlib/mobject
 manimlib.mobject.geometry:Ellipse	improved	BN-09	crates/fmn-python/tests/bridge.py	is an authored Circle subclass over the native stretched-circle geometry and one arc-density rule
 manimlib.mobject.geometry:Ellipse.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	preserves width height center inherited start angle and style through the native builder
 manimlib.mobject.geometry:Line	improved	BN-09	crates/fmn-python/tests/bridge.py	is the authored TipableVMobject subclass whose constructor uses Atlas's governed straight or curved geometry and preserves the declared Reference MRO
+manimlib.mobject.geometry:Line.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	builds buffered straight or governed-density curved Atlas geometry from start end buff and path_arc while preserving VMobject styling
 manimlib.mobject.geometry:Line.get_angle	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	computes the planar bearing from virtual-dispatched live endpoints through Atlas geometry
 manimlib.mobject.geometry:Line.get_arc_length	improved	BN-03	crates/fmn-geom/tests/arclength.rs	returns error-bounded true arc length under the familiar name
 manimlib.mobject.geometry:Line.get_projection	same	crates/fmn-library/src/line.rs	crates/fmn-python/tests/bridge.py	projects three-dimensional points onto the infinite line through its live endpoints
@@ -1063,6 +1067,7 @@ manimlib.mobject.geometry:Line.reset_points_around_ends	improved	BN-09	crates/fm
 manimlib.mobject.geometry:Line.set_angle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	rotates from the live planar bearing around the start endpoint by default
 manimlib.mobject.geometry:Line.set_length	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	scales by the live endpoint length and preserves the fluent identity
 manimlib.mobject.geometry:Line.set_path_arc	improved	BN-09	crates/fmn-python/tests/bridge.py	commits one complete governed-density Atlas arc rebuild and preserves the prior geometry on typed refusal
+manimlib.mobject.geometry:Line.set_perpendicular_to_camera	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	rotates about the start so the live unit normal faces the camera after projection onto the plane perpendicular to the line
 manimlib.mobject.geometry:Line.set_points_by_ends	improved	BN-09	crates/fmn-python/tests/bridge.py	builds buffered straight or governed-density curved points natively before identity-preserving detached or scene-bound commit
 manimlib.mobject.geometry:Line.set_start_and_end_attrs	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	resolves mobject endpoints from continuous bounds along the rough center direction
 manimlib.mobject.geometry:Polygon	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is an authored VMobject subclass backed by Atlas closed shared-anchor geometry rather than a schema-generated shell
@@ -1116,6 +1121,7 @@ manimlib.mobject.geometry:Triangle	same	scripts/manim_ref/manimlib/mobject/geome
 manimlib.mobject.geometry:Triangle.__init__	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	forwards caller style and orientation while fixing the native vertex count to three
 manimlib.mobject.geometry:Vector	improved	BN-09	crates/fmn-python/tests/bridge.py	is the authored Arrow subclass backed by the same native filled-outline builder
 manimlib.mobject.geometry:Vector.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	constructs an unbuffered native Arrow from the origin to a two-dimensional or three-dimensional direction
+manimlib.mobject.geometry:math	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	is a module-internal stdlib import bound in the Python module namespace
 manimlib.mobject.interactive:Button	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	is the authored clickable composition over the native arbitrary-mobject button builder
 manimlib.mobject.interactive:Button.__init__	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	wraps the visual mobject stores the click callback and adopts the child
 manimlib.mobject.interactive:Button.mob_on_mouse_press	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	forwards the pressed child to on_click and returns False
@@ -1170,12 +1176,16 @@ manimlib.mobject.interactive:Textbox.set_value_anim	same	scripts/manim_ref/manim
 manimlib.mobject.interactive:Textbox.update_text	same	scripts/manim_ref/manimlib/mobject/interactive.py	crates/fmn-python/tests/bridge.py	rebuilds the live text candidate for the written string refusing non-strings
 manimlib.mobject.matrix:DecimalMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass whose real-valued entries use the native DecimalNumber shelf and bundled delimiters
 manimlib.mobject.matrix:DecimalMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves decimal places scalar grid configuration live entry identities and style forwarding without an external typesetting tool
+manimlib.mobject.matrix:DecimalMatrix.element_to_mobject	improved	BN-08	crates/fmn-python/tests/bridge.py	refuses post-construction entry conversion because Atlas owns decimal entry construction
 manimlib.mobject.matrix:IntegerMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored DecimalMatrix subclass selecting Atlas's native integer display route at the default zero decimal places
 manimlib.mobject.matrix:IntegerMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves the typed constructor surface while routing zero-place entries through the native Integer shelf
 manimlib.mobject.matrix:Matrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored VMobject whose homogeneous scalar grid uses native Atlas layout and bundled fmd-math delimiters without TeX subprocesses
 manimlib.mobject.matrix:Matrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves scalar dispatch buffers height alignment entry style and constructor-time ellipses while unsupported heterogeneous and live-Mobject grids fail precisely
 manimlib.mobject.matrix:Matrix.add_background_to_entries	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	adds one live BackgroundRectangle behind every non-ellipsis entry and returns the original matrix
 manimlib.mobject.matrix:Matrix.copy	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	remaps row-major entries brackets elements and ellipses onto the independent copied native family
+manimlib.mobject.matrix:Matrix.create_brackets	improved	BN-08	crates/fmn-python/tests/bridge.py	refuses post-construction bracket building because the bundled native delimiter engine owns construction
+manimlib.mobject.matrix:Matrix.create_mobject_matrix	improved	BN-08	crates/fmn-python/tests/bridge.py	refuses post-construction grid assembly because the native matrix engine owns construction
+manimlib.mobject.matrix:Matrix.element_to_mobject	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	maps scalars through DecimalNumber or Tex and passes through already-built VMobject entries
 manimlib.mobject.matrix:Matrix.get_brackets	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns a VGroup over the two live native delimiter children
 manimlib.mobject.matrix:Matrix.get_column	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable caller-visible column group and preserves the exact bounds refusal
 manimlib.mobject.matrix:Matrix.get_columns	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable left-to-right VGroup of live native column views
@@ -1185,6 +1195,11 @@ manimlib.mobject.matrix:Matrix.get_mob_matrix	same	scripts/manim_ref/manimlib/mo
 manimlib.mobject.matrix:Matrix.get_row	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable caller-visible row group and preserves the exact bounds refusal
 manimlib.mobject.matrix:Matrix.get_rows	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the stable top-to-bottom VGroup of live native row views
 manimlib.mobject.matrix:Matrix.set_column_colors	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	applies colors by zipped column order recursively over each live entry and returns the matrix
+manimlib.mobject.matrix:Matrix.swap_entries_for_ellipses	improved	BN-08	crates/fmn-python/tests/bridge.py	refuses post-construction ellipsis replacement because native construction owns ellipses_row and ellipses_col
+manimlib.mobject.matrix:Matrix.swap_entry_for_dots	improved	BN-08	crates/fmn-python/tests/bridge.py	refuses post-construction dots replacement because native construction owns ellipsis substitution
+manimlib.mobject.matrix:MobjectMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass that lays caller-owned VMobjects onto Atlas's native grid without TeX
+manimlib.mobject.matrix:MobjectMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	scales and seats a VGroup onto the native grid preserving entry identity leftover truncation and exact undersize refusal
+manimlib.mobject.matrix:MobjectMatrix.element_to_mobject	same	scripts/manim_ref/manimlib/mobject/matrix.py	crates/fmn-python/tests/bridge.py	returns the caller-owned VMobject entry unchanged
 manimlib.mobject.matrix:TexMatrix	improved	BN-08	crates/fmn-python/tests/bridge.py	is an authored Matrix subclass whose scalar sources use the bundled fmd-math entry and delimiter engine
 manimlib.mobject.matrix:TexMatrix.__init__	improved	BN-08	crates/fmn-python/tests/bridge.py	preserves string grid configuration font and style forwarding and live Tex entry identity without an external TeX toolchain
 manimlib.mobject.mobject:Generic	same	scripts/manim_ref/manimlib/mobject/mobject.py	crates/fmn-python/tests/bridge.py	exposes the identical typing Generic base the Reference imports

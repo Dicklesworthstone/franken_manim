@@ -10490,6 +10490,18 @@ assert line.set_angle(math.pi / 2.0) is line
 assert np.allclose(line.get_start(), line_start, rtol=0.0, atol=1e-9)
 assert np.allclose(line.get_unit_vector(), [0.0, 1.0, 0.0], rtol=0.0, atol=1e-9)
 
+geom_mod = importlib.import_module("manimlib.mobject.geometry")
+assert geom_mod.DEFAULT_ARROW_TIP_LENGTH == 0.35
+assert geom_mod.DEFAULT_ARROW_TIP_WIDTH == 0.35
+assert geom_mod.DEFAULT_DASH_LENGTH == 0.05
+assert geom_mod.math is math
+perp_line = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
+perp_start = perp_line.get_start().copy()
+perp_frame = manimlib.CameraFrame()
+assert perp_line.set_perpendicular_to_camera(perp_frame) is perp_line
+assert np.allclose(perp_line.get_start(), perp_start, rtol=0.0, atol=1e-9)
+assert np.isclose(np.linalg.norm(perp_line.get_unit_normal()), 1.0)
+
 line_style = geometry.Line(
     (-2.0, -1.0, 0.0),
     (2.0, -1.0, 0.0),
@@ -13556,6 +13568,30 @@ except NotImplementedError as error:
     assert "constructor-time" in str(error)
 else:
     raise AssertionError("post-construction Matrix ellipses silently succeeded")
+try:
+    tex_matrix.swap_entry_for_dots(tex_matrix.elements[0], tex_matrix)
+except NotImplementedError as error:
+    assert "constructor-time" in str(error)
+else:
+    raise AssertionError("Matrix.swap_entry_for_dots silently succeeded")
+try:
+    tex_matrix.create_brackets()
+except NotImplementedError as error:
+    assert "native delimiter" in str(error)
+else:
+    raise AssertionError("Matrix.create_brackets silently succeeded")
+try:
+    tex_matrix.create_mobject_matrix()
+except NotImplementedError as error:
+    assert "constructor-owned" in str(error)
+else:
+    raise AssertionError("Matrix.create_mobject_matrix silently succeeded")
+try:
+    matrix_module.DecimalMatrix([[1.0]]).element_to_mobject(1.0)
+except NotImplementedError as error:
+    assert "constructor-owned" in str(error)
+else:
+    raise AssertionError("DecimalMatrix.element_to_mobject silently succeeded")
 try:
     integer_tex_matrix.get_row(-1)
 except IndexError as error:

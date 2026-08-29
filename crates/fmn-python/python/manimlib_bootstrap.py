@@ -3635,10 +3635,16 @@ class VMobject(Mobject):
     def get_unit_normal(self, refresh=False):
         if self.get_num_points() < 3:
             return _np.array((0.0, 0.0, 1.0))
-        if not self.needs_new_unit_normal and not refresh:
-            return self.data["base_normal"][1, :]
+        if not getattr(self, "needs_new_unit_normal", True) and not refresh:
+            try:
+                return self.data["base_normal"][1, :]
+            except (KeyError, IndexError, TypeError):
+                pass
         normal = _np.array(self._path_unit_normal())
-        self.data["base_normal"][1::2] = normal
+        try:
+            self.data["base_normal"][1::2] = normal
+        except (KeyError, TypeError, ValueError):
+            pass
         self.needs_new_unit_normal = False
         return normal
 
@@ -5203,6 +5209,21 @@ class Line(TipableVMobject):
 
     def set_length(self, length, **kwargs):
         self.scale(float(length) / self.get_length(), **kwargs)
+        return self
+
+    def set_perpendicular_to_camera(self, camera_frame):
+        # geometry.py:798: rotate so the live unit normal faces the camera
+        # after projection onto the plane perpendicular to the line axis.
+        to_cam = camera_frame.get_implied_camera_location() - self.get_center()
+        normal = self.get_unit_normal()
+        axis = self.get_unit_vector()
+        trg_normal = to_cam - _np.dot(to_cam, axis) * axis
+        mat = _np.array(
+            _BridgeMobject._rotation_between_vectors(
+                _vec3(normal), _vec3(trg_normal)
+            )
+        )
+        self.apply_matrix(mat, about_point=self.get_start())
         return self
 
 
