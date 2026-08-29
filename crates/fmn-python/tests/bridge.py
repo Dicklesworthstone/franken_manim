@@ -12489,6 +12489,8 @@ assert np.allclose(
 )
 assert np.allclose(sphere.uv_func(0.0, 0.0), [0.0, 0.0, -2.0])
 assert np.allclose(sphere.uv_func(0.0, math.pi / 2.0), [2.0, 0.0, 0.0])
+assert sphere.init_points() is None
+assert sphere.n_records() == 15
 
 failed_sphere = three_dimensions.Sphere.__new__(three_dimensions.Sphere)
 try:
@@ -12514,6 +12516,8 @@ cylinder = three_dimensions.Cylinder(
     color=manimlib.BLUE,
     depth_test=False,
 )
+assert cylinder.n_records() == 15
+assert cylinder.init_points() is None
 assert cylinder.n_records() == 15
 assert cylinder.u_range == (0.0, math.tau)
 assert cylinder.v_range == (-1.0, 1.0)
@@ -12615,6 +12619,8 @@ assert torus_order_scene.get_mobjects() == [back_torus, front_torus]
 sphere_mesh = three_dimensions.SurfaceMesh(sphere, resolution=(4, 3))
 assert len(sphere_mesh.submobjects) == 7
 assert all(isinstance(line, VMobject) and line.has_points() for line in sphere_mesh)
+assert sphere_mesh.init_points() is None
+assert len(sphere_mesh.submobjects) == 7
 assert sphere_mesh.get_joint_type() == VMobject.joint_type_map["no_joint"]
 
 bevel_mesh = three_dimensions.SurfaceMesh(
@@ -12818,6 +12824,14 @@ assert not hasattr(failed_square3d, "submobjects")
 
 solid_scene = Scene().add(torus, cone, line3d, disk3d, square3d)
 assert solid_scene.get_mobjects() == [torus, cone, line3d, disk3d, square3d]
+
+cube_face = three_dimensions.Square3D(side_length=2.0)
+cube_faces = three_dimensions.square_to_cube_faces(cube_face)
+assert manimlib.square_to_cube_faces is three_dimensions.square_to_cube_faces
+assert len(cube_faces) == 6
+assert np.allclose(cube_face.get_center(), [0.0, 0.0, 1.0], atol=1e-6)
+assert np.allclose(cube_faces[0].get_center(), [0.0, 0.0, 1.0], atol=1e-6)
+assert np.isclose(cube_faces[-1].get_center()[2], -1.0, atol=1e-5)
 
 default_cube = three_dimensions.Cube()
 assert len(default_cube.submobjects) == 6
@@ -20202,6 +20216,210 @@ _textures = manimlib.ThreeDModel.__dict__["get_textures_from_mtl"](
     None, str(_mtl_path / "model.obj")
 )
 assert _textures["matA"].endswith("texA.png") and _textures["matB"] is None
+
+# fm-5wq.4: remaining types.surface identities over native sampled grids.
+assert surface_types.Surface.__bases__ == (manimlib.Mobject,)
+assert surface_types.ParametricSurface.__bases__ == (surface_types.Surface,)
+assert surface_types.SGroup.__bases__ == (surface_types.Surface,)
+assert list(inspect.signature(surface_types.Surface).parameters) == [
+    "color",
+    "shading",
+    "depth_test",
+    "u_range",
+    "v_range",
+    "resolution",
+    "preferred_creation_axis",
+    "epsilon",
+    "normal_nudge",
+    "kwargs",
+]
+assert list(inspect.signature(surface_types.SGroup).parameters) == [
+    "parametric_surfaces",
+    "kwargs",
+]
+assert surface_types.Surface.shader_folder == "surface"
+assert surface_types.Surface.render_primitive == 4
+assert surface_types.Surface.pointlike_data_keys == ["point", "d_normal_point"]
+assert [field[0] for field in surface_types.Surface.data_dtype] == [
+    "point",
+    "d_normal_point",
+    "rgba",
+]
+assert surface_types.TexturedSurface.shader_folder == "textured_surface"
+assert [field[0] for field in surface_types.TexturedSurface.data_dtype] == [
+    "point",
+    "d_normal_point",
+    "im_coords",
+    "opacity",
+]
+
+plane = surface_types.Surface(
+    u_range=(0.0, 2.0),
+    v_range=(0.0, 1.0),
+    resolution=(3, 2),
+    color=manimlib.BLUE,
+)
+assert plane.n_records() == 6
+assert plane.resolution == (3, 2)
+assert plane.u_range == (0.0, 2.0)
+assert plane.v_range == (0.0, 1.0)
+assert np.allclose(plane.uv_func(1.0, 0.5), (1.0, 0.5, 0.0))
+assert np.allclose(plane.get_points()[0], [0.0, 0.0, 0.0], atol=1e-5)
+assert np.allclose(plane.get_points()[-1], [2.0, 1.0, 0.0], atol=1e-5)
+assert plane.init_points() is None
+assert plane.n_records() == 6
+plane_indices = plane.get_shader_vert_indices()
+assert plane_indices.shape == (12,)
+assert np.array_equal(plane_indices, plane.get_triangle_indices())
+plane_points = plane.get_points().copy()
+plane_normals = plane.data["d_normal_point"].copy()
+assert (
+    plane.apply_points_function(
+        lambda points: points + np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        about_edge=None,
+    )
+    is plane
+)
+assert np.allclose(plane.get_points(), plane_points + np.array([1.0, 0.0, 0.0]))
+assert np.allclose(
+    plane.data["d_normal_point"], plane_normals + np.array([1.0, 0.0, 0.0])
+)
+
+failed_surface = surface_types.Surface.__new__(surface_types.Surface)
+try:
+    surface_types.Surface.__init__(failed_surface, bogus=True)
+except NotImplementedError as error:
+    assert str(error) == (
+        "Surface() keyword(s) not yet routed to the native builder: bogus"
+    )
+else:
+    raise AssertionError("an unrouted Surface keyword reached the native builder")
+assert not hasattr(failed_surface, "submobjects")
+
+left_sheet = surface_types.ParametricSurface(
+    lambda u, v: [u, v, 0.0],
+    resolution=(2, 2),
+)
+right_sheet = surface_types.ParametricSurface(
+    lambda u, v: [u + 3.0, v, 0.0],
+    resolution=(2, 2),
+)
+surface_group = surface_types.SGroup(left_sheet, right_sheet)
+assert surface_group.resolution == (0, 0)
+assert surface_group.submobjects == [left_sheet, right_sheet]
+assert surface_group.init_points() is None
+assert surface_group.submobjects == [left_sheet, right_sheet]
+assert np.array_equal(surface_group.get_triangle_indices(), np.zeros(0, dtype=int))
+
+for leaked in ("logging", "pywavefront", "trimesh"):
+    try:
+        getattr(surface_types, leaked)()
+    except NotImplementedError as error:
+        assert "OOT-LEAKED-SURFACE-IMPORTS" in str(error), (leaked, error)
+    else:
+        raise AssertionError(f"{leaked} was callable without a named exclusion")
+
+# fm-5wq.4: the remaining DotCloud shelf over native point/radius/rgba records.
+dot_cloud_mod = importlib.import_module("manimlib.mobject.types.dot_cloud")
+assert dot_cloud_mod.DotCloud.__bases__ == (manimlib.PMobject,)
+assert dot_cloud_mod.TrueDot.__bases__ == (dot_cloud_mod.DotCloud,)
+assert dot_cloud_mod.GlowDots.__bases__ == (dot_cloud_mod.DotCloud,)
+assert dot_cloud_mod.GlowDot.__bases__ == (dot_cloud_mod.GlowDots,)
+assert dot_cloud_mod.DEFAULT_DOT_RADIUS == 0.05
+assert dot_cloud_mod.DEFAULT_GLOW_DOT_RADIUS == 0.2
+assert dot_cloud_mod.DEFAULT_GRID_HEIGHT == 6
+assert dot_cloud_mod.DEFAULT_BUFF_RATIO == 0.5
+assert dot_cloud_mod.DotCloud.shader_folder == "true_dot"
+assert dot_cloud_mod.DotCloud.render_primitive == 0
+assert [field[0] for field in dot_cloud_mod.DotCloud.data_dtype] == [
+    "point",
+    "radius",
+    "rgba",
+]
+assert list(inspect.signature(dot_cloud_mod.DotCloud).parameters) == [
+    "points",
+    "color",
+    "opacity",
+    "radius",
+    "glow_factor",
+    "anti_alias_width",
+    "kwargs",
+]
+assert list(inspect.signature(dot_cloud_mod.TrueDot).parameters) == [
+    "center",
+    "kwargs",
+]
+assert list(inspect.signature(dot_cloud_mod.GlowDots).parameters) == [
+    "points",
+    "color",
+    "radius",
+    "glow_factor",
+    "kwargs",
+]
+assert list(inspect.signature(dot_cloud_mod.GlowDot).parameters) == [
+    "center",
+    "kwargs",
+]
+
+default_cloud = dot_cloud_mod.DotCloud()
+assert default_cloud.n_records() == 1
+assert np.allclose(default_cloud.get_points(), [[0.0, 0.0, 0.0]])
+assert np.isclose(default_cloud.get_radius(), 0.05)
+assert np.allclose(default_cloud.get_radii(), [[0.05]])
+assert np.isclose(default_cloud.get_glow_factor(), 0.0)
+assert np.isclose(default_cloud.uniforms["glow_factor"], 0.0)
+assert np.isclose(default_cloud.uniforms["anti_alias_width"], 2.0)
+
+cloud = dot_cloud_mod.DotCloud(
+    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+    radius=0.25,
+    glow_factor=0.5,
+)
+assert cloud.n_records() == 3
+assert np.isclose(cloud.get_radius(), 0.25)
+assert cloud.set_radii([0.1, 0.2, 0.4]) is cloud
+assert np.allclose(cloud.get_radii().reshape(-1), [0.1, 0.2, 0.4])
+assert np.isclose(cloud.get_radius(), 0.4)
+assert cloud.set_radius(0.3) is cloud
+assert np.allclose(cloud.get_radii().reshape(-1), [0.3, 0.3, 0.3])
+assert cloud.scale_radii(2.0) is cloud
+assert np.allclose(cloud.get_radii().reshape(-1), [0.6, 0.6, 0.6])
+before_points = cloud.get_points().copy()
+assert cloud.scale(0.5, scale_radii=False, about_point=manimlib.ORIGIN) is cloud
+assert np.allclose(cloud.get_points(), before_points * 0.5)
+assert np.allclose(cloud.get_radii().reshape(-1), [0.6, 0.6, 0.6])
+assert cloud.scale(2.0, about_point=manimlib.ORIGIN) is cloud
+assert np.allclose(cloud.get_radii().reshape(-1), [1.2, 1.2, 1.2])
+assert cloud.set_glow_factor(1.5) is cloud
+assert np.isclose(cloud.get_glow_factor(), 1.5)
+assert np.isclose(cloud.uniforms["glow_factor"], 1.5)
+if "glow_factor" in cloud.data.dtype.names:
+    assert np.allclose(cloud.data["glow_factor"].reshape(-1), [1.5, 1.5, 1.5])
+assert cloud.make_3d() is cloud
+assert np.allclose(cloud.get_shading(), [0.5, 0.1, 0.2])
+assert bool(cloud.uniforms["depth_test"]) is True
+
+grid = dot_cloud_mod.DotCloud(radius=0.05).to_grid(2, 3)
+assert grid is not None
+assert grid.n_records() == 6
+assert np.isclose(grid.get_height(), 6.0, atol=1e-5)
+assert np.allclose(grid.get_center(), [0.0, 0.0, 0.0], atol=1e-5)
+buff_grid = dot_cloud_mod.DotCloud(radius=0.05).to_grid(2, 2, buff_ratio=0.0)
+assert buff_grid.n_records() == 4
+
+true_dot = dot_cloud_mod.TrueDot([1.0, 2.0, 3.0], radius=0.1)
+assert true_dot.n_records() == 1
+assert np.allclose(true_dot.get_points(), [[1.0, 2.0, 3.0]])
+assert np.isclose(true_dot.get_radius(), 0.1)
+glow_dots = dot_cloud_mod.GlowDots([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+assert glow_dots.n_records() == 2
+assert np.isclose(glow_dots.get_radius(), 0.2)
+assert np.isclose(glow_dots.get_glow_factor(), 2.0)
+glow_dot = dot_cloud_mod.GlowDot([-1.0, 0.0, 0.0])
+assert glow_dot.n_records() == 1
+assert np.allclose(glow_dot.get_points(), [[-1.0, 0.0, 0.0]])
+assert np.isclose(glow_dot.get_radius(), 0.2)
+assert np.isclose(glow_dot.get_glow_factor(), 2.0)
 
 
 # ---------------------------------------------------------------------------

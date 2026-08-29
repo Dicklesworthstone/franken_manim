@@ -10571,10 +10571,18 @@ class DotCloud(PMobject):
     VMobject stroke/fill surface does not exist here; Mobject-level
     set_color/set_opacity write the real rgba records)."""
 
+    shader_folder = "true_dot"
+    render_primitive = 0  # moderngl.POINTS, without importing a renderer
+    data_dtype = [
+        ("point", _np.float32, (3,)),
+        ("radius", _np.float32, (1,)),
+        ("rgba", _np.float32, (4,)),
+    ]
+
     def __init__(
         self,
         points=None,
-        color=None,
+        color=_GREY_C,
         opacity=1.0,
         radius=0.05,
         glow_factor=0.0,
@@ -10586,19 +10594,74 @@ class DotCloud(PMobject):
             setattr(self, key, val)
         self.radius = float(radius)
         self.glow_factor = float(glow_factor)
+        self.anti_alias_width = float(anti_alias_width)
+        if points is None:
+            point_rows = [[0.0, 0.0, 0.0]]
+        else:
+            point_rows = [_vec3(p) for p in points]
         specs = self._build_dot_cloud(
             _native_shell_factory,
-            [] if points is None else [_vec3(p) for p in points],
-            None if color is None else color,
+            point_rows,
+            color,
             float(opacity),
             float(radius),
             float(glow_factor),
             float(anti_alias_width),
         )
         _hang_native_children(self, specs)
+        self.init_uniforms()
+
+    def init_uniforms(self):
+        super().init_uniforms()
+        self.uniforms["glow_factor"] = float(self.glow_factor)
+        self.uniforms["anti_alias_width"] = float(self.anti_alias_width)
+
+    def get_radii(self):
+        return self.data["radius"]
+
+    def set_radii(self, radii):
+        n_points = self.get_num_points()
+        radii = _np.asarray(radii, dtype=float).reshape((-1, 1))
+        self.data["radius"][:] = _resize_with_interpolation(radii, n_points)
+        self.refresh_bounding_box()
+        return self
+
+    def set_radius(self, radius):
+        data = self.data if self.get_num_points() > 0 else self._style_data()
+        data["radius"][:] = radius
+        radii = data["radius"]
+        if radii.size:
+            self.radius = float(_np.max(radii))
+        else:
+            self.radius = float(_np.asarray(radius, dtype=float).reshape(-1)[0])
+        self.refresh_bounding_box()
+        return self
 
     def get_radius(self):
-        return self.radius
+        radii = self.get_radii()
+        if len(radii) == 0:
+            return float(self.radius)
+        return float(_np.max(radii))
+
+    def scale_radii(self, scale_factor):
+        self.set_radius(scale_factor * self.get_radii())
+        return self
+
+    def scale(self, scale_factor, scale_radii=True, **kwargs):
+        super().scale(scale_factor, **kwargs)
+        if scale_radii:
+            self.set_radii(scale_factor * self.get_radii())
+        return self
+
+    def set_glow_factor(self, glow_factor):
+        self.glow_factor = float(glow_factor)
+        self.uniforms["glow_factor"] = self.glow_factor
+        if self.get_num_points() > 0 and "glow_factor" in self.data.dtype.names:
+            self.data["glow_factor"][:] = self.glow_factor
+        return self
+
+    def get_glow_factor(self):
+        return float(self.uniforms.get("glow_factor", self.glow_factor))
 
     def compute_bounding_box(self):
         # Point-cloud radii are geometry, not merely a render uniform.  Keep
@@ -10610,8 +10673,45 @@ class DotCloud(PMobject):
         bb[2] += _np.full((3,), radius)
         return bb
 
-    def get_glow_factor(self):
-        return self.glow_factor
+    def to_grid(
+        self,
+        n_rows,
+        n_cols,
+        n_layers=1,
+        buff_ratio=None,
+        h_buff_ratio=1.0,
+        v_buff_ratio=1.0,
+        d_buff_ratio=1.0,
+        height=6,
+    ):
+        n_rows = int(n_rows)
+        n_cols = int(n_cols)
+        n_layers = int(n_layers)
+        n_points = n_rows * n_cols * n_layers
+        points = _np.repeat(_np.arange(n_points), 3).reshape((n_points, 3)).astype(float)
+        if n_cols:
+            points[:, 0] = points[:, 0] % n_cols
+        if n_rows:
+            points[:, 1] = (points[:, 1] // n_cols) % n_rows
+        row_span = n_rows * n_cols
+        if row_span:
+            points[:, 2] = points[:, 2] // row_span
+        self.set_points(points)
+        if buff_ratio is not None:
+            v_buff_ratio = h_buff_ratio = d_buff_ratio = float(buff_ratio)
+        radius = self.get_radius()
+        ns = [n_cols, n_rows, n_layers]
+        brs = [h_buff_ratio, v_buff_ratio, d_buff_ratio]
+        self.set_radius(0)
+        for count, br, dim in zip(ns, brs, range(3)):
+            self.rescale_to_fit(
+                2 * radius * (1 + br) * (count - 1), dim, stretch=True
+            )
+        self.set_radius(radius)
+        if height is not None:
+            self.set_height(height)
+        self.center()
+        return self
 
     def make_3d(self, reflectiveness=0.5, gloss=0.1, shadow=0.2):
         # Reference dot_cloud.py:149 — uniforms-only, both engine-real.
@@ -11253,10 +11353,75 @@ class Button(Mobject):
 class Surface(Mobject):
     """The Surface-family MRO anchor (Reference Surface(Mobject), NOT a
     VMobject — VGroup's only-VMobjects refusal stays correct for it).
-    Concrete construction routes through the solid subclasses; the
-    remaining Surface surface stays precise schema placeholders."""
+    Generic sampled grids and ParametricSurface share Atlas's native
+    parametric builder; solid subclasses keep their specialized constructors."""
 
     dimension = 3
+    shader_folder = "surface"
+    data_dtype = [
+        ("point", _np.float32, (3,)),
+        ("d_normal_point", _np.float32, (3,)),
+        ("rgba", _np.float32, (4,)),
+    ]
+    pointlike_data_keys = ["point", "d_normal_point"]
+    render_primitive = 4  # moderngl.TRIANGLES, without importing a renderer
+
+    def __init__(
+        self,
+        color=_GREY,
+        shading=(0.3, 0.2, 0.4),
+        depth_test=True,
+        u_range=(0.0, 1.0),
+        v_range=(0.0, 1.0),
+        resolution=(101, 101),
+        preferred_creation_axis=1,
+        epsilon=0.001,
+        normal_nudge=0.001,
+        **kwargs,
+    ):
+        opacity = kwargs.pop("opacity", None)
+        z_index = int(kwargs.pop("z_index", 0))
+        _refuse_unrouted(
+            type(self).__name__ + "()",
+            [(name, True) for name in sorted(kwargs)],
+        )
+        _install_live_state(self)
+        self.u_range = tuple(u_range)
+        self.v_range = tuple(v_range)
+        self.resolution = (int(resolution[0]), int(resolution[1]))
+        self.preferred_creation_axis = int(preferred_creation_axis)
+        self.epsilon = float(epsilon)
+        self.normal_nudge = float(normal_nudge)
+        self.z_index = z_index
+        if self.resolution[0] == 0 or self.resolution[1] == 0:
+            self._engine_init()
+        else:
+            specs = self._build_parametric_surface(
+                _native_surface_shell_factory,
+                self.uv_func,
+                (float(self.u_range[0]), float(self.u_range[1])),
+                (float(self.v_range[0]), float(self.v_range[1])),
+                self.resolution,
+                self.epsilon,
+                self.normal_nudge,
+            )
+            _hang_native_children(self, specs)
+        self.compute_triangle_indices()
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def init_points(self):
+        # Native construction already installed the sampled grid.
+        return None
+
+    def apply_points_function(self, *args, **kwargs):
+        super().apply_points_function(*args, **kwargs)
+        self.get_unit_normals()
+        return self
+
+    def get_shader_vert_indices(self):
+        if not hasattr(self, "triangle_indices"):
+            self.compute_triangle_indices()
+        return self.get_triangle_indices()
 
     def pointwise_become_partial(self, smobject, a, b, axis=None):
         assert isinstance(smobject, Surface)
@@ -11409,10 +11574,15 @@ class Surface(Mobject):
 
 
 class SGroup(Surface):
-    # Reference SGroup(*parametric_surfaces): the group init is inherited
-    # (Mobject's ingest rule); only-Surface membership is the schema's
-    # concern once real Surface parents exist.
-    pass
+    """Reference SGroup(*parametric_surfaces): an empty-resolution Surface
+    whose membership lives on the family, not a sampled grid."""
+
+    def __init__(self, *parametric_surfaces, **kwargs):
+        super().__init__(resolution=(0, 0), **kwargs)
+        self.add(*parametric_surfaces)
+
+    def init_points(self):
+        return None
 
 
 class TexturedSurface(Surface):
@@ -11735,6 +11905,10 @@ class Cylinder(Surface):
 
     def uv_func(self, u, v):
         return _np.array(self._cylinder_uv(float(u), float(v)))
+
+    def init_points(self):
+        # Native construction already installed the sampled grid.
+        return None
 
 
 class Cone(Cylinder):
@@ -12293,6 +12467,31 @@ class SurfaceMesh(VGroup):
         else:
             self.deactivate_depth_test()
         self.set_joint_type(joint_type)
+
+    def init_points(self):
+        # Native construction already hung the wireframe family.
+        return None
+
+
+def square_to_cube_faces(square):
+    # three_dimensions.py:258. The input square is moved to +z, then five
+    # copies complete the cube. compass_directions is the live space_ops
+    # helper, already bound before this function is called.
+    radius = square.get_height() / 2.0
+    square.move_to(radius * _OUT)
+    result = [square.copy()]
+    space_ops = _sys.modules["manimlib.utils.space_ops"]
+    for vect in space_ops.compass_directions(4):
+        result.append(
+            square.copy().rotate(_math.pi / 2, axis=vect, about_point=_ORIGIN)
+        )
+    result.append(square.copy().rotate(_math.pi, _RIGHT, about_point=_ORIGIN))
+    return result
+
+
+# Schema install later copies exported names onto this module and would
+# otherwise overwrite the real function with the parity-surface placeholder.
+_SQUARE_TO_CUBE_FACES = square_to_cube_faces
 
 
 class TracingTail(VMobject):
@@ -22139,6 +22338,55 @@ def _install_coordinate_system_helpers():
 
 
 _install_coordinate_system_helpers()
+
+
+def _install_three_dimension_helpers():
+    """Overwrite the schema placeholder for square_to_cube_faces."""
+    module = _ensure_module("manimlib.mobject.three_dimensions")
+    module.square_to_cube_faces = _SQUARE_TO_CUBE_FACES
+    _FMN_MODULE.square_to_cube_faces = _SQUARE_TO_CUBE_FACES
+
+
+_install_three_dimension_helpers()
+
+
+def _install_surface_leaked_refusals():
+    """Exclude types.surface's leaked third-party and stdlib imports."""
+
+    module = _ensure_module("manimlib.mobject.types.surface")
+
+    def _refuse(name):
+        def unavailable(*args, **kwargs):
+            del args, kwargs
+            raise NotImplementedError(
+                f"manimlib.mobject.types.surface.{name} is excluded "
+                "(OOT-LEAKED-SURFACE-IMPORTS)"
+            )
+
+        unavailable.__name__ = name
+        unavailable.__qualname__ = name
+        unavailable.__module__ = "manimlib.mobject.types.surface"
+        return unavailable
+
+    module.logging = _refuse("logging")
+    module.pywavefront = _refuse("pywavefront")
+    module.trimesh = _refuse("trimesh")
+
+
+_install_surface_leaked_refusals()
+
+
+def _install_dot_cloud_constants():
+    """Bind the four exported DotCloud defaults onto the submodule."""
+
+    module = _ensure_module("manimlib.mobject.types.dot_cloud")
+    module.DEFAULT_DOT_RADIUS = 0.05
+    module.DEFAULT_GLOW_DOT_RADIUS = 0.2
+    module.DEFAULT_GRID_HEIGHT = 6
+    module.DEFAULT_BUFF_RATIO = 0.5
+
+
+_install_dot_cloud_constants()
 
 
 def _portal_cli_emit(code, identity, kind, message, robot, **fields):
