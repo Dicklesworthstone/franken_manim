@@ -556,7 +556,7 @@ impl NeuralNetworkMobject {
                     }
                 }
                 // Sigmoid activation: 1 / (1 + e^(-z))
-                let sigmoid = 1.0 / (1.0 + (-z).exp());
+                let sigmoid = 1.0 / (1.0 + fmn_dmath::exp(-z));
                 next_act[to_idx] = sigmoid;
             }
             self.layers[i + 1].activations = next_act.clone();
