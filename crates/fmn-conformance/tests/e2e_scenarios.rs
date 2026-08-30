@@ -59,7 +59,8 @@
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
-use fmn_anim::{FramePacket, Timeline};
+use fmn_anim::animation::Animation as _;
+use fmn_anim::{FramePacket, MoveAlongPath, RateFunc, Timeline};
 use fmn_conformance::e2e::{
     self, Assertion, FieldPred, Invocation, LogEvent, LogExpect, RegressionKind, RunCtx,
     RunOutcome, Runner, ScenarioClass, ScenarioError, ScenarioSpec, Status, Surface, Tier,
@@ -75,16 +76,20 @@ use fmn_conformance::perf_pg6_peak::{
 };
 use fmn_conformance::scene_goldens::{self, TILING};
 use fmn_core::color::Srgb;
-use fmn_core::constants::{BLUE_C, WHITE};
+use fmn_core::constants::{
+    BLUE_C, BOTTOM, DOWN, FRAME_X_RADIUS, FRAME_Y_RADIUS, LEFT, LEFT_SIDE, RED_C, RIGHT,
+    RIGHT_SIDE, TEAL_B, TOP, UL, UP, WHITE, YELLOW,
+};
 use fmn_core::rng::RngRoot;
 use fmn_frame::convert::{rgba_to_nv12, rgba16f_to_rgba8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_hash::sha256;
-use fmn_library::Circle;
 use fmn_library::style::VStyle;
 use fmn_library::vmobject::VMobject;
-use fmn_mobject::Stage;
+use fmn_library::{Circle, FunctionGraph, NumberPlane};
 use fmn_mobject::animate::AnimateArgs;
+use fmn_mobject::record::{RecordBuffer, RecordSchema};
+use fmn_mobject::{Mob, Mobject, Stage};
 use fmn_output::sinks::{
     NativeArtifactKind, NativeArtifactReport, PngSink, PngSinkConfig, PngTarget, SinkLimits,
     Y4mSink, Y4mSinkConfig,
@@ -107,7 +112,7 @@ use fmn_scene::{
     CaptureReason, IntegrationError, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram,
     SceneSink,
 };
-use fmn_tex::TexError;
+use fmn_tex::{Prim, TexError};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2841,6 +2846,510 @@ fn public_facade_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
 }
 
 // ---------------------------------------------------------------------------
+// Parity drills (fm-parity-drill-scenarios-hzng): one fast-tier drill per
+// Parity Ledger ruling family. Each scenario drives the real Rust API
+// surface and asserts the CORRECTED behavior, so reintroducing the
+// Reference-buggy expectation turns the drill red — a drill that cannot
+// fail is not a drill.
+// ---------------------------------------------------------------------------
+
+/// A bare vmobject in `stage` carrying `points` as its point records (the
+/// fmn-anim movement-suite construction: shared-anchor quad runs).
+fn parity_vmob(stage: &mut Stage, points: &[[f64; 3]]) -> Mob {
+    let mob = stage.add(Mobject::new());
+    let entry = stage.get_mut(mob).expect("a fresh handle has an entry");
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len())
+        .expect("a bounded point record buffer");
+    #[allow(clippy::cast_possible_truncation)]
+    let flat: Vec<f32> = points
+        .iter()
+        .flat_map(|point| point.iter().map(|value| *value as f32))
+        .collect();
+    entry.buffer.write_range("point", 0, &flat);
+    mob
+}
+
+/// C-5 / BN-07 — `add_updater(call = True)` runs the registration update
+/// exactly ONCE. The Reference's registration path calls `update(dt = 0)`
+/// and then unconditionally calls `update()` again, so every `call=True`
+/// attach double-fires its callable; the corrected engine fires one
+/// registration pass per updater and ordinary ticks continue from there.
+fn parity_updater_call_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    ctx.set_fps((FPS, 1));
+    let mut stage = Stage::new();
+    let mob = parity_vmob(&mut stage, &[[0.0; 3]]);
+    stage
+        .add_to_scene(mob)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+    let dt_mob = parity_vmob(&mut stage, &[[0.0; 3]]);
+    stage
+        .add_to_scene(dt_mob)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+
+    let attach_calls = Rc::new(Cell::new(0_u64));
+    let dt_attach_calls = Rc::new(Cell::new(0_u64));
+    {
+        let attach_calls = Rc::clone(&attach_calls);
+        stage
+            .add_updater(
+                mob,
+                move |_stage, _target| {
+                    attach_calls.set(attach_calls.get() + 1);
+                },
+                true,
+            )
+            .map_err(|error| fail(format!("register call updater: {error}")))?;
+    }
+    {
+        let dt_attach_calls = Rc::clone(&dt_attach_calls);
+        stage
+            .add_dt_updater(
+                dt_mob,
+                move |_stage, _target, _dt| {
+                    dt_attach_calls.set(dt_attach_calls.get() + 1);
+                },
+                true,
+            )
+            .map_err(|error| fail(format!("register dt updater: {error}")))?;
+    }
+
+    // Each call = true registration has fired its own callable exactly
+    // once; the Reference's double-call would read 2 here.
+    let calls_after_attach = attach_calls.get();
+    let dt_after_attach = dt_attach_calls.get();
+    stage.update(0.25);
+    stage.update(0.25);
+    let calls_after_two_ticks = attach_calls.get();
+    let dt_after_two_ticks = dt_attach_calls.get();
+
+    // Each call = true registration has fired its own callable exactly
+    // once; the Reference's double-call would read 2 here.
+    let corrected = calls_after_attach == 1
+        && dt_after_attach == 1
+        && calls_after_two_ticks == 3
+        && dt_after_two_ticks == 3;
+    if !corrected {
+        return Err(fail(format!(
+            "C-5: add_updater(call=true) attach fired call={calls_after_attach} \
+             dt={dt_after_attach} (corrected: exactly one each); after two ticks \
+             call={calls_after_two_ticks} dt={dt_after_two_ticks} (corrected: 3 each)"
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.updater_call_once")
+            .field("call_attach_calls", calls_after_attach)
+            .field("dt_attach_calls", dt_after_attach)
+            .field("call_after_two_ticks", calls_after_two_ticks)
+            .field("dt_after_two_ticks", dt_after_two_ticks),
+    );
+    ctx.counter("parity_updater_attach_calls", calls_after_attach);
+    Ok(RunOutcome::ok().with_counter("parity_updater_attach_calls", calls_after_attach))
+}
+
+/// C-17 / BN-07 — `NumberPlane.get_y_unit_size()` measures the Y axis. The
+/// Reference's body answers `get_x_axis().get_unit_size()`, invisible on
+/// the default square-aspect plane; this plane is deliberately
+/// non-square-aspect (equal 8-unit edge lengths over a 16-unit x span and
+/// a 4-unit y span), so the correct y answer and the pinned x answer
+/// differ by 4×.
+fn parity_plane_y_unit_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let corpus = scene_goldens::corpus();
+    let plane = NumberPlane::new()
+        .x_range([-8.0, 8.0, 1.0])
+        .y_range([-2.0, 2.0, 1.0])
+        .width(8.0)
+        .height(8.0)
+        .build(&corpus.book)
+        .map_err(|error| fail(format!("plane builds: {error}")))?;
+    let x_unit = plane.x_unit_size();
+    let y_unit = plane.y_unit_size();
+
+    // Corrected answers: 8.0 units of width over 16 x-units → 0.5 scene
+    // units per x unit; 8.0 of height over 4 y-units → 2.0 per y unit.
+    if (x_unit - 0.5).abs() > 1e-9 || (y_unit - 2.0).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-17: y_unit_size() answered {y_unit} while x_unit_size() answered \
+             {x_unit}; the corrected plane measures the axis the name names (2.0, x 0.5)"
+        )));
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (x_milli, y_milli) = ((x_unit * 1000.0) as u64, (y_unit * 1000.0) as u64);
+    ctx.event(
+        LogEvent::new("e2e.parity.plane_y_unit_size")
+            .field("x_unit_milli", x_milli)
+            .field("y_unit_milli", y_milli),
+    );
+    ctx.counter("parity_plane_y_unit_is_own_axis", 1);
+    Ok(RunOutcome::ok().with_counter("parity_plane_y_unit_is_own_axis", 1))
+}
+
+/// C-15 / BN-07 — `FunctionGraph(..., color = …)` styles the graph. The
+/// Reference declares `color=YELLOW` but never forwards it, so every
+/// explicit color request was silently ignored; the corrected builder
+/// strokes the graph in the requested color and the no-color default stays
+/// YELLOW.
+fn parity_function_graph_color_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let default_graph = FunctionGraph::new(|x: f64| x * x)
+        .build()
+        .map_err(|error| fail(format!("default graph builds: {error}")))?;
+    let requested_graph = FunctionGraph::new(|x: f64| x * x)
+        .x_range([-2.0, 2.0, 0.05])
+        .color(TEAL_B)
+        .build()
+        .map_err(|error| fail(format!("styled graph builds: {error}")))?;
+    let default_color = default_graph.style().stroke_color;
+    let requested_color = requested_graph.style().stroke_color;
+
+    let default_stays_yellow = default_color == YELLOW;
+    let requested_honored = requested_color == TEAL_B && requested_color != default_color;
+    if !default_stays_yellow || !requested_honored {
+        return Err(fail(format!(
+            "C-15: FunctionGraph color — default strokes {default_color:?} (want YELLOW), \
+             requested strokes {requested_color:?} (want TEAL_B, distinct from the default)"
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.function_graph_color")
+            .field("default_yellow", truth(default_stays_yellow))
+            .field("requested_honored", truth(requested_honored)),
+    );
+    ctx.counter("parity_function_graph_color_honored", 1);
+    Ok(RunOutcome::ok().with_counter("parity_function_graph_color_honored", 1))
+}
+
+/// C-16 / BN-07 — the frame-marker constants work as unit directions for
+/// `to_edge`/`to_corner`. The pinned markers are frame-radius-scaled while
+/// `align_on_border` subtracts `direction * buff` unnormalized, so the
+/// markers' only realistic use misplaces by a frame-radius factor; the
+/// ruling resolves each marker to its unit direction, and this drill pins
+/// the exact flush placements the names promise through the real
+/// positional engine.
+fn parity_frame_markers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    // The C-16 resolution: marker → the unit direction it names.
+    const MARKERS: [(&str, [f64; 3], [f64; 3]); 4] = [
+        ("TOP", TOP, UP),
+        ("BOTTOM", BOTTOM, DOWN),
+        ("LEFT_SIDE", LEFT_SIDE, LEFT),
+        ("RIGHT_SIDE", RIGHT_SIDE, RIGHT),
+    ];
+    let sign = |value: f64| {
+        if value > 0.0 {
+            1.0
+        } else if value < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    };
+    for (name, marker, direction) in MARKERS {
+        for axis in 0..3 {
+            if sign(marker[axis]) != sign(direction[axis]) {
+                return Err(fail(format!(
+                    "C-16: frame marker {name} does not carry the sign of its \
+                     resolved direction on axis {axis}"
+                )));
+            }
+        }
+    }
+
+    let mut stage = Stage::new();
+    // A 2×2 box: bounding box exactly [-1, 1]².
+    let mob = parity_vmob(
+        &mut stage,
+        &[
+            [-1.0, -1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ],
+    );
+    stage
+        .add_to_scene(mob)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+
+    // Each resolved direction lands the box exactly `buff` inside the
+    // named frame edge; a frame-radius-scaled direction argument would
+    // multiply the buffer by the frame radius instead.
+    stage.to_edge(mob, UP, 0.5);
+    let top = stage.get_bounding_box_point(mob, UP);
+    if (top[1] - (FRAME_Y_RADIUS - 0.5)).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-16: the top-edge marker direction placed the top at y = {}, want {}",
+            top[1],
+            FRAME_Y_RADIUS - 0.5
+        )));
+    }
+    stage.to_edge(mob, DOWN, 0.5);
+    let bottom = stage.get_bounding_box_point(mob, DOWN);
+    if (bottom[1] + (FRAME_Y_RADIUS - 0.5)).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-16: the bottom-edge marker direction placed the bottom at y = {}, want {}",
+            bottom[1],
+            -(FRAME_Y_RADIUS - 0.5)
+        )));
+    }
+    stage.to_edge(mob, LEFT, 0.25);
+    let left = stage.get_bounding_box_point(mob, LEFT);
+    if (left[0] + (FRAME_X_RADIUS - 0.25)).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-16: the left-side marker direction placed the left at x = {}, want {}",
+            left[0],
+            -(FRAME_X_RADIUS - 0.25)
+        )));
+    }
+    stage.to_edge(mob, RIGHT, 0.75);
+    let right = stage.get_bounding_box_point(mob, RIGHT);
+    if (right[0] - (FRAME_X_RADIUS - 0.75)).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-16: the right-side marker direction placed the right at x = {}, want {}",
+            right[0],
+            FRAME_X_RADIUS - 0.75
+        )));
+    }
+    stage.to_corner(mob, UL, 0.5);
+    let corner_top = stage.get_bounding_box_point(mob, UP);
+    let corner_left = stage.get_bounding_box_point(mob, LEFT);
+    if (corner_top[1] - (FRAME_Y_RADIUS - 0.5)).abs() > 1e-9
+        || (corner_left[0] + (FRAME_X_RADIUS - 0.5)).abs() > 1e-9
+    {
+        return Err(fail(format!(
+            "C-16: the UL corner direction placed the corner at ({}, {}), want ({}, {})",
+            corner_left[0],
+            corner_top[1],
+            -(FRAME_X_RADIUS - 0.5),
+            FRAME_Y_RADIUS - 0.5
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.frame_markers")
+            .field("marker_directions", MARKERS.len() as u64)
+            .field("exact_placements", 5_u64),
+    );
+    ctx.counter("parity_frame_marker_placements", 5);
+    Ok(RunOutcome::ok().with_counter("parity_frame_marker_placements", 5))
+}
+
+/// BN-03 — `point_from_proportion`/`MoveAlongPath` place by TRUE arc
+/// length. Metamorphic: uniform α steps visit equal arc-length increments
+/// on an uneven curved path (built corner-free, so equal chords are a
+/// faithful stand-in for equal arcs), `MoveAlongPath` rides the same
+/// corrected layer end-to-end, and the shipped layer provably disagrees
+/// with the Reference's chord heuristic at α = 0.5.
+fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let mut stage = Stage::new();
+    // Two very unequal curved quads sharing one tangent-continuous anchor:
+    // a short arch (≈1.8 units of arc) then a long shallow one (≈4.5). The
+    // join carries no corner, so chord steps track arc steps to well under
+    // the 1% band below.
+    let path = parity_vmob(
+        &mut stage,
+        &[
+            [0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.0, 1.5, 0.0],
+            [1.5, 2.0, 0.0],
+            [5.0, 0.0, 0.0],
+        ],
+    );
+    stage
+        .add_to_scene(path)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+
+    // Metamorphic relation: uniform α steps visit equal arc lengths.
+    const STEPS: u32 = 64;
+    let mut prev = stage
+        .point_from_proportion(path, 0.0)
+        .map_err(|error| fail(format!("proportion(0): {error}")))?;
+    #[allow(clippy::cast_possible_truncation)]
+    let mut chords = Vec::with_capacity(STEPS as usize);
+    for i in 1..=STEPS {
+        let alpha = f64::from(i) / f64::from(STEPS);
+        let point = stage
+            .point_from_proportion(path, alpha)
+            .map_err(|error| fail(format!("proportion({alpha}): {error}")))?;
+        chords.push(((point[0] - prev[0]).powi(2) + (point[1] - prev[1]).powi(2)).sqrt());
+        prev = point;
+    }
+    let mean_step = chords.iter().sum::<f64>() / f64::from(STEPS);
+    let worst_deviation = chords
+        .iter()
+        .fold(0.0_f64, |w, c| w.max((c - mean_step).abs()));
+    if mean_step <= 0.0 || worst_deviation / mean_step > 0.01 {
+        return Err(fail(format!(
+            "BN-03: uniform α steps are not equal arc length — mean step {mean_step}, \
+             worst deviation {worst_deviation} ({:.3}%, allowed 1%)",
+            100.0 * worst_deviation / mean_step
+        )));
+    }
+
+    // The Reference's equal-curve-length heuristic would land α = 0.5
+    // exactly at the shared anchor (x = 1): two curves, equal shares. True
+    // arc length sits deep in the long second curve, while α = 0.25 is
+    // still inside the short first curve.
+    let quarter = stage
+        .point_from_proportion(path, 0.25)
+        .map_err(|error| fail(format!("proportion(0.25): {error}")))?;
+    if quarter[0] >= 1.0 {
+        return Err(fail(format!(
+            "BN-03: α = 0.25 landed at x = {} — outside the short first curve, \
+             whose arc is well under a quarter of the path",
+            quarter[0]
+        )));
+    }
+    let half = stage
+        .point_from_proportion(path, 0.5)
+        .map_err(|error| fail(format!("proportion(0.5): {error}")))?;
+    if half[0] <= 1.25 {
+        return Err(fail(format!(
+            "BN-03: α = 0.5 landed at x = {} — the chord-length boundary answer, \
+             not true arc length",
+            half[0]
+        )));
+    }
+    // Direct discriminator against the labeled heuristic on the same
+    // records: the shipped layer and `quick_point_from_proportion` must
+    // disagree decisively at α = 0.5.
+    let records = stage
+        .get_points(path)
+        .ok_or_else(|| fail("the path lost its points"))?;
+    let quad =
+        fmn_geom::QuadPath::from_points(records).map_err(|error| fail(format!("{error:?}")))?;
+    let quick = quad
+        .quick_point_from_proportion(0.5)
+        .ok_or_else(|| fail("quick proportion(0.5)"))?;
+    let heuristic_gap = ((half[0] - quick[0]).powi(2) + (half[1] - quick[1]).powi(2)).sqrt();
+    if heuristic_gap <= 0.5 {
+        return Err(fail(format!(
+            "BN-03: true arc length and the chord heuristic agree at α = 0.5 \
+             (gap {heuristic_gap}) — the drill no longer discriminates"
+        )));
+    }
+
+    // MoveAlongPath rides the corrected layer end-to-end: its interpolated
+    // positions match the proportion layer at every α.
+    let dot = parity_vmob(&mut stage, &[[9.0, 9.0, 0.0]]);
+    let mut animation = MoveAlongPath::new(dot, path);
+    animation.state_mut().config.rate_func = RateFunc::linear();
+    animation
+        .begin(&mut stage)
+        .map_err(|error| fail(format!("MoveAlongPath begin: {error}")))?;
+    let mut animation_matches = 0_u64;
+    for &alpha in &[0.25_f64, 0.5, 0.75] {
+        animation.interpolate(&mut stage, alpha);
+        let at = *stage
+            .get_points(dot)
+            .ok_or_else(|| fail("the dot lost its points"))?
+            .first()
+            .ok_or_else(|| fail("the dot lost its point"))?;
+        let want = stage
+            .point_from_proportion(path, alpha)
+            .map_err(|error| fail(format!("proportion({alpha}): {error}")))?;
+        if (at[0] - want[0]).abs() > 1e-3 || (at[1] - want[1]).abs() > 1e-3 {
+            return Err(fail(format!(
+                "BN-03: MoveAlongPath at α={alpha} sat at ({}, {}), want ({}, {})",
+                at[0], at[1], want[0], want[1]
+            )));
+        }
+        animation_matches += 1;
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.move_along_path_arclength")
+            .field("equal_steps", truth(worst_deviation / mean_step <= 0.01))
+            .field("animation_matches", animation_matches),
+    );
+    ctx.counter("parity_arclength_animation_matches", animation_matches);
+    Ok(RunOutcome::ok().with_counter("parity_arclength_animation_matches", animation_matches))
+}
+
+/// §11.3 span map — `tex_to_color_map` colors by SOURCE identity. The
+/// constructor map rides `Typeset::occurrences`: two source occurrences of
+/// one substring get independent fates, the longer overlapping entry wins
+/// exactly its own span, unmapped glyphs keep the default white, and each
+/// mapped ordinal is the glyph of the matched source span (the
+/// two-render-and-align hack stays dead).
+fn parity_tex_span_map_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let corpus = scene_goldens::corpus();
+    let t2c = [("x", RED_C), ("x^2", TEAL_B), ("y", BLUE_C)];
+    let built = fmn_library::Tex::new("x + x^2 + y")
+        .t2c(&t2c)
+        .build(&corpus.tex)
+        .map_err(|error| fail(format!("tex builds: {error}")))?;
+
+    let fill_of = |ord: usize| built.vmob.children()[ord].style().fill_color;
+    let all_fill = |ords: &[usize], color: Srgb| ords.iter().all(|&ord| fill_of(ord) == color);
+
+    // Two distinct source occurrences of "x" with independent fates: the
+    // standalone x is RED, the x inside the later "x^2" span is TEAL_B.
+    let x_occurrences = built.occurrences("x");
+    if x_occurrences.len() != 2 {
+        return Err(fail(format!(
+            "the span map found {} occurrences of \"x\", want 2",
+            x_occurrences.len()
+        )));
+    }
+    if !all_fill(&x_occurrences[0], RED_C) || !all_fill(&x_occurrences[1], TEAL_B) {
+        return Err(fail(
+            "t2c did not give the two \"x\" occurrences their independent mapped fills",
+        ));
+    }
+    // The longer overlapping entry wins exactly its own span: both glyphs
+    // of the second term, and nothing else.
+    let x_squared = built.occurrences("x^2");
+    if x_squared.len() != 1 || x_squared[0].len() != 2 || !all_fill(&x_squared[0], TEAL_B) {
+        return Err(fail(format!(
+            "the \"x^2\" span mapped {} occurrence(s) with coverage {:?}",
+            x_squared.len(),
+            x_squared.first()
+        )));
+    }
+    // "y" maps by identity; unmapped glyphs keep the default white.
+    let y = built.occurrences("y");
+    let plus = built.occurrences("+");
+    if y.len() != 1 || !all_fill(&y[0], BLUE_C) {
+        return Err(fail("the mapped \"y\" glyph is not BLUE_C"));
+    }
+    if plus.len() != 2 || !plus.iter().all(|ords| all_fill(ords, WHITE)) {
+        return Err(fail(
+            "unmapped \"+\" glyphs must keep the default white fill",
+        ));
+    }
+    // The mapped ordinal is the glyph of the matched source span — the
+    // span map, not a render-and-align assignment.
+    let first_x = x_occurrences[0][0];
+    let is_x_glyph = matches!(
+        built.typeset.subs[first_x].prim,
+        Prim::Glyph(glyph) if built.typeset.layout.glyphs[glyph].ch == 'x'
+    );
+    if !is_x_glyph {
+        return Err(fail(
+            "the ordinal selected by the span map is not the glyph of the matched source span",
+        ));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.tex_span_map_t2c")
+            .field("x_occurrences", x_occurrences.len() as u64)
+            .field("plus_occurrences", plus.len() as u64),
+    );
+    ctx.counter("parity_t2c_source_identity", 1);
+    Ok(RunOutcome::ok().with_counter("parity_t2c_source_identity", 1))
+}
+
+// ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
 
@@ -3388,6 +3897,111 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     ));
 
     // ------------------------------------------------------------------
+    // Parity drills (fm-parity-drill-scenarios-hzng): one fast-tier drill
+    // per Parity Ledger ruling family — C-5, C-17, C-15, C-16, BN-03, and
+    // the §11.3 span map — each asserting the CORRECTED behavior
+    // end-to-end so the Reference-buggy answer turns the drill red.
+    // ------------------------------------------------------------------
+    specs.push(spec(
+        "parity.updater_call_runs_once.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_updater_call_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("parity_updater_attach_calls", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.updater_call_once",
+            vec![
+                FieldPred::u64_eq("call_attach_calls", 1),
+                FieldPred::u64_eq("dt_attach_calls", 1),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.plane_y_unit_size.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_plane_y_unit_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("parity_plane_y_unit_is_own_axis", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.plane_y_unit_size",
+            vec![FieldPred::u64_eq("y_unit_milli", 2_000)],
+        )],
+    ));
+    specs.push(spec(
+        "parity.function_graph_color.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_function_graph_color_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("parity_function_graph_color_honored", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.function_graph_color",
+            vec![
+                FieldPred::str_eq("default_yellow", "true"),
+                FieldPred::str_eq("requested_honored", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.frame_markers_to_edge.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_frame_markers_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("parity_frame_marker_placements", 5),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.frame_markers",
+            vec![
+                FieldPred::u64_eq("marker_directions", 4),
+                FieldPred::u64_eq("exact_placements", 5),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.move_along_path_true_arclength.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_move_along_path_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("parity_arclength_animation_matches", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.move_along_path_arclength",
+            vec![
+                FieldPred::str_eq("equal_steps", "true"),
+                FieldPred::u64_eq("animation_matches", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_span_map_t2c.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_tex_span_map_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("parity_t2c_source_identity", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_span_map_t2c",
+            vec![
+                FieldPred::u64_eq("x_occurrences", 2),
+                FieldPred::u64_eq("plus_occurrences", 2),
+            ],
+        )],
+    ));
+    // ------------------------------------------------------------------
     // fm-3kr / fm-n64 enhanced-surface drills: refusal policy by name,
     // spring-kernel determinism, CSV→Table round-trip.
     // ------------------------------------------------------------------
@@ -3689,6 +4303,19 @@ fn runner_log_artifact_validates_against_declared_schema() {
         .expect("the run's NDJSON log artifact validates against the harness's declared schema");
 }
 
+/// The Parity Ledger ruling drills' stable scenario ids: one per ruling
+/// family (C-5, C-17, C-15, C-16, BN-03, and the §11.3 span map). The
+/// invariant pins each id so a ruling can never silently lose its e2e
+/// drill.
+const PARITY_RULING_DRILL_IDS: &[&str] = &[
+    "parity.updater_call_runs_once.v1",
+    "parity.plane_y_unit_size.v1",
+    "parity.function_graph_color.v1",
+    "parity.frame_markers_to_edge.v1",
+    "parity.move_along_path_true_arclength.v1",
+    "parity.tex_span_map_t2c.v1",
+];
+
 /// Catalog invariants: unique path-safe names, class coverage, a drill
 /// per class, and no Pending-surface stubs.
 #[test]
@@ -3729,6 +4356,23 @@ fn catalog_invariants_hold() {
             .count();
         assert!(seeded >= 2, "{class:?} has {seeded} scenarios");
         assert_eq!(drills, 1, "{class:?} must carry exactly one drill");
+    }
+
+    // ParityDrill is the Parity Ledger's ruling class: never empty again,
+    // and every ruling family keeps its stable drill id.
+    let parity_seeded = scenarios
+        .iter()
+        .filter(|s| s.class == ScenarioClass::ParityDrill && s.regression.is_none())
+        .count();
+    assert!(
+        parity_seeded >= 1,
+        "ParityDrill has {parity_seeded} scenarios"
+    );
+    for id in PARITY_RULING_DRILL_IDS {
+        assert!(
+            scenarios.iter().any(|scenario| scenario.name == *id),
+            "ParityDrill lost its stable ruling drill {id}"
+        );
     }
 
     // Pending surfaces are declared, never stubbed: nothing registers against
