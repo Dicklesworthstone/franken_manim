@@ -471,6 +471,8 @@ impl MixReport {
 pub struct SoundMixer {
     config: MixerConfig,
     cues: Vec<PreparedCue>,
+    /// Digital-silence floor for the mixed timeline, in output frames.
+    min_timeline_frames: u64,
 }
 
 impl SoundMixer {
@@ -482,7 +484,22 @@ impl SoundMixer {
         Ok(Self {
             config: config.validate()?,
             cues: Vec::new(),
+            min_timeline_frames: 0,
         })
+    }
+
+    /// Extend the mixed timeline to at least this many output frames with
+    /// digital silence.
+    ///
+    /// Composition roots pass the scene duration so the published soundtrack
+    /// spans the whole picture timeline even when the last cue ends earlier.
+    /// The floor counts against [`MixerConfig::max_output_frames`]: a floor
+    /// beyond the budget is a [`SoundError::OutputTooLong`] refusal, never a
+    /// silent allocation.
+    #[must_use]
+    pub fn with_timeline_frames(mut self, frames: u64) -> Self {
+        self.min_timeline_frames = frames;
+        self
     }
 
     /// Resolved output configuration.
@@ -599,7 +616,7 @@ impl SoundMixer {
                 max: MAX_MIX_THREADS,
             });
         }
-        let total_frames = self
+        let cue_end_frames = self
             .cues
             .iter()
             .filter_map(|cue| {
@@ -608,8 +625,17 @@ impl SoundMixer {
             })
             .max()
             .unwrap_or(0);
+        let timeline_frames = cue_end_frames.max(i128::from(self.min_timeline_frames));
+        if timeline_frames > i128::from(self.config.max_output_frames) {
+            let required =
+                u64::try_from(timeline_frames).map_err(|_| SoundError::SampleCountOverflow)?;
+            return Err(SoundError::OutputTooLong {
+                frames: required,
+                max_frames: self.config.max_output_frames,
+            });
+        }
         let total_frames =
-            usize::try_from(total_frames).map_err(|_| SoundError::SampleCountOverflow)?;
+            usize::try_from(timeline_frames).map_err(|_| SoundError::SampleCountOverflow)?;
         let channels = usize::from(self.config.channels);
         let sample_count = total_frames
             .checked_mul(channels)
@@ -1048,6 +1074,28 @@ fn mix_overlap_simd<const LANES: usize>(
     );
 }
 
+/// Convert one frame-grid position to the output sample grid exactly.
+///
+/// This is the same rational conversion [`SoundMixer`] applies to cue
+/// placement (round-half-up on the exact integer ratio), exposed so a
+/// composition root can size its timeline floor without duplicating the
+/// placement rule.
+///
+/// # Errors
+/// A zero `fps` or `sample_rate`, or a ratio outside the signed `i64`
+/// sample timeline ([`SoundError::PlacementOutOfRange`]).
+pub fn frames_to_samples(frames: i64, fps: u32, sample_rate: u32) -> Result<i64, SoundError> {
+    if fps == 0 {
+        return Err(SoundError::InvalidConfig("cue fps must be nonzero"));
+    }
+    if sample_rate == 0 {
+        return Err(SoundError::InvalidConfig("sample_rate must be nonzero"));
+    }
+    round_ratio(
+        i128::from(frames) * i128::from(sample_rate),
+        u128::from(fps),
+    )
+}
 fn round_ratio(numerator: i128, denominator: u128) -> Result<i64, SoundError> {
     let negative = numerator.is_negative();
     let magnitude = numerator.unsigned_abs();
@@ -1164,6 +1212,63 @@ mod tests {
         assert_eq!(MixKernel::Compiled.lanes(), COMPILED_MIX_LANES);
     }
 
+    #[test]
+    fn timeline_floor_extends_the_mix_with_digital_silence() {
+        let mut mixer = SoundMixer::new(config(8, 1))
+            .expect("mixer")
+            .with_timeline_frames(10);
+        mixer.add(cue(&[0.5, 0.5], 0, 8)).expect("cue");
+        let report = mixer.mix(1).expect("floor-extended mix");
+        assert_eq!(report.audio.samples.len(), 10);
+        assert_eq!(report.audio.samples[..2], [0.5, 0.5]);
+        assert!(report.audio.samples[2..].iter().all(|&s| s == 0.0));
+
+        // A cue longer than the floor still extends the timeline, and a
+        // floor beyond the allocation budget is a named refusal.
+        let mut longer = SoundMixer::new(config(8, 1))
+            .expect("mixer")
+            .with_timeline_frames(3);
+        longer.add(cue(&[0.5; 5], 0, 8)).expect("cue");
+        assert_eq!(longer.mix(1).expect("mix").audio.samples.len(), 5);
+        let too_long = SoundMixer::new(MixerConfig {
+            max_output_frames: 4,
+            ..config(8, 1)
+        })
+        .expect("mixer")
+        .with_timeline_frames(5);
+        assert!(matches!(
+            too_long.mix(1),
+            Err(SoundError::OutputTooLong {
+                frames: 5,
+                max_frames: 4
+            })
+        ));
+
+        // No floor: the cue-derived length is unchanged.
+        let mut plain = SoundMixer::new(config(8, 1)).expect("mixer");
+        plain.add(cue(&[0.5, 0.5], 0, 8)).expect("cue");
+        assert_eq!(plain.mix(1).expect("mix").audio.samples.len(), 2);
+    }
+
+    #[test]
+    fn frames_to_samples_matches_the_cue_placement_rule_and_refuses_zero_grids() {
+        assert_eq!(
+            frames_to_samples(30, 30, 48_000).expect("one second"),
+            48_000
+        );
+        assert_eq!(frames_to_samples(1, 30, 48_000).expect("one frame"), 1_600);
+        // Round-half-up on the exact ratio, matching cue placement.
+        assert_eq!(frames_to_samples(1, 3, 10).expect("round up"), 3);
+        assert_eq!(frames_to_samples(-1, 30, 48_000).expect("negative"), -1_600);
+        assert!(matches!(
+            frames_to_samples(1, 0, 48_000),
+            Err(SoundError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            frames_to_samples(1, 30, 0),
+            Err(SoundError::InvalidConfig(_))
+        ));
+    }
     #[test]
     fn golden_offsets_overlaps_negative_clip_and_past_end() {
         let mut mixer = SoundMixer::new(config(8, 1)).expect("mixer");

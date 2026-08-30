@@ -594,7 +594,7 @@ pub const FLAG_SPECS: &[FlagSpec] = &[
         value_type: Some("output_format"),
         status: FlagStatus::Improved,
         source: FlagSource::Native,
-        help: "Select auto, png, png_sequence, gif, y4m, wav, or video output",
+        help: "Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues",
     },
     FlagSpec {
         options: &["--math-pack"],
@@ -901,21 +901,21 @@ pub const INTERACTION_SPECS: &[InteractionSpec] = &[
     InteractionSpec {
         id: "gif-vs-non-gif-format",
         kind: InteractionKind::Conflicts,
-        operands: &["gif", "format=auto,png,png_sequence,y4m,wav,video"],
+        operands: &["gif", "format=auto,png,png_sequence,y4m,wav,svg,video"],
         exit_code: Some("usage"),
         message: "--gif conflicts with a non-GIF --format",
     },
     InteractionSpec {
         id: "native-format-vs-codec",
         kind: InteractionKind::Conflicts,
-        operands: &["format=png,png_sequence,gif,y4m,wav", "vcodec"],
+        operands: &["format=png,png_sequence,gif,y4m,wav,svg", "vcodec"],
         exit_code: Some("usage"),
         message: "--vcodec applies only to ffmpeg video output",
     },
     InteractionSpec {
         id: "native-format-vs-pixel-format",
         kind: InteractionKind::Conflicts,
-        operands: &["format=png,png_sequence,gif,y4m,wav", "pix_fmt"],
+        operands: &["format=png,png_sequence,gif,y4m,wav,svg", "pix_fmt"],
         exit_code: Some("usage"),
         message: "--pix_fmt applies only to ffmpeg video output",
     },

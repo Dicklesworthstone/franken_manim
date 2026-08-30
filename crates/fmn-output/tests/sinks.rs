@@ -16,8 +16,8 @@ use fmn_output::{
 use fmn_output::{
     DitherPolicy, EmitterConfig, FrameSink, GifSink, GifSinkConfig, MixKernel, MixReport,
     NativeArtifactKind, OrderedEmitter, OutputProfile, PngSink, PngSinkConfig, PngTarget,
-    ReceiptError, SinkAdapterError, SinkLimits, SinkMode, SinkWrite, WavPublicationConfig, Y4mSink,
-    Y4mSinkConfig, publish_wav,
+    ReceiptError, SinkAdapterError, SinkLimits, SinkMode, SinkWrite, SvgPublicationConfig,
+    SvgPublicationReport, WavPublicationConfig, Y4mSink, Y4mSinkConfig, publish_svg, publish_wav,
 };
 use fmn_platform::clock::FakeClock;
 use fmn_platform::fs::{
@@ -1214,6 +1214,69 @@ fn wav_publication_is_native_atomic_and_preflight_bounded() {
         })
     ));
     assert_eq!(fs.read(&destination).expect("old WAV"), b"old-wav");
+}
+#[test]
+fn svg_publication_is_native_atomic_and_preflight_bounded() {
+    let fs = VirtualFs::new();
+    let destination = PathBuf::from("/render/still.svg");
+    let config = SvgPublicationConfig {
+        destination: destination.clone(),
+        max_artifact_bytes: 128,
+        profile: None,
+    };
+    let document =
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\"><path d=\"M0,0 L1,1\"/></svg>";
+    let report = publish_svg(&fs, &config, document).expect("SVG publish");
+    assert_eq!(report.path, destination);
+    assert_eq!(report.bytes, u64::try_from(document.len()).expect("usize"));
+    let bytes = fs.read(&destination).expect("SVG bytes");
+    assert_eq!(bytes, document);
+    assert_eq!(report.digest, sha256(&bytes));
+
+    fs.insert(&destination, b"old-svg".to_vec());
+    let too_small = SvgPublicationConfig {
+        max_artifact_bytes: 7,
+        ..config.clone()
+    };
+    let document_len = u64::try_from(document.len()).expect("usize");
+    assert!(matches!(
+        publish_svg(&fs, &too_small, document),
+        Err(SinkAdapterError::ArtifactBytesExceeded { attempted, max })
+        if attempted == document_len && max == 7
+    ));
+    assert_eq!(fs.read(&destination).expect("old SVG"), b"old-svg");
+
+    let zero = SvgPublicationConfig {
+        max_artifact_bytes: 0,
+        ..config
+    };
+    assert!(matches!(
+        publish_svg(&fs, &zero, document),
+        Err(SinkAdapterError::InvalidConfig(_))
+    ));
+    assert_eq!(fs.read(&destination).expect("kept SVG"), b"old-svg");
+}
+
+#[test]
+fn native_artifact_kinds_cover_still_and_audio_publications() {
+    // Copy + Eq stay available for report provenance tables; the two
+    // composition-only kinds exist beside the frame-stream kinds.
+    let kinds = [
+        NativeArtifactKind::Png,
+        NativeArtifactKind::PngSequence,
+        NativeArtifactKind::Gif,
+        NativeArtifactKind::Y4m,
+        NativeArtifactKind::Wav,
+        NativeArtifactKind::Svg,
+    ];
+    assert_eq!(kinds[4], NativeArtifactKind::Wav);
+    assert_eq!(kinds[5], NativeArtifactKind::Svg);
+    let unused = SvgPublicationReport {
+        path: PathBuf::from("/render/unused.svg"),
+        bytes: 0,
+        digest: sha256(b""),
+    };
+    assert_eq!(unused.bytes, 0);
 }
 
 #[cfg(any(unix, windows))]

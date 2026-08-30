@@ -193,6 +193,53 @@ pub mod builtins {
                 name: PRIMITIVE_SCENE_NAMES[index],
             })
     }
+    /// Stable name of the sound-cue scene outside the pinned G1 corpus.
+    ///
+    /// The 25-name primitive corpus is digest-pinned by the conformance
+    /// scene-runtime goldens, so the audio corpus rides beside it: this scene
+    /// is selected by explicit name (never `--write_all`) and exercises the
+    /// `Scene.add_sound` request boundary end to end.
+    pub const SOUND_CUE_SCENE_NAME: &str = "sound_cue.v1";
+
+    /// The sound-cue scene's asset, resolved by the composition root.
+    ///
+    /// The path is relative: the caller resolves it against the process
+    /// working directory (a checked-in deterministic copy ships under
+    /// `crates/fmn/assets/`).
+    pub const SOUND_CUE_ASSET_NAME: &str = "sound_cue_tone.v1.wav";
+
+    /// The native sound-cue scene: one shape, one `add_sound` request.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SoundCueScene {
+        name: &'static str,
+    }
+
+    impl SceneConstruct for SoundCueScene {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+            let main = stage.add(Circle::new().radius(0.6).color(WHITE))?;
+            stage.set_fill(main, Some(TEAL_B), Some(0.3), Some(0.0), true);
+            stage.set_stroke(main, Some(WHITE), Some(1.2), Some(0.95), None, true);
+            stage.wait(0.5)?;
+            stage
+                .scene_mut()
+                .add_sound(SOUND_CUE_ASSET_NAME, 0.0, None, None)
+                .map(|_| ())?;
+            stage.wait(0.5)?;
+            Ok(())
+        }
+    }
+
+    /// Resolve the built-in sound-cue scene by its stable name.
+    #[must_use]
+    pub fn sound_scene(name: &str) -> Option<SoundCueScene> {
+        (name == SOUND_CUE_SCENE_NAME).then_some(SoundCueScene {
+            name: SOUND_CUE_SCENE_NAME,
+        })
+    }
 
     fn primitive(index: usize, color: Srgb) -> crate::Result<Mobject> {
         Ok(match index {

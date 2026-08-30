@@ -511,6 +511,10 @@ pub enum NativeArtifactKind {
     Gif,
     /// Native YUV4MPEG2 stream.
     Y4m,
+    /// Native WAV soundtrack.
+    Wav,
+    /// Native SVG still.
+    Svg,
 }
 
 /// Successful native frame-artifact publication.
@@ -1693,6 +1697,65 @@ pub fn publish_wav(
         sample_frames: sample_count / channels,
         clipped_samples: mix.clipped_samples,
         cues_mixed: mix.cues_mixed,
+    })
+}
+/// Native SVG publication configuration.
+#[derive(Debug, Clone)]
+pub struct SvgPublicationConfig {
+    /// Destination path.
+    pub destination: PathBuf,
+    /// Complete artifact bound.
+    pub max_artifact_bytes: u64,
+    /// Optional output profiling.
+    pub profile: Option<OutputProfile>,
+}
+
+/// Successful native SVG publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SvgPublicationReport {
+    /// Published destination.
+    pub path: PathBuf,
+    /// Encoded bytes.
+    pub bytes: u64,
+    /// SHA-256 of the published bytes.
+    pub digest: Digest,
+}
+
+/// Encode-validate and atomically publish one complete native SVG document.
+///
+/// SVG, like WAV, is deliberately not a [`FrameSink`]: a still is a single
+/// finished document, not an ordered frame stream. The sink receives the
+/// complete emitted bytes from the composition root, so the Reel boundary
+/// stays bytes-only; geometry ownership remains in the geometry crates. The
+/// publication is bounded by `max_artifact_bytes` and is one atomic rename,
+/// so cancellation between staging and publication never exposes a torn
+/// artifact.
+///
+/// # Errors
+/// An invalid destination, a zero budget, or document bytes beyond the
+/// declared artifact budget ([`SinkAdapterError::ArtifactBytesExceeded`]).
+pub fn publish_svg(
+    fs: &dyn FileSystem,
+    config: &SvgPublicationConfig,
+    document: &[u8],
+) -> Result<SvgPublicationReport, SinkAdapterError> {
+    validate_destination(&config.destination)?;
+    if config.max_artifact_bytes == 0 {
+        return Err(SinkAdapterError::InvalidConfig(
+            "SVG max_artifact_bytes must be nonzero",
+        ));
+    }
+    let _span = config
+        .profile
+        .as_ref()
+        .and_then(|profile| profile.span(None, ProfilePhase::Encode));
+    let bytes = byte_len(document)?;
+    enforce_artifact_limit(bytes, config.max_artifact_bytes)?;
+    publish_atomic(fs, &config.destination, document)?;
+    Ok(SvgPublicationReport {
+        path: config.destination.clone(),
+        bytes,
+        digest: sha256(document),
     })
 }
 

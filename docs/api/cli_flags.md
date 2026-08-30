@@ -63,7 +63,7 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--ffmpeg` | global | `ffmpeg` | improved | BN-15 | store | — | Absolute path to the optional ffmpeg executable |
 | `--cache-dir` | global | `cache_dir` | improved | BN-15 | store | — | Explicit FrankenManim content-store root |
 | `--engine` | render | `engine` | improved | BN-15 | store | — | Select the CPU engine or a standard-only accelerator annex |
-| `--format` | render | `format` | improved | BN-15 | store | auto | Select auto, png, png_sequence, gif, y4m, wav, or video output |
+| `--format` | render | `format` | improved | BN-15 | store | auto | Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues |
 | `--math-pack` | render | `math_pack` | improved | BN-15 | store | default | Select an fmd-math preamble pack |
 | `--budget-ms` | batch | `budget_ms` | improved | BN-15 | store | — | Wall-clock budget for the batch |
 | `--max-scenes` | batch | `max_scenes` | improved | BN-15 | store | — | Bound simultaneously active scene jobs |
@@ -118,9 +118,9 @@ These rules are emitted into the parser artifact and executed after token collec
 | `subdivide-writes` | implies | `subdivide`, `write_file` | — | --subdivide implies durable output |
 | `filename-writes` | implies | `file_name`, `write_file` | — | --file_name implies durable output |
 | `video-directory-writes` | implies | `video_dir`, `write_file` | — | --video_dir implies durable output |
-| `gif-vs-non-gif-format` | conflicts | `gif`, `format=auto,png,png_sequence,y4m,wav,video` | usage | --gif conflicts with a non-GIF --format |
-| `native-format-vs-codec` | conflicts | `format=png,png_sequence,gif,y4m,wav`, `vcodec` | usage | --vcodec applies only to ffmpeg video output |
-| `native-format-vs-pixel-format` | conflicts | `format=png,png_sequence,gif,y4m,wav`, `pix_fmt` | usage | --pix_fmt applies only to ffmpeg video output |
+| `gif-vs-non-gif-format` | conflicts | `gif`, `format=auto,png,png_sequence,y4m,wav,svg,video` | usage | --gif conflicts with a non-GIF --format |
+| `native-format-vs-codec` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `vcodec` | usage | --vcodec applies only to ffmpeg video output |
+| `native-format-vs-pixel-format` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `pix_fmt` | usage | --pix_fmt applies only to ffmpeg video output |
 | `transparent-vs-opaque-pixel-format` | conflicts | `transparent`, `pix_fmt=yuv420p,yuv422p,yuv444p,nv12,p010,p010le,rgb24,bgr24` | usage | --transparent requires an alpha-capable output pixel format |
 | `transparent-vs-opaque-native-format` | conflicts | `transparent`, `format=y4m,wav` | usage | --transparent is incompatible with y4m and WAV outputs |
 | `skip-vs-subdivide` | conflicts | `skip_animations`, `subdivide` | usage | --skip_animations cannot produce per-animation subdivisions |

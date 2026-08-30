@@ -106,6 +106,7 @@ pub mod solids;
 pub mod special_tex;
 pub mod style;
 pub mod svg;
+pub mod svg_export;
 pub mod tex;
 pub mod text;
 pub mod tip;

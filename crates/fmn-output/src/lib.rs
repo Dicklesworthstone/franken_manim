@@ -71,10 +71,10 @@ pub use provenance::{
 pub use sinks::{
     FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, GifSink, GifSinkConfig, NativeArtifactKind,
     NativeArtifactReport, OutputProfile, PngSink, PngSinkConfig, PngTarget, ReceiptError,
-    SinkAdapterError, SinkLimits, SinkReceipt, WavPublicationConfig, WavPublicationReport, Y4mSink,
-    Y4mSinkConfig, publish_wav,
+    SinkAdapterError, SinkLimits, SinkReceipt, SvgPublicationConfig, SvgPublicationReport,
+    WavPublicationConfig, WavPublicationReport, Y4mSink, Y4mSinkConfig, publish_svg, publish_wav,
 };
 pub use sound::{
     COMPILED_MIX_LANES, COMPILED_MIX_TIER, DitherPolicy, MixKernel, MixReport, MixerConfig,
-    RESAMPLER_NAME, SoundCue, SoundError, SoundMixer,
+    RESAMPLER_NAME, SoundCue, SoundError, SoundMixer, frames_to_samples,
 };

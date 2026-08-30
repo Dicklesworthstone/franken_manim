@@ -26,16 +26,19 @@ use std::time::Duration;
 #[cfg(feature = "batch")]
 use std::time::Instant;
 
+use fmn_codec::{SampleFormat, WavLimits, decode_wav};
 use fmn_core::color::Srgb;
 use fmn_core::rng::{RNG_LAYOUT_VERSION, RngRoot};
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_output::{
-    ArtifactDigest, ClosureItem, ColorDescription, Container, EmitterConfig, EmitterHandle,
-    EncoderCapabilities, EncoderChoice, FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig,
-    FfmpegTool, GifSink, GifSinkConfig, JobLimits, ManifestIdentity, ManifestMode, ManifestOutput,
-    NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget, ProvenanceManifest,
-    SinkLimits, SinkReceipt, StructuralField, VideoJob, WireFormat, Y4mSink, Y4mSinkConfig,
+    ArtifactDigest, ClosureItem, ColorDescription, Container, DitherPolicy, EmitterConfig,
+    EmitterHandle, EncoderCapabilities, EncoderChoice, FfmpegArtifactReport, FfmpegSink,
+    FfmpegSinkConfig, FfmpegTool, GifSink, GifSinkConfig, JobLimits, ManifestIdentity,
+    ManifestMode, ManifestOutput, NativeArtifactKind, NativeArtifactReport, OrderedEmitter,
+    PngSink, PngSinkConfig, PngTarget, ProvenanceManifest, SinkLimits, SinkReceipt,
+    StructuralField, SvgPublicationConfig, VideoJob, WavPublicationConfig, WireFormat, Y4mSink,
+    Y4mSinkConfig, frames_to_samples, publish_svg, publish_wav,
 };
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
@@ -171,8 +174,10 @@ pub enum OutputFormat {
     Gif,
     /// Native y4m.
     Y4m,
-    /// Native WAV.
+    /// Native WAV soundtrack.
     Wav,
+    /// Native SVG still.
+    Svg,
     /// Video through the optional ffmpeg boundary.
     Video,
 }
@@ -186,6 +191,7 @@ impl OutputFormat {
             "gif" => Self::Gif,
             "y4m" => Self::Y4m,
             "wav" => Self::Wav,
+            "svg" => Self::Svg,
             "video" => Self::Video,
             _ => return None,
         })
@@ -2435,6 +2441,10 @@ struct FfmpegRenderContext {
 
 enum RenderTarget {
     Native(NativeFrameFormat),
+    /// One WAV soundtrack composed from the scene's sound-cue requests.
+    Wav,
+    /// One SVG still exported from the final scene state.
+    Svg,
     Video(Box<FfmpegRenderContext>),
 }
 
@@ -2442,6 +2452,9 @@ impl RenderTarget {
     const fn pixel_format(&self) -> PixelFormat {
         match self {
             Self::Native(format) => format.pixel_format(),
+            // Composition targets never construct a frame sink, so no
+            // pixels are planned; the arm only keeps the match total.
+            Self::Wav | Self::Svg => PixelFormat::Rgba8,
             Self::Video(context) => context.job.wire.frame_format(),
         }
     }
@@ -3542,6 +3555,18 @@ struct RenderBackendReport {
 struct FinishedRender {
     artifact: RenderArtifactReport,
     backend: RenderBackendReport,
+    /// Decoded sound-cue assets backing a WAV publication; empty for every
+    /// other target. They enter the FMNP input closure as C1 byte inputs.
+    cue_assets: Vec<SoundCueAssetInput>,
+}
+
+/// One decoded sound-cue asset retained for FMNP provenance.
+#[derive(Clone, Debug)]
+struct SoundCueAssetInput {
+    /// Composition-root-resolved virtual path.
+    path: String,
+    /// The exact decoded bytes.
+    bytes: Vec<u8>,
 }
 
 struct RenderSink {
@@ -3728,6 +3753,15 @@ impl RenderSink {
                 .map_err(output_adapter_error)?
                 .into_binding("y4m");
                 (binding, RenderReceipt::Native(receipt))
+            }
+            // Composition targets never construct a frame sink; the render
+            // path branches to the audio/geometry composers before this
+            // constructor. Refuse by name if that invariant ever drifts.
+            RenderTarget::Wav | RenderTarget::Svg => {
+                return Err(CliError::new(
+                    "internal",
+                    "composition target reached the frame-sink constructor",
+                ));
             }
             RenderTarget::Video(context) => {
                 let (binding, receipt) = FfmpegSink::new(
@@ -3972,7 +4006,11 @@ impl RenderSink {
                 })
             }
         };
-        Ok(FinishedRender { artifact, backend })
+        Ok(FinishedRender {
+            artifact,
+            backend,
+            cue_assets: Vec::new(),
+        })
     }
 }
 
@@ -4212,6 +4250,17 @@ fn subdivided_destination(
         RenderTarget::Native(NativeFrameFormat::Y4m) => {
             naming.partial_artifact(scene_name, play_index, "y4m")
         }
+        // `requested_render_format` refuses `--subdivide` for the
+        // composition targets, so these arms are unreachable; keep them
+        // named rather than panicking if invariants ever drift.
+        RenderTarget::Wav | RenderTarget::Svg => naming.partial_artifact(
+            scene_name,
+            play_index,
+            match target {
+                RenderTarget::Wav => "wav",
+                _ => "svg",
+            },
+        ),
         RenderTarget::Video(context) => {
             naming.partial_artifact(scene_name, play_index, context.job.container.extension())
         }
@@ -4239,6 +4288,210 @@ fn render_sink_limits(layout: &FrameLayout) -> Result<SinkLimits, CliError> {
     )
     .map_err(output_adapter_error)
 }
+/// Named refusal when a scene renders no sound cues.
+const NO_SOUND_CUES_MESSAGE: &str = "scene_has_no_sound_cues: the scene recorded no add_sound requests, and --format wav publishes only the scene soundtrack";
+
+/// The certified soundtrack output grid (48 kHz stereo, `S16`, no dither).
+const SOUNDTRACK_SAMPLE_RATE: u32 = 48_000;
+const SOUNDTRACK_CHANNELS: u16 = 2;
+/// Bounded read for one cue asset; the mixer resamples after the budget check.
+const MAX_CUE_ASSET_BYTES: usize = 64 * 1024 * 1024;
+
+/// The execution backend record for a composition-only target.
+///
+/// No frames are rasterized, so the journal is empty and the frame counters
+/// stay at zero; the determinism identity still records which certified
+/// contract executed the scene.
+fn composition_backend(config: &fmn_config::Config) -> RenderBackendReport {
+    let identity = if config.determinism.mode == fmn_config::config::DeterminismMode::Certified {
+        EngineIdentity::certified()
+    } else {
+        EngineIdentity::fast()
+    };
+    RenderBackendReport {
+        route: "composition",
+        identity: identity.closure_string(),
+        journal: Vec::new(),
+        frames: 0,
+        upload_bytes: None,
+        readback_bytes: None,
+        elapsed_ns: None,
+    }
+}
+
+/// Mix the scene's sound-cue requests and publish the soundtrack as WAV.
+///
+/// The composition-root adapter mirrors the conformance `sound_pipeline`
+/// seam: each [`fmn_scene::SoundRequest`] keeps its exact rational call-site
+/// time and Reference gain arguments, and the mixer owns every sample-grid
+/// conversion. The mix spans the whole scene timeline (digital silence past
+/// the last cue) and is encoded certified (`S16`, no dither).
+///
+/// # Errors
+/// The named no-cue refusal, unreadable or undecodable cue assets, mixer
+/// placement/budget refusals, and publication failures.
+fn publish_scene_soundtrack(
+    fs: &dyn FileSystem,
+    destination: &Path,
+    max_artifact_bytes: u64,
+    scene: &fmn_scene::Scene,
+    mix_threads: usize,
+) -> Result<(RenderArtifactReport, Vec<SoundCueAssetInput>), CliError> {
+    let requests = scene.sound_requests();
+    if requests.is_empty() {
+        return Err(CliError::new("scene", NO_SOUND_CUES_MESSAGE));
+    }
+    let scene_time = scene.time();
+    let timeline_frames = frames_to_samples(
+        scene_time.frames(),
+        scene_time.fps(),
+        SOUNDTRACK_SAMPLE_RATE,
+    )
+    .map_err(|error| CliError::new("scene", error.to_string()))?;
+    let mut mixer = fmn_output::SoundMixer::new(fmn_output::MixerConfig {
+        sample_rate: SOUNDTRACK_SAMPLE_RATE,
+        channels: SOUNDTRACK_CHANNELS,
+        // S16 stereo is four bytes per mixed frame; the artifact budget is
+        // the same one the frame sinks publish under.
+        max_output_frames: (max_artifact_bytes / 4).max(1),
+    })
+    .map_err(|error| CliError::new("config", error.to_string()))?
+    .with_timeline_frames(u64::try_from(timeline_frames.max(0)).unwrap_or(0));
+    let mut cue_assets = Vec::with_capacity(requests.len());
+    for request in requests {
+        let bytes = fs
+            .read_bounded(&request.sound_file, MAX_CUE_ASSET_BYTES)
+            .map_err(|error| {
+                let exit_name = if matches!(error, FsError::TooLarge { .. }) {
+                    "budget"
+                } else {
+                    "scene"
+                };
+                CliError::new(
+                    exit_name,
+                    format!("sound cue asset {}: {error}", request.sound_file.display()),
+                )
+            })?;
+        let audio = decode_wav(&bytes, &WavLimits::default()).map_err(|error| {
+            CliError::new(
+                "scene",
+                format!(
+                    "sound cue asset {} is not decodable PCM WAV: {error}",
+                    request.sound_file.display()
+                ),
+            )
+        })?;
+        mixer
+            .add(fmn_output::SoundCue {
+                audio,
+                frame: request.time.frames(),
+                fps: request.time.fps(),
+                time_offset: request.time_offset,
+                gain: request.gain,
+                gain_to_background: request.gain_to_background,
+            })
+            .map_err(|error| {
+                CliError::new(
+                    "scene",
+                    format!("sound cue {}: {error}", request.sound_file.display()),
+                )
+            })?;
+        cue_assets.push(SoundCueAssetInput {
+            path: request.sound_file.to_string_lossy().into_owned(),
+            bytes,
+        });
+    }
+    let mix = mixer
+        .mix(mix_threads.max(1))
+        .map_err(|error| CliError::new("render", error.to_string()))?;
+    let report = publish_wav(
+        fs,
+        &WavPublicationConfig {
+            destination: destination.to_owned(),
+            format: SampleFormat::S16,
+            dither: DitherPolicy::None,
+            max_artifact_bytes,
+            profile: None,
+        },
+        &mix,
+    )
+    .map_err(output_adapter_error)?;
+    let artifact = RenderArtifactReport::Native(NativeArtifactReport {
+        kind: NativeArtifactKind::Wav,
+        path: report.path,
+        frame_count: report.sample_frames,
+        bytes: report.bytes,
+        digest: report.digest,
+    });
+    Ok((artifact, cue_assets))
+}
+
+/// Export the final scene state as one deterministic SVG still.
+///
+/// Geometry stays in the geometry crates: the CLI hands the live stage to
+/// `fmn::library::svg_export` and publishes the emitted bytes through the
+/// Reel `SvgPublication` boundary.
+///
+/// # Errors
+/// Geometry or publication refusals, both typed.
+fn publish_scene_still_svg(
+    fs: &dyn FileSystem,
+    destination: &Path,
+    max_artifact_bytes: u64,
+    stage: &fmn_scene::studio_bridge::Stage,
+    pixel_width: u32,
+    pixel_height: u32,
+    frame_width: f64,
+    frame_height: f64,
+) -> Result<RenderArtifactReport, CliError> {
+    let document = fmn::library::svg_export::stage_svg_document(
+        stage,
+        f64::from(pixel_width),
+        f64::from(pixel_height),
+        frame_width,
+        frame_height,
+    )
+    .map_err(|error| CliError::new("scene", error.to_string()))?;
+    let report = publish_svg(
+        fs,
+        &SvgPublicationConfig {
+            destination: destination.to_owned(),
+            max_artifact_bytes,
+            profile: None,
+        },
+        document.as_bytes(),
+    )
+    .map_err(output_adapter_error)?;
+    Ok(RenderArtifactReport::Native(NativeArtifactReport {
+        kind: NativeArtifactKind::Svg,
+        path: report.path,
+        frame_count: 1,
+        bytes: report.bytes,
+        digest: report.digest,
+    }))
+}
+
+/// The composition artifact budget and the pixel viewport that sizes it.
+fn composition_budget(config: &fmn_config::Config) -> Result<(u64, u32, u32), CliError> {
+    let (width, height) = config.camera.resolution;
+    let layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)
+        .map_err(|error| CliError::new("config", error.to_string()))?;
+    Ok((
+        render_sink_limits(&layout)?.max_artifact_bytes(),
+        width,
+        height,
+    ))
+}
+/// The scene frame extent (width, height) in user units: the configured
+/// frame height scaled to the output aspect ratio.
+fn scene_frame_extent(config: &fmn_config::Config) -> (f64, f64) {
+    let (width, height) = config.camera.resolution;
+    let frame_height = config.sizes.frame_height;
+    (
+        frame_height * f64::from(width) / f64::from(height),
+        frame_height,
+    )
+}
 
 fn output_adapter_error(error: fmn_output::SinkAdapterError) -> CliError {
     let exit_name = match error {
@@ -4261,6 +4514,10 @@ fn native_scene_error(error: fmn::Error) -> CliError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestedRenderFormat {
     Native(NativeFrameFormat),
+    /// One WAV soundtrack from the scene's sound-cue requests.
+    Audio,
+    /// One SVG still from the final scene state.
+    StillSvg,
     Video,
 }
 
@@ -4284,10 +4541,20 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
             "capability",
             "native registered scenes require an explicit `--format`; no format is substituted silently",
         )),
-        OutputFormat::Wav => Err(CliError::new(
+        OutputFormat::Wav if command.subdivide => Err(CliError::new(
             "capability",
-            "WAV publication requires a scene sound-cue composition path, which is not registered yet",
+            "--subdivide publishes per-animation segments; the WAV soundtrack is one whole-scene composition",
         )),
+        // The mix is insertion-ordered and bit-locked on the rational frame
+        // clock, so certified WAV stays inside the certified artifact set.
+        OutputFormat::Wav => Ok(RequestedRenderFormat::Audio),
+        OutputFormat::Svg if command.subdivide => Err(CliError::new(
+            "capability",
+            "--subdivide publishes per-animation segments; the SVG still captures only the final scene state",
+        )),
+        // Emitted SVG bytes are deterministic by construction (fixed
+        // attribute order), so certified SVG is certification-eligible.
+        OutputFormat::Svg => Ok(RequestedRenderFormat::StillSvg),
     }
 }
 
@@ -4401,6 +4668,12 @@ fn output_manifest_entry(mode: ManifestMode, artifact: &RenderArtifactReport) ->
                     report.kind,
                     fmn_output::NativeArtifactKind::Png
                         | fmn_output::NativeArtifactKind::PngSequence
+                        // Certified WAV mixes on the rational frame clock
+                        // with a bit-locked kernel; SVG emission is
+                        // deterministic by construction (fixed attribute
+                        // order). Both are certification-eligible.
+                        | fmn_output::NativeArtifactKind::Wav
+                        | fmn_output::NativeArtifactKind::Svg
                 ),
         },
         RenderArtifactReport::Video(report) => ManifestOutput {
@@ -4418,6 +4691,8 @@ const fn native_artifact_kind_name(kind: fmn_output::NativeArtifactKind) -> &'st
         fmn_output::NativeArtifactKind::PngSequence => "canonical_png_sequence",
         fmn_output::NativeArtifactKind::Gif => "gif",
         fmn_output::NativeArtifactKind::Y4m => "y4m",
+        fmn_output::NativeArtifactKind::Wav => "wav",
+        fmn_output::NativeArtifactKind::Svg => "svg",
     }
 }
 
@@ -4435,6 +4710,8 @@ struct ManifestContext<'a> {
     config: &'a fmn_config::Config,
     plan: &'a fmn_runtime::ExecutionPlan,
     backend: &'a RenderBackendReport,
+    /// Decoded sound-cue assets; empty unless the artifact is a WAV.
+    cue_assets: &'a [SoundCueAssetInput],
 }
 
 fn render_manifest(
@@ -4449,6 +4726,7 @@ fn render_manifest(
         config,
         plan,
         backend,
+        cue_assets,
     } = context;
     if fs.identity() == "opaque.file_system/v1" {
         return Err(CliError::new(
@@ -4511,14 +4789,25 @@ fn render_manifest(
         ],
     )
     .map_err(|error| internal(error.to_string()))?;
-    let c6 = ClosureItem::structural(
-        6,
-        "no asset or font reads on the native primitive/FMTL route",
-        &[
-            StructuralField::Absent("asset reads"),
-            StructuralField::Absent("font reads"),
-        ],
-    )
+    let c6 = if cue_assets.is_empty() {
+        ClosureItem::structural(
+            6,
+            "no asset or font reads on the native primitive/FMTL route",
+            &[
+                StructuralField::Absent("asset reads"),
+                StructuralField::Absent("font reads"),
+            ],
+        )
+    } else {
+        ClosureItem::structural(
+            6,
+            "scene sound-cue asset reads on the native route; no font reads",
+            &[
+                StructuralField::U64(u64::try_from(cue_assets.len()).unwrap_or(u64::MAX)),
+                StructuralField::Absent("font reads"),
+            ],
+        )
+    }
     .map_err(|error| internal(error.to_string()))?;
     let engine_identity = backend.identity.clone();
     let c7 = ClosureItem::structural(
@@ -4614,6 +4903,17 @@ fn render_manifest(
         simd_tier: active_compiled_tier().to_owned(),
         declared_config_digest: c10.digest,
     };
+    // Every decoded cue asset enters the input closure as a C1 byte input
+    // alongside the scene source; the manifest orders byte inputs by virtual
+    // path, so the artifact digest is independent of request order in the
+    // (already insertion-ordered) request list only through those digests.
+    let mut cue_items = Vec::with_capacity(cue_assets.len());
+    for asset in cue_assets {
+        cue_items.push(
+            ClosureItem::byte_input(1, asset.path.clone(), &asset.bytes, "scene sound-cue asset")
+                .map_err(|error| internal(error.to_string()))?,
+        );
+    }
     ProvenanceManifest::new(
         mode,
         vec![
@@ -4628,7 +4928,10 @@ fn render_manifest(
             c8,
             c9,
             c10,
-        ],
+        ]
+        .into_iter()
+        .chain(cue_items)
+        .collect(),
         identity,
         vec![output_manifest_entry(mode, artifact)],
         None,
@@ -4834,8 +5137,9 @@ fn resolve_native_render_input(
             return Err(CliError::new(
                 "scene",
                 format!(
-                    "select a built-in scene or pass --write_all; available scenes: {}",
-                    fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", ")
+                    "select a built-in scene or pass --write_all; available scenes: {}, plus {} for --format wav",
+                    fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
+                    fmn::builtins::SOUND_CUE_SCENE_NAME,
                 ),
             ));
         } else {
@@ -4848,19 +5152,21 @@ fn resolve_native_render_input(
             ));
         }
         for name in &names {
-            if fmn::builtins::primitive_scene(name).is_none() {
+            if fmn::builtins::primitive_scene(name).is_none()
+                && fmn::builtins::sound_scene(name).is_none()
+            {
                 return Err(CliError::new(
                     "scene",
                     format!(
-                        "unknown built-in scene {name:?}; available scenes: {}",
-                        fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", ")
+                        "unknown built-in scene {name:?}; available scenes: {} plus {}",
+                        fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
+                        fmn::builtins::SOUND_CUE_SCENE_NAME,
                     ),
                 ));
             }
         }
         return Ok(NativeRenderInput::Builtin { names });
     }
-
     if source
         .extension()
         .and_then(OsStr::to_str)
@@ -4944,6 +5250,20 @@ fn execute_native_render(
         ManifestPublication::Adjacent,
     )
 }
+/// Resolve one built-in program: the pinned primitive corpus or the
+/// standalone sound-cue scene.
+fn resolve_builtin_program(name: &str) -> Result<Box<dyn fmn::SceneConstruct>, CliError> {
+    if let Some(mut scene) = fmn::builtins::primitive_scene(name) {
+        return Ok(Box::new(scene));
+    }
+    if let Some(mut scene) = fmn::builtins::sound_scene(name) {
+        return Ok(Box::new(scene));
+    }
+    Err(CliError::new(
+        "internal",
+        "validated built-in scene disappeared",
+    ))
+}
 
 fn prerun_builtin_scene(
     name: &str,
@@ -4951,8 +5271,7 @@ fn prerun_builtin_scene(
     config: &fmn_config::Config,
     cancellation: Option<&RenderCancellation>,
 ) -> Result<PreRunSummary, CliError> {
-    let mut scene = fmn::builtins::primitive_scene(name)
-        .ok_or_else(|| CliError::new("internal", "validated built-in scene disappeared"))?;
+    let mut scene = resolve_builtin_program(name)?;
     let mut counter = PreRunCounter::new(command.subdivide);
     if let Some(cancellation) = cancellation {
         let mut cancellable = CancellableSceneSink {
@@ -4960,14 +5279,14 @@ fn prerun_builtin_scene(
             cancellation,
         };
         fmn::run_scene(
-            &mut scene,
+            &mut *scene,
             command.runtime_config(config),
             config.determinism.seed,
             &mut cancellable,
         )
     } else {
         fmn::run_scene(
-            &mut scene,
+            &mut *scene,
             command.runtime_config(config),
             config.determinism.seed,
             &mut counter,
@@ -5014,11 +5333,19 @@ fn execute_native_render_with_cancellation(
         config = resolve_render_config(fs.as_ref(), &compiled_command)?;
     }
     let video_job = match requested_format {
-        RequestedRenderFormat::Native(_) => None,
+        RequestedRenderFormat::Native(_)
+        | RequestedRenderFormat::Audio
+        | RequestedRenderFormat::StillSvg => None,
         RequestedRenderFormat::Video => Some(ffmpeg_video_job(command, &config)?),
     };
     let planning_format = match (requested_format, video_job.as_ref()) {
         (RequestedRenderFormat::Native(format), _) => format.planning_format(),
+        // Composition targets plan no frames: the soundtrack mixes from the
+        // scene's cue requests and the SVG still exports final-state
+        // geometry, so the planning pixel format is never consumed.
+        (RequestedRenderFormat::Audio | RequestedRenderFormat::StillSvg, _) => {
+            fmn_runtime::OutputPixelFormat::Rgba8
+        }
         (RequestedRenderFormat::Video, Some(job)) => match job.wire.frame_format() {
             PixelFormat::Rgba8 => fmn_runtime::OutputPixelFormat::Rgba8,
             PixelFormat::Bgra8 => fmn_runtime::OutputPixelFormat::Bgra8,
@@ -5042,6 +5369,8 @@ fn execute_native_render_with_cancellation(
     let process_mechanism = runner.mechanism();
     let target = match (requested_format, video_job) {
         (RequestedRenderFormat::Native(format), None) => RenderTarget::Native(format),
+        (RequestedRenderFormat::Audio, None) => RenderTarget::Wav,
+        (RequestedRenderFormat::StillSvg, None) => RenderTarget::Svg,
         (RequestedRenderFormat::Video, Some(job)) => {
             RenderTarget::Video(Box::new(prepare_ffmpeg_context(
                 runner,
@@ -5077,6 +5406,8 @@ fn execute_native_render_with_cancellation(
         RenderTarget::Native(NativeFrameFormat::PngSequence) => naming.root(name),
         RenderTarget::Native(NativeFrameFormat::Gif) => naming.artifact(name, "gif"),
         RenderTarget::Native(NativeFrameFormat::Y4m) => naming.artifact(name, "y4m"),
+        RenderTarget::Wav => naming.artifact(name, "wav"),
+        RenderTarget::Svg => naming.artifact(name, "svg"),
         RenderTarget::Video(context) => naming.artifact(name, context.job.container.extension()),
     };
     let complete = |source,
@@ -5086,7 +5417,11 @@ fn execute_native_render_with_cancellation(
                     subdivision,
                     prerun|
      -> Result<CompletedRender, CliError> {
-        let FinishedRender { artifact, backend } = render;
+        let FinishedRender {
+            artifact,
+            backend,
+            cue_assets,
+        } = render;
         let manifest = render_manifest(
             ManifestContext {
                 fs: fs.as_ref(),
@@ -5095,6 +5430,7 @@ fn execute_native_render_with_cancellation(
                 config: &config,
                 plan: &plan,
                 backend: &backend,
+                cue_assets: &cue_assets,
             },
             source_item,
             &artifact,
@@ -5155,23 +5491,21 @@ fn execute_native_render_with_cancellation(
                         &name,
                         summary.segment_count(),
                     )?;
-                    let mut scene = fmn::builtins::primitive_scene(&name).ok_or_else(|| {
-                        CliError::new("internal", "validated built-in scene disappeared")
-                    })?;
+                    let mut scene = resolve_builtin_program(&name)?;
                     if let Some(cancellation) = cancellation {
                         let mut cancellable = CancellableSceneSink {
                             inner: &mut sink,
                             cancellation,
                         };
                         fmn::run_scene(
-                            &mut scene,
+                            &mut *scene,
                             command.runtime_config(&config),
                             config.determinism.seed,
                             &mut cancellable,
                         )
                     } else {
                         fmn::run_scene(
-                            &mut scene,
+                            &mut *scene,
                             command.runtime_config(&config),
                             config.determinism.seed,
                             &mut sink,
@@ -5204,6 +5538,86 @@ fn execute_native_render_with_cancellation(
                     }
                     continue;
                 }
+                if matches!(target, RenderTarget::Wav | RenderTarget::Svg) {
+                    // Composition targets publish from scene state, not from
+                    // a frame stream: play the scene through a discard sink
+                    // (cancellation still checkpoints every lifecycle event)
+                    // and compose the artifact from the final state.
+                    let artifact_destination = destination(&name);
+                    preflight_render_generation(fs.as_ref(), &artifact_destination)?;
+                    if manifest_publication == ManifestPublication::Adjacent {
+                        preflight_manifest_generation(
+                            fs.as_ref(),
+                            &adjacent_manifest_destination(&artifact_destination)?,
+                        )?;
+                    }
+                    let mut scene = resolve_builtin_program(&name)?;
+                    let mut discard = NullSceneSink;
+                    let completed = if let Some(cancellation) = cancellation {
+                        let mut cancellable = CancellableSceneSink {
+                            inner: &mut discard,
+                            cancellation,
+                        };
+                        fmn::run_scene(
+                            &mut *scene,
+                            command.runtime_config(&config),
+                            config.determinism.seed,
+                            &mut cancellable,
+                        )
+                    } else {
+                        fmn::run_scene(
+                            &mut *scene,
+                            command.runtime_config(&config),
+                            config.determinism.seed,
+                            &mut discard,
+                        )
+                    }
+                    .map_err(native_scene_error)?;
+                    if let Some(cancellation) = cancellation {
+                        cancellation.cli_checkpoint()?;
+                    }
+                    let scene = completed.into_scene();
+                    let (max_artifact_bytes, pixel_width, pixel_height) =
+                        composition_budget(&config)?;
+                    let (artifact, cue_assets) = match target {
+                        RenderTarget::Wav => publish_scene_soundtrack(
+                            fs.as_ref(),
+                            &artifact_destination,
+                            max_artifact_bytes,
+                            &scene,
+                            render_threads,
+                        )?,
+                        _ => {
+                            let (frame_width, frame_height) = scene_frame_extent(&config);
+                            (
+                                publish_scene_still_svg(
+                                    fs.as_ref(),
+                                    &artifact_destination,
+                                    max_artifact_bytes,
+                                    scene.stage(),
+                                    pixel_width,
+                                    pixel_height,
+                                    frame_width,
+                                    frame_height,
+                                )?,
+                                Vec::new(),
+                            )
+                        }
+                    };
+                    reports.push(complete(
+                        RenderSourceReport::Builtin,
+                        builtin_source_item(&name)?,
+                        name,
+                        FinishedRender {
+                            artifact,
+                            backend: composition_backend(&config),
+                            cue_assets,
+                        },
+                        None,
+                        summary,
+                    )?);
+                    continue;
+                }
                 let artifact_destination = destination(&name);
                 if manifest_publication == ManifestPublication::Adjacent {
                     preflight_manifest_generation(
@@ -5225,9 +5639,7 @@ fn execute_native_render_with_cancellation(
                     cancellation.register_emitter(emitter);
                     cancellation.cli_checkpoint()?;
                 }
-                let mut scene = fmn::builtins::primitive_scene(&name).ok_or_else(|| {
-                    CliError::new("internal", "validated built-in scene disappeared")
-                })?;
+                let mut scene = resolve_builtin_program(&name)?;
                 if command.skip_animations
                     || matches!(target, RenderTarget::Native(NativeFrameFormat::Png))
                 {
@@ -5238,14 +5650,14 @@ fn execute_native_render_with_cancellation(
                             cancellation,
                         };
                         fmn::run_scene(
-                            &mut scene,
+                            &mut *scene,
                             command.runtime_config(&config),
                             config.determinism.seed,
                             &mut cancellable,
                         )
                     } else {
                         fmn::run_scene(
-                            &mut scene,
+                            &mut *scene,
                             command.runtime_config(&config),
                             config.determinism.seed,
                             &mut discard,
@@ -5274,14 +5686,14 @@ fn execute_native_render_with_cancellation(
                             cancellation,
                         };
                         fmn::run_scene(
-                            &mut scene,
+                            &mut *scene,
                             command.runtime_config(&config),
                             config.determinism.seed,
                             &mut cancellable,
                         )
                     } else {
                         fmn::run_scene(
-                            &mut scene,
+                            &mut *scene,
                             command.runtime_config(&config),
                             config.determinism.seed,
                             &mut sink,
@@ -5310,6 +5722,66 @@ fn execute_native_render_with_cancellation(
             name,
             bundle,
         } => {
+            // A compiled artifact replays recorded stages and carries no
+            // sound-cue requests, so a WAV soundtrack has no input model.
+            if matches!(target, RenderTarget::Wav) {
+                return Err(CliError::new(
+                    "capability",
+                    "compiled FMTL artifacts do not carry scene sound cues; --format wav requires a live native scene (@builtin)",
+                ));
+            }
+            if matches!(target, RenderTarget::Svg) {
+                let artifact_destination = destination(&name);
+                preflight_render_generation(fs.as_ref(), &artifact_destination)?;
+                if manifest_publication == ManifestPublication::Adjacent {
+                    preflight_manifest_generation(
+                        fs.as_ref(),
+                        &adjacent_manifest_destination(&artifact_destination)?,
+                    )?;
+                }
+                let final_frame = bundle.frame_count().checked_sub(1).ok_or_else(|| {
+                    CliError::new(
+                        "scene",
+                        "the compiled timeline has no frame to publish as a final-state SVG",
+                    )
+                })?;
+                let stage = bundle.stage_at(final_frame).map_err(bundle_read_error)?;
+                let (max_artifact_bytes, pixel_width, pixel_height) = composition_budget(&config)?;
+                let (frame_width, frame_height) = scene_frame_extent(&config);
+                let artifact = publish_scene_still_svg(
+                    fs.as_ref(),
+                    &artifact_destination,
+                    max_artifact_bytes,
+                    &stage,
+                    pixel_width,
+                    pixel_height,
+                    frame_width,
+                    frame_height,
+                )?;
+                let summary = PreRunSummary {
+                    frames: u64::from(bundle.frame_count()),
+                    play_indices: (0..bundle.segment_count())
+                        .map(|index| {
+                            u64::try_from(index).map_err(|_| {
+                                CliError::new("budget", "compiled subdivision index exceeds u64")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                reports.push(complete(
+                    RenderSourceReport::Compiled(source),
+                    source_item,
+                    name,
+                    FinishedRender {
+                        artifact,
+                        backend: composition_backend(&config),
+                        cue_assets: Vec::new(),
+                    },
+                    None,
+                    command.prerun.then_some(summary),
+                )?);
+                return Ok(reports);
+            }
             let play_indices = (0..bundle.segment_count())
                 .map(|index| {
                     u64::try_from(index).map_err(|_| {
@@ -5573,6 +6045,8 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
                             fmn_output::NativeArtifactKind::Png => "png",
                             fmn_output::NativeArtifactKind::Gif => "gif",
+                            fmn_output::NativeArtifactKind::Wav => "wav",
+                            fmn_output::NativeArtifactKind::Svg => "svg",
                         }),
                         json_string(&report.path.to_string_lossy()),
                         report.frame_count,
@@ -5593,6 +6067,8 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
                             fmn_output::NativeArtifactKind::Png => "PNG",
                             fmn_output::NativeArtifactKind::Gif => "GIF",
+                            fmn_output::NativeArtifactKind::Wav => "WAV audio",
+                            fmn_output::NativeArtifactKind::Svg => "SVG",
                         },
                         report.path.display(),
                         report.frame_count,
@@ -5766,7 +6242,7 @@ fn preflight_batch_manifests(
     };
     match fs.node_kind_no_follow(root).map_err(|error| {
         CliError::new(
-            "output",
+            "render",
             format!(
                 "could not inspect manifest directory {}: {error}",
                 root.display()
@@ -5804,7 +6280,7 @@ fn preflight_batch_manifests(
             .node_kind_no_follow(&destination)
             .map_err(|error| {
                 CliError::new(
-                    "output",
+                    "render",
                     format!(
                         "could not inspect manifest destination {}: {error}",
                         destination.display()
@@ -5814,7 +6290,7 @@ fn preflight_batch_manifests(
             .is_some()
         {
             return Err(CliError::new(
-                "output",
+                "render",
                 format!(
                     "manifest destination {} already exists; per-scene manifests are no-clobber generations",
                     destination.display()
@@ -5828,7 +6304,7 @@ fn preflight_batch_manifests(
 fn adjacent_manifest_destination(artifact: &Path) -> Result<PathBuf, CliError> {
     let leaf = artifact.file_name().ok_or_else(|| {
         CliError::new(
-            "output",
+            "render",
             format!(
                 "render artifact {} has no leaf name for its provenance sidecar",
                 artifact.display()
@@ -5845,7 +6321,7 @@ fn preflight_render_generation(fs: &dyn FileSystem, destination: &Path) -> Resul
         .node_kind_no_follow(destination)
         .map_err(|error| {
             CliError::new(
-                "output",
+                "render",
                 format!(
                     "could not inspect render destination {}: {error}",
                     destination.display()
@@ -5855,7 +6331,7 @@ fn preflight_render_generation(fs: &dyn FileSystem, destination: &Path) -> Resul
         .is_some()
     {
         return Err(CliError::new(
-            "output",
+            "render",
             format!(
                 "render destination {} already exists; subdivided artifacts are no-clobber generations",
                 destination.display()
@@ -5870,7 +6346,7 @@ fn preflight_manifest_generation(fs: &dyn FileSystem, destination: &Path) -> Res
         .node_kind_no_follow(destination)
         .map_err(|error| {
             CliError::new(
-                "output",
+                "render",
                 format!(
                     "could not inspect manifest destination {}: {error}",
                     destination.display()
@@ -5880,7 +6356,7 @@ fn preflight_manifest_generation(fs: &dyn FileSystem, destination: &Path) -> Res
         .is_some()
     {
         return Err(CliError::new(
-            "output",
+            "render",
             format!(
                 "manifest destination {} already exists; sidecars are no-clobber generations",
                 destination.display()
@@ -5907,7 +6383,7 @@ fn publish_manifest_generation(
         .begin_atomic_directory(destination)
         .map_err(|error| {
             CliError::new(
-                "output",
+                "render",
                 format!(
                     "could not stage manifest generation {}: {error}",
                     destination.display()
@@ -5919,7 +6395,7 @@ fn publish_manifest_generation(
         .and_then(|()| writer.write_file(Path::new("manifest.txt"), text.as_bytes()))
         .map_err(|error| {
             CliError::new(
-                "output",
+                "render",
                 format!(
                     "could not write manifest generation {}: {error}",
                     destination.display()
@@ -5931,7 +6407,7 @@ fn publish_manifest_generation(
         .and_then(|prepared| prepared.commit())
         .map_err(|error| {
             CliError::new(
-                "output",
+                "render",
                 format!(
                     "could not publish manifest generation {}: {error}",
                     destination.display()

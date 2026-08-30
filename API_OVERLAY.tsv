@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	44dff7ad5943d2a58121c5e6d755142996e7e23052a9c2da8cc04add8659a7fc
+ledger_reviewed_digest	e06ec87d74aeb80e113d84f07bb084987c2797e486d0e60251ddc8d3a3930404
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -2464,7 +2464,7 @@ scene_names	same	-	render	scene_names	crates/fmn-cli/src/lib.rs#tests	explicit s
 --ffmpeg	store	-	-	path	global	ffmpeg	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Absolute path to the optional ffmpeg executable
 --cache-dir	store	-	-	path	global	cache_dir	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Explicit FrankenManim content-store root
 --engine	store	-	-	engine	render	engine	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select the CPU engine or a standard-only accelerator annex
---format	store	-	auto	output_format	render	format	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, or video output
+--format	store	-	auto	output_format	render	format	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues
 --math-pack	store	-	default	pack	render	math_pack	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select an fmd-math preamble pack
 --budget-ms	store	-	-	u64	batch	budget_ms	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Wall-clock budget for the batch
 --max-scenes	store	-	-	usize	batch	max_scenes	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound simultaneously active scene jobs
@@ -2528,9 +2528,9 @@ pixel-format-writes	implies	pix_fmt|write_file	-	--pix_fmt implies durable outpu
 subdivide-writes	implies	subdivide|write_file	-	--subdivide implies durable output
 filename-writes	implies	file_name|write_file	-	--file_name implies durable output
 video-directory-writes	implies	video_dir|write_file	-	--video_dir implies durable output
-gif-vs-non-gif-format	conflicts	gif|format=auto,png,png_sequence,y4m,wav,video	usage	--gif conflicts with a non-GIF --format
-native-format-vs-codec	conflicts	format=png,png_sequence,gif,y4m,wav|vcodec	usage	--vcodec applies only to ffmpeg video output
-native-format-vs-pixel-format	conflicts	format=png,png_sequence,gif,y4m,wav|pix_fmt	usage	--pix_fmt applies only to ffmpeg video output
+gif-vs-non-gif-format	conflicts	gif|format=auto,png,png_sequence,y4m,wav,svg,video	usage	--gif conflicts with a non-GIF --format
+native-format-vs-codec	conflicts	format=png,png_sequence,gif,y4m,wav,svg|vcodec	usage	--vcodec applies only to ffmpeg video output
+native-format-vs-pixel-format	conflicts	format=png,png_sequence,gif,y4m,wav,svg|pix_fmt	usage	--pix_fmt applies only to ffmpeg video output
 transparent-vs-opaque-pixel-format	conflicts	transparent|pix_fmt=yuv420p,yuv422p,yuv444p,nv12,p010,p010le,rgb24,bgr24	usage	--transparent requires an alpha-capable output pixel format
 transparent-vs-opaque-native-format	conflicts	transparent|format=y4m,wav	usage	--transparent is incompatible with y4m and WAV outputs
 skip-vs-subdivide	conflicts	skip_animations|subdivide	usage	--skip_animations cannot produce per-animation subdivisions

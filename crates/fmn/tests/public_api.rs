@@ -223,3 +223,36 @@ fn public_prelude_constructs_expanded_mobjects() {
     let cube = Cube::new(1.0).build();
     assert!(!cube.children().is_empty());
 }
+
+#[test]
+fn sound_cue_scene_records_an_exact_rational_request() {
+    let mut program = fmn::builtins::sound_scene(fmn::builtins::SOUND_CUE_SCENE_NAME)
+        .expect("the sound-cue scene is registered");
+    let mut sink = PacketSink::default();
+    let completed = run_scene(
+        &mut program,
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        0,
+        &mut sink,
+    )
+    .expect("the sound-cue scene runs");
+
+    let requests = completed.scene().sound_requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(
+        request.sound_file,
+        std::path::PathBuf::from(fmn::builtins::SOUND_CUE_ASSET_NAME)
+    );
+    assert_eq!(request.time.frames(), 4, "0.5 s at 8 fps");
+    assert_eq!(request.time.fps(), 8);
+    assert_eq!(request.time_offset, 0.0);
+    assert_eq!(request.gain, None);
+    assert_eq!(request.gain_to_background, None);
+
+    assert!(fmn::builtins::sound_scene("circle_shift.v1").is_none());
+    assert!(fmn::builtins::primitive_scene(fmn::builtins::SOUND_CUE_SCENE_NAME).is_none());
+}

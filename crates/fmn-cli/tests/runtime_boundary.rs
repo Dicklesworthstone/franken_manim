@@ -937,7 +937,7 @@ fn subdivide_preflights_every_generation_before_rendering() {
     ]);
     let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
 
-    assert_eq!(output.status.code(), Some(70), "{stdout}");
+    assert_eq!(output.status.code(), Some(6), "{stdout}");
     assert!(output.stderr.is_empty());
     assert!(stdout.contains("sidecars are no-clobber generations"));
     assert!(!root.join("circle_shift.v1/00000.y4m").exists());
@@ -1212,7 +1212,7 @@ fn batch_publishes_complete_fmnp_manifests_and_preflights_no_clobber() {
     ]);
     let blocked_stdout = String::from_utf8(blocked.stdout).expect("robot output is UTF-8");
 
-    assert_eq!(blocked.status.code(), Some(70), "{blocked_stdout}");
+    assert_eq!(blocked.status.code(), Some(6), "{blocked_stdout}");
     assert!(blocked.stderr.is_empty());
     assert!(blocked_stdout.contains("already exists"));
     assert_eq!(
@@ -1551,7 +1551,7 @@ fn occupied_sidecar_is_refused_before_render_artifact_publication() {
     ]);
     let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
 
-    assert_eq!(output.status.code(), Some(70), "{stdout}");
+    assert_eq!(output.status.code(), Some(6), "{stdout}");
     assert!(output.stderr.is_empty());
     assert!(stdout.contains("sidecars are no-clobber generations"));
     assert!(!root.join("circle_shift.v1").exists());
@@ -1613,5 +1613,169 @@ fn video_render_names_the_missing_optional_tool_and_native_alternative() {
             .expect("list untouched output root")
             .count(),
         0
+    );
+}
+
+fn run_in_dir(dir: &std::path::Path, args: &[String]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_fmn"))
+        .args(args)
+        .current_dir(dir)
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .env("PATH", "")
+        .output()
+        .expect("launch the standalone fmn binary by absolute path")
+}
+
+fn wav_asset_bytes(amplitude: f32) -> Vec<u8> {
+    let samples: Vec<f32> = (0..12_000)
+        .map(|index| amplitude * (core::f32::consts::TAU * 440.0 * index as f32 / 48_000.0).sin())
+        .collect();
+    fmn_codec::encode_wav(1, 48_000, fmn_codec::SampleFormat::S16, &samples)
+}
+
+#[test]
+fn wav_soundtrack_refuses_no_cue_scenes_and_publishes_cue_content_deterministically() {
+    // A scene without add_sound requests refuses by name, before output.
+    let root = output_root("wav-no-cue-refusal");
+    let output = run_clean(&[
+        "--robot",
+        "--format",
+        "wav",
+        "--video_dir",
+        root.join("out").to_str().expect("output path is UTF-8"),
+        BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
+    assert_eq!(output.status.code(), Some(5), "{stdout}");
+    assert!(stdout.contains("\"exit_name\":\"scene\""), "{stdout}");
+    assert!(stdout.contains("scene_has_no_sound_cues"), "{stdout}");
+    assert!(!root.join("out").exists(), "refusal created output state");
+
+    // The sound-cue scene publishes a decodable soundtrack whose bytes
+    // follow the cue assets and stay bit-identical across runs.
+    let home = output_root("wav-positive");
+    std::fs::write(home.join("sound_cue_tone.v1.wav"), wav_asset_bytes(0.4))
+        .expect("write cue asset");
+    let video_dir = home.join("med").join("videos");
+    std::fs::create_dir_all(&video_dir).expect("create output directory");
+    let args = |dir: &std::path::Path| {
+        [
+            "--robot".to_owned(),
+            "--format".to_owned(),
+            "wav".to_owned(),
+            "--fps".to_owned(),
+            "8".to_owned(),
+            "--threads".to_owned(),
+            "1".to_owned(),
+            "--video_dir".to_owned(),
+            dir.to_str().expect("output path is UTF-8").to_owned(),
+            BUILTIN_SCENE_SOURCE.to_owned(),
+            "sound_cue.v1".to_owned(),
+        ]
+    };
+    let first = run_in_dir(&home, &args(&video_dir));
+    let stdout = String::from_utf8(first.stdout).expect("robot output is UTF-8");
+    assert_eq!(first.status.code(), Some(0), "{stdout}");
+    let record = stdout.lines().next().expect("one render record");
+    assert!(record.contains("\"format\":\"wav\""), "{record}");
+    let published = video_dir.join("sound_cue.wav");
+    let bytes = std::fs::read(&published).expect("read published WAV");
+    assert!(!bytes.is_empty());
+    let decoded = fmn_codec::decode_wav(&bytes, &fmn_codec::WavLimits::default())
+        .expect("published artifact is a decodable PCM WAV");
+    assert!(
+        decoded.samples.iter().any(|&s| s != 0.0),
+        "cue content flows"
+    );
+    assert!(
+        record.contains(&format!("\"bytes\":{}", bytes.len())),
+        "{record}"
+    );
+    assert!(
+        video_dir
+            .join("sound_cue.wav.manifest")
+            .join("manifest.fmnp")
+            .is_file(),
+        "WAV publishes FMNP provenance"
+    );
+
+    // A changed cue parameter (asset amplitude) changes the mix bytes.
+    let home_b = output_root("wav-positive-louder");
+    std::fs::write(home_b.join("sound_cue_tone.v1.wav"), wav_asset_bytes(0.8))
+        .expect("write louder cue asset");
+    let video_dir_b = home_b.join("med").join("videos");
+    std::fs::create_dir_all(&video_dir_b).expect("create output directory");
+    let louder = run_in_dir(&home_b, &args(&video_dir_b));
+    assert_eq!(louder.status.code(), Some(0));
+    let louder_bytes = std::fs::read(video_dir_b.join("sound_cue.wav")).expect("read louder WAV");
+    assert_ne!(bytes, louder_bytes, "cue amplitude reaches the mix");
+
+    // Repeating the same composition into a fresh generation is
+    // bit-identical (sidecars are no-clobber generations).
+    let video_dir_repeat = home.join("med").join("videos-repeat");
+    std::fs::create_dir_all(&video_dir_repeat).expect("create repeat directory");
+    let repeat = run_in_dir(&home, &args(&video_dir_repeat));
+    assert_eq!(repeat.status.code(), Some(0));
+    let repeated =
+        std::fs::read(video_dir_repeat.join("sound_cue.wav")).expect("read repeated WAV");
+    assert_eq!(bytes, repeated, "the mix is deterministic");
+}
+
+#[test]
+fn svg_still_publishes_round_trippable_deterministic_certified_bytes() {
+    let run = |dir: &std::path::Path, extra: &[&str]| {
+        let mut args: Vec<&str> = vec![
+            "--robot",
+            "--format",
+            "svg",
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            "--video_dir",
+            dir.to_str().expect("output path is UTF-8"),
+        ];
+        args.extend_from_slice(extra);
+        args.push(BUILTIN_SCENE_SOURCE);
+        args.push("circle_shift.v1");
+        run_clean(&args)
+    };
+    let root = output_root("svg-positive");
+    let first = run(&root, &[]);
+    let stdout = String::from_utf8(first.stdout).expect("robot output is UTF-8");
+    assert_eq!(first.status.code(), Some(0), "{stdout}");
+    let bytes = std::fs::read(root.join("circle_shift.svg")).expect("read published SVG");
+    let document = fmn::geometry::SvgDocument::parse(&bytes)
+        .expect("the published artifact parses back as an SVG document");
+    assert!(document.width > 0.0);
+    assert!(!document.shapes.is_empty(), "the still carries shapes");
+
+    // Deterministic emission: a fresh publication is byte-identical.
+    let root_b = output_root("svg-determinism");
+    run(&root_b, &[]);
+    let repeated = std::fs::read(root_b.join("circle_shift.svg")).expect("read repeat");
+    assert_eq!(bytes, repeated, "SVG emission is deterministic");
+
+    // Certified SVG is certification-eligible (recorded ruling).
+    let certified_root = output_root("svg-certified");
+    let certified = run(&certified_root, &["--reproducible"]);
+    let certified_stdout = String::from_utf8(certified.stdout).expect("robot output is UTF-8");
+    assert_eq!(certified.status.code(), Some(0), "{certified_stdout}");
+    let certified_bytes =
+        std::fs::read(certified_root.join("circle_shift.svg")).expect("read certified SVG");
+    assert_eq!(bytes, certified_bytes, "certified bytes match standard");
+
+    // Publication limits stay named: a second generation into the same
+    // directory refuses instead of clobbering.
+    let rerun = run(&root, &[]);
+    let rerun_stdout = String::from_utf8(rerun.stdout).expect("robot output is UTF-8");
+    assert_eq!(rerun.status.code(), Some(6), "{rerun_stdout}");
+    assert!(
+        rerun_stdout.contains("\"exit_name\":\"render\""),
+        "{rerun_stdout}"
     );
 }

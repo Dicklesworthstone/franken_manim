@@ -32,7 +32,7 @@ fmn.cli.render	--autoreload	autoreload	cli_flag	0	action=store_true;nargs=-;type
 fmn.cli.render	--engine	engine	cli_flag	0	action=store;nargs=-;type=engine;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select the CPU engine or a standard-only accelerator annex
 fmn.cli.render	--file_name	file_name	cli_flag	0	action=store;nargs=-;type=-;default=-	same	-	crates/fmn-cli/src/lib.rs#tests	explicit output stem
 fmn.cli.render	--finder	finder	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	portable reveal-in-file-manager action
-fmn.cli.render	--format	format	cli_flag	0	action=store;nargs=-;type=output_format;default=auto	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, or video output
+fmn.cli.render	--format	format	cli_flag	0	action=store;nargs=-;type=output_format;default=auto	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues
 fmn.cli.render	--fps	fps	cli_flag	0	action=store;nargs=-;type=int;default=-	same	-	crates/fmn-cli/src/lib.rs#tests	positive integer frame rate
 fmn.cli.render	--hd	hd	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	1080p resolution preset
 fmn.cli.render	--leave_progress_bars	leave_progress_bars	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	human progress policy
