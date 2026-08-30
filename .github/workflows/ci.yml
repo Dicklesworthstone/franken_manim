@@ -546,3 +546,50 @@ jobs:
         with:
           name: e2e-certified-digests
           path: crates/fmn-conformance/goldens/e2e.certified.lock
+
+  pg56-release-perf:
+    # fm-inr.2 / fm-0q0g (c): the release-perf producers on their weekly
+    # cadence. These are the REAL timing rigs — PG-5's certified
+    # thread-matrix + frame-parallel + ordered-pipeline schedule sweep over
+    # the committed 27-scene goldens, and PG-6's warm/reused-arena
+    # allocation probes plus the 4K gallery peak — each anchored per scene
+    # against the committed scene-golden lock. The fast-tier thread sweep
+    # already runs per commit (pg5-thread-determinism); this lane adds the
+    # producers, which require the release-perf profile and are too heavy
+    # for the mandatory gate. Samples are wall-clock/RSS observations, not
+    # verdicts: no pinned-host qualification is claimed from a shared
+    # runner — the lane proves the rigs RUN and replay, and that schedule
+    # mismatches cannot regress silently. No bless env is set anywhere.
+    name: PG-5/PG-6 release-perf producers
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: target/pg56
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/pg56
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-pg56-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Run the release-perf PG-5/PG-6 producers
+        run: cargo test --profile release-perf --locked -p fmn-conformance --test perf_pg5 --test perf_pg6 -- --ignored
+
+      - name: Upload the producer traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pg56-producer-traces
+          path: crates/fmn-conformance/tests/artifacts/perf/
+          if-no-files-found: warn
