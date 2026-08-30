@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	e06ec87d74aeb80e113d84f07bb084987c2797e486d0e60251ddc8d3a3930404
+ledger_reviewed_digest	09e35b387d324defd65fe487c047cf3a5bf8fab03cc865b750322dca5aaf4e92
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -391,6 +391,11 @@ OOT-VARIABLE-FONTS	variable-font axes and color glyphs	tiered	Bundled static OFL
 # placeholder.
 #
 # symbol	status	evidence	tests	notes
+OOT-PYGLET-WINDOW-SURFACE	the pyglet/moderngl-window on-screen GL window family (Window, PygletWindow, Timer, mglw, screeninfo)	excluded	pyglet and moderngl-window are the refused GUI dependencies; interactive presentation is the Studio loopback preview (multipart PNG stream, native Metal presentation, kitty/sixel TUI) and input is the typed fmn-scene event surface with the Reference keyboard map	A host integration needs an on-screen GL window beyond the Studio and TUI surfaces, with a security review of the native presentation path
+OOT-TEX-LATEX-PIPELINE	the LaTeX file-writing pipeline (latex_to_svg, full_tex_to_svg, get_full_tex, get_tex_config, get_tex_template_config, num_tex_symbols, remove_tex_environments, TEX_TO_SYMBOL_COUNT)	excluded	D-03: there is no LaTeX on any path; fmd-math lays out TeX natively over bundled Computer Modern with source-span maps and named tier-tagged errors, and the corpus ratchet governs coverage	None; the native typesetter is authoritative and its coverage is a public ratchet
+OOT-REFERENCE-SCENE-EXTRACTION	the Reference CLI module-introspection workflow (ModuleLoader, extract_scene discovery, prompt_user_for_choice, insert_embed_line_to_module, compute_total_frames)	excluded	Scene discovery is the generated front-door contract: the standalone CLI resolves scene sources (native registry, compiled FMTL, refused Python with a named portal pointer) and the portal assembles modules schema-driven with list-scenes discovery	A corpus workflow needs Reference-style module introspection semantics beyond named scene discovery and portal list-scenes
+OOT-REFERENCE-LOGGER	the decorated Reference logger surface (log, FORMAT, logger __all__)	excluded	Console output is the robot-mode NDJSON contract and owned tracing; the decorated logger is presentation, not API	A consumer needs a log-record API beyond the robot NDJSON schema and owned tracing events
+OOT-REFERENCE-IMPORT-INTROSPECTION	Python typing and reflection artifacts (TYPE_CHECKING, PackageNotFoundError, get_num_args, get_parameters, leaked hashlib/urllib/validators/linalg imports)	excluded	Reflection-based argument handling is absorbed by typed Rust builders and the generated schema; leaked third-party names are not part of manimlib's public API surface	A portal consumer needs reflection semantics the typed builders and schema cannot express
 [status]
 manimlib.animation.animation:Animation	same	crates/fmn-anim/src/animation.rs	crates/fmn-anim/tests/animation.rs	is the base Animation trait and class defining the begin, interpolate, finish, and clean_up lifecycle
 manimlib.animation.animation:Animation.__init__	same	crates/fmn-anim/src/animation.rs	crates/fmn-anim/tests/animation.rs	initializes the animation with mobject, run_time, rate_func, time_span, lag_ratio, remover, and suspend_mobject_updating
@@ -2414,6 +2419,82 @@ manimlib.utils.space_ops:tri_area	same	scripts/manim_ref/manimlib/utils/space_op
 manimlib.utils.space_ops:z_to_vector	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	delegates to the OUT-alignment rotation matrix through Chisel
 manimlib.utils.svg_export:_get_path_data	same	scripts/manim_ref/manimlib/utils/svg_export.py	crates/fmn-python/tests/bridge.py	builds svg path data from subpaths with y negation and handle-based linear detection
 manimlib.utils.svg_export:vmobject_to_svg	same	scripts/manim_ref/manimlib/utils/svg_export.py	crates/fmn-python/tests/bridge.py	emits one path per point-carrying family member in a frame-unit viewBox with resolved paints and optional file write
+manimlib.window:Window	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	on-screen GL window is refused; the Studio loopback preview and typed event surface own presentation and interaction
+manimlib.window:Window.__init__	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	GL-window construction is refused with the Studio preview as the presentation surface
+manimlib.window:Window.cursor	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	cursor presentation belongs to the host surface, not a headless engine
+manimlib.window:Window.focus	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	focus is a window-manager concern outside the headless engine
+manimlib.window:Window.fullscreen	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	fullscreen is a window-manager concern outside the headless engine
+manimlib.window:Window.get_default_size	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	resolution comes from the typed camera config, not a window probe
+manimlib.window:Window.get_monitor	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	monitor enumeration is a refused GUI dependency surface
+manimlib.window:Window.gl_version	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	there is no GL context; the certified CPU engine and Metal annex report their own identities
+manimlib.window:Window.has_undrawn_event	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	event state is the typed fmn-scene event surface
+manimlib.window:Window.init_for_scene	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	scene binding is the SceneProgram runtime, not a window
+manimlib.window:Window.is_key_pressed	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-scene/src/events.rs	pressed-key state is tracked by the typed event dispatcher
+manimlib.window:Window.note_undrawn_event	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	event state is the typed fmn-scene event surface
+manimlib.window:Window.on_close	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	window lifecycle is refused; the Studio owns session shutdown
+manimlib.window:Window.on_hide	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	window lifecycle is refused; the Studio owns session shutdown
+manimlib.window:Window.on_key_press	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-scene/src/interactive.rs	key input is the typed event surface with the pinned Reference keyboard map
+manimlib.window:Window.on_key_release	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-scene/src/interactive.rs	key input is the typed event surface with the pinned Reference keyboard map
+manimlib.window:Window.on_mouse_drag	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-scene/src/interactive.rs	mouse input is the typed event surface with the pinned Reference keyboard map
+manimlib.window:Window.on_mouse_motion	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-scene/src/events.rs	mouse input is the typed event surface
+manimlib.window:Window.on_mouse_press	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-scene/src/events.rs	mouse input is the typed event surface
+manimlib.window:Window.on_mouse_release	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-scene/src/events.rs	mouse input is the typed event surface
+manimlib.window:Window.on_mouse_scroll	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-scene/src/events.rs	mouse input is the typed event surface
+manimlib.window:Window.on_resize	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	resolution is the typed camera config, never a window callback
+manimlib.window:Window.on_show	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	window lifecycle is refused; the Studio owns presentation
+manimlib.window:Window.pixel_coords_to_space_coords	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-render/src/camera.rs	coordinate conversion lives on the native camera and scene surfaces
+manimlib.window:Window.position_from_string	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	window placement is a refused GUI dependency surface
+manimlib.window:Window.resizable	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	resolution is the typed camera config, never a window property
+manimlib.window:Window.swap_buffers	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	presentation is the Studio stream and native Metal surface, not a GL swap
+manimlib.window:Window.to_default_position	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	window placement is a refused GUI dependency surface
+manimlib.window:Window.vsync	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	frame pacing is the ordered emitter and pipeline, not GL vsync
+manimlib.window:PygletWindow	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	pyglet is the refused GUI dependency
+manimlib.window:Timer	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	timing is the rational frame clock and owned tracing
+manimlib.window:mglw	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	moderngl-window is the refused GUI dependency
+manimlib.window:screeninfo	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	monitor enumeration is a refused GUI dependency surface
+manimlib.utils.tex_file_writing:LatexError	improved	BN-05	crates/fmn-tex/src/error.rs	LaTeX failures surface as named tier-tagged fmd-math errors passed through verbatim
+manimlib.utils.tex_file_writing:latex_to_svg	excluded	OOT-TEX-LATEX-PIPELINE	crates/fmn-tex/tests/scribe2.rs	there is no LaTeX on any path; fmd-math typesets natively with span maps
+manimlib.utils.tex_file_writing:full_tex_to_svg	excluded	OOT-TEX-LATEX-PIPELINE	crates/fmn-tex/tests/scribe2.rs	there is no LaTeX on any path; fmd-math typesets natively with span maps
+manimlib.utils.tex_file_writing:get_full_tex	excluded	OOT-TEX-LATEX-PIPELINE	crates/fmn-tex/tests/scribe2.rs	there is no LaTeX on any path; fmd-math typesets natively with span maps
+manimlib.utils.tex_file_writing:get_tex_config	excluded	OOT-TEX-LATEX-PIPELINE	crates/fmn-config/src/packs.rs	LaTeX template configuration is replaced by preamble packs with named refusals
+manimlib.utils.tex_file_writing:get_tex_template_config	excluded	OOT-TEX-LATEX-PIPELINE	crates/fmn-config/src/packs.rs	LaTeX template configuration is replaced by preamble packs with named refusals
+manimlib.utils.tex:num_tex_symbols	excluded	OOT-TEX-LATEX-PIPELINE	crates/fmn-conformance/src/ratchet.rs	LaTeX symbol accounting is replaced by the corpus coverage ratchet
+manimlib.utils.tex:remove_tex_environments	excluded	OOT-TEX-LATEX-PIPELINE	crates/fmn-conformance/src/ratchet.rs	LaTeX symbol accounting is replaced by the corpus coverage ratchet
+manimlib.utils.tex_to_symbol_count:TEX_TO_SYMBOL_COUNT	excluded	OOT-TEX-LATEX-PIPELINE	crates/fmn-conformance/src/ratchet.rs	LaTeX symbol accounting is replaced by the corpus coverage ratchet
+manimlib.module_loader:Module	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/tests/runtime_boundary.rs	scene discovery is the front-door contract over native, FMTL, and portal sources
+manimlib.module_loader:ModuleLoader	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/tests/runtime_boundary.rs	scene discovery is the front-door contract over native, FMTL, and portal sources
+manimlib.module_loader:ModuleLoader.get_module	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/tests/runtime_boundary.rs	scene discovery is the front-door contract over native, FMTL, and portal sources
+manimlib.extract_scene:BlankScene	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	the empty-scene base is bound in the portal bootstrap
+manimlib.extract_scene:BlankScene.construct	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	the empty-scene construct is the inherited no-op
+manimlib.extract_scene:compute_total_frames	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-scene/src/runtime.rs	frame counts derive from the rational clock and the scene runtime
+manimlib.extract_scene:get_indent	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/tests/runtime_boundary.rs	source-text rewriting is not part of the front-door contracts
+manimlib.extract_scene:get_module	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/tests/runtime_boundary.rs	the portal assembles modules schema-driven with list-scenes discovery
+manimlib.extract_scene:get_scene_classes	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-python/python/manimlib_bootstrap.py	the portal discovers scene classes from the schema-assembled module
+manimlib.extract_scene:get_scenes_to_render	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/tests/runtime_boundary.rs	scene selection is CLI arguments and portal discovery, never prompts
+manimlib.extract_scene:insert_embed_line_to_module	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-studio/src/supervisor.rs	source rewriting for embed is replaced by supervised worker iteration
+manimlib.extract_scene:is_child_scene	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-python/python/manimlib_bootstrap.py	the portal discovers scene classes from the schema-assembled module
+manimlib.extract_scene:main	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/src/lib.rs	scene execution is the standalone CPython-free binary
+manimlib.extract_scene:note_missing_scenes	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/tests/runtime_boundary.rs	unknown scenes fail with named errors before publication
+manimlib.extract_scene:prompt_user_for_choice	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-cli/tests/runtime_boundary.rs	scene selection is CLI arguments and portal discovery, never prompts
+manimlib.extract_scene:scene_from_class	excluded	OOT-REFERENCE-SCENE-EXTRACTION	crates/fmn-python/python/manimlib_bootstrap.py	the portal constructs scenes through the typed bridge
+manimlib.logger:log	excluded	OOT-REFERENCE-LOGGER	crates/fmn-cli/tests/runtime_boundary.rs	console output is the robot-mode NDJSON contract and owned tracing
+manimlib.logger:FORMAT	excluded	OOT-REFERENCE-LOGGER	crates/fmn-cli/tests/runtime_boundary.rs	console output is the robot-mode NDJSON contract and owned tracing
+manimlib.logger:__all__	excluded	OOT-REFERENCE-LOGGER	crates/fmn-cli/tests/runtime_boundary.rs	console output is the robot-mode NDJSON contract and owned tracing
+manimlib.__main__:main	improved	BN-15	crates/fmn-cli/src/lib.rs	scene execution is the standalone CPython-free binary with generated flags and exit codes
+manimlib.__main__:run_scenes	improved	BN-15	crates/fmn-cli/tests/runtime_boundary.rs	scene execution is the standalone CPython-free binary with named capability refusals
+manimlib:version	improved	BN-15	crates/fmn-cli/src/lib.rs	robot --version reports compile provenance
+manimlib:__version__	improved	BN-15	crates/fmn-cli/src/lib.rs	robot --version reports compile provenance
+manimlib:TYPE_CHECKING	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-python/tests/bridge.py	typing artifacts are absorbed by the typed Rust surface
+manimlib:PackageNotFoundError	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-python/tests/bridge.py	import-introspection errors are absorbed by the typed bridge
+manimlib.utils.simple_functions:gen_choose	same	crates/fmn-core/src/rate.rs	crates/fmn-core/tests/parity.rs	binomial choose is exact in the rate-function catalog
+manimlib.utils.simple_functions:hash_string	same	crates/fmn-hash/src/sha256.rs	crates/fmn-hash/tests/golden.rs	string hashing is the owned FIPS 180-4 SHA-256
+manimlib.utils.simple_functions:get_num_args	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-conformance/tests/api_schema.rs	reflection-based argument counting is absorbed by the generated schema
+manimlib.utils.simple_functions:get_parameters	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-conformance/tests/api_schema.rs	reflection-based parameter introspection is absorbed by the generated schema
+manimlib.utils.bezier:linalg	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-geom/src/cubic.rs	the leaked numpy import is replaced by the sovereign cubic converter
+manimlib.utils.file_ops:hashlib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-cache/src/key.rs	file hashing is the owned content-addressed cache keying
+manimlib.utils.file_ops:urllib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-platform/src/fetch.rs	network access is the host-provided AssetFetcher capability, never urllib
+manimlib.utils.file_ops:manimlib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-python/tests/bridge.py	leaked self-import is not part of manimlib's public API surface
+manimlib.utils.file_ops:validators	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-python/tests/bridge.py	leaked validators import is not part of manimlib's public API surface
 # options	status	evidence	command	binding	tests	note
 [flag_binding]
 --autoreload	tiered	OOT-CLI-AUTORELOAD	render	autoreload	crates/fmn-cli/src/lib.rs#tests	re-specified as supervised Studio worker reload
