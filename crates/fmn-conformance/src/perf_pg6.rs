@@ -386,8 +386,18 @@ pub fn measure_pg6(
     let result_digest = aggregate_result_digest(definition.corpus_lock_digest(), &cases)?;
     // ubs:ignore — public corpus self-golden, not authentication material.
     if result_digest != definition.expected_result_digest() {
+        let per_scene = cases
+            .iter()
+            .map(|case| {
+                format!(
+                    "{}(warm={},measured={})",
+                    case.scene, case.warm_frame_digest, case.measured_frame_digest
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
         return Err(Pg6Error::Render(format!(
-            "corpus result self-golden drift: expected {}, got {}",
+            "corpus result self-golden drift: expected {}, got {}; per-scene digests: {per_scene}",
             definition.expected_result_digest(),
             result_digest
         )));

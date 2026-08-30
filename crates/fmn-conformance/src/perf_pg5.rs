@@ -376,8 +376,13 @@ pub fn measure_pg5(
     let reference_digest = aggregate_reference_digest(definition.corpus_lock_digest(), &cases)?;
     // ubs:ignore — public corpus self-golden, not authentication material.
     if reference_digest != definition.expected_reference_digest() {
+        let per_scene = cases
+            .iter()
+            .map(|case| format!("{}={}", case.scene, case.one_thread))
+            .collect::<Vec<_>>()
+            .join(";");
         return Err(Pg5Error::Render(format!(
-            "reference corpus self-golden drift: expected {}, got {}",
+            "reference corpus self-golden drift: expected {}, got {}; per-scene one-thread digests: {per_scene}",
             definition.expected_reference_digest(),
             reference_digest
         )));
