@@ -2893,6 +2893,29 @@ impl NativeStudioRenderer {
     }
 }
 
+/// The builtin Studio programs: the pinned primitive corpus plus the
+/// explicit-name tex-span scene whose span records the worker harvests.
+enum BuiltinProgram {
+    Primitive(fmn::builtins::PrimitiveScene),
+    TexSpan(fmn::builtins::TexSpanScene),
+}
+
+impl fmn::SceneConstruct for BuiltinProgram {
+    fn name(&self) -> &str {
+        match self {
+            Self::Primitive(program) => program.name(),
+            Self::TexSpan(program) => program.name(),
+        }
+    }
+
+    fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+        match self {
+            Self::Primitive(program) => program.construct(stage),
+            Self::TexSpan(program) => program.construct(stage),
+        }
+    }
+}
+
 struct NativeStudioWorker {
     build_id: fmn_studio::ProtocolDigest,
     scene: String,
@@ -2906,6 +2929,7 @@ struct NativeStudioWorker {
     source_read: Option<AssetRead>,
     journal_position: usize,
     journal_tail: Vec<u8>,
+    span_records: Vec<fmn_library::SpanRecord>,
     last_state_hash: Option<fmn_studio::ProtocolDigest>,
     last_checkpoint_frame: Option<usize>,
 }
@@ -2913,7 +2937,7 @@ struct NativeStudioWorker {
 impl NativeStudioWorker {
     fn from_command(fs: &dyn FileSystem, command: &StudioCommand) -> Result<Self, CliError> {
         let input = resolve_native_render_input(fs, &command.render)?;
-        let (scene, frames, config, source_read) = match input {
+        let (scene, frames, config, source_read, span_records) = match input {
             NativeRenderInput::Builtin { names } => {
                 if names.len() != 1 {
                     return Err(CliError::new(
@@ -2924,9 +2948,13 @@ impl NativeStudioWorker {
                 let scene = names.into_iter().next().ok_or_else(|| {
                     CliError::new("scene", "Studio requires exactly one scene name")
                 })?;
-                let mut program = fmn::builtins::primitive_scene(&scene).ok_or_else(|| {
-                    CliError::new("scene", "validated built-in scene disappeared")
-                })?;
+                let mut program = if let Some(scene) = fmn::builtins::tex_span_scene(&scene) {
+                    BuiltinProgram::TexSpan(scene)
+                } else {
+                    BuiltinProgram::Primitive(fmn::builtins::primitive_scene(&scene).ok_or_else(
+                        || CliError::new("scene", "validated built-in scene disappeared"),
+                    )?)
+                };
                 let config = resolve_render_config(fs, &command.render)?;
                 let mut capture = StudioPacketCapture::default();
                 let completed = fmn::run_scene(
@@ -2942,11 +2970,16 @@ impl NativeStudioWorker {
                         .show(&mut capture)
                         .map_err(|error| CliError::new("scene", error.to_string()))?;
                 }
+                let span_records = match program {
+                    BuiltinProgram::TexSpan(scene) => scene.into_span_records(),
+                    BuiltinProgram::Primitive(_) => Vec::new(),
+                };
                 (
                     scene,
                     NativeStudioFrames::Captured(capture.packets),
                     config,
                     None,
+                    span_records,
                 )
             }
             NativeRenderInput::Compiled {
@@ -2980,6 +3013,7 @@ impl NativeStudioWorker {
                         path,
                         digest: source_item.digest,
                     }),
+                    Vec::new(),
                 )
             }
         };
@@ -3058,6 +3092,7 @@ impl NativeStudioWorker {
             journal_tail: Vec::new(),
             last_state_hash: None,
             last_checkpoint_frame: None,
+            span_records,
         })
     }
 
@@ -3360,13 +3395,11 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
                 self.require_scene(&scene)?;
                 let stage = self.frames.stage_at(self.current_frame)?;
                 let limits = fmn_studio::InspectorLimits::default();
-                let bytes = fmn_studio::InspectorSnapshot::capture(
-                    &stage,
-                    &fmn_studio::SpanRegistry::new(),
-                    limits,
-                )
-                .and_then(|snapshot| snapshot.to_json(limits))
-                .map_err(|error| studio_service_error(error.to_string()))?;
+                let (registry, _skipped_records) =
+                    rebuild_span_registry(&stage, &self.span_records);
+                let bytes = fmn_studio::InspectorSnapshot::capture(&stage, &registry, limits)
+                    .and_then(|snapshot| snapshot.to_json(limits))
+                    .map_err(|error| studio_service_error(error.to_string()))?;
                 Ok(self.studio_data(fmn_studio::StudioDataKind::Inspection, bytes))
             }
             fmn_studio::SupervisorRequest::Overlay { scene, layers } => {
@@ -3404,6 +3437,73 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
 
 fn studio_service_error(message: impl Into<String>) -> fmn_studio::ServiceError {
     fmn_studio::ServiceError::new(fmn_studio::WorkerErrorCode::ExecutionFailed, message)
+}
+
+/// Rebuild one live [`fmn_studio::SpanRegistry`] for THIS call's
+/// reconstructed stage.
+///
+/// The worker stores harvested span maps keyed by stable identity — the
+/// root's top-level draw-list ordinal at construct time — because a
+/// reconstructed stage materializes `Mob` handles with fresh generations
+/// that can never match construct-time handles. Per call, each record's
+/// ordinal resolves against the current roots, the root's
+/// first-generation children are collected in family order, and entry
+/// `i` binds to child ordinal `i`. A record that no longer resolves
+/// (ordinal out of range, more entries than children, an invalid source
+/// range) is skipped and counted, never fatal: one stale record must not
+/// fail the whole inspection.
+fn rebuild_span_registry(
+    stage: &fmn_scene::studio_bridge::Stage,
+    records: &[fmn_library::SpanRecord],
+) -> (fmn_studio::SpanRegistry, usize) {
+    let mut registry = fmn_studio::SpanRegistry::new();
+    let mut skipped = 0usize;
+    for record in records {
+        let Some(&root) = stage.roots().get(record.root_ordinal) else {
+            skipped += 1;
+            continue;
+        };
+        let Some(entry) = stage.get(root) else {
+            skipped += 1;
+            continue;
+        };
+        let children = entry.submobjects();
+        // Entry i is child ordinal i. Fewer entries than children is the
+        // decorated-text shape (decorations trail the glyphs); more
+        // entries than children can never bind honestly.
+        if record.entries.len() > children.len() {
+            skipped += 1;
+            continue;
+        }
+        let bindings: Vec<fmn_studio::NativeSpanBinding> = record
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(submobject_index, entry)| fmn_studio::NativeSpanBinding {
+                submobject_index,
+                start: entry.start,
+                end: entry.end,
+                kind: span_kind(entry.kind),
+            })
+            .collect();
+        if registry
+            .bind_native(Arc::clone(&record.source), children, &bindings)
+            .is_err()
+        {
+            skipped += 1;
+        }
+    }
+    (registry, skipped)
+}
+
+/// Translate the library's span-kind vocabulary onto Studio's.
+fn span_kind(kind: fmn_library::SpanKindU8) -> fmn_studio::SpanKind {
+    match kind {
+        fmn_library::SpanKindU8::TextGlyph => fmn_studio::SpanKind::TextGlyph,
+        fmn_library::SpanKindU8::MathGlyph => fmn_studio::SpanKind::MathGlyph,
+        fmn_library::SpanKindU8::MathRule => fmn_studio::SpanKind::MathRule,
+        fmn_library::SpanKindU8::MathPath => fmn_studio::SpanKind::MathPath,
+    }
 }
 
 enum OfflineFrameRenderer {
@@ -4426,6 +4526,26 @@ fn publish_scene_soundtrack(
     Ok((artifact, cue_assets))
 }
 
+/// The pixel viewport and world-frame extent one SVG still is sized by.
+#[derive(Clone, Copy, Debug)]
+struct StillViewport {
+    pixel_width: u32,
+    pixel_height: u32,
+    frame_width: f64,
+    frame_height: f64,
+}
+
+impl StillViewport {
+    fn new(pixel_width: u32, pixel_height: u32, frame_width: f64, frame_height: f64) -> Self {
+        Self {
+            pixel_width,
+            pixel_height,
+            frame_width,
+            frame_height,
+        }
+    }
+}
+
 /// Export the final scene state as one deterministic SVG still.
 ///
 /// Geometry stays in the geometry crates: the CLI hands the live stage to
@@ -4439,17 +4559,14 @@ fn publish_scene_still_svg(
     destination: &Path,
     max_artifact_bytes: u64,
     stage: &fmn_scene::studio_bridge::Stage,
-    pixel_width: u32,
-    pixel_height: u32,
-    frame_width: f64,
-    frame_height: f64,
+    viewport: StillViewport,
 ) -> Result<RenderArtifactReport, CliError> {
     let document = fmn::library::svg_export::stage_svg_document(
         stage,
-        f64::from(pixel_width),
-        f64::from(pixel_height),
-        frame_width,
-        frame_height,
+        f64::from(viewport.pixel_width),
+        f64::from(viewport.pixel_height),
+        viewport.frame_width,
+        viewport.frame_height,
     )
     .map_err(|error| CliError::new("scene", error.to_string()))?;
     let report = publish_svg(
@@ -5137,8 +5254,9 @@ fn resolve_native_render_input(
             return Err(CliError::new(
                 "scene",
                 format!(
-                    "select a built-in scene or pass --write_all; available scenes: {}, plus {} for --format wav",
+                    "select a built-in scene or pass --write_all; available scenes: {}, plus {} and {} for --format wav",
                     fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
+                    fmn::builtins::TEX_SPAN_SCENE_NAME,
                     fmn::builtins::SOUND_CUE_SCENE_NAME,
                 ),
             ));
@@ -5154,12 +5272,14 @@ fn resolve_native_render_input(
         for name in &names {
             if fmn::builtins::primitive_scene(name).is_none()
                 && fmn::builtins::sound_scene(name).is_none()
+                && fmn::builtins::tex_span_scene(name).is_none()
             {
                 return Err(CliError::new(
                     "scene",
                     format!(
-                        "unknown built-in scene {name:?}; available scenes: {} plus {}",
+                        "unknown built-in scene {name:?}; available scenes: {} plus {} and {}",
                         fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
+                        fmn::builtins::TEX_SPAN_SCENE_NAME,
                         fmn::builtins::SOUND_CUE_SCENE_NAME,
                     ),
                 ));
@@ -5250,13 +5370,17 @@ fn execute_native_render(
         ManifestPublication::Adjacent,
     )
 }
-/// Resolve one built-in program: the pinned primitive corpus or the
-/// standalone sound-cue scene.
+
+/// Resolve one built-in program: the pinned primitive corpus, the
+/// tex-span drill, or the standalone sound-cue scene.
 fn resolve_builtin_program(name: &str) -> Result<Box<dyn fmn::SceneConstruct>, CliError> {
-    if let Some(mut scene) = fmn::builtins::primitive_scene(name) {
+    if let Some(scene) = fmn::builtins::primitive_scene(name) {
         return Ok(Box::new(scene));
     }
-    if let Some(mut scene) = fmn::builtins::sound_scene(name) {
+    if let Some(scene) = fmn::builtins::tex_span_scene(name) {
+        return Ok(Box::new(scene));
+    }
+    if let Some(scene) = fmn::builtins::sound_scene(name) {
         return Ok(Box::new(scene));
     }
     Err(CliError::new(
@@ -5589,16 +5713,19 @@ fn execute_native_render_with_cancellation(
                         )?,
                         _ => {
                             let (frame_width, frame_height) = scene_frame_extent(&config);
+                            let viewport = StillViewport::new(
+                                pixel_width,
+                                pixel_height,
+                                frame_width,
+                                frame_height,
+                            );
                             (
                                 publish_scene_still_svg(
                                     fs.as_ref(),
                                     &artifact_destination,
                                     max_artifact_bytes,
                                     scene.stage(),
-                                    pixel_width,
-                                    pixel_height,
-                                    frame_width,
-                                    frame_height,
+                                    viewport,
                                 )?,
                                 Vec::new(),
                             )
@@ -5748,15 +5875,14 @@ fn execute_native_render_with_cancellation(
                 let stage = bundle.stage_at(final_frame).map_err(bundle_read_error)?;
                 let (max_artifact_bytes, pixel_width, pixel_height) = composition_budget(&config)?;
                 let (frame_width, frame_height) = scene_frame_extent(&config);
+                let viewport =
+                    StillViewport::new(pixel_width, pixel_height, frame_width, frame_height);
                 let artifact = publish_scene_still_svg(
                     fs.as_ref(),
                     &artifact_destination,
                     max_artifact_bytes,
                     &stage,
-                    pixel_width,
-                    pixel_height,
-                    frame_width,
-                    frame_height,
+                    viewport,
                 )?;
                 let summary = PreRunSummary {
                     frames: u64::from(bundle.frame_count()),
@@ -9461,5 +9587,89 @@ mod tests {
             .expect_err("version-1 schema cannot carry native non-UTF-8");
         assert_eq!(error.exit_name(), "config");
         assert!(error.message().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn span_records_bind_by_root_ordinal_and_skip_stale_ones() {
+        use fmn_library::{SpanKindU8, SpanMapEntry, SpanRecord};
+        use fmn_scene::studio_bridge::Stage;
+
+        let mut stage = Stage::new();
+        let root = stage.add(fmn_library::VMobject::new().with_children(vec![
+            fmn_library::VMobject::new(),
+            fmn_library::VMobject::new(),
+        ]));
+        stage.add_to_scene(root).expect("roots the family");
+
+        let source: Arc<str> = Arc::from("hi");
+        let record = |root_ordinal: usize, entries: Vec<SpanMapEntry>| SpanRecord {
+            root_ordinal,
+            source: Arc::clone(&source),
+            entries,
+        };
+        let records = vec![
+            // Live: ordinal 0, two entries for the two children.
+            record(
+                0,
+                vec![
+                    SpanMapEntry {
+                        start: 0,
+                        end: 1,
+                        kind: SpanKindU8::TextGlyph,
+                    },
+                    SpanMapEntry {
+                        start: 1,
+                        end: 2,
+                        kind: SpanKindU8::TextGlyph,
+                    },
+                ],
+            ),
+            // Stale: ordinal beyond the draw list.
+            record(7, vec![]),
+            // Overlong: three entries against two children.
+            record(
+                0,
+                vec![
+                    SpanMapEntry {
+                        start: 0,
+                        end: 1,
+                        kind: SpanKindU8::TextGlyph,
+                    },
+                    SpanMapEntry {
+                        start: 1,
+                        end: 2,
+                        kind: SpanKindU8::TextGlyph,
+                    },
+                    SpanMapEntry {
+                        start: 2,
+                        end: 2,
+                        kind: SpanKindU8::TextGlyph,
+                    },
+                ],
+            ),
+        ];
+
+        let (registry, skipped) = rebuild_span_registry(&stage, &records);
+        assert_eq!(skipped, 2, "the stale and overlong records are counted");
+
+        // The live record surfaces in a real capture: entry i binds to
+        // child ordinal i, so the children carry (0,1) and (1,2).
+        let snapshot = fmn_studio::InspectorSnapshot::capture(
+            &stage,
+            &registry,
+            fmn_studio::InspectorLimits::default(),
+        )
+        .expect("captures");
+        let spans: Vec<_> = snapshot
+            .nodes
+            .iter()
+            .filter_map(|node| node.source_span.as_ref())
+            .collect();
+        assert_eq!(spans.len(), 2, "one span per span-bound child");
+        assert_eq!((spans[0].start, spans[0].end), (0, 1));
+        assert_eq!((spans[1].start, spans[1].end), (1, 2));
+        assert_eq!(spans[0].source_bytes, 2);
+        assert_eq!(spans[0].excerpt, "h");
+        assert_eq!(spans[1].excerpt, "i");
     }
 }

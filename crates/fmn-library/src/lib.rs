@@ -103,6 +103,7 @@ pub mod pointcloud;
 pub mod poly;
 pub mod probability;
 pub mod solids;
+pub mod spans;
 pub mod special_tex;
 pub mod style;
 pub mod svg;
@@ -205,3 +206,10 @@ pub use fmn_geom::{
 };
 pub use fmn_tex::TexEngine;
 pub use fmn_text::FontBook;
+
+// The Scribe span-map seam: the composition root's translation data
+// between the builders' native span tables and Studio's SpanRegistry.
+pub use spans::{
+    MAX_SPAN_RECORDS, SpanCollector, SpanCollectorError, SpanKindU8, SpanMapData, SpanMapEntry,
+    SpanRecord, add_with_spans,
+};

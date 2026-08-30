@@ -1,9 +1,9 @@
 //! Native `vmobject_to_svg` (§14.2, fm-ek1 tail): the export twin of
 //! [`crate::svg`].
 //!
-//! The importer turns a parsed [`SvgDocument`] into a [`VMobject`] family;
-//! this module walks a live [`Stage`] in draw order and emits the same
-//! document model back out through `fmn_geom`'s hardened emitter. The
+//! The importer turns a parsed `fmn_geom::SvgDocument` into a VMobject
+//! family; this module walks a live [`Stage`] in draw order and emits the
+//! same document model back out through `fmn_geom`'s hardened emitter. The
 //! fidelity ruling carries over from the emitter: every resolved style field
 //! is written with a fixed attribute order, so the bytes are deterministic by
 //! construction.

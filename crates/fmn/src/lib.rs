@@ -51,7 +51,7 @@ use fmn_anim::{
 };
 use fmn_config::ConfigError;
 use fmn_geom::{GeomError, SpaceOpsError};
-use fmn_library::{DashError, TexMobjectError, TextMobjectError};
+use fmn_library::{DashError, SpanCollectorError, TexMobjectError, TextMobjectError};
 use fmn_mobject::{AnimateError, Mob, Mobject, Stage as MobjectStage, StageError};
 use fmn_platform::fetch::FetchError;
 use fmn_platform::fs::FsError;
@@ -241,6 +241,69 @@ pub mod builtins {
         })
     }
 
+    /// Stable name of the tex-span scene outside the pinned G1 corpus.
+    ///
+    /// Like the audio corpus, this scene rides beside the digest-pinned
+    /// 25-name primitive corpus and is selected by explicit name (never
+    /// `--write_all`). It exercises the Studio span-map seam end to end:
+    /// Scribe math and text build through
+    /// [`crate::library::add_with_spans`] into a
+    /// [`crate::library::SpanCollector`] the composition root harvests
+    /// into worker state, so the shipped `GET /api/inspect` serves real
+    /// typeset span maps instead of an empty registry.
+    pub const TEX_SPAN_SCENE_NAME: &str = "tex_span.v1";
+
+    /// The native tex-span scene: one formula with a fraction bar, one
+    /// text, both recorded through the span collector.
+    #[derive(Clone, Debug)]
+    pub struct TexSpanScene {
+        name: &'static str,
+        collector: crate::library::SpanCollector,
+    }
+
+    impl TexSpanScene {
+        /// Consume the scene into the span records gathered at
+        /// construct time, in collection order.
+        #[must_use]
+        pub fn into_span_records(self) -> Vec<crate::library::SpanRecord> {
+            self.collector.into_records()
+        }
+    }
+
+    impl SceneConstruct for TexSpanScene {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+            let engine = TexEngine::new("fmd-math/pack/default", None)?;
+            let tex = Tex::new(r"\frac{x}{y}").build(&engine)?;
+            let text = Text::new("hello")
+                .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
+            let (tex_data, text_data) = (tex.span_map(), text.span_map());
+            // Record order is the span table's order: root ordinal 0 is
+            // the formula, 1 is the text. Both roots share the default
+            // z-index, so the stable draw-list sort keeps insertion order
+            // and the recorded ordinals hold for every reconstructed
+            // frame stage.
+            let tex_root = stage.add(tex.vmob)?;
+            self.collector.record(stage.arena(), tex_root, tex_data)?;
+            let text_root = stage.add(text.vmob)?;
+            self.collector.record(stage.arena(), text_root, text_data)?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+
+    /// Resolve the built-in tex-span scene by its stable name.
+    #[must_use]
+    pub fn tex_span_scene(name: &str) -> Option<TexSpanScene> {
+        (name == TEX_SPAN_SCENE_NAME).then_some(TexSpanScene {
+            name: TEX_SPAN_SCENE_NAME,
+            collector: crate::library::SpanCollector::default(),
+        })
+    }
+
     fn primitive(index: usize, color: Srgb) -> crate::Result<Mobject> {
         Ok(match index {
             0 | 11 => Circle::new()
@@ -420,6 +483,8 @@ pub enum Error {
     Typesetting(TexMobjectError),
     /// Math-engine initialization or layout.
     TexEngine(TexError),
+    /// Span-record bookkeeping for the Studio span-map seam.
+    Span(SpanCollectorError),
     /// Filesystem capability I/O.
     FileSystem(FsError),
     /// Host-provided asset fetch.
@@ -485,7 +550,8 @@ impl Error {
             )
             | Self::Text(_)
             | Self::Typesetting(_)
-            | Self::TexEngine(_) => ErrorKind::Scene,
+            | Self::TexEngine(_)
+            | Self::Span(_) => ErrorKind::Scene,
             Self::Scene(SceneError::Camera(_) | SceneError::Integration(_))
             | Self::FileSystem(_)
             | Self::Process(_) => ErrorKind::Render,
@@ -506,6 +572,7 @@ impl fmt::Display for Error {
             Self::Text(error) => write!(f, "text construction failed: {error}"),
             Self::Typesetting(error) => write!(f, "math construction failed: {error}"),
             Self::TexEngine(error) => write!(f, "math engine failed: {error}"),
+            Self::Span(error) => write!(f, "span records failed: {error}"),
             Self::FileSystem(error) => write!(f, "{error}"),
             Self::AssetFetch(error) => write!(f, "{error}"),
             Self::FfmpegLocator(error) => write!(f, "{error}"),
@@ -528,6 +595,7 @@ impl std::error::Error for Error {
             Self::Text(error) => error,
             Self::Typesetting(error) => error,
             Self::TexEngine(error) => error,
+            Self::Span(error) => error,
             Self::FileSystem(error) => error,
             Self::AssetFetch(error) => error,
             Self::FfmpegLocator(error) => error,
@@ -556,6 +624,7 @@ error_from!(AnimError, Animation);
 error_from!(TextMobjectError, Text);
 error_from!(TexMobjectError, Typesetting);
 error_from!(TexError, TexEngine);
+error_from!(SpanCollectorError, Span);
 error_from!(FsError, FileSystem);
 error_from!(FetchError, AssetFetch);
 error_from!(FfmpegLocatorError, FfmpegLocator);

@@ -19,6 +19,8 @@
 //! "0" in the book's default family and scale so its ink height is
 //! `font_size / font_size_for_unit_height` manim units.
 
+use std::sync::Arc;
+
 use fmn_core::color::Srgb;
 use fmn_core::constants::DEFAULT_MOBJECT_COLOR;
 use fmn_core::types::Vec3;
@@ -30,6 +32,7 @@ use fmn_text::{
     TextRequest, glyph_quadpath, layout_text,
 };
 
+use crate::spans::{SpanKindU8, SpanMapData, SpanMapEntry};
 use crate::style::Style;
 use crate::vmobject::VMobject;
 
@@ -149,6 +152,9 @@ pub struct TextMobject {
     pub vmob: VMobject,
     /// The layout: submobject indices and source spans, intact.
     pub layout: TextLayout,
+    /// The source string, verbatim — the byte-range anchor of the span
+    /// map ([`TextMobject::span_map`]).
+    pub source: Arc<str>,
 }
 
 impl TextMobject {
@@ -177,6 +183,31 @@ impl TextMobject {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The native span map: one entry per glyph, in child order — entry
+    /// `i` is glyph child `i`'s source byte range. Decorations trail the
+    /// glyphs as children but carry no construct kind of their own, so
+    /// they are not span entries; the glyph child ordinals are exactly
+    /// the entries' ordinals. This is the data the composition root binds
+    /// into the Studio inspector's `SpanRegistry` (§11.3's native
+    /// provenance).
+    #[must_use]
+    pub fn span_map(&self) -> SpanMapData {
+        let entries = self
+            .layout
+            .glyphs
+            .iter()
+            .map(|glyph| SpanMapEntry {
+                start: glyph.span.0,
+                end: glyph.span.1,
+                kind: SpanKindU8::TextGlyph,
+            })
+            .collect();
+        SpanMapData {
+            source: Arc::clone(&self.source),
+            entries,
+        }
     }
 }
 
@@ -404,7 +435,11 @@ impl<'a> Text<'a> {
         let vmob = VMobject::new()
             .with_style(self.style)
             .with_children(children);
-        Ok(TextMobject { vmob, layout })
+        Ok(TextMobject {
+            vmob,
+            layout,
+            source: Arc::from(self.text),
+        })
     }
 
     /// One glyph child: the positioned outline scaled to scene units,

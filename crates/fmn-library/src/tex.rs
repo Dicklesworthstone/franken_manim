@@ -20,12 +20,15 @@
 //! typeset a reference "0" and scale so its height is
 //! `font_size / font_size_for_unit_height` manim units.
 
+use std::sync::Arc;
+
 use fmn_core::color::Srgb;
 use fmn_core::types::Vec3;
 use fmn_geom::QuadPath;
 use fmn_mobject::Mobject;
-use fmn_tex::{Mode, PathContour, PathSeg, Style as MathStyle, TexEngine, TexError, Typeset};
+use fmn_tex::{Mode, PathContour, PathSeg, Prim, Style as MathStyle, TexEngine, TexError, Typeset};
 
+use crate::spans::{SpanKindU8, SpanMapData, SpanMapEntry};
 use crate::style::Style;
 use crate::text::{DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT, text_style};
 use crate::vmobject::VMobject;
@@ -109,6 +112,32 @@ impl TexMobject {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The native span map: one entry per `Sub`, in child order — entry
+    /// `i` is child ordinal `i`'s source byte range and construct kind.
+    /// This is the data the composition root binds into the Studio
+    /// inspector's `SpanRegistry` (§11.4).
+    #[must_use]
+    pub fn span_map(&self) -> SpanMapData {
+        let entries = self
+            .typeset
+            .subs
+            .iter()
+            .map(|sub| SpanMapEntry {
+                start: sub.span.start,
+                end: sub.span.end,
+                kind: match sub.prim {
+                    Prim::Glyph(_) => SpanKindU8::MathGlyph,
+                    Prim::Rule(_) => SpanKindU8::MathRule,
+                    Prim::Path(_) => SpanKindU8::MathPath,
+                },
+            })
+            .collect();
+        SpanMapData {
+            source: Arc::from(self.typeset.source.as_str()),
+            entries,
+        }
     }
 }
 

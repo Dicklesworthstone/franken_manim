@@ -1779,3 +1779,142 @@ fn svg_still_publishes_round_trippable_deterministic_certified_bytes() {
         "{rerun_stdout}"
     );
 }
+
+/// Launch the Studio front door for one scene and return the child plus
+/// the readiness line's `(authority, capability query)`.
+#[cfg(unix)]
+fn spawn_studio_for(
+    scene: &str,
+) -> (
+    std::process::Child,
+    std::io::BufReader<std::process::ChildStdout>,
+    String,
+    String,
+) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fmn"))
+        .args([
+            "studio",
+            "--robot",
+            "--no-browser",
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            BUILTIN_SCENE_SOURCE,
+            scene,
+        ])
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .env("PATH", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("launch Studio front door");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("Studio stdout"));
+    let mut ready = String::new();
+    stdout
+        .read_line(&mut ready)
+        .expect("read Studio readiness record");
+    assert!(ready.contains("\"kind\":\"studio_ready\""), "{ready}");
+    let url = json_string_field(&ready, "url").expect("readiness URL");
+    let location = url.strip_prefix("http://").expect("loopback HTTP URL");
+    let (authority, target) = location.split_once('/').expect("URL authority and target");
+    let query = target.split_once('?').expect("capability query").1;
+    (child, stdout, authority.to_owned(), query.to_owned())
+}
+
+/// Shut a spawned Studio front door down through stdin EOF and demand a
+/// clean exit with silent stderr.
+#[cfg(unix)]
+fn shutdown_studio_cleanly(mut child: std::process::Child) {
+    drop(child.stdin.take());
+    let status = child.wait().expect("wait for graceful Studio shutdown");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("Studio stderr")
+        .read_to_string(&mut stderr)
+        .expect("read Studio stderr");
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+/// One plain GET against the Studio API, response body and all.
+#[cfg(unix)]
+fn studio_get(authority: &str, target: &str) -> String {
+    let mut stream = std::net::TcpStream::connect(authority).expect("connect to Studio API");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("Studio API timeout");
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .expect("write Studio API request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("read Studio API response");
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    String::from_utf8(response).expect("Studio API response is UTF-8")
+}
+
+#[cfg(unix)]
+#[test]
+fn studio_inspect_serves_real_tex_span_entries_for_the_tex_span_scene() {
+    let (child, stdout, authority, query) = spawn_studio_for("tex_span.v1");
+    let response = studio_get(&authority, &format!("/api/inspect?{query}"));
+    drop(stdout);
+    shutdown_studio_cleanly(child);
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    // The formula's `x` glyph carries its own source bytes (6..7 of
+    // `\frac{x}{y}`), verbatim excerpt included.
+    assert!(
+        response.contains(
+            "\"source_span\":{\"kind\":\"math_glyph\",\"start\":6,\"end\":7,\
+             \"source_bytes\":11,\"excerpt\":\"x\""
+        ),
+        "{response}"
+    );
+    // The fraction bar is a rule spanning the whole formula.
+    assert!(
+        response.contains("\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":11"),
+        "{response}"
+    );
+    // The text glyphs carry their per-character byte ranges.
+    assert!(
+        response.contains(
+            "\"source_span\":{\"kind\":\"text_glyph\",\"start\":0,\"end\":1,\
+             \"source_bytes\":5,\"excerpt\":\"h\""
+        ),
+        "{response}"
+    );
+    assert!(
+        response.contains(
+            "\"source_span\":{\"kind\":\"text_glyph\",\"start\":4,\"end\":5,\
+             \"source_bytes\":5,\"excerpt\":\"o\""
+        ),
+        "{response}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn studio_inspect_serves_null_spans_for_a_scene_without_span_records() {
+    let (child, stdout, authority, query) = spawn_studio_for("circle_shift.v1");
+    let response = studio_get(&authority, &format!("/api/inspect?{query}"));
+    drop(stdout);
+    shutdown_studio_cleanly(child);
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    // A primitive scene harvests no span records, so every node's
+    // source span is null — inspection degrades gracefully, never
+    // fails.
+    assert!(!response.contains("\"source_span\":{"), "{response}");
+    assert!(response.contains("\"source_span\":null"), "{response}");
+}
