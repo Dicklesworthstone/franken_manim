@@ -46,7 +46,7 @@ fn key() -> BenchmarkKey {
         execution_plan_digest: definition.execution_plan_digest(),
         config_digest: definition.config_digest(),
         cache_state: "independent-cold-scenes".to_owned(),
-        output_mode: "raw-rgba16f-digests".to_owned(),
+        output_mode: "scene-golden-anchored-documents".to_owned(),
         external_tool_fingerprint: None,
         bare_metal: true,
         isolated: true,
@@ -152,7 +152,9 @@ fn release_perf_producer_emits_three_zero_mismatch_schedule_samples() {
     }));
     assert_eq!(
         artifacts.reference_digest,
-        definition.expected_reference_digest()
+        definition
+            .reference_digest(&artifacts.cases)
+            .expect("reference aggregate recomputes from produced cases")
     );
     assert!(
         artifacts

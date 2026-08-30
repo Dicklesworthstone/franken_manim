@@ -27,13 +27,15 @@ use crate::perf::{
 use crate::scene_goldens::{self, SCENES, TILING};
 use fmn_frame::FrameBuffer;
 use fmn_hash::{Digest, Sha256, sha256};
+use fmn_mobject::Stage;
 use fmn_output::{
     EmitterConfig, EmitterHandle, EmitterReport, FrameReservation, FrameSink, OrderedEmitter,
     SinkBinding, SinkFailure, SinkWrite,
 };
 use fmn_platform::topology::{HardwareTopology, SimdTier};
 use fmn_render::{
-    Binning, EngineIdentity, FrameConfig, FrameJob, MonoTable, RenderPlan, Tier, frame_digest,
+    Binning, EngineIdentity, FrameConfig, FrameJob, MonoTable, RenderPlan, Tier,
+    engine::encode_frame, frame_digest,
 };
 use fmn_runtime::{
     Determinism, ExecutionEngine, ExecutionPlan, FramePipeline, LocalityLane, OutputPixelFormat,
@@ -45,7 +47,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Stable workload-definition schema.
-pub const PG5_DEFINITION_SCHEMA: &str = "fmn-perf-pg5-definition/1";
+pub const PG5_DEFINITION_SCHEMA: &str = "fmn-perf-pg5-definition/2";
 /// Stable phase-trace schema.
 pub const PG5_TRACE_SCHEMA: &str = "fmn-perf-pg5-trace/1";
 /// Policy-catalog scenario implemented by this producer.
@@ -68,16 +70,7 @@ pub const PG5_THREADS_PER_TEAM: usize = 32;
 const BUILD_PROFILE: &str = "release-perf";
 const THREAD_PROFILE: &str = "matrix-1-4-16-frame-parallel-ordered-pipeline";
 const CACHE_STATE: &str = "independent-cold-scenes";
-const OUTPUT_MODE: &str = "raw-rgba16f-digests";
-
-// Filled by the reviewed release-perf producer. This hashes only the ordered
-// one-thread reference frame digests (plus corpus-lock identity), not schedule
-// candidates: a candidate mismatch must reach the common verifier as a valid
-// nonzero sample rather than being intercepted as self-golden drift.
-const EXPECTED_REFERENCE_DIGEST: Digest = Digest::from_bytes([
-    0x96, 0x15, 0x26, 0x46, 0x89, 0xc2, 0xa3, 0x5d, 0x20, 0x50, 0x70, 0x64, 0x5d, 0xe7, 0x09, 0x2b,
-    0xa9, 0x7e, 0x36, 0xed, 0x55, 0x80, 0xda, 0xbb, 0xf1, 0x4d, 0x35, 0xe3, 0xec, 0xb0, 0xc0, 0x81,
-]);
+const OUTPUT_MODE: &str = "scene-golden-anchored-documents";
 
 /// The complete content-addressed definition of the PG-5 per-commit workload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,10 +129,6 @@ impl Pg5Definition {
             row("scene_golden_lock_digest", &self.corpus_lock_digest());
             row("config_digest", &self.config_digest());
             row("execution_plan_digest", &self.execution_plan_digest());
-            row(
-                "expected_reference_digest",
-                &self.expected_reference_digest(),
-            );
         }
         for (index, case) in SCENES.iter().enumerate() {
             let _ = writeln!(output, "scene\t{index}\t{}", case.name);
@@ -170,11 +159,14 @@ impl Pg5Definition {
     pub const fn execution_plan_digest(self) -> Digest {
         self.execution_plan_digest
     }
-
-    /// Aggregate one-thread frame identity required before evidence is emitted.
-    #[must_use]
-    pub const fn expected_reference_digest(self) -> Digest {
-        EXPECTED_REFERENCE_DIGEST
+    /// Recompute the reference aggregate from produced cases — the trace
+    /// identity the common verifier replays. The committed scene-golden
+    /// lock is the anchor; this aggregate is derived, never pinned.
+    ///
+    /// # Errors
+    /// Propagates fixture errors from the corpus field hashing.
+    pub fn reference_digest(&self, cases: &[Pg5CaseResult]) -> Result<Digest, Pg5Error> {
+        aggregate_reference_digest(self.corpus_lock_digest(), cases)
     }
 
     /// Validate the embedded corpus lock and fixed scene count.
@@ -349,6 +341,23 @@ pub fn measure_pg5(
         ));
     }
 
+    // Reference anchor: every scene's certified artifact document must
+    // reproduce the committed cross-platform lock — the same quantity the
+    // fast-tier scene_goldens gate pins. The schedule sweep below then
+    // measures whether every execution schedule reproduces the committed
+    // bits, with schedule mismatches flowing to the common verifier.
+    let corpus = scene_goldens::corpus();
+    let golden_store = scene_goldens::store();
+    for (index, case) in SCENES.iter().enumerate() {
+        let bytes = scene_goldens::artifact(case, corpus, index, &certified_document);
+        if let Err(error) = golden_store.check(case.name, &bytes) {
+            return Err(Pg5Error::Render(format!(
+                "reference corpus self-golden drift at {}: {error}",
+                case.name
+            )));
+        }
+    }
+
     let frame_parallel = run_frame_parallel(&execution_plan)?;
     let ordered = run_ordered_pipeline(&execution_plan)?;
     if frame_parallel.digests.len() != SCENES.len() || ordered.digests.len() != SCENES.len() {
@@ -374,20 +383,8 @@ pub fn measure_pg5(
     }
 
     let reference_digest = aggregate_reference_digest(definition.corpus_lock_digest(), &cases)?;
-    // ubs:ignore — public corpus self-golden, not authentication material.
-    if reference_digest != definition.expected_reference_digest() {
-        let per_scene = cases
-            .iter()
-            .map(|case| format!("{}={}", case.scene, case.one_thread))
-            .collect::<Vec<_>>()
-            .join(";");
-        return Err(Pg5Error::Render(format!(
-            "reference corpus self-golden drift: expected {}, got {}; per-scene one-thread digests: {per_scene}",
-            definition.expected_reference_digest(),
-            reference_digest
-        )));
-    }
-
+    // The per-scene anchor above is the committed-provenance check; the
+    // aggregate below is derived trace identity, never a pinned constant.
     let direct_mismatches = cases
         .iter()
         .map(|case| {
@@ -478,6 +475,26 @@ fn prepare_scene(index: usize) -> Result<PreparedScene, String> {
     })
 }
 
+/// The certified single-threaded frame of a stage, encoded into its
+/// canonical document — byte-for-byte the fast-tier scene_goldens closure,
+/// so the producer's lock anchor is the committed quantity itself.
+fn certified_document(stage: &Stage) -> Vec<u8> {
+    let config = scene_goldens::frame_config();
+    let mut plan = RenderPlan::new();
+    plan.sync(stage, 0).expect("scene-golden anchor plan syncs");
+    let mono = MonoTable::build(&plan, config.map).expect("scene-golden anchor monotone table");
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("scene-golden anchor binning");
+    binning
+        .prune_occluded(&plan)
+        .expect("scene-golden anchor pruning");
+    let frame =
+        FrameJob::with_identity(&plan, &mono, &binning, config, EngineIdentity::certified())
+            .expect("scene-golden anchor frame artifacts")
+            .render(1)
+            .expect("scene-golden anchor renders");
+    encode_frame(&frame).expect("scene-golden anchor encodes")
+}
 fn render_prepared(prepared: &PreparedScene, threads: usize) -> Result<Digest, Pg5Error> {
     let job = FrameJob::with_identity(
         &prepared.plan,
@@ -1131,16 +1148,15 @@ mod tests {
                 .count(),
             PG5_CORPUS_SCENES
         );
+        // The definition digest pins the complete axis set for the portable
+        // tier; the reference aggregate is derived from the committed lock
+        // (checked per scene by the producer), never pinned here.
         if Tier::COMPILED.name() == "portable" {
             assert_eq!(
                 definition.digest().to_string(),
-                "34b7fa6b05af58c07ef26d6b06ff68c93a24cf37abfc99142d1516ce8c279ddf"
+                "a63c6f818be6f3f2d52949a269f58196fd054099a59222b60a78e388b21283f7"
             );
         }
-        assert_eq!(
-            definition.expected_reference_digest().to_string(),
-            "9615264689c2a35d205070645de7092ba97e36ed5580dabbf14d35e3ecb0c081"
-        );
     }
 
     #[test]

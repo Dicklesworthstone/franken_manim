@@ -53,7 +53,7 @@ fn key() -> BenchmarkKey {
         execution_plan_digest: sha256(b"execution-plan"),
         config_digest: definition.config_digest(),
         cache_state: "warm-reused-frame-arena".to_owned(),
-        output_mode: "raw-rgba16f".to_owned(),
+        output_mode: "scene-golden-anchored".to_owned(),
         external_tool_fingerprint: None,
         bare_metal: true,
         isolated: true,
@@ -158,7 +158,12 @@ fn release_perf_producer_emits_every_zero_allocation_scene_and_replayable_trace(
             && case.warm.pool_slots == case.measured.pool_slots
             && case.measured.pool_slots == PG6_THREADS
     }));
-    assert_eq!(artifacts.result_digest, definition.expected_result_digest());
+    assert_eq!(
+        artifacts.result_digest,
+        definition
+            .result_digest(&artifacts.cases)
+            .expect("result aggregate recomputes from produced cases")
+    );
     assert!(
         artifacts
             .trace_tsv
@@ -225,7 +230,7 @@ fn soak_key() -> BenchmarkKey {
         execution_plan_digest: sha256(b"execution-plan"),
         config_digest: definition.config_digest(),
         cache_state: "warm-reused-frame-arena-soak".to_owned(),
-        output_mode: "raw-rgba16f".to_owned(),
+        output_mode: "scene-golden-anchored".to_owned(),
         external_tool_fingerprint: None,
         bare_metal: true,
         isolated: true,

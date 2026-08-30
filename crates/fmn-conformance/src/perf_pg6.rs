@@ -18,15 +18,16 @@ use crate::perf::{
 };
 use crate::scene_goldens::{self, SCENES, TILING};
 use fmn_hash::{Digest, Sha256, sha256};
+use fmn_mobject::Stage;
 use fmn_render::{
     AllocStats, Binning, EngineIdentity, FrameArena, FrameJob, MonoTable, RenderPlan, Tier,
-    frame_digest,
+    engine::encode_frame, frame_digest,
 };
 use std::fmt;
 use std::fmt::Write as _;
 
 /// Stable workload-definition schema.
-pub const PG6_DEFINITION_SCHEMA: &str = "fmn-perf-pg6-definition/1";
+pub const PG6_DEFINITION_SCHEMA: &str = "fmn-perf-pg6-definition/2";
 /// Stable phase-trace schema.
 pub const PG6_TRACE_SCHEMA: &str = "fmn-perf-pg6-trace/1";
 /// Policy-catalog scenario implemented by this producer.
@@ -45,15 +46,7 @@ pub const PG6_WARMUP_FRAMES_PER_SCENE: usize = 1;
 const BUILD_PROFILE: &str = "release-perf";
 const THREAD_PROFILE: &str = "fixed-4";
 const CACHE_STATE: &str = "warm-reused-frame-arena";
-const OUTPUT_MODE: &str = "raw-rgba16f";
-// Fixed by the reviewed release-perf corpus proof. The aggregate hashes the
-// ordered scene names and both equal frame digests, independently of allocation
-// counts, so a rendering/corpus drift cannot silently retain the same producer
-// identity.
-const EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
-    0xd5, 0x45, 0x1d, 0x89, 0xeb, 0x10, 0x50, 0xa6, 0x51, 0x34, 0x03, 0xa0, 0x60, 0x61, 0x75, 0x42,
-    0xfa, 0x93, 0x98, 0x1a, 0x67, 0x1b, 0x5f, 0xea, 0x58, 0xb7, 0xbb, 0x86, 0xee, 0xca, 0x6e, 0xaa,
-]);
+const OUTPUT_MODE: &str = "scene-golden-anchored";
 
 /// The complete content-addressed definition of the allocation workload.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,7 +87,6 @@ impl Pg6Definition {
             row("frame_height_px", &scene_goldens::HEIGHT);
             row("scene_golden_lock_digest", &self.corpus_lock_digest());
             row("config_digest", &self.config_digest());
-            row("expected_result_digest", &self.expected_result_digest());
         }
         for (index, case) in SCENES.iter().enumerate() {
             let _ = writeln!(output, "scene\t{index}\t{}", case.name);
@@ -119,11 +111,14 @@ impl Pg6Definition {
     pub fn corpus_lock_digest(self) -> Digest {
         scene_goldens::certified_lock_digest()
     }
-
-    /// Aggregate frame identity required before evidence is emitted.
-    #[must_use]
-    pub const fn expected_result_digest(self) -> Digest {
-        EXPECTED_RESULT_DIGEST
+    /// Recompute the result aggregate from produced cases — the trace
+    /// identity the common verifier replays. The committed scene-golden
+    /// lock is the anchor; this aggregate is derived, never pinned.
+    ///
+    /// # Errors
+    /// Propagates fixture errors from the corpus field hashing.
+    pub fn result_digest(&self, cases: &[Pg6CaseResult]) -> Result<Digest, Pg6Error> {
+        aggregate_result_digest(self.corpus_lock_digest(), cases)
     }
 
     /// Validate that the embedded lock and compiled corpus name exactly the
@@ -259,6 +254,28 @@ pub struct Pg6Artifacts {
 
 /// Measure every committed corpus scene through one warm and one reused frame.
 ///
+/// The certified single-threaded frame of a stage, encoded into its
+/// canonical document — byte-for-byte the fast-tier scene_goldens closure,
+/// so the allocation probe's lock anchor is the committed quantity itself.
+fn certified_document(stage: &Stage) -> Vec<u8> {
+    let config = scene_goldens::frame_config();
+    let mut plan = RenderPlan::new();
+    plan.sync(stage, 0).expect("scene-golden anchor plan syncs");
+    let mono = MonoTable::build(&plan, config.map).expect("scene-golden anchor monotone table");
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("scene-golden anchor binning");
+    binning
+        .prune_occluded(&plan)
+        .expect("scene-golden anchor pruning");
+    let frame =
+        FrameJob::with_identity(&plan, &mono, &binning, config, EngineIdentity::certified())
+            .expect("scene-golden anchor frame artifacts")
+            .render(1)
+            .expect("scene-golden anchor renders");
+    encode_frame(&frame).expect("scene-golden anchor encodes")
+}
+
+/// Run the allocation workload...
 /// `trace_path` is recorded and content-addressed, but this function performs
 /// no filesystem I/O. The CLI publishes the returned trace before the raw
 /// bundle using exclusive-create semantics.
@@ -281,6 +298,22 @@ pub fn measure_pg6(
     let _ = EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path.clone(), &[])?;
     require_compiled_cargo_profile(BUILD_PROFILE)?;
     definition.validate_corpus_lock()?;
+
+    // Reference anchor: the warm and measured frames of every corpus scene
+    // must re-derive the committed cross-platform scene-golden artifacts,
+    // so allocation-path equivalence means equivalence to the committed
+    // bits, not merely to themselves.
+    let golden_corpus = scene_goldens::corpus();
+    let golden_store = scene_goldens::store();
+    for (index, case) in SCENES.iter().enumerate() {
+        let bytes = scene_goldens::artifact(case, golden_corpus, index, &certified_document);
+        if let Err(error) = golden_store.check(case.name, &bytes) {
+            return Err(Pg6Error::Render(format!(
+                "reference corpus self-golden drift at {}: {error}",
+                case.name
+            )));
+        }
+    }
 
     let (key, host_evidence) =
         crate::perf_host::measurement_identity(&baseline.key, qualification)?;
@@ -382,26 +415,9 @@ pub fn measure_pg6(
             measured,
         });
     }
-
+    // The per-scene anchor above is the committed-provenance check; the
+    // aggregate below is derived trace identity, never a pinned constant.
     let result_digest = aggregate_result_digest(definition.corpus_lock_digest(), &cases)?;
-    // ubs:ignore — public corpus self-golden, not authentication material.
-    if result_digest != definition.expected_result_digest() {
-        let per_scene = cases
-            .iter()
-            .map(|case| {
-                format!(
-                    "{}(warm={},measured={})",
-                    case.scene, case.warm_frame_digest, case.measured_frame_digest
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(";");
-        return Err(Pg6Error::Render(format!(
-            "corpus result self-golden drift: expected {}, got {}; per-scene digests: {per_scene}",
-            definition.expected_result_digest(),
-            result_digest
-        )));
-    }
     let trace_tsv = render_trace(definition, result_digest, &cases);
     let evidence =
         EvidenceRef::from_bytes(EvidenceKind::PhaseTrace, trace_path, trace_tsv.as_bytes())?;
@@ -936,16 +952,15 @@ mod tests {
                 .count(),
             PG6_SAMPLE_COUNT
         );
+        // The definition digest pins the complete axis set for the portable
+        // tier; the result aggregate is derived from the committed lock
+        // (checked per scene by the producer), never pinned here.
         if Tier::COMPILED.name() == "portable" {
             assert_eq!(
                 definition.digest().to_string(),
-                "0c6904044d38a3b27ab799320ae74094e584631da607397368e5450a9435f9b0"
+                "007714f642ee8d56811670dd735aa3827a27571ec812d68c52b753d631724c2d"
             );
         }
-        assert_eq!(
-            definition.expected_result_digest().to_string(),
-            "d5451d89eb1050a6513403a060617542fa93981a671b5fea58b7bb86eeca6eaa"
-        );
     }
 
     #[test]

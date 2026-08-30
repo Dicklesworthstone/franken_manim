@@ -530,7 +530,6 @@ fn pg5_definitions() -> Result<String, CliError> {
          \"scenario\":\"{PG5_SCENARIO}\",\
          \"benchmark_definition\":\"{}\",\"config_digest\":\"{}\",\
          \"execution_plan_digest\":\"{}\",\"corpus_lock_digest\":\"{}\",\
-         \"expected_reference_digest\":\"{}\",\
          \"engine\":\"{}\",\"tier\":\"{}\",\
          \"direct_threads\":[{},{},{}],\"sample_count\":{PG5_SAMPLE_COUNT},\
          \"corpus_scenes\":{PG5_CORPUS_SCENES},\
@@ -541,7 +540,6 @@ fn pg5_definitions() -> Result<String, CliError> {
         definition.config_digest(),
         definition.execution_plan_digest(),
         definition.corpus_lock_digest(),
-        definition.expected_reference_digest(),
         pg5_identity().engine.name(),
         pg5_identity().tier.name(),
         PG5_DIRECT_THREADS[0],
@@ -558,7 +556,7 @@ fn pg6_definitions() -> String {
          \"definition_schema\":\"{PG6_DEFINITION_SCHEMA}\",\"gate\":\"pg-6\",\
          \"scenario\":\"{PG6_SCENARIO}\",\
          \"benchmark_definition\":\"{}\",\"config_digest\":\"{}\",\
-         \"corpus_lock_digest\":\"{}\",\"expected_result_digest\":\"{}\",\
+         \"corpus_lock_digest\":\"{}\",\
          \"engine\":\"{}\",\"tier\":\"{}\",\
          \"thread_profile\":\"fixed-4\",\"threads\":{PG6_THREADS},\
          \"sample_count\":{PG6_SAMPLE_COUNT},\
@@ -577,7 +575,6 @@ fn pg6_definitions() -> String {
         definition.digest(),
         definition.config_digest(),
         definition.corpus_lock_digest(),
-        definition.expected_result_digest(),
         pg6_identity().engine.name(),
         pg6_identity().tier.name(),
         peak.digest(),
