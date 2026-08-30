@@ -4,10 +4,11 @@
 //!
 //! y4m is a header line plus `FRAME` records of planar YUV data. The
 //! writer emits planar I420 (from fmn-frame NV12 buffers, chroma
-//! deinterleaved) or full-resolution C444; the exact rational frame
-//! rate travels verbatim in the `F` parameter — no float ever touches
-//! the timing. A reader lives here too, primarily as the conformance
-//! oracle for the writer.
+//! deinterleaved) in the two 4:2:0 chroma sitings `Y4mColorspace`
+//! defines; full-resolution C444 output is future work. The exact
+//! rational frame rate travels verbatim in the `F` parameter — no
+//! float ever touches the timing. A reader lives here too, primarily
+//! as the conformance oracle for the writer.
 
 use fmn_frame::{FrameBuffer, PixelFormat};
 

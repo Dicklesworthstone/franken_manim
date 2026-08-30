@@ -415,6 +415,8 @@ fmn-python studio hello.py
 
 `fmn` reads the Reference's config file shapes exactly (defaults → user file → CLI). The `tex_templates.yml` concept is reborn as **fmd-math preamble packs** (named macro/symbol bundles), with a compatibility mapping for the common templates.
 
+> **A tense marker, per the CLI blocks above.** The typed config surface that exists today is the Reference-shaped section set — `directories` / `camera` / `file_writer` / `scene` / `vmobject` / `mobject` / `tex` / `text` / `embed` / `resolution_options` — plus the native `determinism` and `render` sections. The `style:` and `output:` sections in the example below, and its flat `directories.output` key, are the **1.0 target**: today they survive only in the raw config tree, because their typed homes are the fields that already exist (`text.font`, `tex.template`, `file_writer.video_codec`, `directories.subdirs.output`). The example is kept as written because it *is* the target state.
+
 ```yaml
 # custom_config.yml
 directories:

@@ -486,3 +486,63 @@ jobs:
         # Any crash fails the step; the reproducer is logged by libFuzzer
         # (base64) and written under fuzz/artifacts/ — a finding to fix at
         # the source in fmn-codec.
+
+  e2e-full:
+    # fm-e2e-full-ci-lane-ryq3: the full-tier e2e matrix (fm-fjq catalog)
+    # on its weekly budget. The fast tier already runs per-commit inside
+    # scripts/check.sh's workspace test; this lane adds the FMN_E2E_FULL=1
+    # rows — the --uhd 4K render-matrix rows, the 16-thread determinism
+    # drill, and the PG-6 peak UHD gallery — through the same entry point
+    # the per-commit lane uses: cargo test --locked -p fmn-conformance
+    # --test e2e_scenarios. The harness renders one frame per matrix row,
+    # which keeps even the 4K rows inside the default profile's budget
+    # (measured: the full binary passes in ~4 minutes of test time on a
+    # 16-core linux-x86-64 host), so the lane matches the other cargo
+    # test lanes and builds no separate release or perf profile.
+    # Certified rows verify every emitted artifact against the committed
+    # lock crates/fmn-conformance/goldens/e2e.certified.lock (12 digests)
+    # in check mode: drift fails the run. Blessing is never enabled in
+    # CI — a drift is a finding to adjudicate, never a number to
+    # re-bless.
+    name: weekly e2e full matrix (fmn-conformance)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: target/e2e-full
+      FMN_E2E_FULL: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/e2e-full
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-e2e-full-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      # The portal scenarios drive the real embedded-CPython bridge,
+      # whose record views are NumPy arrays (same requirement as the
+      # PG-8 bridge lanes above).
+      - name: Install NumPy for the embedded-CPython bridge
+        run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+
+      - name: Run the full-tier e2e matrix
+        run: cargo test --locked -p fmn-conformance --test e2e_scenarios
+
+      # The 12 certified artifact digests the run just verified, attached
+      # to the run (also on drift failure) so a red lane can be audited
+      # against the exact lock it checked.
+      - name: Upload the certified e2e artifact digests
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-certified-digests
+          path: crates/fmn-conformance/goldens/e2e.certified.lock
