@@ -6,6 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+echo "==> agent control-plane parser/tests"
+python3 scripts/agent_brief.py --format json --limit 1 >/dev/null
+python3 scripts/test_agent_brief.py
+
 echo "==> native installer smoke"
 bash scripts/test_install.sh
 
