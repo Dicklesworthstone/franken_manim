@@ -589,7 +589,21 @@ impl AnnularSector {
             .inner_radius(0.0)
             .outer_radius(radius)
     }
+}
 
+/// Top-level `Sector(angle, radius)` constructor matching the Python class.
+#[must_use]
+pub fn sector(angle: f64, radius: f64) -> AnnularSector {
+    AnnularSector::sector(angle, radius)
+}
+
+/// Top-level `SmallDot(point)` constructor matching the Python class.
+#[must_use]
+pub fn small_dot(point: Vec3) -> Dot {
+    Dot::new().point(point).small()
+}
+
+impl AnnularSector {
     /// Subtended angle.
     #[must_use]
     pub fn angle(mut self, angle: f64) -> Self {

@@ -984,6 +984,16 @@ impl From<VMobject> for Mobject {
     }
 }
 
+/// `Group`: a heterogeneous mobject holding any children (Appendix A
+/// `types/mobject`).
+///
+/// Unlike [`v_group`], this accepts the broader [`Mobject`] family and is
+/// the native analogue of `manimlib.mobject.mobject.Group`.
+#[must_use]
+pub fn group(children: impl IntoIterator<Item = Mobject>) -> Mobject {
+    Mobject::group(children.into_iter().collect())
+}
+
 /// `VGroup`: a vectorized mobject with no geometry of its own, holding
 /// children (Appendix A `types/vectorized_mobject`).
 ///

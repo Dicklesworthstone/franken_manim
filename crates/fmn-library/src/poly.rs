@@ -657,6 +657,28 @@ impl TryFrom<Rectangle> for Mobject {
     }
 }
 
+/// Top-level `RoundedRectangle(width, height, corner_radius)` constructor
+/// matching the Python class.
+#[must_use]
+pub fn rounded_rectangle(width: f64, height: f64, corner_radius: f64) -> Rectangle {
+    Rectangle::new()
+        .width(width)
+        .height(height)
+        .corner_radius(corner_radius)
+}
+
+/// Top-level `Polyline(*vertices)` constructor matching the Python class.
+#[must_use]
+pub fn polyline(vertices: impl IntoIterator<Item = Vec3>) -> Polygon {
+    Polygon::polyline(vertices)
+}
+
+/// Top-level `Triangle()` constructor matching the Python class.
+#[must_use]
+pub fn triangle() -> RegularPolygon {
+    RegularPolygon::triangle()
+}
+
 /// `Square(side_length=2.0)`.
 ///
 /// This is a distinct public builder because `Square` is part of the manim

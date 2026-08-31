@@ -113,7 +113,10 @@ pub mod text;
 pub mod tip;
 pub mod vmobject;
 
-pub use arc::{AnnularSector, Annulus, Arc, ArcBetweenPoints, Circle, Dot, Ellipse};
+pub use arc::{
+    AnnularSector, Annulus, Arc, ArcBetweenPoints, Circle, Dot, Ellipse, curved_arrow,
+    curved_double_arrow, sector, small_dot,
+};
 pub use brace::{Brace, BraceLabel, line_brace};
 pub use code::{Code, CodeTheme};
 pub use controls::{
@@ -140,7 +143,7 @@ pub use graphs::{
     SamplingBudget, SamplingError,
 };
 pub use image::{DEFAULT_IMAGE_HEIGHT, ImageError, ImageMobject};
-pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow};
+pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow, vector};
 pub use markdown::{LaidBlock, Markdown, MarkdownMobject, heading_factor};
 pub use matchers::{
     SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
@@ -168,7 +171,10 @@ pub use pointcloud::{
     DOT_CLOUD_AA_WIDTH, DOT_CLOUD_SHADING, DotCloud, GLOW_DOT_FACTOR, GlowLayer, PMobject,
     glow_dot, glow_dots, glow_falloff, glow_layers, p_group, rim_coverage, true_dot,
 };
-pub use poly::{ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, Square, TipStyle};
+pub use poly::{
+    ArrowTip, CubicBezier, Polygon, Rectangle, RegularPolygon, Square, TipStyle, polyline,
+    rounded_rectangle, triangle,
+};
 pub use probability::{ProbabilityError, SampleSpace};
 pub use solids::{
     CUBE_SHADING, Cone, Cube, Cylinder, Disk3D, Dodecahedron, Line3D, MESH_NORMAL_NUDGE,
@@ -183,7 +189,7 @@ pub use svg::svg_document_mobject;
 pub use tex::{Tex, TexMobject, TexMobjectError, TexText};
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use tip::TipEnd;
-pub use vmobject::{DashError, MAX_DASHES, VMobject};
+pub use vmobject::{DashError, MAX_DASHES, VMobject, group, v_group, vectorized_point};
 
 // The typesetting handles the builders take. Re-exported so
 // above-library consumers (the Python portal's native-builder seam) can
