@@ -1918,3 +1918,42 @@ fn studio_inspect_serves_null_spans_for_a_scene_without_span_records() {
     assert!(!response.contains("\"source_span\":{"), "{response}");
     assert!(response.contains("\"source_span\":null"), "{response}");
 }
+
+#[test]
+fn doctor_robot_snapshot_emits_all_expected_kinds() {
+    let output = run_clean(&["doctor", "--robot"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+
+    let stdout = String::from_utf8(output.stdout).expect("doctor --robot output is UTF-8");
+    let kinds: Vec<Option<&str>> = stdout
+        .lines()
+        .map(|line| json_string_field(line, "kind"))
+        .collect();
+
+    for expected in [
+        "topology",
+        "execution_plan",
+        "ffmpeg",
+        "cache",
+        "fonts",
+        "math_packs",
+        "certification",
+    ] {
+        assert!(
+            kinds.iter().any(|k| k == &Some(expected)),
+            "missing doctor kind '{expected}' in:\n{stdout}"
+        );
+    }
+
+    for line in stdout.lines() {
+        assert!(
+            line.starts_with('{') && line.ends_with('}'),
+            "non-JSON line: {line}"
+        );
+        assert!(
+            line.contains("\"schema\":\"fmn.doctor\""),
+            "missing schema marker: {line}"
+        );
+    }
+}
