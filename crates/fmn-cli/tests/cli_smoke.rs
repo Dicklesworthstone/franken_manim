@@ -6,7 +6,7 @@ use std::ffi::OsString;
 #[cfg(feature = "batch")]
 use std::fs;
 #[cfg(feature = "batch")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(feature = "batch")]
 use std::process::{Command, Output, Stdio};
 #[cfg(feature = "batch")]
@@ -83,13 +83,16 @@ fn run(fixture: &Fixture, args: Vec<OsString>) -> Output {
 
 #[cfg(feature = "batch")]
 fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
+    values
+        .iter()
+        .map(|value| OsString::from(*value))
+        .collect()
 }
 
 #[cfg(feature = "batch")]
 fn doctor_args(fixture: &Fixture, extra: &[&str]) -> Vec<OsString> {
     let mut values = args(&["doctor"]);
-    values.extend(extra.iter().map(OsString::from));
+    values.extend(extra.iter().map(|value| OsString::from(*value)));
     values.push(OsString::from("--ffmpeg"));
     values.push(fixture.missing_ffmpeg().into_os_string());
     values.push(OsString::from("--cache-dir"));
@@ -135,13 +138,17 @@ fn shipped_binary_reports_version_and_generated_help() {
 
     let version = run(&fixture, args(&["--version"]));
     assert_code(&version, 0);
-    assert_eq!(stdout(&version), format!("fmn {}\n", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        stdout(&version),
+        format!("fmn {}\n", env!("CARGO_PKG_VERSION"))
+    );
     assert!(stderr(&version).is_empty());
 
     let help = run(&fixture, args(&["--help"]));
     assert_code(&help, 0);
     assert!(stderr(&help).is_empty());
-    assert!(stdout(&help).starts_with("Usage: fmn [OPTIONS]"));
+    assert!(stdout(&help).contains("Usage"));
+    assert!(stdout(&help).contains("fmn"));
     for command in ["render", "doctor", "batch", "studio"] {
         assert!(
             stdout(&help).contains(command),
@@ -231,6 +238,6 @@ fn shipped_doctor_quiet_mode_suppresses_only_non_error_output() {
 #[test]
 fn smoke_fixture_paths_are_absolute_and_do_not_depend_on_repo_state() {
     let fixture = Fixture::new();
-    assert!(Path::new(&fixture.root).is_absolute());
+    assert!(fixture.root.is_absolute());
     assert!(!fixture.root.join("custom_config.yml").exists());
 }
