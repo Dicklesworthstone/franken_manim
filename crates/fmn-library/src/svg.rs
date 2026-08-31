@@ -43,6 +43,17 @@ pub fn svg_document_mobject(document: &SvgDocument) -> VMobject {
     )
 }
 
+/// Parse SVG bytes and build the detached `SVGMobject` family in one call,
+/// using the default budgets (the untrusted-input path is
+/// [`SvgDocument::parse_with_limits`] + [`svg_document_mobject`]).
+///
+/// # Errors
+/// Returns the same typed refusals as [`SvgDocument::parse`].
+pub fn svg_mobject(bytes: &[u8]) -> Result<VMobject, SvgError> {
+    let document = SvgDocument::parse(bytes)?;
+    Ok(svg_document_mobject(&document))
+}
+
 /// One shape's child: its shared-anchor point run under its resolved style.
 fn shape_child(shape: &SvgShape) -> VMobject {
     VMobject::from_points(shape.path.points().to_vec()).with_style(shape_style(&shape.style))

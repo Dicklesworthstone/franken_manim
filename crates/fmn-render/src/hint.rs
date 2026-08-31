@@ -37,11 +37,14 @@
 //!
 //! ## What is deliberately absent
 //!
-//! `Image` and `Glyph` have no producer in the tree — there is no
-//! `ImageMobject` and Scribe's outlines are not yet interned — so this enum
-//! stops at the geometry tier's vocabulary, exactly as `ShapeTag` does. Adding
-//! a variant nothing can construct would put a dead branch in every kernel
-//! selector in W5.
+//! `Image` and `Glyph` have no producer in the geometry tier's vocabulary
+//! — that is the `ShapeTag` contract — so this enum stops there too. Images
+//! exist (`fmn_library::ImageMobject` produces a retained `ImageQuad`), but
+//! they route through `RenderPrimitive` and its own sampler kernel rather
+//! than through this geometric-hint selector. Glyphs are still full vector
+//! outlines in Scribe; once they are interned as cached path instances, an
+//! `Image`-/`Glyph`-style hint may be added without dead branches because
+//! there will be producers that can construct them.
 
 use fmn_geom::quadpath::QuadPath;
 use fmn_mobject::{Mob, ShapeTag, Stage};

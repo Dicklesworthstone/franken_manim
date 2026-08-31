@@ -111,8 +111,8 @@ impl Line {
 
 /// Top-level `Vector(direction)` constructor matching the Python class.
 #[must_use]
-pub fn vector(direction: Vec3) -> Line {
-    Line::vector(direction)
+pub fn vector(direction: Vec3) -> Arrow {
+    Arrow::vector(direction)
 }
 
 impl TryFrom<Line> for VMobject {

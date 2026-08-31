@@ -600,7 +600,7 @@ pub fn sector(angle: f64, radius: f64) -> AnnularSector {
 /// Top-level `SmallDot(point)` constructor matching the Python class.
 #[must_use]
 pub fn small_dot(point: Vec3) -> Dot {
-    Dot::new().point(point).small()
+    Dot::small().point(point)
 }
 
 impl AnnularSector {

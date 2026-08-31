@@ -22,8 +22,9 @@ pub use fmn_library::{
     NumberPlane, ParametricCurve, Polygon, Rectangle, RegularPolygon, SampleSpace, Sphere, Square,
     StreamLines, Style, SurroundingRectangle, TableMobject, Tex, TexMobject, TexText, Text,
     TextMobject, ThreeDAxes, ThreeDModel, VMobject, VStyle, VectorField, curved_arrow,
-    curved_double_arrow, group, polyline, rounded_rectangle, sector, small_dot, triangle, v_group,
-    vector, vectorized_point,
+    curved_double_arrow, curves_as_submobjects, dashed_vmobject, group, polyline,
+    rounded_rectangle, sector, small_dot, svg_mobject, tangent_line, triangle, v_group,
+    v_highlight, vector, vectorized_point,
 };
 pub use fmn_mobject::{
     AnimBuilder, AnimateArgs, AnimateError, Mob, Mobject, PosTarget, StageError,

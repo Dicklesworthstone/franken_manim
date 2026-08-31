@@ -25,7 +25,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
-
+fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "82588865c453b175cb1263b36e30f5b9b1941a2e", features = ["bundled-faces"] }
+fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "82588865c453b175cb1263b36e30f5b9b1941a2e" }
 [dependencies.fmn-codec]
 path = "../crates/fmn-codec"
 
@@ -34,6 +35,24 @@ path = "../crates/fmn-cache"
 
 [dependencies.fmn-hash]
 path = "../crates/fmn-hash"
+
+[dependencies.fmn-geom]
+path = "../crates/fmn-geom"
+
+[dependencies.fmn-config]
+path = "../crates/fmn-config"
+
+# fmd-math arrives transitively through fmn-tex (workspace dep) so the
+# fuzz target can drive the typed Engine + parse + typeset surface.
+[dependencies.fmn-tex]
+path = "../crates/fmn-tex"
+
+[dependencies.fmn-library]
+path = "../crates/fmn-library"
+
+[dependencies.fmn-text]
+path = "../crates/fmn-text"
+
 
 # Prevent this from accidentally linking arbitrary code in release builds.
 [profile.release]
@@ -67,5 +86,33 @@ doc = false
 [[bin]]
 name = "namespace_and_object_paths"
 path = "fuzz_targets/namespace_and_object_paths.rs"
+test = false
+
+[[bin]]
+name = "svg_document"
+path = "fuzz_targets/svg_document.rs"
+test = false
+doc = false
+[[bin]]
+name = "yaml_config"
+path = "fuzz_targets/yaml_config.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tex_math"
+path = "fuzz_targets/tex_math.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ttf_font_parse"
+path = "fuzz_targets/ttf_font_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "path_boolean"
+path = "fuzz_targets/path_boolean.rs"
 test = false
 doc = false

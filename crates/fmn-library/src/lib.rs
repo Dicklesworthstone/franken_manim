@@ -143,7 +143,7 @@ pub use graphs::{
     SamplingBudget, SamplingError,
 };
 pub use image::{DEFAULT_IMAGE_HEIGHT, ImageError, ImageMobject};
-pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow, vector};
+pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow, tangent_line, vector};
 pub use markdown::{LaidBlock, Markdown, MarkdownMobject, heading_factor};
 pub use matchers::{
     SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
@@ -185,11 +185,14 @@ pub use solids::{
 };
 pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};
 pub use style::{Style, VStyle};
-pub use svg::svg_document_mobject;
+pub use svg::{svg_document_mobject, svg_mobject};
 pub use tex::{Tex, TexMobject, TexMobjectError, TexText};
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use tip::TipEnd;
-pub use vmobject::{DashError, MAX_DASHES, VMobject, group, v_group, vectorized_point};
+pub use vmobject::{
+    DashError, MAX_DASHES, VMobject, curves_as_submobjects, dashed_vmobject, group, v_group,
+    v_highlight, vectorized_point,
+};
 
 // The typesetting handles the builders take. Re-exported so
 // above-library consumers (the Python portal's native-builder seam) can
