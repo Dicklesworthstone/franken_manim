@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	09e35b387d324defd65fe487c047cf3a5bf8fab03cc865b750322dca5aaf4e92
+ledger_reviewed_digest	56ef94313c08475357167888f9670ddd9658977ea37a98b981af15bab2d9c4fd
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -396,6 +396,9 @@ OOT-TEX-LATEX-PIPELINE	the LaTeX file-writing pipeline (latex_to_svg, full_tex_t
 OOT-REFERENCE-SCENE-EXTRACTION	the Reference CLI module-introspection workflow (ModuleLoader, extract_scene discovery, prompt_user_for_choice, insert_embed_line_to_module, compute_total_frames)	excluded	Scene discovery is the generated front-door contract: the standalone CLI resolves scene sources (native registry, compiled FMTL, refused Python with a named portal pointer) and the portal assembles modules schema-driven with list-scenes discovery	A corpus workflow needs Reference-style module introspection semantics beyond named scene discovery and portal list-scenes
 OOT-REFERENCE-LOGGER	the decorated Reference logger surface (log, FORMAT, logger __all__)	excluded	Console output is the robot-mode NDJSON contract and owned tracing; the decorated logger is presentation, not API	A consumer needs a log-record API beyond the robot NDJSON schema and owned tracing events
 OOT-REFERENCE-IMPORT-INTROSPECTION	Python typing and reflection artifacts (TYPE_CHECKING, PackageNotFoundError, get_num_args, get_parameters, leaked hashlib/urllib/validators/linalg imports)	excluded	Reflection-based argument handling is absorbed by typed Rust builders and the generated schema; leaked third-party names are not part of manimlib's public API surface	A portal consumer needs reflection semantics the typed builders and schema cannot express
+OOT-INTERACTIVE-IPYTHON-EMBED	IPython/clipboard host interop surface (get_ipython, pyperclip)	tiered	Interactive presentation is the Studio loopback preview and the typed fmn-scene event surface; IPython and pyperclip are the Reference embed-workflow host interop, not part of the headless engine	A corpus workflow needs the IPython shell or a clipboard surface beyond the Studio and TUI surfaces
+OOT-EMBED-WORKFLOW	the IPython-embed scene iteration workflow (InteractiveSceneEmbed.*, CheckpointManager.*)	tiered	Embed-driven live iteration is the supervised Studio worker: a code change triggers an incremental rebuild, the worker restarts, the nearest serialized checkpoint restores, the journal replays from the last valid barrier; crashes isolate to the worker	A corpus workflow needs the IPython embed workflow beyond the Studio supervisor/worker iteration and journal replay
+OOT-VMOBJECT-RENDER-INTERNALS	VMobject render-internal helpers (get_triangulation, get_joint_angles, refresh_joint_angles, refresh_unit_normal, curve_and_prop_of_partial_point, ensure_positive_orientation, get_outer_vert_indices, set_color_by_proportion, triggers_refresh)	tiered	Render-internal helpers are absorbed by the Lumen render plan: joint angles and unit normals are computed in the plan and the per-frame pipeline, triangulation lives behind the earclip seam (OOT-LEAKED-EARCUT-IMPORT), color-along-path lives in the color resolver	A consumer needs a VMobject-level access to render-internal helpers beyond the Lumen plan and pipeline seams
 [status]
 manimlib.animation.animation:Animation	same	crates/fmn-anim/src/animation.rs	crates/fmn-anim/tests/animation.rs	is the base Animation trait and class defining the begin, interpolate, finish, and clean_up lifecycle
 manimlib.animation.animation:Animation.__init__	same	crates/fmn-anim/src/animation.rs	crates/fmn-anim/tests/animation.rs	initializes the animation with mobject, run_time, rate_func, time_span, lag_ratio, remover, and suspend_mobject_updating
@@ -2495,6 +2498,139 @@ manimlib.utils.file_ops:hashlib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crat
 manimlib.utils.file_ops:urllib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-platform/src/fetch.rs	network access is the host-provided AssetFetcher capability, never urllib
 manimlib.utils.file_ops:manimlib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-python/tests/bridge.py	leaked self-import is not part of manimlib's public API surface
 manimlib.utils.file_ops:validators	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-python/tests/bridge.py	leaked validators import is not part of manimlib's public API surface
+manimlib.camera.camera_frame:CameraFrame.interpolate	same	crates/fmn-render/src/camera.rs	crates/fmn-render/tests/camera.rs	the C-16 fixed-conventions ruling lives in the camera and journal_digest; the parity R-3 space-ops audit rides the same fmn-geom scipy conventions
+manimlib.mobject.functions:ParametricCurve.init_points	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-geom/src/cubic.rs	curve init_points is absorbed by the cubic-to-quad ingress at construction
+manimlib.mobject.functions:plot_isoline	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-geom/src/isolines.rs	plot construction is absorbed by the fmn-geom adaptive quadtree isoline extractor
+manimlib.mobject.interactive:ColorSliders	tiered	OOT-INTERACTIVE-IPYTHON-EMBED	crates/fmn-scene/src/interactive.rs	color-picker interactions are the typed event surface with the interactive selection flow
+manimlib.mobject.interactive:ColorSliders.get_background	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-scene/src/interactive.rs	getter is absorbed by the per-mobject fill_opacity surface
+manimlib.mobject.interactive:EnableDisableButton.toggle_value	tiered	OOT-INTERACTIVE-IPYTHON-EMBED	crates/fmn-scene/src/interactive.rs	toggle interactions are the typed event surface
+manimlib.mobject.mobject:Mobject	same	crates/fmn-mobject/src/stage.rs	crates/fmn-mobject/tests/behavior.rs	the Mobject family is the Stage arena with generational handles and family walk
+manimlib.mobject.mobject:Mobject.__init__	same	crates/fmn-mobject/src/stage.rs	crates/fmn-mobject/tests/behavior.rs	mobject insertion is the Stage arena entry with affine placement
+manimlib.mobject.mobject:Mobject.get_group_class	same	crates/fmn-mobject/src/stage.rs	crates/fmn-mobject/tests/behavior.rs	group class is the family-bound subclass
+manimlib.mobject.mobject:_AnimationBuilder	same	crates/fmn-library/src/animate.rs	crates/fmn-library/tests/animate_builder.rs	animation builder is the deferred-command recorder with ArgsAlreadySet and OverrideNotChainable
+manimlib.mobject.mobject:_AnimationBuilder.set_anim_args	same	crates/fmn-library/src/animate.rs	crates/fmn-library/tests/animate_builder.rs	anim args are set once per chain and validated against the typed surface
+manimlib.mobject.mobject:_FunctionalUpdaterBuilder	same	crates/fmn-library/src/animate.rs	crates/fmn-library/tests/animate_builder.rs	functional updater builder is the IntoAnimate conversion for f_always-style callbacks
+manimlib.mobject.mobject:_UpdaterBuilder	same	crates/fmn-library/src/animate.rs	crates/fmn-library/tests/animate_builder.rs	updater builder is the IntoAnimate conversion for typed updater construction
+manimlib.mobject.mobject:override_animate	same	crates/fmn-library/src/animate.rs	crates/fmn-library/tests/animate_builder.rs	override_animate is the registry that flags methods as un-chainable
+manimlib.mobject.probability:EPSILON	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-core/src/types.rs	float epsilon is f64::EPSILON in the Rust surface; the named module-level constant is reference naming
+manimlib.mobject.shape_matchers:Color	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-core/src/color.rs	color is the per-mobject fill_rgba/stroke_rgba surface, not a separate matchers module
+manimlib.mobject.types.vectorized_mobject:VMobject.curve_and_prop_of_partial_point	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-render/src/fill.rs	curve-and-proportion is the fmn-geom analytic nonzero-winding fill seam
+manimlib.mobject.types.vectorized_mobject:VMobject.ensure_positive_orientation	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-render/src/fill.rs	orientation is computed at construction and during the render plan
+manimlib.mobject.types.vectorized_mobject:VMobject.get_joint_angles	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-render/src/stroke.rs	joint angles are computed in the render plan and the per-frame pipeline
+manimlib.mobject.types.vectorized_mobject:VMobject.get_outer_vert_indices	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-render/src/fill.rs	outer-vertex indices are computed during the monotonic split at construction
+manimlib.mobject.types.vectorized_mobject:VMobject.get_triangulation	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-geom/src/earclip.rs	triangulation lives behind the sovereign earclip seam and is render-internal
+manimlib.mobject.types.vectorized_mobject:VMobject.refresh_joint_angles	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-render/src/stroke.rs	joint-angle refresh is the render plan's per-pass work
+manimlib.mobject.types.vectorized_mobject:VMobject.refresh_unit_normal	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-render/src/three_d.rs	unit-normal refresh is the render plan's per-pass work
+manimlib.mobject.types.vectorized_mobject:VMobject.set_color_by_proportion	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-render/src/fill.rs	color-along-proportion lives in the color resolver and the per-frame color pass
+manimlib.mobject.types.vectorized_mobject:VMobject.triggers_refresh	tiered	OOT-VMOBJECT-RENDER-INTERNALS	crates/fmn-render/src/plan.rs	trigger state is the render plan's epoch and revision tracking
+manimlib.scene.scene:Scene.affects_mobject_list	same	crates/fmn-mobject/src/dynamics.rs	crates/fmn-mobject/tests/dynamics.rs	updater-scope affects_mobject_list is the updater execution rules
+manimlib.scene.scene:Scene.assemble_render_groups	same	crates/fmn-mobject/src/order.rs	crates/fmn-mobject/tests/render_order.rs	render-order assembly is the Stage draw_plan two-level model with adjacent batch key equality
+manimlib.scene.scene:Scene.default_frame_orientation	same	crates/fmn-render/src/camera.rs	crates/fmn-render/tests/camera.rs	default orientation is the camera config and the journal_digest
+manimlib.scene.scene:Scene.get_state	same	crates/fmn-mobject/src/persist.rs	crates/fmn-scene/tests/runtime.rs	scene state restore is the in-memory and durable SCENE_STATE_SCHEMA with DecodedSceneState
+manimlib.scene.scene:Scene.on_hide	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-cli/tests/runtime_boundary.rs	scene hide is the Studio session lifecycle
+manimlib.scene.scene:Scene.redo	tiered	OOT-EMBED-WORKFLOW	crates/fmn-scene/src/runtime.rs	redo is the embed-workflow command replay; the journal model records commands and effects for the Studio replay
+manimlib.scene.scene:Scene.run	same	crates/fmn-scene/src/runtime.rs	crates/fmn-scene/tests/runtime.rs	scene run is the SceneProgram execution through the state machine
+manimlib.scene.interactive_scene:GRAB_KEYS	improved	BN-15	crates/fmn-python/tests/bridge.py	the Reference key namespace is bound individually in the portal bootstrap
+manimlib.scene.interactive_scene:INFORMATION_KEY	improved	BN-15	crates/fmn-python/tests/bridge.py	the Reference information key is bound individually in the portal bootstrap
+manimlib.scene.interactive_scene:InteractiveScene	improved	BN-15	crates/fmn-scene/tests/runtime.rs	interactive behaviors are the typed fmn-scene surface with the pinned Reference keyboard map and Studio session lifecycle
+manimlib.scene.interactive_scene:InteractiveScene.add	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	mobject addition is the stage arena entry
+manimlib.scene.interactive_scene:InteractiveScene.add_to_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection addition is the typed selection list with the hierarchy test
+manimlib.scene.interactive_scene:InteractiveScene.choose_color	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	color-picker is the typed event flow
+manimlib.scene.interactive_scene:InteractiveScene.clear_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection clearing is the typed selection list reset
+manimlib.scene.interactive_scene:InteractiveScene.copy_cursor_position	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	cursor position is the typed event surface state
+manimlib.scene.interactive_scene:InteractiveScene.copy_frame_positioning	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	frame positioning is the camera-affine transform captured at the event
+manimlib.scene.interactive_scene:InteractiveScene.copy_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection copy is the per-mobject family transform captured at the event
+manimlib.scene.interactive_scene:InteractiveScene.corner_dot_config	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	corner-dot configuration is the typed selection highlight with stroke and radius
+manimlib.scene.interactive_scene:InteractiveScene.crosshair_style	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	crosshair styling is the typed selection rectangle
+manimlib.scene.interactive_scene:InteractiveScene.crosshair_width	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	crosshair width is the selection rectangle stroke width
+manimlib.scene.interactive_scene:InteractiveScene.cursor_location_config	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	cursor location is the typed event coordinate
+manimlib.scene.interactive_scene:InteractiveScene.delete_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection delete is the typed removal that exercises the removal hit-test
+manimlib.scene.interactive_scene:InteractiveScene.disable_interaction	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	interaction disable is the event surface suspend
+manimlib.scene.interactive_scene:InteractiveScene.display_information	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	information display is the typed information label surface
+manimlib.scene.interactive_scene:InteractiveScene.enable_interaction	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	interaction enable is the event surface resume
+manimlib.scene.interactive_scene:InteractiveScene.enable_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection enable is the typed selection flow
+manimlib.scene.interactive_scene:InteractiveScene.gather_new_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection gathering is the typed sweep-search over the family
+manimlib.scene.interactive_scene:InteractiveScene.get_color_palette	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	color palette is the fmn-core palette accessor
+manimlib.scene.interactive_scene:InteractiveScene.get_corner_dots	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	corner-dot access is the typed selection highlight
+manimlib.scene.interactive_scene:InteractiveScene.get_crosshair	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	crosshair access is the typed selection rectangle
+manimlib.scene.interactive_scene:InteractiveScene.get_highlight	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	highlight access is the typed selection highlight
+manimlib.scene.interactive_scene:InteractiveScene.get_information_label	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	information label access is the typed display surface
+manimlib.scene.interactive_scene:InteractiveScene.get_selection_highlight	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection highlight access is the typed selection rectangle
+manimlib.scene.interactive_scene:InteractiveScene.get_selection_rectangle	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection rectangle is the typed selection crosshair
+manimlib.scene.interactive_scene:InteractiveScene.get_selection_search_set	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection search-set is the typed hit-test family
+manimlib.scene.interactive_scene:InteractiveScene.get_state	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	interactive state is the DecodedSceneState capture
+manimlib.scene.interactive_scene:InteractiveScene.group_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection grouping is the typed group-by-family transform
+manimlib.scene.interactive_scene:InteractiveScene.handle_grabbing	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	grabbing handle is the typed drag-move event flow
+manimlib.scene.interactive_scene:InteractiveScene.handle_resizing	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	resizing handle is the typed resize-drag event flow
+manimlib.scene.interactive_scene:InteractiveScene.handle_sweeping_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	sweeping selection is the typed sweep-search event flow
+manimlib.scene.interactive_scene:InteractiveScene.nudge_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	nudging is the typed incremental selection move
+manimlib.scene.interactive_scene:InteractiveScene.on_key_press	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	key-press handling is the typed event dispatcher with the Reference keyboard map
+manimlib.scene.interactive_scene:InteractiveScene.on_key_release	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	key-release handling is the typed event dispatcher
+manimlib.scene.interactive_scene:InteractiveScene.on_mouse_drag	same	crates/fmn-scene/src/events.rs	crates/fmn-scene/tests/runtime.rs	mouse-drag handling is the typed drag-target event flow
+manimlib.scene.interactive_scene:InteractiveScene.on_mouse_motion	same	crates/fmn-scene/src/events.rs	crates/fmn-scene/tests/runtime.rs	mouse-motion handling is the typed event flow with hit-test ordering
+manimlib.scene.interactive_scene:InteractiveScene.on_mouse_release	same	crates/fmn-scene/src/events.rs	crates/fmn-scene/tests/runtime.rs	mouse-release handling is the typed drag-terminate event flow
+manimlib.scene.interactive_scene:InteractiveScene.palette_colors	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	palette color list is the fmn-core palette accessor
+manimlib.scene.interactive_scene:InteractiveScene.paste_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	pasting is the typed family-remap transform
+manimlib.scene.interactive_scene:InteractiveScene.prepare_grab	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	grab preparation is the typed drag-start event
+manimlib.scene.interactive_scene:InteractiveScene.prepare_resizing	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	resize preparation is the typed resize-start event
+manimlib.scene.interactive_scene:InteractiveScene.refresh_selection_scope	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection scope refresh is the typed family rebind
+manimlib.scene.interactive_scene:InteractiveScene.regenerate_selection_search_set	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	search-set regeneration is the typed selection recomputation
+manimlib.scene.interactive_scene:InteractiveScene.remove	same	crates/fmn-mobject/src/stage.rs	crates/fmn-mobject/tests/behavior.rs	mobject removal is the Stage arena deferred-delete
+manimlib.scene.interactive_scene:InteractiveScene.remove_all_except	same	crates/fmn-mobject/src/stage.rs	crates/fmn-mobject/tests/behavior.rs	keep-set removal is the Stage arena deferred-delete with pin
+manimlib.scene.interactive_scene:InteractiveScene.restore_state	same	crates/fmn-mobject/src/persist.rs	crates/fmn-scene/tests/runtime.rs	state restore is the SCENE_STATE_SCHEMA with DecodedSceneState
+manimlib.scene.interactive_scene:InteractiveScene.selection_nudge_size	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	nudge size is the typed incremental move delta
+manimlib.scene.interactive_scene:InteractiveScene.selection_rectangle_stroke_color	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection-rectangle stroke color is the typed selection highlight
+manimlib.scene.interactive_scene:InteractiveScene.selection_rectangle_stroke_width	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection-rectangle stroke width is the typed selection highlight
+manimlib.scene.interactive_scene:InteractiveScene.setup	same	crates/fmn-scene/src/runtime.rs	crates/fmn-scene/tests/runtime.rs	interactive setup is the SceneProgram construct with the reference keyboard map
+manimlib.scene.interactive_scene:InteractiveScene.time_label_config	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	time-label configuration is the typed information label surface
+manimlib.scene.interactive_scene:InteractiveScene.toggle_color_palette	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	palette toggle is the typed event flow
+manimlib.scene.interactive_scene:InteractiveScene.toggle_from_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	toggle-from-selection is the typed selection state flip
+manimlib.scene.interactive_scene:InteractiveScene.toggle_selection_mode	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection-mode toggle is the typed event flow
+manimlib.scene.interactive_scene:InteractiveScene.ungroup_selection	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	ungrouping is the typed family-remap transform
+manimlib.scene.interactive_scene:InteractiveScene.update_selection_highlight	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection highlight update is the typed selection rectangle refresh
+manimlib.scene.interactive_scene:InteractiveScene.update_selection_rectangle	same	crates/fmn-scene/src/interactive.rs	crates/fmn-scene/tests/runtime.rs	selection rectangle update is the typed crosshair refresh
+manimlib.scene.interactive_scene:RESIZE_KEY	improved	BN-15	crates/fmn-python/tests/bridge.py	the Reference resize key is bound individually in the portal bootstrap
+manimlib.scene.interactive_scene:SELECT_KEY	improved	BN-15	crates/fmn-python/tests/bridge.py	the Reference select key is bound individually in the portal bootstrap
+manimlib.scene.interactive_scene:UNSELECT_KEY	improved	BN-15	crates/fmn-python/tests/bridge.py	the Reference unselect key is bound individually in the portal bootstrap
+manimlib.scene.interactive_scene:X_GRAB_KEY	improved	BN-15	crates/fmn-python/tests/bridge.py	the Reference x-grab key is bound individually in the portal bootstrap
+manimlib.scene.interactive_scene:Y_GRAB_KEY	improved	BN-15	crates/fmn-python/tests/bridge.py	the Reference y-grab key is bound individually in the portal bootstrap
+manimlib.scene.interactive_scene:Z_GRAB_KEY	improved	BN-15	crates/fmn-python/tests/bridge.py	the Reference z-grab key is bound individually in the portal bootstrap
+manimlib.scene.interactive_scene:get_ipython	tiered	OOT-INTERACTIVE-IPYTHON-EMBED	crates/fmn-python/tests/bridge.py	IPython shell access is the embed-workflow host interop
+manimlib.scene.interactive_scene:pyperclip	tiered	OOT-INTERACTIVE-IPYTHON-EMBED	crates/fmn-python/tests/bridge.py	clipboard access is the embed-workflow host interop
+manimlib.scene.scene_embed:CheckpointManager	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	checkpoint paste is the journal-replay barrier in the supervised worker iteration
+manimlib.scene.scene_embed:CheckpointManager.__init__	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	checkpoint construction is the journal-replay barrier
+manimlib.scene.scene_embed:CheckpointManager.checkpoint_paste	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	checkpoint paste is the journal-replay barrier
+manimlib.scene.scene_embed:CheckpointManager.clear_checkpoints	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	clear is the checkpoint table lifecycle
+manimlib.scene.scene_embed:CheckpointManager.get_leading_comment	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	embed-driven comment parsing is the journal-replay surface
+manimlib.scene.scene_embed:CheckpointManager.handle_checkpoint_key	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	checkpoint key handling is the journal-replay barrier
+manimlib.scene.scene_embed:InteractiveSceneEmbed	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	interactive embed is the supervised worker iteration
+manimlib.scene.scene_embed:InteractiveSceneEmbed.__init__	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	embed init is the supervised worker startup
+manimlib.scene.scene_embed:InteractiveSceneEmbed.auto_reload	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	auto-reload is the supervisor rebuild driver
+manimlib.scene.scene_embed:InteractiveSceneEmbed.checkpoint_paste	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	checkpoint paste is the journal-replay barrier
+manimlib.scene.scene_embed:InteractiveSceneEmbed.enable_gui	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	gui enable is the embed-workflow surface
+manimlib.scene.scene_embed:InteractiveSceneEmbed.ensure_flash_on_error	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	flash-on-error is the embed error surface
+manimlib.scene.scene_embed:InteractiveSceneEmbed.ensure_frame_update_post_cell	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	post-cell frame update is the embed-workflow live surface
+manimlib.scene.scene_embed:InteractiveSceneEmbed.get_ipython_shell_for_embedded_scene	tiered	OOT-INTERACTIVE-IPYTHON-EMBED	crates/fmn-studio/src/supervisor.rs	IPython shell access is the embed-workflow host interop
+manimlib.scene.scene_embed:InteractiveSceneEmbed.get_shortcuts	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	shortcut enumeration is the embed-workflow surface
+manimlib.scene.scene_embed:InteractiveSceneEmbed.launch	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	embed launch is the supervised worker startup
+manimlib.scene.scene_embed:InteractiveSceneEmbed.reload_scene	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	scene reload is the supervisor rebuild driver
+manimlib.scene.scene_embed:InteractiveSceneEmbed.validate_syntax	tiered	OOT-EMBED-WORKFLOW	crates/fmn-studio/src/supervisor.rs	syntax validation is the embed-workflow compile step
+manimlib.config:manim_config	improved	BN-15	crates/fmn-config/tests/config.rs	config singleton is the typed generated surface with precedence defaults-then-user-then-cli
+manimlib.config:get_animations_numbers	improved	BN-15	crates/fmn-config/tests/config.rs	animations number parsing is the generated flag spec
+manimlib.config:get_file_ext	improved	BN-15	crates/fmn-config/tests/config.rs	file extension resolution is the path helper
+manimlib.config:get_manim_dir	improved	BN-15	crates/fmn-config/tests/config.rs	manim directory resolution is the typed directories config
+manimlib.config:get_output_directory	improved	BN-15	crates/fmn-config/tests/config.rs	output directory resolution is the typed directories config
+manimlib.config:get_resolution_from_args	improved	BN-15	crates/fmn-cli/tests/runtime_boundary.rs	resolution parsing is the --resolution flag
+manimlib.config:initialize_manim_config	improved	BN-15	crates/fmn-config/tests/config.rs	config initialization is the precedence-resolved typed surface
+manimlib.config:load_yaml	improved	BN-15	crates/fmn-config/tests/config.rs	yaml loading is the typed yaml-subset parser with diagnostics
+manimlib.config:parse_cli	improved	BN-15	crates/fmn-cli/tests/runtime_boundary.rs	cli parsing is the generated flag spec with named exit codes
+manimlib.config:update_camera_config	improved	BN-15	crates/fmn-config/tests/config.rs	camera config update is the precedence-resolved typed surface
+manimlib.config:update_directory_config	improved	BN-15	crates/fmn-config/tests/config.rs	directory config update is the precedence-resolved typed surface
+manimlib.config:update_embed_config	improved	BN-15	crates/fmn-config/tests/config.rs	embed config update is the precedence-resolved typed surface
+manimlib.config:update_file_writer_config	improved	BN-15	crates/fmn-config/tests/config.rs	file-writer config update is the precedence-resolved typed surface
+manimlib.config:update_run_config	improved	BN-15	crates/fmn-config/tests/config.rs	run config update is the precedence-resolved typed surface
+manimlib.config:update_scene_config	improved	BN-15	crates/fmn-config/tests/config.rs	scene config update is the precedence-resolved typed surface
+manimlib.config:update_window_config	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-config/tests/config.rs	window config update is the refused GUI dependency surface
 # options	status	evidence	command	binding	tests	note
 [flag_binding]
 --autoreload	tiered	OOT-CLI-AUTORELOAD	render	autoreload	crates/fmn-cli/src/lib.rs#tests	re-specified as supervised Studio worker reload
