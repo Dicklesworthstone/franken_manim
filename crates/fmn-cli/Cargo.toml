@@ -14,6 +14,13 @@ path = "src/main.rs"
 # library builds, but never emit a partially featured shipping executable.
 required-features = ["cli", "batch"]
 
+# The smoke target always compiles so the parser contract remains exercised by
+# default-feature library builds. Its real-process cases are cfg(batch), which
+# is exactly the feature set that makes the complete shipping binary exist.
+[[test]]
+name = "cli_smoke"
+path = "tests/cli_smoke.rs"
+
 [[test]]
 name = "runtime_boundary"
 path = "tests/runtime_boundary.rs"

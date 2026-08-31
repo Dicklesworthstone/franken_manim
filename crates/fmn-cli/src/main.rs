@@ -6,9 +6,31 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+fn quiet_human_doctor(args: &[std::ffi::OsString]) -> bool {
+    let Some(args) = args
+        .iter()
+        .map(|arg| arg.to_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    matches!(
+        fmn_cli::parse_args(args),
+        Ok(fmn_cli::Invocation::Doctor(fmn_cli::DoctorCommand {
+            common: fmn_cli::CommonOptions {
+                quiet: true,
+                robot: false,
+                ..
+            },
+            ..
+        }))
+    )
+}
+
 fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let output = if fmn_cli::is_internal_studio_worker_os(&args) {
+    let suppress_doctor_report = quiet_human_doctor(&args);
+    let mut output = if fmn_cli::is_internal_studio_worker_os(&args) {
         fmn_cli::run_internal_studio_worker_os(&args)
     } else if fmn_cli::is_studio_invocation_os(&args) {
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -34,6 +56,14 @@ fn main() -> ExitCode {
     } else {
         fmn_cli::run_os(args)
     };
+
+    // `doctor` builds one complete capability snapshot before deciding whether
+    // an optional requirement failed. In human quiet mode the snapshot is
+    // non-error output, so suppress it while retaining any typed stderr error.
+    // Robot records are never suppressed: they are the command's API.
+    if suppress_doctor_report {
+        output.stdout.clear();
+    }
 
     if !output.stdout.is_empty()
         && std::io::stdout()
