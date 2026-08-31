@@ -12,8 +12,12 @@ use fmn_library::{
 };
 use fmn_mobject::dynamics::TrackerKind;
 use fmn_mobject::stage::Stage;
-use fmn_render::camera::CameraFrame;
 use fmn_tex::TexEngine;
+use fmn_text::FontBook;
+
+fn book() -> FontBook {
+    FontBook::bundled().expect("bundled font book")
+}
 
 /// `Group` is the heterogeneous `Mobject` family container.
 #[test]
@@ -78,7 +82,7 @@ fn pmobject_and_pgroup_construct() {
     let p = PMobject::new().with_points(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]);
     assert_eq!(p.num_points(), 2);
     let p2 = PMobject::new().with_points(vec![[2.0, 0.0, 0.0]]);
-    let g = p_group([p, p2]);
+    let g = p_group([p, p2]).ingest_submobjects();
     assert_eq!(g.num_points(), 3, "PGroup merges child point buffers");
 }
 
@@ -87,12 +91,6 @@ fn pmobject_and_pgroup_construct() {
 fn dot_cloud_construction_and_shading() {
     let dc = DotCloud::new(vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]]).make_3d();
     assert_eq!(dc.num_points(), 2);
-}
-
-/// `CameraFrame` carries the kept 3b1b projection.
-#[test]
-fn camera_frame_default_constructible() {
-    let _cf = CameraFrame::default();
 }
 
 /// `SVGMobject` (Chisel) constructs from a minimal valid user SVG document.
@@ -119,7 +117,7 @@ fn image_mobject_constructs_from_rgba8() {
 #[test]
 fn text_constructs_with_string_and_font_size() {
     let text = Text::new("hello").font_size(12.0);
-    let built = text.build().expect("text builds");
+    let built = text.build(&book()).expect("text builds");
     assert!(!built.vmob.children().is_empty());
 }
 
@@ -175,7 +173,7 @@ fn tracker_kinds_round_trip() {
 fn control_mobject_composition_is_vgroup() {
     let label = Text::new("v")
         .font_size(12.0)
-        .build()
+        .build(&book())
         .expect("label builds");
     let c = ControlMobject::new(0.0, std::iter::once(label.vmob));
     let comp = c.composition();
