@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	56ef94313c08475357167888f9670ddd9658977ea37a98b981af15bab2d9c4fd
+ledger_reviewed_digest	e3f3b235aea308ed61a7816c73480bada5d9eb3627740ad25fd4d555ff3b181d
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -399,6 +399,7 @@ OOT-REFERENCE-IMPORT-INTROSPECTION	Python typing and reflection artifacts (TYPE_
 OOT-INTERACTIVE-IPYTHON-EMBED	IPython/clipboard host interop surface (get_ipython, pyperclip)	tiered	Interactive presentation is the Studio loopback preview and the typed fmn-scene event surface; IPython and pyperclip are the Reference embed-workflow host interop, not part of the headless engine	A corpus workflow needs the IPython shell or a clipboard surface beyond the Studio and TUI surfaces
 OOT-EMBED-WORKFLOW	the IPython-embed scene iteration workflow (InteractiveSceneEmbed.*, CheckpointManager.*)	tiered	Embed-driven live iteration is the supervised Studio worker: a code change triggers an incremental rebuild, the worker restarts, the nearest serialized checkpoint restores, the journal replays from the last valid barrier; crashes isolate to the worker	A corpus workflow needs the IPython embed workflow beyond the Studio supervisor/worker iteration and journal replay
 OOT-VMOBJECT-RENDER-INTERNALS	VMobject render-internal helpers (get_triangulation, get_joint_angles, refresh_joint_angles, refresh_unit_normal, curve_and_prop_of_partial_point, ensure_positive_orientation, get_outer_vert_indices, set_color_by_proportion, triggers_refresh)	tiered	Render-internal helpers are absorbed by the Lumen render plan: joint angles and unit normals are computed in the plan and the per-frame pipeline, triangulation lives behind the earclip seam (OOT-LEAKED-EARCUT-IMPORT), color-along-path lives in the color resolver	A consumer needs a VMobject-level access to render-internal helpers beyond the Lumen plan and pipeline seams
+OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	the Reference utils.* helper surface (utils.color, utils.cache, utils.directories, utils.bezier, utils.paths, utils.family_ops, utils.file_ops, utils.images, utils.debug, utils.dict_ops, utils.iterables, utils.simple_functions, utils.sounds asset resolution)	tiered	Python-side utility helpers are absorbed by the typed native surface: fmn-config typed directories and config precedence, fmn-core palette and color arithmetic, fmn-cache content-addressed store, fmn-platform AssetFetcher and FileSystem capability, fmn-mobject stage family walk, fmn-library ImageMobject asset resolution, fmn-anim path thresholds, fmn-render color resolver	A corpus workflow needs a utils.* helper surface beyond the typed native surfaces and the portal bootstrap's individual bindings
 [status]
 manimlib.animation.animation:Animation	same	crates/fmn-anim/src/animation.rs	crates/fmn-anim/tests/animation.rs	is the base Animation trait and class defining the begin, interpolate, finish, and clean_up lifecycle
 manimlib.animation.animation:Animation.__init__	same	crates/fmn-anim/src/animation.rs	crates/fmn-anim/tests/animation.rs	initializes the animation with mobject, run_time, rate_func, time_span, lag_ratio, remover, and suspend_mobject_updating
@@ -2630,6 +2631,50 @@ manimlib.config:update_embed_config	improved	BN-15	crates/fmn-config/tests/confi
 manimlib.config:update_file_writer_config	improved	BN-15	crates/fmn-config/tests/config.rs	file-writer config update is the precedence-resolved typed surface
 manimlib.config:update_run_config	improved	BN-15	crates/fmn-config/tests/config.rs	run config update is the precedence-resolved typed surface
 manimlib.config:update_scene_config	improved	BN-15	crates/fmn-config/tests/config.rs	scene config update is the precedence-resolved typed surface
+manimlib.utils.bezier:CLOSED_THRESHOLD	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-geom/src/cubic.rs	the cubic-to-quad ingress owns the chord-collapse threshold as a single shared constant
+manimlib.utils.bezier:curve_to_quadratic	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-geom/src/cubic.rs	the one error-bounded cubic-to-quadratic converter absorbs the helper
+manimlib.utils.cache:CACHE_SIZE	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-cache/src/store.rs	the content-addressed cache owns the cache leaf size with a typed default
+manimlib.utils.cache:Cache	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-cache/src/store.rs	the content-addressed cache class replaces the Python on-disk cache
+manimlib.utils.cache:_cache	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-cache/src/store.rs	the module-level cache singleton is the content-addressed default cache
+manimlib.utils.cache:cache_on_disk	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-cache/src/store.rs	disk-on-cache is the content-addressed on-disk option
+manimlib.utils.cache:clear_cache	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-cache/src/store.rs	clear is the content-addressed cache lifecycle
+manimlib.utils.color:get_color_map	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	color map lookup is the fmn-core typed palette accessor
+manimlib.utils.color:get_colormap_from_colors	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	colormap from colors is the fmn-core typed gradient builder
+manimlib.utils.color:get_colormap_list	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	colormap list is the typed registered colormap surface
+manimlib.utils.color:hex2rgb	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	hex parsing lives in the owned srgb eotf / hex parser
+manimlib.utils.color:pyplot	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-python/tests/bridge.py	matplotlib pyplot is the refused third-party import; the bundled colormap tier covers the named-map use case
+manimlib.utils.color:random_bright_color	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	random bright color is the fmn-core palette random selection
+manimlib.utils.color:random_color	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	random color is the fmn-core palette random selection
+manimlib.utils.color:rgb2hex	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	rgb to hex is the owned hex encoder
+manimlib.utils.debug:index_labels	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	debug label index is absorbed by the typed label and family surfaces
+manimlib.utils.debug:print_family	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	print-family is the typed family walk with bounded traversal
+manimlib.utils.dict_ops:merge_dicts_recursively	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/coords.rs	merge dicts recursively is the typed config merge in fmn-config / fmn-library
+manimlib.utils.directories:appdirs	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-platform/src/fetch.rs	appdirs is the refused third-party directory helper; the typed directory config replaces it
+manimlib.utils.directories:get_cache_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-config/src/config.rs	cache directory resolution is the typed directories config
+manimlib.utils.directories:get_directories	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-config/src/config.rs	get directories is the typed directories config accessor
+manimlib.utils.directories:get_downloads_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	downloads directory is the AssetFetcher-resolved typed path
+manimlib.utils.directories:get_output_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-config/src/config.rs	output directory resolution is the typed directories config
+manimlib.utils.directories:get_raster_image_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	raster image directory is the AssetFetcher-resolved typed path
+manimlib.utils.directories:get_shader_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	shader directory is the AssetFetcher-resolved typed path
+manimlib.utils.directories:get_sound_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	sound directory is the AssetFetcher-resolved typed path
+manimlib.utils.directories:get_temp_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	temp directory is the AssetFetcher-resolved typed path
+manimlib.utils.directories:get_three_d_model_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	three-d model directory is the AssetFetcher-resolved typed path
+manimlib.utils.directories:get_vector_image_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	vector image directory is the AssetFetcher-resolved typed path
+manimlib.utils.family_ops:extract_mobject_family_members	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	family extraction is the typed family walk in the Stage arena
+manimlib.utils.family_ops:recursive_mobject_remove	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	recursive removal is the typed Stage deferred-delete with pin semantics
+manimlib.utils.file_ops:find_file	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	file find is the AssetFetcher-resolved typed path
+manimlib.utils.file_ops:guarantee_existence	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	file existence guarantee is the typed FileSystem capability
+manimlib.utils.images:get_full_raster_image_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/image.rs	raster image path resolution is the typed ImageMobject asset path
+manimlib.utils.images:get_full_three_d_model_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/three_d.rs	three-d model path resolution is the typed OBJ subset reader
+manimlib.utils.images:get_full_vector_image_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/image.rs	vector image path resolution is the typed ImageMobject asset path
+manimlib.utils.images:invert_image	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-render/src/fill.rs	color inversion is the typed fill path color resolver
+manimlib.utils.iterables:listify	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-render/src/plan.rs	listify is absorbed by the typed plan/parser collections
+manimlib.utils.paths:STRAIGHT_PATH_THRESHOLD	same	crates/fmn-anim/src/transform.rs	crates/fmn-anim/tests/path.rs	straight-path threshold is the owned scalar at crates/fmn-anim/src/transform.rs
+manimlib.utils.simple_functions:arr_clip	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-render/src/plan.rs	arr clip is absorbed by the typed render-plan/parser collections
+manimlib.utils.sounds:get_full_sound_file_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	sound file path resolution is the AssetFetcher-resolved typed path
+manimlib.utils.sounds:play_sound	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-output/src/sound.rs	play_sound is the SoundRequest/portal-bridge sound playback surface
+manimlib.utils.sounds:subprocess	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-platform/src/process.rs	subprocess is the refused stdlib leak; the portal sandboxes subprocess invocations
+manimlib.utils.sounds:threading	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-platform/src/clock.rs	threading is the refused stdlib leak; the typed executor owns concurrency
 manimlib.config:update_window_config	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-config/tests/config.rs	window config update is the refused GUI dependency surface
 # options	status	evidence	command	binding	tests	note
 [flag_binding]
