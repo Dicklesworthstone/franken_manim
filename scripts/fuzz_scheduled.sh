@@ -28,7 +28,7 @@ SECONDS="${FMN_FUZZ_SECONDS:-60}"
 TIMEOUT="${FMN_FUZZ_TIMEOUT:-25}"
 RSS_MB="${FMN_FUZZ_RSS_MB:-2048}"
 FALLBACK_TARGET_DIR="${FMN_FUZZ_TARGET_DIR:-fuzz/target}"
-TARGETS=(inflate_bytes decode_png decode_jpeg)
+TARGETS=(inflate_bytes decode_png decode_jpeg svg_document yaml_config tex_math ttf_font_parse path_boolean)
 
 mkdir -p fuzz/artifacts
 
