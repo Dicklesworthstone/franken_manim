@@ -3,8 +3,8 @@
 
 This is a read-only projection of .beads/issues.jsonl. It never edits Beads and
 never becomes a second source of truth. The output is intentionally compact so
-an agent can reconstruct current work, blockers, and activation pressure
-without loading the multi-megabyte ledger.
+an agent can reconstruct current work, blockers, activation pressure, and the
+best claim that does not create avoidable concurrency.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from typing import Any, Iterable
 MAX_LEDGER_BYTES = 32 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024
 MAX_ISSUES = 100_000
+SNAPSHOT_SCHEMA_VERSION = 2
 ACTIVE_STATUS = "in_progress"
 OPEN_STATUSES = frozenset({"open", ACTIVE_STATUS})
 CLOSED_STATUSES = frozenset({"closed", "tombstone"})
@@ -175,6 +176,11 @@ def issue_sort_key(issue: Issue) -> tuple[int, int, float, str]:
     return (status_rank, issue.priority, -issue.updated_at.timestamp(), issue.id)
 
 
+def recommendation_sort_key(issue: Issue) -> tuple[int, int, float, str]:
+    scope_rank = 1 if issue.workstream == "UNSCOPED" else 0
+    return (issue.priority, scope_rank, -issue.updated_at.timestamp(), issue.id)
+
+
 def compact_title(title: str, limit: int = 100) -> str:
     normalized = " ".join(title.split())
     return normalized if len(normalized) <= limit else normalized[: limit - 1] + "…"
@@ -186,6 +192,23 @@ def latest_comment(issue: Issue) -> str | None:
         if isinstance(text, str) and text.strip():
             return compact_title(text, 140)
     return None
+
+
+def select_recommendation(
+    ready: list[Issue], active_workstreams: set[str], activation_cap: int
+) -> tuple[Issue | None, str]:
+    in_active = [issue for issue in ready if issue.workstream in active_workstreams]
+    if in_active:
+        issue = min(in_active, key=recommendation_sort_key)
+        return issue, f"highest-priority ready issue in already-active {issue.workstream}"
+    if not ready:
+        return None, "no dependency-ready open issues"
+    if len(active_workstreams) >= activation_cap:
+        return None, "activation cap is full and no ready issue belongs to an active workstream"
+    issue = min(ready, key=recommendation_sort_key)
+    if issue.workstream == "UNSCOPED":
+        return issue, "highest-priority ready unscoped issue; verify governance scope before claiming"
+    return issue, f"highest-priority ready issue; claiming it activates {issue.workstream}"
 
 
 def build_snapshot(
@@ -207,7 +230,10 @@ def build_snapshot(
         (issue for issue in issues.values() if issue.status in OPEN_STATUSES),
         key=issue_sort_key,
     )
-    active_workstreams = sorted({issue.workstream for issue in active})
+    active_workstream_set = {
+        issue.workstream for issue in active if issue.workstream != "UNSCOPED"
+    }
+    active_workstreams = sorted(active_workstream_set)
     ready = [
         issue
         for issue in open_issues
@@ -224,6 +250,11 @@ def build_snapshot(
         for issue in active
         if issue.assignee is not None and issue.updated_at < stale_before
     ]
+    unowned = [issue for issue in active if issue.assignee is None]
+    unscoped = [issue for issue in active if issue.workstream == "UNSCOPED"]
+    recommendation, recommendation_reason = select_recommendation(
+        ready, active_workstream_set, activation_cap
+    )
 
     def row(issue: Issue) -> dict[str, Any]:
         blockers = unresolved_blockers(issue, issues)
@@ -239,8 +270,14 @@ def build_snapshot(
             "latest_comment": latest_comment(issue),
         }
 
+    recommendation_row = row(recommendation) if recommendation is not None else None
+    activates_workstream = bool(
+        recommendation is not None
+        and recommendation.workstream != "UNSCOPED"
+        and recommendation.workstream not in active_workstream_set
+    )
     return {
-        "schema_version": 1,
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "as_of": as_of.isoformat().replace("+00:00", "Z"),
         "activation": {
             "cap": activation_cap,
@@ -256,6 +293,13 @@ def build_snapshot(
             "ready": len(ready),
             "blocked": len(blocked),
             "stale_claims": len(stale),
+            "unowned_active": len(unowned),
+            "unscoped_active": len(unscoped),
+        },
+        "recommendation": {
+            "issue": recommendation_row,
+            "reason": recommendation_reason,
+            "activates_workstream": activates_workstream,
         },
         "active": [row(issue) for issue in active[:limit]],
         "ready": [row(issue) for issue in ready[:limit]],
@@ -264,12 +308,15 @@ def build_snapshot(
             for issue, blockers in blocked[:limit]
         ],
         "stale_claims": [row(issue) for issue in stale[:limit]],
+        "unowned_active": [row(issue) for issue in unowned[:limit]],
+        "unscoped_active": [row(issue) for issue in unscoped[:limit]],
     }
 
 
 def render_markdown(snapshot: dict[str, Any]) -> str:
     activation = snapshot["activation"]
     counts = snapshot["counts"]
+    recommendation = snapshot["recommendation"]
     lines = [
         "# FrankenManim agent brief",
         "",
@@ -285,9 +332,18 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
         (
             f"- Issues: **{counts['in_progress']}** in progress, **{counts['open']}** open, "
             f"**{counts['ready']}** ready, **{counts['blocked']}** blocked, "
-            f"**{counts['stale_claims']}** stale claims."
+            f"**{counts['stale_claims']}** stale, **{counts['unowned_active']}** unowned active."
         ),
     ]
+    recommended = recommendation["issue"]
+    if recommended is None:
+        lines.append(f"- Recommended next: **none** — {recommendation['reason']}.")
+    else:
+        activation_note = "; activates a workstream" if recommendation["activates_workstream"] else ""
+        lines.append(
+            f"- Recommended next: **P{recommended['priority']} `{recommended['id']}`** "
+            f"[{recommended['workstream']}] — {recommendation['reason']}{activation_note}."
+        )
 
     def section(title: str, rows: Iterable[dict[str, Any]], empty: str) -> None:
         lines.extend(["", f"## {title}", ""])
@@ -311,6 +367,8 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
     section("Ready queue", snapshot["ready"], "No dependency-ready open issues.")
     section("Blocked queue", snapshot["blocked"], "No blocked open issues.")
     section("Stale claims", snapshot["stale_claims"], "No stale assigned claims.")
+    section("Unowned active claims", snapshot["unowned_active"], "No unowned active claims.")
+    section("Unscoped active claims", snapshot["unscoped_active"], "No unscoped active claims.")
     lines.extend(
         [
             "",
@@ -318,8 +376,9 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
             "",
             "1. Refresh this brief immediately before claiming work.",
             "2. Treat Beads as authoritative; this projection never edits status.",
-            "3. Do not activate a fifth workstream. Prefer a ready bead in an already-active workstream.",
-            "4. Re-run after every claim, dependency change, close, or handoff.",
+            "3. Prefer the recommendation only after rechecking reservations and current HEAD.",
+            "4. Do not activate a fifth workstream; an unscoped recommendation needs a governance check.",
+            "5. Re-run after every claim, dependency change, close, or handoff.",
             "",
         ]
     )
@@ -335,7 +394,7 @@ def parse_as_of(value: str | None) -> dt.datetime:
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ledger", type=Path, default=Path(".beads/issues.jsonl"))
-    parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    parser.add_argument("--format", choices=("markdown", "json", "next"), default="markdown")
     parser.add_argument("--as-of", help="ISO-8601 timestamp; defaults to the current UTC time")
     parser.add_argument("--stale-days", type=int, default=2)
     parser.add_argument("--activation-cap", type=int, default=4)
@@ -373,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.format == "json":
         print(json.dumps(snapshot, indent=2, sort_keys=True))
+    elif args.format == "next":
+        issue = snapshot["recommendation"]["issue"]
+        print(issue["id"] if issue is not None else "none")
     else:
         print(render_markdown(snapshot), end="")
     if args.check and not snapshot["activation"]["within_cap"]:
