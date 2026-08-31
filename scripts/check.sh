@@ -35,6 +35,12 @@ fi
 echo "==> cargo check -p fmn-cli --features batch --all-targets"
 cargo check -p fmn-cli --features batch --all-targets
 
+echo "==> fmn CLI smoke (default-feature parser floor)"
+cargo test -p fmn-cli --test cli_smoke
+
+echo "==> fmn CLI smoke (complete shipping binary)"
+cargo test -p fmn-cli --features batch --test cli_smoke
+
 echo "==> cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets"
 cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets
 
