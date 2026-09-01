@@ -168,6 +168,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    if not snapshot["integrity"]["within_contract"]:
+        counts = snapshot["counts"]
+        print(
+            "error: Beads dependency integrity is invalid "
+            f"({counts['blocking_cycles']} blocking cycles, "
+            f"{counts['missing_blockers']} missing blockers)",
+            file=sys.stderr,
+        )
+        return 1
     if not snapshot["activation"]["within_cap"]:
         print(
             "error: active workstream cap breached "
