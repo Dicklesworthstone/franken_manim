@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Claim one guarded Beads leaf under a local repository lock.
+"""Claim one guarded Beads leaf under a shared repository lock.
 
 ``agent_claim_guard`` proves that a recommendation still matches the parsed
 Beads graph, planner semantics, policy, and schema contract. This command keeps
 that proof, the ``br update``, the explicit JSONL flush, and postcondition
-verification inside one process while holding a repository-local advisory lock.
-It narrows the compare-before-set interval and produces an auditable receipt.
-It is not a distributed lease: Agent Mail reservations and other checkouts must
-still be checked before invoking it.
+verification inside one process while holding an advisory lock in Git's shared
+common directory. It narrows the compare-before-set interval and produces an
+auditable receipt. It is not a distributed lease: Agent Mail reservations and
+other clones must still be checked before invoking it.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ MAX_TOKEN_BYTES = 4096
 MAX_ISSUE_ID_BYTES = 1024
 MAX_ASSIGNEE_BYTES = 1024
 MAX_TRANSITION_COMMENT_BYTES = 64 * 1024
+MAX_GIT_PATH_FILE_BYTES = 4096
 LOCK_FILE_NAME = "fmn-agent-claim.lock"
 
 
@@ -80,7 +81,7 @@ def _repo_root(path: Path) -> Path:
     return resolved
 
 
-def _read_gitdir_file(path: Path) -> str:
+def _read_git_path_file(path: Path, label: str) -> str:
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -89,15 +90,17 @@ def _read_gitdir_file(path: Path) -> str:
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise ClaimError(f"cannot open worktree gitdir marker {path}: {exc}") from exc
+        raise ClaimError(f"cannot open {label} {path}: {exc}") from exc
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
-            raise ClaimError(f"worktree gitdir marker is not a regular file: {path}")
-        if metadata.st_size > 4096:
-            raise ClaimError(f"worktree gitdir marker exceeds the 4096-byte limit: {path}")
+            raise ClaimError(f"{label} is not a regular file: {path}")
+        if metadata.st_size > MAX_GIT_PATH_FILE_BYTES:
+            raise ClaimError(
+                f"{label} exceeds the {MAX_GIT_PATH_FILE_BYTES}-byte limit: {path}"
+            )
         chunks: list[bytes] = []
-        remaining = 4097
+        remaining = MAX_GIT_PATH_FILE_BYTES + 1
         while remaining > 0:
             chunk = os.read(descriptor, remaining)
             if not chunk:
@@ -105,14 +108,32 @@ def _read_gitdir_file(path: Path) -> str:
             chunks.append(chunk)
             remaining -= len(chunk)
         data = b"".join(chunks)
-        if len(data) > 4096:
-            raise ClaimError(f"worktree gitdir marker exceeds the 4096-byte limit: {path}")
+        if len(data) > MAX_GIT_PATH_FILE_BYTES:
+            raise ClaimError(
+                f"{label} exceeds the {MAX_GIT_PATH_FILE_BYTES}-byte limit: {path}"
+            )
         try:
             return data.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ClaimError(f"worktree gitdir marker is not UTF-8: {path}") from exc
+            raise ClaimError(f"{label} is not UTF-8: {path}") from exc
     finally:
         os.close(descriptor)
+
+
+def _resolve_git_directory(base: Path, target_text: str, marker: Path, label: str) -> Path:
+    if not target_text or "\x00" in target_text:
+        raise ClaimError(f"malformed {label} target: {marker}")
+    target = Path(target_text)
+    if not target.is_absolute():
+        target = base / target
+    try:
+        target = target.resolve(strict=True)
+        target_metadata = os.lstat(target)
+    except OSError as exc:
+        raise ClaimError(f"cannot resolve {label} {target}: {exc}") from exc
+    if stat.S_ISLNK(target_metadata.st_mode) or not stat.S_ISDIR(target_metadata.st_mode):
+        raise ClaimError(f"{label} is not a real directory: {target}")
+    return target
 
 
 def resolve_git_dir(repo_root: Path) -> Path:
@@ -127,23 +148,39 @@ def resolve_git_dir(repo_root: Path) -> Path:
         return marker
     if not stat.S_ISREG(metadata.st_mode):
         raise ClaimError(f".git marker is neither a directory nor a worktree file: {marker}")
-    text = _read_gitdir_file(marker)
+    text = _read_git_path_file(marker, "worktree gitdir marker")
     if not text.endswith("\n") or text.count("\n") != 1 or not text.startswith("gitdir: "):
         raise ClaimError(f"malformed worktree gitdir marker: {marker}")
-    target_text = text[len("gitdir: ") : -1]
-    if not target_text or "\x00" in target_text:
-        raise ClaimError(f"malformed worktree gitdir target: {marker}")
-    target = Path(target_text)
-    if not target.is_absolute():
-        target = repo_root / target
+    return _resolve_git_directory(
+        repo_root,
+        text[len("gitdir: ") : -1],
+        marker,
+        "worktree git directory",
+    )
+
+
+def resolve_git_common_dir(repo_root: Path) -> Path:
+    git_dir = resolve_git_dir(repo_root)
+    marker = git_dir / "commondir"
     try:
-        target = target.resolve(strict=True)
-        target_metadata = os.lstat(target)
+        metadata = os.lstat(marker)
+    except FileNotFoundError:
+        return git_dir
     except OSError as exc:
-        raise ClaimError(f"cannot resolve worktree git directory {target}: {exc}") from exc
-    if stat.S_ISLNK(target_metadata.st_mode) or not stat.S_ISDIR(target_metadata.st_mode):
-        raise ClaimError(f"worktree git directory is not a real directory: {target}")
-    return target
+        raise ClaimError(f"cannot inspect Git commondir marker {marker}: {exc}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ClaimError(f"refusing symlink Git commondir marker: {marker}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ClaimError(f"Git commondir marker is not a regular file: {marker}")
+    text = _read_git_path_file(marker, "Git commondir marker")
+    if not text.endswith("\n") or text.count("\n") != 1:
+        raise ClaimError(f"malformed Git commondir marker: {marker}")
+    return _resolve_git_directory(
+        git_dir,
+        text[:-1],
+        marker,
+        "Git common directory",
+    )
 
 
 def _lock_descriptor(descriptor: int) -> None:
@@ -182,8 +219,8 @@ def _unlock_descriptor(descriptor: int) -> None:
 
 @contextlib.contextmanager
 def claim_lock(repo_root: Path) -> Iterator[Path]:
-    git_dir = resolve_git_dir(repo_root)
-    lock_path = git_dir / LOCK_FILE_NAME
+    git_common_dir = resolve_git_common_dir(repo_root)
+    lock_path = git_common_dir / LOCK_FILE_NAME
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
