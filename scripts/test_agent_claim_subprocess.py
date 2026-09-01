@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -138,6 +140,25 @@ class AgentClaimSubprocessTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(agent_claim.ClaimError, message):
                     self.run_python("pass", timeout_seconds=value)
+
+    def test_cli_timeout_validation_emits_no_machine_payload(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = agent_claim.main(
+                [
+                    "--expect-token",
+                    "v2:" + "a" * 64 + ":fm-next",
+                    "--assignee",
+                    "agent@example.com",
+                    "--command-timeout-seconds",
+                    "nan",
+                    "--dry-run",
+                ]
+            )
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("--command-timeout-seconds must be finite", stderr.getvalue())
 
 
 if __name__ == "__main__":
