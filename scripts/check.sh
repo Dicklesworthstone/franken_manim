@@ -6,9 +6,19 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "==> agent control-plane parser/tests"
+echo "==> agent control-plane parser/generator/tests"
+python3 -m py_compile \
+    scripts/agent_brief.py \
+    scripts/generate_agent_brief.py \
+    scripts/test_agent_brief.py \
+    scripts/test_generate_agent_brief.py
 python3 scripts/agent_brief.py --format json --limit 1 >/dev/null
 python3 scripts/test_agent_brief.py
+python3 scripts/test_generate_agent_brief.py
+# Render the complete live ledger through the exact committed-artifact path,
+# but do not mutate docs during validation. This also fails on a breached
+# workstream cap or malformed/missing dependency state.
+python3 scripts/generate_agent_brief.py --stdout >/dev/null
 
 echo "==> Python geometry helper alias policy"
 python3 scripts/check_python_helper_aliases.py
