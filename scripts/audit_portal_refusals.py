@@ -128,6 +128,7 @@ class RefusalVisitor(ast.NodeVisitor):
         detail: ast.AST | None,
         violations: list[str],
         abstract: bool | None = None,
+        bare: bool = False,
     ) -> None:
         if len(self.sites) >= MAX_SITES:
             raise AuditError(f"portal refusal inventory exceeds the {MAX_SITES}-site limit")
@@ -141,13 +142,19 @@ class RefusalVisitor(ast.NodeVisitor):
                 "subject": compact_expression(subject),
                 "detail": compact_expression(detail),
                 "abstract": context.abstract if abstract is None else abstract,
+                "bare": bare,
                 "violations": violations,
             }
         )
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        # A class body is a new executable scope. In particular, a class nested
+        # inside an abstract method does not inherit that method's permission to
+        # use a bare NotImplementedError.
         self.scope.append(node.name)
+        self.abstract_stack.append(False)
         self.generic_visit(node)
+        self.abstract_stack.pop()
         self.scope.pop()
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -184,6 +191,7 @@ class RefusalVisitor(ast.NodeVisitor):
                 subject=target,
                 detail=message,
                 violations=violations,
+                bare=call is None,
             )
         self.generic_visit(node)
 
@@ -245,9 +253,7 @@ def build_inventory(path: Path) -> dict[str, Any]:
         "counts": {
             "sites": len(sites),
             "not_implemented": len(direct),
-            "abstract_bare": sum(
-                site["abstract"] and site["detail"] is None for site in direct
-            ),
+            "abstract_bare": sum(site["abstract"] and site["bare"] for site in direct),
             "refuse_unrouted": len(helpers),
             "violations": len(violations),
         },
