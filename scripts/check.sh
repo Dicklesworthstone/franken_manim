@@ -19,6 +19,7 @@ python3 -m py_compile \
     scripts/test_agent_next_output.py \
     scripts/test_agent_claim_guard.py \
     scripts/test_agent_claim.py \
+    scripts/test_agent_claim_subprocess.py \
     scripts/test_generate_agent_brief.py \
     scripts/test_generate_agent_brief_io.py
 # Invalid graph or activation state must fail before any machine payload.
@@ -29,6 +30,7 @@ python3 scripts/test_agent_next.py
 python3 scripts/test_agent_next_output.py
 python3 scripts/test_agent_claim_guard.py
 python3 scripts/test_agent_claim.py
+python3 scripts/test_agent_claim_subprocess.py
 python3 scripts/test_generate_agent_brief.py
 python3 scripts/test_generate_agent_brief_io.py
 # Render the complete live ledger through every operational projection without
