@@ -88,7 +88,13 @@ class AgentBriefTests(unittest.TestCase):
             record("fm-blocked", "W11: blocked", "open", blockers=("fm-missing",)),
         ]
         snapshot = self.snapshot(rows)
-        self.assertEqual(snapshot["schema_version"], 4)
+        self.assertEqual(snapshot["schema_version"], 5)
+        self.assertNotIn("recommendation", snapshot)
+        self.assertFalse(snapshot["situational_priority"]["claim_safe"])
+        self.assertEqual(
+            snapshot["situational_priority"]["claim_surface"],
+            "scripts/agent_next.py",
+        )
         self.assertEqual(snapshot["activation"]["active_workstreams"], ["W10"])
         self.assertEqual([row["id"] for row in snapshot["ready"]], ["fm-ready"])
         self.assertEqual([row["id"] for row in snapshot["blocked"]], ["fm-blocked"])
@@ -99,9 +105,9 @@ class AgentBriefTests(unittest.TestCase):
             snapshot["integrity"]["missing_blockers"],
             [{"issue_id": "fm-blocked", "depends_on_id": "fm-missing"}],
         )
-        self.assertIsNone(snapshot["recommendation"]["issue"])
+        self.assertIsNone(snapshot["situational_priority"]["issue"])
 
-    def test_recommendation_prefers_an_active_workstream_over_lower_priority_activation(self) -> None:
+    def test_situational_priority_prefers_an_active_workstream(self) -> None:
         snapshot = self.snapshot(
             [
                 record("fm-active", "W10: active", "in_progress", assignee="agent"),
@@ -109,12 +115,13 @@ class AgentBriefTests(unittest.TestCase):
                 record("fm-new-stream", "W11: ready", "open", priority=1),
             ]
         )
-        recommendation = snapshot["recommendation"]
-        self.assertEqual(recommendation["issue"]["id"], "fm-same-stream")
-        self.assertFalse(recommendation["activates_workstream"])
-        self.assertIn("already-active W10", recommendation["reason"])
+        situational = snapshot["situational_priority"]
+        self.assertEqual(situational["issue"]["id"], "fm-same-stream")
+        self.assertFalse(situational["activates_workstream"])
+        self.assertFalse(situational["claim_safe"])
+        self.assertIn("already-active W10", situational["reason"])
 
-    def test_assigned_and_epic_work_are_visible_but_never_recommended(self) -> None:
+    def test_assigned_and_epic_work_are_visible_but_not_broad_priority(self) -> None:
         snapshot = self.snapshot(
             [
                 record("fm-active", "W10: active", "in_progress", assignee="agent"),
@@ -126,7 +133,7 @@ class AgentBriefTests(unittest.TestCase):
                     assignee="peer",
                 ),
                 record("fm-epic", "W10: container", "open", priority=0, issue_type="epic"),
-                record("fm-leaf", "W10: free leaf", "open", priority=2),
+                record("fm-leaf", "W10: free candidate", "open", priority=2),
             ]
         )
         self.assertEqual(snapshot["counts"]["dependency_ready"], 3)
@@ -135,27 +142,28 @@ class AgentBriefTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in snapshot["assigned_ready"]], ["fm-assigned"])
         self.assertEqual([row["id"] for row in snapshot["container_ready"]], ["fm-epic"])
         self.assertEqual([row["id"] for row in snapshot["ready"]], ["fm-leaf"])
-        self.assertEqual(snapshot["recommendation"]["issue"]["id"], "fm-leaf")
+        self.assertEqual(snapshot["situational_priority"]["issue"]["id"], "fm-leaf")
 
-    def test_only_assigned_or_container_work_yields_no_recommendation(self) -> None:
+    def test_only_assigned_or_epic_work_yields_no_situational_priority(self) -> None:
         snapshot = self.snapshot(
             [
                 record("fm-assigned", "W10: reserved", "open", assignee="peer"),
                 record("fm-epic", "W10: epic", "open", issue_type="epic"),
             ]
         )
-        self.assertIsNone(snapshot["recommendation"]["issue"])
-        self.assertIn("unassigned leaf", snapshot["recommendation"]["reason"])
+        situational = snapshot["situational_priority"]
+        self.assertIsNone(situational["issue"])
+        self.assertIn("unassigned non-epic", situational["reason"])
 
-    def test_full_activation_cap_refuses_to_recommend_a_new_stream(self) -> None:
+    def test_full_activation_cap_suppresses_new_stream_priority(self) -> None:
         rows = [
             record(f"fm-active-{index}", f"W{index}: active", "in_progress", assignee="agent")
             for index in range(1, 5)
         ]
         rows.append(record("fm-new", "W9: ready", "open", priority=1))
-        recommendation = self.snapshot(rows)["recommendation"]
-        self.assertIsNone(recommendation["issue"])
-        self.assertIn("activation cap is full", recommendation["reason"])
+        situational = self.snapshot(rows)["situational_priority"]
+        self.assertIsNone(situational["issue"])
+        self.assertIn("activation cap is full", situational["reason"])
 
     def test_unscoped_and_unowned_active_claims_are_visible_but_do_not_consume_cap(self) -> None:
         snapshot = self.snapshot([record("fm-x", "Operational cleanup", "in_progress")])
@@ -164,7 +172,7 @@ class AgentBriefTests(unittest.TestCase):
         self.assertEqual(snapshot["counts"]["unscoped_active"], 1)
         self.assertEqual(snapshot["unowned_active"][0]["id"], "fm-x")
 
-    def test_parent_child_edges_do_not_block_readiness_or_integrity(self) -> None:
+    def test_parent_child_edges_do_not_block_broad_readiness_or_integrity(self) -> None:
         row = record("fm-child", "W10: child", "open")
         row["dependencies"] = [dependency("fm-child", "fm-parent", "parent-child")]
         issues = agent_brief.load_issues(self.write_ledger([row]))
@@ -178,7 +186,8 @@ class AgentBriefTests(unittest.TestCase):
         )
         self.assertTrue(snapshot["integrity"]["within_contract"])
         self.assertEqual(snapshot["counts"]["missing_links"], 1)
-        self.assertEqual(snapshot["recommendation"]["issue"]["id"], "fm-child")
+        self.assertEqual(snapshot["situational_priority"]["issue"]["id"], "fm-child")
+        self.assertFalse(snapshot["situational_priority"]["claim_safe"])
 
     def test_dependency_owner_self_reference_and_duplicate_edges_fail_closed(self) -> None:
         wrong_owner = record("fm-child", "W10: child", "open")
@@ -204,7 +213,7 @@ class AgentBriefTests(unittest.TestCase):
         with self.assertRaisesRegex(agent_brief.BriefError, "unknown status 'paused'"):
             agent_brief.load_issues(self.write_ledger([unknown]))
 
-    def test_blocking_cycle_is_deterministic_and_suppresses_recommendation(self) -> None:
+    def test_blocking_cycle_suppresses_situational_priority_and_stdout(self) -> None:
         first = record("fm-a", "W10: first", "open", priority=1)
         second = record("fm-b", "W10: second", "open", priority=1)
         first["dependencies"] = [dependency("fm-a", "fm-b")]
@@ -212,8 +221,8 @@ class AgentBriefTests(unittest.TestCase):
         snapshot = self.snapshot([second, first])
         self.assertEqual(snapshot["integrity"]["blocking_cycles"], [["fm-a", "fm-b"]])
         self.assertFalse(snapshot["integrity"]["within_contract"])
-        self.assertIsNone(snapshot["recommendation"]["issue"])
-        self.assertIn("integrity failures", snapshot["recommendation"]["reason"])
+        self.assertIsNone(snapshot["situational_priority"]["issue"])
+        self.assertIn("suppress situational", snapshot["situational_priority"]["reason"])
 
         path = self.write_ledger([second, first])
         stdout = io.StringIO()
@@ -248,7 +257,7 @@ class AgentBriefTests(unittest.TestCase):
         snapshot = self.snapshot(rows)
         self.assertTrue(snapshot["integrity"]["within_contract"])
         self.assertEqual(snapshot["integrity"]["blocking_cycles"], [])
-        self.assertEqual(snapshot["recommendation"]["issue"]["id"], "fm-1499")
+        self.assertEqual(snapshot["situational_priority"]["issue"]["id"], "fm-1499")
 
     def test_activation_cap_is_fail_closed(self) -> None:
         rows = [
@@ -288,7 +297,7 @@ class AgentBriefTests(unittest.TestCase):
         )
         self.assertIn("scripts/agent_next.py", stderr.getvalue())
 
-    def test_valid_check_emits_the_requested_projection(self) -> None:
+    def test_valid_check_emits_the_requested_situational_projection(self) -> None:
         path = self.write_ledger([record("fm-ready", "W10: ready", "open")])
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -310,6 +319,11 @@ class AgentBriefTests(unittest.TestCase):
         self.assertTrue(payload["integrity"]["within_contract"])
         self.assertTrue(payload["activation"]["within_cap"])
         self.assertEqual(payload["ready"][0]["id"], "fm-ready")
+        self.assertNotIn("recommendation", payload)
+        self.assertEqual(
+            payload["situational_priority"]["claim_surface"],
+            "scripts/agent_next.py",
+        )
 
     def test_duplicate_ids_and_missing_final_lf_are_rejected(self) -> None:
         duplicate = record("fm-x", "W1: x", "open")
@@ -381,7 +395,7 @@ class AgentBriefTests(unittest.TestCase):
         with self.assertRaisesRegex(agent_brief.BriefError, "cannot open"):
             agent_brief.load_issues(link)
 
-    def test_markdown_is_compact_and_names_authority(self) -> None:
+    def test_markdown_is_situational_and_names_the_claim_surface(self) -> None:
         snapshot = self.snapshot(
             [
                 record("fm-active", "W10: active", "in_progress", assignee="agent"),
@@ -392,10 +406,12 @@ class AgentBriefTests(unittest.TestCase):
         self.assertIn("Read-only projection of `.beads/issues.jsonl`", rendered)
         self.assertIn("Ledger integrity: **clean**", rendered)
         self.assertIn("**1/4** active", rendered)
-        self.assertIn("Recommended next", rendered)
-        self.assertIn("Claimable ready queue", rendered)
+        self.assertIn("Broad priority", rendered)
+        self.assertNotIn("Recommended next", rendered)
+        self.assertIn("Broad dependency-ready queue", rendered)
         self.assertIn("`fm-ready`", rendered)
-        self.assertIn("Never claim an assigned issue", rendered)
+        self.assertIn("Never claim directly from this projection", rendered)
+        self.assertIn("`python3 scripts/agent_next.py`", rendered)
         self.assertIn("Beads as authoritative", rendered)
 
 
