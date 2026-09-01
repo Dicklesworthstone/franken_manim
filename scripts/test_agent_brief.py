@@ -4,6 +4,7 @@ import contextlib
 import datetime as dt
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,10 +47,18 @@ def dependency(issue_id: str, target: str, kind: str = "blocks") -> dict:
 
 
 class AgentBriefTests(unittest.TestCase):
-    def write_ledger(self, rows: list[dict], *, final_lf: bool = True) -> Path:
+    def path(self) -> Path:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        path = Path(directory.name) / "issues.jsonl"
+        return Path(directory.name) / "issues.jsonl"
+
+    def write_raw(self, data: bytes) -> Path:
+        path = self.path()
+        path.write_bytes(data)
+        return path
+
+    def write_ledger(self, rows: list[dict], *, final_lf: bool = True) -> Path:
+        path = self.path()
         text = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows)
         path.write_text(text + ("\n" if final_lf else ""), encoding="utf-8")
         return path
@@ -289,6 +298,69 @@ class AgentBriefTests(unittest.TestCase):
             agent_brief.load_issues(self.write_ledger([duplicate, duplicate]))
         with self.assertRaisesRegex(agent_brief.BriefError, "missing its final LF"):
             agent_brief.load_issues(self.write_ledger([duplicate], final_lf=False))
+
+    def test_duplicate_json_keys_are_rejected_at_any_object_depth(self) -> None:
+        top_level = (
+            b'{"id":"fm-x","id":"fm-y","title":"W10: x","status":"open",'
+            b'"priority":1,"issue_type":"task","created_at":"2026-08-01T00:00:00Z",'
+            b'"updated_at":"2026-08-31T00:00:00Z"}\n'
+        )
+        with self.assertRaisesRegex(agent_brief.BriefError, "duplicate JSON object key 'id'"):
+            agent_brief.load_issues(self.write_raw(top_level))
+
+        nested = (
+            b'{"id":"fm-x","title":"W10: x","status":"open","priority":1,'
+            b'"issue_type":"task","created_at":"2026-08-01T00:00:00Z",'
+            b'"updated_at":"2026-08-31T00:00:00Z","dependencies":['
+            b'{"issue_id":"fm-x","depends_on_id":"fm-y","type":"blocks","type":"parent-child"}]}\n'
+        )
+        with self.assertRaisesRegex(agent_brief.BriefError, "duplicate JSON object key 'type'"):
+            agent_brief.load_issues(self.write_raw(nested))
+
+    def test_optional_arrays_accept_null_but_reject_falsey_non_arrays(self) -> None:
+        nullable = record("fm-null", "W10: nullable", "open")
+        nullable["dependencies"] = None
+        nullable["comments"] = None
+        issues = agent_brief.load_issues(self.write_ledger([nullable]))
+        self.assertEqual(issues["fm-null"].dependencies, ())
+        self.assertEqual(issues["fm-null"].comments, ())
+
+        for field, value in (("dependencies", ""), ("comments", 0), ("comments", {})):
+            malformed = record("fm-bad", "W10: bad", "open")
+            malformed[field] = value
+            with self.assertRaisesRegex(
+                agent_brief.BriefError, f"{field} must be an array or null"
+            ):
+                agent_brief.load_issues(self.write_ledger([malformed]))
+
+    def test_malformed_comments_and_present_invalid_updated_at_are_rejected(self) -> None:
+        malformed_comment = record("fm-comment", "W10: comment", "open")
+        malformed_comment["comments"] = ["not-an-object"]
+        with self.assertRaisesRegex(agent_brief.BriefError, "comment 0 must be an object"):
+            agent_brief.load_issues(self.write_ledger([malformed_comment]))
+
+        malformed_text = record("fm-text", "W10: text", "open")
+        malformed_text["comments"] = [{"text": 7}]
+        with self.assertRaisesRegex(agent_brief.BriefError, "text must be a string or null"):
+            agent_brief.load_issues(self.write_ledger([malformed_text]))
+
+        invalid_timestamp = record("fm-time", "W10: time", "open")
+        invalid_timestamp["updated_at"] = ""
+        with self.assertRaisesRegex(
+            agent_brief.BriefError, "updated_at must be a non-empty timestamp"
+        ):
+            agent_brief.load_issues(self.write_ledger([invalid_timestamp]))
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "host lacks no-follow open")
+    def test_ledger_symlink_is_refused_before_reading(self) -> None:
+        target = self.write_ledger([record("fm-x", "W10: x", "open")])
+        link = target.with_name("linked.jsonl")
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            self.skipTest(f"host cannot create symlinks: {exc}")
+        with self.assertRaisesRegex(agent_brief.BriefError, "cannot open"):
+            agent_brief.load_issues(link)
 
     def test_markdown_is_compact_and_names_authority(self) -> None:
         snapshot = self.snapshot(
