@@ -259,7 +259,44 @@ class GenerateAgentBriefTests(unittest.TestCase):
                 )
             self.assertEqual(status, 1)
             self.assertEqual(stdout.getvalue(), "")
-            self.assertIn("dependency integrity is invalid", stderr.getvalue())
+            self.assertIn("task-graph integrity is invalid", stderr.getvalue())
+            self.assertIn("1 missing blockers", stderr.getvalue())
+            self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
+
+    def test_containment_cycle_refuses_every_publication_mode(self) -> None:
+        ledger, output = self.fixture()
+        self.write_ledger(
+            ledger,
+            [
+                record(
+                    "fm-a",
+                    "W10: containment A",
+                    "open",
+                    updated_at="2026-08-31T09:00:00Z",
+                    parent="fm-b",
+                ),
+                record(
+                    "fm-b",
+                    "W10: containment B",
+                    "open",
+                    updated_at="2026-08-31T09:01:00Z",
+                    parent="fm-a",
+                ),
+            ],
+        )
+        output.write_text("sentinel\n", encoding="utf-8")
+
+        for mode in ([], ["--check"], ["--stdout"]):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = generator.main(
+                    ["--ledger", str(ledger), "--output", str(output), *mode]
+                )
+            self.assertEqual(status, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("task-graph integrity is invalid", stderr.getvalue())
+            self.assertIn("1 containment cycles", stderr.getvalue())
             self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
 
 
