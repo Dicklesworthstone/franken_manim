@@ -4,6 +4,8 @@
 
 The guard never mutates Beads and is not a lease. It proves only that the claim input and recommendation are still the same at the instant of revalidation. File reservations, current assignees, current `main`, and coordinating messages must still be checked immediately before the mutation.
 
+For mutation, use `scripts/agent_claim.py`. It revalidates the guard, executes `br update`, flushes JSONL, and verifies the postcondition under one repository-local advisory lock. Its complete contract is in [`AGENT_CLAIM_EXECUTOR.md`](AGENT_CLAIM_EXECUTOR.md).
+
 ## Canonical workflow
 
 ```bash
@@ -13,20 +15,24 @@ issue="${token##*:}"
 
 # 2. Inspect the selected task and external coordination state.
 br show "$issue"
-# Check Agent Mail and file reservations here.
+# Check Agent Mail, file reservations, active peers, and current main here.
 
-# 3. Immediately before mutation, compare the current graph and policy to the token.
-python3 scripts/agent_claim_guard.py \
+# 3. Optionally inspect the exact intended mutation without changing Beads.
+python3 scripts/agent_claim.py \
     --expect-token "$token" \
-    --require \
-    --format id
+    --issue "$issue" \
+    --assignee "$FMN_AGENT_ID" \
+    --dry-run
 
-# 4. Only an exit-0 revalidation authorizes the ordinary Beads mutation.
-br update "$issue" --status=in_progress
-br sync --flush-only
+# 4. Revalidate, mutate, flush, and verify under one local lock.
+python3 scripts/agent_claim.py \
+    --expect-token "$token" \
+    --issue "$issue" \
+    --assignee "$FMN_AGENT_ID" \
+    --transition-comment "Claimed after graph, reservation, and HEAD checks"
 ```
 
-A successful comparison prints the current recommendation according to `--format`. Every nonzero result emits no stdout payload, so shell automation cannot accidentally consume a failed plan.
+A successful guard comparison prints the current recommendation according to `--format`. Every nonzero guard result emits no stdout payload, so shell automation cannot accidentally consume a failed plan. The executor similarly emits a success receipt only after its complete transaction shape succeeds.
 
 ## Token contract
 
@@ -50,6 +56,8 @@ The claim digest covers:
 
 Issue-record order and dependency-array order do not affect the digest. Semantic changes do. The literal issue ID `none` is reserved because `none` denotes a valid graph with no claimable recommendation.
 
+The canonical claim-graph grammar is version `2`. It uses strict JSON decoding: unquoted `NaN`, `Infinity`, and `-Infinity` are forbidden anywhere in an issue row, including ignored extension fields. Tokens issued under the earlier permissive grammar are invalidated by the schema contract.
+
 JSON output exposes two intentionally different hashes:
 
 - `graph_sha256` identifies only the canonical parsed Beads graph and is useful for graph-level diagnostics;
@@ -57,7 +65,7 @@ JSON output exposes two intentionally different hashes:
 
 A graph can therefore keep the same `graph_sha256` while a policy or planner-schema change correctly produces a different `claim_sha256` and invalidates the old token.
 
-## Exit codes
+## Guard exit codes
 
 | Exit | Meaning | Safe automation response |
 |---:|---|---|
@@ -83,10 +91,14 @@ python3 scripts/agent_claim_guard.py --format id --expect-token "$token" --requi
 
 ## What the guard does not prove
 
-The guard cannot make `br update` atomic with the preceding read. Another actor can still change the ledger or coordination state in the remaining interval. Keep that interval minimal, use Agent Mail reservations, and treat a failed subsequent `br` mutation as a fresh conflict rather than overriding it.
+The guard alone cannot make `br update` atomic with the preceding read. The executor narrows that local interval by holding one Git-directory lock across revalidation and mutation, but neither mechanism is a distributed lease. Another clone, a direct manual `br` invocation, or external coordination can still conflict.
 
-The guard also does not edit, close, assign, export, or commit issues. All tracker changes continue through `br`, followed by `br sync --flush-only` and an explicit `.beads/` commit.
+Use Agent Mail reservations, inspect current `main`, and keep the interval between those checks and executor invocation minimal. A failed mutation is a fresh conflict; never override it or blindly reuse the old token.
+
+The guard itself does not edit, close, assign, export, or commit issues. The executor performs only the guarded `open` → `in_progress` claim path through `br`, followed by `br sync --flush-only` and parsed-ledger verification. Committing the resulting `.beads/` export remains an explicit repository action.
 
 ## Verification
 
-`scripts/test_agent_claim_guard.py` covers v2 token round trips, graph and recommendation changes, canonical order independence, every policy input, schema-version changes, unchanged-recommendation planner drift, the reserved sentinel, no-work behavior, malformed and legacy tokens, output bounds, and integrity precedence. `scripts/check.sh` compiles and runs that suite, issues a token against the complete live ledger, and immediately revalidates the exact token before entering the Rust gates.
+`scripts/test_agent_claim_guard.py` covers v2 token round trips, graph and recommendation changes, canonical order independence, every policy input, schema-version changes, unchanged-recommendation planner drift, the reserved sentinel, no-work behavior, malformed and legacy tokens, output bounds, and integrity precedence.
+
+`scripts/test_agent_claim.py` covers the locked mutation path and failure semantics. `scripts/test_agent_brief_strict_json.py` covers the strict JSON grammar and claim-graph version. `scripts/check.sh` compiles and runs all three suites, issues a token against the complete live ledger, immediately revalidates it, and exercises the executor's live-ledger dry-run path before entering the Rust gates.
