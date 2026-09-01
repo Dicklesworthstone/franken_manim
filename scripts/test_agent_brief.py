@@ -223,6 +223,22 @@ class AgentBriefTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("dependency integrity is invalid", stderr.getvalue())
 
+    def test_long_blocking_chain_is_iterative_and_acyclic(self) -> None:
+        count = 1_500
+        rows = []
+        for index in range(count):
+            issue_id = f"fm-{index:04d}"
+            row = record(issue_id, f"W10: chain {index}", "open", priority=2)
+            if index + 1 < count:
+                row["dependencies"] = [
+                    dependency(issue_id, f"fm-{index + 1:04d}")
+                ]
+            rows.append(row)
+        snapshot = self.snapshot(rows)
+        self.assertTrue(snapshot["integrity"]["within_contract"])
+        self.assertEqual(snapshot["integrity"]["blocking_cycles"], [])
+        self.assertEqual(snapshot["recommendation"]["issue"]["id"], "fm-1499")
+
     def test_activation_cap_is_fail_closed(self) -> None:
         rows = [
             record(f"fm-{index}", f"W{index}: active", "in_progress", assignee="agent")
