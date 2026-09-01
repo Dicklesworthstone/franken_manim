@@ -1,7 +1,7 @@
 # FrankenManim implementation status
 
 **Status date:** 2026-09-01 UTC / 2026-08-31 America/New_York  
-**Evidence checkpoint:** substantive source commits through `204eabf`, followed by documentation truth-up commits.  
+**Evidence checkpoint:** substantive source commits through `64b92be`, followed by documentation truth-up commits.  
 **Authority rule:** this document summarizes evidence; `.beads/issues.jsonl` remains the task and dependency authority.
 
 ## How to read this document
@@ -15,11 +15,32 @@ FrankenManim is pre-1.0. A capability is listed as implemented only when a concr
 | Native Rust library | The composition root, scene runtime, mobject/animation stack, native text and math, retained renderer, codecs, output pipeline, and built-in scene corpus are implemented as workspace crates. | Ordinary workspace checks and tests run through `scripts/check.sh`; platform certification remains a separate matrix. |
 | `fmn` CLI | Typed render, doctor, batch, and Studio command surfaces exist. The shipped binary has executable smoke coverage for version/help, doctor robot and quiet behavior, typed exit codes, a real one-scene batch render, native artifact publication, and machine/human manifests. | `cargo test -p fmn-cli --features batch --test cli_smoke` exercises the complete shipping feature shape. The process-output helper is additionally exercised as a binary unit module by the all-target Cargo gate. |
 | Studio | Supervisor/worker, replay, event, inspection, and presentation foundations are implemented. | Platform and real-browser presentation evidence is not inferred from local Rust tests. |
-| `fmn-python` portal | A separately installed CPython 3.13 wheel exposes the pinned `manimlib` namespace with native and authored compatibility behavior. | The W10 semantic-surface parent remains open. The newest tracker reality-check overrides older comments that described ledger review as product completion. |
+| `fmn-python` portal | A separately installed CPython 3.13 wheel exposes the pinned `manimlib` namespace with native and authored compatibility behavior. Every explicit bootstrap refusal is now mechanically inventoried and must be named. | The W10 semantic-surface parent remains open. A named refusal is evidence of an honest missing capability, not evidence that the capability is implemented. |
 | WASM/browser | The wasm32 render/player foundations and package gate exist. | The npm/real-browser release gate is opt-in (`FMN_WASM_PACKAGE_GATE=1`) and is not claimed merely because ordinary local checks pass. |
 | Distribution | Tagged `v0.1.0` through `v0.4.0` releases are prereleases. | Cross-platform artifacts, hardware-specific execution, and release matrices require their own receipts. |
 
 ## Recently completed implementation tranche
+
+### Python portal refusal truthfulness
+
+`scripts/audit_portal_refusals.py` turns the remaining fail-closed Python compatibility surface into a canonical, bounded inventory with schema `fmn.portal.refusals` version `1`.
+
+The audit:
+
+- reads `manimlib_bootstrap.py` through a regular-file descriptor and uses no-follow opening where supported;
+- caps source bytes, AST nodes, refusal sites, and rendered report bytes;
+- parses the source rather than grepping text;
+- inventories direct `NotImplementedError` raises and `_refuse_unrouted` calls with source location, qualified scope, subject, detail expression, abstract status, and source SHA-256;
+- permits a bare `NotImplementedError` only in the exact function decorated as `abstractmethod`;
+- rejects bare concrete raises, zero-argument or blank-message `NotImplementedError` calls, missing or blank `_refuse_unrouted` subjects, and missing or statically empty entry collections;
+- accepts equivalent positional and named `class_name` / `subject` / `entries` helper calls;
+- scopes abstractness correctly across nested classes rather than leaking the outer method's permission;
+- emits canonical compact JSON or deterministic Markdown;
+- produces no stdout report when `--check` finds an anonymous refusal.
+
+This is intentionally not a refusal-count completion claim. The inventory makes each remaining W10 gap addressable and prevents a new anonymous placeholder from entering the mandatory gate. Actual reductions still require implementing the owning native seam or recording a deliberate tier/exclusion with its evidence.
+
+The focused suite has nine adversarial tests covering valid named and abstract refusals, all anonymous forms, keyword helper calls, nested-class scope, canonical output, source/AST/site/output budgets, syntax and UTF-8 failures, and source symlinks. `scripts/check.sh` runs that suite and audits the real bootstrap before any expensive Cargo work.
 
 ### Process-output lifecycle
 
@@ -88,7 +109,7 @@ The default planner `as_of` is derived from the newest ledger record. Identical 
 
 The human generator refuses blocking cycles, containment cycles, missing blockers, and activation-cap breaches before any output. Existing artifacts are read through a descriptor-bound regular-file check. Failed publication removes only the temporary inode created by that attempt; if the path was substituted, the foreign path is retained and reported.
 
-`scripts/check.sh` compiles and runs the parser, planner, deterministic-output, generator, and publication-I/O tests, validates the live plan, then continues into the Rust/Python/WASM/structural gate. Hosted GitHub Actions is not required.
+`scripts/check.sh` compiles and runs the parser, planner, deterministic-output, generator, publication-I/O, and portal-refusal tests, validates the live plan and real portal source, then continues into the Rust/Python/WASM/structural gate. Hosted GitHub Actions is not required.
 
 ## Current open obligations
 
@@ -97,8 +118,10 @@ The human generator refuses blocking cycles, containment cycles, missing blocker
 `fm-5wq.4` remains in progress. Its history contains both an older “100% reviewed” comment and a newer reality-check describing remaining portal implementation gaps. The newer tracker state is the operative evidence boundary. Therefore:
 
 - reviewed ledger coverage is not presented as universal callable implementation;
+- the refusal inventory is not presented as implementation coverage;
 - generic or capability-refusing behavior must continue to match the row's declared status;
 - representative clean-wheel semantics remain required across API families;
+- each inventoried refusal should fall only by landing the owning behavior or an evidence-backed tier/exclusion;
 - no closure is claimed here.
 
 ### CLI library/binary quiet-policy convergence
@@ -122,13 +145,18 @@ The following remain independent evidence lanes rather than automatic consequenc
 
 ### Tracker synchronization
 
-Beads mutations must still be performed through `br`, followed by `br sync --flush-only` and a committed `.beads/` export. The read-only projections never edit or close work. Large tracker files must not be replaced from truncated connector output.
+Beads mutations must still be performed through `br`, followed by `br sync --flush-only` and a committed `.beads/` export. The read-only projections and refusal audit never edit or close work. Large tracker files must not be replaced from truncated connector output.
 
 ## Verification entry points
 
 ```bash
 # Mandatory local or owned-host repository gate
 scripts/check.sh
+
+# Portal refusal truthfulness
+python3 scripts/audit_portal_refusals.py --check
+python3 scripts/audit_portal_refusals.py --format markdown
+python3 scripts/test_audit_portal_refusals.py
 
 # Whole-graph validation and human context
 python3 scripts/agent_brief.py --format json --check
@@ -153,14 +181,16 @@ cargo test -p fmn-cli --features batch --test cli_smoke
 
 ### Evidence from the current editing environment
 
-The strict parser's complete focused suite passed before the final documentation phase, and targeted probes passed for containment-publication refusal, descriptor-bound artifact I/O, owned-temporary cleanup, substituted-temporary preservation, deterministic planner timestamps, and pre-output size refusal. This environment did not provide an exact repository checkout, so the full Cargo, Clippy, rustdoc, WASM, wheel, browser, and `scripts/check.sh` gates were not represented as run against `204eabf`.
+The portal refusal suite passed 9/9 against the final audit logic. Earlier in the tranche, the strict task parser's complete focused suite passed, and targeted probes passed for containment-publication refusal, descriptor-bound artifact I/O, owned-temporary cleanup, substituted-temporary preservation, deterministic planner timestamps, and pre-output size refusal.
+
+This environment did not provide an exact repository checkout containing the full portal source and Rust workspace. Therefore the audit against the real `manimlib_bootstrap.py`, the complete Cargo/Clippy/rustdoc/WASM/wheel/browser axes, and the repository-wide `scripts/check.sh` invocation are not represented as run against `64b92be`.
 
 GitHub Actions is not a correctness dependency. Verification is designed to run on controlled local or owned build hosts; unavailable hosted capacity does not weaken or waive any gate.
 
 ## Truthfulness rules for future updates
 
 - Record exact commands and the source commit they exercised.
-- Do not convert “compiled,” “reviewed,” or “imported” into “fully implemented.”
+- Do not convert “compiled,” “reviewed,” “inventoried,” or “imported” into “fully implemented.”
 - Do not infer hardware or artifact evidence from a different platform.
 - Do not close a parent merely because one child or one census reaches 100%.
 - Distinguish broad readiness from true leaf claimability.
