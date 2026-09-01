@@ -1,198 +1,151 @@
 # GOVERNANCE.md — the program governance machinery (R9)
 
-Risk R9 — program bandwidth across eleven workstreams — is rated **High**,
-and the plan names governance as its mitigation, with a hard kill
-criterion: **breaching governance halts new activation.** This document is
-that mitigation made concrete. Governance is a deliverable, not a vibe:
-each section below is a checkable rule, and the session workflow in
-`AGENTS.md` references it directly.
+Risk R9 — program bandwidth across eleven workstreams — is rated **High**, and the plan names governance as its mitigation, with a hard kill criterion: **breaching governance halts new activation.** This document makes that mitigation checkable. Governance is a deliverable, not a vibe.
 
-Authority: the plan (`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`,
-Revision 4) is the source of truth; this document operationalizes §20
-(workstreams and gates), §23 (the decision log), §2.9 (the upstream
-ledger), and R9/R20/R21 (the standing stop conditions). Where they seem to
-disagree, the plan wins and this file gets fixed.
+Authority: the plan (`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`, Revision 4) is the source of truth; this document operationalizes §20 (workstreams and gates), §23 (the decision log), §2.9 (the upstream ledger), and R9/R20/R21 (standing stop conditions). Where they seem to disagree, the plan wins and this file gets fixed.
 
 ---
 
-## 1. The workstream activation and claim-integrity limit
+## 1. Workstream activation and claim integrity
 
-**The cap: at most 4 simultaneously-active workstreams.** (G0 spike work
-counts as one workstream, named "G0". The cap is chosen for the current
-agent-session bandwidth; raising it is an ADR.)
+**The cap: at most 4 simultaneously active workstreams.** G0 spike work counts as one workstream named `G0`. Raising the cap requires an ADR.
 
-**Definition — active.** A workstream is *active* iff at least one of its
-beads is `in_progress`. Historical touch does not count: a workstream with
-landed (closed) beads and nothing claimed is *dormant*, and re-activating
-it goes through the same check as activating a fresh one. A workstream
-deactivates the moment its last `in_progress` bead is closed or released
-back to `open`.
+**Definition — active.** A workstream is active iff at least one of its beads is `in_progress`. Historical touch does not count. A workstream with landed beads and no current claim is dormant; reactivation goes through the same check as fresh activation. A workstream deactivates when its last `in_progress` bead is closed or released to `open`.
 
-**Definition — claimable leaf.** An issue is claimable only when it is
-`open`, unassigned, dependency-ready, not an epic, and has no live
-`parent-child` descendant. A task, bug, or feature with live children is a
-container regardless of its type label. The live blocking graph must have
-no missing blocker or cycle; the live containment graph must have no cycle.
+**Definition — claimable leaf.** An issue is claimable only when it is `open`, unassigned, dependency-ready, not an epic, and has no live `parent-child` descendant. A task, bug, or feature with live children is a container regardless of type label. The live blocking graph must have no missing blocker or cycle; the live containment graph must have no cycle.
 
-**The check (mandatory, before claiming any bead).** Run the strict graph
-projection and canonical leaf planner against the same ledger bytes:
+### Mandatory pre-claim sequence
 
 ```bash
+# Validate broad state and inspect the exact plan.
 python3 scripts/agent_brief.py --format json --check >/dev/null
 python3 scripts/agent_next.py --format json --check
-python3 scripts/agent_next.py --require
+
+# Issue one exact graph/plan/policy/schema-bound token.
+token="$(python3 scripts/agent_claim_guard.py --require)"
+issue="${token##*:}"
+
+# Inspect task and all non-ledger coordination state.
+br show "$issue"
+# Check current main, Agent Mail, file reservations, and active peers.
+
+# Optional no-mutation receipt.
+python3 scripts/agent_claim.py \
+    --expect-token "$token" \
+    --issue "$issue" \
+    --assignee "$FMN_AGENT_ID" \
+    --command-timeout-seconds 60 \
+    --dry-run
+
+# Canonical guarded claim transition.
+python3 scripts/agent_claim.py \
+    --expect-token "$token" \
+    --issue "$issue" \
+    --assignee "$FMN_AGENT_ID" \
+    --command-timeout-seconds 60 \
+    --transition-comment "Claimed after graph, reservation, and HEAD checks"
 ```
 
-Planner exit meanings are part of governance:
+Exit identities are governance:
 
-- exit `0`: the emitted ID is a claimable leaf under the current graph;
-- exit `1`: graph integrity or activation state is unsafe — repair it first;
-- exit `2`: input, bounds, or output-budget contract is malformed;
-- exit `3`: the graph is valid but currently has no claimable leaf.
+- exit `0`: valid plan/token, or a verified executor receipt;
+- exit `1`: graph integrity or activation state is unsafe;
+- exit `2`: ledger, arguments, bounds, token grammar, timeout, or output contract is malformed;
+- exit `3`: the graph is valid but has no claimable leaf;
+- exit `4`: the token or explicit issue is stale;
+- exit `5`: no verified executor receipt because lock acquisition, child execution, timeout/cleanup, flush, output bounds, or postcondition verification failed.
 
-Every nonzero planner exit emits no stdout plan. **Never move an issue to
-`in_progress` from a failed or empty plan.** A recommendation is not a
-lease: before mutation, inspect it with `br show`, verify current file
-reservations and coordinating messages, then claim it through `br`.
+Every nonzero planner, guard, or executor result emits no usable success payload. **Never move an issue to `in_progress` from a failed or empty plan.** A recommendation and token are not a lease: external coordination checks remain mandatory immediately before executor invocation.
 
-The planner prefers an eligible leaf in an already-active workstream. If
-none exists, it may recommend activating a new stream only while the
-active count is below four. Breaching the cap halts *new activation only*
-— in-flight work always runs to completion.
+Exit `5` does not prove that native tracker state is unchanged. `br update` may have mutated state before a timeout, flush failure, or postcondition failure. Inspect `br show ISSUE`, `br sync --status`, and the working tree before retrying; never replay the old token blindly.
 
-`br ready` remains broad dependency-ready context; it does not understand
-non-epic containment. `bv` remains graph-analysis support; rank alone
-cannot override assignment, integrity, containment, or the activation
-cap. `agent_next.py` is the autonomous claim surface.
+The executor timeout is per `br update` and per `br sync --flush-only`. Production defaults to 60 seconds and accepts finite positive values up to 3,600 seconds. Timeout cleanup is process-tree-aware and bounded; it may extend the failure path slightly beyond the selected deadline.
+
+The planner prefers an eligible leaf in an already-active workstream. If none exists, it may recommend activating a new stream only while the active count is below four. Breaching the cap halts *new activation only*; in-flight work runs to completion.
+
+`br ready` remains broad dependency-ready context; it does not understand non-epic containment. `bv` is graph-analysis support; rank cannot override assignment, integrity, containment, activation, token, or executor refusal. `agent_next.py` is the selection surface, `agent_claim_guard.py` is the compare-before-set contract, and `agent_claim.py` is the canonical autonomous mutation surface.
+
+The shared advisory lock serializes cooperating processes only within one clone's Git common directory. Another clone, direct manual `br`, Agent Mail, reservations, and agents that ignore the executor remain outside that lock.
 
 ---
 
 ## 2. Gate ownership
 
-Every gate G0–G5 has a named owner responsible for convening the
-gate-review session and for the recorded evidence packet. The owner of
-record remains **Jeffrey Emanuel (program owner)**. He may delegate a
-named gate verdict to a reviewing agent (ADR-0018); the packet records
-the delegate, the date, and the evidence viewed. The agent session that
-assembles a gate's evidence packet ("the marshal") is named in the gate's
-epic bead at review time, and the packet lands in the repo before the
-gate is declared passed. A chat summary is never a pass.
+Every gate G0–G5 has a named owner responsible for convening review and recording its evidence packet. The owner of record remains **Jeffrey Emanuel (program owner)**. He may delegate a verdict to a reviewing agent under ADR-0018; the packet records the delegate, date, and evidence viewed. The session assembling a gate packet (the marshal) is named in the gate's epic bead. A chat summary is never a pass.
 
-| Gate | Name | Evidence packet (recorded, in-repo) |
+| Gate | Name | Evidence packet |
 |---|---|---|
-| G0 | The Laws of the Machine | one ratification note per spike under `docs/g0/` (the G0-1 note is the pattern); decision amendments filed as ADRs; `SUITE.lock` + `SUITE_ALLOWLIST.tsv` committed |
-| G1 | Core 2D | primitive-corpus self-goldens bit-locked; the {1,4,16} thread-sweep proof; path-invariant + kernel fixture runs; Look Gallery verdict sheet vs Reference imagery |
-| G2 | The Native Word | tier-1 construct set with published-rule verification runs; the span-map fixtures (`isolate`/`t2c`/`TransformMatchingTex`); the ratchet dashboard snapshot; Gallery verdicts; PG-1(G2) + PG-7 runs |
-| G3 | Depth & Motion | 3D/lighting/camera fixture runs; Studio-baseline demonstration; the annex-or-fallback declaration (OQ-12) with its public note if the fallback is exercised; PG-3 (+ PG-A if the annex ships) |
-| G4a | The Python Gallery | `VIDEO_CORPUS.lock` frozen; structural-assertion runs for every enumerated scene; Gallery review; TeX-pending scenes named with missing constructs; the published PG-8 class table |
-| G4b | Certified Reproducibility | bit-identity manifests across the certified matrix; PG-5 runs; PG-1(G4); sidecar provenance samples |
-| G5 | Distribution & Leapfrogs | per-tier release artifacts + selection UX; reproducible-release proof; the broadened-annex and ratchet-progress records |
+| G0 | The Laws of the Machine | one ratification note per spike under `docs/g0/`; decision amendments as ADRs; `SUITE.lock` + `SUITE_ALLOWLIST.tsv` committed |
+| G1 | Core 2D | primitive-corpus self-goldens; {1,4,16} thread proof; path/kernel fixtures; Look Gallery verdicts |
+| G2 | The Native Word | tier-1 published-rule verification; span-map fixtures; ratchet dashboard; Gallery verdicts; PG-1(G2) + PG-7 |
+| G3 | Depth & Motion | 3D/lighting/camera fixtures; Studio baseline; OQ-12 annex/fallback declaration; PG-3 (+ PG-A if shipped) |
+| G4a | The Python Gallery | frozen `VIDEO_CORPUS.lock`; structural runs for enumerated scenes; Gallery review; TeX gaps; PG-8 class table |
+| G4b | Certified Reproducibility | certified-matrix bit manifests; PG-5; PG-1(G4); provenance samples |
+| G5 | Distribution & Leapfrogs | release artifacts by tier; selection UX; reproducible-release proof; annex and ratchet records |
 
-A gate is *passed* when the owner records the verdict against the packet —
-in the gate epic's close reason and, for anything that amends the plan, an
-ADR. **A gate is never passed on a summary; the packet is the pass.**
+A gate passes only when the owner records a verdict against the committed packet — in the gate epic's close reason and, when the plan changes, an ADR. **The packet is the pass.**
 
 ---
 
 ## 3. Architecture Decision Records
 
-Convention: `docs/adr/NNNN-kebab-title.md`, numbered monotonically, never
-renumbered or reused; template at `docs/adr/TEMPLATE.md`; status vocabulary
-`Proposed → Accepted → Superseded by ADR-NNNN`.
+Convention: `docs/adr/NNNN-kebab-title.md`, numbered monotonically and never reused; template at `docs/adr/TEMPLATE.md`; status vocabulary `Proposed → Accepted → Superseded by ADR-NNNN`.
 
-**An ADR is required for:**
-- every amendment to the plan's decision log D-01…D-24;
-- every resolution of an open question OQ-1…OQ-12 (each has a named owner
-  gate/workstream in §23 — code never silently resolves one);
-- every policy ruling made under a standing rule (e.g. allowlist-tier
-  rulings under D1, certification-matrix changes under §16.7).
+An ADR is required for:
 
-**The true-up rule:** when an ADR amends the plan, the plan document is
-edited to match **in the same commit** — or the ADR's Consequences section
-records precisely why the true-up is deferred and under which bead.
+- every amendment to D-01…D-24;
+- every resolution of OQ-1…OQ-12;
+- every policy ruling made under a standing rule.
 
-Worked examples: ADR-0001 (the retroactive record of the Rev-4 contract
-pivot), ADR-0002 (the D-11 amendment via G0-1 ratification), ADR-0003 (a
-live policy ruling: the dev/fuzz allowlist tiers).
+**True-up rule:** when an ADR amends the plan, the plan is edited to match in the same commit, or the ADR records why true-up is deferred and under which bead.
+
+Worked examples: ADR-0001 (Rev-4 contract pivot), ADR-0002 (D-11 ratification), ADR-0003 (dev/fuzz allowlist tiers).
 
 ---
 
-## 4. Review rules — required coverage before handoff
+## 4. Review rules before handoff
 
-A workstream may not hand off with failing gates or unwritten fixtures.
-"Landing the plane" (`AGENTS.md`), made checkable — every item below is
-verified before a session ends, and a handoff violating any of them is not
-a handoff (the next session's first duty is restoring the invariant):
+A workstream may not hand off with failing gates or unwritten fixtures. Every item below is verified before a session ends; if a handoff violates one, the next session's first duty is restoring the invariant.
 
-1. `scripts/check.sh` green on one named, unchanged committed source HEAD.
-   The wrapper runs control-plane integrity, `cargo fmt --check`, `cargo
-   check --all-targets`, warning-denied Clippy, strict rustdoc, the hard
-   `cargo test` gate, feature axes, the crate DAG, and available WASM smoke.
-   A partial run, an uncommitted tree, or a different commit is not this
-   evidence. Hosted GitHub Actions availability is irrelevant.
-2. `ubs` run over changed files; criticals fixed, or adjudicated
-   false-positive *in the handoff note* — never silently ignored.
-3. New or changed behavior carries its fixtures/tests in the same commit.
-   Self-goldens drifted by the change are adjudicated, not re-blessed.
-4. Semantic divergences from the Reference introduced this session have
-   Behavior Notes (`docs/behavior_notes/`).
-5. Beads trued up: finished work closed with reasons; claimed-but-unfinished
-   beads released back to `open` with a status comment; follow-ups filed.
+1. `scripts/check.sh` green on one named, unchanged committed source HEAD. A partial run, uncommitted tree, different commit, or hosted-only result is not this evidence.
+2. `ubs` run over changed files; criticals fixed or explicitly adjudicated as false positives in the handoff.
+3. New or changed behavior carries tests/fixtures in the same commit. Self-golden drift is adjudicated, never reflexively re-blessed.
+4. New semantic divergences from the Reference have Behavior Notes under `docs/behavior_notes/`.
+5. Beads trued up: finished work closed with reasons; unfinished claims released to `open` with status comments; follow-ups filed.
 6. `br sync --flush-only`, then `.beads/` staged and committed.
-7. Re-run `python3 scripts/agent_next.py --format json --check` against the
-   exported post-mutation ledger. The handoff records its current
-   recommendation or its exact no-work/refusal state.
-8. Agent-mail file reservations released; a handoff message posted in the
-   bead's thread (`thread_id` = the bead ID).
+7. Re-run `python3 scripts/agent_next.py --format json --check` against the exported post-mutation ledger.
+8. If a next leaf exists, issue a **fresh** `agent_claim_guard.py --require` token for the handoff. A pre-mutation token is stale by construction.
+9. Agent-mail reservations released; a handoff message posted in the bead thread (`thread_id` = bead ID).
+10. The handoff records exact commits, commands actually run, source HEAD, remaining evidence gaps, and the current next-leaf/no-work/refusal state.
 
 ---
 
-## 5. Stop conditions & the leapfrog-postponement policy
-
-**Stop conditions.** Each is a tripwire that halts a named class of work
-until its condition clears:
+## 5. Stop conditions and leapfrog postponement
 
 | Tripwire | Halt |
 |---|---|
-| Activation cap reached (§1) | no new workstream activation |
-| Missing blocker, blocking cycle, or containment cycle | no new claim until the graph is repaired |
-| Core performance gate (PG-1…PG-3) regresses | all annex work pauses (R21) |
-| A purity misclassification is observed in frame-parallel output | that effect class demotes to stateful engine-wide until root-caused (R20) |
-| A self-golden drifts without an adjudicated cause | the introducing change reverts; the drift is a finding, never noise |
-| A governed-closure violation (unlisted package) appears | no lands until the closure check is green |
+| Activation cap reached | no new workstream activation |
+| Missing blocker, blocking cycle, or containment cycle | no new claim until repaired |
+| Planner/guard/executor nonzero exit | no autonomous claim from that plan/token |
+| Claim exit `5` | inspect tracker/native state before any retry |
+| Core performance gate PG-1…PG-3 regresses | all annex work pauses (R21) |
+| Purity misclassification appears | effect class demotes to stateful engine-wide until root-caused (R20) |
+| Self-golden drifts without adjudicated cause | introducing change reverts |
+| Governed closure contains an unlisted package | no lands until closure is green |
 
-**The leapfrog-postponement policy.** Enhanced-tier and leapfrog work —
-the W7 fnx/fp/data lineage, annex broadening beyond the G3 Studio-preview
-duty, the exploratory tier, WASM beyond tier-1 — is postponable **by
-policy**, at any time, for bandwidth. Two clauses make the policy safe,
-and the policy text is itself the artifact:
+Enhanced-tier and leapfrog work — W7 lineage, annex broadening beyond G3 Studio-preview duty, exploratory tier, and WASM beyond tier 1 — is postponable by policy.
 
-1. **Postponement never weakens core work.** No core interface is shaped
-   around a postponed leapfrog's absence; the seams the leapfrog needs
-   (the backend trait, the enhanced-mobject registration points, the WASM
-   feature axes) are built with core regardless.
-2. **Postponement is never scope reduction.** Gates are integration
-   checkpoints (there is no MVP); a postponed item moves to a later gate
-   *publicly* — a dated note in the gate's epic bead — and its acceptance
-   criteria travel unmodified.
+1. **Postponement never weakens core work.** Core interfaces retain the seams leapfrogs require.
+2. **Postponement is never scope reduction.** The item moves publicly to a later gate and its acceptance criteria travel unchanged.
 
 ---
 
-## 6. The upstream ledger ritual (§2.9)
+## 6. Upstream ledger ritual (§2.9)
 
-Primitives that belong in a foundation crate land there, never here —
-tracked in [`UPSTREAM_LEDGER.md`](../UPSTREAM_LEDGER.md) at the repo root.
-The ritual, per entry (R8, R17 — upgrades deliberate, Gauntlet-diffed):
+Primitives belonging in a foundation crate land there, never here, and are tracked in [`UPSTREAM_LEDGER.md`](../UPSTREAM_LEDGER.md).
 
-1. **Propose:** add or update the ledger row (primitive, target repo,
-   owner, status, coordination step it is waiting on).
-2. **Land upstream:** the work happens in the foundation repo, governed
-   like any foundation change.
-3. **Pin:** bump the foundation commit in `SUITE.lock` (and the
-   `SUITE_ALLOWLIST.tsv` rows it affects) in a commit that does nothing
-   else.
-4. **Diff:** run the full Gauntlet; diff self-goldens and the Look
-   Gallery. A drifted golden is a finding to adjudicate, not noise to
-   re-bless.
-5. **Adjudicate and record:** the adjudication goes in the pin-bump commit
-   message; the ledger row's status advances. Land only green.
+1. **Propose:** add/update the ledger row with primitive, target repo, owner, status, and coordination dependency.
+2. **Land upstream:** implement under the foundation repository's governance.
+3. **Pin:** bump the foundation commit in `SUITE.lock` and affected `SUITE_ALLOWLIST.tsv` rows in a single-purpose commit.
+4. **Diff:** run the full Gauntlet; diff self-goldens and Look Gallery evidence.
+5. **Adjudicate and record:** record the adjudication in the pin-bump commit and advance the ledger row. Land only green.
