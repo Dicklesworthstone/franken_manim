@@ -50,6 +50,7 @@ class PortalRefusalAuditTests(unittest.TestCase):
         inventory = audit.build_inventory(path)
         self.assertEqual(inventory["schema"], "fmn.portal.refusals")
         self.assertEqual(inventory["version"], 1)
+        self.assertGreater(inventory["ast_nodes"], 0)
         self.assertEqual(inventory["counts"]["sites"], 3)
         self.assertEqual(inventory["counts"]["not_implemented"], 2)
         self.assertEqual(inventory["counts"]["abstract_bare"], 1)
@@ -124,6 +125,25 @@ def empty_entries():
         self.assertIn("_refuse_unrouted subject is blank", messages)
         self.assertIn("_refuse_unrouted entries are statically empty", messages)
 
+    def test_refuse_unrouted_keyword_arguments_are_supported(self) -> None:
+        source = '''
+def _refuse_unrouted(class_name, entries):
+    return class_name, entries
+
+
+def configure(enabled=False):
+    _refuse_unrouted(
+        class_name="Thing()",
+        entries=[("enabled", enabled)],
+    )
+'''.lstrip()
+        inventory = audit.build_inventory(self.fixture(source))
+        self.assertEqual(inventory["counts"]["refuse_unrouted"], 1)
+        self.assertEqual(inventory["counts"]["violations"], 0)
+        site = inventory["sites"][0]
+        self.assertEqual(site["subject"], "'Thing()'")
+        self.assertIn("enabled", site["detail"])
+
     def test_abstractness_does_not_leak_into_nested_class_bodies(self) -> None:
         source = '''
 import abc
@@ -164,7 +184,7 @@ class Outer:
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
         )
 
-    def test_output_and_site_budgets_refuse_before_payload(self) -> None:
+    def test_output_ast_and_site_budgets_refuse_before_payload(self) -> None:
         path = self.fixture()
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -174,6 +194,10 @@ class Outer:
         self.assertEqual(status, 2)
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("32-byte output limit", stderr.getvalue())
+
+        with mock.patch.object(audit, "MAX_AST_NODES", 1):
+            with self.assertRaisesRegex(audit.AuditError, "1-node AST limit"):
+                audit.build_inventory(path)
 
         with mock.patch.object(audit, "MAX_SITES", 1):
             with self.assertRaisesRegex(audit.AuditError, "1-site limit"):
