@@ -7,7 +7,7 @@ This document defines the operational layer that lets an agent reconstruct curre
 1. **`.beads/issues.jsonl`** is the authoritative task graph after `br sync --flush-only`.
 2. **`scripts/agent_brief.py`** is the bounded, read-only graph parser and situational projection.
 3. **`scripts/agent_next.py`** is the fail-closed claim planner over that projection. It alone decides autonomous leaf eligibility.
-4. **`scripts/generate_agent_brief.py`** renders the broad situational projection as deterministic Markdown.
+4. **`scripts/generate_agent_brief.py`** renders the broad situational projection and the exact leaf plan as deterministic Markdown.
 5. A generated `docs/AGENT_BRIEF.md`, when deliberately committed, is only a cache of exact ledger bytes at one ledger timestamp. It never outranks Beads.
 
 Source authority, semantic authority, and artifact evidence remain separate:
@@ -29,13 +29,13 @@ python3 scripts/agent_next.py --format json --check
 # Require one claimable leaf; exits 3 when the graph is valid but no leaf exists.
 python3 scripts/agent_next.py --require
 
-# Render the broad human brief without touching the worktree.
+# Render the broad human brief plus the same leaf-safe decision.
 python3 scripts/generate_agent_brief.py --stdout
 ```
 
-`agent_next.py` emits either one claimable leaf ID or `none` in its default mode. Exit `1` means the blocking graph or activation state is unsafe, exit `2` means malformed input or invocation, and exit `3` means the graph is valid but currently has no claimable recommendation. Any nonzero planner exit emits no stdout payload, so an automation that correctly treats stdout as a plan can never consume a failed plan.
+`agent_next.py` emits either one claimable leaf ID or `none` in its default mode. Exit `1` means the task graph or activation state is unsafe, exit `2` means malformed input, an invalid bound, or an output-budget refusal, and exit `3` means the graph is valid but currently has no claimable recommendation. Every nonzero planner exit emits no stdout payload, so automation cannot accidentally consume a failed plan.
 
-`agent_brief.py --format next` remains a backward-compatible broad ready-queue projection. It does not inspect live child containment and must not be used as an autonomous claim decision. `agent_next.py` is the claim surface.
+`agent_brief.py --format next` is a legacy broad ready-queue projection. It does not inspect live child containment and is not an autonomous claim surface. New automation must use `agent_next.py`; retaining the legacy spelling is compatibility only, not an endorsement.
 
 Before claiming the recommendation, also verify current `main`, current file reservations, and any coordinating agent messages. A recommendation is a deterministic graph choice, not a lease.
 
@@ -48,7 +48,7 @@ An issue is recommendation-eligible only when all of the following hold:
 - it has no assignee;
 - it is not an epic container;
 - it has no live issue whose `parent-child` edge points to it;
-- the dependency graph has no live blocking cycle or missing blocker target;
+- neither the blocking graph nor the parent-child graph has a live cycle;
 - claiming it does not violate the four-workstream activation cap.
 
 A task can therefore be a container even when its `issue_type` is `task`, `feature`, or `bug`. Live child topology, not only the type label, determines whether it is a leaf.
@@ -65,37 +65,46 @@ Recommendation order is deterministic:
 
 This deliberately values coordination economy and graph-release pressure without allowing those heuristics to override explicit priority.
 
-## Integrity contract
+## Ledger parsing contract
 
-The parser refuses before recommendation on:
+The parser is an untrusted-input boundary. It opens the ledger through a descriptor-bound regular-file check and uses `O_NOFOLLOW` when the host exposes it. It refuses:
 
-- malformed UTF-8 JSONL, blank records, missing final LF, duplicate issue IDs;
+- malformed UTF-8 JSONL, blank records, missing final LF, and duplicate issue IDs;
+- duplicate JSON object keys at any depth;
 - unknown statuses;
-- invalid priorities or required text fields;
-- dependency arrays over their finite budget;
+- invalid priorities, required text fields, or a present-but-invalid `updated_at`;
+- falsey non-array spellings for `dependencies` or `comments`;
+- malformed comment rows or non-string comment text;
+- dependency or comment arrays over their finite per-issue budgets;
 - dependency rows owned by another issue;
 - self-dependencies or duplicate `(target, type)` edges;
-- total ledger, line, issue, or dependency counts over their limits.
+- non-regular ledger files and total ledger, line, issue, dependency, or comment counts over their limits.
 
-The projection reports all missing targets. Missing non-blocking links such as an orphan historical parent link are visible diagnostics but do not disable work. A missing `blocks` target or a live blocking strongly connected component makes the graph non-claimable.
+Explicit `null` remains the canonical empty spelling for optional dependency and comment arrays. Invalid present data is never silently converted to absence.
 
-Cycle analysis is iterative rather than recursive, so a valid deep dependency chain cannot fail merely because it exceeds Python's call-stack limit.
+## Graph-integrity contract
+
+The broad projection reports all missing targets. Missing non-blocking links such as an orphan historical parent link are visible diagnostics but do not disable unrelated work. A missing `blocks` target or live blocking strongly connected component makes the graph non-claimable.
+
+The leaf planner additionally rejects live `parent-child` cycles. Both SCC analyses are iterative rather than recursive, so a valid deep blocking chain or hierarchy cannot fail merely because it exceeds Python's call-stack limit.
+
+The deterministic brief generator consumes the exact planner integrity record. Blocking cycles, containment cycles, missing blockers, or an activation-cap breach are all decided before file publication or stdout rendering.
 
 ## Machine contract
 
-`agent_next.py --format json` emits one canonical compact JSON record with schema `fmn.agent.next`, version `1`. It includes:
+`agent_next.py --format json` emits one canonical compact JSON record with schema `fmn.agent.next`, version `2`. It includes:
 
-- the base graph-integrity and activation records;
+- normalized blocking- and containment-integrity records;
 - the selected leaf and activation effect;
 - live-child containment;
 - direct and immediate-unblock pressure;
 - bounded claimable, container, and assigned-ready queues.
 
-Field order is canonical through sorted-key JSON, output always ends in one LF, and identical input plus `--as-of` produces identical bytes. Integrity, activation-cap, malformed-input, and required-but-empty failures are decided before rendering and produce no stdout bytes.
+Field order is canonical through sorted-key JSON, output always ends in one LF, and the default `as_of` is the newest ledger `updated_at`. Identical ledger bytes therefore produce identical JSON without requiring a wall-clock override. An explicit `--as-of` remains available for fixtures. The rendered payload has a 4 MiB ceiling; an oversized plan returns exit `2` before emitting any stdout bytes.
 
-## Deterministic rendering
+## Deterministic human rendering
 
-The generated broad brief's `as_of` is the newest issue `updated_at`, not wall-clock time. Identical ledger bytes therefore produce identical Markdown.
+The generated brief's `as_of` is also the newest issue `updated_at`, not wall-clock time. Its leaf-safe section is generated from the same planner record as the JSON interface.
 
 ```bash
 # Nonmutating exact output
@@ -110,11 +119,14 @@ python3 scripts/generate_agent_brief.py --check
 
 Publication is fail-closed:
 
-- graph integrity and activation-cap checks run before output;
+- task-graph integrity and activation-cap checks run before output;
+- existing output is read through a descriptor-bound regular-file check;
 - output and temporary symlinks are refused;
 - a pre-existing temporary path is never truncated or followed;
-- the new file is written exclusively, flushed, fsynced, and atomically replaced;
-- malformed input leaves the prior artifact untouched.
+- the new file is created exclusively, flushed, fsynced, and atomically replaced;
+- a failed replace removes only the temporary inode created by that invocation;
+- if that temporary path was substituted, it is preserved and the identity change is reported;
+- malformed input or failed publication leaves the prior artifact untouched.
 
 ## Mutation protocol
 
@@ -133,7 +145,7 @@ Do not reconstruct or replace the large ledger from a truncated API response. If
 
 ## Verification policy
 
-`scripts/check.sh` compiles the parser, planner, and generator; runs all three unit suites; validates the live claim plan; and renders the real ledger through `--stdout`. The same local gate then proceeds into the Rust, Python, WASM, and structural checks.
+`scripts/check.sh` compiles the parser, planner, generator, and all focused regression files; runs the parser, planner, deterministic-output, generator, and publication-I/O suites; validates the live claim plan; and renders the real ledger through `--stdout`. The same local gate then proceeds into the Rust, Python, WASM, and structural checks.
 
 Hosted GitHub Actions is not part of this authority chain. The gate is intentionally runnable on local or owned build hosts, and unavailable hosted capacity is neither a waiver nor a product failure.
 
