@@ -3,9 +3,8 @@
 
 This is a read-only projection of .beads/issues.jsonl. It never edits Beads and
 never becomes a second source of truth. The output is intentionally compact so
-an agent can reconstruct current work, blockers, graph integrity, activation
-pressure, and the best collision-free claim that does not create avoidable
-concurrency.
+an agent can reconstruct current work, blockers, graph integrity, and
+activation pressure. Autonomous claim selection belongs only to agent_next.py.
 """
 
 from __future__ import annotations
@@ -648,7 +647,12 @@ def parse_as_of(value: str | None) -> dt.datetime:
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ledger", type=Path, default=Path(".beads/issues.jsonl"))
-    parser.add_argument("--format", choices=("markdown", "json", "next"), default="markdown")
+    parser.add_argument(
+        "--format",
+        choices=("markdown", "json", "next"),
+        default="markdown",
+        help="render situational Markdown/JSON; legacy 'next' is a fail-closed refusal",
+    )
     parser.add_argument("--as-of", help="ISO-8601 timestamp; defaults to the current UTC time")
     parser.add_argument("--stale-days", type=int, default=2)
     parser.add_argument("--activation-cap", type=int, default=4)
@@ -656,7 +660,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="exit nonzero when governance or dependency integrity is invalid",
+        help="exit nonzero without stdout when governance or dependency integrity is invalid",
     )
     return parser
 
@@ -672,6 +676,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit < 1 or args.limit > 1000:
         print("error: --limit must be between 1 and 1000", file=sys.stderr)
         return 2
+    if args.format == "next":
+        print(
+            "error: agent_brief --format next was removed because the broad projection "
+            "is not leaf-safe; use `python3 scripts/agent_next.py`",
+            file=sys.stderr,
+        )
+        return 2
     try:
         issues = load_issues(args.ledger)
         snapshot = build_snapshot(
@@ -684,27 +695,25 @@ def main(argv: list[str] | None = None) -> int:
     except BriefError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if args.check:
+        failed = False
+        if not snapshot["integrity"]["within_contract"]:
+            print("error: Beads dependency integrity is invalid", file=sys.stderr)
+            failed = True
+        if not snapshot["activation"]["within_cap"]:
+            print(
+                f"error: active workstream cap breached "
+                f"({snapshot['activation']['count']}/{snapshot['activation']['cap']})",
+                file=sys.stderr,
+            )
+            failed = True
+        if failed:
+            return 1
     if args.format == "json":
         print(json.dumps(snapshot, indent=2, sort_keys=True))
-    elif args.format == "next":
-        issue = snapshot["recommendation"]["issue"]
-        print(issue["id"] if issue is not None else "none")
     else:
         print(render_markdown(snapshot), end="")
-    if not args.check:
-        return 0
-    failed = False
-    if not snapshot["integrity"]["within_contract"]:
-        print("error: Beads dependency integrity is invalid", file=sys.stderr)
-        failed = True
-    if not snapshot["activation"]["within_cap"]:
-        print(
-            f"error: active workstream cap breached "
-            f"({snapshot['activation']['count']}/{snapshot['activation']['cap']})",
-            file=sys.stderr,
-        )
-        failed = True
-    return 1 if failed else 0
+    return 0
 
 
 if __name__ == "__main__":
