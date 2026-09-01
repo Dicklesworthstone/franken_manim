@@ -2,13 +2,15 @@
 
 This is a synthesized, agent-facing changelog for the full history of **franken_manim**.
 
-Scope window: project inception on **2026-07-20** through unreleased HEAD **[`0d74a2b`](https://github.com/Dicklesworthstone/franken_manim/commit/0d74a2ba602232915a6d3f05f4d84dde736a22cd)** on **2026-08-19**.
+Scope window: project inception on **2026-07-20** through the verified unreleased implementation checkpoint **[`403c1f4`](https://github.com/Dicklesworthstone/franken_manim/commit/403c1f4c5a772ab228dc0f2c14739b7e8c954f7e)** on **2026-09-01**.
 
-**franken_manim** is a sovereign, deterministic rewrite of 3Blue1Brown's `manim` in pure Rust: analytic Bézier rasterization, native TeX-math (no LaTeX), a `manimlib`-compatible Python portal, and a crash-isolated Studio. Workspace version at HEAD is **`0.4.0`**.
+**franken_manim** is a sovereign, deterministic rewrite of 3Blue1Brown's `manim` in pure Rust: analytic Bézier rasterization, native TeX-math (no LaTeX), a `manimlib`-compatible Python portal, and a crash-isolated Studio. Workspace version at this checkpoint is **`0.4.0`**.
+
+The historical reconstruction below was originally complete through 2026-08-19. The new unreleased section is deliberately narrower: it records only later capabilities directly re-audited in the current implementation tranche, not an unsupported claim that every intervening commit has been reconstructed here.
 
 This document was rebuilt from:
 
-- git history on `main` (833 commits / 832 non-merge; 305 in 2026-07, 527 in 2026-08)
+- git history on `main`
 - annotated git tags `v0.1.0` … `v0.4.0`
 - GitHub Releases (all four tags are **published pre-releases**, not drafts and not "latest stable")
 - Beads tracker in [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/franken_manim/blob/main/.beads/issues.jsonl)
@@ -18,18 +20,48 @@ It is organized by landed capabilities, not raw diff order. Representative commi
 
 ---
 
+## Unreleased — executable front doors and fail-closed agent control plane (2026-08-31 → 2026-09-01)
+
+### Delivered capability
+
+- The shipped `fmn` executable now has a real one-scene batch smoke that renders a native artifact and verifies publication of both machine and human manifests. Robot-mode batch output includes an explicit terminal `batch_job` success record, so agents no longer infer job completion by reconciling unrelated records.
+- `doctor --quiet` is enforced in the central dispatcher rather than by reparsing argv in `main.rs`; embedded callers, the OS front door, human output, robot output, and typed failures now share one policy.
+- The Rust-native snake_case geometry helpers are mechanically prevented from leaking into the Python `manimlib` wildcard namespace. The policy proves the corresponding Reference CamelCase classes remain present in the schema, package wrapper, and clean-wheel smoke.
+- The Beads operational projection advanced to schema v4. It distinguishes claimable leaves from assigned work and epic containers; enforces known statuses, ownership, unique dependency edges, and finite graph budgets; reports missing targets; detects live blocking cycles with a deterministic iterative SCC pass; and suppresses recommendations whenever dependency integrity is invalid.
+- `scripts/generate_agent_brief.py` produces deterministic Markdown using the newest Beads record timestamp, supports exact `--check` and nonmutating `--stdout` modes, publishes atomically without following pre-existing temporary paths, and refuses before publication on activation-cap or dependency-integrity failure.
+- `scripts/check.sh` runs the complete Python control-plane parser/generator tests and renders the real live ledger without mutating repository documentation. These are local repository gates; no GitHub Actions execution is required or claimed.
+
+### Evidence boundary
+
+- Beads remains the sole task authority. The brief is a projection and never edits task state.
+- The current W10 semantic-surface parent remains open because the live tracker contains a newer reality-check that supersedes older completion commentary. This changelog does not convert ledger adjudication into a claim of universal portal implementation.
+- Hardware-specific and release-matrix evidence remains separate from local correctness gates. No hosted GitHub Actions result is claimed in this tranche.
+
+### Representative commits
+
+- [`82d915e`](https://github.com/Dicklesworthstone/franken_manim/commit/82d915ee34285ea7ab2198e76e831ee23bf88250) Smoke a real batch render and manifest publication through the shipped binary.
+- [`0fc2fc7`](https://github.com/Dicklesworthstone/franken_manim/commit/0fc2fc7fd4ec5f7a21820faf471228797b72670e) Enforce the Rust-helper / Reference-class Python boundary.
+- [`40df985`](https://github.com/Dicklesworthstone/franken_manim/commit/40df985fc40d35ea7bdbb80a71608bad16d7d724) Reject vacuous package alias guards.
+- [`38c3eb3`](https://github.com/Dicklesworthstone/franken_manim/commit/38c3eb3af1dbde03c2c5ce390997152e745d7c2d) Gate the live Beads projection locally.
+- [`5ce894f`](https://github.com/Dicklesworthstone/franken_manim/commit/5ce894f888a71d6fae7c82fd685c84d51e1902d3) Fail closed on malformed Beads dependency graphs.
+- [`4629943`](https://github.com/Dicklesworthstone/franken_manim/commit/4629943ccdb0bfe14829dc1f94c8b88dcb0446b1) Make cycle analysis iterative for deep valid graphs.
+- [`55e1186`](https://github.com/Dicklesworthstone/franken_manim/commit/55e11868d5e1355844ef17948e45995e34e25bd9) Refuse publishing briefs from corrupt task graphs.
+- [`403c1f4`](https://github.com/Dicklesworthstone/franken_manim/commit/403c1f4c5a772ab228dc0f2c14739b7e8c954f7e) Prove every publication mode preserves the prior artifact on integrity failure.
+
+---
+
 ## Version Timeline
 
 `Kind` distinguishes a published GitHub Release from a plain git tag. Every tag below also has a GitHub Release, and every Release is marked **prerelease**.
 
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
-| inception [`92eff5ed`](https://github.com/Dicklesworthstone/franken_manim/commit/92eff5ed0dfbb69ea5c8cc582014b47f611074a6) | unreleased HEAD | 2026-07-20 | Comprehensive plan (Rev 4), README, AGENTS, license; 106-issue beads graph. |
+| inception [`92eff5ed`](https://github.com/Dicklesworthstone/franken_manim/commit/92eff5ed0dfbb69ea5c8cc582014b47f611074a6) | inception | 2026-07-20 | Comprehensive plan (Rev 4), README, AGENTS, license; 106-issue beads graph. |
 | [`v0.1.0`](https://github.com/Dicklesworthstone/franken_manim/releases/tag/v0.1.0) | Release (prerelease) | 2026-08-15 | Early native preview. Peel [`ca0e830`](https://github.com/Dicklesworthstone/franken_manim/commit/ca0e83032eedadfe56a6f541a11903fc2c9d6665). Native `fmn` CLI + Studio/runtime; no `fmn-python` wheel. |
 | [`v0.2.0`](https://github.com/Dicklesworthstone/franken_manim/releases/tag/v0.2.0) | Release (prerelease) | 2026-08-16 | Production Python-render preview. Peel [`88b431e`](https://github.com/Dicklesworthstone/franken_manim/commit/88b431e17d8e1cf3c3b09d91b82b6ae06f2f3ba9). Portal PNG sequences through retained Lumen + Reel. |
 | [`v0.3.0`](https://github.com/Dicklesworthstone/franken_manim/releases/tag/v0.3.0) | Release (prerelease) | 2026-08-16 (published 2026-08-17) | Source-unedited final-still preview. Peel [`82c3daa`](https://github.com/Dicklesworthstone/franken_manim/commit/82c3daa84129e31d742e691e3835366b7356d1c4). Eight locked G4a corpus scenes render PNG sequences / atomic final PNGs. |
 | [`v0.4.0`](https://github.com/Dicklesworthstone/franken_manim/releases/tag/v0.4.0) | Release (prerelease) | 2026-08-18 | Native Studio/Metal and threaded browser preview. Peel [`d1e4274`](https://github.com/Dicklesworthstone/franken_manim/commit/d1e4274aa32ba5c59934029db397bbbeb9bfa18c). Checksummed native installer; threaded WASM frame pool. |
-| current HEAD [`0d74a2b`](https://github.com/Dicklesworthstone/franken_manim/commit/0d74a2ba602232915a6d3f05f4d84dde736a22cd) | unreleased HEAD | 2026-08-19 | Post-`v0.4.0` Python portal parity (ImageMobject, Arc lineage, pickle renderer state) + janitor docs-reorg. |
+| implementation checkpoint [`403c1f4`](https://github.com/Dicklesworthstone/franken_manim/commit/403c1f4c5a772ab228dc0f2c14739b7e8c954f7e) | unreleased | 2026-09-01 | Executable CLI smoke, Python helper-boundary ratchet, and fail-closed local Beads control plane. |
 
 ---
 
@@ -235,4 +267,6 @@ After the tag, the Python portal keeps closing G4a composition gaps, and the rep
 - The Python portal (`fmn-python`) is a separately installed host-CPython wheel; the native `fmn` / Studio binary is CPython-free. That split landed in `fm-7wm.3` before `v0.1.0`.
 - Certified/`--reproducible` bit-identity, video containers, and the full SIMD-tier artifact matrix are still outside the tagged previews (called out in the v0.1.0 Release notes).
 - Master plan lives at [`docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md`](https://github.com/Dicklesworthstone/franken_manim/blob/main/docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md) after the 2026-08-19 janitor. README links were updated in the same commit; do not look for the plan at repo root.
-- Tracker of record is [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/franken_manim/blob/main/.beads/issues.jsonl). There is no `origin/master` on this remote.
+- Tracker of record is [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/franken_manim/blob/main/.beads/issues.jsonl). Generate a nonmutating operational view with `python3 scripts/generate_agent_brief.py --stdout`; use `python3 scripts/agent_brief.py --format next --check` before claiming work.
+- The mandatory verification surface is `scripts/check.sh` on controlled local or owned build hosts. Hosted GitHub Actions availability is not a correctness premise.
+- There is no `origin/master` on this remote.
