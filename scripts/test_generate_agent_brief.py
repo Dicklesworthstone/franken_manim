@@ -19,6 +19,7 @@ def record(
     priority: int = 2,
     issue_type: str = "task",
     assignee: str | None = None,
+    parent: str | None = None,
 ) -> dict:
     row = {
         "id": issue_id,
@@ -31,6 +32,10 @@ def record(
     }
     if assignee is not None:
         row["assignee"] = assignee
+    if parent is not None:
+        row["dependencies"] = [
+            {"issue_id": issue_id, "depends_on_id": parent, "type": "parent-child"}
+        ]
     return row
 
 
@@ -73,8 +78,43 @@ class GenerateAgentBriefTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["as_of"], "2026-08-31T08:15:00Z")
         self.assertIn("As of `2026-08-31T08:15:00Z`", document)
+        self.assertIn("## Leaf-safe claim plan", document)
+        self.assertIn("## Broad dependency-ready queue", document)
         self.assertTrue(document.endswith("\n"))
         self.assertFalse(document.endswith("\n\n"))
+
+    def test_human_recommendation_uses_the_exact_leaf_planner(self) -> None:
+        ledger, _output = self.fixture()
+        self.write_ledger(
+            ledger,
+            [
+                record(
+                    "fm-parent",
+                    "W10: non-epic container",
+                    "open",
+                    updated_at="2026-08-31T08:00:00Z",
+                    priority=0,
+                ),
+                record(
+                    "fm-child",
+                    "W10: true leaf",
+                    "open",
+                    updated_at="2026-08-31T08:15:00Z",
+                    priority=2,
+                    parent="fm-parent",
+                ),
+            ],
+        )
+        document, snapshot = generator.build_document(
+            ledger, stale_days=2, activation_cap=4, limit=20
+        )
+        plan = snapshot["claim_plan"]
+        self.assertEqual(plan["recommendation"]["issue"]["id"], "fm-child")
+        self.assertEqual(plan["ready_containers"][0]["id"], "fm-parent")
+        self.assertEqual(document.count("Recommended next: **P2 `fm-child`** [W10]"), 2)
+        self.assertNotIn("Recommended next: **P0 `fm-parent`**", document)
+        self.assertIn("**1** ready containers (**1** non-epic)", document)
+        self.assertIn("broader queue below is situational context only", document)
 
     def test_identical_ledger_bytes_produce_identical_document_bytes(self) -> None:
         ledger, _output = self.fixture()
