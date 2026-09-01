@@ -221,7 +221,7 @@ def missing_dependency_targets(
 
 
 def blocking_cycles(issues: dict[str, Issue]) -> tuple[tuple[str, ...], ...]:
-    """Return deterministic strongly connected components in the live block graph."""
+    """Return deterministic live blocking SCCs without Python recursion."""
 
     live_ids = {issue.id for issue in issues.values() if issue.status in OPEN_STATUSES}
     adjacency = {
@@ -234,41 +234,52 @@ def blocking_cycles(issues: dict[str, Issue]) -> tuple[tuple[str, ...], ...]:
         )
         for issue_id in live_ids
     }
-    index = 0
-    indices: dict[str, int] = {}
-    lowlinks: dict[str, int] = {}
-    stack: list[str] = []
-    on_stack: set[str] = set()
-    components: list[tuple[str, ...]] = []
+    reverse_lists = {issue_id: [] for issue_id in live_ids}
+    for issue_id, targets in adjacency.items():
+        for target in targets:
+            reverse_lists[target].append(issue_id)
+    reverse = {
+        issue_id: tuple(sorted(targets))
+        for issue_id, targets in reverse_lists.items()
+    }
 
-    def visit(issue_id: str) -> None:
-        nonlocal index
-        indices[issue_id] = index
-        lowlinks[issue_id] = index
-        index += 1
-        stack.append(issue_id)
-        on_stack.add(issue_id)
-        for target in adjacency[issue_id]:
-            if target not in indices:
-                visit(target)
-                lowlinks[issue_id] = min(lowlinks[issue_id], lowlinks[target])
-            elif target in on_stack:
-                lowlinks[issue_id] = min(lowlinks[issue_id], indices[target])
-        if lowlinks[issue_id] != indices[issue_id]:
-            return
+    visited: set[str] = set()
+    finish_order: list[str] = []
+    for root in sorted(live_ids):
+        if root in visited:
+            continue
+        visited.add(root)
+        stack: list[tuple[str, int]] = [(root, 0)]
+        while stack:
+            issue_id, next_index = stack[-1]
+            targets = adjacency[issue_id]
+            if next_index < len(targets):
+                target = targets[next_index]
+                stack[-1] = (issue_id, next_index + 1)
+                if target not in visited:
+                    visited.add(target)
+                    stack.append((target, 0))
+            else:
+                stack.pop()
+                finish_order.append(issue_id)
+
+    assigned: set[str] = set()
+    components: list[tuple[str, ...]] = []
+    for root in reversed(finish_order):
+        if root in assigned:
+            continue
+        assigned.add(root)
         component: list[str] = []
-        while True:
-            member = stack.pop()
-            on_stack.remove(member)
-            component.append(member)
-            if member == issue_id:
-                break
+        stack = [root]
+        while stack:
+            issue_id = stack.pop()
+            component.append(issue_id)
+            for target in reversed(reverse[issue_id]):
+                if target not in assigned:
+                    assigned.add(target)
+                    stack.append(target)
         if len(component) > 1:
             components.append(tuple(sorted(component)))
-
-    for issue_id in sorted(live_ids):
-        if issue_id not in indices:
-            visit(issue_id)
     return tuple(sorted(components))
 
 
