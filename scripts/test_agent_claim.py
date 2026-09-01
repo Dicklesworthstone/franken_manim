@@ -159,7 +159,7 @@ class AgentClaimTests(unittest.TestCase):
         )
         self.assertEqual(runner.calls, [])
         self.assertEqual(receipt["schema"], "fmn.agent.claim")
-        self.assertEqual(receipt["version"], 3)
+        self.assertEqual(receipt["version"], 4)
         self.assertEqual(receipt["mode"], "dry-run")
         self.assertFalse(receipt["claimed"])
         self.assertEqual(receipt["issue_id"], "fm-next")
@@ -208,9 +208,142 @@ class AgentClaimTests(unittest.TestCase):
         self.assertRegex(receipt["before_graph_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(receipt["after_graph_sha256"], r"^[0-9a-f]{64}$")
         self.assertNotEqual(receipt["before_graph_sha256"], receipt["after_graph_sha256"])
+        self.assertEqual(receipt["claim_delta"]["changed_issue_ids"], ["fm-next"])
+        self.assertEqual(receipt["claim_delta"]["status_before"], "open")
+        self.assertEqual(receipt["claim_delta"]["status_after"], "in_progress")
+        self.assertFalse(receipt["claim_delta"]["transition_comment_appended"])
         row = fixture.rows()[0]
         self.assertEqual(row["status"], "in_progress")
         self.assertEqual(row["assignee"], "agent@example.com")
+
+    def test_postcondition_rejects_unrelated_and_membership_graph_drift(self) -> None:
+        fixture = self.fixture([record("fm-next"), record("fm-other", priority=2)])
+        base = FakeRunner(fixture)
+
+        def unrelated_runner(
+            argv: tuple[str, ...],
+            cwd: Path,
+        ) -> agent_claim.CommandResult:
+            result = base(argv, cwd)
+            if argv[1] == "sync":
+                rows = fixture.rows()
+                rows[1]["title"] = "W10: concurrently changed"
+                rows[1]["updated_at"] = "2026-09-01T00:00:02Z"
+                fixture.write(rows)
+            return result
+
+        with self.assertRaises(agent_claim.ClaimError) as raised:
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=unrelated_runner,
+            )
+        self.assertEqual(raised.exception.exit_code, 5)
+        self.assertIn("unrelated graph drift", str(raised.exception))
+
+        fixture = self.fixture([record("fm-next")])
+        base = FakeRunner(fixture)
+
+        def membership_runner(
+            argv: tuple[str, ...],
+            cwd: Path,
+        ) -> agent_claim.CommandResult:
+            result = base(argv, cwd)
+            if argv[1] == "sync":
+                rows = fixture.rows()
+                rows.append(record("fm-concurrent", priority=3))
+                fixture.write(rows)
+            return result
+
+        with self.assertRaises(agent_claim.ClaimError) as raised:
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=membership_runner,
+            )
+        self.assertEqual(raised.exception.exit_code, 5)
+        self.assertIn("issue-membership drift", str(raised.exception))
+
+    def test_postcondition_rejects_target_field_and_comment_drift(self) -> None:
+        fixture = self.fixture([record("fm-next")])
+        base = FakeRunner(fixture)
+
+        def target_runner(
+            argv: tuple[str, ...],
+            cwd: Path,
+        ) -> agent_claim.CommandResult:
+            result = base(argv, cwd)
+            if argv[1] == "sync":
+                rows = fixture.rows()
+                rows[0]["priority"] = 3
+                fixture.write(rows)
+            return result
+
+        with self.assertRaises(agent_claim.ClaimError) as raised:
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=target_runner,
+            )
+        self.assertEqual(raised.exception.exit_code, 5)
+        self.assertIn("non-claim fields", str(raised.exception))
+
+        fixture = self.fixture([record("fm-next")])
+        base = FakeRunner(fixture)
+
+        def wrong_comment_runner(
+            argv: tuple[str, ...],
+            cwd: Path,
+        ) -> agent_claim.CommandResult:
+            result = base(argv, cwd)
+            if argv[1] == "update":
+                rows = fixture.rows()
+                rows[0]["comments"] = [{"text": "different comment"}]
+                fixture.write(rows)
+            return result
+
+        with self.assertRaises(agent_claim.ClaimError) as raised:
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                transition_comment="expected comment",
+                runner=wrong_comment_runner,
+            )
+        self.assertEqual(raised.exception.exit_code, 5)
+        self.assertIn("exact appended transition comment", str(raised.exception))
+
+    def test_exact_transition_comment_is_the_only_optional_claim_delta(self) -> None:
+        fixture = self.fixture([record("fm-next")])
+        base = FakeRunner(fixture)
+
+        def comment_runner(
+            argv: tuple[str, ...],
+            cwd: Path,
+        ) -> agent_claim.CommandResult:
+            result = base(argv, cwd)
+            if argv[1] == "update":
+                rows = fixture.rows()
+                rows[0]["comments"] = [{"text": "coordinated claim"}]
+                fixture.write(rows)
+            return result
+
+        receipt = agent_claim.execute_claim(
+            fixture.root,
+            fixture.token(),
+            "agent@example.com",
+            transition_comment="coordinated claim",
+            runner=comment_runner,
+        )
+        self.assertTrue(receipt["claimed"])
+        self.assertTrue(receipt["claim_delta"]["transition_comment_appended"])
+        self.assertEqual(
+            receipt["claim_delta"]["allowed_fields"],
+            ["assignee", "status", "updated_at", "comments"],
+        )
 
     def test_stale_token_and_issue_mismatch_never_invoke_br(self) -> None:
         fixture = self.fixture([record("fm-next"), record("fm-other", priority=2)])
