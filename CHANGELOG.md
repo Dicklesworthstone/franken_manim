@@ -9,11 +9,61 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open or blocked;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased source checkpoint covered here is **[`60ec415`](https://github.com/Dicklesworthstone/franken_manim/commit/60ec415bb86685bebe5bad6e3a156d2df8dfd186)** on 2026-09-01 UTC. Later documentation-only commits truth up that implementation state.
+The current unreleased source checkpoint covered here is **[`204eabf`](https://github.com/Dicklesworthstone/franken_manim/commit/204eabfdada854ad55d14de9c466fda652f1bd2f)** on 2026-09-01 UTC. Later documentation-only commits truth up that implementation state.
 
 ---
 
-## Unreleased — executable boundaries and agent control plane
+## Unreleased — strict deterministic task control plane
+
+### Added
+
+- Strict JSONL ingestion for the Beads projection:
+  - duplicate JSON object keys are rejected at every nesting depth;
+  - explicit `null` remains the empty optional-array spelling, while falsey non-arrays are rejected;
+  - malformed comments and non-string comment text fail closed rather than disappearing;
+  - a present invalid `updated_at` no longer falls back to `created_at`;
+  - per-issue comment limits join the existing ledger, line, issue, and dependency budgets;
+  - ledger reads are bound to an opened regular-file descriptor and use no-follow opening where supported.
+- Parent-child integrity is now part of every publication path. The human brief refuses live containment cycles rather than accepting a blocking-clean but structurally impossible task hierarchy.
+- Dedicated publication-I/O regressions prove:
+  - failed replacement removes only the temporary inode created by that attempt;
+  - a substituted temporary path is preserved and reported;
+  - check mode refuses output symlinks without reading the target.
+- Dedicated planner-output regressions prove ledger-derived timestamps, byte-identical default JSON, a stable epoch for an empty ledger, and refusal before payload emission when the output budget is exceeded.
+
+### Changed
+
+- `fmn.agent.next` is now schema version `2`.
+- The planner's default `as_of` is the newest issue `updated_at`, so identical ledger bytes produce identical JSON without an explicit clock argument.
+- JSON, Markdown, and ID plan outputs share a 4 MiB ceiling. An oversized plan exits `2` with no stdout payload.
+- Deterministic human rendering and machine triage now consume the same normalized integrity record: blocking cycles, containment cycles, missing blockers, and activation-cap failures are decided before output.
+- Existing generated briefs are read through a descriptor-bound regular-file check rather than a separate stat/read path.
+- The mandatory local/owned-host gate now includes strict-parser, deterministic-output, and publication-I/O suites before entering Cargo, WASM, and structural checks.
+
+### Fixed
+
+- A two-node or larger `parent-child` cycle can no longer be rendered as an apparently valid operational brief.
+- Duplicate keys such as two conflicting dependency `type` values can no longer be silently resolved by Python's last-key-wins JSON behavior.
+- An interrupted atomic publish no longer strands the generator's own fixed temporary file and permanently blocks later retries.
+- Claim-plan JSON no longer changes merely because two agents ran it at different wall-clock times.
+- Oversized machine plans no longer risk partial stdout publication.
+
+### Representative commits
+
+- [`9839a38`](https://github.com/Dicklesworthstone/franken_manim/commit/9839a3862dfca41083ad8f0a5b680edfd3cd17d9) — refuse containment cycles before brief publication.
+- [`9bf1d20`](https://github.com/Dicklesworthstone/franken_manim/commit/9bf1d20f94f3bd8d3cf252badfe57bb215236f2f) — make Beads JSONL parsing strictly fail closed.
+- [`e0364a0`](https://github.com/Dicklesworthstone/franken_manim/commit/e0364a0bd25b207481964274ce2e38d6eba269be) — lock duplicate-key, malformed-array/comment, timestamp, and no-follow regressions.
+- [`dcad037`](https://github.com/Dicklesworthstone/franken_manim/commit/dcad037a2bf52e010efa97b0cd1bb838e3f63cf4) — make deterministic brief I/O descriptor-bound and recoverable.
+- [`f6c23f6`](https://github.com/Dicklesworthstone/franken_manim/commit/f6c23f65fa3f16d524589f1f4dba4b7ec654dcd0) — make claim-plan output deterministic and bounded.
+- [`204eabf`](https://github.com/Dicklesworthstone/franken_manim/commit/204eabfdada854ad55d14de9c466fda652f1bd2f) — gate the complete deterministic-output tranche locally.
+
+### Evidence boundary
+
+Focused parser and publication probes passed in the editing environment. That environment did not contain an exact repository checkout, so this changelog does not claim that the complete Cargo, Clippy, rustdoc, WASM, wheel, browser, or `scripts/check.sh` gates ran against `204eabf`.
+
+---
+
+## Unreleased — executable boundaries and leaf-aware planning
 
 ### Added
 
@@ -22,26 +72,21 @@ The current unreleased source checkpoint covered here is **[`60ec415`](https://g
   - Assigned work, epic containers, and topology-derived containers are never autonomous recommendations.
   - Work in an already-active workstream wins before activating another stream.
   - Equal-priority leaves are ordered by immediate-unblock pressure, direct blocker pressure, scope, recency, and lexical ID.
-  - Canonical compact JSON is published as `fmn.agent.next` version 1.
-  - Exit 1 means unsafe graph or activation state, exit 2 malformed input, and exit 3 a valid graph with no claimable leaf.
-- Six focused claim-planner regressions covering non-epic parents, closed-child release, assigned/epic exclusion, active-workstream preference, unblock pressure, canonical JSON, and fail-closed exits.
 - A dedicated process-output publisher for the shipped `fmn` binary.
   - stdout and stderr are attempted independently.
   - `BrokenPipe` is treated as normal downstream closure and preserves the command's typed exit code.
   - a stdout failure cannot suppress a typed stderr diagnostic.
   - non-broken output failures remain internal failures with deterministic precedence.
-  - five deterministic writer tests cover the full policy.
-- The mandatory local/owned-host gate now compiles and tests the graph parser, claim planner, and deterministic brief generator, validates the live claim plan, and then proceeds into the Rust, Python, WASM, and crate-DAG gates.
 
 ### Changed
 
-- The agent control plane is now an explicit tower of linked abstractions:
+- The agent control plane became an explicit tower of linked abstractions:
   1. Beads is task authority.
   2. `agent_brief.py` owns bounded parsing, graph integrity, and broad situational state.
   3. `agent_next.py` owns leaf-safe claim selection.
   4. `generate_agent_brief.py` owns deterministic human rendering.
-- Hosted GitHub Actions is no longer described as part of the correctness authority chain. The repository gate is designed for local or owned build hosts.
-- Implementation-status documentation now corrects an earlier overstatement: human `doctor --quiet` suppression still occurs in the binary entry point; it is not yet centralized for embedded `run_with_capabilities` callers.
+- Hosted GitHub Actions is no longer part of the correctness authority chain. The repository gate is designed for local or owned build hosts.
+- Implementation-status documentation corrected an earlier overstatement: human `doctor --quiet` suppression still occurs in the binary entry point; it is not yet centralized for embedded `run_with_capabilities` callers.
 
 ### Fixed
 
@@ -137,8 +182,9 @@ A 100% reviewed ledger is not interpreted as universal implementation. `fm-5wq.4
 
 ## Current evidence boundaries
 
-The following are **not** inferred from a local green source tree:
+The following are **not** inferred from a focused green source probe:
 
+- the complete local repository gate;
 - cross-platform release artifacts;
 - real aarch64 topology evidence;
 - platform-native SIMD and certified bit-identity matrices;
