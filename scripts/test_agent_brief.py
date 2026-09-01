@@ -41,6 +41,10 @@ def record(
     return row
 
 
+def dependency(issue_id: str, target: str, kind: str = "blocks") -> dict:
+    return {"issue_id": issue_id, "depends_on_id": target, "type": kind}
+
+
 class AgentBriefTests(unittest.TestCase):
     def write_ledger(self, rows: list[dict], *, final_lf: bool = True) -> Path:
         directory = tempfile.TemporaryDirectory()
@@ -75,12 +79,18 @@ class AgentBriefTests(unittest.TestCase):
             record("fm-blocked", "W11: blocked", "open", blockers=("fm-missing",)),
         ]
         snapshot = self.snapshot(rows)
-        self.assertEqual(snapshot["schema_version"], 3)
+        self.assertEqual(snapshot["schema_version"], 4)
         self.assertEqual(snapshot["activation"]["active_workstreams"], ["W10"])
         self.assertEqual([row["id"] for row in snapshot["ready"]], ["fm-ready"])
         self.assertEqual([row["id"] for row in snapshot["blocked"]], ["fm-blocked"])
         self.assertEqual(snapshot["blocked"][0]["blockers"], ["fm-missing"])
         self.assertEqual([row["id"] for row in snapshot["stale_claims"]], ["fm-active"])
+        self.assertFalse(snapshot["integrity"]["within_contract"])
+        self.assertEqual(
+            snapshot["integrity"]["missing_blockers"],
+            [{"issue_id": "fm-blocked", "depends_on_id": "fm-missing"}],
+        )
+        self.assertIsNone(snapshot["recommendation"]["issue"])
 
     def test_recommendation_prefers_an_active_workstream_over_lower_priority_activation(self) -> None:
         snapshot = self.snapshot(
@@ -145,28 +155,73 @@ class AgentBriefTests(unittest.TestCase):
         self.assertEqual(snapshot["counts"]["unscoped_active"], 1)
         self.assertEqual(snapshot["unowned_active"][0]["id"], "fm-x")
 
-    def test_parent_child_edges_do_not_block_readiness(self) -> None:
+    def test_parent_child_edges_do_not_block_readiness_or_integrity(self) -> None:
         row = record("fm-child", "W10: child", "open")
-        row["dependencies"] = [
-            {"issue_id": "fm-child", "depends_on_id": "fm-parent", "type": "parent-child"}
-        ]
+        row["dependencies"] = [dependency("fm-child", "fm-parent", "parent-child")]
         issues = agent_brief.load_issues(self.write_ledger([row]))
         self.assertEqual(agent_brief.unresolved_blockers(issues["fm-child"], issues), ())
+        snapshot = agent_brief.build_snapshot(
+            issues,
+            as_of=dt.datetime(2026, 8, 31, tzinfo=dt.timezone.utc),
+            stale_days=2,
+            activation_cap=4,
+            limit=20,
+        )
+        self.assertTrue(snapshot["integrity"]["within_contract"])
+        self.assertEqual(snapshot["counts"]["missing_links"], 1)
+        self.assertEqual(snapshot["recommendation"]["issue"]["id"], "fm-child")
 
-    def test_dependency_owner_and_self_reference_fail_closed(self) -> None:
+    def test_dependency_owner_self_reference_and_duplicate_edges_fail_closed(self) -> None:
         wrong_owner = record("fm-child", "W10: child", "open")
-        wrong_owner["dependencies"] = [
-            {"issue_id": "fm-other", "depends_on_id": "fm-parent", "type": "blocks"}
-        ]
+        wrong_owner["dependencies"] = [dependency("fm-other", "fm-parent")]
         with self.assertRaisesRegex(agent_brief.BriefError, "owned by 'fm-other'"):
             agent_brief.load_issues(self.write_ledger([wrong_owner]))
 
         self_edge = record("fm-self", "W10: self", "open")
-        self_edge["dependencies"] = [
-            {"issue_id": "fm-self", "depends_on_id": "fm-self", "type": "blocks"}
-        ]
+        self_edge["dependencies"] = [dependency("fm-self", "fm-self")]
         with self.assertRaisesRegex(agent_brief.BriefError, "self-referential"):
             agent_brief.load_issues(self.write_ledger([self_edge]))
+
+        duplicate = record("fm-dup", "W10: duplicate", "open")
+        duplicate["dependencies"] = [
+            dependency("fm-dup", "fm-parent"),
+            dependency("fm-dup", "fm-parent"),
+        ]
+        with self.assertRaisesRegex(agent_brief.BriefError, "duplicate dependency"):
+            agent_brief.load_issues(self.write_ledger([duplicate]))
+
+    def test_unknown_status_is_rejected_before_projection(self) -> None:
+        unknown = record("fm-x", "W10: x", "paused")
+        with self.assertRaisesRegex(agent_brief.BriefError, "unknown status 'paused'"):
+            agent_brief.load_issues(self.write_ledger([unknown]))
+
+    def test_blocking_cycle_is_deterministic_and_suppresses_recommendation(self) -> None:
+        first = record("fm-a", "W10: first", "open", priority=1)
+        second = record("fm-b", "W10: second", "open", priority=1)
+        first["dependencies"] = [dependency("fm-a", "fm-b")]
+        second["dependencies"] = [dependency("fm-b", "fm-a")]
+        snapshot = self.snapshot([second, first])
+        self.assertEqual(snapshot["integrity"]["blocking_cycles"], [["fm-a", "fm-b"]])
+        self.assertFalse(snapshot["integrity"]["within_contract"])
+        self.assertIsNone(snapshot["recommendation"]["issue"])
+        self.assertIn("integrity failures", snapshot["recommendation"]["reason"])
+
+        path = self.write_ledger([second, first])
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = agent_brief.main(
+                [
+                    "--ledger",
+                    str(path),
+                    "--as-of",
+                    "2026-08-31T00:00:00Z",
+                    "--format",
+                    "json",
+                    "--check",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("dependency integrity is invalid", stderr.getvalue())
 
     def test_activation_cap_is_fail_closed(self) -> None:
         rows = [
@@ -228,6 +283,7 @@ class AgentBriefTests(unittest.TestCase):
         )
         rendered = agent_brief.render_markdown(snapshot)
         self.assertIn("Read-only projection of `.beads/issues.jsonl`", rendered)
+        self.assertIn("Ledger integrity: **clean**", rendered)
         self.assertIn("**1/4** active", rendered)
         self.assertIn("Recommended next", rendered)
         self.assertIn("Claimable ready queue", rendered)
