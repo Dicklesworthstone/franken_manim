@@ -28,6 +28,13 @@ python3 scripts/test_generate_agent_brief_io.py
 python3 scripts/agent_next.py --format json --check >/dev/null
 python3 scripts/generate_agent_brief.py --stdout >/dev/null
 
+echo "==> Python portal refusal inventory"
+python3 -m py_compile \
+    scripts/audit_portal_refusals.py \
+    scripts/test_audit_portal_refusals.py
+python3 scripts/test_audit_portal_refusals.py
+python3 scripts/audit_portal_refusals.py --check >/dev/null
+
 echo "==> Python geometry helper alias policy"
 python3 scripts/check_python_helper_aliases.py
 python3 scripts/test_python_helper_aliases.py
