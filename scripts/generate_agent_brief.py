@@ -4,9 +4,9 @@
 The Beads JSONL ledger remains authoritative. This command derives
 ``docs/AGENT_BRIEF.md`` from that ledger using the newest issue timestamp as
 ``as_of``; wall-clock time never enters the artifact, so identical ledger bytes
-produce identical Markdown. The broad situational projection and the
-machine-readable leaf planner are computed from the same parsed issue graph,
-so the human recommendation cannot disagree with autonomous triage.
+produce identical Markdown. Broad situational context and the leaf planner are
+computed from the same parsed graph, but only the leaf section is a claim
+contract.
 """
 
 from __future__ import annotations
@@ -87,18 +87,8 @@ def build_document(
         activation_cap=activation_cap,
         limit=limit,
     )
-    snapshot["recommendation"] = plan["recommendation"]
     snapshot["claim_plan"] = plan
     broad = agent_brief.render_markdown(snapshot).rstrip("\n")
-    broad = broad.replace(
-        "## Claimable ready queue",
-        "## Broad dependency-ready queue",
-        1,
-    ).replace(
-        "No claimable ready leaf issues.",
-        "No broad dependency-ready open issues.",
-        1,
-    )
     marker = "\n## Active claims\n"
     if marker not in broad:
         raise GenerateError("agent brief renderer omitted the Active claims section")
