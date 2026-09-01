@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,8 +17,17 @@ class AgentClaimSubprocessTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         return Path(directory.name)
 
-    def run_python(self, source: str) -> agent_claim.CommandResult:
-        return agent_claim.run_command((sys.executable, "-c", source), self.cwd())
+    def run_python(
+        self,
+        source: str,
+        *,
+        timeout_seconds: float = agent_claim.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    ) -> agent_claim.CommandResult:
+        return agent_claim.run_command(
+            (sys.executable, "-c", source),
+            self.cwd(),
+            timeout_seconds=timeout_seconds,
+        )
 
     def test_exact_limit_is_retained_for_both_streams(self) -> None:
         with mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64):
@@ -70,6 +81,63 @@ class AgentClaimSubprocessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7)
         self.assertEqual(result.stdout, b"")
         self.assertEqual(result.stderr, b"bounded failure")
+
+    def test_timeout_terminates_a_stalled_child_and_returns_promptly(self) -> None:
+        started = time.monotonic()
+        with self.assertRaises(agent_claim.ClaimError) as raised:
+            self.run_python("import time; time.sleep(60)", timeout_seconds=0.1)
+        elapsed = time.monotonic() - started
+        self.assertEqual(raised.exception.exit_code, 5)
+        self.assertIn("timed out after 0.1 seconds", str(raised.exception))
+        self.assertLess(elapsed, 3.0)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group assertion")
+    def test_timeout_terminates_descendants_in_the_command_session(self) -> None:
+        marker = self.cwd() / "descendant-survived"
+        grandchild = (
+            "import pathlib,time; "
+            "time.sleep(0.8); "
+            f"pathlib.Path({str(marker)!r}).write_text('alive')"
+        )
+        parent = (
+            "import subprocess,sys,time; "
+            f"subprocess.Popen([sys.executable, '-c', {grandchild!r}]); "
+            "time.sleep(60)"
+        )
+        with self.assertRaisesRegex(agent_claim.ClaimError, "timed out"):
+            self.run_python(parent, timeout_seconds=0.1)
+        time.sleep(1.0)
+        self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX inherited-pipe assertion")
+    def test_parent_exit_with_a_live_descendant_cannot_hold_readers_forever(self) -> None:
+        source = (
+            "import subprocess,sys; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])"
+        )
+        with mock.patch.object(agent_claim, "COMMAND_READER_JOIN_SECONDS", 0.1):
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                agent_claim.ClaimError,
+                "output pipes remained open",
+            ):
+                self.run_python(source, timeout_seconds=5.0)
+            self.assertLess(time.monotonic() - started, 3.0)
+
+    def test_timeout_contract_rejects_nonfinite_nonpositive_and_excessive_values(self) -> None:
+        for value, message in (
+            (0.0, "must be positive"),
+            (-1.0, "must be positive"),
+            (float("nan"), "must be finite"),
+            (float("inf"), "must be finite"),
+            (
+                agent_claim.MAX_COMMAND_TIMEOUT_SECONDS + 1.0,
+                "exceeds the",
+            ),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(agent_claim.ClaimError, message):
+                    self.run_python("pass", timeout_seconds=value)
 
 
 if __name__ == "__main__":
