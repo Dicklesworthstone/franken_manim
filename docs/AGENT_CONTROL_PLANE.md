@@ -12,12 +12,12 @@ This document defines the operational layer that lets an agent reconstruct curre
 6. **`scripts/generate_agent_brief.py`** renders the broad situational projection and exact leaf plan as deterministic Markdown.
 7. A generated `docs/AGENT_BRIEF.md`, when deliberately committed, is only a cache of exact ledger bytes at one ledger timestamp. It never outranks Beads.
 
-Source authority, semantic authority, and artifact evidence remain separate:
+Source authority, semantic authority, task authority, and evidence remain separate:
 
-- source code says what is implemented;
+- source code says what behavior exists;
 - API schema/overlay says what compatibility status is claimed;
 - Beads says what work is open or blocked;
-- gates and retained artifacts say what has actually been verified.
+- gates and retained artifacts say what was actually exercised.
 
 ## Safe session start and claim
 
@@ -41,6 +41,7 @@ python3 scripts/agent_claim.py \
     --expect-token "$token" \
     --issue "$issue" \
     --assignee "$FMN_AGENT_ID" \
+    --command-timeout-seconds 60 \
     --dry-run
 
 # Revalidate, mutate, flush, and verify under one shared local lock.
@@ -48,13 +49,14 @@ python3 scripts/agent_claim.py \
     --expect-token "$token" \
     --issue "$issue" \
     --assignee "$FMN_AGENT_ID" \
+    --command-timeout-seconds 60 \
     --transition-comment "Claimed after graph, reservation, and HEAD checks"
 
 # Render the broad human brief plus the same leaf-safe decision.
 python3 scripts/generate_agent_brief.py --stdout
 ```
 
-`agent_next.py` emits either one claimable leaf ID or `none` in its default mode. Exit `1` means the task graph or activation state is unsafe, exit `2` means malformed input, an invalid bound, or an output-budget refusal, and exit `3` means the graph is valid but currently has no claimable recommendation. Every nonzero planner exit emits no stdout payload, so automation cannot accidentally consume a failed plan.
+`agent_next.py` emits either one claimable leaf ID or `none` in its default mode. Exit `1` means the task graph or activation state is unsafe, exit `2` means malformed input, an invalid bound, or an output-budget refusal, and exit `3` means the graph is valid but currently has no claimable recommendation. Every nonzero planner exit emits no stdout payload.
 
 `agent_brief.py --format next` has been removed because the broad ready queue is not leaf-safe. It exits `2` before reading the ledger and directs callers to `agent_next.py`. There is no compatibility claim surface competing with the planner.
 
@@ -84,8 +86,6 @@ Recommendation order is deterministic:
 6. most recently updated;
 7. lexical issue ID.
 
-This deliberately values coordination economy and graph-release pressure without allowing those heuristics to override explicit priority.
-
 ## Ledger parsing contract
 
 The parser is an untrusted-input boundary. It opens the ledger through a descriptor-bound regular-file check and uses `O_NOFOLLOW` when the host exposes it. It refuses:
@@ -112,21 +112,15 @@ The broad projection reports all missing targets. Missing non-blocking links suc
 
 The leaf planner additionally rejects live `parent-child` cycles. Both SCC analyses are iterative rather than recursive, so a valid deep blocking chain or hierarchy cannot fail merely because it exceeds Python's call-stack limit.
 
-The deterministic brief generator and claim guard consume the exact planner integrity record. Blocking cycles, containment cycles, missing blockers, or an activation-cap breach are all decided before publication, token output, or mutation.
+The deterministic brief generator and claim guard consume the exact planner integrity record. Blocking cycles, containment cycles, missing blockers, or an activation-cap breach are decided before publication, token output, or mutation.
 
 ## Machine contracts
 
 ### Leaf plan
 
-`agent_next.py --format json` emits one canonical compact JSON record with schema `fmn.agent.next`, version `2`. It includes:
+`agent_next.py --format json` emits one canonical compact JSON record with schema `fmn.agent.next`, version `2`. It contains normalized integrity, activation state, the selected leaf, live-child containment, unblock pressure, and bounded claimable/container/assigned queues.
 
-- normalized blocking- and containment-integrity records;
-- the selected leaf and activation effect;
-- live-child containment;
-- direct and immediate-unblock pressure;
-- bounded claimable, container, and assigned-ready queues.
-
-Field order is canonical through sorted-key JSON, output always ends in one LF, and the default `as_of` is the newest ledger `updated_at`. Identical ledger bytes therefore produce identical JSON without requiring a wall-clock override. An explicit `--as-of` remains available for fixtures. The rendered payload has a 4 MiB ceiling; an oversized plan returns exit `2` before emitting any stdout bytes.
+Field order is canonical through sorted-key JSON, output ends in one LF, and the default `as_of` is the newest ledger `updated_at`. Identical ledger bytes therefore produce identical JSON without a wall-clock override. The payload has a 4 MiB ceiling; an oversized plan exits `2` before stdout.
 
 ### Claim token
 
@@ -140,9 +134,11 @@ The claim digest covers the canonical graph, complete plan, policy values, and p
 
 ### Claim receipt
 
-`agent_claim.py` emits schema `fmn.agent.claim`, version `1`, only after a dry-run validation or a verified mutation. The receipt includes the guarded recommendation, exact token, pre-claim digests, policy/schema contract, exact no-shell `br` argv, and post-claim graph/status evidence when mutation occurred. Receipt output is canonical compact JSON with one LF and a 1 MiB ceiling.
+`agent_claim.py` emits schema `fmn.agent.claim`, version `2`, only after a dry-run validation or a verified mutation. The receipt includes the guarded recommendation, exact token, pre-claim digests, planner policy, schema contracts, exact no-shell `br` argv, executor policy, and post-claim graph/status evidence when mutation occurred.
 
-Executor exit `5` means no verified receipt. It does not guarantee no mutation: `br update` may have changed native state before a later flush or verification failure. Inspect tracker state before retrying.
+The executor policy records the requested per-command timeout and retained-byte ceiling. The CLI production path enforces that policy; injected runners exist only as a focused test seam. Receipt output is canonical compact JSON with one LF and a 1 MiB ceiling.
+
+Executor exit `5` means no verified receipt. It does not guarantee no mutation: `br update` may have changed native state before a timeout, flush failure, or postcondition failure. Inspect tracker state before retrying and never reuse the old token blindly.
 
 ## Shared claim-lock contract
 
@@ -156,31 +152,34 @@ Both marker files are bounded UTF-8 regular files and are opened without followi
 
 The lock serializes only cooperating executor processes in the same clone. It does not cover another clone, direct manual `br`, an agent that ignores the executor, Agent Mail, file reservations, or unrelated changes to `main`. It is intentionally not described as a distributed lease.
 
+## Command lifetime and output contract
+
+Each production `br update` and `br sync --flush-only` invocation has an independent wall-clock timeout. The default is 60 seconds; callers may select a finite positive value up to 3,600 seconds with `--command-timeout-seconds`.
+
+The child starts in its own POSIX session or Windows process group. On timeout:
+
+- POSIX sends `SIGKILL` to the complete process group and waits under a finite cleanup bound;
+- Windows attempts no-shell `taskkill.exe /T /F`, then directly kills the child if necessary;
+- stdout and stderr readers are daemonized and joined under finite bounds;
+- no success receipt is emitted.
+
+If the direct child exits but a descendant keeps an inherited output pipe open, the executor forces cleanup and returns exit `5` instead of holding the repository claim lock indefinitely.
+
+stdout and stderr are drained concurrently. Each stream retains at most `MAX_COMMAND_OUTPUT_BYTES + 1` bytes and discards later bytes while continuing to drain, so the retained-memory bound is eager and a full pipe cannot deadlock the child. The timeout bounds lifetime, but there is not yet a separate total-produced-byte ceiling; a child may generate discarded bytes until exit or timeout.
+
+The timeout marks the command deadline, not a promise that the caller returns at that exact instant: bounded process-tree and reader cleanup may extend the failure path slightly.
+
 ## Deterministic human rendering
 
-The generated brief's `as_of` is also the newest issue `updated_at`, not wall-clock time. Its leaf-safe section is generated from the same planner record as the JSON interface.
+The generated brief's `as_of` is the newest issue `updated_at`, not wall-clock time. Its leaf-safe section is generated from the same planner record as the JSON interface.
 
 ```bash
-# Nonmutating exact output
 python3 scripts/generate_agent_brief.py --stdout
-
-# Publish docs/AGENT_BRIEF.md atomically
 python3 scripts/generate_agent_brief.py
-
-# Verify a deliberately committed projection
 python3 scripts/generate_agent_brief.py --check
 ```
 
-Publication is fail-closed:
-
-- task-graph integrity and activation-cap checks run before output;
-- existing output is read through a descriptor-bound regular-file check;
-- output and temporary symlinks are refused;
-- a pre-existing temporary path is never truncated or followed;
-- the new file is created exclusively, flushed, fsynced, and atomically replaced;
-- a failed replace removes only the temporary inode created by that invocation;
-- if that temporary path was substituted, it is preserved and the identity change is reported;
-- malformed input or failed publication leaves the prior artifact untouched.
+Publication is fail-closed: integrity and activation checks precede output; existing and temporary symlinks are refused; exclusive temporary creation, flush, fsync, and atomic replacement are used; failed publication leaves the prior artifact untouched.
 
 ## Mutation protocol
 
@@ -191,7 +190,8 @@ The broad projection, planner, guard, and generator never mutate task state. Use
 python3 scripts/agent_claim.py \
     --expect-token "$token" \
     --issue "$issue" \
-    --assignee "$FMN_AGENT_ID"
+    --assignee "$FMN_AGENT_ID" \
+    --command-timeout-seconds 60
 
 git add .beads/
 git commit -m "chore(beads): claim $issue"
@@ -205,11 +205,11 @@ git add .beads/
 git commit -m "chore(beads): ..."
 ```
 
-Do not reconstruct or replace the large ledger from a truncated API response. If the complete current bytes are not available through `br` or an exact local checkout, leave the tracker unchanged and state that limitation explicitly.
+Do not reconstruct or replace the large ledger from a truncated API response. If complete current bytes are unavailable through `br` or an exact local checkout, leave the tracker unchanged and state that limitation explicitly.
 
 ## Verification policy
 
-`scripts/check.sh` compiles the parser, planner, guard, executor, generator, and focused regression files; runs the strict-parser, strict-JSON, planner, claim-token, claim-executor, deterministic-output, generator, and publication-I/O suites; validates the live plan and token; exercises the live executor in `--dry-run`; and renders the real ledger through `--stdout`. The same local gate then proceeds into the Rust, Python, WASM, and structural checks.
+`scripts/check.sh` compiles the parser, planner, guard, executor, generator, and focused regression files; runs the strict-parser, strict-JSON, planner, claim-token, claim-executor, real-process lifetime/output, deterministic-output, generator, and publication-I/O suites; validates the live plan and token; exercises the live executor in `--dry-run`; and renders the real ledger through `--stdout`. The same local gate then proceeds into Rust, Python, WASM, and structural checks.
 
 The verification path never invokes a mutating executor call. It uses a synthetic assignee only in dry-run receipt evidence.
 
