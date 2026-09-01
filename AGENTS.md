@@ -169,9 +169,9 @@ If any check fails, fix root causes before handing off.
 
 ### The `cargo test` gate (green-bar requirement)
 
-`cargo test` is a **hard gate**: it MUST exit `0` before any change is handed off or a bead is closed. The convenience wrapper `scripts/check.sh` runs `cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in order and stops on the first failure. When CI is added, wire `scripts/check.sh` as the CI test step rather than duplicating the commands.
+`cargo test` is a **hard gate**: it MUST exit `0` before any change is handed off or a bead is closed. The convenience wrapper `scripts/check.sh` runs the complete local/owned-host policy in order and stops on the first failure. Hosted GitHub Actions availability is not part of the correctness contract; never substitute an unavailable hosted run for the exact local gate, and never treat hosted quota exhaustion as a product failure.
 
-Beyond the bare gate, **every Gauntlet plane in §16 and every performance gate in §17.2 is a permanent CI gate** — self-goldens are bit-locked and blocking; the engine-equivalence suite blocks engine changes; PG-5 determinism runs per commit; a Look Gallery regression blocks the gate that introduced it. A release may bypass a gate only with a public, expiring waiver.
+Beyond the bare gate, **every Gauntlet plane in §16 and every performance gate in §17.2 is a permanent release gate** — self-goldens are bit-locked and blocking; the engine-equivalence suite blocks engine changes; PG-5 determinism runs per commit; a Look Gallery regression blocks the gate that introduced it. A release may bypass a gate only with a public, expiring waiver.
 
 ---
 
@@ -194,14 +194,22 @@ This is a design pillar with its own budget, not a QA appendix.
 
 CLI robot mode must be: stable versioned schema, deterministic where possible, explicit exit codes, line-oriented NDJSON, easy to pipe. Do not mix human decoration with machine output in robot mode. `fmn doctor` reports capabilities (ffmpeg fingerprint + hardware encoders, fonts, cache, the derived ExecutionPlan). Every bug report is a deterministic replay: one-command repro bundles (scene + input closure) and the sidecar provenance manifest are first-class DX artifacts (§18).
 
+The repository's own operational interfaces follow the same rule. `.beads/issues.jsonl` is authority, `agent_brief.py` is the bounded situational projection, `agent_next.py` is the sole autonomous claim planner, and `generate_agent_brief.py` is the deterministic human rendering. Do not infer a claim from a raw issue list, from `bv` rank alone, or from the legacy broad `agent_brief.py --format next` spelling.
+
 ---
 
 ## Program Governance (R9) — read before claiming a bead
 
 The governance machinery lives in [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md); the two rules you touch every session:
 
-- **The activation check (GOVERNANCE.md §1).** At most **4 workstreams active** (≥1 bead `in_progress`) at once; G0 counts as one. Before claiming a bead in a workstream that has nothing in progress: `br list --status=in_progress`, count distinct workstreams by title prefix, and if the cap is reached, work an already-active workstream instead. Breaching governance halts new activation, never in-flight work.
+- **The activation and integrity check (GOVERNANCE.md §1).** At most **4 workstreams active** (≥1 bead `in_progress`) at once; G0 counts as one. Before any claim, run the strict whole-graph validation and canonical leaf planner shown below. Exit `1` means graph/activation state is unsafe, exit `2` means malformed input, and exit `3` means the graph is valid but no claimable leaf exists. Never activate work from a failed or empty plan.
 - **The handoff checklist (GOVERNANCE.md §4).** The checkable form of "Landing the Plane" below — a handoff violating it is not a handoff.
+
+```bash
+python3 scripts/agent_brief.py --format json --check >/dev/null
+python3 scripts/agent_next.py --format json --check
+python3 scripts/agent_next.py --require
+```
 
 Amendments to the plan's decision log (D-01…D-24), OQ resolutions, and policy rulings under standing rules land as **ADRs** (`docs/adr/NNNN-*.md`, template + worked examples in `docs/adr/`), with the plan trued up in the same commit. Upstream-bound primitives ride [`UPSTREAM_LEDGER.md`](UPSTREAM_LEDGER.md) under the §2.9 ritual (GOVERNANCE.md §6).
 
@@ -214,7 +222,8 @@ The checkable version of this list is `docs/GOVERNANCE.md` §4. Before finishing
 2. Run quality gates (if code changed) — tests, clippy, fmt, `ubs`.
 3. Update issue status — close finished work, update in-progress.
 4. `br sync --flush-only` to export beads to JSONL, then `git add .beads/`.
-5. Hand off — summarize what changed, gates run + results, remaining risks/gaps, concrete next steps.
+5. Re-run `python3 scripts/agent_next.py --format json --check` after the tracker mutation so the handoff names current graph state rather than the pre-change plan.
+6. Hand off — summarize what changed, exact source commit, gates actually run + results, remaining risks/gaps, and the next concrete claimable leaf if one exists.
 
 ---
 
@@ -235,7 +244,13 @@ A mail-like layer for agents to coordinate via MCP tools/resources: identities, 
 This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`). Issues live in `.beads/` and are tracked in git. **`br` is non-invasive — it NEVER runs git.** After `br sync --flush-only`, manually `git add .beads/ && git commit`.
 
 ```bash
-br ready                 # issues ready to work (no blockers)
+# Validate authority and obtain the only autonomous claim recommendation.
+python3 scripts/agent_brief.py --format json --check >/dev/null
+python3 scripts/agent_next.py --format json --check
+python3 scripts/agent_next.py --require
+
+# Inspect and mutate the selected Bead through br.
+br ready                 # broad dependency-ready context, not the claim oracle
 br list --status=open
 br show <id>             # full detail with dependencies
 br create --title="..." --type=task|bug|feature|epic --priority=2   # 0=critical..4=backlog (NUMBERS)
@@ -245,13 +260,15 @@ br dep add <issue> <depends-on>
 br sync --flush-only     # export to JSONL (NO git ops)
 ```
 
+A task with live `parent-child` descendants is a container even when its type is `task`, `bug`, or `feature`; `br ready` alone does not make it claimable. `agent_next.py` also enforces blocking integrity, containment integrity, assignment, the activation cap, and deterministic tie-breaking. Any nonzero planner exit emits no stdout plan.
+
 Conventions: use the bead ID (e.g. `fm-123`) as the Agent-Mail `thread_id` and prefix subjects with `[fm-123]`; put the issue ID in the file-reservation `reason`; include `fm-###` in commit messages. Map beads to workstreams (W1 Substrate & Contracts … W11 Distribution) and gates (G0–G5) from §20.
 
 ---
 
-## bv — Graph-Aware Triage
+## bv — Graph-Aware Analysis
 
-`bv` computes PageRank/betweenness/critical-path/cycles over `.beads/beads.jsonl`. **Use ONLY `--robot-*` flags — bare `bv` launches a blocking TUI.** Start with `bv --robot-triage` (counts + top picks + quick wins + blockers). `bv --robot-plan` for parallel tracks; `bv --robot-insights` for full metrics (check `.Cycles` — must be empty).
+`bv` computes PageRank/betweenness/critical-path/cycles over `.beads/beads.jsonl`. **Use ONLY `--robot-*` flags — bare `bv` launches a blocking TUI.** Use it after `agent_next.py` when you need explanatory graph metrics, parallel-track planning, or cycle diagnostics. It is not a lease and must not override assignment, containment, blocking-integrity, or activation-cap refusal from the canonical planner. Useful commands: `bv --robot-triage`, `bv --robot-plan`, and `bv --robot-insights` (check `.Cycles`).
 
 ---
 
