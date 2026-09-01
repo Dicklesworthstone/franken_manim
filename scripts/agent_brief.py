@@ -3,8 +3,9 @@
 
 This is a read-only projection of .beads/issues.jsonl. It never edits Beads and
 never becomes a second source of truth. The output is intentionally compact so
-an agent can reconstruct current work, blockers, activation pressure, and the
-best collision-free claim that does not create avoidable concurrency.
+an agent can reconstruct current work, blockers, graph integrity, activation
+pressure, and the best collision-free claim that does not create avoidable
+concurrency.
 """
 
 from __future__ import annotations
@@ -21,8 +22,11 @@ from typing import Any, Iterable
 MAX_LEDGER_BYTES = 32 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024
 MAX_ISSUES = 100_000
-SNAPSHOT_SCHEMA_VERSION = 3
+MAX_DEPENDENCIES_PER_ISSUE = 10_000
+MAX_DEPENDENCIES = 500_000
+SNAPSHOT_SCHEMA_VERSION = 4
 ACTIVE_STATUS = "in_progress"
+KNOWN_STATUSES = frozenset({"open", ACTIVE_STATUS, "closed", "tombstone"})
 OPEN_STATUSES = frozenset({"open", ACTIVE_STATUS})
 CLOSED_STATUSES = frozenset({"closed", "tombstone"})
 NON_CLAIMABLE_TYPES = frozenset({"epic"})
@@ -87,6 +91,11 @@ def parse_issue(raw: Any, *, line: int) -> Issue:
     assert issue_id is not None
     title = _text(raw.get("title"), field="title", issue_id=issue_id)
     status = _text(raw.get("status"), field="status", issue_id=issue_id)
+    if status not in KNOWN_STATUSES:
+        raise BriefError(
+            f"{issue_id}: unknown status {status!r}; expected one of "
+            + ", ".join(sorted(KNOWN_STATUSES))
+        )
     issue_type = _text(raw.get("issue_type"), field="issue_type", issue_id=issue_id)
     priority = raw.get("priority")
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
@@ -95,8 +104,16 @@ def parse_issue(raw: Any, *, line: int) -> Issue:
     updated_raw = raw.get("updated_at") or raw.get("created_at")
     updated_at = parse_timestamp(updated_raw, field="updated_at", issue_id=issue_id)
 
+    dependencies_raw = raw.get("dependencies") or []
+    if not isinstance(dependencies_raw, list):
+        raise BriefError(f"{issue_id}: dependencies must be an array")
+    if len(dependencies_raw) > MAX_DEPENDENCIES_PER_ISSUE:
+        raise BriefError(
+            f"{issue_id}: dependencies exceed the {MAX_DEPENDENCIES_PER_ISSUE}-edge limit"
+        )
     dependencies: list[Dependency] = []
-    for index, item in enumerate(raw.get("dependencies") or ()):
+    seen_dependencies: set[tuple[str, str]] = set()
+    for index, item in enumerate(dependencies_raw):
         if not isinstance(item, dict):
             raise BriefError(f"{issue_id}: dependency {index} must be an object")
         owner = _text(item.get("issue_id"), field="dependency.issue_id", issue_id=issue_id)
@@ -108,6 +125,12 @@ def parse_issue(raw: Any, *, line: int) -> Issue:
             )
         if target == issue_id:
             raise BriefError(f"{issue_id}: dependency {index} is self-referential")
+        edge = (target or "", kind or "")
+        if edge in seen_dependencies:
+            raise BriefError(
+                f"{issue_id}: duplicate dependency on {target!r} with type {kind!r}"
+            )
+        seen_dependencies.add(edge)
         dependencies.append(Dependency(owner or "", target or "", kind or ""))
 
     comments_raw = raw.get("comments") or []
@@ -135,6 +158,7 @@ def load_issues(path: Path) -> dict[str, Issue]:
     if size > MAX_LEDGER_BYTES:
         raise BriefError(f"{path} exceeds the {MAX_LEDGER_BYTES}-byte ledger limit")
     issues: dict[str, Issue] = {}
+    dependency_count = 0
     try:
         with path.open("rb") as handle:
             for line_number, raw_line in enumerate(handle, 1):
@@ -154,8 +178,13 @@ def load_issues(path: Path) -> dict[str, Issue]:
                 if issue.id in issues:
                     raise BriefError(f"{path}:{line_number}: duplicate issue id {issue.id}")
                 issues[issue.id] = issue
+                dependency_count += len(issue.dependencies)
                 if len(issues) > MAX_ISSUES:
                     raise BriefError(f"{path} exceeds the {MAX_ISSUES}-issue limit")
+                if dependency_count > MAX_DEPENDENCIES:
+                    raise BriefError(
+                        f"{path} exceeds the {MAX_DEPENDENCIES}-dependency limit"
+                    )
     except OSError as exc:
         raise BriefError(f"cannot read {path}: {exc}") from exc
     return issues
@@ -176,6 +205,71 @@ def unresolved_blockers(issue: Issue, issues: dict[str, Issue]) -> tuple[str, ..
         if blocker is None or blocker.status not in CLOSED_STATUSES:
             unresolved.append(blocker_id)
     return tuple(sorted(set(unresolved)))
+
+
+def missing_dependency_targets(
+    issues: dict[str, Issue],
+) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        sorted(
+            (issue.id, dependency.depends_on_id, dependency.kind)
+            for issue in issues.values()
+            for dependency in issue.dependencies
+            if dependency.depends_on_id not in issues
+        )
+    )
+
+
+def blocking_cycles(issues: dict[str, Issue]) -> tuple[tuple[str, ...], ...]:
+    """Return deterministic strongly connected components in the live block graph."""
+
+    live_ids = {issue.id for issue in issues.values() if issue.status in OPEN_STATUSES}
+    adjacency = {
+        issue_id: tuple(
+            sorted(
+                target
+                for target in blocking_dependencies(issues[issue_id])
+                if target in live_ids
+            )
+        )
+        for issue_id in live_ids
+    }
+    index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[tuple[str, ...]] = []
+
+    def visit(issue_id: str) -> None:
+        nonlocal index
+        indices[issue_id] = index
+        lowlinks[issue_id] = index
+        index += 1
+        stack.append(issue_id)
+        on_stack.add(issue_id)
+        for target in adjacency[issue_id]:
+            if target not in indices:
+                visit(target)
+                lowlinks[issue_id] = min(lowlinks[issue_id], lowlinks[target])
+            elif target in on_stack:
+                lowlinks[issue_id] = min(lowlinks[issue_id], indices[target])
+        if lowlinks[issue_id] != indices[issue_id]:
+            return
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == issue_id:
+                break
+        if len(component) > 1:
+            components.append(tuple(sorted(component)))
+
+    for issue_id in sorted(live_ids):
+        if issue_id not in indices:
+            visit(issue_id)
+    return tuple(sorted(components))
 
 
 def issue_sort_key(issue: Issue) -> tuple[int, int, float, str]:
@@ -270,9 +364,19 @@ def build_snapshot(
     ]
     unowned = [issue for issue in active if issue.assignee is None]
     unscoped = [issue for issue in active if issue.workstream == "UNSCOPED"]
-    recommendation, recommendation_reason = select_recommendation(
-        ready, active_workstream_set, activation_cap
+    missing_targets = missing_dependency_targets(issues)
+    missing_blockers = tuple(
+        (owner, target) for owner, target, kind in missing_targets if kind == "blocks"
     )
+    cycles = blocking_cycles(issues)
+    integrity_ok = not missing_blockers and not cycles
+    if integrity_ok:
+        recommendation, recommendation_reason = select_recommendation(
+            ready, active_workstream_set, activation_cap
+        )
+    else:
+        recommendation = None
+        recommendation_reason = "ledger integrity failures must be repaired before claiming work"
 
     def row(issue: Issue) -> dict[str, Any]:
         blockers = unresolved_blockers(issue, issues)
@@ -298,6 +402,19 @@ def build_snapshot(
     return {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "as_of": as_of.isoformat().replace("+00:00", "Z"),
+        "integrity": {
+            "within_contract": integrity_ok,
+            "blocking_cycles": [list(component) for component in cycles],
+            "missing_blockers": [
+                {"issue_id": owner, "depends_on_id": target}
+                for owner, target in missing_blockers
+            ],
+            "missing_links": [
+                {"issue_id": owner, "depends_on_id": target, "type": kind}
+                for owner, target, kind in missing_targets
+                if kind != "blocks"
+            ],
+        },
         "activation": {
             "cap": activation_cap,
             "active_workstreams": active_workstreams,
@@ -314,6 +431,9 @@ def build_snapshot(
             "assigned_ready": len(assigned_ready),
             "container_ready": len(container_ready),
             "blocked": len(blocked),
+            "blocking_cycles": len(cycles),
+            "missing_blockers": len(missing_blockers),
+            "missing_links": len(missing_targets) - len(missing_blockers),
             "stale_claims": len(stale),
             "unowned_active": len(unowned),
             "unscoped_active": len(unscoped),
@@ -338,9 +458,11 @@ def build_snapshot(
 
 
 def render_markdown(snapshot: dict[str, Any]) -> str:
+    integrity = snapshot["integrity"]
     activation = snapshot["activation"]
     counts = snapshot["counts"]
     recommendation = snapshot["recommendation"]
+    integrity_label = "clean" if integrity["within_contract"] else "FAILED"
     lines = [
         "# FrankenManim agent brief",
         "",
@@ -348,6 +470,12 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
         "",
         "## Control plane",
         "",
+        (
+            f"- Ledger integrity: **{integrity_label}**; "
+            f"**{counts['blocking_cycles']}** blocking cycles, "
+            f"**{counts['missing_blockers']}** missing blockers, "
+            f"**{counts['missing_links']}** missing non-blocking links."
+        ),
         (
             f"- Workstreams: **{activation['count']}/{activation['cap']}** active "
             f"({'within cap' if activation['within_cap'] else 'CAP BREACHED'}): "
@@ -388,6 +516,25 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
                 f" ({row['issue_type']}){owner}{blockers}: {row['title']}"
             )
 
+    lines.extend(["", "## Integrity failures", ""])
+    if integrity["within_contract"] and not integrity["missing_links"]:
+        lines.append("No dependency-integrity failures or orphan links.")
+    else:
+        for component in integrity["blocking_cycles"]:
+            lines.append(
+                "- Blocking cycle: " + " → ".join(f"`{issue_id}`" for issue_id in component)
+            )
+        for edge in integrity["missing_blockers"]:
+            lines.append(
+                f"- Missing blocker: `{edge['issue_id']}` depends on absent "
+                f"`{edge['depends_on_id']}`."
+            )
+        for edge in integrity["missing_links"]:
+            lines.append(
+                f"- Orphan {edge['type']} link: `{edge['issue_id']}` references absent "
+                f"`{edge['depends_on_id']}`."
+            )
+
     section("Active claims", snapshot["active"], "No active claims.")
     section("Claimable ready queue", snapshot["ready"], "No claimable ready leaf issues.")
     section(
@@ -411,10 +558,11 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
             "",
             "1. Refresh this brief immediately before claiming work.",
             "2. Treat Beads as authoritative; this projection never edits status.",
-            "3. Never claim an assigned issue or an epic container from this projection.",
-            "4. Prefer the recommendation only after rechecking reservations and current HEAD.",
-            "5. Do not activate a fifth workstream; an unscoped recommendation needs a governance check.",
-            "6. Re-run after every claim, dependency change, close, or handoff.",
+            "3. Repair blocking cycles or missing blocker targets before any new claim.",
+            "4. Never claim an assigned issue or an epic container from this projection.",
+            "5. Prefer the recommendation only after rechecking reservations and current HEAD.",
+            "6. Do not activate a fifth workstream; an unscoped recommendation needs a governance check.",
+            "7. Re-run after every claim, dependency change, close, or handoff.",
             "",
         ]
     )
@@ -438,7 +586,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="exit nonzero when the activation cap is breached or the ledger is malformed",
+        help="exit nonzero when governance or dependency integrity is invalid",
     )
     return parser
 
@@ -473,14 +621,20 @@ def main(argv: list[str] | None = None) -> int:
         print(issue["id"] if issue is not None else "none")
     else:
         print(render_markdown(snapshot), end="")
-    if args.check and not snapshot["activation"]["within_cap"]:
+    if not args.check:
+        return 0
+    failed = False
+    if not snapshot["integrity"]["within_contract"]:
+        print("error: Beads dependency integrity is invalid", file=sys.stderr)
+        failed = True
+    if not snapshot["activation"]["within_cap"]:
         print(
             f"error: active workstream cap breached "
             f"({snapshot['activation']['count']}/{snapshot['activation']['cap']})",
             file=sys.stderr,
         )
-        return 1
-    return 0
+        failed = True
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
