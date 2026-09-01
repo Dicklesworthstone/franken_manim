@@ -9,7 +9,61 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open or blocked;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased substantive source checkpoint covered here is **[`5629a41`](https://github.com/Dicklesworthstone/franken_manim/commit/5629a41349d1fb0f4574ab8b8473348becd6a312)** on 2026-09-01 UTC. Later documentation commits truth up that implementation state.
+The current unreleased substantive source checkpoint covered here is **[`95187b9`](https://github.com/Dicklesworthstone/franken_manim/commit/95187b950fdb078ffaea71d48008b5defeb678ca)** on 2026-09-01 UTC. Later documentation commits truth up that implementation state.
+
+---
+
+## Unreleased — guarded claim execution and strict ledger grammar
+
+### Added
+
+- `scripts/agent_claim.py`, the mutation companion to the version-2 claim guard.
+  - It acquires a persistent advisory lock in Git's shared common directory.
+  - It re-reads the ledger and rebuilds the complete graph/policy/schema guard while holding that lock.
+  - It invokes `br update` and `br sync --flush-only` through exact argv without a shell.
+  - It re-reads the exported JSONL and requires the selected row to be `in_progress` with the requested assignee before emitting a success receipt.
+  - `--dry-run` performs the guarded read and publishes the exact intended argv without invoking `br`.
+- Canonical version-1 claim receipts record the issue, assignee, guard token, pre-claim graph and claim digests, policy/schema contract, recommendation evidence, exact command vectors, and post-claim graph/status evidence.
+- `docs/AGENT_CLAIM_EXECUTOR.md` specifies the workflow, transaction shape, receipt, exit codes, partial-failure semantics, and concurrency boundary.
+- `scripts/test_agent_claim.py` covers success, stale/mismatched tokens, update and flush failures, missing mutation, no-work/integrity exits, output bounds, no-stdout failures, normal Git directories, linked worktrees, and lock contention.
+- `scripts/test_agent_brief_strict_json.py` covers strict decoding of all non-finite spellings, nested ignored data, quoted spellings, CLI no-projection failure, and claim-graph grammar versioning.
+
+### Changed
+
+- The claim lock is stored in Git's shared `commondir`, not a linked worktree's private Git directory. The primary checkout and all linked worktrees therefore contend on the same inode.
+- `.git` and `commondir` markers are read through bounded regular-file descriptors with no-follow opening where supported; malformed, oversized, non-UTF-8, symlinked, or non-directory targets fail closed.
+- The canonical claim-graph grammar advanced to version `2`.
+- `scripts/check.sh` now:
+  - compiles and runs the guarded-executor and strict-JSON suites;
+  - issues and revalidates a live-ledger token;
+  - invokes `agent_claim.py --dry-run` against the exact live recommendation when one exists;
+  - never mutates Beads from the mandatory verification path.
+
+### Fixed
+
+- The remaining manual interval between successful token validation and `br update` is no longer the canonical workflow.
+- A successful `br` process exit can no longer be reported as a verified claim unless the JSONL flush and parsed-ledger postcondition also succeed.
+- Linked worktrees can no longer acquire independent claim locks for the same repository.
+- Python's non-standard JSON constants `NaN`, `Infinity`, and `-Infinity` are rejected at decode time even when they occur only in ignored extension fields.
+- A token issued under the earlier permissive claim-graph grammar cannot revalidate under the strict grammar merely because the visible issue rows produce the same recommendation.
+
+### Representative commits
+
+- [`23dec4b`](https://github.com/Dicklesworthstone/franken_manim/commit/23dec4baa9a677703f31106f9fc0542733a68bf7) — add the guarded Beads claim executor.
+- [`2e7a80b`](https://github.com/Dicklesworthstone/franken_manim/commit/2e7a80ba2020276213a8aad524624e7fe468e207) — lock executor success and failure semantics.
+- [`6169519`](https://github.com/Dicklesworthstone/franken_manim/commit/6169519af2bf586f19effeda10f4c2e71b39ebaa) — exercise live-ledger guarded dry-run in the mandatory gate.
+- [`4546c8f`](https://github.com/Dicklesworthstone/franken_manim/commit/4546c8f1631a6c67bc9d03a892972608bad1a0e1) — reject non-finite Beads JSON constants.
+- [`bc09262`](https://github.com/Dicklesworthstone/franken_manim/commit/bc09262de628b3ea7fbebd1a9f8793fa7517f37c) — version the strict claim-graph grammar.
+- [`f0ba176`](https://github.com/Dicklesworthstone/franken_manim/commit/f0ba17638cabc4f70fd575fcd5f0713d717f58c1) — add strict-JSON regressions.
+- [`776096d`](https://github.com/Dicklesworthstone/franken_manim/commit/776096dec32904365cffb2cca953e0a3b296a6fd) — make the strict grammar part of the repository gate.
+- [`6f1584d`](https://github.com/Dicklesworthstone/franken_manim/commit/6f1584dbc903d2920a9133e32d500daade279c36) — move claim serialization to Git's shared common directory.
+- [`95187b9`](https://github.com/Dicklesworthstone/franken_manim/commit/95187b950fdb078ffaea71d48008b5defeb678ca) — prove sibling linked worktrees contend on one lock.
+
+### Evidence boundary
+
+The original executor tranche passed a ten-case interface-compatible local harness before publication. The editing environment did not contain an exact full checkout, so the later strict-JSON and shared-worktree changes, complete Python suites, Cargo/Clippy/rustdoc/WASM axes, and repository-wide `scripts/check.sh` are not claimed as locally executed at `95187b9`. Hosted CI runs were queued or superseded during the incremental commit sequence and are not treated as correctness authority.
+
+The executor was not used to mutate the live Beads ledger from this environment because no tracker-native `br` execution capability was available. `.beads/issues.jsonl` was deliberately left untouched rather than reconstructed or hand-edited through truncated connector output.
 
 ---
 
@@ -123,10 +177,11 @@ Focused parser and publication probes passed in the editing environment. That en
 
 - The agent control plane became an explicit tower of linked abstractions:
   1. Beads is task authority.
-  2. `agent_brief.py` owns bounded parsing, graph integrity, and broad situational state.
+  2. `agent_brief.py` owns bounded strict parsing, graph integrity, and broad situational state.
   3. `agent_next.py` owns leaf-safe claim selection.
   4. `agent_claim_guard.py` owns graph-and-policy-bound pre-mutation revalidation.
-  5. `generate_agent_brief.py` owns deterministic human rendering.
+  5. `agent_claim.py` owns the shared-lock claim mutation and receipt.
+  6. `generate_agent_brief.py` owns deterministic human rendering.
 - Hosted GitHub Actions is no longer part of the correctness authority chain. The repository gate is designed for local or owned build hosts.
 - Implementation-status documentation corrected an earlier overstatement: human `doctor --quiet` suppression still occurs in the binary entry point; it is not yet centralized for embedded `run_with_capabilities` callers.
 
@@ -240,8 +295,8 @@ Hosted GitHub Actions availability is not a correctness dependency. The authorit
 ## Agent notes
 
 - Start with `docs/IMPLEMENTATION_STATUS.md` for present-tense evidence.
-- Use `scripts/agent_claim_guard.py --require` to issue a claim token, then re-run it with `--expect-token` immediately before `br update`.
+- Use `scripts/agent_claim_guard.py --require` to issue a token, perform external coordination checks, then use `scripts/agent_claim.py` for the guarded mutation.
 - Treat `agent_brief.py` as broad situational context only; it has no autonomous claim output.
-- Treat Beads as authoritative and mutate it only through `br` followed by `br sync --flush-only`.
+- Treat Beads as authoritative and mutate it only through `br`; the executor performs the claim update and `br sync --flush-only`, but the resulting `.beads/` export still needs an explicit commit.
 - Never replace `.beads/issues.jsonl` from truncated connector output.
 - Do not turn “reviewed,” “compiled,” “imported,” or “historically green” into a stronger implementation or release claim.
