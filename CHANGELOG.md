@@ -9,7 +9,7 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open or blocked;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased substantive source checkpoint covered here is **[`95187b9`](https://github.com/Dicklesworthstone/franken_manim/commit/95187b950fdb078ffaea71d48008b5defeb678ca)** on 2026-09-01 UTC. Later documentation commits truth up that implementation state.
+The current unreleased substantive source checkpoint covered here is **[`f96c3eb`](https://github.com/Dicklesworthstone/franken_manim/commit/f96c3eb12bdbafa7822e989d1a39702df28215a2)** on 2026-09-01 UTC. Later documentation commits truth up that implementation state.
 
 ---
 
@@ -24,17 +24,19 @@ The current unreleased substantive source checkpoint covered here is **[`95187b9
   - It re-reads the exported JSONL and requires the selected row to be `in_progress` with the requested assignee before emitting a success receipt.
   - `--dry-run` performs the guarded read and publishes the exact intended argv without invoking `br`.
 - Canonical version-1 claim receipts record the issue, assignee, guard token, pre-claim graph and claim digests, policy/schema contract, recommendation evidence, exact command vectors, and post-claim graph/status evidence.
-- `docs/AGENT_CLAIM_EXECUTOR.md` specifies the workflow, transaction shape, receipt, exit codes, partial-failure semantics, and concurrency boundary.
+- `docs/AGENT_CLAIM_EXECUTOR.md` specifies the workflow, transaction shape, receipt, exit codes, partial-failure semantics, concurrency boundary, and child-process output policy.
 - `scripts/test_agent_claim.py` covers success, stale/mismatched tokens, update and flush failures, missing mutation, no-work/integrity exits, output bounds, no-stdout failures, normal Git directories, linked worktrees, and lock contention.
+- `scripts/test_agent_claim_subprocess.py` uses real child processes to cover exact-limit stdout/stderr retention, independent overflow, simultaneous large-stream draining, and bounded nonzero-exit diagnostics.
 - `scripts/test_agent_brief_strict_json.py` covers strict decoding of all non-finite spellings, nested ignored data, quoted spellings, CLI no-projection failure, and claim-graph grammar versioning.
 
 ### Changed
 
 - The claim lock is stored in Git's shared `commondir`, not a linked worktree's private Git directory. The primary checkout and all linked worktrees therefore contend on the same inode.
 - `.git` and `commondir` markers are read through bounded regular-file descriptors with no-follow opening where supported; malformed, oversized, non-UTF-8, symlinked, or non-directory targets fail closed.
+- Claim subprocess stdout and stderr are drained concurrently. Each reader retains at most `MAX_COMMAND_OUTPUT_BYTES + 1` bytes and discards subsequent bytes while continuing to drain, so the memory bound is eager and a full pipe cannot deadlock the child.
 - The canonical claim-graph grammar advanced to version `2`.
 - `scripts/check.sh` now:
-  - compiles and runs the guarded-executor and strict-JSON suites;
+  - compiles and runs the guarded-executor, real-subprocess, and strict-JSON suites;
   - issues and revalidates a live-ledger token;
   - invokes `agent_claim.py --dry-run` against the exact live recommendation when one exists;
   - never mutates Beads from the mandatory verification path.
@@ -44,6 +46,8 @@ The current unreleased substantive source checkpoint covered here is **[`95187b9
 - The remaining manual interval between successful token validation and `br update` is no longer the canonical workflow.
 - A successful `br` process exit can no longer be reported as a verified claim unless the JSONL flush and parsed-ledger postcondition also succeed.
 - Linked worktrees can no longer acquire independent claim locks for the same repository.
+- Child output can no longer be retained without bound by `subprocess.run` and rejected only after the allocation has already occurred.
+- Large simultaneous stdout and stderr payloads can no longer deadlock the executor while one pipe remains unread.
 - Python's non-standard JSON constants `NaN`, `Infinity`, and `-Infinity` are rejected at decode time even when they occur only in ignored extension fields.
 - A token issued under the earlier permissive claim-graph grammar cannot revalidate under the strict grammar merely because the visible issue rows produce the same recommendation.
 
@@ -58,10 +62,13 @@ The current unreleased substantive source checkpoint covered here is **[`95187b9
 - [`776096d`](https://github.com/Dicklesworthstone/franken_manim/commit/776096dec32904365cffb2cca953e0a3b296a6fd) — make the strict grammar part of the repository gate.
 - [`6f1584d`](https://github.com/Dicklesworthstone/franken_manim/commit/6f1584dbc903d2920a9133e32d500daade279c36) — move claim serialization to Git's shared common directory.
 - [`95187b9`](https://github.com/Dicklesworthstone/franken_manim/commit/95187b950fdb078ffaea71d48008b5defeb678ca) — prove sibling linked worktrees contend on one lock.
+- [`9ea1045`](https://github.com/Dicklesworthstone/franken_manim/commit/9ea1045aef8b20c037c84ed54a00822c1c528ee9) — retain child output under an eager per-stream bound while draining both pipes.
+- [`0f75c39`](https://github.com/Dicklesworthstone/franken_manim/commit/0f75c3902b2da7493d74ef39b42954560a41b542) — prove exact-limit, overflow, dual-stream, and nonzero-exit behavior with real child processes.
+- [`f96c3eb`](https://github.com/Dicklesworthstone/franken_manim/commit/f96c3eb12bdbafa7822e989d1a39702df28215a2) — make real-child-process output coverage part of the mandatory gate.
 
 ### Evidence boundary
 
-The original executor tranche passed a ten-case interface-compatible local harness before publication. The editing environment did not contain an exact full checkout, so the later strict-JSON and shared-worktree changes, complete Python suites, Cargo/Clippy/rustdoc/WASM axes, and repository-wide `scripts/check.sh` are not claimed as locally executed at `95187b9`. Hosted CI runs were queued or superseded during the incremental commit sequence and are not treated as correctness authority.
+The original executor tranche passed a ten-case interface-compatible local harness before publication. The editing environment did not contain an exact full checkout, so the later strict-JSON, shared-worktree, eager-output, complete Python, Cargo/Clippy/rustdoc/WASM, and repository-wide `scripts/check.sh` changes are not claimed as locally executed at `f96c3eb`. Hosted CI runs were queued or superseded during the incremental commit sequence and are not treated as correctness authority.
 
 The executor was not used to mutate the live Beads ledger from this environment because no tracker-native `br` execution capability was available. `.beads/issues.jsonl` was deliberately left untouched rather than reconstructed or hand-edited through truncated connector output.
 
