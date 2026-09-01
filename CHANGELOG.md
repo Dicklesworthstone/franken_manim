@@ -9,92 +9,95 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open or blocked;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased substantive source-and-test checkpoint covered here is **[`301684d`](https://github.com/Dicklesworthstone/franken_manim/commit/301684d670eadced9c948a3859438f9aa8d755a1)** on 2026-09-01 UTC. Later documentation commits truth up that implementation state.
+The current unreleased substantive source-and-test checkpoint covered here is **[`0d56b27`](https://github.com/Dicklesworthstone/franken_manim/commit/0d56b27ec734fd6e60305faadbe28a69d7808a19)** on 2026-09-01 UTC. Later documentation commits truth up that implementation state.
 
 ---
 
-## Unreleased — bounded claim-command lifetime
+## Unreleased — bounded-output, exact-delta guarded claims
 
 ### Added
 
-- A finite wall-clock contract for each production `br update` and `br sync --flush-only` invocation in `scripts/agent_claim.py`.
-  - default timeout: 60 seconds;
-  - accepted caller range: finite, positive, and no more than 3,600 seconds;
-  - CLI option: `--command-timeout-seconds`.
-- Process-tree cleanup for timed-out claim commands:
-  - POSIX children start in a new session and the complete process group is killed;
-  - Windows children start in a new process group, use no-shell `taskkill.exe /T /F` when available, and retain direct-child kill fallback;
-  - all waits and output-reader joins use finite cleanup bounds.
-- Receipt schema `fmn.agent.claim` version `2`, including an `executor_policy` record for the requested command timeout and retained per-stream output ceiling.
-- Focused real-process regressions for:
-  - a stalled direct child;
-  - descendant termination on POSIX;
-  - a direct child that exits while a descendant retains its output pipes;
-  - zero, negative, non-finite, and excessive timeout values;
-  - the pre-existing exact-limit, overflow, dual-stream, and nonzero-exit cases.
-- A CLI regression proving an invalid timeout exits `2`, emits no stdout receipt, and never invokes `br`.
+- One shared 16 MiB total-produced-byte budget for each claim-executor child command, across stdout and stderr together.
+  - Every produced chunk is counted before bytes beyond the retained diagnostic ceilings are discarded.
+  - Exactly the ceiling is accepted.
+  - The first byte beyond it triggers bounded process-tree cleanup and exit `5` rather than allowing a noisy process to run until its wall-clock timeout.
+- Exact post-sync claim-delta verification over the canonical parsed Beads graph.
+  - Issue membership must be unchanged.
+  - Every non-target issue must remain unchanged.
+  - The selected target may change only from unassigned `open` to the requested assignee and `in_progress`, with a non-regressing `updated_at`.
+  - When requested, exactly one transition comment with matching text may be appended; otherwise comments must remain unchanged.
+  - Target title, priority, type, dependencies, and identity must not drift.
+- A normalized `claim_delta` record in successful mutating receipts.
+- Focused regressions for exact and excessive combined output, a continuously spewing child, unrelated issue drift, issue-membership drift, target-field drift, exact transition-comment append, and injected-runner combined-output bounds.
 
 ### Changed
 
-- `run_command` now starts a bounded process group/session and uses `Popen.wait(timeout=...)` rather than waiting indefinitely.
-- Reader threads are daemonized and joined under a finite bound. If inherited output descriptors remain open after the direct child exits, forced cleanup occurs and the command fails instead of holding the repository claim lock.
-- The timeout is per child command rather than one transaction-wide deadline. Bounded termination and reader cleanup may extend the return path slightly beyond the selected deadline.
-- stdout and stderr remain concurrently drained under the eager 1 MiB retained-byte ceiling. The timeout bounds lifetime; a separate total-produced-byte ceiling is still future work.
+- Claim receipt schema `fmn.agent.claim` advanced to version `4`.
+- `executor_policy` now records three independent controls:
+  - wall-clock timeout per child command;
+  - retained diagnostic bytes per stream;
+  - total produced bytes across both streams per child command.
+- The production runner polls both its deadline and the shared output-budget event while child output is drained concurrently.
+- A mutating success receipt now proves the entire canonical parsed graph changed only through the intended claim transition, rather than checking only the selected row's final status and assignee.
 
 ### Fixed
 
-- A stalled `br` process can no longer hold `fmn-agent-claim.lock` indefinitely.
-- A timed-out descendant tree can no longer continue under the executor's POSIX session after the parent is killed.
-- A background descendant that inherits stdout or stderr can no longer strand the reader threads and lock after its direct parent exits.
-- Invalid `NaN`, infinite, nonpositive, or excessive timeout values can no longer reach process execution.
-- Timeout and cleanup failures emit exit `5` and no success receipt. As with any post-`br update` failure, this does not prove no tracker mutation occurred; recovery begins by inspecting Beads, not replaying the stale token.
+- A child can no longer produce unlimited discarded output until timeout after overflowing its retained diagnostic buffer.
+- Concurrent parsed-graph changes from another clone, a direct manual `br`, or another actor outside the local advisory lock can no longer receive a successful claim receipt merely because the selected issue itself looks claimed.
+- A transition comment cannot silently disappear, multiply, or be replaced by different text while the executor reports success.
+- A target claim cannot silently alter priority, type, title, or dependency topology.
 
 ### Representative commits
 
-- [`47cdf1f`](https://github.com/Dicklesworthstone/franken_manim/commit/47cdf1fa5af31ee3c4427b0b255435a8422c0246) — bound command lifetime, process-group cleanup, and receipt policy.
-- [`da07b21`](https://github.com/Dicklesworthstone/franken_manim/commit/da07b210ba096d98ded4548d0960d1ef7eb5b606) — add real-process timeout and descendant regressions.
-- [`d3b79e6`](https://github.com/Dicklesworthstone/franken_manim/commit/d3b79e6a15ca8f10ab846e92e245cf35b511336f) — lock receipt schema version 2 and timeout policy evidence.
-- [`301684d`](https://github.com/Dicklesworthstone/franken_manim/commit/301684d670eadced9c948a3859438f9aa8d755a1) — lock timeout CLI failure semantics.
+- [`06bab2a`](https://github.com/Dicklesworthstone/franken_manim/commit/06bab2acbae2e92d649dc6314432193171e28cb3) — cap total produced claim-subprocess output.
+- [`15e7d25`](https://github.com/Dicklesworthstone/franken_manim/commit/15e7d25315d968e622fc65ca2cd58d219a88b486) — prove exact, excessive, combined, and continuously spewing output behavior.
+- [`2350609`](https://github.com/Dicklesworthstone/franken_manim/commit/2350609ba27a9ccd4f34988e0101330ac32e62cf) — expose the total-output policy in versioned receipts.
+- [`240bcc9`](https://github.com/Dicklesworthstone/franken_manim/commit/240bcc9bcea7c32100fa88b1f966aa40609f6c53) — require an exact claim-only post-sync graph delta.
+- [`0d56b27`](https://github.com/Dicklesworthstone/franken_manim/commit/0d56b27ec734fd6e60305faadbe28a69d7808a19) — lock concurrent-drift and transition-comment semantics.
 
 ### Evidence boundary
 
-The exact replacement executor and real-process regression bytes were Python-bytecode compiled before publication. The nine-case real-process suite passed locally in about five seconds, including the POSIX descendant marker and inherited-pipe probes. A separate dry-run receipt probe passed with schema version `2` and an explicit timeout value. Blob identities were checked against the committed files.
+The exact replacement Python source and test bytes passed bytecode compilation. The real-child-process suite passed 13/13 locally, including exact total-output acceptance, combined overflow, prompt termination of a continuously spewing child, retained-output overflow, timeout, POSIX descendant cancellation, and inherited-pipe cleanup. Targeted claim-delta probes passed for the permitted transition and all newly rejected drift classes.
 
-The editing environment did not contain an exact complete checkout with the full parser/planner modules, Rust workspace, and installed repository toolchain. Therefore the complete `scripts/test_agent_claim.py`, repository-wide `scripts/check.sh`, Cargo, Clippy, rustdoc, WASM, wheel, browser, and release axes are not claimed as run at `301684d`.
+This editing environment did not contain an exact complete repository checkout with the full Rust workspace and installed toolchain. The complete `scripts/test_agent_claim.py`, repository-wide `scripts/check.sh`, Cargo, Clippy, rustdoc, WASM, wheel, browser, and release axes are therefore not claimed as run at `0d56b27`.
 
 No live Beads mutation was performed from this environment because tracker-native `br` execution was unavailable. `.beads/issues.jsonl` was deliberately left untouched rather than reconstructed or hand-edited through truncated connector output.
 
 ---
 
+## Unreleased — bounded claim-command lifetime
+
+### Added and changed
+
+- Every production `br update` and `br sync --flush-only` invocation has a finite independent wall-clock timeout.
+  - default: 60 seconds;
+  - accepted range: finite, positive, at most 3,600 seconds;
+  - CLI: `--command-timeout-seconds`.
+- POSIX children start in a new session and timed-out process groups are killed; Windows uses a new process group, native `taskkill.exe /T /F` when available, and direct-child fallback.
+- Process termination, child wait, and output-reader joins use finite cleanup bounds.
+- A direct child that exits while a descendant retains inherited stdout or stderr can no longer strand the reader threads and repository claim lock.
+- Receipt policy records the selected timeout and output ceilings.
+
+### Representative commits
+
+- [`47cdf1f`](https://github.com/Dicklesworthstone/franken_manim/commit/47cdf1fa5af31ee3c4427b0b255435a8422c0246) — bound command lifetime and process-tree cleanup.
+- [`da07b21`](https://github.com/Dicklesworthstone/franken_manim/commit/da07b210ba096d98ded4548d0960d1ef7eb5b606) — add real-process timeout and descendant regressions.
+- [`d3b79e6`](https://github.com/Dicklesworthstone/franken_manim/commit/d3b79e6a15ca8f10ab846e92e245cf35b511336f) — version bounded executor-policy receipts.
+- [`301684d`](https://github.com/Dicklesworthstone/franken_manim/commit/301684d670eadced9c948a3859438f9aa8d755a1) — lock invalid-timeout CLI semantics.
+
+---
+
 ## Unreleased — guarded claim execution and strict ledger grammar
 
-### Added
+### Added and changed
 
-- `scripts/agent_claim.py`, the mutation companion to the version-2 claim guard.
-  - It acquires a persistent advisory lock in Git's shared common directory.
-  - It re-reads the ledger and rebuilds the complete graph/policy/schema guard while holding that lock.
-  - It invokes `br update` and `br sync --flush-only` through exact argv without a shell.
-  - It re-reads the exported JSONL and requires the selected row to be `in_progress` with the requested assignee before emitting a success receipt.
-  - `--dry-run` performs the guarded read and publishes the exact intended argv without invoking `br`.
-- Canonical claim receipts record the issue, assignee, guard token, pre-claim graph and claim digests, planner policy, schema contracts, recommendation evidence, exact command vectors, executor policy, and post-claim graph/status evidence.
-- `docs/AGENT_CLAIM_EXECUTOR.md` and `docs/AGENT_CONTROL_PLANE.md` specify the transaction, receipt, exit codes, partial-failure semantics, concurrency boundary, strict parser, and process policy.
-- `scripts/test_agent_claim.py`, `scripts/test_agent_claim_subprocess.py`, and `scripts/test_agent_brief_strict_json.py` provide focused executor, process, and strict-JSON coverage.
-
-### Changed
-
-- The claim lock is stored in Git's shared `commondir`, so a primary checkout and its linked worktrees contend on one persistent inode.
-- `.git` and `commondir` markers are read through bounded regular-file descriptors with no-follow opening where supported.
-- Claim stdout and stderr are drained concurrently; each stream retains at most `MAX_COMMAND_OUTPUT_BYTES + 1` bytes and discards subsequent bytes while continuing to drain.
+- `scripts/agent_claim.py` keeps token revalidation, `br update`, `br sync --flush-only`, and parsed-ledger postconditions inside one process and one advisory-lock scope.
+- The claim lock lives in Git's shared `commondir`, so a primary checkout and linked worktrees contend on one persistent inode.
+- `.git` and `commondir` markers use bounded no-follow regular-file reads where supported.
+- stdout and stderr are concurrently drained under eager retained-memory ceilings.
+- `--dry-run` exercises guard, lock, and exact argv composition without mutating Beads.
+- The strict parser rejects duplicate keys and issue IDs, malformed framing and optional arrays, invalid statuses/timestamps, self/duplicate dependencies, and unquoted `NaN`, `Infinity`, or `-Infinity` at any depth.
 - The canonical claim-graph grammar is version `2`.
-- `scripts/check.sh` runs the executor and strict-JSON suites, revalidates a live-ledger token, and exercises `agent_claim.py --dry-run` without mutating Beads.
-
-### Fixed
-
-- The manual interval between token revalidation and `br update` is no longer the canonical workflow.
-- A successful `br` exit is not reported as a verified claim unless JSONL export and parsed-ledger postconditions also succeed.
-- Linked worktrees can no longer acquire independent claim locks for the same clone.
-- Child output is bounded while being read rather than only rejected after unbounded capture.
-- Unquoted `NaN`, `Infinity`, and `-Infinity` are rejected at the initial Beads JSON boundary, including ignored nested extension fields.
 
 ### Representative commits
 
@@ -163,10 +166,11 @@ Representative commits include [`b5518dd`](https://github.com/Dicklesworthstone/
 2. **Rendering and media:** analytic fills/strokes, retained tile rendering, camera/depth/lighting/textures, native codecs, ffmpeg capability boundary, FMTL, and WASM foundations.
 3. **Front doors and Gauntlet:** Rust API, `fmn`, optional CPython portal, Studio supervisor/worker, API schema/Parity Ledger, self-goldens, differential, determinism, fuzzing, performance, and packaging gates.
 4. **Portal convergence and truthfulness:** broad authored `manimlib` compatibility, precise capability refusals, executable wheel/bridge tests, and refusal/namespace ratchets.
+5. **Agent operations:** strict graph parsing, leaf-aware planning, stale-plan tokens, shared-lock mutation, exact post-sync deltas, and bounded subprocess resources.
 
 ## Current evidence boundaries
 
-The following are **not** inferred from focused source tests:
+The following are **not** inferred from a focused green source probe:
 
 - the complete local repository gate;
 - cross-platform release artifacts;
@@ -185,5 +189,6 @@ Hosted GitHub Actions availability is not a correctness dependency. The authorit
 - Use `scripts/agent_claim_guard.py --require`, complete external coordination checks, then use `scripts/agent_claim.py` with an explicit command timeout for the guarded mutation.
 - Treat `agent_brief.py` as broad situational context only; it has no autonomous claim output.
 - Treat Beads as authoritative. The executor performs the claim update and `br sync --flush-only`; the resulting `.beads/` export still needs an explicit commit.
+- On executor exit `5`, inspect Beads and the working tree before doing anything else; never replay the old token blindly.
 - Never replace `.beads/issues.jsonl` from truncated connector output.
 - Do not turn “reviewed,” “compiled,” “inventoried,” or “historically green” into a stronger implementation or release claim.
