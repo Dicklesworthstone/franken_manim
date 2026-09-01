@@ -216,8 +216,9 @@ class AgentBriefTests(unittest.TestCase):
         self.assertIn("integrity failures", snapshot["recommendation"]["reason"])
 
         path = self.write_ledger([second, first])
+        stdout = io.StringIO()
         stderr = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             status = agent_brief.main(
                 [
                     "--ledger",
@@ -230,6 +231,7 @@ class AgentBriefTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
         self.assertIn("dependency integrity is invalid", stderr.getvalue())
 
     def test_long_blocking_chain_is_iterative_and_acyclic(self) -> None:
@@ -267,18 +269,30 @@ class AgentBriefTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
         self.assertIn("active workstream cap breached", stderr.getvalue())
 
-    def test_next_format_emits_only_a_claimable_leaf_identity(self) -> None:
-        path = self.write_ledger(
-            [
-                record("fm-assigned", "W9: reserved", "open", priority=0, assignee="peer"),
-                record("fm-epic", "W9: epic", "open", priority=0, issue_type="epic"),
-                record("fm-next", "W9: ready", "open", priority=1),
-            ]
-        )
+    def test_legacy_next_format_fails_closed_without_reading_the_ledger(self) -> None:
+        missing = self.path()
         stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = agent_brief.main(
+                ["--ledger", str(missing), "--format", "next"]
+            )
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn(
+            "was removed because the broad projection is not leaf-safe",
+            stderr.getvalue(),
+        )
+        self.assertIn("scripts/agent_next.py", stderr.getvalue())
+
+    def test_valid_check_emits_the_requested_projection(self) -> None:
+        path = self.write_ledger([record("fm-ready", "W10: ready", "open")])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             status = agent_brief.main(
                 [
                     "--ledger",
@@ -286,11 +300,16 @@ class AgentBriefTests(unittest.TestCase):
                     "--as-of",
                     "2026-08-31T00:00:00Z",
                     "--format",
-                    "next",
+                    "json",
+                    "--check",
                 ]
             )
         self.assertEqual(status, 0)
-        self.assertEqual(stdout.getvalue(), "fm-next\n")
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["integrity"]["within_contract"])
+        self.assertTrue(payload["activation"]["within_cap"])
+        self.assertEqual(payload["ready"][0]["id"], "fm-ready")
 
     def test_duplicate_ids_and_missing_final_lf_are_rejected(self) -> None:
         duplicate = record("fm-x", "W1: x", "open")
