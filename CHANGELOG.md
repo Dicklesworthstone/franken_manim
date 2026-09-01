@@ -9,7 +9,48 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open or blocked;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased source checkpoint covered here is **[`204eabf`](https://github.com/Dicklesworthstone/franken_manim/commit/204eabfdada854ad55d14de9c466fda652f1bd2f)** on 2026-09-01 UTC. Later documentation-only commits truth up that implementation state.
+The current unreleased substantive source checkpoint covered here is **[`5629a41`](https://github.com/Dicklesworthstone/franken_manim/commit/5629a41349d1fb0f4574ab8b8473348becd6a312)** on 2026-09-01 UTC. Later documentation commits truth up that implementation state.
+
+---
+
+## Unreleased — graph-and-policy-bound claim revalidation
+
+### Added
+
+- `scripts/agent_claim_guard.py` now issues version-2 compare-before-set tokens for autonomous Beads claims.
+- The machine report exposes two distinct diagnostic identities:
+  - `graph_sha256` for the canonical parsed Beads graph;
+  - `claim_sha256` for the complete graph, planner, policy, and schema input carried by the token.
+- Focused regressions cover graph and recommendation changes, issue/dependency order canonicalization, every policy input, planner and brief schema changes, unchanged-recommendation planner drift, the reserved no-work sentinel, legacy/malformed tokens, output budgets, and integrity precedence.
+
+### Changed
+
+- Claim tokens now have the form `v2:<claim-sha256>:<issue-id-or-none>`.
+- The claim digest commits to:
+  - the full canonical task graph and comments;
+  - the complete `fmn.agent.next` plan rather than only its selected issue;
+  - normalized `as_of`, stale-day policy, activation cap, and queue limit;
+  - the brief, planner, graph, claim-input, guard, and token schema contracts.
+- The literal issue ID `none` is reserved so a real issue cannot collide with the valid no-recommendation token subject.
+- `scripts/check.sh` now compiles and runs the claim-guard suite, issues a token against the live ledger, and immediately revalidates that exact token before entering the Rust gates.
+
+### Fixed
+
+- A token issued under one activation cap, stale window, queue limit, or explicit `as_of` can no longer validate under another policy merely because the selected issue stayed the same.
+- A planner or snapshot schema change can no longer reuse a token from the preceding semantics.
+- A change to non-recommendation planner evidence can no longer leave an old token apparently valid.
+- The implementation and mandatory gate now match the already-published version-2 claim contract.
+
+### Representative commits
+
+- [`6a6b3c8`](https://github.com/Dicklesworthstone/franken_manim/commit/6a6b3c8fe52b34095958d3fe0e68ef55c62b6536) — bind claim tokens to the graph, full plan, policy, and schemas.
+- [`93877d4`](https://github.com/Dicklesworthstone/franken_manim/commit/93877d486254a61a1eee85c2c2c7dda22bd45f8f) — lock v2 semantics with adversarial regressions.
+- [`5629a41`](https://github.com/Dicklesworthstone/franken_manim/commit/5629a41349d1fb0f4574ab8b8473348becd6a312) — make issue/revalidate behavior part of the mandatory gate.
+- [`d7a1716`](https://github.com/Dicklesworthstone/franken_manim/commit/d7a17163399c7347c39869bf09aa8744fceda5e4) — define graph and claim digests precisely.
+
+### Evidence boundary
+
+The replacement implementation and focused suite were syntax-checked before publication. Hosted CI was queued when this entry was written; it is not represented here as a completed repository-wide verdict. The authoritative full check remains `scripts/check.sh` on an exact local or owned-host checkout.
 
 ---
 
@@ -84,7 +125,8 @@ Focused parser and publication probes passed in the editing environment. That en
   1. Beads is task authority.
   2. `agent_brief.py` owns bounded parsing, graph integrity, and broad situational state.
   3. `agent_next.py` owns leaf-safe claim selection.
-  4. `generate_agent_brief.py` owns deterministic human rendering.
+  4. `agent_claim_guard.py` owns graph-and-policy-bound pre-mutation revalidation.
+  5. `generate_agent_brief.py` owns deterministic human rendering.
 - Hosted GitHub Actions is no longer part of the correctness authority chain. The repository gate is designed for local or owned build hosts.
 - Implementation-status documentation corrected an earlier overstatement: human `doctor --quiet` suppression still occurs in the binary entry point; it is not yet centralized for embedded `run_with_capabilities` callers.
 
@@ -198,7 +240,8 @@ Hosted GitHub Actions availability is not a correctness dependency. The authorit
 ## Agent notes
 
 - Start with `docs/IMPLEMENTATION_STATUS.md` for present-tense evidence.
-- Use `scripts/agent_next.py`, not the legacy broad `agent_brief.py --format next`, for autonomous claim selection.
+- Use `scripts/agent_claim_guard.py --require` to issue a claim token, then re-run it with `--expect-token` immediately before `br update`.
+- Treat `agent_brief.py` as broad situational context only; it has no autonomous claim output.
 - Treat Beads as authoritative and mutate it only through `br` followed by `br sync --flush-only`.
 - Never replace `.beads/issues.jsonl` from truncated connector output.
 - Do not turn “reviewed,” “compiled,” “imported,” or “historically green” into a stronger implementation or release claim.
