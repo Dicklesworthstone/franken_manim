@@ -42,6 +42,52 @@ class AgentClaimSubprocessTests(unittest.TestCase):
         self.assertEqual(result.stdout, b"x" * 64)
         self.assertEqual(result.stderr, b"y" * 64)
 
+    def test_exact_total_output_limit_is_accepted_across_both_streams(self) -> None:
+        with (
+            mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64),
+            mock.patch.object(agent_claim, "MAX_COMMAND_TOTAL_OUTPUT_BYTES", 128),
+        ):
+            result = self.run_python(
+                "import sys; "
+                "sys.stdout.buffer.write(b'x' * 64); "
+                "sys.stderr.buffer.write(b'y' * 64)"
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"x" * 64)
+        self.assertEqual(result.stderr, b"y" * 64)
+
+    def test_combined_streams_share_one_total_output_budget(self) -> None:
+        with (
+            mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64),
+            mock.patch.object(agent_claim, "MAX_COMMAND_TOTAL_OUTPUT_BYTES", 64),
+        ):
+            with self.assertRaisesRegex(
+                agent_claim.ClaimError,
+                "produced more than 64 total output bytes",
+            ):
+                self.run_python(
+                    "import sys; "
+                    "sys.stdout.buffer.write(b'x' * 40); "
+                    "sys.stderr.buffer.write(b'y' * 40)"
+                )
+
+    def test_total_output_budget_terminates_a_spewing_child_promptly(self) -> None:
+        started = time.monotonic()
+        with (
+            mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64),
+            mock.patch.object(agent_claim, "MAX_COMMAND_TOTAL_OUTPUT_BYTES", 4096),
+        ):
+            with self.assertRaisesRegex(
+                agent_claim.ClaimError,
+                "produced more than 4096 total output bytes",
+            ):
+                self.run_python(
+                    "import os; chunk=b'x' * 65536; "
+                    "\nwhile True: os.write(1, chunk)",
+                    timeout_seconds=10.0,
+                )
+        self.assertLess(time.monotonic() - started, 3.0)
+
     def test_stdout_overflow_is_detected_after_the_pipe_is_fully_drained(self) -> None:
         with mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64):
             with self.assertRaisesRegex(
