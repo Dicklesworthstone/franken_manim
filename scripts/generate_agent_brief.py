@@ -87,8 +87,6 @@ def build_document(
         activation_cap=activation_cap,
         limit=limit,
     )
-    # Preserve the broad queues for situational awareness, but make every
-    # human-visible recommendation use the exact machine planner decision.
     snapshot["recommendation"] = plan["recommendation"]
     snapshot["claim_plan"] = plan
     broad = agent_brief.render_markdown(snapshot).rstrip("\n")
@@ -121,25 +119,71 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def read_existing(path: Path) -> str:
-    if path.is_symlink():
-        raise GenerateError(f"refusing symlink output path {path}")
+def _file_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _open_existing_regular(path: Path):
     try:
-        metadata = path.stat()
+        before = os.lstat(path)
     except FileNotFoundError as exc:
         raise GenerateError(f"generated agent brief is missing: {path}") from exc
     except OSError as exc:
-        raise GenerateError(f"cannot stat generated agent brief {path}: {exc}") from exc
-    if not stat.S_ISREG(metadata.st_mode):
+        raise GenerateError(f"cannot inspect generated agent brief {path}: {exc}") from exc
+    if stat.S_ISLNK(before.st_mode):
+        raise GenerateError(f"refusing symlink output path {path}")
+    if not stat.S_ISREG(before.st_mode):
         raise GenerateError(f"generated agent brief is not a regular file: {path}")
-    if metadata.st_size > MAX_OUTPUT_BYTES:
-        raise GenerateError(
-            f"{path} exceeds the {MAX_OUTPUT_BYTES}-byte generated-output limit"
-        )
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        return path.read_text(encoding="utf-8")
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise GenerateError(f"cannot open generated agent brief {path}: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        after = os.lstat(path)
+        identity = _file_identity(opened)
+        if not stat.S_ISREG(opened.st_mode):
+            raise GenerateError(f"generated agent brief is not a regular file: {path}")
+        if _file_identity(before) != identity or _file_identity(after) != identity:
+            raise GenerateError(f"generated agent brief changed while opening: {path}")
+        if opened.st_size > MAX_OUTPUT_BYTES:
+            raise GenerateError(
+                f"{path} exceeds the {MAX_OUTPUT_BYTES}-byte generated-output limit"
+            )
+        return os.fdopen(descriptor, "r", encoding="utf-8", newline="")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def read_existing(path: Path) -> str:
+    try:
+        with _open_existing_regular(path) as handle:
+            return handle.read()
+    except GenerateError:
+        raise
     except (OSError, UnicodeDecodeError) as exc:
         raise GenerateError(f"cannot read generated agent brief {path}: {exc}") from exc
+
+
+def _remove_owned_temporary(path: Path, identity: tuple[int, int]) -> str | None:
+    try:
+        current = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"cannot inspect temporary output {path}: {exc}"
+    if not stat.S_ISREG(current.st_mode) or _file_identity(current) != identity:
+        return f"temporary output identity changed before cleanup: {path}"
+    try:
+        os.unlink(path)
+    except OSError as exc:
+        return f"cannot remove temporary output {path}: {exc}"
+    return None
 
 
 def write_atomic(path: Path, document: str) -> None:
@@ -163,15 +207,28 @@ def write_atomic(path: Path, document: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    descriptor: int | None = None
+    identity: tuple[int, int] | None = None
     try:
         descriptor = os.open(temporary, flags, 0o644)
+        identity = _file_identity(os.fstat(descriptor))
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = None
             handle.write(document)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except OSError as exc:
-        raise GenerateError(f"cannot publish generated agent brief {path}: {exc}") from exc
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        cleanup = _remove_owned_temporary(temporary, identity) if identity is not None else None
+        detail = f"cannot publish generated agent brief {path}: {exc}"
+        if cleanup is not None:
+            detail += f"; {cleanup}"
+        raise GenerateError(detail) from exc
 
 
 def check_current(path: Path, expected: str) -> None:
