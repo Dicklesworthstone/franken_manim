@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed claim planner layered over :mod:`agent_brief`.
 
-``agent_brief`` owns bounded ledger parsing and graph-integrity analysis. This
+``agent_brief`` owns bounded ledger parsing and blocking-graph analysis. This
 module adds the narrower question an autonomous worker actually needs answered:
 which *unassigned dependency-ready leaf* is the best collision-free next claim?
 A non-epic parent with live ``parent-child`` descendants is a container, not a
@@ -22,11 +22,13 @@ from typing import Any
 import agent_brief
 
 SCHEMA = "fmn.agent.next"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 UTC = dt.timezone.utc
 
 
 def live_children(issues: dict[str, agent_brief.Issue]) -> dict[str, tuple[str, ...]]:
+    """Return live child IDs keyed by their existing parent ID."""
+
     children: dict[str, list[str]] = defaultdict(list)
     for child in issues.values():
         if child.status not in agent_brief.OPEN_STATUSES:
@@ -35,6 +37,74 @@ def live_children(issues: dict[str, agent_brief.Issue]) -> dict[str, tuple[str, 
             if dependency.kind == "parent-child" and dependency.depends_on_id in issues:
                 children[dependency.depends_on_id].append(child.id)
     return {parent: tuple(sorted(ids)) for parent, ids in children.items()}
+
+
+def strongly_connected_components(
+    adjacency: dict[str, tuple[str, ...]],
+) -> tuple[tuple[str, ...], ...]:
+    """Return deterministic nontrivial SCCs without Python recursion."""
+
+    reverse_lists = {issue_id: [] for issue_id in adjacency}
+    for issue_id, targets in adjacency.items():
+        for target in targets:
+            reverse_lists[target].append(issue_id)
+    reverse = {
+        issue_id: tuple(sorted(targets))
+        for issue_id, targets in reverse_lists.items()
+    }
+
+    visited: set[str] = set()
+    finish_order: list[str] = []
+    for root in sorted(adjacency):
+        if root in visited:
+            continue
+        visited.add(root)
+        stack: list[tuple[str, int]] = [(root, 0)]
+        while stack:
+            issue_id, next_index = stack[-1]
+            targets = adjacency[issue_id]
+            if next_index < len(targets):
+                target = targets[next_index]
+                stack[-1] = (issue_id, next_index + 1)
+                if target not in visited:
+                    visited.add(target)
+                    stack.append((target, 0))
+            else:
+                stack.pop()
+                finish_order.append(issue_id)
+
+    assigned: set[str] = set()
+    components: list[tuple[str, ...]] = []
+    for root in reversed(finish_order):
+        if root in assigned:
+            continue
+        assigned.add(root)
+        component: list[str] = []
+        stack = [root]
+        while stack:
+            issue_id = stack.pop()
+            component.append(issue_id)
+            for target in reversed(reverse[issue_id]):
+                if target not in assigned:
+                    assigned.add(target)
+                    stack.append(target)
+        if len(component) > 1:
+            components.append(tuple(sorted(component)))
+    return tuple(sorted(components))
+
+
+def containment_cycles(
+    issues: dict[str, agent_brief.Issue],
+    children: dict[str, tuple[str, ...]],
+) -> tuple[tuple[str, ...], ...]:
+    """Return live ``parent-child`` cycles as deterministic SCCs."""
+
+    live_ids = {issue.id for issue in issues.values() if issue.status in agent_brief.OPEN_STATUSES}
+    adjacency = {
+        issue_id: tuple(child for child in children.get(issue_id, ()) if child in live_ids)
+        for issue_id in live_ids
+    }
+    return strongly_connected_components(adjacency)
 
 
 def blocker_pressure(
@@ -85,6 +155,7 @@ def build_plan(
         limit=limit,
     )
     children = live_children(issues)
+    hierarchy_cycles = containment_cycles(issues, children)
     direct, immediate = blocker_pressure(issues)
     dependency_ready = [
         issue
@@ -106,11 +177,23 @@ def build_plan(
         and not children.get(issue.id)
     ]
     active_workstreams = set(base["activation"]["active_workstreams"])
+    base_integrity = base["integrity"]
+    blocking_ok = bool(base_integrity["within_contract"])
+    integrity = {
+        "ok": blocking_ok and not hierarchy_cycles,
+        "blocking_within_contract": blocking_ok,
+        "blocking_cycles": base_integrity["blocking_cycles"],
+        "containment_cycles": [list(component) for component in hierarchy_cycles],
+        "missing_blockers": base_integrity["missing_blockers"],
+        "missing_links": base_integrity["missing_links"],
+    }
 
     recommendation: agent_brief.Issue | None = None
     reason: str
-    if not base["integrity"]["ok"]:
+    if not blocking_ok:
         reason = "blocking-graph integrity must be repaired before claiming work"
+    elif hierarchy_cycles:
+        reason = "parent-child containment cycles must be repaired before claiming work"
     else:
         active_leaves = [issue for issue in leaves if issue.workstream in active_workstreams]
         candidates = active_leaves or leaves
@@ -164,7 +247,7 @@ def build_plan(
         "schema": SCHEMA,
         "version": SCHEMA_VERSION,
         "as_of": as_of.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-        "integrity": base["integrity"],
+        "integrity": integrity,
         "activation": base["activation"],
         "recommendation": {
             "issue": row(recommendation) if recommendation is not None else None,
@@ -178,6 +261,7 @@ def build_plan(
             "non_epic_containers": sum(
                 issue.issue_type not in agent_brief.NON_CLAIMABLE_TYPES for issue in containers
             ),
+            "containment_cycles": len(hierarchy_cycles),
         },
         "claimable_leaves": [row(issue) for issue in sorted(leaves, key=sort)[:limit]],
         "ready_containers": [row(issue) for issue in sorted(containers, key=sort)[:limit]],
@@ -208,12 +292,19 @@ def render_markdown(plan: dict[str, Any]) -> str:
         (
             f"- Queues: {plan['counts']['claimable_leaves']} claimable leaves, "
             f"{plan['counts']['ready_containers']} ready containers, "
-            f"{plan['counts']['assigned_ready']} assigned-ready."
+            f"{plan['counts']['assigned_ready']} assigned-ready, "
+            f"{plan['counts']['containment_cycles']} containment cycles."
         ),
         "",
         "A task with any live `parent-child` descendant is a container even when its issue type is not `epic`.",
         "",
     ]
+    for component in plan["integrity"]["containment_cycles"]:
+        lines.append(
+            "- Parent-child cycle: " + " → ".join(f"`{issue_id}`" for issue_id in component)
+        )
+    if plan["integrity"]["containment_cycles"]:
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -256,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
 
     enforce = args.check or args.require
     if enforce and not plan["integrity"]["ok"]:
-        print("error: Beads blocking graph integrity failed", file=sys.stderr)
+        print("error: Beads task-graph integrity failed", file=sys.stderr)
         return 1
     if enforce and not plan["activation"]["within_cap"]:
         print("error: active workstream cap breached", file=sys.stderr)
