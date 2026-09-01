@@ -132,10 +132,16 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stale-days", type=int, default=2)
     parser.add_argument("--activation-cap", type=int, default=4)
     parser.add_argument("--limit", type=int, default=20)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="verify committed bytes and governance state without writing",
+    )
+    mode.add_argument(
+        "--stdout",
+        action="store_true",
+        help="render exact Markdown to stdout without reading or writing the output path",
     )
     return parser
 
@@ -158,10 +164,6 @@ def main(argv: list[str] | None = None) -> int:
             activation_cap=args.activation_cap,
             limit=args.limit,
         )
-        if args.check:
-            check_current(args.output, document)
-        else:
-            write_atomic(args.output, document)
     except (agent_brief.BriefError, GenerateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -173,6 +175,19 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    try:
+        if args.stdout:
+            sys.stdout.write(document)
+            return 0
+        if args.check:
+            check_current(args.output, document)
+        else:
+            write_atomic(args.output, document)
+    except GenerateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     action = "current" if args.check else "generated"
     print(
         f"agent brief {action}: {args.output} "
