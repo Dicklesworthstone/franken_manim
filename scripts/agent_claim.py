@@ -19,9 +19,10 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Sequence
+from typing import BinaryIO, Callable, Iterator, Sequence
 
 import agent_brief
 import agent_claim_guard
@@ -36,6 +37,7 @@ MAX_ISSUE_ID_BYTES = 1024
 MAX_ASSIGNEE_BYTES = 1024
 MAX_TRANSITION_COMMENT_BYTES = 64 * 1024
 MAX_GIT_PATH_FILE_BYTES = 4096
+COMMAND_READ_CHUNK_BYTES = 64 * 1024
 LOCK_FILE_NAME = "fmn-agent-claim.lock"
 
 
@@ -50,6 +52,13 @@ class CommandResult:
     returncode: int
     stdout: bytes = b""
     stderr: bytes = b""
+
+
+@dataclass
+class _DrainResult:
+    payload: bytearray
+    overflow: bool = False
+    error: OSError | None = None
 
 
 Runner = Callable[[tuple[str, ...], Path], CommandResult]
@@ -254,30 +263,111 @@ def _decode_process_output(value: bytes) -> str:
     return value.decode("utf-8", errors="replace").strip()
 
 
+def _drain_command_stream(stream: BinaryIO, result: _DrainResult) -> None:
+    try:
+        while True:
+            chunk = stream.read(COMMAND_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            remaining = MAX_COMMAND_OUTPUT_BYTES + 1 - len(result.payload)
+            if remaining > 0:
+                result.payload.extend(chunk[:remaining])
+            if len(result.payload) > MAX_COMMAND_OUTPUT_BYTES:
+                result.overflow = True
+    except OSError as exc:
+        result.error = exc
+    finally:
+        try:
+            stream.close()
+        except OSError as exc:
+            if result.error is None:
+                result.error = exc
+
+
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait()
+    except OSError:
+        pass
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
 def run_command(argv: tuple[str, ...], cwd: Path) -> CommandResult:
     env = os.environ.copy()
     env.setdefault("NO_COLOR", "1")
     env.setdefault("RUST_LOG", "error")
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             argv,
             cwd=cwd,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            check=False,
+            bufsize=0,
         )
     except OSError as exc:
         raise ClaimError(f"could not execute {argv[0]!r}: {exc}", 5) from exc
-    for stream_name, payload in (("stdout", completed.stdout), ("stderr", completed.stderr)):
-        if len(payload) > MAX_COMMAND_OUTPUT_BYTES:
+    if process.stdout is None or process.stderr is None:
+        _stop_process(process)
+        raise ClaimError(f"could not capture output from {argv[0]!r}", 5)
+
+    stdout = _DrainResult(bytearray())
+    stderr = _DrainResult(bytearray())
+    threads = [
+        threading.Thread(
+            target=_drain_command_stream,
+            args=(process.stdout, stdout),
+            name="fmn-agent-claim-stdout",
+        ),
+        threading.Thread(
+            target=_drain_command_stream,
+            args=(process.stderr, stderr),
+            name="fmn-agent-claim-stderr",
+        ),
+    ]
+    started: list[threading.Thread] = []
+    try:
+        for thread in threads:
+            thread.start()
+            started.append(thread)
+    except RuntimeError as exc:
+        _stop_process(process)
+        for thread in started:
+            thread.join()
+        raise ClaimError(f"could not start bounded output readers for {argv[0]!r}: {exc}", 5) from exc
+
+    try:
+        returncode = process.wait()
+    except OSError as exc:
+        _stop_process(process)
+        for thread in started:
+            thread.join()
+        raise ClaimError(f"could not wait for {argv[0]!r}: {exc}", 5) from exc
+    for thread in started:
+        thread.join()
+
+    for stream_name, result in (("stdout", stdout), ("stderr", stderr)):
+        if result.error is not None:
+            raise ClaimError(
+                f"could not read {argv[0]!r} {stream_name}: {result.error}", 5
+            )
+        if result.overflow:
             raise ClaimError(
                 f"{argv[0]!r} {stream_name} exceeded the "
                 f"{MAX_COMMAND_OUTPUT_BYTES}-byte command-output limit",
                 5,
             )
-    return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+    return CommandResult(returncode, bytes(stdout.payload), bytes(stderr.payload))
 
 
 def _run_checked(runner: Runner, argv: tuple[str, ...], cwd: Path, label: str) -> None:
