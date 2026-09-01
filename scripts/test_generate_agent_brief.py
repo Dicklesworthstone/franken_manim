@@ -196,6 +196,32 @@ class GenerateAgentBriefTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("workstream cap breached", stderr.getvalue())
 
+    def test_integrity_failure_refuses_every_publication_mode(self) -> None:
+        ledger, output = self.fixture()
+        bad = record(
+            "fm-bad",
+            "W10: missing blocker",
+            "open",
+            updated_at="2026-08-31T09:00:00Z",
+        )
+        bad["dependencies"] = [
+            {"issue_id": "fm-bad", "depends_on_id": "fm-absent", "type": "blocks"}
+        ]
+        self.write_ledger(ledger, [bad])
+        output.write_text("sentinel\n", encoding="utf-8")
+
+        for mode in ([], ["--check"], ["--stdout"]):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = generator.main(
+                    ["--ledger", str(ledger), "--output", str(output), *mode]
+                )
+            self.assertEqual(status, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("dependency integrity is invalid", stderr.getvalue())
+            self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
+
 
 if __name__ == "__main__":
     unittest.main()
