@@ -4,7 +4,7 @@
 This is a read-only projection of .beads/issues.jsonl. It never edits Beads and
 never becomes a second source of truth. The output is intentionally compact so
 an agent can reconstruct current work, blockers, activation pressure, and the
-best claim that does not create avoidable concurrency.
+best collision-free claim that does not create avoidable concurrency.
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ from typing import Any, Iterable
 MAX_LEDGER_BYTES = 32 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024
 MAX_ISSUES = 100_000
-SNAPSHOT_SCHEMA_VERSION = 2
+SNAPSHOT_SCHEMA_VERSION = 3
 ACTIVE_STATUS = "in_progress"
 OPEN_STATUSES = frozenset({"open", ACTIVE_STATUS})
 CLOSED_STATUSES = frozenset({"closed", "tombstone"})
+NON_CLAIMABLE_TYPES = frozenset({"epic"})
 WORKSTREAM_RE = re.compile(r"^W(?P<number>\d+)(?:\b|:)")
 UTC = dt.timezone.utc
 
@@ -101,6 +102,12 @@ def parse_issue(raw: Any, *, line: int) -> Issue:
         owner = _text(item.get("issue_id"), field="dependency.issue_id", issue_id=issue_id)
         target = _text(item.get("depends_on_id"), field="dependency.depends_on_id", issue_id=issue_id)
         kind = _text(item.get("type"), field="dependency.type", issue_id=issue_id)
+        if owner != issue_id:
+            raise BriefError(
+                f"{issue_id}: dependency {index} is owned by {owner!r}, not this issue"
+            )
+        if target == issue_id:
+            raise BriefError(f"{issue_id}: dependency {index} is self-referential")
         dependencies.append(Dependency(owner or "", target or "", kind or ""))
 
     comments_raw = raw.get("comments") or []
@@ -200,15 +207,15 @@ def select_recommendation(
     in_active = [issue for issue in ready if issue.workstream in active_workstreams]
     if in_active:
         issue = min(in_active, key=recommendation_sort_key)
-        return issue, f"highest-priority ready issue in already-active {issue.workstream}"
+        return issue, f"highest-priority unassigned leaf in already-active {issue.workstream}"
     if not ready:
-        return None, "no dependency-ready open issues"
+        return None, "no dependency-ready, unassigned leaf issues"
     if len(active_workstreams) >= activation_cap:
-        return None, "activation cap is full and no ready issue belongs to an active workstream"
+        return None, "activation cap is full and no claimable issue belongs to an active workstream"
     issue = min(ready, key=recommendation_sort_key)
     if issue.workstream == "UNSCOPED":
-        return issue, "highest-priority ready unscoped issue; verify governance scope before claiming"
-    return issue, f"highest-priority ready issue; claiming it activates {issue.workstream}"
+        return issue, "highest-priority unassigned leaf is unscoped; verify governance before claiming"
+    return issue, f"highest-priority unassigned leaf; claiming it activates {issue.workstream}"
 
 
 def build_snapshot(
@@ -234,10 +241,21 @@ def build_snapshot(
         issue.workstream for issue in active if issue.workstream != "UNSCOPED"
     }
     active_workstreams = sorted(active_workstream_set)
-    ready = [
+    dependency_ready = [
         issue
         for issue in open_issues
         if issue.status == "open" and not unresolved_blockers(issue, issues)
+    ]
+    assigned_ready = [issue for issue in dependency_ready if issue.assignee is not None]
+    container_ready = [
+        issue
+        for issue in dependency_ready
+        if issue.assignee is None and issue.issue_type in NON_CLAIMABLE_TYPES
+    ]
+    ready = [
+        issue
+        for issue in dependency_ready
+        if issue.assignee is None and issue.issue_type not in NON_CLAIMABLE_TYPES
     ]
     blocked = [
         (issue, unresolved_blockers(issue, issues))
@@ -262,6 +280,7 @@ def build_snapshot(
             "id": issue.id,
             "priority": issue.priority,
             "status": issue.status,
+            "issue_type": issue.issue_type,
             "workstream": issue.workstream,
             "assignee": issue.assignee,
             "updated_at": issue.updated_at.isoformat().replace("+00:00", "Z"),
@@ -290,7 +309,10 @@ def build_snapshot(
             "open": sum(issue.status == "open" for issue in issues.values()),
             "in_progress": len(active),
             "closed": sum(issue.status in CLOSED_STATUSES for issue in issues.values()),
+            "dependency_ready": len(dependency_ready),
             "ready": len(ready),
+            "assigned_ready": len(assigned_ready),
+            "container_ready": len(container_ready),
             "blocked": len(blocked),
             "stale_claims": len(stale),
             "unowned_active": len(unowned),
@@ -303,6 +325,8 @@ def build_snapshot(
         },
         "active": [row(issue) for issue in active[:limit]],
         "ready": [row(issue) for issue in ready[:limit]],
+        "assigned_ready": [row(issue) for issue in assigned_ready[:limit]],
+        "container_ready": [row(issue) for issue in container_ready[:limit]],
         "blocked": [
             {**row(issue), "blockers": list(blockers)}
             for issue, blockers in blocked[:limit]
@@ -331,7 +355,8 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
         ),
         (
             f"- Issues: **{counts['in_progress']}** in progress, **{counts['open']}** open, "
-            f"**{counts['ready']}** ready, **{counts['blocked']}** blocked, "
+            f"**{counts['ready']}** claimable, **{counts['assigned_ready']}** assigned-ready, "
+            f"**{counts['container_ready']}** ready containers, **{counts['blocked']}** blocked, "
             f"**{counts['stale_claims']}** stale, **{counts['unowned_active']}** unowned active."
         ),
     ]
@@ -359,12 +384,22 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
                 else ""
             )
             lines.append(
-                f"- **P{row['priority']} `{row['id']}`** [{row['workstream']}]{owner}"
-                f"{blockers}: {row['title']}"
+                f"- **P{row['priority']} `{row['id']}`** [{row['workstream']}]"
+                f" ({row['issue_type']}){owner}{blockers}: {row['title']}"
             )
 
     section("Active claims", snapshot["active"], "No active claims.")
-    section("Ready queue", snapshot["ready"], "No dependency-ready open issues.")
+    section("Claimable ready queue", snapshot["ready"], "No claimable ready leaf issues.")
+    section(
+        "Assigned dependency-ready work",
+        snapshot["assigned_ready"],
+        "No assigned dependency-ready work.",
+    )
+    section(
+        "Dependency-ready containers",
+        snapshot["container_ready"],
+        "No dependency-ready epic containers.",
+    )
     section("Blocked queue", snapshot["blocked"], "No blocked open issues.")
     section("Stale claims", snapshot["stale_claims"], "No stale assigned claims.")
     section("Unowned active claims", snapshot["unowned_active"], "No unowned active claims.")
@@ -376,9 +411,10 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
             "",
             "1. Refresh this brief immediately before claiming work.",
             "2. Treat Beads as authoritative; this projection never edits status.",
-            "3. Prefer the recommendation only after rechecking reservations and current HEAD.",
-            "4. Do not activate a fifth workstream; an unscoped recommendation needs a governance check.",
-            "5. Re-run after every claim, dependency change, close, or handoff.",
+            "3. Never claim an assigned issue or an epic container from this projection.",
+            "4. Prefer the recommendation only after rechecking reservations and current HEAD.",
+            "5. Do not activate a fifth workstream; an unscoped recommendation needs a governance check.",
+            "6. Re-run after every claim, dependency change, close, or handoff.",
             "",
         ]
     )
