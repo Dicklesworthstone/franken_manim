@@ -51,13 +51,16 @@ class Fixture:
         self.root.mkdir()
         (self.root / ".beads").mkdir()
         if worktree:
-            self.git_dir = Path(self.directory.name) / "git" / "worktrees" / "fixture"
+            self.git_common_dir = Path(self.directory.name) / "git"
+            self.git_dir = self.git_common_dir / "worktrees" / "fixture"
             self.git_dir.mkdir(parents=True)
+            (self.git_dir / "commondir").write_text("../..\n", encoding="utf-8")
             relative = os.path.relpath(self.git_dir, self.root)
             (self.root / ".git").write_text(f"gitdir: {relative}\n", encoding="utf-8")
         else:
             self.git_dir = self.root / ".git"
             self.git_dir.mkdir()
+            self.git_common_dir = self.git_dir
         self.ledger = self.root / ".beads" / "issues.jsonl"
         self.write(rows)
 
@@ -80,6 +83,18 @@ class Fixture:
             limit=policy.get("limit", 20),
         )
         return guard["token"]
+
+    def sibling_worktree(self, name: str) -> Path:
+        root = Path(self.directory.name) / name
+        root.mkdir()
+        (root / ".beads").mkdir()
+        (root / ".beads" / "issues.jsonl").write_bytes(self.ledger.read_bytes())
+        git_dir = self.git_common_dir / "worktrees" / name
+        git_dir.mkdir(parents=True)
+        (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        relative = os.path.relpath(git_dir, root)
+        (root / ".git").write_text(f"gitdir: {relative}\n", encoding="utf-8")
+        return root
 
     def cleanup(self) -> None:
         self.directory.cleanup()
@@ -165,7 +180,7 @@ class AgentClaimTests(unittest.TestCase):
             ],
         )
         self.assertEqual(fixture.rows()[0]["status"], "open")
-        self.assertTrue((fixture.git_dir / agent_claim.LOCK_FILE_NAME).is_file())
+        self.assertTrue((fixture.git_common_dir / agent_claim.LOCK_FILE_NAME).is_file())
 
     def test_claim_runs_update_then_flush_and_verifies_the_postcondition(self) -> None:
         fixture = self.fixture([record("fm-next")])
@@ -279,7 +294,7 @@ class AgentClaimTests(unittest.TestCase):
         self.assertEqual(raised.exception.exit_code, 3)
         self.assertIn("no claimable recommendation", str(raised.exception))
 
-    def test_worktree_gitdir_markers_resolve_to_a_persistent_unlinked_lock(self) -> None:
+    def test_worktree_gitdir_markers_resolve_to_a_persistent_shared_lock(self) -> None:
         fixture = self.fixture([record("fm-next")], worktree=True)
         receipt = agent_claim.execute_claim(
             fixture.root,
@@ -288,9 +303,25 @@ class AgentClaimTests(unittest.TestCase):
             dry_run=True,
         )
         self.assertFalse(receipt["claimed"])
-        lock = fixture.git_dir / agent_claim.LOCK_FILE_NAME
+        lock = fixture.git_common_dir / agent_claim.LOCK_FILE_NAME
         self.assertTrue(lock.is_file())
         self.assertEqual(lock.read_bytes(), b"0")
+        self.assertFalse((fixture.git_dir / agent_claim.LOCK_FILE_NAME).exists())
+
+    @unittest.skipIf(os.name == "nt", "fcntl contention fixture is Unix-specific")
+    def test_linked_worktrees_contend_on_the_same_common_lock(self) -> None:
+        fixture = self.fixture([record("fm-next")], worktree=True)
+        sibling = fixture.sibling_worktree("sibling")
+        self.assertEqual(
+            agent_claim.resolve_git_common_dir(fixture.root),
+            agent_claim.resolve_git_common_dir(sibling),
+        )
+        with agent_claim.claim_lock(fixture.root):
+            with self.assertRaises(agent_claim.ClaimError) as raised:
+                with agent_claim.claim_lock(sibling):
+                    self.fail("sibling worktree acquired the shared claim lock")
+        self.assertEqual(raised.exception.exit_code, 5)
+        self.assertIn("already in progress", str(raised.exception))
 
     @unittest.skipIf(os.name == "nt", "fcntl contention fixture is Unix-specific")
     def test_local_lock_contention_fails_before_guard_or_mutation(self) -> None:
