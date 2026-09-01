@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# The mandatory verification gate (AGENTS.md): fmt, check, clippy -D warnings,
-# rustdoc -D warnings, test, then the structural crate-DAG check — in order,
-# stopping on first failure. CI wires this script rather than duplicating the
-# commands.
+# The mandatory local/owned-host verification gate (AGENTS.md): fmt, check,
+# clippy -D warnings, rustdoc -D warnings, test, then the structural crate-DAG
+# check — in order, stopping on first failure. Hosted workflows may invoke this
+# script, but hosted CI availability is not part of the correctness contract.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "==> agent control-plane parser/generator/tests"
+echo "==> agent control-plane parser/planner/generator/tests"
 python3 -m py_compile \
     scripts/agent_brief.py \
+    scripts/agent_next.py \
     scripts/generate_agent_brief.py \
     scripts/test_agent_brief.py \
+    scripts/test_agent_next.py \
     scripts/test_generate_agent_brief.py
 python3 scripts/agent_brief.py --format json --limit 1 >/dev/null
 python3 scripts/test_agent_brief.py
+python3 scripts/test_agent_next.py
 python3 scripts/test_generate_agent_brief.py
-# Render the complete live ledger through the exact committed-artifact path,
-# but do not mutate docs during validation. This also fails on a breached
-# workstream cap or malformed/missing dependency state.
+# Render the complete live ledger through both operational projections without
+# mutating documentation. The claim planner additionally proves that non-epic
+# parents with live children cannot be returned as autonomous leaf work.
+python3 scripts/agent_next.py --format json --check >/dev/null
 python3 scripts/generate_agent_brief.py --stdout >/dev/null
 
 echo "==> Python geometry helper alias policy"
@@ -102,7 +106,7 @@ python3 scripts/check_crate_dag.py
 # wasm VM and prove the render path executes there deterministically, the
 # browser clock capability reads the host clocks, the process capability
 # fails closed, and the topology is single-CPU. Skipped (loudly) only where
-# no JS runtime exists; CI has node.
+# no JS runtime exists; owned release hosts carry node.
 if command -v node >/dev/null 2>&1; then
     echo "==> wasm32 headless smoke (node)"
     ./wasm-smoke/run.sh
