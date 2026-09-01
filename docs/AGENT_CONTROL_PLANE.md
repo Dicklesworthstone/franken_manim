@@ -33,7 +33,7 @@ python3 scripts/agent_next.py --require
 python3 scripts/generate_agent_brief.py --stdout
 ```
 
-`agent_next.py` emits either one claimable leaf ID or `none` in its default mode. Exit `1` means the blocking graph or activation state is unsafe, exit `2` means malformed input or invocation, and exit `3` means the graph is valid but currently has no claimable recommendation.
+`agent_next.py` emits either one claimable leaf ID or `none` in its default mode. Exit `1` means the blocking graph or activation state is unsafe, exit `2` means malformed input or invocation, and exit `3` means the graph is valid but currently has no claimable recommendation. Any nonzero planner exit emits no stdout payload, so an automation that correctly treats stdout as a plan can never consume a failed plan.
 
 `agent_brief.py --format next` remains a backward-compatible broad ready-queue projection. It does not inspect live child containment and must not be used as an autonomous claim decision. `agent_next.py` is the claim surface.
 
@@ -91,7 +91,7 @@ Cycle analysis is iterative rather than recursive, so a valid deep dependency ch
 - direct and immediate-unblock pressure;
 - bounded claimable, container, and assigned-ready queues.
 
-Field order is canonical through sorted-key JSON, output always ends in one LF, and identical input plus `--as-of` produces identical bytes.
+Field order is canonical through sorted-key JSON, output always ends in one LF, and identical input plus `--as-of` produces identical bytes. Integrity, activation-cap, malformed-input, and required-but-empty failures are decided before rendering and produce no stdout bytes.
 
 ## Deterministic rendering
 
