@@ -4,7 +4,9 @@
 The Beads JSONL ledger remains authoritative. This command derives
 ``docs/AGENT_BRIEF.md`` from that ledger using the newest issue timestamp as
 ``as_of``; wall-clock time never enters the artifact, so identical ledger bytes
-produce identical Markdown.
+produce identical Markdown. The broad situational projection and the
+machine-readable leaf planner are computed from the same parsed issue graph,
+so the human recommendation cannot disagree with autonomous triage.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import agent_brief
+import agent_next
 
 DEFAULT_LEDGER = Path(".beads/issues.jsonl")
 DEFAULT_OUTPUT = Path("docs/AGENT_BRIEF.md")
@@ -34,6 +37,33 @@ def ledger_as_of(issues: dict[str, agent_brief.Issue]):
     return max(issue.updated_at for issue in issues.values())
 
 
+def render_leaf_section(plan: dict[str, Any]) -> str:
+    recommendation = plan["recommendation"]
+    issue = recommendation["issue"]
+    if issue is None:
+        selected = "**none**"
+    else:
+        selected = (
+            f"**P{issue['priority']} `{issue['id']}`** "
+            f"[{issue['workstream']}]"
+        )
+    lines = [
+        "## Leaf-safe claim plan",
+        "",
+        f"- Recommended next: {selected} — {recommendation['reason']}.",
+        (
+            f"- Queues: **{plan['counts']['claimable_leaves']}** claimable leaves, "
+            f"**{plan['counts']['ready_containers']}** ready containers "
+            f"({plan['counts']['non_epic_containers']} non-epic), "
+            f"**{plan['counts']['assigned_ready']}** assigned-ready."
+        ),
+        "- A task with any live `parent-child` descendant is a container, regardless of its issue type.",
+        "- This section is the claim contract; the broader queue below is situational context only.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def build_document(
     ledger: Path,
     *,
@@ -42,14 +72,43 @@ def build_document(
     limit: int,
 ) -> tuple[str, dict[str, Any]]:
     issues = agent_brief.load_issues(ledger)
+    as_of = ledger_as_of(issues)
     snapshot = agent_brief.build_snapshot(
         issues,
-        as_of=ledger_as_of(issues),
+        as_of=as_of,
         stale_days=stale_days,
         activation_cap=activation_cap,
         limit=limit,
     )
-    document = agent_brief.render_markdown(snapshot).rstrip("\n") + "\n"
+    plan = agent_next.build_plan(
+        issues,
+        as_of=as_of,
+        stale_days=stale_days,
+        activation_cap=activation_cap,
+        limit=limit,
+    )
+    # Preserve the broad queues for situational awareness, but make every
+    # human-visible recommendation use the exact machine planner decision.
+    snapshot["recommendation"] = plan["recommendation"]
+    snapshot["claim_plan"] = plan
+    broad = agent_brief.render_markdown(snapshot).rstrip("\n")
+    broad = broad.replace(
+        "## Claimable ready queue",
+        "## Broad dependency-ready queue",
+        1,
+    ).replace(
+        "No claimable ready leaf issues.",
+        "No broad dependency-ready open issues.",
+        1,
+    )
+    marker = "\n## Active claims\n"
+    if marker not in broad:
+        raise GenerateError("agent brief renderer omitted the Active claims section")
+    document = broad.replace(
+        marker,
+        "\n" + render_leaf_section(plan) + "## Active claims\n",
+        1,
+    ).rstrip("\n") + "\n"
     encoded = document.encode("utf-8")
     if len(encoded) > MAX_OUTPUT_BYTES:
         raise GenerateError(
