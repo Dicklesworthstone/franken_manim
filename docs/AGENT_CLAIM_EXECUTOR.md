@@ -33,7 +33,7 @@ python3 scripts/agent_claim.py \
     --command-timeout-seconds 60
 ```
 
-On success, the command emits one canonical compact JSON receipt. It emits no success receipt unless `br update`, `br sync --flush-only`, and the parsed-ledger postcondition all succeed.
+On success, the command emits one canonical compact JSON receipt. It emits no success receipt unless `br update`, `br sync --flush-only`, strict JSONL reload, and exact claim-delta verification all succeed.
 
 ## Transaction shape
 
@@ -52,53 +52,76 @@ While holding the claim lock, the executor performs these steps in order:
    br update ISSUE --status in_progress --assignee ASSIGNEE [--transition-comment TEXT]
    ```
 
-9. Drain stdout and stderr concurrently under an eager retained-byte ceiling while enforcing the per-command wall-clock deadline.
+9. Drain stdout and stderr concurrently while enforcing the per-stream retention ceiling, combined produced-byte ceiling, and per-command wall-clock deadline.
 10. Invoke `br sync --flush-only` under the same subprocess policy.
-11. Re-read the exported JSONL and require the selected row to be `in_progress` with the requested assignee.
-12. Emit the receipt and release the advisory lock.
+11. Re-read the exported JSONL.
+12. Require one exact claim-only graph delta: no issue may appear or disappear, every non-target parsed issue must remain unchanged, and only the selected issue's status, assignee, non-regressing `updated_at`, and optional exact appended transition comment may change.
+13. Emit the receipt and release the advisory lock.
 
 The `.git` and `commondir` markers are read through no-follow bounded regular-file descriptors where supported. Malformed, non-UTF-8, oversized, symlinked, or non-directory targets fail before lock acquisition.
 
 The lock file is intentionally persistent. Deleting and recreating a lock pathname can split contenders across different inodes, so cleanup is neither required nor permitted by the normal workflow.
 
-## Command lifetime and process cleanup
+## Command lifetime and output policy
 
-Each `br` command has a finite wall-clock deadline. The default is 60 seconds, the accepted maximum is 3,600 seconds, and zero, negative, non-finite, or excessive values are rejected before repository access. The chosen value is exposed in the version-2 receipt's `executor_policy` object.
+Each `br` command has a finite wall-clock deadline. The default is 60 seconds, the accepted maximum is 3,600 seconds, and zero, negative, non-finite, or excessive values are rejected before repository access. The chosen value is exposed in the receipt's `executor_policy` object.
 
-On POSIX hosts, every command starts in a new session. A timeout sends `SIGKILL` to the command's process group, so descendants in that session are cancelled with the direct child. On Windows, the command starts in a new process group; timeout cleanup uses the native `taskkill.exe /T /F` facility when available and falls back to direct-child termination. The Windows fallback is deliberately not described as a complete descendant guarantee.
+On POSIX hosts, every command starts in a new session. Timeout or output-budget failure sends `SIGKILL` to the command's process group, so descendants in that session are cancelled with the direct child. On Windows, the command starts in a new process group; cleanup uses the native `taskkill.exe /T /F` facility when available and falls back to direct-child termination. The Windows fallback is deliberately not described as a complete descendant guarantee.
 
 Reader threads are daemonized and joined under a finite cleanup budget. If the direct child exits while a descendant still owns an inherited stdout or stderr handle, the executor forces cleanup and returns exit `5` rather than holding the repository claim lock indefinitely.
 
-The deadline is per command, not a single budget for the whole update-plus-flush transaction. Cleanup can extend wall-clock duration by the finite termination and reader-join budgets. The executor still has no total-produced-byte ceiling: retained memory is bounded, and command lifetime is bounded, but bytes discarded after the retained ceiling are not counted as a separate quota.
+The process has two distinct output controls:
+
+- each stream retains at most 1 MiB plus one overflow-detection byte;
+- stdout and stderr share a 16 MiB total-produced-byte budget per child command.
+
+The readers count every produced chunk before discarding bytes beyond the retained diagnostic ceiling. Exceeding the combined budget therefore kills the process tree promptly instead of allowing a continuously spewing child to run until its wall-clock timeout. Exactly 16 MiB is accepted; the first byte beyond it fails closed.
+
+The deadline and produced-byte ceiling are per command, not one budget for the whole update-plus-flush transaction. Cleanup can extend wall-clock duration slightly beyond the selected deadline. The production `Popen` runner enforces produced bytes while reading; an injected test runner can validate only the payload it returns.
+
+## Exact claim-delta contract
+
+The post-sync verifier compares the canonical parsed task graph before and after the mutation. It permits only:
+
+- target status: `open` → `in_progress`;
+- target assignee: unassigned → the requested nonempty assignee;
+- target `updated_at`: unchanged or advanced, never regressed;
+- when requested, exactly one newly appended comment whose `text` equals the transition comment.
+
+The target's ID, title, priority, issue type, and dependencies must remain unchanged. Without `--transition-comment`, its comments must remain exactly unchanged. All parsed fields of every non-target issue must remain equal, and issue membership must be identical.
+
+This comparison deliberately uses the same canonical parsed graph as the guard rather than raw JSONL byte identity. Unknown extension fields outside that graph are not promoted into task-selection semantics. Any observed parsed-graph drift produces exit `5` and no success receipt, even when the selected row itself looks correctly claimed.
 
 ## Receipt contract
 
-The version-2 receipt records:
+The version-4 receipt records:
 
 - mode (`claim` or `dry-run`);
 - issue and assignee;
 - the exact guard token;
 - pre-claim graph and claim digests;
 - graph-selection policy and schema contracts;
-- executor policy, including command timeout and retained bytes per stream;
+- executor policy, including command timeout, retained bytes per stream, and total produced bytes per command;
 - the guarded recommendation evidence;
 - the exact `br` argv vectors;
-- post-claim status and graph digest after successful mutation.
+- after-graph digest and a normalized `claim_delta` record after successful mutation.
 
-Receipt JSON is canonical, UTF-8, sorted by key, terminated by one LF, and capped at 1 MiB. Child-process diagnostic payloads accepted by the executor are capped at 1 MiB per stream.
+The `claim_delta` names the sole changed issue, allowed fields, status/assignee/timestamp transitions, and whether the exact transition comment was appended.
+
+Receipt JSON is canonical, UTF-8, sorted by key, terminated by one LF, and capped at 1 MiB.
 
 ## Exit codes
 
 | Exit | Meaning | Required response |
 |---:|---|---|
-| `0` | Dry-run validation succeeded, or the claim was flushed and postcondition-verified. | Consume the JSON receipt. |
+| `0` | Dry-run validation succeeded, or the claim was flushed and exact-delta verified. | Consume the JSON receipt. |
 | `1` | Blocking/containment integrity or activation state is unsafe. | Repair governance state; do not claim. |
-| `2` | Arguments, paths, token, ledger, timeout, or other input are malformed. | Repair input; do not claim. |
+| `2` | Arguments, paths, token, ledger, timeout, or another input contract is malformed. | Repair input; do not claim. |
 | `3` | The guarded graph has no recommendation. | Stop or repair coordination/graph state. |
 | `4` | The token or explicitly requested issue is stale. | Discard the token and repeat all external checks. |
-| `5` | Lock acquisition, timeout, process cleanup, `br`, flush, command-output bounds, or postcondition verification failed. | Inspect Beads before retrying; the update may have occurred even though no success receipt was emitted. |
+| `5` | Lock acquisition, timeout, process cleanup, output budget, `br`, flush, exact graph-delta verification, or receipt publication failed. | Inspect Beads before retrying; mutation may already have occurred. |
 
-A `br update` can durably mutate its native store before a timeout, later flush failure, or verification failure. Exit `5` therefore means “no verified transaction receipt,” not necessarily “no state changed.” Inspect `br show ISSUE`, `br sync --status`, and the working tree before retrying. Never blindly reissue the old token.
+A `br update` can durably mutate its native store before a timeout, output-budget kill, later flush failure, or verification failure. Exit `5` therefore means “no verified transaction receipt,” not necessarily “no state changed.” Inspect `br show ISSUE`, `br sync --status`, and the working tree before retrying. Never blindly reissue the old token.
 
 ## Concurrency boundary
 
@@ -110,7 +133,7 @@ The advisory lock serializes cooperating executor processes in the primary and l
 - remote coordination or file reservations;
 - changes to `main` outside Beads.
 
-The guard comparison remains necessary inside the lock because a token can already be stale when lock acquisition succeeds. External coordination checks remain necessary immediately before invoking the executor.
+The guard comparison remains necessary inside the lock because a token can already be stale when lock acquisition succeeds. The exact post-sync delta catches parsed-graph changes that occur during the two child commands, including changes from actors outside the local lock. External coordination checks remain necessary immediately before invoking the executor.
 
 ## Strict ledger grammar
 
@@ -118,9 +141,9 @@ The shared Beads reader accepts strict JSON, not Python's historical JSON extens
 
 ## Verification
 
-`scripts/test_agent_claim.py` covers dry-run argv, version-2 executor-policy receipts, successful update/flush/postcondition flow, stale tokens, issue mismatch, update and sync failures, missing mutation, graph-integrity and no-work exits, normal and linked-worktree Git resolution, shared-common-directory contention, local contention, output bounds, and no-stdout failure behavior.
+`scripts/test_agent_claim.py` covers dry-run argv, version-4 executor-policy receipts, successful update/flush/exact-delta flow, transition comments, unrelated and membership graph drift, target-field drift, stale tokens, issue mismatch, update and sync failures, missing mutation, graph-integrity and no-work exits, normal and linked-worktree Git resolution, shared-common-directory contention, local contention, injected-runner output bounds, and no-stdout failure behavior.
 
-`scripts/test_agent_claim_subprocess.py` uses real child processes to cover exact-limit stdout/stderr retention, independent overflow, simultaneous large-stream draining, bounded nonzero-exit diagnostics, direct-child timeout, POSIX descendant cancellation, inherited-pipe cleanup, timeout input validation, and no-stdout CLI refusal.
+`scripts/test_agent_claim_subprocess.py` uses real child processes to cover exact-limit retained output, exact and excessive combined produced output, early termination of a continuously spewing child, independent stream overflow, simultaneous large-stream draining, bounded nonzero-exit diagnostics, direct-child timeout, POSIX descendant cancellation, inherited-pipe cleanup, timeout validation, and no-stdout CLI refusal.
 
 `scripts/test_agent_brief_strict_json.py` covers all three non-finite spellings at top level and in nested ignored data, quoted-string acceptance, no-projection CLI failure, and claim-graph grammar versioning.
 
