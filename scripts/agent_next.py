@@ -23,7 +23,12 @@ import agent_brief
 
 SCHEMA = "fmn.agent.next"
 SCHEMA_VERSION = 2
+MAX_PLAN_OUTPUT_BYTES = 4 * 1024 * 1024
 UTC = dt.timezone.utc
+
+
+class PlanError(ValueError):
+    pass
 
 
 def live_children(issues: dict[str, agent_brief.Issue]) -> dict[str, tuple[str, ...]]:
@@ -269,8 +274,17 @@ def build_plan(
     }
 
 
+def _bounded_output(text: str) -> str:
+    size = len(text.encode("utf-8"))
+    if size > MAX_PLAN_OUTPUT_BYTES:
+        raise PlanError(
+            f"claim plan exceeds the {MAX_PLAN_OUTPUT_BYTES}-byte output limit ({size} bytes)"
+        )
+    return text
+
+
 def render_json(plan: dict[str, Any]) -> str:
-    return json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n"
+    return _bounded_output(json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n")
 
 
 def render_markdown(plan: dict[str, Any]) -> str:
@@ -305,13 +319,18 @@ def render_markdown(plan: dict[str, Any]) -> str:
         )
     if plan["integrity"]["containment_cycles"]:
         lines.append("")
-    return "\n".join(lines)
+    return _bounded_output("\n".join(lines))
 
 
-def parse_as_of(value: str | None) -> dt.datetime:
-    if value is None:
-        return dt.datetime.now(UTC)
-    return agent_brief.parse_timestamp(value, field="--as-of", issue_id="command line")
+def parse_as_of(
+    value: str | None, issues: dict[str, agent_brief.Issue]
+) -> dt.datetime:
+    if value is not None:
+        return agent_brief.parse_timestamp(value, field="--as-of", issue_id="command line")
+    return max(
+        (issue.updated_at for issue in issues.values()),
+        default=dt.datetime(1970, 1, 1, tzinfo=UTC),
+    )
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -336,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         issues = agent_brief.load_issues(args.ledger)
         plan = build_plan(
             issues,
-            as_of=parse_as_of(args.as_of),
+            as_of=parse_as_of(args.as_of, issues),
             stale_days=args.stale_days,
             activation_cap=args.activation_cap,
             limit=args.limit,
@@ -356,13 +375,19 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no claimable recommendation exists", file=sys.stderr)
         return 3
 
-    if args.format == "json":
-        print(render_json(plan), end="")
-    elif args.format == "markdown":
-        print(render_markdown(plan), end="")
-    else:
-        issue = plan["recommendation"]["issue"]
-        print(issue["id"] if issue is not None else "none")
+    try:
+        if args.format == "json":
+            output = render_json(plan)
+        elif args.format == "markdown":
+            output = render_markdown(plan)
+        else:
+            issue = plan["recommendation"]["issue"]
+            output = (issue["id"] if issue is not None else "none") + "\n"
+            output = _bounded_output(output)
+    except PlanError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    sys.stdout.write(output)
     return 0
 
 
