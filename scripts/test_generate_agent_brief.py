@@ -83,6 +83,24 @@ class GenerateAgentBriefTests(unittest.TestCase):
         second, _ = generator.build_document(ledger, stale_days=2, activation_cap=4, limit=20)
         self.assertEqual(first.encode(), second.encode())
 
+    def test_stdout_mode_is_exact_and_never_touches_the_output_path(self) -> None:
+        ledger, output = self.fixture()
+        self.write_ledger(ledger, self.rows())
+        output.write_text("sentinel\n", encoding="utf-8")
+        expected, _snapshot = generator.build_document(
+            ledger, stale_days=2, activation_cap=4, limit=20
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = generator.main(
+                ["--ledger", str(ledger), "--output", str(output), "--stdout"]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(stdout.getvalue(), expected)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
+
     def test_generate_then_check_succeeds_and_stale_or_missing_refuses(self) -> None:
         ledger, output = self.fixture()
         self.write_ledger(ledger, self.rows())
@@ -150,7 +168,7 @@ class GenerateAgentBriefTests(unittest.TestCase):
         self.assertEqual(temporary.read_text(encoding="utf-8"), "do-not-touch\n")
         self.assertFalse(output.exists())
 
-    def test_check_fails_when_activation_cap_is_breached(self) -> None:
+    def test_activation_cap_breach_refuses_before_publication(self) -> None:
         ledger, output = self.fixture()
         rows = [
             record(
@@ -163,18 +181,19 @@ class GenerateAgentBriefTests(unittest.TestCase):
             for index in range(1, 6)
         ]
         self.write_ledger(ledger, rows)
-        first_stderr = io.StringIO()
-        with contextlib.redirect_stderr(first_stderr):
-            status = generator.main(["--ledger", str(ledger), "--output", str(output)])
-        self.assertEqual(status, 1)
-        self.assertIn("workstream cap breached", first_stderr.getvalue())
-        self.assertTrue(output.is_file())
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            status = generator.main(
-                ["--ledger", str(ledger), "--output", str(output), "--check"]
-            )
+            status = generator.main(["--ledger", str(ledger), "--output", str(output)])
         self.assertEqual(status, 1)
+        self.assertIn("workstream cap breached", stderr.getvalue())
+        self.assertFalse(output.exists())
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = generator.main(["--ledger", str(ledger), "--stdout"])
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
         self.assertIn("workstream cap breached", stderr.getvalue())
 
 
