@@ -14,6 +14,41 @@ _ensure_exclusive_manimlib_namespace()
 
 from . import manimlib as _native
 
+
+# The Rust API deliberately exposes ergonomic snake_case constructors, while
+# the pinned Reference exports the corresponding CamelCase classes.  Treat a
+# leak in either direction as an invalid wheel rather than silently widening
+# or shrinking ``from manimlib import *``.
+_REFERENCE_CLASS_BY_RUST_HELPER = {
+    "group": "Group",
+    "v_group": "VGroup",
+    "vectorized_point": "VectorizedPoint",
+    "small_dot": "SmallDot",
+    "sector": "Sector",
+    "vector": "Vector",
+    "polyline": "Polyline",
+    "triangle": "Triangle",
+    "rounded_rectangle": "RoundedRectangle",
+    "svg_mobject": "SVGMobject",
+    "tangent_line": "TangentLine",
+    "curved_arrow": "CurvedArrow",
+    "curved_double_arrow": "CurvedDoubleArrow",
+    "curves_as_submobjects": "CurvesAsSubmobjects",
+    "dashed_vmobject": "DashedVMobject",
+    "v_highlight": "VHighlight",
+}
+for _rust_helper, _reference_class in _REFERENCE_CLASS_BY_RUST_HELPER.items():
+    if hasattr(_native, _rust_helper):
+        raise ImportError(
+            f"Rust-only constructor helper {_rust_helper!r} leaked into manimlib"
+        )
+    if not hasattr(_native, _reference_class):
+        raise ImportError(
+            f"Reference constructor class {_reference_class!r} is missing from manimlib"
+        )
+del _REFERENCE_CLASS_BY_RUST_HELPER, _rust_helper, _reference_class
+
+
 for _name in dir(_native):
     if not _name.startswith("_"):
         globals()[_name] = getattr(_native, _name)
