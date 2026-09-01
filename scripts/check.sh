@@ -11,11 +11,13 @@ python3 -m py_compile \
     scripts/agent_brief.py \
     scripts/agent_next.py \
     scripts/agent_claim_guard.py \
+    scripts/agent_claim.py \
     scripts/generate_agent_brief.py \
     scripts/test_agent_brief.py \
     scripts/test_agent_next.py \
     scripts/test_agent_next_output.py \
     scripts/test_agent_claim_guard.py \
+    scripts/test_agent_claim.py \
     scripts/test_generate_agent_brief.py \
     scripts/test_generate_agent_brief_io.py
 # Invalid graph or activation state must fail before any machine payload.
@@ -24,6 +26,7 @@ python3 scripts/test_agent_brief.py
 python3 scripts/test_agent_next.py
 python3 scripts/test_agent_next_output.py
 python3 scripts/test_agent_claim_guard.py
+python3 scripts/test_agent_claim.py
 python3 scripts/test_generate_agent_brief.py
 python3 scripts/test_generate_agent_brief_io.py
 # Render the complete live ledger through every operational projection without
@@ -31,11 +34,22 @@ python3 scripts/test_generate_agent_brief_io.py
 # live children cannot be returned as autonomous leaf work. The claim guard
 # then revalidates the exact graph, policy, schema contract, and recommendation
 # it just issued before any later gate can rely on that coordination surface.
+# When work is claimable, the executor additionally acquires its repository-
+# local lock and validates the exact intended br argv in dry-run mode; it never
+# invokes br or mutates Beads from this verification path.
 python3 scripts/agent_next.py --format json --check >/dev/null
 claim_token="$(python3 scripts/agent_claim_guard.py --format token)"
 python3 scripts/agent_claim_guard.py \
     --expect-token "$claim_token" \
     --format json >/dev/null
+claim_id="${claim_token##*:}"
+if [[ "$claim_id" != "none" ]]; then
+    python3 scripts/agent_claim.py \
+        --expect-token "$claim_token" \
+        --issue "$claim_id" \
+        --assignee fmn-check-gate \
+        --dry-run >/dev/null
+fi
 python3 scripts/generate_agent_brief.py --stdout >/dev/null
 
 echo "==> Python portal refusal inventory"
