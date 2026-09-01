@@ -21,6 +21,7 @@ python3 scripts/agent_claim.py \
     --issue "$issue" \
     --assignee "$FMN_AGENT_ID" \
     --transition-comment "Claimed after graph, reservation, and HEAD checks" \
+    --command-timeout-seconds 60 \
     --dry-run
 
 # 4. Perform the guarded mutation.
@@ -28,7 +29,8 @@ python3 scripts/agent_claim.py \
     --expect-token "$token" \
     --issue "$issue" \
     --assignee "$FMN_AGENT_ID" \
-    --transition-comment "Claimed after graph, reservation, and HEAD checks"
+    --transition-comment "Claimed after graph, reservation, and HEAD checks" \
+    --command-timeout-seconds 60
 ```
 
 On success, the command emits one canonical compact JSON receipt. It emits no success receipt unless `br update`, `br sync --flush-only`, and the parsed-ledger postcondition all succeed.
@@ -41,7 +43,7 @@ While holding the claim lock, the executor performs these steps in order:
 2. If the resolved Git directory contains `commondir`, resolve that bounded regular-file marker to Git's shared common directory.
 3. Open and non-blockingly lock the persistent `fmn-agent-claim.lock` file in the common directory. The primary worktree and every linked worktree therefore contend on the same inode.
 4. Read `.beads/issues.jsonl` through the strict bounded parser.
-5. Rebuild the complete v2 guard with the caller's exact policy arguments.
+5. Rebuild the complete v2 guard with the caller's exact graph-selection policy.
 6. Compare the supplied token's claim digest and issue subject with the live guard.
 7. Verify the selected row remains an unassigned `open` issue.
 8. Invoke `br` without a shell using exact argv:
@@ -50,8 +52,8 @@ While holding the claim lock, the executor performs these steps in order:
    br update ISSUE --status in_progress --assignee ASSIGNEE [--transition-comment TEXT]
    ```
 
-9. Concurrently drain stdout and stderr while retaining at most the configured limit plus one detection byte for each stream.
-10. Invoke `br sync --flush-only` under the same output policy.
+9. Drain stdout and stderr concurrently under an eager retained-byte ceiling while enforcing the per-command wall-clock deadline.
+10. Invoke `br sync --flush-only` under the same subprocess policy.
 11. Re-read the exported JSONL and require the selected row to be `in_progress` with the requested assignee.
 12. Emit the receipt and release the advisory lock.
 
@@ -59,28 +61,31 @@ The `.git` and `commondir` markers are read through no-follow bounded regular-fi
 
 The lock file is intentionally persistent. Deleting and recreating a lock pathname can split contenders across different inodes, so cleanup is neither required nor permitted by the normal workflow.
 
-## Child-process output policy
+## Command lifetime and process cleanup
 
-The executor does not use `subprocess.run(..., stdout=PIPE, stderr=PIPE)`, because that interface retains complete child output before a later length check can reject it. Instead it starts one reader for each pipe, drains both concurrently, and stores no more than `MAX_COMMAND_OUTPUT_BYTES + 1` bytes per stream. Once overflow is known, the reader discards further bytes while continuing to drain the pipe so the child cannot deadlock on a full stdout or stderr buffer.
+Each `br` command has a finite wall-clock deadline. The default is 60 seconds, the accepted maximum is 3,600 seconds, and zero, negative, non-finite, or excessive values are rejected before repository access. The chosen value is exposed in the version-2 receipt's `executor_policy` object.
 
-Exact-limit payloads remain available for diagnostics. A limit-plus-one payload causes exit `5` after the child terminates, and no success receipt is emitted. Both pipes are always drained concurrently, including when the child writes large stdout and stderr payloads at the same time.
+On POSIX hosts, every command starts in a new session. A timeout sends `SIGKILL` to the command's process group, so descendants in that session are cancelled with the direct child. On Windows, the command starts in a new process group; timeout cleanup uses the native `taskkill.exe /T /F` facility when available and falls back to direct-child termination. The Windows fallback is deliberately not described as a complete descendant guarantee.
 
-This is a retained-output memory bound, not a child wall-clock or total-produced-byte limit. A malicious or hung `br` process remains outside the executor's trust model and requires separate process-lifecycle policy rather than pretending the diagnostic buffer is a timeout.
+Reader threads are daemonized and joined under a finite cleanup budget. If the direct child exits while a descendant still owns an inherited stdout or stderr handle, the executor forces cleanup and returns exit `5` rather than holding the repository claim lock indefinitely.
+
+The deadline is per command, not a single budget for the whole update-plus-flush transaction. Cleanup can extend wall-clock duration by the finite termination and reader-join budgets. The executor still has no total-produced-byte ceiling: retained memory is bounded, and command lifetime is bounded, but bytes discarded after the retained ceiling are not counted as a separate quota.
 
 ## Receipt contract
 
-The version-1 receipt records:
+The version-2 receipt records:
 
 - mode (`claim` or `dry-run`);
 - issue and assignee;
 - the exact guard token;
 - pre-claim graph and claim digests;
-- policy and schema contracts;
+- graph-selection policy and schema contracts;
+- executor policy, including command timeout and retained bytes per stream;
 - the guarded recommendation evidence;
 - the exact `br` argv vectors;
 - post-claim status and graph digest after successful mutation.
 
-Receipt JSON is canonical, UTF-8, sorted by key, terminated by one LF, and capped at 1 MiB. Child-process diagnostics are eagerly retained under a 1 MiB-per-stream ceiling rather than collected without bound and checked afterward.
+Receipt JSON is canonical, UTF-8, sorted by key, terminated by one LF, and capped at 1 MiB. Child-process diagnostic payloads accepted by the executor are capped at 1 MiB per stream.
 
 ## Exit codes
 
@@ -88,12 +93,12 @@ Receipt JSON is canonical, UTF-8, sorted by key, terminated by one LF, and cappe
 |---:|---|---|
 | `0` | Dry-run validation succeeded, or the claim was flushed and postcondition-verified. | Consume the JSON receipt. |
 | `1` | Blocking/containment integrity or activation state is unsafe. | Repair governance state; do not claim. |
-| `2` | Arguments, paths, token, ledger, or other input are malformed. | Repair input; do not claim. |
+| `2` | Arguments, paths, token, ledger, timeout, or other input are malformed. | Repair input; do not claim. |
 | `3` | The guarded graph has no recommendation. | Stop or repair coordination/graph state. |
 | `4` | The token or explicitly requested issue is stale. | Discard the token and repeat all external checks. |
-| `5` | Lock acquisition, `br`, flush, command-output bounds, or postcondition verification failed. | Inspect Beads before retrying; the update may have occurred even though no success receipt was emitted. |
+| `5` | Lock acquisition, timeout, process cleanup, `br`, flush, command-output bounds, or postcondition verification failed. | Inspect Beads before retrying; the update may have occurred even though no success receipt was emitted. |
 
-A `br update` can durably mutate its native store before a later flush or verification fails. Exit `5` therefore means “no verified transaction receipt,” not necessarily “no state changed.” Inspect `br show ISSUE`, `br sync --status`, and the working tree before retrying. Never blindly reissue the old token.
+A `br update` can durably mutate its native store before a timeout, later flush failure, or verification failure. Exit `5` therefore means “no verified transaction receipt,” not necessarily “no state changed.” Inspect `br show ISSUE`, `br sync --status`, and the working tree before retrying. Never blindly reissue the old token.
 
 ## Concurrency boundary
 
@@ -113,9 +118,9 @@ The shared Beads reader accepts strict JSON, not Python's historical JSON extens
 
 ## Verification
 
-`scripts/test_agent_claim.py` covers dry-run argv, successful update/flush/postcondition flow, stale tokens, issue mismatch, update and sync failures, missing mutation, graph-integrity and no-work exits, normal and linked-worktree Git resolution, shared-common-directory contention, local contention, injected-runner output bounds, and no-stdout failure behavior.
+`scripts/test_agent_claim.py` covers dry-run argv, version-2 executor-policy receipts, successful update/flush/postcondition flow, stale tokens, issue mismatch, update and sync failures, missing mutation, graph-integrity and no-work exits, normal and linked-worktree Git resolution, shared-common-directory contention, local contention, output bounds, and no-stdout failure behavior.
 
-`scripts/test_agent_claim_subprocess.py` uses real child processes to prove exact-limit stdout and stderr retention, independent stdout and stderr overflow, simultaneous large-stream draining without deadlock, and bounded diagnostics for a nonzero child exit.
+`scripts/test_agent_claim_subprocess.py` uses real child processes to cover exact-limit stdout/stderr retention, independent overflow, simultaneous large-stream draining, bounded nonzero-exit diagnostics, direct-child timeout, POSIX descendant cancellation, inherited-pipe cleanup, timeout input validation, and no-stdout CLI refusal.
 
 `scripts/test_agent_brief_strict_json.py` covers all three non-finite spellings at top level and in nested ignored data, quoted-string acceptance, no-projection CLI failure, and claim-graph grammar versioning.
 
