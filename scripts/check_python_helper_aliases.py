@@ -6,7 +6,7 @@ helpers. The pinned manimlib Reference exports CamelCase classes instead. This
 gate keeps those two front doors distinct: every Reference class must remain in
 the extracted schema, no Rust-only helper may leak into Python wildcard
 exports, the package import guard must enforce the same mapping, and the
-installed-wheel smoke must exercise the complete boundary.
+installed-wheel smoke must construct every corresponding Reference class.
 """
 
 from __future__ import annotations
@@ -50,10 +50,16 @@ REFERENCE_CONSTRUCTOR_ALIASES: dict[str, tuple[str, str]] = {
 }
 
 WRAPPER_MAPPING_NAME = "_REFERENCE_CLASS_BY_RUST_HELPER"
-WHEEL_MAPPING_NAME = "REFERENCE_CONSTRUCTOR_ALIASES"
 WRAPPER_HELPER_NAME = "_rust_helper"
 WRAPPER_CLASS_NAME = "_reference_class"
 WRAPPER_NATIVE_NAME = "_native"
+WHEEL_MAPPING_NAME = "REFERENCE_CONSTRUCTOR_ALIASES"
+WHEEL_VERIFY_FUNCTION = "verify_reference_constructor_aliases"
+WHEEL_BUILDERS_NAME = "builders"
+WHEEL_ALIAS_NAME = "alias"
+WHEEL_MODULE_NAME = "module_name"
+WHEEL_CLASS_NAME = "class_name"
+WHEEL_ROOT_NAME = "manimlib"
 
 
 class AliasPolicyError(ValueError):
@@ -186,15 +192,7 @@ def mapping_drift(
     )
 
 
-def function_names(tree: ast.Module) -> set[str]:
-    return {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
-
-def function_calls(tree: ast.Module, function_name: str) -> set[str]:
+def function_node(tree: ast.Module, path: Path, function_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     functions = [
         node
         for node in tree.body
@@ -203,16 +201,28 @@ def function_calls(tree: ast.Module, function_name: str) -> set[str]:
     ]
     if len(functions) != 1:
         raise AliasPolicyError(
-            f"expected exactly one {function_name} function, found {len(functions)}"
+            f"{path}: expected exactly one {function_name} function, found {len(functions)}"
         )
+    return functions[0]
+
+
+def function_names(tree: ast.Module) -> set[str]:
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def function_calls(tree: ast.Module, path: Path, function_name: str) -> set[str]:
     calls: set[str] = set()
-    for node in ast.walk(functions[0]):
+    for node in ast.walk(function_node(tree, path, function_name)):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             calls.add(node.func.id)
     return calls
 
 
-def is_mapping_items_call(node: ast.expr) -> bool:
+def named_items_call(node: ast.expr, mapping_name: str) -> bool:
     return (
         isinstance(node, ast.Call)
         and not node.args
@@ -220,11 +230,28 @@ def is_mapping_items_call(node: ast.expr) -> bool:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "items"
         and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == WRAPPER_MAPPING_NAME
+        and node.func.value.id == mapping_name
     )
 
 
-def is_hasattr_test(node: ast.expr, attribute_name: str, *, negated: bool) -> bool:
+def exact_name_tuple(node: ast.expr, names: tuple[str, ...]) -> bool:
+    return (
+        isinstance(node, (ast.Tuple, ast.List))
+        and len(node.elts) == len(names)
+        and all(
+            isinstance(item, ast.Name) and item.id == expected
+            for item, expected in zip(node.elts, names, strict=True)
+        )
+    )
+
+
+def is_hasattr_test(
+    node: ast.expr,
+    object_name: str,
+    attribute_name: str,
+    *,
+    negated: bool,
+) -> bool:
     candidate = node
     if negated:
         if not isinstance(node, ast.UnaryOp) or not isinstance(node.op, ast.Not):
@@ -238,7 +265,7 @@ def is_hasattr_test(node: ast.expr, attribute_name: str, *, negated: bool) -> bo
         and len(candidate.args) == 2
         and not candidate.keywords
         and isinstance(candidate.args[0], ast.Name)
-        and candidate.args[0].id == WRAPPER_NATIVE_NAME
+        and candidate.args[0].id == object_name
         and isinstance(candidate.args[1], ast.Name)
         and candidate.args[1].id == attribute_name
     )
@@ -259,10 +286,11 @@ def verify_wrapper_guard(tree: ast.Module, path: Path) -> None:
         node
         for node in tree.body
         if isinstance(node, ast.For)
-        and isinstance(node.target, (ast.Tuple, ast.List))
-        and [item.id for item in node.target.elts if isinstance(item, ast.Name)]
-        == [WRAPPER_HELPER_NAME, WRAPPER_CLASS_NAME]
-        and is_mapping_items_call(node.iter)
+        and exact_name_tuple(
+            node.target,
+            (WRAPPER_HELPER_NAME, WRAPPER_CLASS_NAME),
+        )
+        and named_items_call(node.iter, WRAPPER_MAPPING_NAME)
     ]
     if len(loops) != 1:
         raise AliasPolicyError(
@@ -273,13 +301,23 @@ def verify_wrapper_guard(tree: ast.Module, path: Path) -> None:
     helper_guards = [
         node
         for node in direct_ifs
-        if is_hasattr_test(node.test, WRAPPER_HELPER_NAME, negated=False)
+        if is_hasattr_test(
+            node.test,
+            WRAPPER_NATIVE_NAME,
+            WRAPPER_HELPER_NAME,
+            negated=False,
+        )
         and raises_import_error(node)
     ]
     class_guards = [
         node
         for node in direct_ifs
-        if is_hasattr_test(node.test, WRAPPER_CLASS_NAME, negated=True)
+        if is_hasattr_test(
+            node.test,
+            WRAPPER_NATIVE_NAME,
+            WRAPPER_CLASS_NAME,
+            negated=True,
+        )
         and raises_import_error(node)
     ]
     if len(helper_guards) != 1:
@@ -304,6 +342,123 @@ def verify_wrapper_guard(tree: ast.Module, path: Path) -> None:
     if not any(required_cleanup <= names for names in cleanup_sets):
         raise AliasPolicyError(
             f"{path}: import guard does not delete its private mapping and loop variables"
+        )
+
+
+def local_lambda_dict_keys(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    path: Path,
+    name: str,
+) -> set[str]:
+    matches: list[ast.Dict] = []
+    for node in ast.walk(function):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            raise AliasPolicyError(f"{path}: {name} must be a literal dict")
+        matches.append(node.value)
+    if len(matches) != 1:
+        raise AliasPolicyError(f"{path}: expected one local {name} table, found {len(matches)}")
+
+    keys: list[str] = []
+    for key_node, value_node in zip(matches[0].keys, matches[0].values, strict=True):
+        if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
+            raise AliasPolicyError(f"{path}: every {name} key must be a string literal")
+        if not isinstance(value_node, ast.Lambda):
+            raise AliasPolicyError(
+                f"{path}: {name}[{key_node.value!r}] must be an explicit constructor lambda"
+            )
+        keys.append(key_node.value)
+    if len(set(keys)) != len(keys):
+        raise AliasPolicyError(f"{path}: {name} contains duplicate class keys")
+    return set(keys)
+
+
+def wheel_loop_target(node: ast.expr) -> bool:
+    return (
+        isinstance(node, (ast.Tuple, ast.List))
+        and len(node.elts) == 2
+        and isinstance(node.elts[0], ast.Name)
+        and node.elts[0].id == WHEEL_ALIAS_NAME
+        and exact_name_tuple(
+            node.elts[1],
+            (WHEEL_MODULE_NAME, WHEEL_CLASS_NAME),
+        )
+    )
+
+
+def call_named_pair(node: ast.AST, function_name: str, first: str, second: str) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == function_name
+        and len(node.args) == 2
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == first
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == second
+    )
+
+
+def builder_invocation(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and not node.args
+        and not node.keywords
+        and isinstance(node.func, ast.Subscript)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == WHEEL_BUILDERS_NAME
+        and isinstance(node.func.slice, ast.Name)
+        and node.func.slice.id == WHEEL_CLASS_NAME
+    )
+
+
+def verify_wheel_probe(tree: ast.Module, path: Path) -> None:
+    function = function_node(tree, path, WHEEL_VERIFY_FUNCTION)
+    expected_classes = {
+        class_name for _module, class_name in REFERENCE_CONSTRUCTOR_ALIASES.values()
+    }
+    builders = local_lambda_dict_keys(function, path, WHEEL_BUILDERS_NAME)
+    if builders != expected_classes:
+        missing = sorted(expected_classes - builders)
+        extra = sorted(builders - expected_classes)
+        raise AliasPolicyError(
+            f"wheel constructor table drift: missing={missing}, extra={extra}"
+        )
+
+    loops = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.For)
+        and wheel_loop_target(node.target)
+        and named_items_call(node.iter, WHEEL_MAPPING_NAME)
+    ]
+    if len(loops) != 1:
+        raise AliasPolicyError(
+            f"{path}: expected one runtime loop over {WHEEL_MAPPING_NAME}, found {len(loops)}"
+        )
+    nodes = list(ast.walk(loops[0]))
+    if not any(
+        call_named_pair(node, "getattr", WHEEL_ROOT_NAME, WHEEL_CLASS_NAME)
+        for node in nodes
+    ):
+        raise AliasPolicyError(
+            f"{path}: wheel probe does not resolve each Reference class from manimlib"
+        )
+    if not any(builder_invocation(node) for node in nodes):
+        raise AliasPolicyError(
+            f"{path}: wheel probe does not invoke builders[class_name]()"
+        )
+    if not any(
+        call_named_pair(node, "hasattr", WHEEL_ROOT_NAME, WHEEL_ALIAS_NAME)
+        for node in nodes
+    ):
+        raise AliasPolicyError(
+            f"{path}: wheel probe does not recheck each Rust-only alias at runtime"
         )
 
 
@@ -345,15 +500,19 @@ def verify(schema_path: Path, wheel_smoke_path: Path, wrapper_path: Path) -> Non
     wheel_mapping, wheel_tree = parse_wheel_smoke(wheel_smoke_path)
     if wheel_mapping != REFERENCE_CONSTRUCTOR_ALIASES:
         raise mapping_drift("wheel", REFERENCE_CONSTRUCTOR_ALIASES, wheel_mapping)
-    required_function = "verify_reference_constructor_aliases"
-    if required_function not in function_names(wheel_tree):
-        raise AliasPolicyError(f"{wheel_smoke_path}: missing {required_function}")
-    calls = function_calls(wheel_tree, "verify_installed_distribution")
-    if required_function not in calls:
+    if WHEEL_VERIFY_FUNCTION not in function_names(wheel_tree):
+        raise AliasPolicyError(f"{wheel_smoke_path}: missing {WHEEL_VERIFY_FUNCTION}")
+    calls = function_calls(
+        wheel_tree,
+        wheel_smoke_path,
+        "verify_installed_distribution",
+    )
+    if WHEEL_VERIFY_FUNCTION not in calls:
         raise AliasPolicyError(
             f"{wheel_smoke_path}: verify_installed_distribution does not call "
-            f"{required_function}"
+            f"{WHEEL_VERIFY_FUNCTION}"
         )
+    verify_wheel_probe(wheel_tree, wheel_smoke_path)
 
     wrapper_mapping, wrapper_tree = parse_wrapper(wrapper_path)
     expected_wrapper = {
@@ -391,7 +550,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "Python geometry alias policy: "
         f"{len(REFERENCE_CONSTRUCTOR_ALIASES)} Reference classes verified; "
-        "schema, import guard, and wheel probe agree; no Rust-only helpers exported"
+        "schema, import guard, and constructed-wheel probe agree; "
+        "no Rust-only helpers exported"
     )
     return 0
 
