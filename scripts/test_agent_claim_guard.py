@@ -63,13 +63,27 @@ class AgentClaimGuardTests(unittest.TestCase):
             status = guard.main(["--ledger", str(path), *arguments])
         return status, stdout.getvalue(), stderr.getvalue()
 
-    def test_token_round_trip_revalidates_the_same_graph_and_recommendation(self) -> None:
-        path = self.ledger([record("fm-next", priority=1)])
-        status, output, error = self.invoke(path, "--format", "token", "--require")
-        self.assertEqual(status, 0)
+    def token(self, path: Path, *arguments: str) -> str:
+        status, output, error = self.invoke(path, "--format", "token", *arguments)
+        self.assertEqual(status, 0, error)
         self.assertEqual(error, "")
-        token = output.strip()
-        self.assertRegex(token, r"^v1:[0-9a-f]{64}:fm-next$")
+        return output.strip()
+
+    def assert_stale(self, path: Path, token: str, *arguments: str) -> None:
+        status, output, error = self.invoke(
+            path,
+            "--expect-token",
+            token,
+            *arguments,
+        )
+        self.assertEqual(status, 4, error)
+        self.assertEqual(output, "")
+        self.assertIn("claim token is stale", error)
+
+    def test_v2_token_round_trip_binds_graph_policy_and_schema_contract(self) -> None:
+        path = self.ledger([record("fm-next", priority=1)])
+        token = self.token(path, "--require")
+        self.assertRegex(token, r"^v2:[0-9a-f]{64}:fm-next$")
 
         status, output, error = self.invoke(
             path,
@@ -82,16 +96,50 @@ class AgentClaimGuardTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(error, "")
         payload = json.loads(output)
+        digest = token.split(":", 2)[1]
         self.assertEqual(payload["schema"], "fmn.agent.claim-guard")
-        self.assertEqual(payload["version"], 1)
+        self.assertEqual(payload["version"], 2)
         self.assertEqual(payload["token"], token)
+        self.assertEqual(payload["claim_sha256"], digest)
+        self.assertRegex(payload["graph_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(payload["claim_sha256"], payload["graph_sha256"])
         self.assertEqual(payload["recommendation_id"], "fm-next")
+        self.assertEqual(
+            payload["policy"],
+            {
+                "activation_cap": 4,
+                "as_of": "2026-08-31T08:15:00Z",
+                "limit": 20,
+                "stale_days": 2,
+            },
+        )
+        self.assertEqual(
+            payload["schemas"],
+            {
+                "agent_brief_snapshot_version": guard.agent_brief.SNAPSHOT_SCHEMA_VERSION,
+                "agent_next": {
+                    "schema": guard.agent_next.SCHEMA,
+                    "version": guard.agent_next.SCHEMA_VERSION,
+                },
+                "claim_graph": {
+                    "schema": guard.CLAIM_GRAPH_SCHEMA,
+                    "version": guard.CLAIM_GRAPH_VERSION,
+                },
+                "claim_guard": {
+                    "schema": guard.SCHEMA,
+                    "version": guard.SCHEMA_VERSION,
+                },
+                "claim_input": {
+                    "schema": guard.CLAIM_INPUT_SCHEMA,
+                    "version": guard.CLAIM_INPUT_VERSION,
+                },
+                "token_version": guard.TOKEN_VERSION,
+            },
+        )
 
-    def test_any_authoritative_state_change_invalidates_the_token(self) -> None:
+    def test_any_authoritative_graph_change_invalidates_the_token(self) -> None:
         path = self.ledger([record("fm-next", comments=[{"text": "first"}])])
-        status, output, _error = self.invoke(path)
-        self.assertEqual(status, 0)
-        token = output.strip()
+        token = self.token(path)
 
         path.write_text(
             json.dumps(
@@ -101,10 +149,7 @@ class AgentClaimGuardTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        status, output, error = self.invoke(path, "--expect-token", token)
-        self.assertEqual(status, 4)
-        self.assertEqual(output, "")
-        self.assertIn("claim token is stale", error)
+        self.assert_stale(path, token)
 
     def test_recommendation_change_invalidates_the_token(self) -> None:
         path = self.ledger(
@@ -113,9 +158,7 @@ class AgentClaimGuardTests(unittest.TestCase):
                 record("fm-second", priority=2),
             ]
         )
-        status, output, _error = self.invoke(path)
-        self.assertEqual(status, 0)
-        token = output.strip()
+        token = self.token(path)
         self.assertTrue(token.endswith(":fm-first"))
 
         path.write_text(
@@ -128,10 +171,7 @@ class AgentClaimGuardTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        status, output, error = self.invoke(path, "--expect-token", token)
-        self.assertEqual(status, 4)
-        self.assertEqual(output, "")
-        self.assertIn("claim token is stale", error)
+        self.assert_stale(path, token)
 
     def test_digest_is_independent_of_issue_and_dependency_row_order(self) -> None:
         parent = record("fm-parent", status="closed")
@@ -152,28 +192,87 @@ class AgentClaimGuardTests(unittest.TestCase):
         first_issues = guard.agent_brief.load_issues(first)
         second_issues = guard.agent_brief.load_issues(second)
         self.assertEqual(guard.graph_digest(first_issues), guard.graph_digest(second_issues))
+        self.assertEqual(self.token(first), self.token(second))
+
+    def test_every_policy_input_invalidates_an_otherwise_identical_claim(self) -> None:
+        path = self.ledger([record("fm-next", priority=1)])
+        token = self.token(path)
+        for arguments in (
+            ("--as-of", "2026-09-01T00:00:00Z"),
+            ("--stale-days", "3"),
+            ("--activation-cap", "5"),
+            ("--limit", "21"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assert_stale(path, token, *arguments)
+
+    def test_schema_version_changes_invalidate_an_otherwise_identical_claim(self) -> None:
+        path = self.ledger([record("fm-next", priority=1)])
+        token = self.token(path)
+        patches = (
+            mock.patch.object(
+                guard.agent_brief,
+                "SNAPSHOT_SCHEMA_VERSION",
+                guard.agent_brief.SNAPSHOT_SCHEMA_VERSION + 1,
+            ),
+            mock.patch.object(
+                guard.agent_next,
+                "SCHEMA_VERSION",
+                guard.agent_next.SCHEMA_VERSION + 1,
+            ),
+            mock.patch.object(guard, "SCHEMA_VERSION", guard.SCHEMA_VERSION + 1),
+        )
+        for patch in patches:
+            with self.subTest(patch=patch):
+                with patch:
+                    self.assert_stale(path, token)
+
+    def test_full_planner_output_is_bound_even_when_recommendation_is_unchanged(self) -> None:
+        path = self.ledger([record("fm-next", priority=1)])
+        token = self.token(path)
+        original = guard.agent_next.build_plan
+
+        def changed_plan(*args, **kwargs):
+            plan = original(*args, **kwargs)
+            plan["planner_semantics_fixture"] = "changed"
+            return plan
+
+        with mock.patch.object(guard.agent_next, "build_plan", side_effect=changed_plan):
+            self.assert_stale(path, token)
 
     def test_no_recommendation_has_a_stable_none_token_and_require_exit(self) -> None:
-        path = self.ledger(
-            [record("fm-assigned", assignee="peer", priority=1)]
-        )
+        path = self.ledger([record("fm-assigned", assignee="peer", priority=1)])
         first = self.invoke(path, "--format", "token")
         second = self.invoke(path, "--format", "token")
         self.assertEqual(first, second)
         self.assertEqual(first[0], 0)
-        self.assertRegex(first[1].strip(), r"^v1:[0-9a-f]{64}:none$")
+        self.assertRegex(first[1].strip(), r"^v2:[0-9a-f]{64}:none$")
 
         status, output, error = self.invoke(path, "--require")
         self.assertEqual(status, 3)
         self.assertEqual(output, "")
         self.assertIn("no claimable recommendation", error)
 
-    def test_malformed_token_and_output_budget_fail_without_stdout(self) -> None:
-        path = self.ledger([record("fm-next")])
-        status, output, error = self.invoke(path, "--expect-token", "not-a-token")
+    def test_literal_none_issue_id_is_reserved_and_never_ambiguous(self) -> None:
+        path = self.ledger([record("none", priority=1)])
+        status, output, error = self.invoke(path)
         self.assertEqual(status, 2)
         self.assertEqual(output, "")
-        self.assertIn("must have the form", error)
+        self.assertIn("reserved", error)
+        self.assertIn("no-recommendation token sentinel", error)
+
+    def test_malformed_legacy_token_and_output_budget_fail_without_stdout(self) -> None:
+        path = self.ledger([record("fm-next")])
+        for malformed in (
+            "not-a-token",
+            "v1:" + "0" * 64 + ":fm-next",
+            "v2:" + "A" * 64 + ":fm-next",
+        ):
+            with self.subTest(malformed=malformed):
+                status, output, error = self.invoke(path, "--expect-token", malformed)
+                self.assertEqual(status, 2)
+                self.assertEqual(output, "")
+                self.assertIn("must have the form v2", error)
 
         with mock.patch.object(guard, "MAX_OUTPUT_BYTES", 8):
             status, output, error = self.invoke(path, "--format", "json")
