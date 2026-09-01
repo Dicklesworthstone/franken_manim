@@ -227,12 +227,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if not snapshot["integrity"]["within_contract"]:
-        counts = snapshot["counts"]
+    plan_integrity = snapshot["claim_plan"]["integrity"]
+    if not plan_integrity["ok"]:
         print(
-            "error: Beads dependency integrity is invalid "
-            f"({counts['blocking_cycles']} blocking cycles, "
-            f"{counts['missing_blockers']} missing blockers)",
+            "error: Beads task-graph integrity is invalid "
+            f"({len(plan_integrity['blocking_cycles'])} blocking cycles, "
+            f"{len(plan_integrity['containment_cycles'])} containment cycles, "
+            f"{len(plan_integrity['missing_blockers'])} missing blockers)",
             file=sys.stderr,
         )
         return 1
