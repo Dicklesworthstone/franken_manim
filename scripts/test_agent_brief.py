@@ -17,6 +17,7 @@ def record(
     status: str,
     *,
     priority: int = 2,
+    issue_type: str = "task",
     assignee: str | None = None,
     updated_at: str = "2026-08-30T00:00:00Z",
     blockers: tuple[str, ...] = (),
@@ -26,7 +27,7 @@ def record(
         "title": title,
         "status": status,
         "priority": priority,
-        "issue_type": "task",
+        "issue_type": issue_type,
         "created_at": "2026-08-01T00:00:00Z",
         "updated_at": updated_at,
     }
@@ -74,7 +75,7 @@ class AgentBriefTests(unittest.TestCase):
             record("fm-blocked", "W11: blocked", "open", blockers=("fm-missing",)),
         ]
         snapshot = self.snapshot(rows)
-        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertEqual(snapshot["schema_version"], 3)
         self.assertEqual(snapshot["activation"]["active_workstreams"], ["W10"])
         self.assertEqual([row["id"] for row in snapshot["ready"]], ["fm-ready"])
         self.assertEqual([row["id"] for row in snapshot["blocked"]], ["fm-blocked"])
@@ -93,6 +94,39 @@ class AgentBriefTests(unittest.TestCase):
         self.assertEqual(recommendation["issue"]["id"], "fm-same-stream")
         self.assertFalse(recommendation["activates_workstream"])
         self.assertIn("already-active W10", recommendation["reason"])
+
+    def test_assigned_and_epic_work_are_visible_but_never_recommended(self) -> None:
+        snapshot = self.snapshot(
+            [
+                record("fm-active", "W10: active", "in_progress", assignee="agent"),
+                record(
+                    "fm-assigned",
+                    "W10: reserved leaf",
+                    "open",
+                    priority=0,
+                    assignee="peer",
+                ),
+                record("fm-epic", "W10: container", "open", priority=0, issue_type="epic"),
+                record("fm-leaf", "W10: free leaf", "open", priority=2),
+            ]
+        )
+        self.assertEqual(snapshot["counts"]["dependency_ready"], 3)
+        self.assertEqual(snapshot["counts"]["assigned_ready"], 1)
+        self.assertEqual(snapshot["counts"]["container_ready"], 1)
+        self.assertEqual([row["id"] for row in snapshot["assigned_ready"]], ["fm-assigned"])
+        self.assertEqual([row["id"] for row in snapshot["container_ready"]], ["fm-epic"])
+        self.assertEqual([row["id"] for row in snapshot["ready"]], ["fm-leaf"])
+        self.assertEqual(snapshot["recommendation"]["issue"]["id"], "fm-leaf")
+
+    def test_only_assigned_or_container_work_yields_no_recommendation(self) -> None:
+        snapshot = self.snapshot(
+            [
+                record("fm-assigned", "W10: reserved", "open", assignee="peer"),
+                record("fm-epic", "W10: epic", "open", issue_type="epic"),
+            ]
+        )
+        self.assertIsNone(snapshot["recommendation"]["issue"])
+        self.assertIn("unassigned leaf", snapshot["recommendation"]["reason"])
 
     def test_full_activation_cap_refuses_to_recommend_a_new_stream(self) -> None:
         rows = [
@@ -119,6 +153,21 @@ class AgentBriefTests(unittest.TestCase):
         issues = agent_brief.load_issues(self.write_ledger([row]))
         self.assertEqual(agent_brief.unresolved_blockers(issues["fm-child"], issues), ())
 
+    def test_dependency_owner_and_self_reference_fail_closed(self) -> None:
+        wrong_owner = record("fm-child", "W10: child", "open")
+        wrong_owner["dependencies"] = [
+            {"issue_id": "fm-other", "depends_on_id": "fm-parent", "type": "blocks"}
+        ]
+        with self.assertRaisesRegex(agent_brief.BriefError, "owned by 'fm-other'"):
+            agent_brief.load_issues(self.write_ledger([wrong_owner]))
+
+        self_edge = record("fm-self", "W10: self", "open")
+        self_edge["dependencies"] = [
+            {"issue_id": "fm-self", "depends_on_id": "fm-self", "type": "blocks"}
+        ]
+        with self.assertRaisesRegex(agent_brief.BriefError, "self-referential"):
+            agent_brief.load_issues(self.write_ledger([self_edge]))
+
     def test_activation_cap_is_fail_closed(self) -> None:
         rows = [
             record(f"fm-{index}", f"W{index}: active", "in_progress", assignee="agent")
@@ -140,8 +189,14 @@ class AgentBriefTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("active workstream cap breached", stderr.getvalue())
 
-    def test_next_format_emits_only_the_claim_identity(self) -> None:
-        path = self.write_ledger([record("fm-next", "W9: ready", "open", priority=1)])
+    def test_next_format_emits_only_a_claimable_leaf_identity(self) -> None:
+        path = self.write_ledger(
+            [
+                record("fm-assigned", "W9: reserved", "open", priority=0, assignee="peer"),
+                record("fm-epic", "W9: epic", "open", priority=0, issue_type="epic"),
+                record("fm-next", "W9: ready", "open", priority=1),
+            ]
+        )
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             status = agent_brief.main(
@@ -175,7 +230,9 @@ class AgentBriefTests(unittest.TestCase):
         self.assertIn("Read-only projection of `.beads/issues.jsonl`", rendered)
         self.assertIn("**1/4** active", rendered)
         self.assertIn("Recommended next", rendered)
+        self.assertIn("Claimable ready queue", rendered)
         self.assertIn("`fm-ready`", rendered)
+        self.assertIn("Never claim an assigned issue", rendered)
         self.assertIn("Beads as authoritative", rendered)
 
 
