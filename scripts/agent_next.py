@@ -254,14 +254,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if args.format == "json":
-        print(render_json(plan), end="")
-    elif args.format == "markdown":
-        print(render_markdown(plan), end="")
-    else:
-        issue = plan["recommendation"]["issue"]
-        print(issue["id"] if issue is not None else "none")
-
     enforce = args.check or args.require
     if enforce and not plan["integrity"]["ok"]:
         print("error: Beads blocking graph integrity failed", file=sys.stderr)
@@ -272,6 +264,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.require and plan["recommendation"]["issue"] is None:
         print("error: no claimable recommendation exists", file=sys.stderr)
         return 3
+
+    if args.format == "json":
+        print(render_json(plan), end="")
+    elif args.format == "markdown":
+        print(render_markdown(plan), end="")
+    else:
+        issue = plan["recommendation"]["issue"]
+        print(issue["id"] if issue is not None else "none")
     return 0
 
 
