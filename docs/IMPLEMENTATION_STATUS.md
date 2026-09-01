@@ -1,7 +1,7 @@
 # FrankenManim implementation status
 
 **Status date:** 2026-09-01 UTC / America/New_York  
-**Evidence checkpoint:** substantive source commits through `5629a41`; documentation reconciled through the current status tranche.  
+**Evidence checkpoint:** substantive source commits through `95187b9`; documentation reconciled through the current status tranche.  
 **Authority rule:** this document summarizes evidence; `.beads/issues.jsonl` remains the task and dependency authority.
 
 ## How to read this document
@@ -21,9 +21,58 @@ FrankenManim is pre-1.0. A capability is listed as implemented only when a concr
 
 ## Recently completed implementation tranche
 
+### Guarded Beads claim execution
+
+`scripts/agent_claim.py` is now the canonical mutation companion to the version-2 claim guard. The guard still answers whether one recommendation matches the exact graph, planner, policy, and schema input. The executor keeps that revalidation, the Beads mutation, the explicit JSONL flush, and parsed-ledger postcondition verification inside one process while holding an advisory lock in Git's shared common directory.
+
+The transaction shape is:
+
+1. resolve a real `.git` directory or linked-worktree `.git` marker;
+2. resolve a bounded regular-file `commondir` marker when present;
+3. acquire the persistent `fmn-agent-claim.lock` in the shared common directory;
+4. re-read `.beads/issues.jsonl` and rebuild the complete v2 guard under the lock;
+5. compare the supplied claim digest and issue subject;
+6. require the row to remain unassigned and `open`;
+7. invoke exact no-shell argv for `br update ISSUE --status in_progress --assignee ASSIGNEE` plus an optional transition comment;
+8. invoke `br sync --flush-only`;
+9. re-read the JSONL and require `in_progress` plus the requested assignee;
+10. emit a canonical version-1 JSON receipt only after every preceding step succeeds.
+
+`--dry-run` performs the complete guarded read and emits the exact intended command vectors without invoking `br`. `scripts/check.sh` uses this path against the freshly issued live-ledger token, so the mandatory gate exercises executor composition without mutating tracker state.
+
+The lock lives in Git's shared `commondir`, not the private directory of one linked worktree. The primary checkout and sibling linked worktrees therefore contend on one inode. The lock file intentionally persists; deleting and recreating the pathname could split contenders across distinct inodes.
+
+This remains a local coordination mechanism, not a distributed lease. It does not serialize another clone, a direct manual `br` invocation, an agent that ignores the executor, Agent Mail, file reservations, or unrelated changes to `main`.
+
+Exit `5` means no verified transaction receipt, not necessarily no mutation: `br update` may have changed its native store before a later flush or postcondition failure. Operators must inspect `br show`, `br sync --status`, and the working tree before retrying and must never reuse the old token blindly.
+
+The focused executor suite covers:
+
+- exact dry-run argv and no mutation;
+- successful update → flush → postcondition ordering;
+- stale-token and explicit-issue mismatch refusal;
+- update and flush failures;
+- successful child processes with missing ledger mutation;
+- graph-integrity and no-recommendation exits;
+- ordinary repositories and linked-worktree marker resolution;
+- shared-common-directory sibling contention;
+- same-checkout contention;
+- command-output and receipt bounds;
+- no-stdout CLI failure behavior.
+
+The complete contract is documented in `docs/AGENT_CLAIM_EXECUTOR.md`.
+
+### Literal strict-JSON ledger boundary
+
+The Beads parser now supplies a rejecting `parse_constant` hook to Python's JSON decoder. Unquoted `NaN`, `Infinity`, and `-Infinity` fail at the first decode boundary wherever they appear, including ignored top-level extensions and nested comment or dependency metadata. Quoted spellings remain ordinary strings.
+
+The canonical claim-graph grammar advanced to version `2`. Because that grammar version participates in the v2 claim digest, a token issued under the former permissive decoder cannot survive the semantic change even when the selected issue would otherwise remain the same.
+
+`scripts/test_agent_brief_strict_json.py` covers all three spellings, nested ignored fields, quoted strings, no-projection CLI failure, and grammar version publication. The suite is part of `scripts/check.sh`.
+
 ### Graph-and-policy-bound autonomous claim revalidation
 
-The operational control plane now has a fourth linked layer: `scripts/agent_claim_guard.py` version 2. `agent_next.py` still decides which dependency-ready unassigned leaf is best; the guard binds that decision to the exact state and semantics used to produce it before an agent mutates Beads.
+The operational control plane includes `scripts/agent_claim_guard.py` version 2. `agent_next.py` decides which dependency-ready unassigned leaf is best; the guard binds that decision to the exact state and semantics used to produce it before an agent mutates Beads.
 
 A v2 token has the form:
 
@@ -42,20 +91,9 @@ The JSON report exposes `graph_sha256` separately from `claim_sha256`. The forme
 
 The literal issue ID `none` is reserved because `none` is the valid token subject for a graph with no recommendation. Issue-row order and dependency-array order remain semantically irrelevant; graph, comment, policy, schema, and planner-output changes are not.
 
-The focused suite now covers:
+The focused guard suite covers v2 issue/revalidate round trips; graph, comment, recommendation, policy, schema, and planner-output drift; canonical ordering; the reserved sentinel; no-work behavior; malformed and legacy tokens; output bounds; and integrity precedence.
 
-- v2 issue/revalidate round trips;
-- graph, comment, and recommendation changes;
-- canonical issue/dependency order independence;
-- explicit `as_of`, stale-day, activation-cap, and limit drift;
-- brief, planner, and guard schema drift;
-- full planner-output drift that leaves the recommendation unchanged;
-- the reserved sentinel and no-work exit;
-- malformed, legacy, and noncanonical tokens;
-- bounded report publication;
-- integrity precedence over token parsing.
-
-`scripts/check.sh` compiles and runs the suite, issues a token against the complete live ledger, and immediately revalidates that exact token before entering the Rust gates. The guard remains a compare-before-set boundary, not a lease or an atomic `br` transaction. Current `main`, Agent Mail, file reservations, and the selected issue still require inspection immediately before `br update`.
+The guard remains useful as a read-only machine contract, but the canonical mutation workflow now passes its token to `agent_claim.py` rather than manually running a separate `br update` after revalidation.
 
 ### Python portal refusal truthfulness
 
@@ -108,19 +146,21 @@ This preserves source compatibility rather than inventing a second Python API.
 
 ### Agent control plane
 
-The operational layer now has four linked executable abstractions plus one human projection:
+The operational layer now has five linked script surfaces over one task authority:
 
-1. `scripts/agent_brief.py` owns bounded untrusted-ledger parsing, blocking-graph integrity, activation state, and broad situational rendering. It has no autonomous claim output.
+1. `scripts/agent_brief.py` owns bounded strict ledger parsing, blocking-graph integrity, activation state, and broad situational rendering. It has no autonomous claim output.
 2. `scripts/agent_next.py` owns autonomous leaf selection and emits schema `fmn.agent.next` version `2`.
-3. `scripts/agent_claim_guard.py` owns graph-and-policy-bound pre-mutation revalidation and emits schema `fmn.agent.claim-guard` version `2`.
-4. `scripts/generate_agent_brief.py` publishes a deterministic human brief containing the planner decision plus broad context.
-5. Beads remains the sole task mutation authority.
+3. `scripts/agent_claim_guard.py` owns graph-and-policy-bound read-only revalidation and emits schema `fmn.agent.claim-guard` version `2`.
+4. `scripts/agent_claim.py` owns the shared-lock `open` → `in_progress` mutation, explicit flush, postcondition, and receipt.
+5. `scripts/generate_agent_brief.py` publishes a deterministic human brief containing the planner decision plus broad context.
+6. Beads remains the sole task and dependency authority; the scripts neither replace nor reinterpret its mutation model.
 
 #### Strict ledger ingestion
 
 The parser:
 
 - rejects duplicate JSON keys at any object depth;
+- rejects unquoted non-finite constants at any depth;
 - distinguishes absent or explicit-null optional arrays from falsey malformed values;
 - rejects malformed comment rows and non-string comment text rather than dropping them;
 - treats a present invalid `updated_at` as invalid instead of silently falling back to `created_at`;
@@ -138,7 +178,7 @@ The planner:
 - prefers an eligible leaf in an already-active workstream;
 - preserves explicit numeric priority before immediate-unblock pressure, direct blocker pressure, scope, recency, and lexical ID.
 
-The broad projection now labels its priority as situational and explicitly non-claim-safe. The former `agent_brief.py --format next` alias has been retired; autonomous selection no longer has two competing command surfaces.
+The broad projection labels its priority as situational and explicitly non-claim-safe. The former `agent_brief.py --format next` alias has been retired; autonomous selection has one planner surface, one guard surface, and one guarded mutation surface.
 
 #### Deterministic bounded output
 
@@ -146,7 +186,7 @@ The default planner `as_of` is derived from the newest ledger record. Identical 
 
 The human generator refuses blocking cycles, containment cycles, missing blockers, and activation-cap breaches before any output. Existing artifacts are read through a descriptor-bound regular-file check. Failed publication removes only the temporary inode created by that attempt; if the path was substituted, the foreign path is retained and reported.
 
-`scripts/check.sh` compiles and runs the parser, planner, claim guard, deterministic-output, generator, publication-I/O, and portal-refusal tests; validates the live plan, guarded claim input, and real portal source; then continues into the Rust/Python/WASM/structural gate. Hosted GitHub Actions is not required.
+`scripts/check.sh` compiles and runs the parser, strict-JSON, planner, claim-guard, claim-executor, deterministic-output, generator, publication-I/O, and portal-refusal tests; validates the live plan, guarded claim input, guarded dry-run composition, and real portal source; then continues into the Rust/Python/WASM/structural gate. Hosted GitHub Actions is not required.
 
 ## Current open obligations
 
@@ -165,9 +205,9 @@ The human generator refuses blocking cycles, containment cycles, missing blocker
 
 The shipped binary correctly suppresses human doctor success output under `--quiet` while retaining typed failures. That policy is not yet centralized inside `run_with_capabilities`; an embedded library caller can still receive the complete human snapshot. A future tranche should converge those front doors without reparsing argv or weakening robot output.
 
-### Strict JSON constant rejection
+### Distributed claim coordination
 
-The ledger decoder rejects duplicate keys and malformed structures, but it still calls Python's default `json.loads` constant policy. Python accepts non-standard `NaN`, `Infinity`, and `-Infinity` spellings by default. Typed required fields reject those values when they reach them, and the claim guard's canonical encoder rejects non-finite values retained in its input, but ignored extension fields can still pass the initial decode. The parser should eventually supply a rejecting `parse_constant` hook so its “JSON” contract is literal at the first boundary.
+The claim executor serializes cooperating processes only inside one clone's shared Git common directory. Another clone, a manual `br` command, or an agent that ignores the executor can still race it. Agent Mail, reservations, current-HEAD review, and explicit peer coordination remain mandatory. A future distributed lease would require a separate authority rather than pretending the local file lock provides one.
 
 ### Platform and release evidence
 
@@ -182,7 +222,9 @@ The following remain independent evidence lanes rather than automatic consequenc
 
 ### Tracker synchronization
 
-Beads mutations must still be performed through `br`, followed by `br sync --flush-only` and a committed `.beads/` export. The read-only projections, claim guard, and refusal audit never edit or close work. Large tracker files must not be replaced from truncated connector output.
+The executor performs only the guarded claim transition through `br`, followed by `br sync --flush-only` and parsed-ledger verification. Other Beads mutations still require direct tracker-native commands. Every resulting `.beads/` export requires an explicit commit. Large tracker files must never be replaced from truncated connector output.
+
+No live Beads mutation was performed from the current editing environment because it did not expose a tracker-native `br` execution capability. The authoritative ledger was deliberately left untouched.
 
 ## Verification entry points
 
@@ -199,16 +241,29 @@ python3 scripts/test_audit_portal_refusals.py
 python3 scripts/agent_brief.py --format json --check
 python3 scripts/generate_agent_brief.py --stdout
 
-# Leaf-safe plan and guarded compare-before-set
-python3 scripts/agent_next.py --format json --check
+# Leaf-safe plan, guard, and guarded mutation
 token="$(python3 scripts/agent_claim_guard.py --require)"
-python3 scripts/agent_claim_guard.py --expect-token "$token" --require --format id
+issue="${token##*:}"
+br show "$issue"
+# Check Agent Mail, reservations, peers, and current main.
+python3 scripts/agent_claim.py \
+    --expect-token "$token" \
+    --issue "$issue" \
+    --assignee "$FMN_AGENT_ID" \
+    --dry-run
+python3 scripts/agent_claim.py \
+    --expect-token "$token" \
+    --issue "$issue" \
+    --assignee "$FMN_AGENT_ID" \
+    --transition-comment "Claimed after graph, reservation, and HEAD checks"
 
 # Focused control-plane regressions
 python3 scripts/test_agent_brief.py
+python3 scripts/test_agent_brief_strict_json.py
 python3 scripts/test_agent_next.py
 python3 scripts/test_agent_next_output.py
 python3 scripts/test_agent_claim_guard.py
+python3 scripts/test_agent_claim.py
 python3 scripts/test_generate_agent_brief.py
 python3 scripts/test_generate_agent_brief_io.py
 python3 scripts/check_python_helper_aliases.py
@@ -220,9 +275,9 @@ cargo test -p fmn-cli --features batch --test cli_smoke
 
 ### Evidence from the current editing environment
 
-The exact replacement bytes for `scripts/agent_claim_guard.py` and `scripts/test_agent_claim_guard.py` passed Python bytecode compilation before publication. The implementation, tests, and mandatory-gate wiring were committed incrementally to `main` as `6a6b3c8`, `93877d4`, and `5629a41`.
+The original guarded-executor tranche passed a ten-case interface-compatible local harness before publication. Exact replacement Python files were also syntax-checked during that tranche. The implementation, focused suite, and mandatory-gate wiring landed incrementally as `23dec4b`, `2e7a80b`, and `6169519`.
 
-This environment did not provide an exact repository checkout containing the full portal source and Rust workspace. Therefore the focused claim-guard unit suite against the real parser/planner modules, the audit against the real `manimlib_bootstrap.py`, the complete Cargo/Clippy/rustdoc/WASM/wheel/browser axes, and the repository-wide `scripts/check.sh` invocation are not represented here as completed against `5629a41`. Hosted CI was queued during the documentation reconciliation and is not promoted into local/owned-host evidence.
+Subsequent strict-JSON and shared-worktree changes landed through substantive checkpoint `95187b9`. This environment did not provide an exact repository checkout containing the full parser/planner modules, portal source, Rust workspace, and installed toolchain. Therefore the exact complete Python suites, live-ledger dry-run gate, portal audit, Cargo/Clippy/rustdoc/WASM/wheel/browser axes, and repository-wide `scripts/check.sh` invocation are not represented here as completed against `95187b9`. Hosted workflow runs were repeatedly queued or superseded by the intentional incremental commit sequence and are not promoted into local/owned-host evidence.
 
 GitHub Actions is not a correctness dependency. Verification is designed to run on controlled local or owned build hosts; unavailable hosted capacity does not weaken or waive any gate.
 
@@ -233,5 +288,5 @@ GitHub Actions is not a correctness dependency. Verification is designed to run 
 - Do not infer hardware or artifact evidence from a different platform.
 - Do not close a parent merely because one child or one census reaches 100%.
 - Distinguish broad readiness from true leaf claimability.
-- Revalidate a v2 claim token immediately before any autonomous `br update`.
+- Issue a v2 token, perform external coordination checks, and use `agent_claim.py` for autonomous claim mutation.
 - Keep target-state design in the comprehensive plan and current-state evidence here.
