@@ -37,8 +37,40 @@ class AliasPolicyTests(unittest.TestCase):
         mapping: dict[str, tuple[str, str]] | None = None,
         *,
         call: bool = True,
+        builders: set[str] | None = None,
+        lambda_builders: bool = True,
+        resolve_class: bool = True,
+        invoke_builder: bool = True,
+        recheck_alias: bool = True,
     ) -> Path:
         selected = policy.REFERENCE_CONSTRUCTOR_ALIASES if mapping is None else mapping
+        expected_builders = {
+            class_name for _module, class_name in selected.values()
+        }
+        selected_builders = expected_builders if builders is None else builders
+        if lambda_builders:
+            builder_items = ", ".join(
+                f"{name!r}: (lambda: None)" for name in sorted(selected_builders)
+            )
+        else:
+            builder_items = ", ".join(
+                f"{name!r}: None" for name in sorted(selected_builders)
+            )
+        constructor_line = (
+            "        constructor = getattr(manimlib, class_name)\n"
+            if resolve_class
+            else "        constructor = None\n"
+        )
+        builder_line = (
+            "        instance = builders[class_name]()\n"
+            if invoke_builder
+            else "        instance = None\n"
+        )
+        alias_line = (
+            "        hasattr(manimlib, alias)\n"
+            if recheck_alias
+            else "        pass\n"
+        )
         call_line = (
             "    verify_reference_constructor_aliases(manimlib)\n"
             if call
@@ -50,8 +82,15 @@ class AliasPolicyTests(unittest.TestCase):
             + repr(selected)
             + "\n\n"
             + "def verify_reference_constructor_aliases(manimlib):\n"
+            + f"    builders = {{{builder_items}}}\n"
+            + "    for alias, (module_name, class_name) in "
+            + "REFERENCE_CONSTRUCTOR_ALIASES.items():\n"
+            + constructor_line
+            + builder_line
+            + alias_line
             + "    return None\n\n"
             + "def verify_installed_distribution():\n"
+            + "    manimlib = object()\n"
             + call_line,
         )
 
@@ -131,6 +170,40 @@ class AliasPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(policy.AliasPolicyError, "does not call"):
             self.verify(wheel=self.wheel(call=False))
 
+    def test_wheel_constructor_table_must_cover_every_reference_class(self) -> None:
+        builders = {
+            class_name
+            for _module, class_name in policy.REFERENCE_CONSTRUCTOR_ALIASES.values()
+        }
+        builders.remove("VHighlight")
+        with self.assertRaisesRegex(policy.AliasPolicyError, "constructor table drift"):
+            self.verify(wheel=self.wheel(builders=builders))
+
+    def test_wheel_constructor_table_must_not_add_unrelated_classes(self) -> None:
+        builders = {
+            class_name
+            for _module, class_name in policy.REFERENCE_CONSTRUCTOR_ALIASES.values()
+        }
+        builders.add("UnrelatedMobject")
+        with self.assertRaisesRegex(policy.AliasPolicyError, "constructor table drift"):
+            self.verify(wheel=self.wheel(builders=builders))
+
+    def test_wheel_constructor_table_requires_explicit_lambdas(self) -> None:
+        with self.assertRaisesRegex(policy.AliasPolicyError, "constructor lambda"):
+            self.verify(wheel=self.wheel(lambda_builders=False))
+
+    def test_wheel_probe_must_resolve_each_root_constructor(self) -> None:
+        with self.assertRaisesRegex(policy.AliasPolicyError, "does not resolve"):
+            self.verify(wheel=self.wheel(resolve_class=False))
+
+    def test_wheel_probe_must_invoke_each_constructor_builder(self) -> None:
+        with self.assertRaisesRegex(policy.AliasPolicyError, "does not invoke"):
+            self.verify(wheel=self.wheel(invoke_builder=False))
+
+    def test_wheel_probe_must_recheck_alias_absence_after_construction(self) -> None:
+        with self.assertRaisesRegex(policy.AliasPolicyError, "does not recheck"):
+            self.verify(wheel=self.wheel(recheck_alias=False))
+
     def test_wrapper_mapping_drift_is_rejected(self) -> None:
         mapping = {
             alias: class_name
@@ -169,7 +242,7 @@ class AliasPolicyTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(stderr.getvalue(), "")
         self.assertIn("16 Reference classes verified", stdout.getvalue())
-        self.assertIn("schema, import guard, and wheel probe agree", stdout.getvalue())
+        self.assertIn("constructed-wheel probe agree", stdout.getvalue())
 
 
 if __name__ == "__main__":
