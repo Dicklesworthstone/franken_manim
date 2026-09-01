@@ -98,7 +98,7 @@ else
     echo "==> cargo test"
     cargo test
     echo "==> cargo test -p fmn-cli --features batch --all-targets"
-cargo test -p fmn-cli --features batch --all-targets
+    cargo test -p fmn-cli --features batch --all-targets
     echo "==> cargo test -p fmn-output --features ffmpeg-test-fixture --all-targets"
     cargo test -p fmn-output --features ffmpeg-test-fixture --all-targets
 fi
