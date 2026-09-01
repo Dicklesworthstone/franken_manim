@@ -17,6 +17,34 @@ import zipfile
 
 SUBPROCESS_TIMEOUT_SECONDS = 60
 
+REFERENCE_CONSTRUCTOR_ALIASES = {
+    "group": ("manimlib.mobject.mobject", "Group"),
+    "v_group": ("manimlib.mobject.types.vectorized_mobject", "VGroup"),
+    "vectorized_point": (
+        "manimlib.mobject.types.vectorized_mobject",
+        "VectorizedPoint",
+    ),
+    "small_dot": ("manimlib.mobject.geometry", "SmallDot"),
+    "sector": ("manimlib.mobject.geometry", "Sector"),
+    "vector": ("manimlib.mobject.geometry", "Vector"),
+    "polyline": ("manimlib.mobject.geometry", "Polyline"),
+    "triangle": ("manimlib.mobject.geometry", "Triangle"),
+    "rounded_rectangle": ("manimlib.mobject.geometry", "RoundedRectangle"),
+    "svg_mobject": ("manimlib.mobject.svg.svg_mobject", "SVGMobject"),
+    "tangent_line": ("manimlib.mobject.geometry", "TangentLine"),
+    "curved_arrow": ("manimlib.mobject.geometry", "CurvedArrow"),
+    "curved_double_arrow": ("manimlib.mobject.geometry", "CurvedDoubleArrow"),
+    "curves_as_submobjects": (
+        "manimlib.mobject.types.vectorized_mobject",
+        "CurvesAsSubmobjects",
+    ),
+    "dashed_vmobject": (
+        "manimlib.mobject.types.vectorized_mobject",
+        "DashedVMobject",
+    ),
+    "v_highlight": ("manimlib.mobject.types.vectorized_mobject", "VHighlight"),
+}
+
 
 def require(condition, message):
     if not condition:
@@ -98,6 +126,109 @@ def verify_wheel_archive(path):
     return python_tag, abi_tag, platform_tag, native[0]
 
 
+def verify_reference_constructor_aliases(manimlib):
+    """Exercise the Reference classes without exporting Rust-only aliases."""
+
+    leaked = sorted(
+        alias for alias in REFERENCE_CONSTRUCTOR_ALIASES if hasattr(manimlib, alias)
+    )
+    require(not leaked, f"Rust-only constructor helpers leaked into manimlib: {leaked}")
+
+    with tempfile.TemporaryDirectory(prefix="fmn-alias-smoke-") as directory:
+        svg_path = pathlib.Path(directory) / "minimal.svg"
+        svg_path.write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2">'
+            '<path d="M 0 0 L 2 0 L 2 2 Z"/>'
+            "</svg>",
+            encoding="utf-8",
+        )
+
+        builders = {
+            "Group": lambda: manimlib.Group(manimlib.Mobject(), manimlib.Mobject()),
+            "VGroup": lambda: manimlib.VGroup(
+                manimlib.Circle(radius=0.2),
+                manimlib.Square(side_length=0.2),
+            ),
+            "VectorizedPoint": lambda: manimlib.VectorizedPoint((0.1, 0.2, 0.0)),
+            "SmallDot": lambda: manimlib.SmallDot((0.0, 0.0, 0.0)),
+            "Sector": lambda: manimlib.Sector(),
+            "Vector": lambda: manimlib.Vector((0.5, 0.25, 0.0)),
+            "Polyline": lambda: manimlib.Polyline(
+                (0.0, 0.0, 0.0),
+                (0.5, 0.0, 0.0),
+                (0.5, 0.5, 0.0),
+            ),
+            "Triangle": lambda: manimlib.Triangle(),
+            "RoundedRectangle": lambda: manimlib.RoundedRectangle(
+                width=0.5,
+                height=0.25,
+                corner_radius=0.05,
+            ),
+            "SVGMobject": lambda: manimlib.SVGMobject(str(svg_path)),
+            "TangentLine": lambda: manimlib.TangentLine(
+                manimlib.Circle(radius=0.5),
+                0.25,
+                length=0.5,
+            ),
+            "CurvedArrow": lambda: manimlib.CurvedArrow(
+                (0.0, 0.0, 0.0),
+                (0.75, 0.25, 0.0),
+            ),
+            "CurvedDoubleArrow": lambda: manimlib.CurvedDoubleArrow(
+                (0.0, 0.0, 0.0),
+                (0.75, 0.25, 0.0),
+            ),
+            "CurvesAsSubmobjects": lambda: manimlib.CurvesAsSubmobjects(
+                manimlib.Circle(radius=0.4)
+            ),
+            "DashedVMobject": lambda: manimlib.DashedVMobject(
+                manimlib.Circle(radius=0.4),
+                num_dashes=4,
+            ),
+            "VHighlight": lambda: manimlib.VHighlight(
+                manimlib.Circle(radius=0.4),
+                n_layers=2,
+            ),
+        }
+
+        require(
+            set(builders)
+            == {
+                class_name
+                for _module, class_name in REFERENCE_CONSTRUCTOR_ALIASES.values()
+            },
+            "constructor smoke table does not match the alias policy",
+        )
+        for alias, (module_name, class_name) in REFERENCE_CONSTRUCTOR_ALIASES.items():
+            constructor = getattr(manimlib, class_name)
+            require(
+                module_name in sys.modules,
+                f"schema module {module_name} was not assembled",
+            )
+            require(
+                getattr(sys.modules[module_name], class_name, None) is constructor,
+                f"{module_name}.{class_name} is not the root constructor identity",
+            )
+            instance = builders[class_name]()
+            require(
+                isinstance(instance, constructor),
+                f"{class_name} returned the wrong concrete class",
+            )
+            require(
+                isinstance(instance, manimlib.Mobject),
+                f"{class_name} did not construct a Mobject",
+            )
+            family = instance.get_family()
+            require(
+                family and family[0] is instance,
+                f"{class_name} has an invalid family root",
+            )
+            require(
+                not hasattr(manimlib, alias),
+                f"constructing {class_name} published Rust helper {alias!r}",
+            )
+
+
 def verify_installed_distribution(schema_path, scene_path):
     require(sys.implementation.name == "cpython", "portal requires CPython")
     require(sys.version_info[:2] == (3, 13), "portal requires CPython 3.13")
@@ -120,6 +251,7 @@ def verify_installed_distribution(schema_path, scene_path):
         f"extra={sorted(observed - expected)}",
     )
     require(len(observed) == 663, f"unexpected wildcard size: {len(observed)}")
+    verify_reference_constructor_aliases(manimlib)
 
     distribution = importlib.metadata.distribution("franken-manim")
     requires = set(distribution.requires or ())
