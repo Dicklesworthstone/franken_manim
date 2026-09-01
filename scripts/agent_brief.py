@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,7 @@ MAX_LINE_BYTES = 2 * 1024 * 1024
 MAX_ISSUES = 100_000
 MAX_DEPENDENCIES_PER_ISSUE = 10_000
 MAX_DEPENDENCIES = 500_000
+MAX_COMMENTS_PER_ISSUE = 10_000
 SNAPSHOT_SCHEMA_VERSION = 4
 ACTIVE_STATUS = "in_progress"
 KNOWN_STATUSES = frozenset({"open", ACTIVE_STATUS, "closed", "tombstone"})
@@ -36,6 +39,12 @@ UTC = dt.timezone.utc
 
 class BriefError(ValueError):
     pass
+
+
+class _DuplicateJsonKey(ValueError):
+    def __init__(self, key: str):
+        super().__init__(key)
+        self.key = key
 
 
 @dataclass(frozen=True)
@@ -84,6 +93,24 @@ def _text(value: Any, *, field: str, issue_id: str, optional: bool = False) -> s
     return value
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKey(key)
+        result[key] = value
+    return result
+
+
+def _optional_array(raw: dict[str, Any], field: str, issue_id: str) -> list[Any]:
+    value = raw.get(field, [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise BriefError(f"{issue_id}: {field} must be an array or null")
+    return value
+
+
 def parse_issue(raw: Any, *, line: int) -> Issue:
     if not isinstance(raw, dict):
         raise BriefError(f"line {line}: issue record must be an object")
@@ -101,12 +128,15 @@ def parse_issue(raw: Any, *, line: int) -> Issue:
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
         raise BriefError(f"{issue_id}: priority must be a nonnegative integer")
     assignee = _text(raw.get("assignee"), field="assignee", issue_id=issue_id, optional=True)
-    updated_raw = raw.get("updated_at") or raw.get("created_at")
-    updated_at = parse_timestamp(updated_raw, field="updated_at", issue_id=issue_id)
+    if "updated_at" in raw:
+        updated_raw = raw["updated_at"]
+        updated_field = "updated_at"
+    else:
+        updated_raw = raw.get("created_at")
+        updated_field = "created_at"
+    updated_at = parse_timestamp(updated_raw, field=updated_field, issue_id=issue_id)
 
-    dependencies_raw = raw.get("dependencies") or []
-    if not isinstance(dependencies_raw, list):
-        raise BriefError(f"{issue_id}: dependencies must be an array")
+    dependencies_raw = _optional_array(raw, "dependencies", issue_id)
     if len(dependencies_raw) > MAX_DEPENDENCIES_PER_ISSUE:
         raise BriefError(
             f"{issue_id}: dependencies exceed the {MAX_DEPENDENCIES_PER_ISSUE}-edge limit"
@@ -133,10 +163,19 @@ def parse_issue(raw: Any, *, line: int) -> Issue:
         seen_dependencies.add(edge)
         dependencies.append(Dependency(owner or "", target or "", kind or ""))
 
-    comments_raw = raw.get("comments") or []
-    if not isinstance(comments_raw, list):
-        raise BriefError(f"{issue_id}: comments must be an array")
-    comments = tuple(item for item in comments_raw if isinstance(item, dict))
+    comments_raw = _optional_array(raw, "comments", issue_id)
+    if len(comments_raw) > MAX_COMMENTS_PER_ISSUE:
+        raise BriefError(
+            f"{issue_id}: comments exceed the {MAX_COMMENTS_PER_ISSUE}-comment limit"
+        )
+    comments: list[dict[str, Any]] = []
+    for index, item in enumerate(comments_raw):
+        if not isinstance(item, dict):
+            raise BriefError(f"{issue_id}: comment {index} must be an object")
+        text = item.get("text")
+        if text is not None and not isinstance(text, str):
+            raise BriefError(f"{issue_id}: comment {index} text must be a string or null")
+        comments.append(item)
     return Issue(
         id=issue_id,
         title=title or "",
@@ -146,21 +185,35 @@ def parse_issue(raw: Any, *, line: int) -> Issue:
         assignee=assignee,
         updated_at=updated_at,
         dependencies=tuple(dependencies),
-        comments=comments,
+        comments=tuple(comments),
     )
 
 
-def load_issues(path: Path) -> dict[str, Issue]:
+def _open_ledger(path: Path):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        size = path.stat().st_size
+        descriptor = os.open(path, flags)
     except OSError as exc:
-        raise BriefError(f"cannot stat {path}: {exc}") from exc
-    if size > MAX_LEDGER_BYTES:
-        raise BriefError(f"{path} exceeds the {MAX_LEDGER_BYTES}-byte ledger limit")
+        raise BriefError(f"cannot open {path}: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise BriefError(f"{path} is not a regular file")
+        if metadata.st_size > MAX_LEDGER_BYTES:
+            raise BriefError(f"{path} exceeds the {MAX_LEDGER_BYTES}-byte ledger limit")
+        return os.fdopen(descriptor, "rb")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def load_issues(path: Path) -> dict[str, Issue]:
     issues: dict[str, Issue] = {}
     dependency_count = 0
     try:
-        with path.open("rb") as handle:
+        with _open_ledger(path) as handle:
             for line_number, raw_line in enumerate(handle, 1):
                 if len(raw_line) > MAX_LINE_BYTES:
                     raise BriefError(
@@ -171,7 +224,11 @@ def load_issues(path: Path) -> dict[str, Issue]:
                 if not raw_line.strip():
                     raise BriefError(f"{path}:{line_number} is blank")
                 try:
-                    record = json.loads(raw_line)
+                    record = json.loads(raw_line, object_pairs_hook=_unique_object)
+                except _DuplicateJsonKey as exc:
+                    raise BriefError(
+                        f"{path}:{line_number}: duplicate JSON object key {exc.key!r}"
+                    ) from exc
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise BriefError(f"{path}:{line_number}: invalid UTF-8 JSON: {exc}") from exc
                 issue = parse_issue(record, line=line_number)
@@ -185,6 +242,8 @@ def load_issues(path: Path) -> dict[str, Issue]:
                     raise BriefError(
                         f"{path} exceeds the {MAX_DEPENDENCIES}-dependency limit"
                     )
+    except BriefError:
+        raise
     except OSError as exc:
         raise BriefError(f"cannot read {path}: {exc}") from exc
     return issues
