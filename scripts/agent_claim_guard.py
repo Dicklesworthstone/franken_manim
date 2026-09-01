@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Issue a graph-bound claim token and reject stale autonomous claim plans.
+"""Issue a graph-and-policy-bound token for one autonomous Beads claim.
 
 ``agent_next`` answers which leaf is the best next claim. This command binds
-that answer to a canonical fingerprint of every task-graph field consumed by
-coordination, so an agent can revalidate the recommendation immediately before
-mutating Beads. The token is a compare-before-set guard, not a lease: current
-file reservations, assignees, and coordinating messages still need inspection.
+that answer to the complete parsed task graph, the planner output, and every
+policy/schema input that can affect the recommendation. An agent can therefore
+revalidate the token immediately before mutating Beads. The token is a
+compare-before-set guard, not a lease: current file reservations, assignees,
+and coordinating messages still need inspection.
 """
 
 from __future__ import annotations
@@ -22,10 +23,15 @@ import agent_brief
 import agent_next
 
 SCHEMA = "fmn.agent.claim-guard"
-SCHEMA_VERSION = 1
-TOKEN_VERSION = "v1"
+SCHEMA_VERSION = 2
+TOKEN_VERSION = "v2"
+CLAIM_INPUT_SCHEMA = "fmn.agent.claim-input"
+CLAIM_INPUT_VERSION = 2
+CLAIM_GRAPH_SCHEMA = "fmn.agent.claim-graph"
+CLAIM_GRAPH_VERSION = 1
+RESERVED_ISSUE_ID = "none"
 MAX_OUTPUT_BYTES = 1024 * 1024
-TOKEN_RE = re.compile(r"^v1:(?P<digest>[0-9a-f]{64}):(?P<issue>[^:\s]+)$")
+TOKEN_RE = re.compile(r"^v2:(?P<digest>[0-9a-f]{64}):(?P<issue>[^:\s]+)$")
 
 
 class GuardError(ValueError):
@@ -42,11 +48,15 @@ def canonical_json(value: Any) -> bytes:
             separators=(",", ":"),
         )
     except (TypeError, ValueError) as exc:
-        raise GuardError(f"task graph cannot be canonically encoded: {exc}") from exc
+        raise GuardError(f"claim input cannot be canonically encoded: {exc}") from exc
     return rendered.encode("utf-8")
 
 
 def canonical_graph(issues: dict[str, agent_brief.Issue]) -> dict[str, Any]:
+    if RESERVED_ISSUE_ID in issues:
+        raise GuardError(
+            f"issue id {RESERVED_ISSUE_ID!r} is reserved for the no-recommendation token sentinel"
+        )
     rows: list[dict[str, Any]] = []
     for issue_id in sorted(issues):
         issue = issues[issue_id]
@@ -75,14 +85,18 @@ def canonical_graph(issues: dict[str, agent_brief.Issue]) -> dict[str, Any]:
             }
         )
     return {
-        "schema": "fmn.agent.claim-graph",
-        "version": 1,
+        "schema": CLAIM_GRAPH_SCHEMA,
+        "version": CLAIM_GRAPH_VERSION,
         "issues": rows,
     }
 
 
+def digest(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
 def graph_digest(issues: dict[str, agent_brief.Issue]) -> str:
-    return hashlib.sha256(canonical_json(canonical_graph(issues))).hexdigest()
+    return digest(canonical_graph(issues))
 
 
 def recommendation_id(plan: dict[str, Any]) -> str | None:
@@ -90,23 +104,73 @@ def recommendation_id(plan: dict[str, Any]) -> str | None:
     return None if issue is None else str(issue["id"])
 
 
-def make_token(digest: str, issue_id: str | None) -> str:
-    if not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise GuardError("graph digest must be 64 lowercase hexadecimal characters")
-    subject = "none" if issue_id is None else issue_id
+def schema_contract() -> dict[str, Any]:
+    return {
+        "agent_brief_snapshot_version": agent_brief.SNAPSHOT_SCHEMA_VERSION,
+        "agent_next": {
+            "schema": agent_next.SCHEMA,
+            "version": agent_next.SCHEMA_VERSION,
+        },
+        "claim_graph": {
+            "schema": CLAIM_GRAPH_SCHEMA,
+            "version": CLAIM_GRAPH_VERSION,
+        },
+        "claim_guard": {
+            "schema": SCHEMA,
+            "version": SCHEMA_VERSION,
+        },
+        "claim_input": {
+            "schema": CLAIM_INPUT_SCHEMA,
+            "version": CLAIM_INPUT_VERSION,
+        },
+        "token_version": TOKEN_VERSION,
+    }
+
+
+def claim_input(
+    graph: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    stale_days: int,
+    activation_cap: int,
+    limit: int,
+) -> dict[str, Any]:
+    return {
+        "schema": CLAIM_INPUT_SCHEMA,
+        "version": CLAIM_INPUT_VERSION,
+        "schemas": schema_contract(),
+        "policy": {
+            "as_of": plan["as_of"],
+            "stale_days": stale_days,
+            "activation_cap": activation_cap,
+            "limit": limit,
+        },
+        "graph": graph,
+        "plan": plan,
+    }
+
+
+def make_token(claim_sha256: str, issue_id: str | None) -> str:
+    if not re.fullmatch(r"[0-9a-f]{64}", claim_sha256):
+        raise GuardError("claim digest must be 64 lowercase hexadecimal characters")
+    if issue_id == RESERVED_ISSUE_ID:
+        raise GuardError(
+            f"issue id {RESERVED_ISSUE_ID!r} is reserved for the no-recommendation token sentinel"
+        )
+    subject = RESERVED_ISSUE_ID if issue_id is None else issue_id
     if not subject or ":" in subject or any(character.isspace() for character in subject):
         raise GuardError(f"recommendation id cannot be represented in a claim token: {subject!r}")
-    return f"{TOKEN_VERSION}:{digest}:{subject}"
+    return f"{TOKEN_VERSION}:{claim_sha256}:{subject}"
 
 
 def parse_token(value: str) -> tuple[str, str | None]:
     match = TOKEN_RE.fullmatch(value)
     if match is None:
         raise GuardError(
-            "--expect-token must have the form v1:<64 lowercase hex characters>:<issue-id|none>"
+            "--expect-token must have the form v2:<64 lowercase hex characters>:<issue-id|none>"
         )
     issue_id = match.group("issue")
-    return match.group("digest"), None if issue_id == "none" else issue_id
+    return match.group("digest"), None if issue_id == RESERVED_ISSUE_ID else issue_id
 
 
 def build_guard(
@@ -124,14 +188,26 @@ def build_guard(
         activation_cap=activation_cap,
         limit=limit,
     )
-    digest = graph_digest(issues)
+    graph = canonical_graph(issues)
+    graph_sha256 = digest(graph)
+    input_document = claim_input(
+        graph,
+        plan,
+        stale_days=stale_days,
+        activation_cap=activation_cap,
+        limit=limit,
+    )
+    claim_sha256 = digest(input_document)
     selected = recommendation_id(plan)
-    token = make_token(digest, selected)
+    token = make_token(claim_sha256, selected)
     return {
         "schema": SCHEMA,
         "version": SCHEMA_VERSION,
         "as_of": plan["as_of"],
-        "graph_sha256": digest,
+        "graph_sha256": graph_sha256,
+        "claim_sha256": claim_sha256,
+        "policy": input_document["policy"],
+        "schemas": input_document["schemas"],
         "recommendation_id": selected,
         "token": token,
         "integrity": plan["integrity"],
@@ -168,7 +244,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", choices=("token", "id", "json"), default="token")
     parser.add_argument(
         "--expect-token",
-        help="return exit 4 unless the current graph and recommendation match this token",
+        help="return exit 4 unless the current graph, policy, schemas, and recommendation match",
     )
     parser.add_argument("--as-of")
     parser.add_argument("--stale-days", type=int, default=2)
@@ -222,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if (
-            expected_digest != guard["graph_sha256"]
+            expected_digest != guard["claim_sha256"]
             or expected_issue != guard["recommendation_id"]
         ):
             print(
@@ -239,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.format == "json":
             output = render_json(guard)
         elif args.format == "id":
-            output = bounded((guard["recommendation_id"] or "none") + "\n")
+            output = bounded((guard["recommendation_id"] or RESERVED_ISSUE_ID) + "\n")
         else:
             output = bounded(guard["token"] + "\n")
     except (GuardError, TypeError, ValueError) as exc:
