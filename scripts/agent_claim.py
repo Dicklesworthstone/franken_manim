@@ -32,7 +32,7 @@ import agent_claim_guard
 import agent_next
 
 SCHEMA = "fmn.agent.claim"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_TOTAL_OUTPUT_BYTES = 16 * 1024 * 1024
@@ -620,6 +620,96 @@ def _validate_guard(
     return expected_issue
 
 
+def _verify_claim_only_delta(
+    before: dict[str, agent_brief.Issue],
+    after: dict[str, agent_brief.Issue],
+    issue_id: str,
+    assignee: str,
+    transition_comment: str | None,
+) -> dict[str, object]:
+    before_ids = set(before)
+    after_ids = set(after)
+    if before_ids != after_ids:
+        added = sorted(after_ids - before_ids)
+        removed = sorted(before_ids - after_ids)
+        raise ClaimError(
+            "claim postcondition observed issue-membership drift: "
+            f"added={added!r} removed={removed!r}",
+            5,
+        )
+
+    for other_id in sorted(before_ids - {issue_id}):
+        if before[other_id] != after[other_id]:
+            raise ClaimError(
+                f"claim postcondition observed unrelated graph drift in {other_id}",
+                5,
+            )
+
+    original = before[issue_id]
+    claimed = after[issue_id]
+    if claimed.status != agent_brief.ACTIVE_STATUS or claimed.assignee != assignee:
+        raise ClaimError(
+            f"claim postcondition failed for {issue_id}: expected status "
+            f"{agent_brief.ACTIVE_STATUS!r} and assignee {assignee!r}, got "
+            f"status {claimed.status!r} and assignee {claimed.assignee!r}",
+            5,
+        )
+    if claimed.updated_at < original.updated_at:
+        raise ClaimError(
+            f"claim postcondition regressed updated_at for {issue_id}: "
+            f"{claimed.updated_at.isoformat()} < {original.updated_at.isoformat()}",
+            5,
+        )
+    if (
+        claimed.id != original.id
+        or claimed.title != original.title
+        or claimed.priority != original.priority
+        or claimed.issue_type != original.issue_type
+        or claimed.dependencies != original.dependencies
+    ):
+        raise ClaimError(
+            f"claim postcondition changed non-claim fields on {issue_id}",
+            5,
+        )
+
+    comment_appended = transition_comment is not None
+    if transition_comment is None:
+        comments_match = claimed.comments == original.comments
+    else:
+        comments_match = (
+            len(claimed.comments) == len(original.comments) + 1
+            and claimed.comments[:-1] == original.comments
+            and claimed.comments[-1].get("text") == transition_comment
+        )
+    if not comments_match:
+        expected = (
+            "no comment change"
+            if transition_comment is None
+            else "one exact appended transition comment"
+        )
+        raise ClaimError(
+            f"claim postcondition expected {expected} on {issue_id}",
+            5,
+        )
+
+    return {
+        "changed_issue_ids": [issue_id],
+        "allowed_fields": [
+            "assignee",
+            "status",
+            "updated_at",
+            *([] if transition_comment is None else ["comments"]),
+        ],
+        "status_before": original.status,
+        "status_after": claimed.status,
+        "assignee_before": original.assignee,
+        "assignee_after": claimed.assignee,
+        "updated_at_before": original.updated_at.isoformat().replace("+00:00", "Z"),
+        "updated_at_after": claimed.updated_at.isoformat().replace("+00:00", "Z"),
+        "transition_comment_appended": comment_appended,
+    }
+
+
 def execute_claim(
     repo_root: Path,
     expect_token: str,
@@ -728,18 +818,19 @@ def execute_claim(
         claimed = after.get(issue_id)
         if claimed is None:
             raise ClaimError(f"claimed issue disappeared after br sync: {issue_id}", 5)
-        if claimed.status != agent_brief.ACTIVE_STATUS or claimed.assignee != assignee:
-            raise ClaimError(
-                f"claim postcondition failed for {issue_id}: expected status "
-                f"{agent_brief.ACTIVE_STATUS!r} and assignee {assignee!r}, got "
-                f"status {claimed.status!r} and assignee {claimed.assignee!r}",
-                5,
-            )
+        claim_delta = _verify_claim_only_delta(
+            issues,
+            after,
+            issue_id,
+            assignee,
+            transition_comment,
+        )
         receipt.update(
             {
                 "claimed": True,
                 "status": claimed.status,
                 "after_graph_sha256": after_graph_sha256,
+                "claim_delta": claim_delta,
             }
         )
         return receipt
