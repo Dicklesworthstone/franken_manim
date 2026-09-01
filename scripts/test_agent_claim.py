@@ -153,15 +153,23 @@ class AgentClaimTests(unittest.TestCase):
             "agent@example.com",
             requested_issue="fm-next",
             transition_comment="claiming after reservation check",
+            command_timeout_seconds=17.5,
             dry_run=True,
             runner=runner,
         )
         self.assertEqual(runner.calls, [])
         self.assertEqual(receipt["schema"], "fmn.agent.claim")
-        self.assertEqual(receipt["version"], 1)
+        self.assertEqual(receipt["version"], 2)
         self.assertEqual(receipt["mode"], "dry-run")
         self.assertFalse(receipt["claimed"])
         self.assertEqual(receipt["issue_id"], "fm-next")
+        self.assertEqual(
+            receipt["executor_policy"],
+            {
+                "command_timeout_seconds": 17.5,
+                "command_output_bytes_per_stream": agent_claim.MAX_COMMAND_OUTPUT_BYTES,
+            },
+        )
         self.assertEqual(
             receipt["commands"],
             [
