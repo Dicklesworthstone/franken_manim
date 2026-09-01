@@ -1,7 +1,7 @@
 # FrankenManim implementation status
 
 **Status date:** 2026-09-01 UTC / America/New_York  
-**Evidence checkpoint:** substantive source commits through `95187b9`; documentation reconciled through the current status tranche.  
+**Evidence checkpoint:** substantive source commits through `f96c3eb`; documentation reconciled through the current status tranche.  
 **Authority rule:** this document summarizes evidence; `.beads/issues.jsonl` remains the task and dependency authority.
 
 ## How to read this document
@@ -34,9 +34,10 @@ The transaction shape is:
 5. compare the supplied claim digest and issue subject;
 6. require the row to remain unassigned and `open`;
 7. invoke exact no-shell argv for `br update ISSUE --status in_progress --assignee ASSIGNEE` plus an optional transition comment;
-8. invoke `br sync --flush-only`;
-9. re-read the JSONL and require `in_progress` plus the requested assignee;
-10. emit a canonical version-1 JSON receipt only after every preceding step succeeds.
+8. concurrently drain stdout and stderr under an eager per-stream retained-byte ceiling;
+9. invoke `br sync --flush-only` under the same process-output policy;
+10. re-read the JSONL and require `in_progress` plus the requested assignee;
+11. emit a canonical version-1 JSON receipt only after every preceding step succeeds.
 
 `--dry-run` performs the complete guarded read and emits the exact intended command vectors without invoking `br`. `scripts/check.sh` uses this path against the freshly issued live-ledger token, so the mandatory gate exercises executor composition without mutating tracker state.
 
@@ -46,7 +47,13 @@ This remains a local coordination mechanism, not a distributed lease. It does no
 
 Exit `5` means no verified transaction receipt, not necessarily no mutation: `br update` may have changed its native store before a later flush or postcondition failure. Operators must inspect `br show`, `br sync --status`, and the working tree before retrying and must never reuse the old token blindly.
 
-The focused executor suite covers:
+#### Eager bounded child-process capture
+
+The executor no longer uses `subprocess.run` with captured pipes, because that interface retains complete child output before a later size check can reject it. It starts one reader per pipe, drains stdout and stderr concurrently, and retains at most `MAX_COMMAND_OUTPUT_BYTES + 1` bytes for each stream. After detecting overflow, the reader discards later bytes while continuing to drain so a full pipe cannot deadlock the child.
+
+Exact-limit output remains available for diagnostics. Limit-plus-one output produces exit `5` and no success receipt. The policy is an eager memory-retention bound, not a child timeout or total-produced-byte limit; a hung or malicious `br` process remains outside this tranche's trust model.
+
+The focused executor coverage now includes:
 
 - exact dry-run argv and no mutation;
 - successful update → flush → postcondition ordering;
@@ -57,7 +64,11 @@ The focused executor suite covers:
 - ordinary repositories and linked-worktree marker resolution;
 - shared-common-directory sibling contention;
 - same-checkout contention;
-- command-output and receipt bounds;
+- injected-runner command-output and receipt bounds;
+- exact-limit real stdout and stderr retention;
+- independent stdout and stderr overflow;
+- simultaneous large stdout/stderr draining without deadlock;
+- bounded diagnostics for a real nonzero child exit;
 - no-stdout CLI failure behavior.
 
 The complete contract is documented in `docs/AGENT_CLAIM_EXECUTOR.md`.
@@ -151,7 +162,7 @@ The operational layer now has five linked script surfaces over one task authorit
 1. `scripts/agent_brief.py` owns bounded strict ledger parsing, blocking-graph integrity, activation state, and broad situational rendering. It has no autonomous claim output.
 2. `scripts/agent_next.py` owns autonomous leaf selection and emits schema `fmn.agent.next` version `2`.
 3. `scripts/agent_claim_guard.py` owns graph-and-policy-bound read-only revalidation and emits schema `fmn.agent.claim-guard` version `2`.
-4. `scripts/agent_claim.py` owns the shared-lock `open` → `in_progress` mutation, explicit flush, postcondition, and receipt.
+4. `scripts/agent_claim.py` owns the shared-lock `open` → `in_progress` mutation, explicit flush, postcondition, bounded child-process integration, and receipt.
 5. `scripts/generate_agent_brief.py` publishes a deterministic human brief containing the planner decision plus broad context.
 6. Beads remains the sole task and dependency authority; the scripts neither replace nor reinterpret its mutation model.
 
@@ -186,7 +197,7 @@ The default planner `as_of` is derived from the newest ledger record. Identical 
 
 The human generator refuses blocking cycles, containment cycles, missing blockers, and activation-cap breaches before any output. Existing artifacts are read through a descriptor-bound regular-file check. Failed publication removes only the temporary inode created by that attempt; if the path was substituted, the foreign path is retained and reported.
 
-`scripts/check.sh` compiles and runs the parser, strict-JSON, planner, claim-guard, claim-executor, deterministic-output, generator, publication-I/O, and portal-refusal tests; validates the live plan, guarded claim input, guarded dry-run composition, and real portal source; then continues into the Rust/Python/WASM/structural gate. Hosted GitHub Actions is not required.
+`scripts/check.sh` compiles and runs the parser, strict-JSON, planner, claim-guard, claim-executor, real-subprocess, deterministic-output, generator, publication-I/O, and portal-refusal tests; validates the live plan, guarded claim input, guarded dry-run composition, and real portal source; then continues into the Rust/Python/WASM/structural gate. Hosted GitHub Actions is not required.
 
 ## Current open obligations
 
@@ -208,6 +219,10 @@ The shipped binary correctly suppresses human doctor success output under `--qui
 ### Distributed claim coordination
 
 The claim executor serializes cooperating processes only inside one clone's shared Git common directory. Another clone, a manual `br` command, or an agent that ignores the executor can still race it. Agent Mail, reservations, current-HEAD review, and explicit peer coordination remain mandatory. A future distributed lease would require a separate authority rather than pretending the local file lock provides one.
+
+### Claim subprocess lifecycle
+
+Claim subprocess output is now memory-bounded while being drained, but the executor does not impose a wall-clock timeout or total-produced-byte ceiling. The trusted `br` command can therefore still hang indefinitely. Any timeout/cancellation design must account honestly for the possibility that `br update` has already mutated native tracker state; killing it blindly would weaken recovery semantics.
 
 ### Platform and release evidence
 
@@ -264,6 +279,7 @@ python3 scripts/test_agent_next.py
 python3 scripts/test_agent_next_output.py
 python3 scripts/test_agent_claim_guard.py
 python3 scripts/test_agent_claim.py
+python3 scripts/test_agent_claim_subprocess.py
 python3 scripts/test_generate_agent_brief.py
 python3 scripts/test_generate_agent_brief_io.py
 python3 scripts/check_python_helper_aliases.py
@@ -277,7 +293,7 @@ cargo test -p fmn-cli --features batch --test cli_smoke
 
 The original guarded-executor tranche passed a ten-case interface-compatible local harness before publication. Exact replacement Python files were also syntax-checked during that tranche. The implementation, focused suite, and mandatory-gate wiring landed incrementally as `23dec4b`, `2e7a80b`, and `6169519`.
 
-Subsequent strict-JSON and shared-worktree changes landed through substantive checkpoint `95187b9`. This environment did not provide an exact repository checkout containing the full parser/planner modules, portal source, Rust workspace, and installed toolchain. Therefore the exact complete Python suites, live-ledger dry-run gate, portal audit, Cargo/Clippy/rustdoc/WASM/wheel/browser axes, and repository-wide `scripts/check.sh` invocation are not represented here as completed against `95187b9`. Hosted workflow runs were repeatedly queued or superseded by the intentional incremental commit sequence and are not promoted into local/owned-host evidence.
+Subsequent strict-JSON, shared-worktree, and eager-output changes landed through substantive checkpoint `f96c3eb`. This environment did not provide an exact repository checkout containing the full parser/planner modules, portal source, Rust workspace, and installed toolchain. Therefore the exact complete Python suites, real-child-process suite, live-ledger dry-run gate, portal audit, Cargo/Clippy/rustdoc/WASM/wheel/browser axes, and repository-wide `scripts/check.sh` invocation are not represented here as completed against `f96c3eb`. Hosted workflow runs were repeatedly queued or superseded by the intentional incremental commit sequence and are not promoted into local/owned-host evidence.
 
 GitHub Actions is not a correctness dependency. Verification is designed to run on controlled local or owned build hosts; unavailable hosted capacity does not weaken or waive any gate.
 
