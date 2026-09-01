@@ -50,13 +50,22 @@ While holding the claim lock, the executor performs these steps in order:
    br update ISSUE --status in_progress --assignee ASSIGNEE [--transition-comment TEXT]
    ```
 
-9. Invoke `br sync --flush-only` without a shell.
-10. Re-read the exported JSONL and require the selected row to be `in_progress` with the requested assignee.
-11. Emit the receipt and release the advisory lock.
+9. Concurrently drain stdout and stderr while retaining at most the configured limit plus one detection byte for each stream.
+10. Invoke `br sync --flush-only` under the same output policy.
+11. Re-read the exported JSONL and require the selected row to be `in_progress` with the requested assignee.
+12. Emit the receipt and release the advisory lock.
 
 The `.git` and `commondir` markers are read through no-follow bounded regular-file descriptors where supported. Malformed, non-UTF-8, oversized, symlinked, or non-directory targets fail before lock acquisition.
 
 The lock file is intentionally persistent. Deleting and recreating a lock pathname can split contenders across different inodes, so cleanup is neither required nor permitted by the normal workflow.
+
+## Child-process output policy
+
+The executor does not use `subprocess.run(..., stdout=PIPE, stderr=PIPE)`, because that interface retains complete child output before a later length check can reject it. Instead it starts one reader for each pipe, drains both concurrently, and stores no more than `MAX_COMMAND_OUTPUT_BYTES + 1` bytes per stream. Once overflow is known, the reader discards further bytes while continuing to drain the pipe so the child cannot deadlock on a full stdout or stderr buffer.
+
+Exact-limit payloads remain available for diagnostics. A limit-plus-one payload causes exit `5` after the child terminates, and no success receipt is emitted. Both pipes are always drained concurrently, including when the child writes large stdout and stderr payloads at the same time.
+
+This is a retained-output memory bound, not a child wall-clock or total-produced-byte limit. A malicious or hung `br` process remains outside the executor's trust model and requires separate process-lifecycle policy rather than pretending the diagnostic buffer is a timeout.
 
 ## Receipt contract
 
@@ -71,7 +80,7 @@ The version-1 receipt records:
 - the exact `br` argv vectors;
 - post-claim status and graph digest after successful mutation.
 
-Receipt JSON is canonical, UTF-8, sorted by key, terminated by one LF, and capped at 1 MiB. Child-process diagnostic payloads accepted by the executor are capped at 1 MiB per stream.
+Receipt JSON is canonical, UTF-8, sorted by key, terminated by one LF, and capped at 1 MiB. Child-process diagnostics are eagerly retained under a 1 MiB-per-stream ceiling rather than collected without bound and checked afterward.
 
 ## Exit codes
 
@@ -104,8 +113,10 @@ The shared Beads reader accepts strict JSON, not Python's historical JSON extens
 
 ## Verification
 
-`scripts/test_agent_claim.py` covers dry-run argv, successful update/flush/postcondition flow, stale tokens, issue mismatch, update and sync failures, missing mutation, graph-integrity and no-work exits, normal and linked-worktree Git resolution, shared-common-directory contention, local contention, output bounds, and no-stdout failure behavior.
+`scripts/test_agent_claim.py` covers dry-run argv, successful update/flush/postcondition flow, stale tokens, issue mismatch, update and sync failures, missing mutation, graph-integrity and no-work exits, normal and linked-worktree Git resolution, shared-common-directory contention, local contention, injected-runner output bounds, and no-stdout failure behavior.
+
+`scripts/test_agent_claim_subprocess.py` uses real child processes to prove exact-limit stdout and stderr retention, independent stdout and stderr overflow, simultaneous large-stream draining without deadlock, and bounded diagnostics for a nonzero child exit.
 
 `scripts/test_agent_brief_strict_json.py` covers all three non-finite spellings at top level and in nested ignored data, quoted-string acceptance, no-projection CLI failure, and claim-graph grammar versioning.
 
-`scripts/check.sh` runs both suites and, when the live ledger has a recommendation, invokes the executor in `--dry-run` mode against the freshly issued token. The mandatory gate never mutates Beads.
+`scripts/check.sh` runs all three suites and, when the live ledger has a recommendation, invokes the executor in `--dry-run` mode against the freshly issued token. The mandatory gate never mutates Beads.
