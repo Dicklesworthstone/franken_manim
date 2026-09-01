@@ -23,6 +23,7 @@ from typing import Any
 
 DEFAULT_SOURCE = Path("crates/fmn-python/python/manimlib_bootstrap.py")
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
+MAX_AST_NODES = 1_000_000
 MAX_SITES = 4_096
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 SCHEMA = "fmn.portal.refusals"
@@ -198,8 +199,21 @@ class RefusalVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if final_name(node.func) == "_refuse_unrouted":
             violations: list[str] = []
-            subject = node.args[0] if node.args else None
-            entries = node.args[1] if len(node.args) > 1 else None
+            keywords = {
+                keyword.arg: keyword.value
+                for keyword in node.keywords
+                if keyword.arg is not None
+            }
+            subject = (
+                node.args[0]
+                if node.args
+                else keywords.get("class_name", keywords.get("subject"))
+            )
+            entries = (
+                node.args[1]
+                if len(node.args) > 1
+                else keywords.get("entries")
+            )
             if subject is None:
                 violations.append("_refuse_unrouted call has no subject")
             elif static_blank_string(subject):
@@ -225,6 +239,11 @@ def build_inventory(path: Path) -> dict[str, Any]:
     except SyntaxError as exc:
         location = f"{exc.lineno}:{exc.offset}" if exc.lineno is not None else "unknown"
         raise AuditError(f"portal source is not valid Python at {location}: {exc.msg}") from exc
+    ast_nodes = sum(1 for _ in ast.walk(tree))
+    if ast_nodes > MAX_AST_NODES:
+        raise AuditError(
+            f"portal source exceeds the {MAX_AST_NODES}-node AST limit ({ast_nodes} nodes)"
+        )
     visitor = RefusalVisitor()
     visitor.visit(tree)
     sites = sorted(
@@ -250,6 +269,7 @@ def build_inventory(path: Path) -> dict[str, Any]:
         "source": path.as_posix(),
         "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
         "source_bytes": len(source_bytes),
+        "ast_nodes": ast_nodes,
         "counts": {
             "sites": len(sites),
             "not_implemented": len(direct),
@@ -282,6 +302,7 @@ def render_markdown(inventory: dict[str, Any]) -> str:
         "",
         f"- Source: `{inventory['source']}`",
         f"- SHA-256: `{inventory['source_sha256']}`",
+        f"- Source bytes / AST nodes: **{inventory['source_bytes']}** / **{inventory['ast_nodes']}**",
         (
             f"- Sites: **{counts['sites']}** total; **{counts['not_implemented']}** direct "
             f"`NotImplementedError`; **{counts['refuse_unrouted']}** `_refuse_unrouted`; "
