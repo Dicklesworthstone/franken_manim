@@ -124,10 +124,12 @@ class AgentNextTests(unittest.TestCase):
 
     def test_integrity_and_activation_fail_closed(self) -> None:
         bad = self.ledger([issue("fm-bad", "W10: bad", blockers=("fm-missing",))])
+        stdout = io.StringIO()
         stderr = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             status = agent_next.main(["--ledger", str(bad), "--require"])
         self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
         self.assertIn("integrity failed", stderr.getvalue())
 
         rows = [
@@ -136,9 +138,11 @@ class AgentNextTests(unittest.TestCase):
         ]
         rows.append(issue("fm-new", "W9: new"))
         capped = self.ledger(rows)
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
             status = agent_next.main(["--ledger", str(capped), "--require"])
         self.assertEqual(status, 3)
+        self.assertEqual(stdout.getvalue(), "")
 
     def test_machine_json_is_canonical_and_require_has_distinct_empty_exit(self) -> None:
         path = self.ledger([issue("fm-next", "W10: next", priority=1)])
@@ -157,10 +161,18 @@ class AgentNextTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "fmn.agent.next")
         self.assertEqual(payload["recommendation"]["issue"]["id"], "fm-next")
 
+        required = io.StringIO()
+        with contextlib.redirect_stdout(required):
+            status = agent_next.main(["--ledger", str(path), "--require"])
+        self.assertEqual(status, 0)
+        self.assertEqual(required.getvalue(), "fm-next\n")
+
         empty = self.ledger([issue("fm-done", "W10: done", "closed")])
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
             status = agent_next.main(["--ledger", str(empty), "--require"])
         self.assertEqual(status, 3)
+        self.assertEqual(stdout.getvalue(), "")
 
 
 if __name__ == "__main__":
