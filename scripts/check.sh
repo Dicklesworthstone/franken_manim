@@ -10,6 +10,10 @@ echo "==> agent control-plane parser/tests"
 python3 scripts/agent_brief.py --format json --limit 1 >/dev/null
 python3 scripts/test_agent_brief.py
 
+echo "==> Python geometry helper alias policy"
+python3 scripts/check_python_helper_aliases.py
+python3 scripts/test_python_helper_aliases.py
+
 echo "==> native installer smoke"
 bash scripts/test_install.sh
 
