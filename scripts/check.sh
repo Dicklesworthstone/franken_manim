@@ -10,10 +10,12 @@ echo "==> agent control-plane parser/planner/generator/tests"
 python3 -m py_compile \
     scripts/agent_brief.py \
     scripts/agent_next.py \
+    scripts/agent_claim_guard.py \
     scripts/generate_agent_brief.py \
     scripts/test_agent_brief.py \
     scripts/test_agent_next.py \
     scripts/test_agent_next_output.py \
+    scripts/test_agent_claim_guard.py \
     scripts/test_generate_agent_brief.py \
     scripts/test_generate_agent_brief_io.py
 # Invalid graph or activation state must fail before any machine payload.
@@ -21,12 +23,19 @@ python3 scripts/agent_brief.py --format json --limit 1 --check >/dev/null
 python3 scripts/test_agent_brief.py
 python3 scripts/test_agent_next.py
 python3 scripts/test_agent_next_output.py
+python3 scripts/test_agent_claim_guard.py
 python3 scripts/test_generate_agent_brief.py
 python3 scripts/test_generate_agent_brief_io.py
-# Render the complete live ledger through both operational projections without
-# mutating documentation. The claim planner additionally proves that non-epic
-# parents with live children cannot be returned as autonomous leaf work.
+# Render the complete live ledger through every operational projection without
+# mutating documentation. The claim planner proves that non-epic parents with
+# live children cannot be returned as autonomous leaf work. The claim guard
+# then revalidates the exact graph, policy, schema contract, and recommendation
+# it just issued before any later gate can rely on that coordination surface.
 python3 scripts/agent_next.py --format json --check >/dev/null
+claim_token="$(python3 scripts/agent_claim_guard.py --format token)"
+python3 scripts/agent_claim_guard.py \
+    --expect-token "$claim_token" \
+    --format json >/dev/null
 python3 scripts/generate_agent_brief.py --stdout >/dev/null
 
 echo "==> Python portal refusal inventory"
