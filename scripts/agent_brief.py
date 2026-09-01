@@ -26,7 +26,7 @@ MAX_ISSUES = 100_000
 MAX_DEPENDENCIES_PER_ISSUE = 10_000
 MAX_DEPENDENCIES = 500_000
 MAX_COMMENTS_PER_ISSUE = 10_000
-SNAPSHOT_SCHEMA_VERSION = 4
+SNAPSHOT_SCHEMA_VERSION = 5
 ACTIVE_STATUS = "in_progress"
 KNOWN_STATUSES = frozenset({"open", ACTIVE_STATUS, "closed", "tombstone"})
 OPEN_STATUSES = frozenset({"open", ACTIVE_STATUS})
@@ -346,7 +346,7 @@ def issue_sort_key(issue: Issue) -> tuple[int, int, float, str]:
     return (status_rank, issue.priority, -issue.updated_at.timestamp(), issue.id)
 
 
-def recommendation_sort_key(issue: Issue) -> tuple[int, int, float, str]:
+def situational_priority_sort_key(issue: Issue) -> tuple[int, int, float, str]:
     scope_rank = 1 if issue.workstream == "UNSCOPED" else 0
     return (issue.priority, scope_rank, -issue.updated_at.timestamp(), issue.id)
 
@@ -364,21 +364,24 @@ def latest_comment(issue: Issue) -> str | None:
     return None
 
 
-def select_recommendation(
+def select_situational_priority(
     ready: list[Issue], active_workstreams: set[str], activation_cap: int
 ) -> tuple[Issue | None, str]:
     in_active = [issue for issue in ready if issue.workstream in active_workstreams]
     if in_active:
-        issue = min(in_active, key=recommendation_sort_key)
-        return issue, f"highest-priority unassigned leaf in already-active {issue.workstream}"
+        issue = min(in_active, key=situational_priority_sort_key)
+        return issue, f"highest-priority broad-ready candidate in already-active {issue.workstream}"
     if not ready:
-        return None, "no dependency-ready, unassigned leaf issues"
+        return None, "no dependency-ready, unassigned non-epic candidates"
     if len(active_workstreams) >= activation_cap:
-        return None, "activation cap is full and no claimable issue belongs to an active workstream"
-    issue = min(ready, key=recommendation_sort_key)
+        return None, "activation cap is full and no broad-ready candidate belongs to an active workstream"
+    issue = min(ready, key=situational_priority_sort_key)
     if issue.workstream == "UNSCOPED":
-        return issue, "highest-priority unassigned leaf is unscoped; verify governance before claiming"
-    return issue, f"highest-priority unassigned leaf; claiming it activates {issue.workstream}"
+        return issue, "highest-priority broad-ready candidate is unscoped"
+    return issue, (
+        "highest-priority broad-ready candidate; autonomous selection still requires "
+        "scripts/agent_next.py"
+    )
 
 
 def build_snapshot(
@@ -440,12 +443,12 @@ def build_snapshot(
     cycles = blocking_cycles(issues)
     integrity_ok = not missing_blockers and not cycles
     if integrity_ok:
-        recommendation, recommendation_reason = select_recommendation(
+        priority_issue, priority_reason = select_situational_priority(
             ready, active_workstream_set, activation_cap
         )
     else:
-        recommendation = None
-        recommendation_reason = "ledger integrity failures must be repaired before claiming work"
+        priority_issue = None
+        priority_reason = "ledger integrity failures suppress situational prioritization"
 
     def row(issue: Issue) -> dict[str, Any]:
         blockers = unresolved_blockers(issue, issues)
@@ -462,11 +465,11 @@ def build_snapshot(
             "latest_comment": latest_comment(issue),
         }
 
-    recommendation_row = row(recommendation) if recommendation is not None else None
+    priority_row = row(priority_issue) if priority_issue is not None else None
     activates_workstream = bool(
-        recommendation is not None
-        and recommendation.workstream != "UNSCOPED"
-        and recommendation.workstream not in active_workstream_set
+        priority_issue is not None
+        and priority_issue.workstream != "UNSCOPED"
+        and priority_issue.workstream not in active_workstream_set
     )
     return {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
@@ -507,10 +510,12 @@ def build_snapshot(
             "unowned_active": len(unowned),
             "unscoped_active": len(unscoped),
         },
-        "recommendation": {
-            "issue": recommendation_row,
-            "reason": recommendation_reason,
+        "situational_priority": {
+            "issue": priority_row,
+            "reason": priority_reason,
             "activates_workstream": activates_workstream,
+            "claim_safe": False,
+            "claim_surface": "scripts/agent_next.py",
         },
         "active": [row(issue) for issue in active[:limit]],
         "ready": [row(issue) for issue in ready[:limit]],
@@ -530,7 +535,7 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
     integrity = snapshot["integrity"]
     activation = snapshot["activation"]
     counts = snapshot["counts"]
-    recommendation = snapshot["recommendation"]
+    situational = snapshot["situational_priority"]
     integrity_label = "clean" if integrity["within_contract"] else "FAILED"
     lines = [
         "# FrankenManim agent brief",
@@ -552,20 +557,23 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
         ),
         (
             f"- Issues: **{counts['in_progress']}** in progress, **{counts['open']}** open, "
-            f"**{counts['ready']}** claimable, **{counts['assigned_ready']}** assigned-ready, "
-            f"**{counts['container_ready']}** ready containers, **{counts['blocked']}** blocked, "
+            f"**{counts['ready']}** broad-ready, **{counts['assigned_ready']}** assigned-ready, "
+            f"**{counts['container_ready']}** ready epic containers, **{counts['blocked']}** blocked, "
             f"**{counts['stale_claims']}** stale, **{counts['unowned_active']}** unowned active."
         ),
     ]
-    recommended = recommendation["issue"]
-    if recommended is None:
-        lines.append(f"- Recommended next: **none** — {recommendation['reason']}.")
+    priority_issue = situational["issue"]
+    if priority_issue is None:
+        lines.append(f"- Broad priority: **none** — {situational['reason']}.")
     else:
-        activation_note = "; activates a workstream" if recommendation["activates_workstream"] else ""
+        activation_note = "; would activate a workstream" if situational["activates_workstream"] else ""
         lines.append(
-            f"- Recommended next: **P{recommended['priority']} `{recommended['id']}`** "
-            f"[{recommended['workstream']}] — {recommendation['reason']}{activation_note}."
+            f"- Broad priority: **P{priority_issue['priority']} `{priority_issue['id']}`** "
+            f"[{priority_issue['workstream']}] — {situational['reason']}{activation_note}."
         )
+    lines.append(
+        "- Claim contract: **none in this projection**; use `python3 scripts/agent_next.py`."
+    )
 
     def section(title: str, rows: Iterable[dict[str, Any]], empty: str) -> None:
         lines.extend(["", f"## {title}", ""])
@@ -605,14 +613,18 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
             )
 
     section("Active claims", snapshot["active"], "No active claims.")
-    section("Claimable ready queue", snapshot["ready"], "No claimable ready leaf issues.")
+    section(
+        "Broad dependency-ready queue",
+        snapshot["ready"],
+        "No broad dependency-ready open issues.",
+    )
     section(
         "Assigned dependency-ready work",
         snapshot["assigned_ready"],
         "No assigned dependency-ready work.",
     )
     section(
-        "Dependency-ready containers",
+        "Dependency-ready epic containers",
         snapshot["container_ready"],
         "No dependency-ready epic containers.",
     )
@@ -628,8 +640,8 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
             "1. Refresh this brief immediately before claiming work.",
             "2. Treat Beads as authoritative; this projection never edits status.",
             "3. Repair blocking cycles or missing blocker targets before any new claim.",
-            "4. Never claim an assigned issue or an epic container from this projection.",
-            "5. Prefer the recommendation only after rechecking reservations and current HEAD.",
+            "4. Never claim directly from this projection; use `scripts/agent_next.py`.",
+            "5. Recheck reservations and current HEAD after receiving a leaf-safe recommendation.",
             "6. Do not activate a fifth workstream; an unscoped recommendation needs a governance check.",
             "7. Re-run after every claim, dependency change, close, or handoff.",
             "",
