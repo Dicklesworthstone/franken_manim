@@ -134,11 +134,19 @@ The claim digest covers the canonical graph, complete plan, policy values, and p
 
 ### Claim receipt
 
-`agent_claim.py` emits schema `fmn.agent.claim`, version `2`, only after a dry-run validation or a verified mutation. The receipt includes the guarded recommendation, exact token, pre-claim digests, planner policy, schema contracts, exact no-shell `br` argv, executor policy, and post-claim graph/status evidence when mutation occurred.
+`agent_claim.py` emits schema `fmn.agent.claim`, version `4`, only after a dry-run validation or a verified mutation. The receipt includes the guarded recommendation, exact token, pre-claim digests, planner policy, schema contracts, exact no-shell `br` argv, executor policy, and post-claim evidence when mutation occurred.
 
-The executor policy records the requested per-command timeout and retained-byte ceiling. The CLI production path enforces that policy; injected runners exist only as a focused test seam. Receipt output is canonical compact JSON with one LF and a 1 MiB ceiling.
+The executor policy records:
 
-Executor exit `5` means no verified receipt. It does not guarantee no mutation: `br update` may have changed native state before a timeout, flush failure, or postcondition failure. Inspect tracker state before retrying and never reuse the old token blindly.
+- requested timeout per child command;
+- retained diagnostic bytes per stream;
+- combined total-produced-byte ceiling per child command.
+
+A successful mutating receipt additionally carries a normalized `claim_delta`. That record proves the canonical parsed graph changed only at the selected issue and only through the permitted status, assignee, non-regressing timestamp, and optional exact transition-comment append.
+
+The CLI production path enforces timeout and produced-byte accounting while reading child pipes. Injected runners exist only as focused test seams and can validate only returned payloads. Receipt output is canonical compact JSON with one LF and a 1 MiB ceiling.
+
+Executor exit `5` means no verified receipt. It does not guarantee no mutation: `br update` may have changed native state before an output-budget kill, timeout, flush failure, or graph-delta failure. Inspect tracker state before retrying and never reuse the old token blindly.
 
 ## Shared claim-lock contract
 
@@ -156,7 +164,7 @@ The lock serializes only cooperating executor processes in the same clone. It do
 
 Each production `br update` and `br sync --flush-only` invocation has an independent wall-clock timeout. The default is 60 seconds; callers may select a finite positive value up to 3,600 seconds with `--command-timeout-seconds`.
 
-The child starts in its own POSIX session or Windows process group. On timeout:
+The child starts in its own POSIX session or Windows process group. On timeout or combined-output-budget failure:
 
 - POSIX sends `SIGKILL` to the complete process group and waits under a finite cleanup bound;
 - Windows attempts no-shell `taskkill.exe /T /F`, then directly kills the child if necessary;
@@ -165,9 +173,24 @@ The child starts in its own POSIX session or Windows process group. On timeout:
 
 If the direct child exits but a descendant keeps an inherited output pipe open, the executor forces cleanup and returns exit `5` instead of holding the repository claim lock indefinitely.
 
-stdout and stderr are drained concurrently. Each stream retains at most `MAX_COMMAND_OUTPUT_BYTES + 1` bytes and discards later bytes while continuing to drain, so the retained-memory bound is eager and a full pipe cannot deadlock the child. The timeout bounds lifetime, but there is not yet a separate total-produced-byte ceiling; a child may generate discarded bytes until exit or timeout.
+stdout and stderr are drained concurrently. Each stream retains at most 1 MiB plus one detection byte. Both readers also debit one shared 16 MiB produced-byte budget before discarding excess diagnostic bytes. The first byte above that combined ceiling triggers process-tree cleanup immediately rather than allowing a noisy child to continue until timeout.
 
-The timeout marks the command deadline, not a promise that the caller returns at that exact instant: bounded process-tree and reader cleanup may extend the failure path slightly.
+The timeout and total-output ceiling are per command rather than transaction-wide. Bounded process-tree and reader cleanup can extend a failure path slightly beyond the selected deadline.
+
+## Exact post-sync graph contract
+
+After `br sync --flush-only`, the executor compares the canonical parsed graph before and after the transaction. A success receipt requires:
+
+- identical issue membership;
+- every non-target issue exactly unchanged in the parsed graph;
+- target status `open` → `in_progress`;
+- target assignee unassigned → requested assignee;
+- target timestamp unchanged or advanced;
+- target ID, title, priority, issue type, and dependencies unchanged;
+- target comments unchanged unless a transition comment was requested;
+- when requested, exactly one appended comment with matching text.
+
+This catches concurrent mutations from another clone or a direct manual `br` invocation even though those actors do not honor the local lock. The comparison is intentionally against the canonical parsed task graph, not unknown raw extension fields that do not participate in claim selection.
 
 ## Deterministic human rendering
 
