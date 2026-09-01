@@ -4,7 +4,7 @@
 
 The guard never mutates Beads and is not a lease. It proves only that the claim input and recommendation are still the same at the instant of revalidation. File reservations, current assignees, current `main`, and coordinating messages must still be checked immediately before the mutation.
 
-For mutation, use `scripts/agent_claim.py`. It revalidates the guard, executes `br update`, flushes JSONL, and verifies the postcondition under one repository-local advisory lock. Its complete contract is in [`AGENT_CLAIM_EXECUTOR.md`](AGENT_CLAIM_EXECUTOR.md).
+For mutation, use `scripts/agent_claim.py`. It revalidates the guard, executes `br update`, flushes JSONL, and verifies the postcondition under one advisory lock in Git's shared common directory. The primary worktree and all linked worktrees contend on that same lock. Its complete contract is in [`AGENT_CLAIM_EXECUTOR.md`](AGENT_CLAIM_EXECUTOR.md).
 
 ## Canonical workflow
 
@@ -24,7 +24,7 @@ python3 scripts/agent_claim.py \
     --assignee "$FMN_AGENT_ID" \
     --dry-run
 
-# 4. Revalidate, mutate, flush, and verify under one local lock.
+# 4. Revalidate, mutate, flush, and verify under one shared local lock.
 python3 scripts/agent_claim.py \
     --expect-token "$token" \
     --issue "$issue" \
@@ -91,7 +91,7 @@ python3 scripts/agent_claim_guard.py --format id --expect-token "$token" --requi
 
 ## What the guard does not prove
 
-The guard alone cannot make `br update` atomic with the preceding read. The executor narrows that local interval by holding one Git-directory lock across revalidation and mutation, but neither mechanism is a distributed lease. Another clone, a direct manual `br` invocation, or external coordination can still conflict.
+The guard alone cannot make `br update` atomic with the preceding read. The executor narrows that interval for cooperating processes in the same clone by holding one shared-common-directory lock across revalidation and mutation, but neither mechanism is a distributed lease. Another clone, a direct manual `br` invocation, or external coordination can still conflict.
 
 Use Agent Mail reservations, inspect current `main`, and keep the interval between those checks and executor invocation minimal. A failed mutation is a fresh conflict; never override it or blindly reuse the old token.
 
@@ -101,4 +101,4 @@ The guard itself does not edit, close, assign, export, or commit issues. The exe
 
 `scripts/test_agent_claim_guard.py` covers v2 token round trips, graph and recommendation changes, canonical order independence, every policy input, schema-version changes, unchanged-recommendation planner drift, the reserved sentinel, no-work behavior, malformed and legacy tokens, output bounds, and integrity precedence.
 
-`scripts/test_agent_claim.py` covers the locked mutation path and failure semantics. `scripts/test_agent_brief_strict_json.py` covers the strict JSON grammar and claim-graph version. `scripts/check.sh` compiles and runs all three suites, issues a token against the complete live ledger, immediately revalidates it, and exercises the executor's live-ledger dry-run path before entering the Rust gates.
+`scripts/test_agent_claim.py` covers the shared-lock mutation path and failure semantics. `scripts/test_agent_brief_strict_json.py` covers the strict JSON grammar and claim-graph version. `scripts/check.sh` compiles and runs all three suites, issues a token against the complete live ledger, immediately revalidates it, and exercises the executor's live-ledger dry-run path before entering the Rust gates.
