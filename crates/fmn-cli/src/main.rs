@@ -1,7 +1,9 @@
 //! The `fmn` binary entry point.
 #![forbid(unsafe_code)]
 
-use std::io::{Read as _, Write as _};
+mod process_output;
+
+use std::io::Read as _;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,7 +32,7 @@ fn quiet_human_doctor(args: &[std::ffi::OsString]) -> bool {
 fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let suppress_doctor_report = quiet_human_doctor(&args);
-    let mut output = if fmn_cli::is_internal_studio_worker_os(&args) {
+    let mut run_output = if fmn_cli::is_internal_studio_worker_os(&args) {
         fmn_cli::run_internal_studio_worker_os(&args)
     } else if fmn_cli::is_studio_invocation_os(&args) {
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -62,25 +64,24 @@ fn main() -> ExitCode {
     // non-error output, so suppress it while retaining any typed stderr error.
     // Robot records are never suppressed: they are the command's API.
     if suppress_doctor_report {
-        output.stdout.clear();
+        run_output.stdout.clear();
     }
 
-    if !output.stdout.is_empty()
-        && std::io::stdout()
-            .lock()
-            .write_all(output.stdout.as_bytes())
-            .is_err()
+    let command_code = run_output.code;
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut stdout = stdout.lock();
+    let mut stderr = stderr.lock();
+    if process_output::publish(
+        &mut stdout,
+        &mut stderr,
+        run_output.stdout.as_bytes(),
+        run_output.stderr.as_bytes(),
+    )
+    .is_err()
     {
         return ExitCode::from(fmn_cli::internal_exit_code());
     }
-    if !output.stderr.is_empty()
-        && std::io::stderr()
-            .lock()
-            .write_all(output.stderr.as_bytes())
-            .is_err()
-    {
-        return ExitCode::from(fmn_cli::internal_exit_code());
-    }
 
-    ExitCode::from(output.code)
+    ExitCode::from(command_code)
 }
