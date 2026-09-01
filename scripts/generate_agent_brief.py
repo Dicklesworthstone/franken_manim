@@ -94,7 +94,14 @@ def write_atomic(path: Path, document: str) -> None:
         raise GenerateError(f"cannot create output directory {path.parent}: {exc}") from exc
 
     temporary = path.with_name(f".{path.name}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if temporary.is_symlink():
+        raise GenerateError(f"refusing symlink temporary path {temporary}")
+    if temporary.exists():
+        raise GenerateError(
+            f"refusing pre-existing temporary path {temporary}; "
+            "inspect it before retrying"
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
