@@ -194,7 +194,7 @@ This is a design pillar with its own budget, not a QA appendix.
 
 CLI robot mode must be: stable versioned schema, deterministic where possible, explicit exit codes, line-oriented NDJSON, easy to pipe. Do not mix human decoration with machine output in robot mode. `fmn doctor` reports capabilities (ffmpeg fingerprint + hardware encoders, fonts, cache, the derived ExecutionPlan). Every bug report is a deterministic replay: one-command repro bundles (scene + input closure) and the sidecar provenance manifest are first-class DX artifacts (§18).
 
-The repository's own operational interfaces follow the same rule. `.beads/issues.jsonl` is authority, `agent_brief.py` is the bounded situational projection, `agent_next.py` is the sole autonomous claim planner, and `generate_agent_brief.py` is the deterministic human rendering. Do not infer a claim from a raw issue list, from `bv` rank alone, or from the legacy broad `agent_brief.py --format next` spelling.
+The repository's own operational interfaces follow the same rule. `.beads/issues.jsonl` is authority; `agent_brief.py` is the bounded situational projection; `agent_next.py` is the sole autonomous claim planner; `agent_claim_guard.py` issues the graph/policy/schema-bound token; `agent_claim.py` owns the bounded guarded mutation; and `generate_agent_brief.py` is the deterministic human rendering. Do not infer a claim from a raw issue list, from `bv` rank alone, or from the removed broad `agent_brief.py --format next` spelling.
 
 ---
 
@@ -202,14 +202,17 @@ The repository's own operational interfaces follow the same rule. `.beads/issues
 
 The governance machinery lives in [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md); the two rules you touch every session:
 
-- **The activation and integrity check (GOVERNANCE.md §1).** At most **4 workstreams active** (≥1 bead `in_progress`) at once; G0 counts as one. Before any claim, run the strict whole-graph validation and canonical leaf planner shown below. Exit `1` means graph/activation state is unsafe, exit `2` means malformed input, and exit `3` means the graph is valid but no claimable leaf exists. Never activate work from a failed or empty plan.
+- **The activation and integrity check (GOVERNANCE.md §1).** At most **4 workstreams active** (≥1 bead `in_progress`) at once; G0 counts as one. Before any claim, validate the whole graph, inspect the canonical plan, and issue a guarded token. Exit `1` means graph/activation state is unsafe, exit `2` means malformed input, exit `3` means no claimable leaf, exit `4` means a stale token, and exit `5` means no verified executor receipt. Never activate work from a failed or empty plan.
 - **The handoff checklist (GOVERNANCE.md §4).** The checkable form of "Landing the Plane" below — a handoff violating it is not a handoff.
 
 ```bash
 python3 scripts/agent_brief.py --format json --check >/dev/null
 python3 scripts/agent_next.py --format json --check
-python3 scripts/agent_next.py --require
+token="$(python3 scripts/agent_claim_guard.py --require)"
+issue="${token##*:}"
 ```
+
+Inspect `br show "$issue"`, current `main`, Agent Mail, file reservations, and active peers before invoking the executor. The token is not a lease.
 
 Amendments to the plan's decision log (D-01…D-24), OQ resolutions, and policy rulings under standing rules land as **ADRs** (`docs/adr/NNNN-*.md`, template + worked examples in `docs/adr/`), with the plan trued up in the same commit. Upstream-bound primitives ride [`UPSTREAM_LEDGER.md`](UPSTREAM_LEDGER.md) under the §2.9 ritual (GOVERNANCE.md §6).
 
@@ -222,8 +225,9 @@ The checkable version of this list is `docs/GOVERNANCE.md` §4. Before finishing
 2. Run quality gates (if code changed) — tests, clippy, fmt, `ubs`.
 3. Update issue status — close finished work, update in-progress.
 4. `br sync --flush-only` to export beads to JSONL, then `git add .beads/`.
-5. Re-run `python3 scripts/agent_next.py --format json --check` after the tracker mutation so the handoff names current graph state rather than the pre-change plan.
-6. Hand off — summarize what changed, exact source commit, gates actually run + results, remaining risks/gaps, and the next concrete claimable leaf if one exists.
+5. Re-run `python3 scripts/agent_next.py --format json --check` after tracker mutation so the handoff names current graph state rather than the pre-change plan.
+6. When a next leaf exists, issue a fresh `agent_claim_guard.py --require` token for the handoff; never reuse a pre-mutation token.
+7. Hand off — summarize what changed, exact source commit, gates actually run + results, remaining risks/gaps, and the next concrete claimable leaf if one exists.
 
 ---
 
@@ -244,23 +248,44 @@ A mail-like layer for agents to coordinate via MCP tools/resources: identities, 
 This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`). Issues live in `.beads/` and are tracked in git. **`br` is non-invasive — it NEVER runs git.** After `br sync --flush-only`, manually `git add .beads/ && git commit`.
 
 ```bash
-# Validate authority and obtain the only autonomous claim recommendation.
+# Validate authority and issue the only autonomous claim token.
 python3 scripts/agent_brief.py --format json --check >/dev/null
 python3 scripts/agent_next.py --format json --check
-python3 scripts/agent_next.py --require
+token="$(python3 scripts/agent_claim_guard.py --require)"
+issue="${token##*:}"
 
-# Inspect and mutate the selected Bead through br.
+# Inspect the selected Bead and external coordination state.
 br ready                 # broad dependency-ready context, not the claim oracle
 br list --status=open
-br show <id>             # full detail with dependencies
+br show "$issue"
+# Check current main, Agent Mail, reservations, and active peers.
+
+# Nonmutating receipt/argv inspection.
+python3 scripts/agent_claim.py \
+    --expect-token "$token" \
+    --issue "$issue" \
+    --assignee "$FMN_AGENT_ID" \
+    --command-timeout-seconds 60 \
+    --dry-run
+
+# Canonical autonomous claim mutation.
+python3 scripts/agent_claim.py \
+    --expect-token "$token" \
+    --issue "$issue" \
+    --assignee "$FMN_AGENT_ID" \
+    --command-timeout-seconds 60 \
+    --transition-comment "Claimed after graph, reservation, and HEAD checks"
+
+# Other tracker operations remain direct Beads commands.
 br create --title="..." --type=task|bug|feature|epic --priority=2   # 0=critical..4=backlog (NUMBERS)
-br update <id> --status=in_progress
 br close <id> [<id2> ...] [--reason "..."]
 br dep add <issue> <depends-on>
 br sync --flush-only     # export to JSONL (NO git ops)
 ```
 
-A task with live `parent-child` descendants is a container even when its type is `task`, `bug`, or `feature`; `br ready` alone does not make it claimable. `agent_next.py` also enforces blocking integrity, containment integrity, assignment, the activation cap, and deterministic tie-breaking. Any nonzero planner exit emits no stdout plan.
+A task with live `parent-child` descendants is a container even when its type is `task`, `bug`, or `feature`; `br ready` alone does not make it claimable. `agent_next.py` enforces blocking integrity, containment integrity, assignment, the activation cap, and deterministic tie-breaking. Any nonzero planner/guard/executor exit emits no usable success payload.
+
+The executor timeout is per `br update` and per `br sync --flush-only`. Exit `5` means no verified receipt, not proof that native tracker state is unchanged. Inspect `br show`, `br sync --status`, and the working tree before retrying, and never replay the old token.
 
 Conventions: use the bead ID (e.g. `fm-123`) as the Agent-Mail `thread_id` and prefix subjects with `[fm-123]`; put the issue ID in the file-reservation `reason`; include `fm-###` in commit messages. Map beads to workstreams (W1 Substrate & Contracts … W11 Distribution) and gates (G0–G5) from §20.
 
