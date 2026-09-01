@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -29,7 +31,7 @@ import agent_claim_guard
 import agent_next
 
 SCHEMA = "fmn.agent.claim"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 MAX_TOKEN_BYTES = 4096
@@ -38,6 +40,10 @@ MAX_ASSIGNEE_BYTES = 1024
 MAX_TRANSITION_COMMENT_BYTES = 64 * 1024
 MAX_GIT_PATH_FILE_BYTES = 4096
 COMMAND_READ_CHUNK_BYTES = 64 * 1024
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 60.0
+MAX_COMMAND_TIMEOUT_SECONDS = 60.0 * 60.0
+COMMAND_TERMINATION_WAIT_SECONDS = 5.0
+COMMAND_READER_JOIN_SECONDS = 5.0
 LOCK_FILE_NAME = "fmn-agent-claim.lock"
 
 
@@ -78,6 +84,22 @@ def _bounded_text(name: str, value: str | None, limit: int, *, required: bool) -
     if size > limit:
         raise ClaimError(f"{name} exceeds the {limit}-byte limit ({size} bytes)")
     return value
+
+
+def _command_timeout(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ClaimError("--command-timeout-seconds must be a finite number")
+    timeout = float(value)
+    if not math.isfinite(timeout):
+        raise ClaimError("--command-timeout-seconds must be finite")
+    if timeout <= 0:
+        raise ClaimError("--command-timeout-seconds must be positive")
+    if timeout > MAX_COMMAND_TIMEOUT_SECONDS:
+        raise ClaimError(
+            "--command-timeout-seconds exceeds the "
+            f"{MAX_COMMAND_TIMEOUT_SECONDS:g}-second limit"
+        )
+    return timeout
 
 
 def _repo_root(path: Path) -> Path:
@@ -284,15 +306,7 @@ def _drain_command_stream(stream: BinaryIO, result: _DrainResult) -> None:
                 result.error = exc
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> None:
-    try:
-        process.kill()
-    except OSError:
-        pass
-    try:
-        process.wait()
-    except OSError:
-        pass
+def _close_process_streams(process: subprocess.Popen[bytes]) -> None:
     for stream in (process.stdout, process.stderr):
         if stream is not None:
             try:
@@ -301,10 +315,92 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
                 pass
 
 
-def run_command(argv: tuple[str, ...], cwd: Path) -> CommandResult:
+def _windows_taskkill(process_id: int) -> None:
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    taskkill = Path(system_root) / "System32" / "taskkill.exe"
+    if not taskkill.is_file():
+        return
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.run(
+            (str(taskkill), "/PID", str(process_id), "/T", "/F"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=COMMAND_TERMINATION_WAIT_SECONDS,
+            creationflags=creationflags,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "nt":
+        if process.poll() is None:
+            _windows_taskkill(process.pid)
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+    try:
+        process.wait(timeout=COMMAND_TERMINATION_WAIT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=COMMAND_TERMINATION_WAIT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _join_command_readers(
+    process: subprocess.Popen[bytes],
+    threads: list[threading.Thread],
+) -> tuple[bool, bool]:
+    for thread in threads:
+        thread.join(COMMAND_READER_JOIN_SECONDS)
+    if not any(thread.is_alive() for thread in threads):
+        return True, True
+    _terminate_process_tree(process)
+    _close_process_streams(process)
+    for thread in threads:
+        thread.join(COMMAND_READER_JOIN_SECONDS)
+    return False, not any(thread.is_alive() for thread in threads)
+
+
+def run_command(
+    argv: tuple[str, ...],
+    cwd: Path,
+    *,
+    timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+) -> CommandResult:
+    timeout_seconds = _command_timeout(timeout_seconds)
     env = os.environ.copy()
     env.setdefault("NO_COLOR", "1")
     env.setdefault("RUST_LOG", "error")
+    popen_options: dict[str, object] = {}
+    if os.name == "nt":
+        popen_options["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        popen_options["start_new_session"] = True
     try:
         process = subprocess.Popen(
             argv,
@@ -314,11 +410,13 @@ def run_command(argv: tuple[str, ...], cwd: Path) -> CommandResult:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            **popen_options,
         )
     except OSError as exc:
         raise ClaimError(f"could not execute {argv[0]!r}: {exc}", 5) from exc
     if process.stdout is None or process.stderr is None:
-        _stop_process(process)
+        _terminate_process_tree(process)
+        _close_process_streams(process)
         raise ClaimError(f"could not capture output from {argv[0]!r}", 5)
 
     stdout = _DrainResult(bytearray())
@@ -328,11 +426,13 @@ def run_command(argv: tuple[str, ...], cwd: Path) -> CommandResult:
             target=_drain_command_stream,
             args=(process.stdout, stdout),
             name="fmn-agent-claim-stdout",
+            daemon=True,
         ),
         threading.Thread(
             target=_drain_command_stream,
             args=(process.stderr, stderr),
             name="fmn-agent-claim-stderr",
+            daemon=True,
         ),
     ]
     started: list[threading.Thread] = []
@@ -341,20 +441,37 @@ def run_command(argv: tuple[str, ...], cwd: Path) -> CommandResult:
             thread.start()
             started.append(thread)
     except RuntimeError as exc:
-        _stop_process(process)
+        _terminate_process_tree(process)
+        _close_process_streams(process)
         for thread in started:
-            thread.join()
-        raise ClaimError(f"could not start bounded output readers for {argv[0]!r}: {exc}", 5) from exc
+            thread.join(COMMAND_READER_JOIN_SECONDS)
+        raise ClaimError(
+            f"could not start bounded output readers for {argv[0]!r}: {exc}", 5
+        ) from exc
 
     try:
-        returncode = process.wait()
+        returncode = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        _, readers_stopped = _join_command_readers(process, started)
+        suffix = "" if readers_stopped else "; output readers did not stop"
+        raise ClaimError(
+            f"{argv[0]!r} timed out after {timeout_seconds:g} seconds{suffix}",
+            5,
+        ) from exc
     except OSError as exc:
-        _stop_process(process)
-        for thread in started:
-            thread.join()
+        _terminate_process_tree(process)
+        _join_command_readers(process, started)
         raise ClaimError(f"could not wait for {argv[0]!r}: {exc}", 5) from exc
-    for thread in started:
-        thread.join()
+
+    readers_closed_naturally, readers_stopped = _join_command_readers(process, started)
+    if not readers_closed_naturally:
+        suffix = "" if readers_stopped else "; output readers did not stop"
+        raise ClaimError(
+            f"{argv[0]!r} exited but its output pipes remained open; "
+            f"forced cleanup was required{suffix}",
+            5,
+        )
 
     for stream_name, result in (("stdout", stdout), ("stderr", stderr)):
         if result.error is not None:
@@ -452,8 +569,9 @@ def execute_claim(
     activation_cap: int = 4,
     limit: int = 20,
     br_program: str = "br",
+    command_timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     dry_run: bool = False,
-    runner: Runner = run_command,
+    runner: Runner | None = None,
     lock_factory: LockFactory = claim_lock,
 ) -> dict:
     expect_token = _bounded_text(
@@ -470,12 +588,23 @@ def execute_claim(
         required=False,
     )
     br_program = _bounded_text("--br", br_program, 4096, required=True) or "br"
+    command_timeout_seconds = _command_timeout(command_timeout_seconds)
     if stale_days < 0:
         raise ClaimError("--stale-days must be nonnegative")
     if activation_cap < 1:
         raise ClaimError("--activation-cap must be positive")
     if not 1 <= limit <= 1000:
         raise ClaimError("--limit must be between 1 and 1000")
+
+    if runner is None:
+        def active_runner(argv: tuple[str, ...], cwd: Path) -> CommandResult:
+            return run_command(
+                argv,
+                cwd,
+                timeout_seconds=command_timeout_seconds,
+            )
+    else:
+        active_runner = runner
 
     repo_root = _repo_root(repo_root)
     ledger = repo_root / ".beads" / "issues.jsonl"
@@ -514,6 +643,10 @@ def execute_claim(
             "before_graph_sha256": guard["graph_sha256"],
             "policy": guard["policy"],
             "schemas": guard["schemas"],
+            "executor_policy": {
+                "command_timeout_seconds": command_timeout_seconds,
+                "command_output_bytes_per_stream": MAX_COMMAND_OUTPUT_BYTES,
+            },
             "recommendation": guard["recommendation"],
             "commands": [list(update_command), list(sync_command)],
         }
@@ -521,8 +654,8 @@ def execute_claim(
             receipt["claimed"] = False
             return receipt
 
-        _run_checked(runner, update_command, repo_root, "br update")
-        _run_checked(runner, sync_command, repo_root, "br sync --flush-only")
+        _run_checked(active_runner, update_command, repo_root, "br update")
+        _run_checked(active_runner, sync_command, repo_root, "br sync --flush-only")
         try:
             after = agent_brief.load_issues(ledger)
             after_graph_sha256 = agent_claim_guard.graph_digest(after)
@@ -580,6 +713,16 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--br", default="br")
     parser.add_argument(
+        "--command-timeout-seconds",
+        type=float,
+        default=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        help=(
+            "maximum wall-clock time for each br command; "
+            f"default {DEFAULT_COMMAND_TIMEOUT_SECONDS:g}, "
+            f"maximum {MAX_COMMAND_TIMEOUT_SECONDS:g}"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="revalidate and emit the exact intended argv without invoking br",
@@ -601,6 +744,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             activation_cap=args.activation_cap,
             limit=args.limit,
             br_program=args.br,
+            command_timeout_seconds=args.command_timeout_seconds,
             dry_run=args.dry_run,
         )
         output = render_json(receipt)
