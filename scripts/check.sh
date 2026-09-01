@@ -16,7 +16,8 @@ python3 -m py_compile \
     scripts/test_agent_next_output.py \
     scripts/test_generate_agent_brief.py \
     scripts/test_generate_agent_brief_io.py
-python3 scripts/agent_brief.py --format json --limit 1 >/dev/null
+# Invalid graph or activation state must fail before any machine payload.
+python3 scripts/agent_brief.py --format json --limit 1 --check >/dev/null
 python3 scripts/test_agent_brief.py
 python3 scripts/test_agent_next.py
 python3 scripts/test_agent_next_output.py
