@@ -159,7 +159,7 @@ class AgentClaimTests(unittest.TestCase):
         )
         self.assertEqual(runner.calls, [])
         self.assertEqual(receipt["schema"], "fmn.agent.claim")
-        self.assertEqual(receipt["version"], 2)
+        self.assertEqual(receipt["version"], 3)
         self.assertEqual(receipt["mode"], "dry-run")
         self.assertFalse(receipt["claimed"])
         self.assertEqual(receipt["issue_id"], "fm-next")
@@ -168,6 +168,7 @@ class AgentClaimTests(unittest.TestCase):
             {
                 "command_timeout_seconds": 17.5,
                 "command_output_bytes_per_stream": agent_claim.MAX_COMMAND_OUTPUT_BYTES,
+                "command_total_output_bytes": agent_claim.MAX_COMMAND_TOTAL_OUTPUT_BYTES,
             },
         )
         self.assertEqual(
@@ -362,6 +363,26 @@ class AgentClaimTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.exit_code, 5)
         self.assertIn("command-output limit", str(raised.exception))
+
+        combined = FakeRunner(
+            fixture,
+            update_code=1,
+            stdout=b"x" * 60,
+            stderr=b"y" * 60,
+        )
+        with (
+            mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64),
+            mock.patch.object(agent_claim, "MAX_COMMAND_TOTAL_OUTPUT_BYTES", 100),
+        ):
+            with self.assertRaises(agent_claim.ClaimError) as raised:
+                agent_claim.execute_claim(
+                    fixture.root,
+                    fixture.token(),
+                    "agent@example.com",
+                    runner=combined,
+                )
+        self.assertEqual(raised.exception.exit_code, 5)
+        self.assertIn("100 total output bytes", str(raised.exception))
 
         with mock.patch.object(agent_claim, "MAX_OUTPUT_BYTES", 8):
             with self.assertRaises(agent_claim.ClaimError) as raised:
