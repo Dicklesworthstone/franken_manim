@@ -54,7 +54,7 @@ def render_leaf_section(plan: dict[str, Any]) -> str:
         (
             f"- Queues: **{plan['counts']['claimable_leaves']}** claimable leaves, "
             f"**{plan['counts']['ready_containers']}** ready containers "
-            f"({plan['counts']['non_epic_containers']} non-epic), "
+            f"(**{plan['counts']['non_epic_containers']}** non-epic), "
             f"**{plan['counts']['assigned_ready']}** assigned-ready."
         ),
         "- A task with any live `parent-child` descendant is a container, regardless of its issue type.",
