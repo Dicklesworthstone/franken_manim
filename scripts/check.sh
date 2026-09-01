@@ -13,11 +13,13 @@ python3 -m py_compile \
     scripts/generate_agent_brief.py \
     scripts/test_agent_brief.py \
     scripts/test_agent_next.py \
-    scripts/test_generate_agent_brief.py
+    scripts/test_generate_agent_brief.py \
+    scripts/test_generate_agent_brief_io.py
 python3 scripts/agent_brief.py --format json --limit 1 >/dev/null
 python3 scripts/test_agent_brief.py
 python3 scripts/test_agent_next.py
 python3 scripts/test_generate_agent_brief.py
+python3 scripts/test_generate_agent_brief_io.py
 # Render the complete live ledger through both operational projections without
 # mutating documentation. The claim planner additionally proves that non-epic
 # parents with live children cannot be returned as autonomous leaf work.
