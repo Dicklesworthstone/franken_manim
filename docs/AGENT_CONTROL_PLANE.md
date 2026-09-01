@@ -5,9 +5,10 @@ This document defines the operational layer that lets an agent reconstruct curre
 ## Authority hierarchy
 
 1. **`.beads/issues.jsonl`** is the authoritative task graph after `br sync --flush-only`.
-2. **`scripts/agent_brief.py`** is a bounded, read-only semantic projection.
-3. **`scripts/generate_agent_brief.py`** renders that projection as deterministic Markdown.
-4. A generated `docs/AGENT_BRIEF.md`, when deliberately committed, is only a cache of exact ledger bytes at one ledger timestamp. It never outranks Beads.
+2. **`scripts/agent_brief.py`** is the bounded, read-only graph parser and situational projection.
+3. **`scripts/agent_next.py`** is the fail-closed claim planner over that projection. It alone decides autonomous leaf eligibility.
+4. **`scripts/generate_agent_brief.py`** renders the broad situational projection as deterministic Markdown.
+5. A generated `docs/AGENT_BRIEF.md`, when deliberately committed, is only a cache of exact ledger bytes at one ledger timestamp. It never outranks Beads.
 
 Source authority, semantic authority, and artifact evidence remain separate:
 
@@ -19,11 +20,22 @@ Source authority, semantic authority, and artifact evidence remain separate:
 ## Safe session start
 
 ```bash
-python3 scripts/agent_brief.py --format next --check
+# Validate and inspect the complete graph.
+python3 scripts/agent_brief.py --format json --check >/dev/null
+
+# Obtain the canonical machine-readable claim plan.
+python3 scripts/agent_next.py --format json --check
+
+# Require one claimable leaf; exits 3 when the graph is valid but no leaf exists.
+python3 scripts/agent_next.py --require
+
+# Render the broad human brief without touching the worktree.
 python3 scripts/generate_agent_brief.py --stdout
 ```
 
-The first command emits either one claimable leaf ID or `none`. It exits nonzero when the activation cap or dependency-integrity contract is broken. The second renders the complete human brief without mutating the worktree.
+`agent_next.py` emits either one claimable leaf ID or `none` in its default mode. Exit `1` means the blocking graph or activation state is unsafe, exit `2` means malformed input or invocation, and exit `3` means the graph is valid but currently has no claimable recommendation.
+
+`agent_brief.py --format next` remains a backward-compatible broad ready-queue projection. It does not inspect live child containment and must not be used as an autonomous claim decision. `agent_next.py` is the claim surface.
 
 Before claiming the recommendation, also verify current `main`, current file reservations, and any coordinating agent messages. A recommendation is a deterministic graph choice, not a lease.
 
@@ -35,10 +47,23 @@ An issue is recommendation-eligible only when all of the following hold:
 - every `blocks` target exists and is closed or tombstoned;
 - it has no assignee;
 - it is not an epic container;
+- it has no live issue whose `parent-child` edge points to it;
 - the dependency graph has no live blocking cycle or missing blocker target;
 - claiming it does not violate the four-workstream activation cap.
 
-Among eligible leaves, work in an already-active workstream wins before a numerically higher-priority issue that would activate another stream. This deliberately trades a small amount of local priority optimality for lower coordination and context-switch cost.
+A task can therefore be a container even when its `issue_type` is `task`, `feature`, or `bug`. Live child topology, not only the type label, determines whether it is a leaf.
+
+Recommendation order is deterministic:
+
+1. eligible leaves in an already-active workstream before leaves that activate another stream;
+2. lower numeric priority;
+3. more live issues for which completing this leaf removes the sole unresolved blocker;
+4. more directly blocked live dependents;
+5. scoped work before `UNSCOPED` work;
+6. most recently updated;
+7. lexical issue ID.
+
+This deliberately values coordination economy and graph-release pressure without allowing those heuristics to override explicit priority.
 
 ## Integrity contract
 
@@ -56,9 +81,21 @@ The projection reports all missing targets. Missing non-blocking links such as a
 
 Cycle analysis is iterative rather than recursive, so a valid deep dependency chain cannot fail merely because it exceeds Python's call-stack limit.
 
+## Machine contract
+
+`agent_next.py --format json` emits one canonical compact JSON record with schema `fmn.agent.next`, version `1`. It includes:
+
+- the base graph-integrity and activation records;
+- the selected leaf and activation effect;
+- live-child containment;
+- direct and immediate-unblock pressure;
+- bounded claimable, container, and assigned-ready queues.
+
+Field order is canonical through sorted-key JSON, output always ends in one LF, and identical input plus `--as-of` produces identical bytes.
+
 ## Deterministic rendering
 
-The generated brief's `as_of` is the newest issue `updated_at`, not wall-clock time. Identical ledger bytes therefore produce identical Markdown.
+The generated broad brief's `as_of` is the newest issue `updated_at`, not wall-clock time. Identical ledger bytes therefore produce identical Markdown.
 
 ```bash
 # Nonmutating exact output
@@ -81,7 +118,7 @@ Publication is fail-closed:
 
 ## Mutation protocol
 
-The projection never mutates task state. Status, dependencies, comments, and closure reasons must be changed through Beads:
+The projections never mutate task state. Status, dependencies, comments, and closure reasons must be changed through Beads:
 
 ```bash
 br show <id>
@@ -96,7 +133,7 @@ Do not reconstruct or replace the large ledger from a truncated API response. If
 
 ## Verification policy
 
-`scripts/check.sh` compiles the control-plane scripts, runs their unit suites, and renders the real ledger through `--stdout`. The same local gate then proceeds into the Rust, Python, WASM, and structural checks.
+`scripts/check.sh` compiles the parser, planner, and generator; runs all three unit suites; validates the live claim plan; and renders the real ledger through `--stdout`. The same local gate then proceeds into the Rust, Python, WASM, and structural checks.
 
 Hosted GitHub Actions is not part of this authority chain. The gate is intentionally runnable on local or owned build hosts, and unavailable hosted capacity is neither a waiver nor a product failure.
 
