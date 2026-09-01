@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, Sequence
@@ -31,9 +32,10 @@ import agent_claim_guard
 import agent_next
 
 SCHEMA = "fmn.agent.claim"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
+MAX_COMMAND_TOTAL_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_TOKEN_BYTES = 4096
 MAX_ISSUE_ID_BYTES = 1024
 MAX_ASSIGNEE_BYTES = 1024
@@ -44,6 +46,7 @@ DEFAULT_COMMAND_TIMEOUT_SECONDS = 60.0
 MAX_COMMAND_TIMEOUT_SECONDS = 60.0 * 60.0
 COMMAND_TERMINATION_WAIT_SECONDS = 5.0
 COMMAND_READER_JOIN_SECONDS = 5.0
+COMMAND_WAIT_POLL_SECONDS = 0.05
 LOCK_FILE_NAME = "fmn-agent-claim.lock"
 
 
@@ -65,6 +68,27 @@ class _DrainResult:
     payload: bytearray
     overflow: bool = False
     error: OSError | None = None
+
+
+class _OutputBudget:
+    def __init__(self, limit: int):
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ClaimError("command total-output limit must be a positive integer", 5)
+        self.limit = limit
+        self._produced = 0
+        self._lock = threading.Lock()
+        self.exceeded = threading.Event()
+
+    def consume(self, count: int) -> None:
+        with self._lock:
+            self._produced += count
+            if self._produced > self.limit:
+                self.exceeded.set()
+
+    @property
+    def produced(self) -> int:
+        with self._lock:
+            return self._produced
 
 
 Runner = Callable[[tuple[str, ...], Path], CommandResult]
@@ -285,12 +309,17 @@ def _decode_process_output(value: bytes) -> str:
     return value.decode("utf-8", errors="replace").strip()
 
 
-def _drain_command_stream(stream: BinaryIO, result: _DrainResult) -> None:
+def _drain_command_stream(
+    stream: BinaryIO,
+    result: _DrainResult,
+    budget: _OutputBudget,
+) -> None:
     try:
         while True:
             chunk = stream.read(COMMAND_READ_CHUNK_BYTES)
             if not chunk:
                 break
+            budget.consume(len(chunk))
             remaining = MAX_COMMAND_OUTPUT_BYTES + 1 - len(result.payload)
             if remaining > 0:
                 result.payload.extend(chunk[:remaining])
@@ -421,16 +450,17 @@ def run_command(
 
     stdout = _DrainResult(bytearray())
     stderr = _DrainResult(bytearray())
+    budget = _OutputBudget(MAX_COMMAND_TOTAL_OUTPUT_BYTES)
     threads = [
         threading.Thread(
             target=_drain_command_stream,
-            args=(process.stdout, stdout),
+            args=(process.stdout, stdout, budget),
             name="fmn-agent-claim-stdout",
             daemon=True,
         ),
         threading.Thread(
             target=_drain_command_stream,
-            args=(process.stderr, stderr),
+            args=(process.stderr, stderr, budget),
             name="fmn-agent-claim-stderr",
             daemon=True,
         ),
@@ -449,20 +479,38 @@ def run_command(
             f"could not start bounded output readers for {argv[0]!r}: {exc}", 5
         ) from exc
 
-    try:
-        returncode = process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_tree(process)
-        _, readers_stopped = _join_command_readers(process, started)
-        suffix = "" if readers_stopped else "; output readers did not stop"
-        raise ClaimError(
-            f"{argv[0]!r} timed out after {timeout_seconds:g} seconds{suffix}",
-            5,
-        ) from exc
-    except OSError as exc:
-        _terminate_process_tree(process)
-        _join_command_readers(process, started)
-        raise ClaimError(f"could not wait for {argv[0]!r}: {exc}", 5) from exc
+    deadline = time.monotonic() + timeout_seconds
+    returncode: int | None = None
+    while returncode is None:
+        if budget.exceeded.is_set():
+            _terminate_process_tree(process)
+            _, readers_stopped = _join_command_readers(process, started)
+            suffix = "" if readers_stopped else "; output readers did not stop"
+            raise ClaimError(
+                f"{argv[0]!r} produced more than "
+                f"{MAX_COMMAND_TOTAL_OUTPUT_BYTES} total output bytes "
+                f"across stdout and stderr{suffix}",
+                5,
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_process_tree(process)
+            _, readers_stopped = _join_command_readers(process, started)
+            suffix = "" if readers_stopped else "; output readers did not stop"
+            raise ClaimError(
+                f"{argv[0]!r} timed out after {timeout_seconds:g} seconds{suffix}",
+                5,
+            )
+        try:
+            returncode = process.wait(
+                timeout=min(remaining, COMMAND_WAIT_POLL_SECONDS)
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError as exc:
+            _terminate_process_tree(process)
+            _join_command_readers(process, started)
+            raise ClaimError(f"could not wait for {argv[0]!r}: {exc}", 5) from exc
 
     readers_closed_naturally, readers_stopped = _join_command_readers(process, started)
     if not readers_closed_naturally:
@@ -470,6 +518,13 @@ def run_command(
         raise ClaimError(
             f"{argv[0]!r} exited but its output pipes remained open; "
             f"forced cleanup was required{suffix}",
+            5,
+        )
+    if budget.exceeded.is_set():
+        raise ClaimError(
+            f"{argv[0]!r} produced more than "
+            f"{MAX_COMMAND_TOTAL_OUTPUT_BYTES} total output bytes "
+            f"across stdout and stderr",
             5,
         )
 
@@ -500,6 +555,14 @@ def _run_checked(runner: Runner, argv: tuple[str, ...], cwd: Path, label: str) -
                 f"{MAX_COMMAND_OUTPUT_BYTES}-byte command-output limit",
                 5,
             )
+    produced = len(result.stdout) + len(result.stderr)
+    if produced > MAX_COMMAND_TOTAL_OUTPUT_BYTES:
+        raise ClaimError(
+            f"{label} produced more than "
+            f"{MAX_COMMAND_TOTAL_OUTPUT_BYTES} total output bytes "
+            "across stdout and stderr",
+            5,
+        )
     if result.returncode == 0:
         return
     detail = _decode_process_output(result.stderr) or _decode_process_output(result.stdout)
@@ -646,6 +709,7 @@ def execute_claim(
             "executor_policy": {
                 "command_timeout_seconds": command_timeout_seconds,
                 "command_output_bytes_per_stream": MAX_COMMAND_OUTPUT_BYTES,
+                "command_total_output_bytes": MAX_COMMAND_TOTAL_OUTPUT_BYTES,
             },
             "recommendation": guard["recommendation"],
             "commands": [list(update_command), list(sync_command)],
