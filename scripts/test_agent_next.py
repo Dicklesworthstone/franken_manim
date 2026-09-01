@@ -75,6 +75,7 @@ class AgentNextTests(unittest.TestCase):
                 issue("fm-child", "W10: child", parent="fm-parent"),
             ]
         )
+        self.assertTrue(plan["integrity"]["ok"])
         self.assertEqual(plan["recommendation"]["issue"]["id"], "fm-child")
         self.assertEqual(plan["ready_containers"][0]["id"], "fm-parent")
         self.assertEqual(plan["ready_containers"][0]["live_children"], ["fm-child"])
@@ -122,6 +123,44 @@ class AgentNextTests(unittest.TestCase):
         self.assertEqual(selected["id"], "fm-a")
         self.assertEqual(selected["immediate_unblocks"], 2)
 
+    def test_parent_child_cycles_fail_before_plan_publication(self) -> None:
+        rows = [
+            issue("fm-a", "W10: a", parent="fm-b"),
+            issue("fm-b", "W10: b", parent="fm-a"),
+        ]
+        plan = self.plan(rows)
+        self.assertFalse(plan["integrity"]["ok"])
+        self.assertTrue(plan["integrity"]["blocking_within_contract"])
+        self.assertEqual(plan["integrity"]["containment_cycles"], [["fm-a", "fm-b"]])
+        self.assertEqual(plan["counts"]["containment_cycles"], 1)
+        self.assertIsNone(plan["recommendation"]["issue"])
+        self.assertIn("containment cycles", plan["recommendation"]["reason"])
+
+        path = self.ledger(rows)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = agent_next.main(["--ledger", str(path), "--require"])
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("task-graph integrity failed", stderr.getvalue())
+
+    def test_deep_parent_child_chain_is_iterative_and_selects_the_true_leaf(self) -> None:
+        rows = [
+            issue(
+                f"fm-{index:04d}",
+                "W10: hierarchy",
+                parent=f"fm-{index - 1:04d}" if index else None,
+            )
+            for index in range(1_500)
+        ]
+        plan = self.plan(rows)
+        self.assertTrue(plan["integrity"]["ok"])
+        self.assertEqual(plan["integrity"]["containment_cycles"], [])
+        self.assertEqual(plan["recommendation"]["issue"]["id"], "fm-1499")
+        self.assertEqual(plan["counts"]["ready_containers"], 1_499)
+        self.assertEqual(plan["counts"]["claimable_leaves"], 1)
+
     def test_integrity_and_activation_fail_closed(self) -> None:
         bad = self.ledger([issue("fm-bad", "W10: bad", blockers=("fm-missing",))])
         stdout = io.StringIO()
@@ -159,6 +198,8 @@ class AgentNextTests(unittest.TestCase):
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
         )
         self.assertEqual(payload["schema"], "fmn.agent.next")
+        self.assertEqual(payload["version"], 2)
+        self.assertTrue(payload["integrity"]["ok"])
         self.assertEqual(payload["recommendation"]["issue"]["id"], "fm-next")
 
         required = io.StringIO()
