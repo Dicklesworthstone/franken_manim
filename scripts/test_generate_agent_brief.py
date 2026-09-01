@@ -76,14 +76,17 @@ class GenerateAgentBriefTests(unittest.TestCase):
         document, snapshot = generator.build_document(
             ledger, stale_days=2, activation_cap=4, limit=20
         )
+        self.assertEqual(snapshot["schema_version"], 5)
+        self.assertNotIn("recommendation", snapshot)
         self.assertEqual(snapshot["as_of"], "2026-08-31T08:15:00Z")
         self.assertIn("As of `2026-08-31T08:15:00Z`", document)
         self.assertIn("## Leaf-safe claim plan", document)
         self.assertIn("## Broad dependency-ready queue", document)
+        self.assertIn("Claim contract: **none in this projection**", document)
         self.assertTrue(document.endswith("\n"))
         self.assertFalse(document.endswith("\n\n"))
 
-    def test_human_recommendation_uses_the_exact_leaf_planner(self) -> None:
+    def test_human_claim_and_situational_priority_stay_distinct(self) -> None:
         ledger, _output = self.fixture()
         self.write_ledger(
             ledger,
@@ -109,9 +112,13 @@ class GenerateAgentBriefTests(unittest.TestCase):
             ledger, stale_days=2, activation_cap=4, limit=20
         )
         plan = snapshot["claim_plan"]
+        situational = snapshot["situational_priority"]
         self.assertEqual(plan["recommendation"]["issue"]["id"], "fm-child")
         self.assertEqual(plan["ready_containers"][0]["id"], "fm-parent")
-        self.assertEqual(document.count("Recommended next: **P2 `fm-child`** [W10]"), 2)
+        self.assertEqual(situational["issue"]["id"], "fm-parent")
+        self.assertFalse(situational["claim_safe"])
+        self.assertEqual(document.count("Recommended next: **P2 `fm-child`** [W10]"), 1)
+        self.assertIn("Broad priority: **P0 `fm-parent`** [W10]", document)
         self.assertNotIn("Recommended next: **P0 `fm-parent`**", document)
         self.assertIn("**1** ready containers (**1** non-epic)", document)
         self.assertIn("broader queue below is situational context only", document)
