@@ -46,6 +46,12 @@ class _DuplicateJsonKey(ValueError):
         self.key = key
 
 
+class _NonFiniteJsonConstant(ValueError):
+    def __init__(self, spelling: str):
+        super().__init__(spelling)
+        self.spelling = spelling
+
+
 @dataclass(frozen=True)
 class Dependency:
     issue_id: str
@@ -99,6 +105,10 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise _DuplicateJsonKey(key)
         result[key] = value
     return result
+
+
+def _reject_nonfinite_constant(spelling: str) -> None:
+    raise _NonFiniteJsonConstant(spelling)
 
 
 def _optional_array(raw: dict[str, Any], field: str, issue_id: str) -> list[Any]:
@@ -223,10 +233,19 @@ def load_issues(path: Path) -> dict[str, Issue]:
                 if not raw_line.strip():
                     raise BriefError(f"{path}:{line_number} is blank")
                 try:
-                    record = json.loads(raw_line, object_pairs_hook=_unique_object)
+                    record = json.loads(
+                        raw_line,
+                        object_pairs_hook=_unique_object,
+                        parse_constant=_reject_nonfinite_constant,
+                    )
                 except _DuplicateJsonKey as exc:
                     raise BriefError(
                         f"{path}:{line_number}: duplicate JSON object key {exc.key!r}"
+                    ) from exc
+                except _NonFiniteJsonConstant as exc:
+                    raise BriefError(
+                        f"{path}:{line_number}: non-finite JSON constant "
+                        f"{exc.spelling!r} is forbidden"
                     ) from exc
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise BriefError(f"{path}:{line_number}: invalid UTF-8 JSON: {exc}") from exc
