@@ -15,7 +15,7 @@ disagree, the plan wins and this file gets fixed.
 
 ---
 
-## 1. The workstream activation limit
+## 1. The workstream activation and claim-integrity limit
 
 **The cap: at most 4 simultaneously-active workstreams.** (G0 spike work
 counts as one workstream, named "G0". The cap is chosen for the current
@@ -28,20 +28,42 @@ it goes through the same check as activating a fresh one. A workstream
 deactivates the moment its last `in_progress` bead is closed or released
 back to `open`.
 
-**The check (mandatory, before claiming any bead).** Before moving a bead
-to `in_progress`:
+**Definition — claimable leaf.** An issue is claimable only when it is
+`open`, unassigned, dependency-ready, not an epic, and has no live
+`parent-child` descendant. A task, bug, or feature with live children is a
+container regardless of its type label. The live blocking graph must have
+no missing blocker or cycle; the live containment graph must have no cycle.
+
+**The check (mandatory, before claiming any bead).** Run the strict graph
+projection and canonical leaf planner against the same ledger bytes:
 
 ```bash
-br list --status=in_progress
+python3 scripts/agent_brief.py --format json --check >/dev/null
+python3 scripts/agent_next.py --format json --check
+python3 scripts/agent_next.py --require
 ```
 
-Map each listed bead to its workstream by the `W#:` / `G0-#:` title prefix
-(epics and unprefixed beads map to the workstream of the crates they
-touch). Count distinct active workstreams. If the bead you want to claim
-belongs to a workstream **not** in that set and the count is already at
-the cap: **do not activate.** Pick ready work inside an already-active
-workstream instead, or land in-flight work first. Breaching the cap halts
-*new activation only* — in-flight work always runs to completion.
+Planner exit meanings are part of governance:
+
+- exit `0`: the emitted ID is a claimable leaf under the current graph;
+- exit `1`: graph integrity or activation state is unsafe — repair it first;
+- exit `2`: input, bounds, or output-budget contract is malformed;
+- exit `3`: the graph is valid but currently has no claimable leaf.
+
+Every nonzero planner exit emits no stdout plan. **Never move an issue to
+`in_progress` from a failed or empty plan.** A recommendation is not a
+lease: before mutation, inspect it with `br show`, verify current file
+reservations and coordinating messages, then claim it through `br`.
+
+The planner prefers an eligible leaf in an already-active workstream. If
+none exists, it may recommend activating a new stream only while the
+active count is below four. Breaching the cap halts *new activation only*
+— in-flight work always runs to completion.
+
+`br ready` remains broad dependency-ready context; it does not understand
+non-epic containment. `bv` remains graph-analysis support; rank alone
+cannot override assignment, integrity, containment, or the activation
+cap. `agent_next.py` is the autonomous claim surface.
 
 ---
 
@@ -102,9 +124,12 @@ A workstream may not hand off with failing gates or unwritten fixtures.
 verified before a session ends, and a handoff violating any of them is not
 a handoff (the next session's first duty is restoring the invariant):
 
-1. `scripts/check.sh` green — `cargo fmt --check`, `cargo check
-   --all-targets`, `cargo clippy --all-targets -- -D warnings`, and the
-   hard gate: `cargo test` exits 0.
+1. `scripts/check.sh` green on one named, unchanged committed source HEAD.
+   The wrapper runs control-plane integrity, `cargo fmt --check`, `cargo
+   check --all-targets`, warning-denied Clippy, strict rustdoc, the hard
+   `cargo test` gate, feature axes, the crate DAG, and available WASM smoke.
+   A partial run, an uncommitted tree, or a different commit is not this
+   evidence. Hosted GitHub Actions availability is irrelevant.
 2. `ubs` run over changed files; criticals fixed, or adjudicated
    false-positive *in the handoff note* — never silently ignored.
 3. New or changed behavior carries its fixtures/tests in the same commit.
@@ -114,7 +139,10 @@ a handoff (the next session's first duty is restoring the invariant):
 5. Beads trued up: finished work closed with reasons; claimed-but-unfinished
    beads released back to `open` with a status comment; follow-ups filed.
 6. `br sync --flush-only`, then `.beads/` staged and committed.
-7. Agent-mail file reservations released; a handoff message posted in the
+7. Re-run `python3 scripts/agent_next.py --format json --check` against the
+   exported post-mutation ledger. The handoff records its current
+   recommendation or its exact no-work/refusal state.
+8. Agent-mail file reservations released; a handoff message posted in the
    bead's thread (`thread_id` = the bead ID).
 
 ---
@@ -127,6 +155,7 @@ until its condition clears:
 | Tripwire | Halt |
 |---|---|
 | Activation cap reached (§1) | no new workstream activation |
+| Missing blocker, blocking cycle, or containment cycle | no new claim until the graph is repaired |
 | Core performance gate (PG-1…PG-3) regresses | all annex work pauses (R21) |
 | A purity misclassification is observed in frame-parallel output | that effect class demotes to stateful engine-wide until root-caused (R20) |
 | A self-golden drifts without an adjudicated cause | the introducing change reverts; the drift is a finding, never noise |
