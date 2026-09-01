@@ -40,14 +40,22 @@ The claim digest covers:
 
 - the strict `agent_brief` snapshot schema version;
 - the `agent_next` schema name and version;
-- the claim-guard schema name and version;
+- the claim-guard, claim-input, and canonical-graph schema names and versions;
 - normalized `as_of`, stale-day policy, activation cap, and queue limit;
 - every parsed issue's identity, title, status, priority, type, assignee, and timestamp;
 - every dependency edge, canonically ordered;
 - every parsed comment, in ledger order;
-- the selected recommendation identity, encoded separately in the token.
+- the complete canonical `fmn.agent.next` plan, including integrity, activation, queue evidence, and recommendation;
+- the selected recommendation identity, redundantly encoded as the token subject for shell-safe extraction.
 
 Issue-record order and dependency-array order do not affect the digest. Semantic changes do. The literal issue ID `none` is reserved because `none` denotes a valid graph with no claimable recommendation.
+
+JSON output exposes two intentionally different hashes:
+
+- `graph_sha256` identifies only the canonical parsed Beads graph and is useful for graph-level diagnostics;
+- `claim_sha256` identifies the complete graph, policy, schema, and planner input and is the digest carried by the v2 token.
+
+A graph can therefore keep the same `graph_sha256` while a policy or planner-schema change correctly produces a different `claim_sha256` and invalidates the old token.
 
 ## Exit codes
 
@@ -81,4 +89,4 @@ The guard also does not edit, close, assign, export, or commit issues. All track
 
 ## Verification
 
-`scripts/test_agent_claim_guard.py` covers token round trips, comment and recommendation changes, canonical order independence, policy binding, the reserved sentinel, no-work behavior, malformed tokens, output bounds, and integrity precedence. `scripts/check.sh` runs that suite and renders a guard against the complete live ledger before entering the Rust gates.
+`scripts/test_agent_claim_guard.py` covers v2 token round trips, graph and recommendation changes, canonical order independence, every policy input, schema-version changes, unchanged-recommendation planner drift, the reserved sentinel, no-work behavior, malformed and legacy tokens, output bounds, and integrity precedence. `scripts/check.sh` compiles and runs that suite, issues a token against the complete live ledger, and immediately revalidates the exact token before entering the Rust gates.
