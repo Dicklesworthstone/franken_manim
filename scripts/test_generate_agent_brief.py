@@ -137,6 +137,19 @@ class GenerateAgentBriefTests(unittest.TestCase):
         self.assertIn("contains no issues", stderr.getvalue())
         self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
 
+    def test_preexisting_temporary_path_is_never_followed_or_truncated(self) -> None:
+        ledger, output = self.fixture()
+        self.write_ledger(ledger, self.rows())
+        temporary = output.with_name(f".{output.name}.tmp")
+        temporary.write_text("do-not-touch\n", encoding="utf-8")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            status = generator.main(["--ledger", str(ledger), "--output", str(output)])
+        self.assertEqual(status, 1)
+        self.assertIn("pre-existing temporary path", stderr.getvalue())
+        self.assertEqual(temporary.read_text(encoding="utf-8"), "do-not-touch\n")
+        self.assertFalse(output.exists())
+
     def test_check_fails_when_activation_cap_is_breached(self) -> None:
         ledger, output = self.fixture()
         rows = [
