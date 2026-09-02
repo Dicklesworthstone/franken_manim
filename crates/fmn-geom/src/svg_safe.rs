@@ -1,19 +1,20 @@
 //! Public SVG admission boundary.
 //!
-//! The implementation remains in `svg.rs`; this facade owns the byte-level
-//! preflight that must complete before the XML tokenizer can inspect fixed
-//! ASCII prefixes. Keeping that boundary separate makes the untrusted-input
-//! contract explicit: UTF-8 is validated once, every fixed-width probe is
-//! checked at a character boundary, and only then does the document parser
-//! run.
+//! The parser implementation remains in `svg.rs`; this facade owns the
+//! byte-level preflight that must complete before the XML tokenizer can
+//! inspect fixed ASCII prefixes. Keeping that boundary separate makes the
+//! untrusted-input contract explicit: UTF-8 is validated once, every
+//! fixed-width probe is checked at a character boundary, and only then does
+//! the document parser run.
 
-#[path = "svg.rs"]
-mod parser;
-
-pub use parser::{
+pub use crate::svg_parser::{
     DEFAULT_SVG_TOLERANCE, LineCap, LineJoin, Paint, SvgError, SvgLimits, SvgShape, SvgStyle,
     emit_path_data, emit_svg,
 };
+use crate::svg_parser;
+
+const UNSUPPORTED_DECLARATION: &str = "unsupported markup declaration (only elements, comments, \
+                                      CDATA, and processing instructions are accepted)";
 
 /// A parsed + resolved SVG document admitted through the UTF-8-safe public
 /// boundary.
@@ -29,8 +30,8 @@ pub struct SvgDocument {
     pub shapes: Vec<SvgShape>,
 }
 
-impl From<parser::SvgDocument> for SvgDocument {
-    fn from(document: parser::SvgDocument) -> Self {
+impl From<svg_parser::SvgDocument> for SvgDocument {
+    fn from(document: svg_parser::SvgDocument) -> Self {
         Self {
             width: document.width,
             height: document.height,
@@ -58,7 +59,7 @@ impl SvgDocument {
             offset: error.valid_up_to(),
         })?;
         validate_fixed_markup_probes(text)?;
-        parser::SvgDocument::parse_with_limits(bytes, limits).map(Into::into)
+        svg_parser::SvgDocument::parse_with_limits(bytes, limits).map(Into::into)
     }
 }
 
@@ -105,9 +106,13 @@ fn validate_fixed_markup_probes(text: &str) -> Result<(), SvgError> {
             && bytes.len() - start >= b"<!doctype".len()
             && !text.is_char_boundary(start + b"<!doctype".len())
         {
+            let line = 1 + bytes[..start]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count();
             return Err(SvgError::Malformed {
-                line: 1 + bytes[..start].iter().filter(|byte| **byte == b'\n').count(),
-                message: "unsupported markup declaration (only elements, comments, CDATA, and processing instructions are accepted)".to_owned(),
+                line,
+                message: UNSUPPORTED_DECLARATION.to_owned(),
             });
         }
 
