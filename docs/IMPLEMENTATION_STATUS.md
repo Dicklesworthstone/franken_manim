@@ -1,144 +1,183 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-09-01 UTC / America/New_York  
-**Evidence checkpoint:** substantive source-and-test commits through `301684d`; documentation reconciled through the current status tranche.  
+**Status date:** 2026-09-02 UTC / America/New_York  
+**Substantive checkpoint:** `fffc469e99ac6e9b79e66ddd890fc98238e3f3c9`  
 **Authority rule:** this document summarizes evidence; `.beads/issues.jsonl` remains the task and dependency authority.
 
 ## How to read this document
 
-FrankenManim is pre-1.0. A capability is listed as implemented only when a concrete source surface and a checkable test or artifact boundary exist. Aspirational plan text, a reviewed Parity Ledger row, an inventoried refusal, or an old Beads comment is not by itself implementation evidence. Hardware- and release-specific claims remain separate from local semantic correctness.
+FrankenManim is pre-1.0. A capability is listed as implemented only when a concrete source surface and a checkable test or artifact boundary exist. Plan text, a reviewed Parity Ledger row, an inventoried refusal, or an old Beads comment is not implementation evidence. Hardware, platform, wheel, browser, and release claims remain separate from source-level correctness.
 
 ## Product surfaces
 
 | Surface | Current implementation state | Evidence boundary |
 |---|---|---|
-| Native Rust library | The composition root, scene runtime, mobject/animation stack, native text and math, retained renderer, codecs, output pipeline, and built-in scene corpus are implemented as workspace crates. | Ordinary workspace checks and tests run through `scripts/check.sh`; platform certification remains a separate matrix. |
-| `fmn` CLI | Typed render, doctor, batch, and Studio command surfaces exist. The shipped binary has executable smoke coverage for version/help, doctor robot and quiet behavior, typed exits, a real one-scene batch render, native artifact publication, and machine/human manifests. | `cargo test -p fmn-cli --features batch --test cli_smoke` exercises the complete shipping feature shape. |
-| Studio | Supervisor/worker, replay, event, inspection, and presentation foundations are implemented. | Platform and real-browser presentation evidence is not inferred from local Rust tests. |
-| `fmn-python` portal | A separately installed CPython wheel exposes the pinned `manimlib` namespace with native and authored compatibility behavior. Every explicit bootstrap refusal is mechanically inventoried and must be named. | The W10 semantic-surface parent remains open. A named refusal is evidence of an honest missing capability, not evidence that the capability is implemented. |
-| WASM/browser | The wasm32 render/player foundations and package gate exist. | The npm/real-browser release gate is opt-in (`FMN_WASM_PACKAGE_GATE=1`) and is not claimed merely because ordinary local checks pass. |
-| Distribution | Tagged `v0.1.0` through `v0.4.0` releases are prereleases. | Cross-platform artifacts, hardware-specific execution, and release matrices require their own receipts. |
+| Native Rust library | The composition root, scene runtime, mobject/animation stack, native text and math, retained renderer, codecs, output pipeline, and built-in scene corpus exist as workspace crates. | Ordinary workspace checks run through `scripts/check.sh`; platform certification remains a separate matrix. |
+| `fmn` CLI | Typed render, doctor, batch, and Studio surfaces exist. Human `doctor --quiet` semantics are owned by the shared dispatcher. Batch robot output includes terminal per-job records, and executable smoke covers a real tiny render plus native artifact and manifest publication. | The complete shipping feature shape is exercised by `cargo test -p fmn-cli --features batch --test cli_smoke` when the exact local gate runs. |
+| Studio | Supervisor/worker, replay, event, inspection, and presentation foundations exist. | Platform and real-browser presentation evidence is not inferred from local Rust tests. |
+| `fmn-python` portal | A separately installed CPython wheel exposes the pinned `manimlib` namespace with native and authored compatibility behavior. Explicit bootstrap refusals are mechanically inventoried and must be named. | `fm-5wq.4` remains open. A named refusal or reviewed ledger row is not implemented behavior. |
+| WASM/browser | wasm32 render/player foundations and a package gate exist. | The npm/real-browser release gate is opt-in and independent of ordinary local source checks. |
+| Distribution | Tagged `v0.1.0` through `v0.4.0` are prereleases. | Cross-platform artifacts, hardware-specific execution, clean wheels, and certification require their own receipts. |
 
-## Recently completed implementation tranche
+## Recently completed tranche: governed autonomous scope
 
-### Bounded claim-command lifetime
+### Planner schema version 4
 
-`scripts/agent_claim.py` now gives every production `br update` and `br sync --flush-only` invocation a finite independent wall-clock timeout.
+`scripts/agent_next.py` now owns one exact autonomous-workstream grammar:
 
-The command contract is:
+```text
+G0
+W1 through W11
+```
 
-- default timeout: 60 seconds per child command;
-- accepted values: finite and positive;
-- maximum: 3,600 seconds;
-- CLI control: `--command-timeout-seconds`;
-- invalid values fail before repository, guard, lock, or process mutation work begins.
+A valid prefix begins at the first title character and is followed by a word boundary or `:`. This accepts titles such as `G0: spike`, `W7: drawings`, and `W5/fm-4wt: SIMD`. It rejects `W0`, `W12`, `W999`, lower-case `w10`, and embedded `prefix W10` as `UNSCOPED`.
 
-The executor starts each child in an isolated process scope:
+This is a semantic contract, not display decoration:
 
-- POSIX uses a new session and kills the complete process group with `SIGKILL` after timeout;
-- Windows uses a new process group, attempts no-shell `taskkill.exe /T /F`, and retains a direct-child kill fallback;
-- process termination, child wait, and output-reader joins all have finite cleanup bounds.
+- open unscoped leaves remain visible but never enter autonomous ranking;
+- when only unscoped leaves remain, `--require` exits `3` with no stdout;
+- a governed leaf wins even when an unscoped leaf has a lower numeric priority;
+- any active unscoped issue makes planner integrity invalid and causes exit `1` before token or mutation;
+- `G0` counts toward the four-workstream activation cap;
+- `G0` plus four W-streams is a five-stream breach.
 
-A direct child can exit while one of its descendants still owns inherited stdout or stderr. The executor now detects that condition, forces cleanup, and returns exit `5` rather than holding `fmn-agent-claim.lock` indefinitely.
+Recommendation order remains:
 
-The timeout is a command deadline, not an exact end-to-end response-time promise. Process-tree termination and bounded reader cleanup can extend a timeout failure slightly. Each `br` invocation gets its own timeout; there is not yet one transaction-wide deadline.
+1. governed leaves in an already-active governed workstream;
+2. lower numeric priority;
+3. greater immediate-unblock pressure;
+4. greater direct-blocker pressure;
+5. most recently updated;
+6. lexical issue ID.
 
-#### Output and timeout composition
+### Token and executor propagation
 
-stdout and stderr remain concurrently drained. Each reader retains at most `MAX_COMMAND_OUTPUT_BYTES + 1` bytes and discards later bytes while continuing to drain, so the memory bound is eager and a full pipe cannot deadlock the child.
-
-The timeout bounds child lifetime, but there is not yet a separate total-produced-byte ceiling. A child can continue producing discarded bytes until it exits or reaches the wall-clock deadline.
-
-#### Receipt contract
-
-The claim receipt is now schema `fmn.agent.claim` version `2`. Its `executor_policy` records:
-
-- the requested per-command timeout;
-- the retained-byte ceiling for each output stream.
-
-The CLI production path enforces this policy. The optional injected runner is an internal focused-test seam and is not a production subprocess contract.
-
-As before, exit `5` means **no verified success receipt**, not necessarily **no tracker mutation**. `br update` may have changed its native store before a timeout, flush failure, or postcondition failure. Recovery starts with `br show`, `br sync --status`, and working-tree inspection; the old token must not be replayed.
-
-#### Focused coverage
-
-The real-process suite now covers:
-
-- exact-limit stdout and stderr retention;
-- independent stdout and stderr overflow;
-- simultaneous large-stream draining without deadlock;
-- bounded diagnostics from a real nonzero exit;
-- a stalled direct child;
-- POSIX descendant termination, verified by a delayed marker that must never be created;
-- a parent that exits while a descendant retains inherited pipes;
-- zero, negative, non-finite, and excessive timeout values.
-
-A separate CLI test proves that `--command-timeout-seconds nan` exits `2`, emits no stdout receipt, reports the finite-value requirement, and never invokes `br`.
-
-### Guarded Beads claim execution
-
-The timeout layer extends the existing guarded transaction rather than replacing it. `scripts/agent_claim.py` still keeps these operations under one shared-common-directory advisory lock:
-
-1. read `.beads/issues.jsonl` through the strict parser;
-2. rebuild the complete v2 graph/plan/policy/schema guard;
-3. compare the supplied token and selected issue;
-4. require the row to remain unassigned and `open`;
-5. run exact no-shell `br update` argv;
-6. run `br sync --flush-only`;
-7. re-read the exported JSONL;
-8. require `in_progress` plus the requested assignee;
-9. emit a canonical receipt only after every prior step succeeds.
-
-`--dry-run` performs the guarded read and emits the exact intended command vectors without invoking `br`. `scripts/check.sh` uses this path against a freshly issued live-ledger token so verification exercises the composition without mutating tracker state.
-
-The lock is stored in Git's shared `commondir`. A primary checkout and sibling linked worktrees therefore contend on one persistent inode. This is a local coordination mechanism, not a distributed lease: it does not serialize another clone, a direct manual `br`, Agent Mail, file reservations, or an agent that ignores the executor.
-
-### Literal strict-JSON ledger boundary
-
-The Beads parser rejects unquoted `NaN`, `Infinity`, and `-Infinity` at the initial decode boundary wherever they occur, including ignored extension fields. Duplicate keys, invalid UTF-8/framing, malformed arrays/comments/dependencies, unknown statuses, invalid timestamps, self/duplicate edges, non-regular files, and bounded-resource violations also fail closed.
-
-The canonical claim-graph grammar is version `2`; the version participates in the v2 claim digest, so a token from the former permissive grammar cannot survive the change.
-
-### Graph-and-policy-bound recommendation
-
-`agent_next.py` decides the leaf. `agent_claim_guard.py` binds the complete graph, complete planner output, normalized policy, and parser/planner/guard schema contracts into a token:
+`agent_claim_guard.py` remains schema `fmn.agent.claim-guard` version `2`, with token spelling:
 
 ```text
 v2:<claim-sha256>:<issue-id-or-none>
 ```
 
-The planner excludes assigned work, epic and topology-derived containers, blocking/containment cycles, and activation-cap violations. It prefers already-active workstreams, then numeric priority, immediate-unblock pressure, direct blocker pressure, scope, recency, and lexical ID.
+Its schema contract dynamically includes `fmn.agent.next` version `4`. Old tokens issued under planner versions 2 or 3 therefore fail revalidation without changing token syntax.
 
-The broad `agent_brief.py` projection is situational only. Its unsafe legacy `--format next` spelling has been retired.
+Direct guard regressions cover:
 
-### Python portal refusal truthfulness
+- an unscoped-only graph producing the stable `none` token and exit `3` under `--require`;
+- a valid `G0` active lane selecting a `G0` leaf ahead of new-stream work;
+- invalid `W12` work remaining unscoped;
+- an active unscoped issue suppressing token publication with exit `1`.
 
-`scripts/audit_portal_refusals.py` parses the portal source into a canonical bounded inventory. It uses descriptor-bound no-follow reads, iterative AST traversal, source/AST/depth/site/output ceilings, exact abstract-method scoping, and fail-closed checks for anonymous `NotImplementedError` and malformed `_refuse_unrouted` calls.
+`agent_claim.py` consumes that guard, so unscoped work cannot reach its atomic Beads mutation path as a valid recommendation.
 
-This is not a completion metric. Each refusal remains a product gap until the owning native behavior lands or an evidence-backed tier/exclusion ruling is recorded.
+### Deterministic human brief
 
-### Executable CLI boundaries
+`scripts/generate_agent_brief.py` now consumes the exact planner scope and activation result before publication.
 
-The shipped `fmn` process publishes stdout and stderr independently, treats closed pipes as normal lifecycle, and preserves typed command exits. Batch robot output includes explicit terminal per-job success records, and a shipped-binary smoke renders a tiny FMTL scene and verifies native PNG plus machine/human manifests.
+It:
 
-The Python/Rust namespace boundary mechanically prevents Rust-only snake_case helpers from leaking into the pinned Reference wildcard surface while requiring the corresponding Reference CamelCase constructors.
+- normalizes broad queue labels to `G0`, `W1`–`W11`, or `UNSCOPED`;
+- uses the planner's activation count rather than the broad projection's historical grouping;
+- suppresses an unscoped broad priority instead of presenting it as actionable;
+- keeps unscoped open leaves visible in the leaf-plan census;
+- refuses active unscoped issues before stdout or file replacement;
+- refuses `G0` plus four W-streams as a `5/4` cap breach;
+- preserves broad non-leaf context while making the planner section the only claim contract.
 
-## Agent control-plane architecture
+Focused generator regressions cover G0 rendering, an unscoped broad priority, unscoped active refusal across every publication mode, strict activation-cap refusal, and deterministic output.
 
-1. `scripts/agent_brief.py`: strict bounded parser and broad situational projection.
-2. `scripts/agent_next.py`: leaf-safe planner, schema `fmn.agent.next` version `2`.
-3. `scripts/agent_claim_guard.py`: read-only graph/policy/schema token, schema `fmn.agent.claim-guard` version `2`.
-4. `scripts/agent_claim.py`: shared-lock claim mutation, bounded command lifetime/output, explicit flush, postcondition, and schema-versioned receipt.
-5. `scripts/generate_agent_brief.py`: deterministic human projection and atomic publication.
-6. Beads: sole task/dependency authority.
+## Agent control-plane versions
 
-`scripts/check.sh` compiles and runs the strict parser, strict JSON, planner, guard, executor, real-process output/lifetime, generator, publication-I/O, portal-refusal, and helper-alias suites before entering the Rust, Python, WASM, and structural gates.
+| Layer | Current contract | Role |
+|---|---:|---|
+| Broad snapshot | `agent_brief` snapshot version 5 | Bounded parsing, blocking integrity, broad queues, stale/unowned diagnostics. Not a claim authority. |
+| Leaf planner | `fmn.agent.next` version 4 | Governed workstream classification, leafhood, containment integrity, activation, and recommendation. |
+| Claim guard | `fmn.agent.claim-guard` version 2 | Graph/plan/policy/schema-bound token. |
+| Claim graph | `fmn.agent.claim-graph` version 2 | Canonical represented-field graph used in token and delta evidence. |
+| Claim executor | `fmn.agent.claim` version 6 | Atomic Beads claim, structured response proof, explicit export, and represented-field delta receipt. |
+| Human brief | deterministic Markdown | Planner-normalized human context and atomic publication. |
+
+The direct `agent_brief.py` workstream labels remain broad diagnostic grouping. `agent_next.py` is the only authority for governed scope and activation, and generated Markdown is normalized to that result before publication.
+
+## Atomic guarded claim execution
+
+The autonomous mutation path is:
+
+```text
+br update ISSUE --claim --actor ASSIGNEE --json [--transition-comment TEXT]
+br sync --flush-only
+```
+
+The executor keeps token revalidation, Beads' storage-level unassigned compare-and-set, response validation, export, and postcondition verification under one shared-common-directory advisory lock.
+
+### Atomic response proof
+
+The version-6 executor rejects successful child output unless it is:
+
+- UTF-8 strict JSON;
+- free of duplicate keys and non-finite constants;
+- no deeper than 64 decoded levels;
+- no larger than 100,000 decoded nodes;
+- one ordinary updated-row array or one valid `{updated, warnings}` envelope;
+- exactly one guarded issue with matching ID, title, priority, status, assignee, and timestamp;
+- accompanied by no success-path stderr.
+
+The response timestamp must equal the exported issue timestamp.
+
+### Resource policy
+
+Each `br update --claim` and `br sync --flush-only` child has:
+
+- default 60-second wall-clock deadline, configurable to 3,600 seconds;
+- default 16 MiB combined produced-output ceiling, configurable to 1 GiB;
+- 1 MiB retained diagnostic ceiling per stream;
+- concurrent stdout/stderr draining;
+- bounded process-tree termination and reader cleanup.
+
+A stalled, continuously producing, or inherited-pipe child cannot hold the local claim lock indefinitely.
+
+### Failure semantics
+
+Exit `5` means **no verified success receipt**, not necessarily **no native mutation**. Recovery starts with:
+
+```bash
+br show "$issue"
+br sync --status
+git status
+```
+
+The old token must never be replayed blindly.
+
+## Canonical planning-graph boundary
+
+The token and post-export claim delta currently bind the fields represented by `agent_brief.Issue`:
+
+- ID;
+- title;
+- status;
+- priority;
+- issue type;
+- assignee;
+- normalized update timestamp;
+- dependencies;
+- comments.
+
+The executor verifies unchanged represented issue membership, unchanged represented non-target records, and only the expected represented target transition.
+
+The following persisted Beads fields are **not yet bound**: description, design, acceptance criteria, notes, owner, estimate, due/defer values, labels, and unknown extension metadata. A successful version-6 receipt is not raw-record or whole-database identity. `br show` immediately before claiming remains mandatory, and expanding this field set is a high-value future hardening task.
+
+## Python portal truthfulness
+
+`scripts/audit_portal_refusals.py` parses the portal source into a bounded canonical refusal inventory. It uses descriptor-bound no-follow reads, iterative AST traversal, source/AST/depth/site/output ceilings, exact abstract-method scoping, and fail-closed checks for anonymous `NotImplementedError` and malformed `_refuse_unrouted` calls.
+
+This is not a completion metric. Each refusal remains a product gap until the owning behavior lands or an evidence-backed tier/exclusion ruling is recorded.
+
+The Python/Rust namespace policy also prevents Rust-only snake_case helpers from leaking into the pinned Reference wildcard surface while requiring corresponding Reference CamelCase constructors.
 
 ## Current open obligations
 
 ### W10 semantic surface
 
-`fm-5wq.4` remains in progress. Its newest reality-check supersedes older “100% reviewed” commentary. Therefore:
+`fm-5wq.4` remains in progress. Its newest reality-check supersedes older “100% reviewed” commentary.
 
 - reviewed ledger coverage is not universal callable implementation;
 - refusal inventory coverage is not implementation coverage;
@@ -147,17 +186,17 @@ The Python/Rust namespace boundary mechanically prevents Rust-only snake_case he
 - each refusal falls only through implementation or an evidence-backed tier/exclusion;
 - no W10 or G4 closure is claimed here.
 
-### CLI library/binary quiet-policy convergence
+### Expand the canonical claim graph
 
-The shipped binary suppresses successful human doctor output under `--quiet` while retaining typed failures. That policy is still not centralized for every embedded `run_with_capabilities` caller.
+Task-semantic fields outside `agent_brief.Issue` can currently change without changing `graph_sha256`. The next hardening step is to bind the complete task-semantic record while preserving deterministic canonicalization and harmless row-order independence.
 
-### Distributed claim coordination
+### Unify broad display scope
 
-The executor serializes cooperating processes only inside one clone's shared Git common directory. Another clone, a manual `br`, or an agent that ignores the executor can still race it. Agent Mail, reservations, current-HEAD review, and explicit peer coordination remain mandatory.
+The autonomous planner and generated human brief use the exact governed vocabulary. The direct broad snapshot retains its historical display classifier and is explicitly non-authoritative. Moving the shared classifier into one common module would reduce conceptual duplication, provided broad compatibility and snapshot versioning are handled deliberately.
 
-### Claim-output production ceiling
+### Distributed coordination
 
-Retained memory and wall-clock lifetime are bounded, but total bytes produced and discarded before timeout are not independently capped. Adding an early total-production kill threshold is a valid future hardening item, provided partial tracker-state recovery remains explicit.
+The executor lock covers cooperating processes only inside one clone's Git common directory. Another clone, direct manual Beads activity, Agent Mail, reservations, and unrelated `main` movement remain outside the lock.
 
 ### Platform and release evidence
 
@@ -170,68 +209,47 @@ The following remain independent evidence lanes:
 - clean-wheel gates on every supported platform;
 - ffmpeg/video-container equivalence receipts.
 
-### Tracker synchronization
-
-The executor performs only the guarded claim transition through `br`, followed by `br sync --flush-only` and parsed-ledger verification. Other Beads changes still require tracker-native commands, and every resulting `.beads/` export requires an explicit commit.
-
-No live Beads mutation was performed from the current editing environment because it did not expose tracker-native `br`. The authoritative ledger was deliberately left untouched.
-
 ## Verification entry points
 
 ```bash
 # Mandatory local or owned-host repository gate
 scripts/check.sh
 
-# Whole graph, leaf plan, and human context
+# Whole graph, governed plan, and human context
 python3 scripts/agent_brief.py --format json --check
 python3 scripts/agent_next.py --format json --check
 python3 scripts/generate_agent_brief.py --stdout
 
-# Guarded claim
+# Guarded atomic claim
 token="$(python3 scripts/agent_claim_guard.py --require)"
 issue="${token##*:}"
 br show "$issue"
-# Check Agent Mail, reservations, peers, and current main.
+# Check current main, Agent Mail, reservations, peers, and task scope.
 python3 scripts/agent_claim.py \
     --expect-token "$token" \
     --issue "$issue" \
     --assignee "$FMN_AGENT_ID" \
     --command-timeout-seconds 60 \
+    --command-output-budget-bytes 16777216 \
     --dry-run
-python3 scripts/agent_claim.py \
-    --expect-token "$token" \
-    --issue "$issue" \
-    --assignee "$FMN_AGENT_ID" \
-    --command-timeout-seconds 60 \
-    --transition-comment "Claimed after graph, reservation, and HEAD checks"
-
-# Focused control-plane regressions
-python3 scripts/test_agent_brief.py
-python3 scripts/test_agent_brief_strict_json.py
-python3 scripts/test_agent_next.py
-python3 scripts/test_agent_next_output.py
-python3 scripts/test_agent_claim_guard.py
-python3 scripts/test_agent_claim.py
-python3 scripts/test_agent_claim_subprocess.py
-python3 scripts/test_generate_agent_brief.py
-python3 scripts/test_generate_agent_brief_io.py
-python3 scripts/test_audit_portal_refusals.py
 ```
 
-## Evidence from the current editing environment
+## Evidence for this tranche
 
-The timeout implementation and real-process test bytes were Python-bytecode compiled before publication. The nine-case real-process suite passed locally in about five seconds. The suite included direct timeout, POSIX descendant, and inherited-pipe probes. A separate mocked dry-run receipt probe passed with receipt version `2` and timeout `17.5`. Local Git-blob calculations matched the content SHAs returned for the committed executor and tests.
+The exact `agent_next.py` blob passed Python bytecode compilation and a focused 12-case planner harness using a faithful `agent_brief` test seam. That harness covered non-epic containers, active-stream preference, blocker pressure, G0, all W1–W11 prefixes, invalid W-prefixes, unscoped-only state, active unscoped refusal, containment cycles, a 1,500-node hierarchy, activation limits, canonical JSON, and distinct no-work exits.
 
-The CLI invalid-timeout regression and documentation were committed incrementally after that focused run. This environment did not contain an exact complete checkout with the full parser/planner modules, portal source, Rust workspace, and installed toolchain. Therefore the complete Python suite, live-ledger dry-run gate, portal audit, Cargo/Clippy/rustdoc/WASM/wheel/browser axes, and repository-wide `scripts/check.sh` are not represented as run against `301684d`.
+The committed planner, guard, and generator suites are already invoked by `scripts/check.sh`. This editing environment did not contain an exact complete repository checkout, Cargo/Rust toolchain, `br`, or UBS. Therefore the full repository gate, live-ledger planner result, Beads mutation, Rust axes, wheel/browser gates, and platform matrices are **not** represented as executed against `fffc469`.
 
-GitHub Actions is not a correctness dependency. Hosted runs were not used as acceptance evidence.
+No `.beads/` file was manually reconstructed or replaced. Tracker state was left unchanged because tracker-native `br` execution was unavailable.
+
+GitHub Actions is not a correctness dependency and was not used as acceptance evidence.
 
 ## Truthfulness rules for future updates
 
 - Record exact commands and the source commit they exercised.
 - Do not convert “compiled,” “reviewed,” “inventoried,” or “imported” into “fully implemented.”
-- Do not infer hardware or artifact evidence from a different platform.
+- Do not infer hardware or artifact evidence from another platform.
 - Do not close a parent merely because one child or one census reaches 100%.
-- Distinguish broad readiness from true leaf claimability.
-- Issue a v2 token, complete external coordination, and use `agent_claim.py` with an explicit bounded timeout for autonomous claim mutation.
+- Distinguish broad readiness from governed leaf claimability.
+- Scope autonomous work to `G0` or `W1`–`W11`, issue a fresh token, complete external coordination, and use the atomic executor.
 - Keep target-state design in the comprehensive plan and current-state evidence here.
