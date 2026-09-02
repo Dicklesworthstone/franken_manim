@@ -25,7 +25,7 @@ class StrictJsonLedgerTests(unittest.TestCase):
         path.write_bytes(BASE_PREFIX + suffix + b"}\n")
         return path
 
-    def test_nonfinite_constants_are_rejected_even_in_ignored_extension_fields(self) -> None:
+    def test_nonfinite_constants_are_rejected_even_in_extension_fields(self) -> None:
         for spelling in (b"NaN", b"Infinity", b"-Infinity"):
             with self.subTest(spelling=spelling):
                 path = self.ledger(b',"extension":' + spelling)
@@ -70,11 +70,12 @@ class StrictJsonLedgerTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("non-finite JSON constant 'NaN' is forbidden", stderr.getvalue())
 
-    def test_claim_graph_version_records_the_strict_input_grammar(self) -> None:
-        self.assertEqual(agent_claim_guard.CLAIM_GRAPH_VERSION, 2)
+    def test_claim_graph_version_records_full_task_semantics(self) -> None:
+        self.assertEqual(agent_claim_guard.CLAIM_GRAPH_VERSION, 3)
+        self.assertEqual(agent_claim_guard.CLAIM_INPUT_VERSION, 3)
         self.assertEqual(
             agent_claim_guard.schema_contract()["claim_graph"],
-            {"schema": "fmn.agent.claim-graph", "version": 2},
+            {"schema": "fmn.agent.claim-graph", "version": 3},
         )
 
 
