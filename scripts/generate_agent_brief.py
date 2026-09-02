@@ -37,6 +37,99 @@ def ledger_as_of(issues: dict[str, agent_brief.Issue]):
     return max(issue.updated_at for issue in issues.values())
 
 
+def _context_row(issue: agent_brief.Issue) -> dict[str, Any]:
+    return {
+        "id": issue.id,
+        "priority": issue.priority,
+        "status": issue.status,
+        "issue_type": issue.issue_type,
+        "workstream": agent_next.governed_workstream(issue),
+        "assignee": issue.assignee,
+        "updated_at": issue.updated_at.isoformat().replace("+00:00", "Z"),
+        "title": agent_brief.compact_title(issue.title),
+        "blockers": list(agent_brief.unresolved_blockers(issue, {})),
+        "latest_comment": agent_brief.latest_comment(issue),
+    }
+
+
+def normalize_snapshot_scope(
+    snapshot: dict[str, Any],
+    issues: dict[str, agent_brief.Issue],
+    plan: dict[str, Any],
+    *,
+    limit: int,
+) -> None:
+    """Make the human projection use the planner's exact scope vocabulary."""
+
+    for queue_name in (
+        "active",
+        "ready",
+        "assigned_ready",
+        "container_ready",
+        "blocked",
+        "stale_claims",
+        "unowned_active",
+        "unscoped_active",
+    ):
+        for row in snapshot.get(queue_name, ()):
+            issue = issues.get(row["id"])
+            if issue is not None:
+                row["workstream"] = agent_next.governed_workstream(issue)
+
+    strict_unscoped = sorted(
+        (
+            issue
+            for issue in issues.values()
+            if issue.status == agent_brief.ACTIVE_STATUS
+            and agent_next.governed_workstream(issue) == agent_next.UNSCOPED
+        ),
+        key=agent_brief.issue_sort_key,
+    )
+    snapshot["unscoped_active"] = [
+        _context_row(issue) for issue in strict_unscoped[:limit]
+    ]
+    snapshot["counts"]["unscoped_active"] = len(strict_unscoped)
+    snapshot["activation"] = plan["activation"]
+
+    situational = snapshot["situational_priority"]
+    broad_issue = situational["issue"]
+    if broad_issue is not None:
+        issue = issues.get(broad_issue["id"])
+        if issue is not None:
+            workstream = agent_next.governed_workstream(issue)
+            if workstream == agent_next.UNSCOPED:
+                situational.update(
+                    {
+                        "issue": None,
+                        "reason": (
+                            "the highest-priority broad-ready candidate is unscoped; "
+                            "scope it before prioritization"
+                        ),
+                        "activates_workstream": False,
+                    }
+                )
+            else:
+                broad_issue["workstream"] = workstream
+
+
+def validate_plan_for_publication(plan: dict[str, Any]) -> None:
+    integrity = plan["integrity"]
+    if not integrity["ok"]:
+        raise GenerateError(
+            "Beads task-graph integrity is invalid "
+            f"({len(integrity['blocking_cycles'])} blocking cycles, "
+            f"{len(integrity['containment_cycles'])} containment cycles, "
+            f"{len(integrity['missing_blockers'])} missing blockers, "
+            f"{len(integrity['unscoped_active'])} unscoped active claims)"
+        )
+    activation = plan["activation"]
+    if not activation["within_cap"]:
+        raise GenerateError(
+            "active workstream cap breached "
+            f"({activation['count']}/{activation['cap']})"
+        )
+
+
 def render_leaf_section(plan: dict[str, Any]) -> str:
     recommendation = plan["recommendation"]
     issue = recommendation["issue"]
@@ -52,12 +145,14 @@ def render_leaf_section(plan: dict[str, Any]) -> str:
         "",
         f"- Recommended next: {selected} — {recommendation['reason']}.",
         (
-            f"- Queues: **{plan['counts']['claimable_leaves']}** claimable leaves, "
+            f"- Queues: **{plan['counts']['claimable_leaves']}** scoped claimable leaves, "
+            f"**{plan['counts']['unscoped_leaves']}** unscoped leaves, "
             f"**{plan['counts']['ready_containers']}** ready containers "
             f"(**{plan['counts']['non_epic_containers']}** non-epic), "
             f"**{plan['counts']['assigned_ready']}** assigned-ready."
         ),
         "- A task with any live `parent-child` descendant is a container, regardless of its issue type.",
+        "- Unscoped work is visible for repair but is never an autonomous claim candidate.",
         "- This section is the claim contract; the broader queue below is situational context only.",
         "",
     ]
@@ -87,7 +182,9 @@ def build_document(
         activation_cap=activation_cap,
         limit=limit,
     )
+    validate_plan_for_publication(plan)
     snapshot["claim_plan"] = plan
+    normalize_snapshot_scope(snapshot, issues, plan, limit=limit)
     broad = agent_brief.render_markdown(snapshot).rstrip("\n")
     marker = "\n## Active claims\n"
     if marker not in broad:
@@ -272,24 +369,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (agent_brief.BriefError, GenerateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    plan_integrity = snapshot["claim_plan"]["integrity"]
-    if not plan_integrity["ok"]:
-        print(
-            "error: Beads task-graph integrity is invalid "
-            f"({len(plan_integrity['blocking_cycles'])} blocking cycles, "
-            f"{len(plan_integrity['containment_cycles'])} containment cycles, "
-            f"{len(plan_integrity['missing_blockers'])} missing blockers)",
-            file=sys.stderr,
-        )
-        return 1
-    if not snapshot["activation"]["within_cap"]:
-        print(
-            "error: active workstream cap breached "
-            f"({snapshot['activation']['count']}/{snapshot['activation']['cap']})",
-            file=sys.stderr,
-        )
         return 1
 
     try:
