@@ -35,6 +35,8 @@ pub mod quadpath;
 pub mod rotation;
 pub mod smoothing;
 pub mod space_ops;
+#[path = "svg.rs"]
+mod svg_parser;
 #[path = "svg_safe.rs"]
 pub mod svg;
 
