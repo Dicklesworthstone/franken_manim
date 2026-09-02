@@ -18,6 +18,7 @@ python3 -m py_compile \
     scripts/test_agent_brief_strict_json.py \
     scripts/test_agent_next.py \
     scripts/test_agent_next_output.py \
+    scripts/test_agent_scope.py \
     scripts/test_agent_claim_guard.py \
     scripts/test_agent_task_semantics.py \
     scripts/test_agent_claim.py \
@@ -30,6 +31,7 @@ python3 scripts/test_agent_brief.py
 python3 scripts/test_agent_brief_strict_json.py
 python3 scripts/test_agent_next.py
 python3 scripts/test_agent_next_output.py
+python3 scripts/test_agent_scope.py
 python3 scripts/test_agent_claim_guard.py
 python3 scripts/test_agent_task_semantics.py
 python3 scripts/test_agent_claim.py
