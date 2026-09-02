@@ -34,11 +34,13 @@ import agent_claim_guard
 import agent_next
 
 SCHEMA = "fmn.agent.claim"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 ATOMIC_CLAIM_MODE = "beads.update.claim/v1"
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_TOTAL_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_COMMAND_JSON_DEPTH = 64
+MAX_COMMAND_JSON_NODES = 100_000
 DEFAULT_COMMAND_OUTPUT_BUDGET_BYTES = MAX_COMMAND_TOTAL_OUTPUT_BYTES
 MAX_COMMAND_OUTPUT_BUDGET_BYTES = 1024 * 1024 * 1024
 MAX_TOKEN_BYTES = 4096
@@ -635,6 +637,41 @@ def _reject_command_json_constant(spelling: str) -> None:
     raise _NonFiniteCommandJsonConstant(spelling)
 
 
+def _validate_command_json_tree(value: Any, label: str) -> None:
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_COMMAND_JSON_NODES:
+            raise ClaimError(
+                f"{label} response exceeds the {MAX_COMMAND_JSON_NODES}-node JSON limit",
+                5,
+            )
+        if depth > MAX_COMMAND_JSON_DEPTH:
+            raise ClaimError(
+                f"{label} response exceeds the {MAX_COMMAND_JSON_DEPTH}-level JSON depth limit",
+                5,
+            )
+        if isinstance(current, dict):
+            for key, item in current.items():
+                stack.append((item, depth + 1))
+                stack.append((key, depth + 1))
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+        elif isinstance(current, str):
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in current):
+                raise ClaimError(
+                    f"{label} response contains an unpaired Unicode surrogate",
+                    5,
+                )
+        elif isinstance(current, float) and not math.isfinite(current):
+            raise ClaimError(
+                f"{label} response contains a non-finite JSON number",
+                5,
+            )
+
+
 def _strict_command_json(payload: bytes, label: str) -> Any:
     if not payload:
         raise ClaimError(f"{label} emitted no JSON response", 5)
@@ -643,7 +680,7 @@ def _strict_command_json(payload: bytes, label: str) -> Any:
     except UnicodeDecodeError as exc:
         raise ClaimError(f"{label} response is not UTF-8: {exc}", 5) from exc
     try:
-        return json.loads(
+        document = json.loads(
             text,
             object_pairs_hook=_unique_command_json_object,
             parse_constant=_reject_command_json_constant,
@@ -660,6 +697,10 @@ def _strict_command_json(payload: bytes, label: str) -> Any:
         ) from exc
     except json.JSONDecodeError as exc:
         raise ClaimError(f"{label} response is not valid JSON: {exc}", 5) from exc
+    except (MemoryError, RecursionError) as exc:
+        raise ClaimError(f"{label} response exceeded JSON parser resource limits", 5) from exc
+    _validate_command_json_tree(document, label)
+    return document
 
 
 def _verify_atomic_claim_response(
@@ -941,6 +982,8 @@ def execute_claim(
             "schemas": guard["schemas"],
             "executor_policy": {
                 "beads_claim_mode": ATOMIC_CLAIM_MODE,
+                "beads_response_json_depth": MAX_COMMAND_JSON_DEPTH,
+                "beads_response_json_nodes": MAX_COMMAND_JSON_NODES,
                 "command_timeout_seconds": command_timeout_seconds,
                 "command_output_bytes_per_stream": MAX_COMMAND_OUTPUT_BYTES,
                 "command_output_budget_bytes_total": command_output_budget_bytes,
