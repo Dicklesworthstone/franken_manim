@@ -110,6 +110,51 @@ class AgentNextTests(unittest.TestCase):
         self.assertEqual(plan["recommendation"]["issue"]["id"], "fm-same")
         self.assertFalse(plan["recommendation"]["activates_workstream"])
 
+    def test_governance_workstream_grammar_accepts_g0_and_w1_through_w11_only(self) -> None:
+        rows = [issue("fm-g0", "G0: spike")]
+        rows.extend(
+            issue(f"fm-w{number}", f"W{number}: governed")
+            for number in range(1, 12)
+        )
+        rows.extend(
+            [
+                issue("fm-w0", "W0: invalid"),
+                issue("fm-w12", "W12: invalid"),
+                issue("fm-w999", "W999: invalid"),
+                issue("fm-lower", "w10: invalid"),
+                issue("fm-prefix", "prefix W10: invalid"),
+            ]
+        )
+        path = self.ledger(rows)
+        issues = agent_next.agent_brief.load_issues(path)
+        self.assertEqual(agent_next.governed_workstream(issues["fm-g0"]), "G0")
+        for number in range(1, 12):
+            with self.subTest(number=number):
+                self.assertEqual(
+                    agent_next.governed_workstream(issues[f"fm-w{number}"]),
+                    f"W{number}",
+                )
+        for issue_id in ("fm-w0", "fm-w12", "fm-w999", "fm-lower", "fm-prefix"):
+            with self.subTest(issue_id=issue_id):
+                self.assertEqual(
+                    agent_next.governed_workstream(issues[issue_id]),
+                    agent_next.UNSCOPED,
+                )
+
+        plan = self.plan(
+            [
+                issue("fm-g0-active", "G0: active", "in_progress", assignee="agent"),
+                issue("fm-g0-next", "G0: next", priority=4),
+                issue("fm-w11", "W11: new workstream", priority=1),
+                issue("fm-w12", "W12: invalid", priority=0),
+            ]
+        )
+        self.assertEqual(plan["activation"]["active_workstreams"], ["G0"])
+        self.assertEqual(plan["recommendation"]["issue"]["id"], "fm-g0-next")
+        self.assertFalse(plan["recommendation"]["activates_workstream"])
+        self.assertEqual(plan["counts"]["claimable_leaves"], 2)
+        self.assertEqual(plan["counts"]["unscoped_leaves"], 1)
+
     def test_same_priority_prefers_immediate_unblocking(self) -> None:
         plan = self.plan(
             [
@@ -257,7 +302,7 @@ class AgentNextTests(unittest.TestCase):
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
         )
         self.assertEqual(payload["schema"], "fmn.agent.next")
-        self.assertEqual(payload["version"], 3)
+        self.assertEqual(payload["version"], 4)
         self.assertTrue(payload["integrity"]["ok"])
         self.assertEqual(payload["recommendation"]["issue"]["id"], "fm-next")
 
