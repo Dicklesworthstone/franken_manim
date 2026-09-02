@@ -172,12 +172,13 @@ def _read_ledger(path: Path) -> bytes:
         if identity_before != identity_after or len(data) != after.st_size:
             raise SemanticError(f"{path} changed while task semantics were being read")
         return data
+    except OSError as exc:
+        raise SemanticError(f"cannot read {path}: {exc}") from exc
     finally:
         os.close(descriptor)
 
 
-def _normalize_labels(value: Any, *, issue_id: str) -> Any:
-    del issue_id
+def _normalize_labels(value: Any) -> Any:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         return value
     return sorted(value)
@@ -233,7 +234,7 @@ def _canonical_json(value: Any) -> str:
 def _record_semantics(raw: dict[str, Any], *, issue_id: str) -> dict[str, Any]:
     fields = {key: value for key, value in raw.items() if key not in CORE_FIELDS}
     if "labels" in fields:
-        fields["labels"] = _normalize_labels(fields["labels"], issue_id=issue_id)
+        fields["labels"] = _normalize_labels(fields["labels"])
     dependency_fields = _dependency_semantics(raw.get("dependencies"), issue_id=issue_id)
     return {
         "schema": SCHEMA,
@@ -249,6 +250,7 @@ def load_task_semantics(
     data = _read_ledger(path)
     records: dict[str, dict[str, Any]] = {}
     core_issues: dict[str, agent_brief.Issue] = {}
+    dependency_count = 0
     for line_number, raw_line in enumerate(data.splitlines(keepends=True), 1):
         if len(raw_line) > agent_brief.MAX_LINE_BYTES:
             raise SemanticError(
@@ -283,9 +285,15 @@ def load_task_semantics(
             raise SemanticError(f"{path}:{line_number}: duplicate issue id {issue_id}")
         _validate_json_tree(raw, issue_id=issue_id, line=line_number)
         try:
-            core_issues[issue_id] = agent_brief.parse_issue(raw, line=line_number)
+            issue = agent_brief.parse_issue(raw, line=line_number)
         except agent_brief.BriefError as exc:
             raise SemanticError(str(exc)) from exc
+        core_issues[issue_id] = issue
+        dependency_count += len(issue.dependencies)
+        if dependency_count > agent_brief.MAX_DEPENDENCIES:
+            raise SemanticError(
+                f"{path} exceeds the {agent_brief.MAX_DEPENDENCIES}-dependency limit"
+            )
         records[issue_id] = _record_semantics(raw, issue_id=issue_id)
         if len(records) > agent_brief.MAX_ISSUES:
             raise SemanticError(f"{path} exceeds the {agent_brief.MAX_ISSUES}-issue limit")
