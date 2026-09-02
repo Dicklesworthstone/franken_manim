@@ -13,8 +13,10 @@ pub use crate::svg_parser::{
 };
 use crate::svg_parser;
 
-const UNSUPPORTED_DECLARATION: &str = "unsupported markup declaration (only elements, comments, \
-                                      CDATA, and processing instructions are accepted)";
+const UNSUPPORTED_DECLARATION: &str = concat!(
+    "unsupported markup declaration (only elements, comments, CDATA, ",
+    "and processing instructions are accepted)"
+);
 
 /// A parsed + resolved SVG document admitted through the UTF-8-safe public
 /// boundary.
