@@ -73,10 +73,16 @@
 //!   (`TracedPath`, `TracingTail`, `AnimatedBoundary`), whose dt-updater
 //!   bindings register with the §9.5 purity classifier.
 //!
-//! Still to land here: the enhanced graph and
-//! data mobjects (fm-n64), and the drawings shelf (fm-3kr). The boolean-op mobjects
-//! (`Union`/`Difference`/`Intersection`/`Exclusion`) wait on Chisel's
-//! boolean kernel (fm-8dx) and are tracked by fm-6l6.
+//! * **Data, booleans, graphs, and drawings** (§12.6–12.7). [`data_mobjects`]
+//!   owns Scribe-backed tables and native bar charts; [`network_graph`] and
+//!   [`neural_network`] own the enhanced graph/data visualizations;
+//!   [`boolean_ops`] exposes `Union`/`Difference`/`Intersection`/`Exclusion`
+//!   as audited wrappers over Chisel's certified path-boolean kernel; and
+//!   [`drawings`] contains the geometry-native shelf plus ADR-0020's explicit
+//!   user-supplied SVG resolver path for asset-backed census classes. These
+//!   modules are implemented source surfaces; remaining work is tracked at
+//!   the individual compatibility, asset, portal, and release boundaries,
+//!   not as a blanket missing-library tranche.
 #![forbid(unsafe_code)]
 
 pub mod arc;
