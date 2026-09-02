@@ -215,13 +215,15 @@ class AgentClaimTests(unittest.TestCase):
         )
         self.assertEqual(runner.calls, [])
         self.assertEqual(receipt["schema"], "fmn.agent.claim")
-        self.assertEqual(receipt["version"], 5)
+        self.assertEqual(receipt["version"], 6)
         self.assertEqual(receipt["mode"], "dry-run")
         self.assertFalse(receipt["claimed"])
         self.assertEqual(
             receipt["executor_policy"],
             {
                 "beads_claim_mode": "beads.update.claim/v1",
+                "beads_response_json_depth": 64,
+                "beads_response_json_nodes": 100_000,
                 "command_timeout_seconds": 17.5,
                 "command_output_bytes_per_stream": agent_claim.MAX_COMMAND_OUTPUT_BYTES,
                 "command_output_budget_bytes_total": 4096,
@@ -344,6 +346,41 @@ class AgentClaimTests(unittest.TestCase):
                 issue,
                 "agent@example.com",
             )
+
+    def test_atomic_json_response_has_depth_node_number_and_unicode_bounds(self) -> None:
+        exact_depth = ("[" * 63 + "0" + "]" * 63).encode()
+        self.assertIsNotNone(
+            agent_claim._strict_command_json(exact_depth, "br update --claim")
+        )
+        excessive_depth = ("[" * 64 + "0" + "]" * 64).encode()
+        with self.assertRaisesRegex(agent_claim.ClaimError, "64-level JSON depth limit"):
+            agent_claim._strict_command_json(excessive_depth, "br update --claim")
+
+        with mock.patch.object(agent_claim, "MAX_COMMAND_JSON_NODES", 3):
+            self.assertEqual(
+                agent_claim._strict_command_json(b"[1,2]", "br update --claim"),
+                [1, 2],
+            )
+            with self.assertRaisesRegex(agent_claim.ClaimError, "3-node JSON limit"):
+                agent_claim._strict_command_json(b"[1,2,3]", "br update --claim")
+
+        with self.assertRaisesRegex(agent_claim.ClaimError, "non-finite JSON number"):
+            agent_claim._strict_command_json(b"1e999", "br update --claim")
+        with self.assertRaisesRegex(agent_claim.ClaimError, "Unicode surrogate"):
+            agent_claim._strict_command_json(b'"\\ud800"', "br update --claim")
+        self.assertEqual(
+            agent_claim._strict_command_json(
+                b'"\\ud83d\\ude00"', "br update --claim"
+            ),
+            "😀",
+        )
+
+        parser_deep = ("[" * 1500 + "0" + "]" * 1500).encode()
+        with self.assertRaisesRegex(
+            agent_claim.ClaimError,
+            "JSON parser resource limits|JSON depth limit",
+        ):
+            agent_claim._strict_command_json(parser_deep, "br update --claim")
 
     def test_malformed_success_response_stops_before_sync(self) -> None:
         fixture = self.fixture([record("fm-next")])
