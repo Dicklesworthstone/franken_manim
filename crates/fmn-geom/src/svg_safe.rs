@@ -43,17 +43,6 @@ impl From<svg_parser::SvgDocument> for SvgDocument {
     }
 }
 
-impl From<&SvgDocument> for svg_parser::SvgDocument {
-    fn from(document: &SvgDocument) -> Self {
-        Self {
-            width: document.width,
-            height: document.height,
-            view_box: document.view_box,
-            shapes: document.shapes.clone(),
-        }
-    }
-}
-
 impl SvgDocument {
     /// Parse SVG bytes under the default budgets.
     pub fn parse(bytes: &[u8]) -> Result<Self, SvgError> {
@@ -68,10 +57,12 @@ impl SvgDocument {
     }
 }
 
-/// Emit one resolved document back to SVG bytes.
+/// Emit one resolved document back to SVG bytes without cloning its retained
+/// geometry. Resolved shapes are already in post-`viewBox` user space, so the
+/// original viewBox is deliberately not applied a second time.
 #[must_use]
 pub fn emit_svg_document(document: &SvgDocument) -> String {
-    svg_parser::emit_svg_document(&document.into())
+    emit_svg(&document.shapes, document.width, document.height, None)
 }
 
 fn validate_admission(bytes: &[u8], limits: &SvgLimits) -> Result<(), SvgError> {
