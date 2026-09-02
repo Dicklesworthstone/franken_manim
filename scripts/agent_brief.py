@@ -32,7 +32,10 @@ KNOWN_STATUSES = frozenset({"open", ACTIVE_STATUS, "closed", "tombstone"})
 OPEN_STATUSES = frozenset({"open", ACTIVE_STATUS})
 CLOSED_STATUSES = frozenset({"closed", "tombstone"})
 NON_CLAIMABLE_TYPES = frozenset({"epic"})
-WORKSTREAM_RE = re.compile(r"^W(?P<number>\d+)(?:\b|:)")
+UNSCOPED = "UNSCOPED"
+GOVERNED_WORKSTREAM_RE = re.compile(
+    r"^(?:(?P<g0>G0)|W(?P<number>[1-9]|1[01]))(?:\b|:)"
+)
 UTC = dt.timezone.utc
 
 
@@ -73,8 +76,18 @@ class Issue:
 
     @property
     def workstream(self) -> str:
-        match = WORKSTREAM_RE.match(self.title)
-        return f"W{match.group('number')}" if match else "UNSCOPED"
+        match = GOVERNED_WORKSTREAM_RE.match(self.title)
+        if match is None:
+            return UNSCOPED
+        if match.group("g0") is not None:
+            return "G0"
+        return f"W{match.group('number')}"
+
+
+def governed_workstream(issue: Issue) -> str:
+    """Return the exact governance workstream encoded by an issue title."""
+
+    return issue.workstream
 
 
 def parse_timestamp(value: str, *, field: str, issue_id: str) -> dt.datetime:
@@ -366,7 +379,7 @@ def issue_sort_key(issue: Issue) -> tuple[int, int, float, str]:
 
 
 def situational_priority_sort_key(issue: Issue) -> tuple[int, int, float, str]:
-    scope_rank = 1 if issue.workstream == "UNSCOPED" else 0
+    scope_rank = 1 if issue.workstream == UNSCOPED else 0
     return (issue.priority, scope_rank, -issue.updated_at.timestamp(), issue.id)
 
 
@@ -395,7 +408,7 @@ def select_situational_priority(
     if len(active_workstreams) >= activation_cap:
         return None, "activation cap is full and no broad-ready candidate belongs to an active workstream"
     issue = min(ready, key=situational_priority_sort_key)
-    if issue.workstream == "UNSCOPED":
+    if issue.workstream == UNSCOPED:
         return issue, "highest-priority broad-ready candidate is unscoped"
     return issue, (
         "highest-priority broad-ready candidate; autonomous selection still requires "
@@ -423,7 +436,7 @@ def build_snapshot(
         key=issue_sort_key,
     )
     active_workstream_set = {
-        issue.workstream for issue in active if issue.workstream != "UNSCOPED"
+        issue.workstream for issue in active if issue.workstream != UNSCOPED
     }
     active_workstreams = sorted(active_workstream_set)
     dependency_ready = [
@@ -454,7 +467,7 @@ def build_snapshot(
         if issue.assignee is not None and issue.updated_at < stale_before
     ]
     unowned = [issue for issue in active if issue.assignee is None]
-    unscoped = [issue for issue in active if issue.workstream == "UNSCOPED"]
+    unscoped = [issue for issue in active if issue.workstream == UNSCOPED]
     missing_targets = missing_dependency_targets(issues)
     missing_blockers = tuple(
         (owner, target) for owner, target, kind in missing_targets if kind == "blocks"
@@ -487,7 +500,7 @@ def build_snapshot(
     priority_row = row(priority_issue) if priority_issue is not None else None
     activates_workstream = bool(
         priority_issue is not None
-        and priority_issue.workstream != "UNSCOPED"
+        and priority_issue.workstream != UNSCOPED
         and priority_issue.workstream not in active_workstream_set
     )
     return {
