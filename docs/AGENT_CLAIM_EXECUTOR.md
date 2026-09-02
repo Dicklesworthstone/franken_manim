@@ -1,6 +1,6 @@
 # Guarded Beads claim execution
 
-`scripts/agent_claim.py` is the mutation companion to `scripts/agent_claim_guard.py`. The guard produces a deterministic token for one planner-approved leaf. The executor keeps token revalidation, Beads' storage-level atomic claim, structured-response validation, explicit JSONL export, and post-export delta verification inside one process while holding an advisory lock in Git's shared common directory.
+`scripts/agent_claim.py` is the mutation companion to `scripts/agent_claim_guard.py`. The guard produces a deterministic token for one planner-approved leaf. The executor keeps token revalidation, Beads' storage-level atomic claim, structured-response validation, explicit JSONL export, full task-semantic preservation, and post-export delta verification inside one process while holding an advisory lock in Git's shared common directory.
 
 The executor narrows local races. It is not a distributed lease. Current `main`, Agent Mail, file reservations, direct Beads activity, and agents operating in other clones still require inspection immediately before invocation.
 
@@ -36,7 +36,20 @@ python3 scripts/agent_claim.py \
     --transition-comment "Claimed after graph, reservation, and HEAD checks"
 ```
 
-On success, the command emits one canonical compact JSON receipt. It emits no success receipt unless the planner-v4 scope contract, token, Beads atomic response, explicit export, and post-export delta all agree.
+On success, the command emits one canonical compact JSON receipt. It emits no success receipt unless the planner-v4 scope contract, claim-input v3 token, Beads atomic response, explicit export, full task-semantic invariant, and core claim delta all agree.
+
+## Versioned contract
+
+| Layer | Version | Meaning |
+|---|---:|---|
+| Executor receipt | `fmn.agent.claim` v6 | Mutation command, policy, atomic response, export, and delta evidence. |
+| Guard envelope/token | `fmn.agent.claim-guard` v2 / token `v2` | Stable shell and JSON presentation. |
+| Claim input | `fmn.agent.claim-input` v3 | Complete graph, plan, policy, and schema input. |
+| Claim graph | `fmn.agent.claim-graph` v3 | Core planning graph plus complete exported task semantics. |
+| Task semantics | `fmn.agent.task-semantics` v1 | Top-level and dependency fields outside `agent_brief.Issue`. |
+| Planner | `fmn.agent.next` v4 | Governed leaf and activation policy. |
+
+The executor receipt remains version 6 because its JSON shape is unchanged. Its embedded schema contract now identifies claim-input and claim-graph version 3, so consumers can distinguish the stronger semantic proof without guessing from the token spelling.
 
 ## Transaction shape
 
@@ -45,10 +58,10 @@ While holding the claim lock, the executor performs these steps in order:
 1. Resolve a real `.git` directory or a bounded linked-worktree `.git` marker.
 2. Resolve `commondir`, when present, to Git's shared common directory.
 3. Non-blockingly lock the persistent `fmn-agent-claim.lock` inode in that common directory.
-4. Read `.beads/issues.jsonl` through the shared bounded parser.
-5. Rebuild the version-2 guard, including `fmn.agent.next` version 4.
+4. Read `.beads/issues.jsonl` through the full-semantic stable loader.
+5. Rebuild the version-2 guard over claim-input/claim-graph version 3, including `fmn.agent.next` version 4.
 6. Match the supplied token and optional explicit issue to the live recommendation.
-7. Require the selected row to remain unassigned, `open`, and scoped to `G0` or `W1`–`W11`.
+7. Require the selected row to remain unassigned, `open`, and scoped to `G0` or `W1` through `W11`.
 8. Invoke Beads without a shell using its atomic claim primitive:
 
    ```text
@@ -58,11 +71,13 @@ While holding the claim lock, the executor performs these steps in order:
 9. Require a strict bounded UTF-8 JSON success response and no success-path stderr.
 10. Require exactly one returned issue with the guarded ID, unchanged title and priority, status `in_progress`, the requested assignee, and a valid timestamp.
 11. Run `br sync --flush-only` under the same bounded subprocess policy.
-12. Re-read the exported JSONL and require the permitted claim delta.
-13. Require the Beads response timestamp to equal the exported row timestamp.
-14. Emit the receipt and release the advisory lock.
+12. Re-read the exported JSONL through the stable full-semantic loader.
+13. Require every exported task-semantic field on every issue to equal the guarded value.
+14. Require the permitted core claim delta and unchanged represented issue membership.
+15. Require the Beads response timestamp to equal the exported row timestamp.
+16. Emit the receipt and release the advisory lock.
 
-The executor intentionally does **not** express an autonomous claim as a generic `--status in_progress --assignee ...` update. Beads' `--claim` path owns the storage-level unassigned compare-and-set. The outer token and clone-local lock protect the stronger FrankenManim planner and coordination contract that Beads does not know.
+The executor intentionally does not express an autonomous claim as a generic `--status in_progress --assignee ...` update. Beads' `--claim` path owns the storage-level unassigned compare-and-set. The outer token and clone-local lock protect the stronger FrankenManim planner and coordination contract that Beads does not know.
 
 ## Scoped recommendation prerequisite
 
@@ -77,9 +92,9 @@ W1 through W11
 
 Open unscoped leaves remain diagnostic only. An active unscoped issue invalidates the planner and guard before process execution. `G0` counts toward the four-workstream cap.
 
-## Two independent success proofs
+## Three independent success proofs
 
-A mutating version-6 receipt proves the claim twice.
+A mutating version-6 receipt now relies on three distinct proofs.
 
 ### 1. Atomic Beads response
 
@@ -97,9 +112,24 @@ It refuses empty or malformed JSON, malformed warning envelopes, missing or mult
 
 A process exit of zero is not sufficient evidence. Malformed structured output returns exit `5` before explicit export. The native Beads store may already have changed, so recovery begins with inspection rather than token replay.
 
-### 2. Exported planning-graph delta
+### 2. Exported task-semantic invariant
 
-After `br sync --flush-only`, the executor compares the canonical parsed planning graph before and after the claim. The only permitted transition in that field set is:
+`scripts/agent_task_semantics.py` binds every top-level field exported in the issue row that is not already modeled by `agent_brief.Issue`, plus every non-core dependency-record field. This includes:
+
+- description, design, acceptance criteria, and notes;
+- owner, estimate, creation/source metadata, due/defer values, and labels;
+- dependency metadata, thread identity, and creation metadata;
+- unknown future top-level and dependency extension fields.
+
+The loader derives the full semantic projection and a core `Issue` projection from the same bounded descriptor read, brackets the established loader with identical before/after reads, and requires every projection to agree. Per-record depth and node limits keep unknown metadata bounded.
+
+Immediately before `after_graph_sha256` is calculated, the executor requires the after-export semantic values to equal the exact guarded values for every issue. A semantic mutation on the selected issue or an unrelated issue invalidates the transaction proof even when broad planner behavior would have remained unchanged.
+
+Ordering that carries no task meaning is normalized: issue rows, dependency rows, object keys, and labels. Comment order and ordinary array order remain significant.
+
+### 3. Exported core claim delta
+
+After `br sync --flush-only`, the executor compares the canonical parsed planning graph before and after the claim. The only permitted core transition is:
 
 ```text
 selected issue:
@@ -108,30 +138,27 @@ selected issue:
   updated_at  may advance, never regress
   comments    unchanged, or exactly one requested transition comment appended
 
-all other represented selected-issue fields: unchanged
+all other represented selected-issue core fields: unchanged
+all exported task-semantic fields: unchanged
 all other represented issues: unchanged
 represented issue membership: unchanged
 ```
 
-The receipt's `claim_delta` records that proof. Additional represented target changes, unrelated represented issue changes, or represented membership changes return exit `5`.
+The receipt's `claim_delta` records the core proof. Additional target changes, unrelated represented issue changes, semantic changes, or represented membership changes return exit `5`.
 
-## Canonical planning-graph boundary
+## Canonical authority boundary
 
-The word “exact” above applies to the field set represented by `agent_brief.Issue` and bound by `agent_claim_guard.canonical_graph`:
+The claim graph binds all semantics available in `.beads/issues.jsonl`; it is not a raw-byte identity contract.
 
-- ID;
-- title;
-- status;
-- priority;
-- issue type;
-- assignee;
-- normalized update timestamp;
-- dependencies;
-- comments.
+The following normalization is intentional:
 
-Description, design, acceptance criteria, notes, owner, estimates, due/defer values, labels, and unknown extension fields are not yet included. A version-6 receipt must not be described as raw JSONL identity or a whole-Beads-record transaction proof.
+- JSON object key order does not matter;
+- issue-row order does not matter;
+- dependency-array order does not matter;
+- label order does not matter;
+- equivalent absent/null forms accepted by the core parser may normalize to the same semantic value.
 
-This boundary is why `br show "$issue"` remains mandatory immediately before executor invocation. Expanding the canonical graph to all task-semantic fields is a valid future hardening tranche.
+The proof does not cover private database state or fields that Beads does not export. This is why `br show "$issue"` and external coordination remain mandatory immediately before invocation.
 
 ## Command lifetime and output budgets
 
@@ -164,7 +191,7 @@ Every receipt records:
 - guarded recommendation evidence;
 - exact no-shell command vectors.
 
-A successful mutating receipt additionally records normalized atomic-response evidence, the post-export graph digest, and the represented-field `claim_delta` proof.
+A successful mutating receipt additionally records normalized atomic-response evidence, the post-export full-semantic graph digest, and the represented core `claim_delta` proof.
 
 Receipt JSON is canonical UTF-8, key-sorted, terminated by one LF, and capped at 1 MiB.
 
@@ -172,12 +199,12 @@ Receipt JSON is canonical UTF-8, key-sorted, terminated by one LF, and capped at
 
 | Exit | Meaning | Required response |
 |---:|---|---|
-| `0` | Dry-run validation succeeded, or atomic claim, export, and both proofs succeeded. | Consume the JSON receipt. |
+| `0` | Dry-run validation succeeded, or atomic claim, export, semantic invariant, and all response/delta proofs succeeded. | Consume the JSON receipt. |
 | `1` | Blocking, containment, unscoped-active, or activation state is unsafe. | Repair governance state; do not claim. |
-| `2` | Arguments, paths, token, ledger, or resource-policy input are malformed. | Repair input; do not claim. |
+| `2` | Arguments, paths, token, ledger, task semantics, or resource-policy input are malformed. | Repair input; do not claim. |
 | `3` | The guarded graph has no governed recommendation. | Stop or repair task scope/coordination. |
 | `4` | The token or explicitly requested issue is stale. | Discard the token and repeat every external check. |
-| `5` | Locking, atomic response validation, timeout, cleanup, output bounds, Beads, export, or delta verification failed. | Inspect Beads and the working tree before any retry. |
+| `5` | Locking, atomic response validation, timeout, cleanup, output bounds, Beads, export, semantic invariant, or delta verification failed. | Inspect Beads and the working tree before any retry. |
 
 Exit `5` means **no verified transaction receipt**, not necessarily **no mutation**. `br update --claim` may have committed before malformed output, timeout, export failure, or postcondition failure. Inspect:
 
@@ -193,12 +220,16 @@ Never replay the old token blindly.
 
 The persistent advisory lock serializes cooperating executor processes in the primary checkout and linked worktrees sharing one Git common directory. It does not serialize another clone, direct manual Beads commands, Agent Mail, reservations, or unrelated changes to `main`.
 
-Beads' `--claim` adds a storage-level unassigned compare-and-set for the selected issue. The post-export planning-graph comparison detects additional represented-field writes visible in exported authority. Neither mechanism replaces cross-clone coordination.
+Beads' `--claim` adds a storage-level unassigned compare-and-set for the selected issue. The post-export full-semantic comparison detects additional task changes visible in exported authority. Neither mechanism replaces cross-clone coordination.
+
+The remembered semantic baseline is context-local and ledger-path-scoped. Unrelated test fixtures, worktrees, or repositories cannot inherit one another's pending postcondition state.
 
 ## Verification
 
 `scripts/test_agent_claim.py` covers atomic argv composition, version-6 receipts, ordinary and warning-envelope responses, strict response parsing, response/export timestamp agreement, transition comments, represented graph and membership drift, stale tokens, failure ordering, linked-worktree locking, injected-runner resource bounds, and no-stdout failure behavior.
 
+`scripts/test_agent_task_semantics.py` covers full-field token invalidation, dependency metadata, canonical harmless ordering, allowed core claim transitions, selected and unrelated semantic drift, stable-read projection agreement, and nested-metadata bounds.
+
 `scripts/test_agent_claim_subprocess.py` uses real children to cover retained and produced-output ceilings, continuously producing children, dual-stream draining, diagnostics, timeout, POSIX descendant cancellation, inherited-pipe cleanup, and CLI resource-policy refusal.
 
-The planner, claim-guard, and human-brief suites additionally prove that unscoped work cannot reach this executor as a valid recommendation. `scripts/check.sh` runs all focused suites and exercises the live executor only through `--dry-run`; the mandatory gate never mutates Beads.
+The planner, claim-guard, strict-JSON, and human-brief suites additionally prove that unscoped work cannot reach this executor as a valid recommendation. `scripts/check.sh` runs every focused suite and exercises the live executor only through `--dry-run`; the mandatory gate never mutates Beads.
