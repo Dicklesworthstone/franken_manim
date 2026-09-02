@@ -24,14 +24,16 @@ class AgentClaimSubprocessTests(unittest.TestCase):
         source: str,
         *,
         timeout_seconds: float = agent_claim.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        total_output_bytes: int | None = None,
     ) -> agent_claim.CommandResult:
         return agent_claim.run_command(
             (sys.executable, "-c", source),
             self.cwd(),
             timeout_seconds=timeout_seconds,
+            total_output_bytes=total_output_bytes,
         )
 
-    def test_exact_limit_is_retained_for_both_streams(self) -> None:
+    def test_exact_retained_limit_is_accepted_for_both_streams(self) -> None:
         with mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64):
             result = self.run_python(
                 "import sys; "
@@ -43,24 +45,19 @@ class AgentClaimSubprocessTests(unittest.TestCase):
         self.assertEqual(result.stderr, b"y" * 64)
 
     def test_exact_total_output_limit_is_accepted_across_both_streams(self) -> None:
-        with (
-            mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64),
-            mock.patch.object(agent_claim, "MAX_COMMAND_TOTAL_OUTPUT_BYTES", 128),
-        ):
+        with mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64):
             result = self.run_python(
                 "import sys; "
                 "sys.stdout.buffer.write(b'x' * 64); "
-                "sys.stderr.buffer.write(b'y' * 64)"
+                "sys.stderr.buffer.write(b'y' * 64)",
+                total_output_bytes=128,
             )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"x" * 64)
         self.assertEqual(result.stderr, b"y" * 64)
 
-    def test_combined_streams_share_one_total_output_budget(self) -> None:
-        with (
-            mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64),
-            mock.patch.object(agent_claim, "MAX_COMMAND_TOTAL_OUTPUT_BYTES", 64),
-        ):
+    def test_combined_streams_share_one_configured_output_budget(self) -> None:
+        with mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64):
             with self.assertRaisesRegex(
                 agent_claim.ClaimError,
                 "produced more than 64 total output bytes",
@@ -68,27 +65,25 @@ class AgentClaimSubprocessTests(unittest.TestCase):
                 self.run_python(
                     "import sys; "
                     "sys.stdout.buffer.write(b'x' * 40); "
-                    "sys.stderr.buffer.write(b'y' * 40)"
+                    "sys.stderr.buffer.write(b'y' * 40)",
+                    total_output_bytes=64,
                 )
 
     def test_total_output_budget_terminates_a_spewing_child_promptly(self) -> None:
         started = time.monotonic()
-        with (
-            mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64),
-            mock.patch.object(agent_claim, "MAX_COMMAND_TOTAL_OUTPUT_BYTES", 4096),
-        ):
+        with mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64):
             with self.assertRaisesRegex(
                 agent_claim.ClaimError,
                 "produced more than 4096 total output bytes",
             ):
                 self.run_python(
-                    "import os; chunk=b'x' * 65536; "
-                    "\nwhile True: os.write(1, chunk)",
+                    "import os; chunk=b'x' * 65536; \nwhile True: os.write(1, chunk)",
                     timeout_seconds=10.0,
+                    total_output_bytes=4096,
                 )
         self.assertLess(time.monotonic() - started, 3.0)
 
-    def test_stdout_overflow_is_detected_after_the_pipe_is_fully_drained(self) -> None:
+    def test_stdout_retained_overflow_is_detected_after_full_drain(self) -> None:
         with mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64):
             with self.assertRaisesRegex(
                 agent_claim.ClaimError,
@@ -100,7 +95,7 @@ class AgentClaimSubprocessTests(unittest.TestCase):
                     "sys.stderr.buffer.write(b'ok')"
                 )
 
-    def test_stderr_overflow_is_detected_without_deadlocking_on_stdout(self) -> None:
+    def test_stderr_retained_overflow_does_not_deadlock_on_stdout(self) -> None:
         with mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64):
             with self.assertRaisesRegex(
                 agent_claim.ClaimError,
@@ -178,33 +173,45 @@ class AgentClaimSubprocessTests(unittest.TestCase):
             (-1.0, "must be positive"),
             (float("nan"), "must be finite"),
             (float("inf"), "must be finite"),
-            (
-                agent_claim.MAX_COMMAND_TIMEOUT_SECONDS + 1.0,
-                "exceeds the",
-            ),
+            (agent_claim.MAX_COMMAND_TIMEOUT_SECONDS + 1.0, "exceeds the"),
         ):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(agent_claim.ClaimError, message):
                     self.run_python("pass", timeout_seconds=value)
 
-    def test_cli_timeout_validation_emits_no_machine_payload(self) -> None:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            status = agent_claim.main(
-                [
-                    "--expect-token",
-                    "v2:" + "a" * 64 + ":fm-next",
-                    "--assignee",
-                    "agent@example.com",
-                    "--command-timeout-seconds",
-                    "nan",
-                    "--dry-run",
-                ]
-            )
-        self.assertEqual(status, 2)
-        self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("--command-timeout-seconds must be finite", stderr.getvalue())
+    def test_output_budget_contract_rejects_invalid_values(self) -> None:
+        for value, message in (
+            (0, "must be positive"),
+            (-1, "must be positive"),
+            (True, "positive integer"),
+            (agent_claim.MAX_COMMAND_OUTPUT_BUDGET_BYTES + 1, "exceeds the"),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(agent_claim.ClaimError, message):
+                    self.run_python("pass", total_output_bytes=value)
+
+    def test_cli_resource_validation_emits_no_machine_payload(self) -> None:
+        for flag, value, message in (
+            ("--command-timeout-seconds", "nan", "must be finite"),
+            ("--command-output-budget-bytes", "0", "must be positive"),
+        ):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = agent_claim.main(
+                    [
+                        "--expect-token",
+                        "v2:" + "a" * 64 + ":fm-next",
+                        "--assignee",
+                        "agent@example.com",
+                        flag,
+                        value,
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(status, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn(message, stderr.getvalue())
 
 
 if __name__ == "__main__":
