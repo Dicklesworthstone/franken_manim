@@ -218,6 +218,15 @@ class AgentTaskSemanticsTests(unittest.TestCase):
         with self.assertRaisesRegex(semantics.SemanticError, "changed while"):
             semantics.load_semantic_issues(path, mutating_loader)
 
+    def test_loader_refuses_a_core_projection_not_derived_from_the_same_bytes(self) -> None:
+        path = self.ledger([record()])
+
+        def wrong_loader(_path: Path) -> dict[str, agent_brief.Issue]:
+            return {}
+
+        with self.assertRaisesRegex(semantics.SemanticError, "core projection disagrees"):
+            semantics.load_semantic_issues(path, wrong_loader)
+
 
 if __name__ == "__main__":
     unittest.main()
