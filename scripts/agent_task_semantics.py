@@ -243,9 +243,12 @@ def _record_semantics(raw: dict[str, Any], *, issue_id: str) -> dict[str, Any]:
     }
 
 
-def load_task_semantics(path: Path) -> tuple[dict[str, dict[str, Any]], str]:
+def load_task_semantics(
+    path: Path,
+) -> tuple[dict[str, dict[str, Any]], dict[str, agent_brief.Issue], str]:
     data = _read_ledger(path)
     records: dict[str, dict[str, Any]] = {}
+    core_issues: dict[str, agent_brief.Issue] = {}
     for line_number, raw_line in enumerate(data.splitlines(keepends=True), 1):
         if len(raw_line) > agent_brief.MAX_LINE_BYTES:
             raise SemanticError(
@@ -279,25 +282,29 @@ def load_task_semantics(path: Path) -> tuple[dict[str, dict[str, Any]], str]:
         if issue_id in records:
             raise SemanticError(f"{path}:{line_number}: duplicate issue id {issue_id}")
         _validate_json_tree(raw, issue_id=issue_id, line=line_number)
+        try:
+            core_issues[issue_id] = agent_brief.parse_issue(raw, line=line_number)
+        except agent_brief.BriefError as exc:
+            raise SemanticError(str(exc)) from exc
         records[issue_id] = _record_semantics(raw, issue_id=issue_id)
         if len(records) > agent_brief.MAX_ISSUES:
             raise SemanticError(f"{path} exceeds the {agent_brief.MAX_ISSUES}-issue limit")
-    return records, hashlib.sha256(data).hexdigest()
+    return records, core_issues, hashlib.sha256(data).hexdigest()
 
 
 def load_semantic_issues(path: Path, base_loader: _BaseLoader) -> SemanticIssues:
-    before, before_sha256 = load_task_semantics(path)
+    before, expected_core, before_sha256 = load_task_semantics(path)
     issues = base_loader(path)
-    after, after_sha256 = load_task_semantics(path)
-    if before_sha256 != after_sha256 or before != after:
+    after, after_core, after_sha256 = load_task_semantics(path)
+    if (
+        before_sha256 != after_sha256
+        or before != after
+        or expected_core != after_core
+    ):
         raise SemanticError(f"{path} changed while the planning graph was being loaded")
-    issue_ids = set(issues)
-    semantic_ids = set(before)
-    if issue_ids != semantic_ids:
+    if issues != expected_core:
         raise SemanticError(
-            f"{path} semantic/core issue membership disagrees: "
-            f"semantic_only={sorted(semantic_ids - issue_ids)!r} "
-            f"core_only={sorted(issue_ids - semantic_ids)!r}"
+            f"{path} core projection disagrees with the stable task-semantic read"
         )
     return SemanticIssues(
         issues,
