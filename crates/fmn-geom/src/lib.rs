@@ -20,7 +20,8 @@
 //! `ImplicitFunction` rides (§7.7), and [`earclip`] the deterministic
 //! hole-support triangulator for booleans' flatten fallback and mesh export
 //! (§7.8, fm-81u). [`svg`] is the hardened user-SVG document processor
-//! (§7.6, fm-6nm) with an explicit accept/reject matrix.
+//! (§7.6, fm-6nm) with an explicit accept/reject matrix and a UTF-8-safe
+//! byte-admission facade before its tokenizer.
 #![forbid(unsafe_code)]
 
 pub mod arclength;
@@ -34,6 +35,7 @@ pub mod quadpath;
 pub mod rotation;
 pub mod smoothing;
 pub mod space_ops;
+#[path = "svg_safe.rs"]
 pub mod svg;
 
 mod scalar;
