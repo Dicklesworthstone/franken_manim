@@ -3,10 +3,11 @@
 
 ``agent_brief`` owns bounded ledger parsing and blocking-graph analysis. This
 module adds the narrower question an autonomous worker actually needs answered:
-which *unassigned dependency-ready leaf* is the best collision-free next claim?
-A non-epic parent with live ``parent-child`` descendants is a container, not a
-leaf. Among otherwise equal candidates, work that immediately releases more
-blocked issues wins deterministically.
+which *scoped, unassigned, dependency-ready leaf* is the best collision-free
+next claim? A non-epic parent with live ``parent-child`` descendants is a
+container, not a leaf. Unscoped work stays visible for human repair but can
+never be selected autonomously. Among otherwise equal candidates, work that
+immediately releases more blocked issues wins deterministically.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Any
 import agent_brief
 
 SCHEMA = "fmn.agent.next"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_PLAN_OUTPUT_BYTES = 4 * 1024 * 1024
 UTC = dt.timezone.utc
 
@@ -174,23 +175,35 @@ def build_plan(
         if issue.assignee is None
         and (issue.issue_type in agent_brief.NON_CLAIMABLE_TYPES or children.get(issue.id))
     ]
-    leaves = [
+    leaf_candidates = [
         issue
         for issue in dependency_ready
         if issue.assignee is None
         and issue.issue_type not in agent_brief.NON_CLAIMABLE_TYPES
         and not children.get(issue.id)
     ]
+    leaves = [issue for issue in leaf_candidates if issue.workstream != "UNSCOPED"]
+    unscoped_leaves = [issue for issue in leaf_candidates if issue.workstream == "UNSCOPED"]
+    unscoped_active = sorted(
+        (
+            issue
+            for issue in issues.values()
+            if issue.status == agent_brief.ACTIVE_STATUS
+            and issue.workstream == "UNSCOPED"
+        ),
+        key=agent_brief.issue_sort_key,
+    )
     active_workstreams = set(base["activation"]["active_workstreams"])
     base_integrity = base["integrity"]
     blocking_ok = bool(base_integrity["within_contract"])
     integrity = {
-        "ok": blocking_ok and not hierarchy_cycles,
+        "ok": blocking_ok and not hierarchy_cycles and not unscoped_active,
         "blocking_within_contract": blocking_ok,
         "blocking_cycles": base_integrity["blocking_cycles"],
         "containment_cycles": [list(component) for component in hierarchy_cycles],
         "missing_blockers": base_integrity["missing_blockers"],
         "missing_links": base_integrity["missing_links"],
+        "unscoped_active": [issue.id for issue in unscoped_active],
     }
 
     recommendation: agent_brief.Issue | None = None
@@ -199,11 +212,16 @@ def build_plan(
         reason = "blocking-graph integrity must be repaired before claiming work"
     elif hierarchy_cycles:
         reason = "parent-child containment cycles must be repaired before claiming work"
+    elif unscoped_active:
+        reason = "unscoped active claims must be scoped or released before claiming work"
     else:
         active_leaves = [issue for issue in leaves if issue.workstream in active_workstreams]
         candidates = active_leaves or leaves
         if not candidates:
-            reason = "no dependency-ready unassigned leaf exists"
+            if unscoped_leaves:
+                reason = "only unscoped leaves remain; add a governed workstream prefix before claiming"
+            else:
+                reason = "no dependency-ready unassigned leaf exists"
         elif not active_leaves and len(active_workstreams) >= activation_cap:
             reason = "activation cap is full and no claimable leaf belongs to an active workstream"
         else:
@@ -217,8 +235,6 @@ def build_plan(
             )
             if active_leaves:
                 reason = f"best leaf in already-active {recommendation.workstream}"
-            elif recommendation.workstream == "UNSCOPED":
-                reason = "best leaf is unscoped; verify governance before claiming"
             else:
                 reason = f"best leaf; claiming it activates {recommendation.workstream}"
             if immediate.get(recommendation.id, 0):
@@ -244,7 +260,6 @@ def build_plan(
 
     activates = bool(
         recommendation is not None
-        and recommendation.workstream != "UNSCOPED"
         and recommendation.workstream not in active_workstreams
     )
     sort = lambda issue: rank_key(issue, immediate=immediate, direct=direct)
@@ -261,6 +276,8 @@ def build_plan(
         },
         "counts": {
             "claimable_leaves": len(leaves),
+            "unscoped_leaves": len(unscoped_leaves),
+            "unscoped_active": len(unscoped_active),
             "assigned_ready": len(assigned),
             "ready_containers": len(containers),
             "non_epic_containers": sum(
@@ -269,6 +286,9 @@ def build_plan(
             "containment_cycles": len(hierarchy_cycles),
         },
         "claimable_leaves": [row(issue) for issue in sorted(leaves, key=sort)[:limit]],
+        "unscoped_leaves": [
+            row(issue) for issue in sorted(unscoped_leaves, key=sort)[:limit]
+        ],
         "ready_containers": [row(issue) for issue in sorted(containers, key=sort)[:limit]],
         "assigned_ready": [row(issue) for issue in sorted(assigned, key=sort)[:limit]],
     }
@@ -304,20 +324,27 @@ def render_markdown(plan: dict[str, Any]) -> str:
         ),
         f"- Recommended next: **{selected}** — {recommendation['reason']}.",
         (
-            f"- Queues: {plan['counts']['claimable_leaves']} claimable leaves, "
+            f"- Queues: {plan['counts']['claimable_leaves']} scoped claimable leaves, "
+            f"{plan['counts']['unscoped_leaves']} unscoped leaves, "
             f"{plan['counts']['ready_containers']} ready containers, "
             f"{plan['counts']['assigned_ready']} assigned-ready, "
             f"{plan['counts']['containment_cycles']} containment cycles."
         ),
         "",
         "A task with any live `parent-child` descendant is a container even when its issue type is not `epic`.",
+        "Unscoped issues are diagnostic state only and are never autonomous claim candidates.",
         "",
     ]
     for component in plan["integrity"]["containment_cycles"]:
         lines.append(
             "- Parent-child cycle: " + " → ".join(f"`{issue_id}`" for issue_id in component)
         )
-    if plan["integrity"]["containment_cycles"]:
+    for issue_id in plan["integrity"]["unscoped_active"]:
+        lines.append(f"- Unscoped active claim: `{issue_id}`")
+    if (
+        plan["integrity"]["containment_cycles"]
+        or plan["integrity"]["unscoped_active"]
+    ):
         lines.append("")
     return _bounded_output("\n".join(lines))
 
