@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import agent_brief
 import agent_claim_guard as guard
@@ -226,6 +227,38 @@ class AgentTaskSemanticsTests(unittest.TestCase):
 
         with self.assertRaisesRegex(semantics.SemanticError, "core projection disagrees"):
             semantics.load_semantic_issues(path, wrong_loader)
+
+    def test_semantic_prepass_enforces_the_global_dependency_budget(self) -> None:
+        child = record(
+            dependencies=[
+                {
+                    "issue_id": "fm-semantic",
+                    "depends_on_id": "fm-parent-a",
+                    "type": "related",
+                },
+                {
+                    "issue_id": "fm-semantic",
+                    "depends_on_id": "fm-parent-b",
+                    "type": "related",
+                },
+            ]
+        )
+        path = self.ledger(
+            [
+                child,
+                record("fm-parent-a", status="closed"),
+                record("fm-parent-b", status="closed"),
+            ]
+        )
+        with mock.patch.object(agent_brief, "MAX_DEPENDENCIES", 1):
+            with self.assertRaisesRegex(semantics.SemanticError, "1-dependency limit"):
+                semantics.load_task_semantics(path)
+
+    def test_descriptor_read_failures_are_typed_semantic_errors(self) -> None:
+        path = self.ledger([record()])
+        with mock.patch.object(semantics.os, "read", side_effect=OSError("injected read failure")):
+            with self.assertRaisesRegex(semantics.SemanticError, "cannot read.*injected"):
+                semantics.load_task_semantics(path)
 
 
 if __name__ == "__main__":
