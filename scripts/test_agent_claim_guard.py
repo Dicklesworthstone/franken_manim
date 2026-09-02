@@ -137,6 +137,56 @@ class AgentClaimGuardTests(unittest.TestCase):
             },
         )
 
+    def test_scope_policy_propagates_through_guard_and_token_publication(self) -> None:
+        unscoped = self.ledger(
+            [record("fm-unscoped", title="Maintenance without a workstream", priority=0)]
+        )
+        token = self.token(unscoped)
+        self.assertRegex(token, r"^v2:[0-9a-f]{64}:none$")
+        status, output, error = self.invoke(unscoped, "--require")
+        self.assertEqual(status, 3)
+        self.assertEqual(output, "")
+        self.assertIn("no claimable recommendation", error)
+
+        governed = self.ledger(
+            [
+                record(
+                    "fm-g0-active",
+                    title="G0: active",
+                    status="in_progress",
+                    assignee="agent",
+                ),
+                record("fm-g0-next", title="G0: next", priority=4),
+                record("fm-w11", title="W11: new stream", priority=1),
+                record("fm-w12", title="W12: invalid", priority=0),
+            ]
+        )
+        token = self.token(governed, "--require")
+        self.assertTrue(token.endswith(":fm-g0-next"))
+        status, output, error = self.invoke(governed, "--format", "json", "--require")
+        self.assertEqual(status, 0)
+        self.assertEqual(error, "")
+        payload = json.loads(output)
+        self.assertEqual(payload["recommendation_id"], "fm-g0-next")
+        self.assertEqual(payload["activation"]["active_workstreams"], ["G0"])
+        self.assertEqual(payload["schemas"]["agent_next"]["version"], 4)
+
+        invalid = self.ledger(
+            [
+                record(
+                    "fm-unscoped-active",
+                    title="Maintenance without a workstream",
+                    status="in_progress",
+                    assignee="agent",
+                ),
+                record("fm-scoped", title="W10: governed"),
+            ]
+        )
+        status, output, error = self.invoke(invalid, "--format", "json")
+        self.assertEqual(status, 1)
+        self.assertEqual(output, "")
+        self.assertIn("task-graph integrity failed", error)
+
     def test_any_authoritative_graph_change_invalidates_the_token(self) -> None:
         path = self.ledger([record("fm-next", comments=[{"text": "first"}])])
         token = self.token(path)
