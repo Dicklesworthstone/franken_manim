@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -23,13 +24,28 @@ from typing import Any
 import agent_brief
 
 SCHEMA = "fmn.agent.next"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_PLAN_OUTPUT_BYTES = 4 * 1024 * 1024
 UTC = dt.timezone.utc
+UNSCOPED = "UNSCOPED"
+GOVERNED_WORKSTREAM_RE = re.compile(
+    r"^(?:(?P<g0>G0)|W(?P<number>[1-9]|1[01]))(?:\b|:)"
+)
 
 
 class PlanError(ValueError):
     pass
+
+
+def governed_workstream(issue: agent_brief.Issue) -> str:
+    """Return the exact governance workstream encoded by an issue title."""
+
+    match = GOVERNED_WORKSTREAM_RE.match(issue.title)
+    if match is None:
+        return UNSCOPED
+    if match.group("g0") is not None:
+        return "G0"
+    return f"W{match.group('number')}"
 
 
 def live_children(issues: dict[str, agent_brief.Issue]) -> dict[str, tuple[str, ...]]:
@@ -139,7 +155,7 @@ def rank_key(
         issue.priority,
         -immediate.get(issue.id, 0),
         -direct.get(issue.id, 0),
-        1 if issue.workstream == "UNSCOPED" else 0,
+        1 if governed_workstream(issue) == UNSCOPED else 0,
         -issue.updated_at.timestamp(),
         issue.id,
     )
@@ -182,18 +198,31 @@ def build_plan(
         and issue.issue_type not in agent_brief.NON_CLAIMABLE_TYPES
         and not children.get(issue.id)
     ]
-    leaves = [issue for issue in leaf_candidates if issue.workstream != "UNSCOPED"]
-    unscoped_leaves = [issue for issue in leaf_candidates if issue.workstream == "UNSCOPED"]
+    leaves = [issue for issue in leaf_candidates if governed_workstream(issue) != UNSCOPED]
+    unscoped_leaves = [
+        issue for issue in leaf_candidates if governed_workstream(issue) == UNSCOPED
+    ]
     unscoped_active = sorted(
         (
             issue
             for issue in issues.values()
             if issue.status == agent_brief.ACTIVE_STATUS
-            and issue.workstream == "UNSCOPED"
+            and governed_workstream(issue) == UNSCOPED
         ),
         key=agent_brief.issue_sort_key,
     )
-    active_workstreams = set(base["activation"]["active_workstreams"])
+    active_workstreams = {
+        governed_workstream(issue)
+        for issue in issues.values()
+        if issue.status == agent_brief.ACTIVE_STATUS
+        and governed_workstream(issue) != UNSCOPED
+    }
+    activation = {
+        "cap": activation_cap,
+        "active_workstreams": sorted(active_workstreams),
+        "count": len(active_workstreams),
+        "within_cap": len(active_workstreams) <= activation_cap,
+    }
     base_integrity = base["integrity"]
     blocking_ok = bool(base_integrity["within_contract"])
     integrity = {
@@ -215,7 +244,9 @@ def build_plan(
     elif unscoped_active:
         reason = "unscoped active claims must be scoped or released before claiming work"
     else:
-        active_leaves = [issue for issue in leaves if issue.workstream in active_workstreams]
+        active_leaves = [
+            issue for issue in leaves if governed_workstream(issue) in active_workstreams
+        ]
         candidates = active_leaves or leaves
         if not candidates:
             if unscoped_leaves:
@@ -234,9 +265,9 @@ def build_plan(
                 ),
             )
             if active_leaves:
-                reason = f"best leaf in already-active {recommendation.workstream}"
+                reason = f"best leaf in already-active {governed_workstream(recommendation)}"
             else:
-                reason = f"best leaf; claiming it activates {recommendation.workstream}"
+                reason = f"best leaf; claiming it activates {governed_workstream(recommendation)}"
             if immediate.get(recommendation.id, 0):
                 reason += (
                     f"; completion immediately unblocks {immediate[recommendation.id]} live issue(s)"
@@ -248,7 +279,7 @@ def build_plan(
         return {
             "id": issue.id,
             "priority": issue.priority,
-            "workstream": issue.workstream,
+            "workstream": governed_workstream(issue),
             "issue_type": issue.issue_type,
             "assignee": issue.assignee,
             "updated_at": issue.updated_at.isoformat().replace("+00:00", "Z"),
@@ -260,7 +291,7 @@ def build_plan(
 
     activates = bool(
         recommendation is not None
-        and recommendation.workstream not in active_workstreams
+        and governed_workstream(recommendation) not in active_workstreams
     )
     sort = lambda issue: rank_key(issue, immediate=immediate, direct=direct)
     return {
@@ -268,7 +299,7 @@ def build_plan(
         "version": SCHEMA_VERSION,
         "as_of": as_of.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "integrity": integrity,
-        "activation": base["activation"],
+        "activation": activation,
         "recommendation": {
             "issue": row(recommendation) if recommendation is not None else None,
             "reason": reason,
