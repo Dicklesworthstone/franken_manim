@@ -2,11 +2,11 @@
 """Issue a graph-and-policy-bound token for one autonomous Beads claim.
 
 ``agent_next`` answers which leaf is the best next claim. This command binds
-that answer to the complete parsed task graph, the planner output, and every
-policy/schema input that can affect the recommendation. An agent can therefore
-revalidate the token immediately before mutating Beads. The token is a
-compare-before-set guard, not a lease: current file reservations, assignees,
-and coordinating messages still need inspection.
+that answer to the complete parsed task graph, the planner output, every
+persisted task-semantic field, and every policy/schema input that can affect the
+recommendation. An agent can therefore revalidate the token immediately before
+mutating Beads. The token is a compare-before-set guard, not a lease: current
+file reservations, assignees, and coordinating messages still need inspection.
 """
 
 from __future__ import annotations
@@ -21,14 +21,15 @@ from typing import Any
 
 import agent_brief
 import agent_next
+import agent_task_semantics
 
 SCHEMA = "fmn.agent.claim-guard"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TOKEN_VERSION = "v2"
 CLAIM_INPUT_SCHEMA = "fmn.agent.claim-input"
-CLAIM_INPUT_VERSION = 2
+CLAIM_INPUT_VERSION = 3
 CLAIM_GRAPH_SCHEMA = "fmn.agent.claim-graph"
-CLAIM_GRAPH_VERSION = 2
+CLAIM_GRAPH_VERSION = 3
 RESERVED_ISSUE_ID = "none"
 MAX_OUTPUT_BYTES = 1024 * 1024
 TOKEN_RE = re.compile(r"^v2:(?P<digest>[0-9a-f]{64}):(?P<issue>[^:\s]+)$")
@@ -36,6 +37,9 @@ TOKEN_RE = re.compile(r"^v2:(?P<digest>[0-9a-f]{64}):(?P<issue>[^:\s]+)$")
 
 class GuardError(ValueError):
     pass
+
+
+agent_task_semantics.install_loader()
 
 
 def canonical_json(value: Any) -> bytes:
@@ -47,9 +51,12 @@ def canonical_json(value: Any) -> bytes:
             sort_keys=True,
             separators=(",", ":"),
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise GuardError(f"claim input cannot be canonically encoded: {exc}") from exc
-    return rendered.encode("utf-8")
+    try:
+        return rendered.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise GuardError(f"claim input contains an unpaired Unicode surrogate: {exc}") from exc
 
 
 def canonical_graph(issues: dict[str, agent_brief.Issue]) -> dict[str, Any]:
@@ -57,6 +64,10 @@ def canonical_graph(issues: dict[str, agent_brief.Issue]) -> dict[str, Any]:
         raise GuardError(
             f"issue id {RESERVED_ISSUE_ID!r} is reserved for the no-recommendation token sentinel"
         )
+    try:
+        task_semantics = agent_task_semantics.semantics_for(issues)
+    except agent_task_semantics.SemanticError as exc:
+        raise GuardError(str(exc)) from exc
     rows: list[dict[str, Any]] = []
     for issue_id in sorted(issues):
         issue = issues[issue_id]
@@ -82,6 +93,7 @@ def canonical_graph(issues: dict[str, agent_brief.Issue]) -> dict[str, Any]:
                 "updated_at": issue.updated_at.isoformat().replace("+00:00", "Z"),
                 "dependencies": dependencies,
                 "comments": list(issue.comments),
+                "task_semantics": task_semantics[issue_id],
             }
         )
     return {
@@ -96,6 +108,10 @@ def digest(value: Any) -> str:
 
 
 def graph_digest(issues: dict[str, agent_brief.Issue]) -> str:
+    try:
+        agent_task_semantics.verify_remembered_semantics(issues)
+    except agent_task_semantics.SemanticError as exc:
+        raise GuardError(str(exc)) from exc
     return digest(canonical_graph(issues))
 
 
@@ -110,6 +126,10 @@ def schema_contract() -> dict[str, Any]:
         "agent_next": {
             "schema": agent_next.SCHEMA,
             "version": agent_next.SCHEMA_VERSION,
+        },
+        "task_semantics": {
+            "schema": agent_task_semantics.SCHEMA,
+            "version": agent_task_semantics.SCHEMA_VERSION,
         },
         "claim_graph": {
             "schema": CLAIM_GRAPH_SCHEMA,
@@ -200,6 +220,10 @@ def build_guard(
     claim_sha256 = digest(input_document)
     selected = recommendation_id(plan)
     token = make_token(claim_sha256, selected)
+    try:
+        agent_task_semantics.remember_semantics(issues)
+    except agent_task_semantics.SemanticError as exc:
+        raise GuardError(str(exc)) from exc
     return {
         "schema": SCHEMA,
         "version": SCHEMA_VERSION,
