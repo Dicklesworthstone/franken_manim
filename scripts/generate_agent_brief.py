@@ -5,8 +5,8 @@ The Beads JSONL ledger remains authoritative. This command derives
 ``docs/AGENT_BRIEF.md`` from that ledger using the newest issue timestamp as
 ``as_of``; wall-clock time never enters the artifact, so identical ledger bytes
 produce identical Markdown. Broad situational context and the leaf planner are
-computed from the same parsed graph, but only the leaf section is a claim
-contract.
+computed from the same parsed graph and governed-scope classifier, but only the
+leaf section is a claim contract.
 """
 
 from __future__ import annotations
@@ -37,82 +37,29 @@ def ledger_as_of(issues: dict[str, agent_brief.Issue]):
     return max(issue.updated_at for issue in issues.values())
 
 
-def _context_row(
-    issue: agent_brief.Issue,
-    issues: dict[str, agent_brief.Issue],
-) -> dict[str, Any]:
-    return {
-        "id": issue.id,
-        "priority": issue.priority,
-        "status": issue.status,
-        "issue_type": issue.issue_type,
-        "workstream": agent_next.governed_workstream(issue),
-        "assignee": issue.assignee,
-        "updated_at": issue.updated_at.isoformat().replace("+00:00", "Z"),
-        "title": agent_brief.compact_title(issue.title),
-        "blockers": list(agent_brief.unresolved_blockers(issue, issues)),
-        "latest_comment": agent_brief.latest_comment(issue),
-    }
+def validate_snapshot_scope(snapshot: dict[str, Any], plan: dict[str, Any]) -> None:
+    """Fail closed if broad and claim projections disagree on governed scope."""
 
-
-def normalize_snapshot_scope(
-    snapshot: dict[str, Any],
-    issues: dict[str, agent_brief.Issue],
-    plan: dict[str, Any],
-    *,
-    limit: int,
-) -> None:
-    """Make the human projection use the planner's exact scope vocabulary."""
-
-    for queue_name in (
-        "active",
-        "ready",
-        "assigned_ready",
-        "container_ready",
-        "blocked",
-        "stale_claims",
-        "unowned_active",
-        "unscoped_active",
-    ):
-        for row in snapshot.get(queue_name, ()):
-            issue = issues.get(row["id"])
-            if issue is not None:
-                row["workstream"] = agent_next.governed_workstream(issue)
-
-    strict_unscoped = sorted(
-        (
-            issue
-            for issue in issues.values()
-            if issue.status == agent_brief.ACTIVE_STATUS
-            and agent_next.governed_workstream(issue) == agent_next.UNSCOPED
-        ),
-        key=agent_brief.issue_sort_key,
-    )
-    snapshot["unscoped_active"] = [
-        _context_row(issue, issues) for issue in strict_unscoped[:limit]
-    ]
-    snapshot["counts"]["unscoped_active"] = len(strict_unscoped)
-    snapshot["activation"] = plan["activation"]
+    if snapshot["activation"] != plan["activation"]:
+        raise GenerateError("broad snapshot and claim planner disagree on activation scope")
+    broad_unscoped = sorted(row["id"] for row in snapshot["unscoped_active"])
+    plan_unscoped = sorted(plan["integrity"]["unscoped_active"])
+    if broad_unscoped != plan_unscoped:
+        raise GenerateError("broad snapshot and claim planner disagree on unscoped active claims")
 
     situational = snapshot["situational_priority"]
     broad_issue = situational["issue"]
-    if broad_issue is not None:
-        issue = issues.get(broad_issue["id"])
-        if issue is not None:
-            workstream = agent_next.governed_workstream(issue)
-            if workstream == agent_next.UNSCOPED:
-                situational.update(
-                    {
-                        "issue": None,
-                        "reason": (
-                            "the highest-priority broad-ready candidate is unscoped; "
-                            "scope it before prioritization"
-                        ),
-                        "activates_workstream": False,
-                    }
-                )
-            else:
-                broad_issue["workstream"] = workstream
+    if broad_issue is not None and broad_issue["workstream"] == agent_brief.UNSCOPED:
+        situational.update(
+            {
+                "issue": None,
+                "reason": (
+                    "the highest-priority broad-ready candidate is unscoped; "
+                    "scope it before prioritization"
+                ),
+                "activates_workstream": False,
+            }
+        )
 
 
 def validate_plan_for_publication(plan: dict[str, Any]) -> None:
@@ -186,8 +133,8 @@ def build_document(
         limit=limit,
     )
     validate_plan_for_publication(plan)
+    validate_snapshot_scope(snapshot, plan)
     snapshot["claim_plan"] = plan
-    normalize_snapshot_scope(snapshot, issues, plan, limit=limit)
     broad = agent_brief.render_markdown(snapshot).rstrip("\n")
     marker = "\n## Active claims\n"
     if marker not in broad:
