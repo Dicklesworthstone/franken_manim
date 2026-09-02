@@ -24,7 +24,7 @@ import agent_next
 import agent_task_semantics
 
 SCHEMA = "fmn.agent.claim-guard"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 2
 TOKEN_VERSION = "v2"
 CLAIM_INPUT_SCHEMA = "fmn.agent.claim-input"
 CLAIM_INPUT_VERSION = 3
@@ -126,10 +126,6 @@ def schema_contract() -> dict[str, Any]:
         "agent_next": {
             "schema": agent_next.SCHEMA,
             "version": agent_next.SCHEMA_VERSION,
-        },
-        "task_semantics": {
-            "schema": agent_task_semantics.SCHEMA,
-            "version": agent_task_semantics.SCHEMA_VERSION,
         },
         "claim_graph": {
             "schema": CLAIM_GRAPH_SCHEMA,
