@@ -76,7 +76,7 @@ class SemanticIssues(dict[str, agent_brief.Issue]):
 
 
 _BaseLoader = Callable[[Path], dict[str, agent_brief.Issue]]
-_expected_semantics: contextvars.ContextVar[dict[str, str] | None] = (
+_expected_semantics: contextvars.ContextVar[tuple[str, dict[str, str]] | None] = (
     contextvars.ContextVar("fmn_expected_task_semantics", default=None)
 )
 
@@ -339,21 +339,27 @@ def semantics_for(issues: dict[str, agent_brief.Issue]) -> dict[str, dict[str, A
     }
 
 
+def _ledger_identity(path: Path) -> str:
+    return os.path.abspath(os.fspath(path))
+
+
 def remember_semantics(issues: dict[str, agent_brief.Issue]) -> None:
     if isinstance(issues, SemanticIssues):
-        _expected_semantics.set(
-            {
-                issue_id: _canonical_json(semantic)
-                for issue_id, semantic in semantics_for(issues).items()
-            }
-        )
+        canonical = {
+            issue_id: _canonical_json(semantic)
+            for issue_id, semantic in semantics_for(issues).items()
+        }
+        _expected_semantics.set((_ledger_identity(issues.ledger_path), canonical))
     else:
         _expected_semantics.set(None)
 
 
 def verify_remembered_semantics(issues: dict[str, agent_brief.Issue]) -> None:
-    expected = _expected_semantics.get()
-    if expected is None or not isinstance(issues, SemanticIssues):
+    expected_state = _expected_semantics.get()
+    if expected_state is None or not isinstance(issues, SemanticIssues):
+        return
+    expected_path, expected = expected_state
+    if _ledger_identity(issues.ledger_path) != expected_path:
         return
     actual = {
         issue_id: _canonical_json(semantic)
