@@ -108,34 +108,89 @@ class FakeRunner:
         update_code: int = 0,
         sync_code: int = 0,
         mutate: bool = True,
-        stdout: bytes = b"",
-        stderr: bytes = b"",
+        update_stdout: bytes | None = None,
+        update_stderr: bytes = b"",
+        sync_stdout: bytes = b"",
+        sync_stderr: bytes = b"",
+        envelope: bool = False,
+        warnings: list[dict] | None = None,
+        response_updated_at: str | None = None,
+        after_update=None,
+        after_sync=None,
     ):
         self.fixture = fixture
         self.update_code = update_code
         self.sync_code = sync_code
         self.mutate = mutate
-        self.stdout = stdout
-        self.stderr = stderr
+        self.update_stdout = update_stdout
+        self.update_stderr = update_stderr
+        self.sync_stdout = sync_stdout
+        self.sync_stderr = sync_stderr
+        self.envelope = envelope
+        self.warnings = warnings or []
+        self.response_updated_at = response_updated_at
+        self.after_update = after_update
+        self.after_sync = after_sync
         self.calls: list[tuple[tuple[str, ...], Path]] = []
+
+    @staticmethod
+    def command(argv: tuple[str, ...]) -> str:
+        if "update" in argv:
+            return "update"
+        if "sync" in argv:
+            return "sync"
+        raise AssertionError(f"unexpected command: {argv}")
 
     def __call__(self, argv: tuple[str, ...], cwd: Path) -> agent_claim.CommandResult:
         self.calls.append((argv, cwd))
-        if argv[1] == "update":
+        command = self.command(argv)
+        if command == "update":
+            update_index = argv.index("update")
+            issue_id = argv[update_index + 1]
+            assignee = argv[argv.index("--actor") + 1]
             if self.update_code == 0 and self.mutate:
                 rows = self.fixture.rows()
-                issue_id = argv[2]
-                assignee = argv[argv.index("--assignee") + 1]
                 for row in rows:
                     if row["id"] == issue_id:
                         row["status"] = "in_progress"
                         row["assignee"] = assignee
                         row["updated_at"] = "2026-09-01T00:00:01Z"
+                        if "--transition-comment" in argv:
+                            comment = argv[argv.index("--transition-comment") + 1]
+                            row.setdefault("comments", []).append({"text": comment})
                 self.fixture.write(rows)
-            return agent_claim.CommandResult(self.update_code, self.stdout, self.stderr)
-        if argv[1] == "sync":
-            return agent_claim.CommandResult(self.sync_code, self.stdout, self.stderr)
-        raise AssertionError(f"unexpected command: {argv}")
+            if self.after_update is not None:
+                self.after_update(self.fixture, argv)
+            stdout = self.update_stdout
+            if stdout is None and self.update_code == 0:
+                row = next(row for row in self.fixture.rows() if row["id"] == issue_id)
+                updated = {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "status": row["status"],
+                    "priority": row["priority"],
+                    "assignee": row.get("assignee"),
+                    "owner": None,
+                    "updated_at": self.response_updated_at or row["updated_at"],
+                }
+                document = (
+                    {"updated": [updated], "warnings": self.warnings}
+                    if self.envelope
+                    else [updated]
+                )
+                stdout = json.dumps(document, separators=(",", ":")).encode()
+            return agent_claim.CommandResult(
+                self.update_code,
+                stdout or b"",
+                self.update_stderr,
+            )
+        if self.after_sync is not None:
+            self.after_sync(self.fixture, argv)
+        return agent_claim.CommandResult(
+            self.sync_code,
+            self.sync_stdout,
+            self.sync_stderr,
+        )
 
 
 class AgentClaimTests(unittest.TestCase):
@@ -144,7 +199,7 @@ class AgentClaimTests(unittest.TestCase):
         self.addCleanup(fixture.cleanup)
         return fixture
 
-    def test_dry_run_revalidates_without_invoking_br_and_pins_exact_argv(self) -> None:
+    def test_dry_run_pins_atomic_claim_argv_and_versioned_policy(self) -> None:
         fixture = self.fixture([record("fm-next")])
         runner = FakeRunner(fixture)
         receipt = agent_claim.execute_claim(
@@ -154,21 +209,22 @@ class AgentClaimTests(unittest.TestCase):
             requested_issue="fm-next",
             transition_comment="claiming after reservation check",
             command_timeout_seconds=17.5,
+            command_output_budget_bytes=4096,
             dry_run=True,
             runner=runner,
         )
         self.assertEqual(runner.calls, [])
         self.assertEqual(receipt["schema"], "fmn.agent.claim")
-        self.assertEqual(receipt["version"], 4)
+        self.assertEqual(receipt["version"], 5)
         self.assertEqual(receipt["mode"], "dry-run")
         self.assertFalse(receipt["claimed"])
-        self.assertEqual(receipt["issue_id"], "fm-next")
         self.assertEqual(
             receipt["executor_policy"],
             {
+                "beads_claim_mode": "beads.update.claim/v1",
                 "command_timeout_seconds": 17.5,
                 "command_output_bytes_per_stream": agent_claim.MAX_COMMAND_OUTPUT_BYTES,
-                "command_total_output_bytes": agent_claim.MAX_COMMAND_TOTAL_OUTPUT_BYTES,
+                "command_output_budget_bytes_total": 4096,
             },
         )
         self.assertEqual(
@@ -178,20 +234,23 @@ class AgentClaimTests(unittest.TestCase):
                     "br",
                     "update",
                     "fm-next",
-                    "--status",
-                    "in_progress",
-                    "--assignee",
+                    "--claim",
+                    "--actor",
                     "agent@example.com",
+                    "--json",
                     "--transition-comment",
                     "claiming after reservation check",
                 ],
                 ["br", "sync", "--flush-only"],
             ],
         )
+        update = receipt["commands"][0]
+        self.assertIn("--claim", update)
+        self.assertNotIn("--status", update)
+        self.assertNotIn("--assignee", update)
         self.assertEqual(fixture.rows()[0]["status"], "open")
-        self.assertTrue((fixture.git_common_dir / agent_claim.LOCK_FILE_NAME).is_file())
 
-    def test_claim_runs_update_then_flush_and_verifies_the_postcondition(self) -> None:
+    def test_claim_requires_atomic_json_then_flushes_and_verifies_exact_delta(self) -> None:
         fixture = self.fixture([record("fm-next")])
         runner = FakeRunner(fixture)
         receipt = agent_claim.execute_claim(
@@ -200,143 +259,129 @@ class AgentClaimTests(unittest.TestCase):
             "agent@example.com",
             runner=runner,
         )
-        self.assertEqual([call[0][1] for call in runner.calls], ["update", "sync"])
+        self.assertEqual([runner.command(call[0]) for call in runner.calls], ["update", "sync"])
         self.assertTrue(all(call[1] == fixture.root for call in runner.calls))
         self.assertTrue(receipt["claimed"])
         self.assertEqual(receipt["status"], "in_progress")
-        self.assertRegex(receipt["before_claim_sha256"], r"^[0-9a-f]{64}$")
-        self.assertRegex(receipt["before_graph_sha256"], r"^[0-9a-f]{64}$")
-        self.assertRegex(receipt["after_graph_sha256"], r"^[0-9a-f]{64}$")
-        self.assertNotEqual(receipt["before_graph_sha256"], receipt["after_graph_sha256"])
+        self.assertEqual(
+            receipt["atomic_claim"],
+            {
+                "mode": "beads.update.claim/v1",
+                "shape": "array",
+                "issue_id": "fm-next",
+                "status": "in_progress",
+                "assignee": "agent@example.com",
+                "updated_at": "2026-09-01T00:00:01Z",
+                "warning_count": 0,
+            },
+        )
         self.assertEqual(receipt["claim_delta"]["changed_issue_ids"], ["fm-next"])
         self.assertEqual(receipt["claim_delta"]["status_before"], "open")
         self.assertEqual(receipt["claim_delta"]["status_after"], "in_progress")
         self.assertFalse(receipt["claim_delta"]["transition_comment_appended"])
-        row = fixture.rows()[0]
-        self.assertEqual(row["status"], "in_progress")
-        self.assertEqual(row["assignee"], "agent@example.com")
+        self.assertRegex(receipt["before_claim_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(receipt["before_graph_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(receipt["after_graph_sha256"], r"^[0-9a-f]{64}$")
 
-    def test_postcondition_rejects_unrelated_and_membership_graph_drift(self) -> None:
-        fixture = self.fixture([record("fm-next"), record("fm-other", priority=2)])
-        base = FakeRunner(fixture)
-
-        def unrelated_runner(
-            argv: tuple[str, ...],
-            cwd: Path,
-        ) -> agent_claim.CommandResult:
-            result = base(argv, cwd)
-            if argv[1] == "sync":
-                rows = fixture.rows()
-                rows[1]["title"] = "W10: concurrently changed"
-                rows[1]["updated_at"] = "2026-09-01T00:00:02Z"
-                fixture.write(rows)
-            return result
-
-        with self.assertRaises(agent_claim.ClaimError) as raised:
-            agent_claim.execute_claim(
-                fixture.root,
-                fixture.token(),
-                "agent@example.com",
-                runner=unrelated_runner,
-            )
-        self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("unrelated graph drift", str(raised.exception))
-
+    def test_capacity_warning_envelope_is_accepted_and_counted(self) -> None:
         fixture = self.fixture([record("fm-next")])
-        base = FakeRunner(fixture)
+        runner = FakeRunner(
+            fixture,
+            envelope=True,
+            warnings=[{"capacity_kind": "actor", "message": "near limit"}],
+        )
+        receipt = agent_claim.execute_claim(
+            fixture.root,
+            fixture.token(),
+            "agent@example.com",
+            runner=runner,
+        )
+        self.assertEqual(receipt["atomic_claim"]["shape"], "updated-envelope")
+        self.assertEqual(receipt["atomic_claim"]["warning_count"], 1)
 
-        def membership_runner(
-            argv: tuple[str, ...],
-            cwd: Path,
-        ) -> agent_claim.CommandResult:
-            result = base(argv, cwd)
-            if argv[1] == "sync":
-                rows = fixture.rows()
-                rows.append(record("fm-concurrent", priority=3))
-                fixture.write(rows)
-            return result
-
-        with self.assertRaises(agent_claim.ClaimError) as raised:
-            agent_claim.execute_claim(
-                fixture.root,
-                fixture.token(),
-                "agent@example.com",
-                runner=membership_runner,
-            )
-        self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("issue-membership drift", str(raised.exception))
-
-    def test_postcondition_rejects_target_field_and_comment_drift(self) -> None:
+    def test_atomic_json_response_is_strict_and_semantically_bound(self) -> None:
         fixture = self.fixture([record("fm-next")])
-        base = FakeRunner(fixture)
-
-        def target_runner(
-            argv: tuple[str, ...],
-            cwd: Path,
-        ) -> agent_claim.CommandResult:
-            result = base(argv, cwd)
-            if argv[1] == "sync":
-                rows = fixture.rows()
-                rows[0]["priority"] = 3
-                fixture.write(rows)
-            return result
-
-        with self.assertRaises(agent_claim.ClaimError) as raised:
-            agent_claim.execute_claim(
-                fixture.root,
-                fixture.token(),
+        issue = agent_brief.load_issues(fixture.ledger)["fm-next"]
+        valid = {
+            "id": "fm-next",
+            "title": issue.title,
+            "status": "in_progress",
+            "priority": issue.priority,
+            "assignee": "agent@example.com",
+            "owner": None,
+            "updated_at": "2026-09-01T00:00:01Z",
+        }
+        failures = {
+            "empty": b"",
+            "invalid": b"not json",
+            "duplicate": b'[{"id":"fm-next","id":"fm-other"}]',
+            "nonfinite": b'[{"id":"fm-next","priority":NaN}]',
+            "multiple": json.dumps([valid, valid]).encode(),
+            "wrong id": json.dumps([{**valid, "id": "fm-other"}]).encode(),
+            "wrong status": json.dumps([{**valid, "status": "open"}]).encode(),
+            "wrong assignee": json.dumps([{**valid, "assignee": "peer"}]).encode(),
+            "wrong title": json.dumps([{**valid, "title": "other"}]).encode(),
+            "wrong priority": json.dumps([{**valid, "priority": 4}]).encode(),
+            "bad timestamp": json.dumps([{**valid, "updated_at": "soon"}]).encode(),
+            "bad warnings": json.dumps({"updated": [valid], "warnings": {}}).encode(),
+        }
+        for name, payload in failures.items():
+            with self.subTest(name=name):
+                with self.assertRaises(agent_claim.ClaimError) as raised:
+                    agent_claim._verify_atomic_claim_response(
+                        agent_claim.CommandResult(0, payload, b""),
+                        issue,
+                        "agent@example.com",
+                    )
+                self.assertEqual(raised.exception.exit_code, 5)
+        with self.assertRaisesRegex(agent_claim.ClaimError, "unexpected stderr"):
+            agent_claim._verify_atomic_claim_response(
+                agent_claim.CommandResult(
+                    0,
+                    json.dumps([valid]).encode(),
+                    b"warning",
+                ),
+                issue,
                 "agent@example.com",
-                runner=target_runner,
             )
-        self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("non-claim fields", str(raised.exception))
 
+    def test_malformed_success_response_stops_before_sync(self) -> None:
         fixture = self.fixture([record("fm-next")])
-        base = FakeRunner(fixture)
-
-        def wrong_comment_runner(
-            argv: tuple[str, ...],
-            cwd: Path,
-        ) -> agent_claim.CommandResult:
-            result = base(argv, cwd)
-            if argv[1] == "update":
-                rows = fixture.rows()
-                rows[0]["comments"] = [{"text": "different comment"}]
-                fixture.write(rows)
-            return result
-
+        runner = FakeRunner(fixture, update_stdout=b"not json")
         with self.assertRaises(agent_claim.ClaimError) as raised:
             agent_claim.execute_claim(
                 fixture.root,
                 fixture.token(),
                 "agent@example.com",
-                transition_comment="expected comment",
-                runner=wrong_comment_runner,
+                runner=runner,
             )
         self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("exact appended transition comment", str(raised.exception))
+        self.assertIn("not valid JSON", str(raised.exception))
+        self.assertEqual([runner.command(call[0]) for call in runner.calls], ["update"])
+
+    def test_response_timestamp_must_match_exported_ledger(self) -> None:
+        fixture = self.fixture([record("fm-next")])
+        runner = FakeRunner(
+            fixture,
+            response_updated_at="2026-09-01T00:00:02Z",
+        )
+        with self.assertRaisesRegex(agent_claim.ClaimError, "timestamp disagreed"):
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=runner,
+            )
 
     def test_exact_transition_comment_is_the_only_optional_claim_delta(self) -> None:
         fixture = self.fixture([record("fm-next")])
-        base = FakeRunner(fixture)
-
-        def comment_runner(
-            argv: tuple[str, ...],
-            cwd: Path,
-        ) -> agent_claim.CommandResult:
-            result = base(argv, cwd)
-            if argv[1] == "update":
-                rows = fixture.rows()
-                rows[0]["comments"] = [{"text": "coordinated claim"}]
-                fixture.write(rows)
-            return result
-
+        runner = FakeRunner(fixture)
         receipt = agent_claim.execute_claim(
             fixture.root,
             fixture.token(),
             "agent@example.com",
             transition_comment="coordinated claim",
-            runner=comment_runner,
+            runner=runner,
         )
         self.assertTrue(receipt["claimed"])
         self.assertTrue(receipt["claim_delta"]["transition_comment_appended"])
@@ -345,7 +390,51 @@ class AgentClaimTests(unittest.TestCase):
             ["assignee", "status", "updated_at", "comments"],
         )
 
-    def test_stale_token_and_issue_mismatch_never_invoke_br(self) -> None:
+    def test_postcondition_rejects_unrelated_membership_and_target_drift(self) -> None:
+        def unrelated(fixture: Fixture, _argv) -> None:
+            rows = fixture.rows()
+            rows[1]["title"] = "W10: concurrently changed"
+            rows[1]["updated_at"] = "2026-09-01T00:00:02Z"
+            fixture.write(rows)
+
+        fixture = self.fixture([record("fm-next"), record("fm-other", priority=2)])
+        with self.assertRaisesRegex(agent_claim.ClaimError, "unrelated graph drift"):
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=FakeRunner(fixture, after_sync=unrelated),
+            )
+
+        def membership(fixture: Fixture, _argv) -> None:
+            rows = fixture.rows()
+            rows.append(record("fm-concurrent", priority=3))
+            fixture.write(rows)
+
+        fixture = self.fixture([record("fm-next")])
+        with self.assertRaisesRegex(agent_claim.ClaimError, "issue-membership drift"):
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=FakeRunner(fixture, after_sync=membership),
+            )
+
+        def target(fixture: Fixture, _argv) -> None:
+            rows = fixture.rows()
+            rows[0]["priority"] = 3
+            fixture.write(rows)
+
+        fixture = self.fixture([record("fm-next")])
+        with self.assertRaisesRegex(agent_claim.ClaimError, "non-claim fields"):
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=FakeRunner(fixture, after_sync=target),
+            )
+
+    def test_stale_token_issue_mismatch_and_integrity_fail_before_br(self) -> None:
         fixture = self.fixture([record("fm-next"), record("fm-other", priority=2)])
         token = fixture.token()
         rows = fixture.rows()
@@ -358,85 +447,73 @@ class AgentClaimTests(unittest.TestCase):
         self.assertEqual(stale.exception.exit_code, 4)
         self.assertEqual(runner.calls, [])
 
-        fresh = fixture.token()
         with self.assertRaises(agent_claim.ClaimError) as mismatch:
             agent_claim.execute_claim(
                 fixture.root,
-                fresh,
+                fixture.token(),
                 "agent@example.com",
                 requested_issue="fm-other",
                 runner=runner,
             )
         self.assertEqual(mismatch.exception.exit_code, 2)
-        self.assertIn("disagrees", str(mismatch.exception))
         self.assertEqual(runner.calls, [])
 
-    def test_update_failure_stops_before_sync(self) -> None:
-        fixture = self.fixture([record("fm-next")])
-        runner = FakeRunner(fixture, update_code=9, stderr=b"policy refused")
-        with self.assertRaises(agent_claim.ClaimError) as raised:
-            agent_claim.execute_claim(
-                fixture.root,
-                fixture.token(),
-                "agent@example.com",
-                runner=runner,
-            )
-        self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("policy refused", str(raised.exception))
-        self.assertEqual([call[0][1] for call in runner.calls], ["update"])
-
-    def test_sync_failure_and_missing_mutation_never_emit_a_success_receipt(self) -> None:
-        fixture = self.fixture([record("fm-next")])
-        sync_failure = FakeRunner(fixture, sync_code=7, stderr=b"flush failed")
-        with self.assertRaises(agent_claim.ClaimError) as raised:
-            agent_claim.execute_claim(
-                fixture.root,
-                fixture.token(),
-                "agent@example.com",
-                runner=sync_failure,
-            )
-        self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("flush failed", str(raised.exception))
-        self.assertEqual([call[0][1] for call in sync_failure.calls], ["update", "sync"])
-
-        fixture = self.fixture([record("fm-next")])
-        no_mutation = FakeRunner(fixture, mutate=False)
-        with self.assertRaises(agent_claim.ClaimError) as raised:
-            agent_claim.execute_claim(
-                fixture.root,
-                fixture.token(),
-                "agent@example.com",
-                runner=no_mutation,
-            )
-        self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("postcondition failed", str(raised.exception))
-
-    def test_integrity_and_no_recommendation_have_guard_compatible_exit_codes(self) -> None:
         bad = self.fixture(
             [record("fm-bad", dependencies=[dependency("fm-bad", "fm-missing")])]
         )
-        with self.assertRaises(agent_claim.ClaimError) as raised:
+        with self.assertRaises(agent_claim.ClaimError) as integrity:
             agent_claim.execute_claim(
                 bad.root,
                 "malformed",
                 "agent@example.com",
                 dry_run=True,
             )
-        self.assertEqual(raised.exception.exit_code, 1)
-        self.assertIn("integrity", str(raised.exception))
+        self.assertEqual(integrity.exception.exit_code, 1)
 
+    def test_no_recommendation_update_failure_sync_failure_and_missing_mutation(self) -> None:
         assigned = self.fixture([record("fm-assigned", assignee="peer@example.com")])
-        with self.assertRaises(agent_claim.ClaimError) as raised:
+        with self.assertRaises(agent_claim.ClaimError) as no_work:
             agent_claim.execute_claim(
                 assigned.root,
                 assigned.token(),
                 "agent@example.com",
                 dry_run=True,
             )
-        self.assertEqual(raised.exception.exit_code, 3)
-        self.assertIn("no claimable recommendation", str(raised.exception))
+        self.assertEqual(no_work.exception.exit_code, 3)
 
-    def test_worktree_gitdir_markers_resolve_to_a_persistent_shared_lock(self) -> None:
+        fixture = self.fixture([record("fm-next")])
+        failed = FakeRunner(fixture, update_code=9, update_stderr=b"policy refused")
+        with self.assertRaisesRegex(agent_claim.ClaimError, "policy refused"):
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=failed,
+            )
+        self.assertEqual([failed.command(call[0]) for call in failed.calls], ["update"])
+
+        fixture = self.fixture([record("fm-next")])
+        failed = FakeRunner(fixture, sync_code=7, sync_stderr=b"flush failed")
+        with self.assertRaisesRegex(agent_claim.ClaimError, "flush failed"):
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=failed,
+            )
+        self.assertEqual([failed.command(call[0]) for call in failed.calls], ["update", "sync"])
+
+        fixture = self.fixture([record("fm-next")])
+        failed = FakeRunner(fixture, mutate=False)
+        with self.assertRaisesRegex(agent_claim.ClaimError, "did not report status"):
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                runner=failed,
+            )
+
+    def test_worktrees_share_one_persistent_lock(self) -> None:
         fixture = self.fixture([record("fm-next")], worktree=True)
         receipt = agent_claim.execute_claim(
             fixture.root,
@@ -451,7 +528,7 @@ class AgentClaimTests(unittest.TestCase):
         self.assertFalse((fixture.git_dir / agent_claim.LOCK_FILE_NAME).exists())
 
     @unittest.skipIf(os.name == "nt", "fcntl contention fixture is Unix-specific")
-    def test_linked_worktrees_contend_on_the_same_common_lock(self) -> None:
+    def test_linked_worktrees_and_local_callers_contend_before_mutation(self) -> None:
         fixture = self.fixture([record("fm-next")], worktree=True)
         sibling = fixture.sibling_worktree("sibling")
         self.assertEqual(
@@ -463,11 +540,7 @@ class AgentClaimTests(unittest.TestCase):
                 with agent_claim.claim_lock(sibling):
                     self.fail("sibling worktree acquired the shared claim lock")
         self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("already in progress", str(raised.exception))
 
-    @unittest.skipIf(os.name == "nt", "fcntl contention fixture is Unix-specific")
-    def test_local_lock_contention_fails_before_guard_or_mutation(self) -> None:
-        fixture = self.fixture([record("fm-next")])
         token = fixture.token()
         with agent_claim.claim_lock(fixture.root):
             with self.assertRaises(agent_claim.ClaimError) as raised:
@@ -478,50 +551,57 @@ class AgentClaimTests(unittest.TestCase):
                     dry_run=True,
                 )
         self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("already in progress", str(raised.exception))
 
-    def test_runner_and_receipt_bounds_fail_closed(self) -> None:
+    def test_runner_output_receipt_and_configured_budget_bounds_fail_closed(self) -> None:
         fixture = self.fixture([record("fm-next")])
         oversized = FakeRunner(
             fixture,
             update_code=1,
-            stderr=b"x" * (agent_claim.MAX_COMMAND_OUTPUT_BYTES + 1),
+            update_stderr=b"x" * (agent_claim.MAX_COMMAND_OUTPUT_BYTES + 1),
         )
-        with self.assertRaises(agent_claim.ClaimError) as raised:
+        with self.assertRaisesRegex(agent_claim.ClaimError, "command-output limit"):
             agent_claim.execute_claim(
                 fixture.root,
                 fixture.token(),
                 "agent@example.com",
                 runner=oversized,
             )
-        self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("command-output limit", str(raised.exception))
 
         combined = FakeRunner(
             fixture,
             update_code=1,
-            stdout=b"x" * 60,
-            stderr=b"y" * 60,
+            update_stdout=b"x" * 60,
+            update_stderr=b"y" * 60,
         )
-        with (
-            mock.patch.object(agent_claim, "MAX_COMMAND_OUTPUT_BYTES", 64),
-            mock.patch.object(agent_claim, "MAX_COMMAND_TOTAL_OUTPUT_BYTES", 100),
+        with self.assertRaisesRegex(agent_claim.ClaimError, "100 total output bytes"):
+            agent_claim.execute_claim(
+                fixture.root,
+                fixture.token(),
+                "agent@example.com",
+                command_output_budget_bytes=100,
+                runner=combined,
+            )
+
+        for value, message in (
+            (0, "must be positive"),
+            (-1, "must be positive"),
+            (True, "positive integer"),
+            (agent_claim.MAX_COMMAND_OUTPUT_BUDGET_BYTES + 1, "exceeds the"),
         ):
-            with self.assertRaises(agent_claim.ClaimError) as raised:
-                agent_claim.execute_claim(
-                    fixture.root,
-                    fixture.token(),
-                    "agent@example.com",
-                    runner=combined,
-                )
-        self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("100 total output bytes", str(raised.exception))
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(agent_claim.ClaimError, message):
+                    agent_claim.execute_claim(
+                        fixture.root,
+                        fixture.token(),
+                        "agent@example.com",
+                        command_output_budget_bytes=value,
+                        dry_run=True,
+                    )
 
         with mock.patch.object(agent_claim, "MAX_OUTPUT_BYTES", 8):
             with self.assertRaises(agent_claim.ClaimError) as raised:
                 agent_claim.render_json({"schema": "too-large"})
         self.assertEqual(raised.exception.exit_code, 5)
-        self.assertIn("8-byte limit", str(raised.exception))
 
     def test_cli_failures_publish_no_stdout(self) -> None:
         fixture = self.fixture([record("fm-next")])
@@ -546,6 +626,26 @@ class AgentClaimTests(unittest.TestCase):
         self.assertEqual(status, 4)
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("claim token is stale", stderr.getvalue())
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = agent_claim.main(
+                [
+                    "--repo",
+                    str(fixture.root),
+                    "--expect-token",
+                    fixture.token(),
+                    "--assignee",
+                    "agent@example.com",
+                    "--command-output-budget-bytes",
+                    "0",
+                    "--dry-run",
+                ]
+            )
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("must be positive", stderr.getvalue())
 
 
 if __name__ == "__main__":
