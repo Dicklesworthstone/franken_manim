@@ -37,12 +37,31 @@ An issue is claimable only when it is:
 - dependency-ready;
 - not an epic;
 - free of live `parent-child` descendants;
+- authorized for autonomous handling by the exact claim-kind policy;
 - part of a live blocking graph with no missing blocker or cycle;
 - part of a live containment graph with no cycle;
 - compatible with the four-workstream activation cap;
 - evaluated while no active unscoped issue exists.
 
 A task, bug, or feature with live children is a container regardless of its type label.
+
+### Autonomous claim kind
+
+ADR-0023 defines one closed namespace in the authoritative Beads `labels` field:
+
+```text
+agent:claim:auto
+agent:claim:manual
+agent:claim:external
+```
+
+Unlabelled issues default to `auto`. `manual` means the next step is a human judgment, approval, choice, or tracker repair. `external` means the next step requires evidence or an effect outside the current repository execution environment, such as real hardware, a pinned host, release credentials, or independent review. Manual and external leaves remain visible in `non_autonomous_ready` but never enter autonomous ranking.
+
+Exactly zero or one recognized `agent:claim:*` label may appear. An unknown, duplicate, conflicting, or malformed reserved label on any live issue invalidates the plan. Closed historical rows remain graph-bound but do not halt current selection solely because they contain an obsolete reserved spelling.
+
+`scripts/agent_claim_policy.py` is the one interpreter for this namespace. It consumes the canonical labels already exposed by `agent_task_semantics`; it never reparses or edits the ledger. The policy is nested schema `fmn.agent.claim-policy` version 1. Any vocabulary or semantic change requires an ADR and a policy-schema change.
+
+Apply or change these labels only through tracker-native `br` commands. Never hand-edit or reconstruct `.beads/issues.jsonl` to classify work.
 
 ### Mandatory pre-claim sequence
 
@@ -74,14 +93,14 @@ python3 scripts/agent_claim.py \
     --transition-comment "Claimed after graph, reservation, and HEAD checks"
 ```
 
-`agent_next.py` version 4 is the scope, leafhood, and activation authority. `agent_brief.py` remains broad situational context; its historical display grouping cannot override the planner.
+`agent_next.py` version 4 is the scope, leafhood, activation, claim-kind, and recommendation authority. Its additive claim-kind projection carries nested policy schema version 1. `agent_brief.py` remains broad situational context; its historical display grouping cannot override the planner.
 
 Exit identities are governance:
 
 - exit `0`: valid plan/token or verified executor receipt;
-- exit `1`: blocking, containment, unscoped-active, or activation state is unsafe;
+- exit `1`: blocking, containment, unscoped-active, claim-policy, or activation state is unsafe;
 - exit `2`: ledger, arguments, bounds, token grammar, or resource policy is malformed;
-- exit `3`: the graph is valid but has no governed claimable leaf;
+- exit `3`: the graph is valid but has no governed autonomous claimable leaf;
 - exit `4`: the token or explicit issue is stale;
 - exit `5`: no verified executor receipt because locking, child execution, response validation, export, or postcondition verification failed.
 
@@ -140,7 +159,7 @@ An ADR is required for:
 - every amendment to D-01 through D-24;
 - every resolution of OQ-1 through OQ-12;
 - every policy ruling under a standing rule;
-- any change to the four-workstream cap or governed workstream vocabulary.
+- any change to the four-workstream cap, governed workstream vocabulary, or autonomous claim-kind vocabulary.
 
 When an ADR amends the plan, the plan is edited in the same commit or the ADR records why true-up is deferred and under which Bead.
 
@@ -154,7 +173,7 @@ A workstream may not hand off with failing gates or unwritten fixtures.
 2. UBS is run over changed files; criticals are fixed or explicitly adjudicated in the handoff.
 3. New or changed behavior carries tests or fixtures in the same tranche. Self-golden drift is adjudicated, never reflexively re-blessed.
 4. New semantic divergences from the Reference have Behavior Notes.
-5. Beads is trued up: finished work closed with reasons, unfinished claims released with status comments, and follow-ups filed.
+5. Beads is trued up: finished work closed with reasons, unfinished claims released with status comments, and follow-ups filed. Ready human/external obligations carry the exact ADR-0023 claim-kind label instead of an invented dependency or prose-only convention.
 6. Run `br sync --flush-only`, then stage and commit `.beads/`.
 7. Re-run `python3 scripts/agent_next.py --format json --check` against the exported post-mutation ledger.
 8. If a next leaf exists, issue a fresh guard token for handoff. A pre-mutation token is stale by construction.
@@ -171,6 +190,7 @@ If tracker-native `br` execution is unavailable, do not reconstruct `.beads/issu
 |---|---|
 | Four governed streams already active | no new workstream activation |
 | Active unscoped issue | no new autonomous claim until scoped or released |
+| Unknown, duplicate, conflicting, or malformed live `agent:claim:*` label | no new autonomous claim until repaired through `br` |
 | Missing blocker, blocking cycle, or containment cycle | no new claim until repaired |
 | Planner, guard, or executor nonzero exit | no autonomous claim from that plan/token |
 | Claim exit `5` | inspect tracker/native state before retry |
