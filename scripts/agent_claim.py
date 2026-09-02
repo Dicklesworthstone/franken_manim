@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Claim one guarded Beads leaf under a shared repository lock.
+"""Atomically claim one guarded Beads leaf under a shared repository lock.
 
-``agent_claim_guard`` proves that a recommendation still matches the parsed
-Beads graph, planner semantics, policy, and schema contract. This command keeps
-that proof, the ``br update``, the explicit JSONL flush, and postcondition
-verification inside one process while holding an advisory lock in Git's shared
-common directory. It narrows the compare-before-set interval and produces an
-auditable receipt. It is not a distributed lease: Agent Mail reservations and
-other clones must still be checked before invoking it.
+``agent_claim_guard`` binds one recommendation to the complete parsed Beads
+graph, planner output, policy, and schema contract. This command keeps that
+proof, Beads' atomic ``update --claim`` compare-and-set, the explicit JSONL
+flush, and exact postcondition verification inside one process while holding an
+advisory lock in Git's shared common directory.
+
+The lock serializes cooperating worktrees in one clone. It is not a distributed
+lease: current HEAD, Agent Mail, file reservations, and agents in other clones
+must still be checked immediately before invoking this command.
 """
 
 from __future__ import annotations
@@ -25,17 +27,20 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterator, Sequence
+from typing import Any, BinaryIO, Callable, Iterator, Sequence
 
 import agent_brief
 import agent_claim_guard
 import agent_next
 
 SCHEMA = "fmn.agent.claim"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+ATOMIC_CLAIM_MODE = "beads.update.claim/v1"
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_TOTAL_OUTPUT_BYTES = 16 * 1024 * 1024
+DEFAULT_COMMAND_OUTPUT_BUDGET_BYTES = MAX_COMMAND_TOTAL_OUTPUT_BYTES
+MAX_COMMAND_OUTPUT_BUDGET_BYTES = 1024 * 1024 * 1024
 MAX_TOKEN_BYTES = 4096
 MAX_ISSUE_ID_BYTES = 1024
 MAX_ASSIGNEE_BYTES = 1024
@@ -56,6 +61,18 @@ class ClaimError(ValueError):
         self.exit_code = exit_code
 
 
+class _DuplicateCommandJsonKey(ValueError):
+    def __init__(self, key: str):
+        super().__init__(key)
+        self.key = key
+
+
+class _NonFiniteCommandJsonConstant(ValueError):
+    def __init__(self, spelling: str):
+        super().__init__(spelling)
+        self.spelling = spelling
+
+
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
@@ -72,9 +89,7 @@ class _DrainResult:
 
 class _OutputBudget:
     def __init__(self, limit: int):
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ClaimError("command total-output limit must be a positive integer", 5)
-        self.limit = limit
+        self.limit = _command_output_budget(limit)
         self._produced = 0
         self._lock = threading.Lock()
         self.exceeded = threading.Event()
@@ -124,6 +139,19 @@ def _command_timeout(value: float) -> float:
             f"{MAX_COMMAND_TIMEOUT_SECONDS:g}-second limit"
         )
     return timeout
+
+
+def _command_output_budget(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ClaimError("--command-output-budget-bytes must be a positive integer")
+    if value <= 0:
+        raise ClaimError("--command-output-budget-bytes must be positive")
+    if value > MAX_COMMAND_OUTPUT_BUDGET_BYTES:
+        raise ClaimError(
+            "--command-output-budget-bytes exceeds the "
+            f"{MAX_COMMAND_OUTPUT_BUDGET_BYTES}-byte limit"
+        )
+    return value
 
 
 def _repo_root(path: Path) -> Path:
@@ -418,8 +446,12 @@ def run_command(
     cwd: Path,
     *,
     timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    total_output_bytes: int | None = None,
 ) -> CommandResult:
     timeout_seconds = _command_timeout(timeout_seconds)
+    if total_output_bytes is None:
+        total_output_bytes = MAX_COMMAND_TOTAL_OUTPUT_BYTES
+    total_output_bytes = _command_output_budget(total_output_bytes)
     env = os.environ.copy()
     env.setdefault("NO_COLOR", "1")
     env.setdefault("RUST_LOG", "error")
@@ -450,7 +482,7 @@ def run_command(
 
     stdout = _DrainResult(bytearray())
     stderr = _DrainResult(bytearray())
-    budget = _OutputBudget(MAX_COMMAND_TOTAL_OUTPUT_BYTES)
+    budget = _OutputBudget(total_output_bytes)
     threads = [
         threading.Thread(
             target=_drain_command_stream,
@@ -487,8 +519,7 @@ def run_command(
             _, readers_stopped = _join_command_readers(process, started)
             suffix = "" if readers_stopped else "; output readers did not stop"
             raise ClaimError(
-                f"{argv[0]!r} produced more than "
-                f"{MAX_COMMAND_TOTAL_OUTPUT_BYTES} total output bytes "
+                f"{argv[0]!r} produced more than {total_output_bytes} total output bytes "
                 f"across stdout and stderr{suffix}",
                 5,
             )
@@ -502,9 +533,7 @@ def run_command(
                 5,
             )
         try:
-            returncode = process.wait(
-                timeout=min(remaining, COMMAND_WAIT_POLL_SECONDS)
-            )
+            returncode = process.wait(timeout=min(remaining, COMMAND_WAIT_POLL_SECONDS))
         except subprocess.TimeoutExpired:
             continue
         except OSError as exc:
@@ -522,12 +551,10 @@ def run_command(
         )
     if budget.exceeded.is_set():
         raise ClaimError(
-            f"{argv[0]!r} produced more than "
-            f"{MAX_COMMAND_TOTAL_OUTPUT_BYTES} total output bytes "
-            f"across stdout and stderr",
+            f"{argv[0]!r} produced more than {total_output_bytes} total output bytes "
+            "across stdout and stderr",
             5,
         )
-
     for stream_name, result in (("stdout", stdout), ("stderr", stderr)):
         if result.error is not None:
             raise ClaimError(
@@ -542,7 +569,13 @@ def run_command(
     return CommandResult(returncode, bytes(stdout.payload), bytes(stderr.payload))
 
 
-def _run_checked(runner: Runner, argv: tuple[str, ...], cwd: Path, label: str) -> None:
+def _run_checked(
+    runner: Runner,
+    argv: tuple[str, ...],
+    cwd: Path,
+    label: str,
+    total_output_bytes: int,
+) -> CommandResult:
     result = runner(argv, cwd)
     if not isinstance(result, CommandResult):
         raise ClaimError(f"{label} runner returned an invalid result", 5)
@@ -556,18 +589,17 @@ def _run_checked(runner: Runner, argv: tuple[str, ...], cwd: Path, label: str) -
                 5,
             )
     produced = len(result.stdout) + len(result.stderr)
-    if produced > MAX_COMMAND_TOTAL_OUTPUT_BYTES:
+    if produced > total_output_bytes:
         raise ClaimError(
-            f"{label} produced more than "
-            f"{MAX_COMMAND_TOTAL_OUTPUT_BYTES} total output bytes "
+            f"{label} produced more than {total_output_bytes} total output bytes "
             "across stdout and stderr",
             5,
         )
-    if result.returncode == 0:
-        return
-    detail = _decode_process_output(result.stderr) or _decode_process_output(result.stdout)
-    suffix = f": {detail[:4096]}" if detail else ""
-    raise ClaimError(f"{label} failed with exit {result.returncode}{suffix}", 5)
+    if result.returncode != 0:
+        detail = _decode_process_output(result.stderr) or _decode_process_output(result.stdout)
+        suffix = f": {detail[:4096]}" if detail else ""
+        raise ClaimError(f"{label} failed with exit {result.returncode}{suffix}", 5)
+    return result
 
 
 def _commands(
@@ -580,14 +612,125 @@ def _commands(
         br_program,
         "update",
         issue_id,
-        "--status",
-        agent_brief.ACTIVE_STATUS,
-        "--assignee",
+        "--claim",
+        "--actor",
         assignee,
+        "--json",
     ]
     if transition_comment is not None:
         update.extend(("--transition-comment", transition_comment))
     return tuple(update), (br_program, "sync", "--flush-only")
+
+
+def _unique_command_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateCommandJsonKey(key)
+        result[key] = value
+    return result
+
+
+def _reject_command_json_constant(spelling: str) -> None:
+    raise _NonFiniteCommandJsonConstant(spelling)
+
+
+def _strict_command_json(payload: bytes, label: str) -> Any:
+    if not payload:
+        raise ClaimError(f"{label} emitted no JSON response", 5)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ClaimError(f"{label} response is not UTF-8: {exc}", 5) from exc
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_unique_command_json_object,
+            parse_constant=_reject_command_json_constant,
+        )
+    except _DuplicateCommandJsonKey as exc:
+        raise ClaimError(
+            f"{label} response contains duplicate JSON key {exc.key!r}", 5
+        ) from exc
+    except _NonFiniteCommandJsonConstant as exc:
+        raise ClaimError(
+            f"{label} response contains forbidden non-finite JSON constant "
+            f"{exc.spelling!r}",
+            5,
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ClaimError(f"{label} response is not valid JSON: {exc}", 5) from exc
+
+
+def _verify_atomic_claim_response(
+    result: CommandResult,
+    issue: agent_brief.Issue,
+    assignee: str,
+) -> dict[str, object]:
+    if result.stderr.strip():
+        detail = _decode_process_output(result.stderr)
+        raise ClaimError(
+            f"br update --claim emitted unexpected stderr on success: {detail[:4096]}", 5
+        )
+    document = _strict_command_json(result.stdout, "br update --claim")
+    if isinstance(document, list):
+        rows = document
+        warnings: list[Any] = []
+        shape = "array"
+    elif isinstance(document, dict):
+        rows = document.get("updated")
+        warnings = document.get("warnings", [])
+        shape = "updated-envelope"
+        if not isinstance(warnings, list):
+            raise ClaimError("br update --claim JSON warnings must be an array", 5)
+    else:
+        raise ClaimError("br update --claim JSON must be an array or updated envelope", 5)
+    if not isinstance(rows, list):
+        raise ClaimError("br update --claim JSON has no updated issue array", 5)
+    if len(rows) != 1 or not isinstance(rows[0], dict):
+        raise ClaimError(
+            "br update --claim JSON must report exactly one updated issue object", 5
+        )
+    row = rows[0]
+    if row.get("id") != issue.id:
+        raise ClaimError(
+            f"br update --claim JSON reported issue {row.get('id')!r}, expected {issue.id!r}",
+            5,
+        )
+    if row.get("status") != agent_brief.ACTIVE_STATUS:
+        raise ClaimError(
+            "br update --claim JSON did not report status "
+            f"{agent_brief.ACTIVE_STATUS!r}",
+            5,
+        )
+    if row.get("assignee") != assignee:
+        raise ClaimError(
+            f"br update --claim JSON reported assignee {row.get('assignee')!r}, "
+            f"expected {assignee!r}",
+            5,
+        )
+    if row.get("title") != issue.title:
+        raise ClaimError("br update --claim JSON changed or misreported the issue title", 5)
+    priority = row.get("priority")
+    if isinstance(priority, bool) or priority != issue.priority:
+        raise ClaimError("br update --claim JSON changed or misreported issue priority", 5)
+    try:
+        updated_at = agent_brief.parse_timestamp(
+            row.get("updated_at"),
+            field="br update --claim updated_at",
+            issue_id=issue.id,
+        )
+    except agent_brief.BriefError as exc:
+        raise ClaimError(str(exc), 5) from exc
+    return {
+        "mode": ATOMIC_CLAIM_MODE,
+        "shape": shape,
+        "issue_id": issue.id,
+        "status": agent_brief.ACTIVE_STATUS,
+        "assignee": assignee,
+        "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
+        "warning_count": len(warnings),
+    }
 
 
 def _validate_guard(
@@ -637,12 +780,10 @@ def _verify_claim_only_delta(
             f"added={added!r} removed={removed!r}",
             5,
         )
-
     for other_id in sorted(before_ids - {issue_id}):
         if before[other_id] != after[other_id]:
             raise ClaimError(
-                f"claim postcondition observed unrelated graph drift in {other_id}",
-                5,
+                f"claim postcondition observed unrelated graph drift in {other_id}", 5
             )
 
     original = before[issue_id]
@@ -668,11 +809,9 @@ def _verify_claim_only_delta(
         or claimed.dependencies != original.dependencies
     ):
         raise ClaimError(
-            f"claim postcondition changed non-claim fields on {issue_id}",
-            5,
+            f"claim postcondition changed non-claim fields on {issue_id}", 5
         )
 
-    comment_appended = transition_comment is not None
     if transition_comment is None:
         comments_match = claimed.comments == original.comments
     else:
@@ -688,8 +827,7 @@ def _verify_claim_only_delta(
             else "one exact appended transition comment"
         )
         raise ClaimError(
-            f"claim postcondition expected {expected} on {issue_id}",
-            5,
+            f"claim postcondition expected {expected} on {issue_id}", 5
         )
 
     return {
@@ -706,7 +844,7 @@ def _verify_claim_only_delta(
         "assignee_after": claimed.assignee,
         "updated_at_before": original.updated_at.isoformat().replace("+00:00", "Z"),
         "updated_at_after": claimed.updated_at.isoformat().replace("+00:00", "Z"),
-        "transition_comment_appended": comment_appended,
+        "transition_comment_appended": transition_comment is not None,
     }
 
 
@@ -723,6 +861,7 @@ def execute_claim(
     limit: int = 20,
     br_program: str = "br",
     command_timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    command_output_budget_bytes: int | None = None,
     dry_run: bool = False,
     runner: Runner | None = None,
     lock_factory: LockFactory = claim_lock,
@@ -742,6 +881,9 @@ def execute_claim(
     )
     br_program = _bounded_text("--br", br_program, 4096, required=True) or "br"
     command_timeout_seconds = _command_timeout(command_timeout_seconds)
+    if command_output_budget_bytes is None:
+        command_output_budget_bytes = MAX_COMMAND_TOTAL_OUTPUT_BYTES
+    command_output_budget_bytes = _command_output_budget(command_output_budget_bytes)
     if stale_days < 0:
         raise ClaimError("--stale-days must be nonnegative")
     if activation_cap < 1:
@@ -755,6 +897,7 @@ def execute_claim(
                 argv,
                 cwd,
                 timeout_seconds=command_timeout_seconds,
+                total_output_bytes=command_output_budget_bytes,
             )
     else:
         active_runner = runner
@@ -797,9 +940,10 @@ def execute_claim(
             "policy": guard["policy"],
             "schemas": guard["schemas"],
             "executor_policy": {
+                "beads_claim_mode": ATOMIC_CLAIM_MODE,
                 "command_timeout_seconds": command_timeout_seconds,
                 "command_output_bytes_per_stream": MAX_COMMAND_OUTPUT_BYTES,
-                "command_total_output_bytes": MAX_COMMAND_TOTAL_OUTPUT_BYTES,
+                "command_output_budget_bytes_total": command_output_budget_bytes,
             },
             "recommendation": guard["recommendation"],
             "commands": [list(update_command), list(sync_command)],
@@ -808,16 +952,26 @@ def execute_claim(
             receipt["claimed"] = False
             return receipt
 
-        _run_checked(active_runner, update_command, repo_root, "br update")
-        _run_checked(active_runner, sync_command, repo_root, "br sync --flush-only")
+        update_result = _run_checked(
+            active_runner,
+            update_command,
+            repo_root,
+            "br update --claim",
+            command_output_budget_bytes,
+        )
+        atomic_claim = _verify_atomic_claim_response(update_result, issue, assignee)
+        _run_checked(
+            active_runner,
+            sync_command,
+            repo_root,
+            "br sync --flush-only",
+            command_output_budget_bytes,
+        )
         try:
             after = agent_brief.load_issues(ledger)
             after_graph_sha256 = agent_claim_guard.graph_digest(after)
         except (agent_brief.BriefError, agent_claim_guard.GuardError) as exc:
             raise ClaimError(f"post-claim ledger verification failed: {exc}", 5) from exc
-        claimed = after.get(issue_id)
-        if claimed is None:
-            raise ClaimError(f"claimed issue disappeared after br sync: {issue_id}", 5)
         claim_delta = _verify_claim_only_delta(
             issues,
             after,
@@ -825,11 +979,17 @@ def execute_claim(
             assignee,
             transition_comment,
         )
+        if atomic_claim["updated_at"] != claim_delta["updated_at_after"]:
+            raise ClaimError(
+                "br update --claim JSON timestamp disagreed with the exported ledger",
+                5,
+            )
         receipt.update(
             {
                 "claimed": True,
-                "status": claimed.status,
+                "status": agent_brief.ACTIVE_STATUS,
                 "after_graph_sha256": after_graph_sha256,
+                "atomic_claim": atomic_claim,
                 "claim_delta": claim_delta,
             }
         )
@@ -878,6 +1038,16 @@ def make_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--command-output-budget-bytes",
+        type=int,
+        default=DEFAULT_COMMAND_OUTPUT_BUDGET_BYTES,
+        help=(
+            "maximum combined stdout/stderr bytes produced by each br command; "
+            f"default {DEFAULT_COMMAND_OUTPUT_BUDGET_BYTES}, "
+            f"maximum {MAX_COMMAND_OUTPUT_BUDGET_BYTES}"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="revalidate and emit the exact intended argv without invoking br",
@@ -900,6 +1070,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit=args.limit,
             br_program=args.br,
             command_timeout_seconds=args.command_timeout_seconds,
+            command_output_budget_bytes=args.command_output_budget_bytes,
             dry_run=args.dry_run,
         )
         output = render_json(receipt)
