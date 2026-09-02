@@ -9,7 +9,64 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open, active, blocked, or closed;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased substantive source-and-test checkpoint covered here is **`c2f045340943e3a2c8e241535453653a1d835d87`** on 2026-09-02 UTC. Later documentation commits truth up that implementation state.
+The current unreleased substantive source-and-test checkpoint covered here is **`2a4071fc7db969b68652256a343de58cc63a8224`** on 2026-09-02 UTC. ADR-0023, governance, and implementation-status commits after that checkpoint record the operational contract and evidence boundary without claiming additional runtime behavior.
+
+---
+
+## Unreleased — exact autonomous claim kinds
+
+### Added
+
+- `scripts/agent_claim_policy.py`, the single interpreter for a closed Beads label namespace:
+  - `agent:claim:auto`;
+  - `agent:claim:manual`;
+  - `agent:claim:external`.
+- Nested machine contract `fmn.agent.claim-policy` version 1.
+- `non_autonomous_ready`, `invalid_policy_ready`, and per-mode counts in the claim planner.
+- Per-candidate policy evidence showing mode, source, exact label, and autonomous eligibility.
+- `scripts/test_agent_claim_policy.py`, wired into `scripts/check.sh`.
+- ADR-0023 and matching governance rules for work-kind changes, stop conditions, and tracker-native handoff.
+
+### Changed
+
+- Unlabelled issues remain autonomous by default, preserving the existing Beads corpus without a bulk migration.
+- `agent:claim:manual` leaves remain visible but cannot be selected by an autonomous worker.
+- `agent:claim:external` leaves remain visible but cannot be selected until the required real-world or credential-bound evidence lane is available.
+- `agent_next.py` installs the full semantic loader directly and consumes canonical labels already derived from the same bounded ledger bytes.
+- The outer `fmn.agent.next` envelope remains version 4; the additive policy semantics carry their own nested version. The claim guard already binds the complete planner document and schema contract.
+- Governance now treats malformed live claim labels as a hard stop and requires ready human/external obligations to be classified through `br`, never through hand-edited JSONL or invented dependencies.
+
+### Fixed
+
+- Dependency-ready evidence-only tasks can no longer outrank executable implementation work merely because their numeric priority is higher.
+- Authenticated task meaning now participates in recommendation behavior rather than serving only as stale-token invalidation evidence.
+- Unknown, duplicate, conflicting, or malformed live `agent:claim:*` labels fail closed before any usable recommendation or token is published.
+- Closed historical records with an obsolete reserved spelling remain digest-bound but do not poison current live selection.
+- `docs/IMPLEMENTATION_STATUS.md` no longer lists shared governed-scope classification as unfinished; ADR-0022 and its parity regressions already completed that work.
+
+### Focused regression inventory
+
+The new suite covers:
+
+- default-unlabelled and explicit-auto selection;
+- manual/external visibility without autonomous ranking;
+- valid no-recommendation behavior when only non-autonomous leaves remain;
+- unknown, duplicate, conflicting, and malformed reserved labels;
+- closed-history tolerance;
+- the exact machine-readable policy contract.
+
+### Representative commits
+
+- `2a4071f` — govern autonomous claim policy in code and the mandatory repository gate.
+- `35252a0` — accept ADR-0023.
+- `19e1e8b` — operationalize the policy in governance.
+- `2870405` — replace the stale status narrative with a present-tense evidence map.
+
+### Evidence boundary
+
+The changed Python files passed bytecode compilation, `scripts/check.sh` passed shell syntax validation, and seven focused policy cases passed against a faithful minimal semantic-loader harness before publication. The published blobs matched locally computed Git object hashes and the commit fast-forwarded from the audited `main` head without force.
+
+The editing environment did not contain a complete native checkout, Cargo/Rust execution context, tracker-native `br`, Agent Mail, UBS, release credentials, hardware matrices, or browser/package infrastructure. Hosted Actions runs were queued or pending without completed jobs and were not treated as acceptance evidence. No `.beads/` file was reconstructed or replaced.
 
 ---
 
@@ -112,13 +169,14 @@ The source-level panic path is fixed and the regression is committed. A sanitize
 
 ### Added
 
-- An exact autonomous-workstream grammar in `scripts/agent_next.py`:
+- An exact autonomous-workstream grammar shared by `scripts/agent_brief.py` and `scripts/agent_next.py`:
   - `G0`;
   - `W1` through `W11`;
   - beginning at the first title character and followed by a word boundary or `:`.
 - Explicit `unscoped_leaves` and `unscoped_active` planner evidence.
-- Human-brief normalization that uses the planner's governed activation state and workstream labels rather than the broad projection's historical grouping.
-- Cross-layer regressions proving the same scope policy reaches the planner, claim token, generated human brief, and activation cap.
+- Human-brief normalization that uses the planner's governed activation state and workstream labels.
+- Cross-layer regressions proving the same scope policy reaches the broad snapshot, planner, claim token, generated human brief, and activation cap.
+- ADR-0022, which establishes one shared governed-scope classifier without moving claimability into the broad projection.
 
 ### Changed
 
@@ -127,7 +185,7 @@ The source-level panic path is fixed and the regression is committed. A sanitize
 - A valid governed leaf wins even when an unscoped leaf has a numerically higher priority.
 - Any active unscoped issue invalidates the planner before token, executor, or brief publication.
 - `G0` now counts as one real active workstream. `G0` plus four W-streams is a five-stream cap breach.
-- The generated brief checks the planner's activation result, suppresses an unscoped broad priority, and labels `G0` and invalid W-prefixes consistently with the claim contract.
+- Broad and planner projections now call the same exact classifier and expose parity-tested activation and unscoped-active state.
 - Claim tokens bind planner version 4 through the schema contract; older planner tokens cannot revalidate.
 
 ### Fixed
@@ -135,8 +193,9 @@ The source-level panic path is fixed and the regression is committed. A sanitize
 - An issue without a governed workstream prefix can no longer be selected or atomically claimed by autonomous tooling.
 - Titles such as `W12: ...`, `W999: ...`, lower-case `w10: ...`, or embedded `prefix W10: ...` can no longer masquerade as governed workstreams.
 - `G0` is no longer omitted from the activation count.
-- The deterministic human brief can no longer accept a `G0` plus four-W-stream cap breach because its broad snapshot happened to classify `G0` as unscoped.
+- The deterministic human brief can no longer accept a `G0` plus four-W-stream cap breach because a projection classified `G0` differently.
 - A broad unscoped priority can no longer appear beside a different leaf-safe recommendation as though both were actionable.
+- Direct broad JSON and planner JSON can no longer disagree merely because they parsed title scope independently.
 
 ### Representative commits
 
@@ -148,6 +207,9 @@ The source-level panic path is fixed and the regression is committed. A sanitize
 - `b66f06e` — preserve blocker truth while normalizing rows.
 - `1abc050` — cover G0, unscoped priorities, unscoped active claims, and strict cap refusal.
 - `fffc469` — propagate scoped semantics through claim-guard tokens.
+- `2a49744` — share the governed classifier with the broad projection.
+- `15920a5` — accept ADR-0022.
+- `0253820` — execute cross-projection scope parity in the repository gate.
 
 ---
 
@@ -239,7 +301,7 @@ This is still a semantic projection rather than a raw-byte or whole-database ide
 2. **Rendering and media:** analytic fills/strokes, retained tiles, camera/depth/lighting/textures, native codecs, ffmpeg boundary, FMTL, and WASM foundations.
 3. **Front doors and Gauntlet:** Rust API, `fmn`, optional CPython portal, Studio supervisor/worker, API schema, Parity Ledger, self-goldens, differential tests, determinism, fuzzing, performance, and packaging gates.
 4. **Portal convergence:** authored `manimlib` compatibility, precise capability refusals, executable wheel/bridge tests, and namespace/refusal ratchets.
-5. **Agent operations:** strict graph parsing, governed leaf planning, full-semantic stale-plan tokens, atomic claims, shared-local locking, structured response proof, semantic/core deltas, and bounded subprocess resources.
+5. **Agent operations:** strict graph parsing, governed leaf planning, exact claim-kind classification, full-semantic stale-plan tokens, atomic claims, shared-local locking, structured response proof, semantic/core deltas, and bounded subprocess resources.
 
 ## Current evidence boundaries
 
@@ -249,6 +311,7 @@ The following are not inferred from a focused source probe or from documentation
 - sanitizer replay of the repaired SVG fuzz input;
 - cross-platform release artifacts;
 - real aarch64 topology evidence;
+- pinned-host performance-gate receipts;
 - platform-native SIMD and certified bit-identity matrices;
 - real-browser npm/WASM publication;
 - clean-wheel behavior on every supported Python/platform pair;
@@ -262,7 +325,8 @@ Hosted GitHub Actions availability is not a correctness dependency. The authorit
 - Start with `docs/IMPLEMENTATION_STATUS.md` for present-tense evidence.
 - Use `agent_next.py` for governed selection, `agent_claim_guard.py` for the bound token, and `agent_claim.py` for atomic mutation.
 - Treat `agent_brief.py` as broad situational context only.
-- Treat Beads as authoritative; commit the `.beads/` export explicitly after every mutation.
+- Treat Beads as authoritative; commit the `.beads/` export explicitly after every tracker-native mutation.
+- Use exact ADR-0023 labels to distinguish autonomous, manual, and externally gated ready work; do not infer work kind from prose.
 - On executor exit `5`, inspect Beads and the working tree before doing anything else; never replay the old token blindly.
 - Never replace `.beads/issues.jsonl` from truncated connector output.
-- Do not turn “reviewed,” “compiled,” “inventoried,” or “historically green” into a stronger implementation or release claim.
+- Do not turn “reviewed,” “compiled,” “inventoried,” “queued,” or “historically green” into a stronger implementation or release claim.
