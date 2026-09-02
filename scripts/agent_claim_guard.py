@@ -64,6 +64,10 @@ def canonical_graph(issues: dict[str, agent_brief.Issue]) -> dict[str, Any]:
         raise GuardError(
             f"issue id {RESERVED_ISSUE_ID!r} is reserved for the no-recommendation token sentinel"
         )
+    if not isinstance(issues, agent_task_semantics.SemanticIssues):
+        raise GuardError(
+            "claim graph version 3 requires issues loaded through the full task-semantic loader"
+        )
     try:
         task_semantics = agent_task_semantics.semantics_for(issues)
     except agent_task_semantics.SemanticError as exc:
