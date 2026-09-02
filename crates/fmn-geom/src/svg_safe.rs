@@ -43,24 +43,27 @@ impl From<svg_parser::SvgDocument> for SvgDocument {
     }
 }
 
+impl From<&SvgDocument> for svg_parser::SvgDocument {
+    fn from(document: &SvgDocument) -> Self {
+        Self {
+            width: document.width,
+            height: document.height,
+            view_box: document.view_box,
+            shapes: document.shapes.clone(),
+        }
+    }
+}
+
 impl SvgDocument {
     /// Parse SVG bytes under the default budgets.
     pub fn parse(bytes: &[u8]) -> Result<Self, SvgError> {
-        Self::parse_with_limits(bytes, &SvgLimits::default())
+        validate_admission(bytes, &SvgLimits::default())?;
+        svg_parser::SvgDocument::parse(bytes).map(Into::into)
     }
 
     /// Parse SVG bytes under explicit budgets.
     pub fn parse_with_limits(bytes: &[u8], limits: &SvgLimits) -> Result<Self, SvgError> {
-        if bytes.len() > limits.max_bytes {
-            return Err(SvgError::TooLarge {
-                bytes: bytes.len(),
-                limit: limits.max_bytes,
-            });
-        }
-        let text = std::str::from_utf8(bytes).map_err(|error| SvgError::NotUtf8 {
-            offset: error.valid_up_to(),
-        })?;
-        validate_fixed_markup_probes(text)?;
+        validate_admission(bytes, limits)?;
         svg_parser::SvgDocument::parse_with_limits(bytes, limits).map(Into::into)
     }
 }
@@ -68,10 +71,20 @@ impl SvgDocument {
 /// Emit one resolved document back to SVG bytes.
 #[must_use]
 pub fn emit_svg_document(document: &SvgDocument) -> String {
-    // Parsed shapes are already in post-viewBox user space; preserve the
-    // implementation's established rule that the source viewBox is not
-    // applied a second time on round-trip.
-    emit_svg(&document.shapes, document.width, document.height, None)
+    svg_parser::emit_svg_document(&document.into())
+}
+
+fn validate_admission(bytes: &[u8], limits: &SvgLimits) -> Result<(), SvgError> {
+    if bytes.len() > limits.max_bytes {
+        return Err(SvgError::TooLarge {
+            bytes: bytes.len(),
+            limit: limits.max_bytes,
+        });
+    }
+    let text = std::str::from_utf8(bytes).map_err(|error| SvgError::NotUtf8 {
+        offset: error.valid_up_to(),
+    })?;
+    validate_fixed_markup_probes(text)
 }
 
 fn validate_fixed_markup_probes(text: &str) -> Result<(), SvgError> {
