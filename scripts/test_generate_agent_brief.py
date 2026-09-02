@@ -77,12 +77,14 @@ class GenerateAgentBriefTests(unittest.TestCase):
             ledger, stale_days=2, activation_cap=4, limit=20
         )
         self.assertEqual(snapshot["schema_version"], 5)
+        self.assertEqual(snapshot["claim_plan"]["version"], 4)
         self.assertNotIn("recommendation", snapshot)
         self.assertEqual(snapshot["as_of"], "2026-08-31T08:15:00Z")
         self.assertIn("As of `2026-08-31T08:15:00Z`", document)
         self.assertIn("## Leaf-safe claim plan", document)
         self.assertIn("## Broad dependency-ready queue", document)
         self.assertIn("Claim contract: **none in this projection**", document)
+        self.assertIn("**0** unscoped leaves", document)
         self.assertTrue(document.endswith("\n"))
         self.assertFalse(document.endswith("\n\n"))
 
@@ -122,6 +124,72 @@ class GenerateAgentBriefTests(unittest.TestCase):
         self.assertNotIn("Recommended next: **P0 `fm-parent`**", document)
         self.assertIn("**1** ready containers (**1** non-epic)", document)
         self.assertIn("broader queue below is situational context only", document)
+
+    def test_unscoped_broad_priority_is_suppressed_but_remains_visible(self) -> None:
+        ledger, _output = self.fixture()
+        self.write_ledger(
+            ledger,
+            [
+                record(
+                    "fm-unscoped",
+                    "Maintenance without a workstream",
+                    "open",
+                    updated_at="2026-08-31T08:15:00Z",
+                    priority=0,
+                ),
+                record(
+                    "fm-scoped",
+                    "W10: governed leaf",
+                    "open",
+                    updated_at="2026-08-31T08:14:00Z",
+                    priority=3,
+                ),
+            ],
+        )
+        document, snapshot = generator.build_document(
+            ledger, stale_days=2, activation_cap=4, limit=20
+        )
+        self.assertEqual(
+            snapshot["claim_plan"]["recommendation"]["issue"]["id"],
+            "fm-scoped",
+        )
+        self.assertIsNone(snapshot["situational_priority"]["issue"])
+        self.assertIn("scope it before prioritization", snapshot["situational_priority"]["reason"])
+        self.assertIn("Recommended next: **P3 `fm-scoped`** [W10]", document)
+        self.assertIn("Broad priority: **none**", document)
+        self.assertIn("**1** unscoped leaves", document)
+        self.assertIn("[UNSCOPED]", document)
+
+    def test_g0_is_scoped_in_the_human_projection(self) -> None:
+        ledger, _output = self.fixture()
+        self.write_ledger(
+            ledger,
+            [
+                record(
+                    "fm-g0-active",
+                    "G0: active spike",
+                    "in_progress",
+                    updated_at="2026-08-31T08:00:00Z",
+                    assignee="agent",
+                ),
+                record(
+                    "fm-g0-next",
+                    "G0: next spike",
+                    "open",
+                    updated_at="2026-08-31T08:15:00Z",
+                    priority=1,
+                ),
+            ],
+        )
+        document, snapshot = generator.build_document(
+            ledger, stale_days=2, activation_cap=4, limit=20
+        )
+        self.assertEqual(snapshot["activation"]["active_workstreams"], ["G0"])
+        self.assertEqual(snapshot["counts"]["unscoped_active"], 0)
+        self.assertIn("Workstreams: **1/4** active", document)
+        self.assertIn("`G0`", document)
+        self.assertIn("[G0]", document)
+        self.assertNotIn("Unscoped active claim: `fm-g0-active`", document)
 
     def test_identical_ledger_bytes_produce_identical_document_bytes(self) -> None:
         ledger, _output = self.fixture()
@@ -243,6 +311,42 @@ class GenerateAgentBriefTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("workstream cap breached", stderr.getvalue())
 
+    def test_g0_counts_toward_activation_cap_before_publication(self) -> None:
+        ledger, output = self.fixture()
+        rows = [
+            record(
+                "fm-g0",
+                "G0: active",
+                "in_progress",
+                updated_at="2026-08-20T00:00:00Z",
+                assignee="agent",
+            )
+        ]
+        rows.extend(
+            record(
+                f"fm-w{index}",
+                f"W{index}: active",
+                "in_progress",
+                updated_at=f"2026-08-{20 + index:02d}T00:00:00Z",
+                assignee="agent",
+            )
+            for index in range(1, 5)
+        )
+        self.write_ledger(ledger, rows)
+        output.write_text("sentinel\n", encoding="utf-8")
+
+        for mode in ([], ["--check"], ["--stdout"]):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = generator.main(
+                    ["--ledger", str(ledger), "--output", str(output), *mode]
+                )
+            self.assertEqual(status, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("workstream cap breached (5/4)", stderr.getvalue())
+            self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
+
     def test_integrity_failure_refuses_every_publication_mode(self) -> None:
         ledger, output = self.fixture()
         bad = record(
@@ -304,6 +408,35 @@ class GenerateAgentBriefTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(), "")
             self.assertIn("task-graph integrity is invalid", stderr.getvalue())
             self.assertIn("1 containment cycles", stderr.getvalue())
+            self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
+
+    def test_unscoped_active_refuses_every_publication_mode(self) -> None:
+        ledger, output = self.fixture()
+        self.write_ledger(
+            ledger,
+            [
+                record(
+                    "fm-unscoped",
+                    "Maintenance without a workstream",
+                    "in_progress",
+                    updated_at="2026-08-31T09:00:00Z",
+                    assignee="agent",
+                )
+            ],
+        )
+        output.write_text("sentinel\n", encoding="utf-8")
+
+        for mode in ([], ["--check"], ["--stdout"]):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = generator.main(
+                    ["--ledger", str(ledger), "--output", str(output), *mode]
+                )
+            self.assertEqual(status, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("task-graph integrity is invalid", stderr.getvalue())
+            self.assertIn("1 unscoped active claims", stderr.getvalue())
             self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
 
 
