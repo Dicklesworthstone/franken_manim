@@ -1,0 +1,153 @@
+name: Agent Beads Operations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/agent-ops/**"
+      - ".github/workflows/agent-beads-ops.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-beads-ops-main
+  cancel-in-progress: false
+
+env:
+  BR_VERSION: "0.5.7"
+  BR_ARCHIVE_SHA256: "634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843"
+  RUST_LOG: error
+  NO_COLOR: "1"
+
+jobs:
+  operate:
+    name: execute bounded tracker operation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned br
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/br-${BR_VERSION}-linux_amd64.tar.gz"
+          extract_dir="${RUNNER_TEMP}/br-${BR_VERSION}"
+          curl --fail --location --silent --show-error \
+            "https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}/br-${BR_VERSION}-linux_amd64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$BR_ARCHIVE_SHA256" "$archive" | sha256sum --check --strict
+          mkdir -p "$extract_dir"
+          tar -xzf "$archive" -C "$extract_dir"
+          binary="$(find "$extract_dir" -type f -name br -print -quit)"
+          test -n "$binary"
+          install -m 0755 "$binary" "${RUNNER_TEMP}/br"
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/br" --version
+
+      - name: Rebuild local tracker from authoritative JSONL
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .beads/beads.db \
+            .beads/beads.db-shm \
+            .beads/beads.db-wal \
+            .beads/beads.db-journal
+          br sync --import-only --rebuild
+
+      - name: Resolve the request introduced by this push
+        id: request
+        shell: bash
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          requests=()
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            changed=()
+            if [[ -z "$EVENT_BEFORE" || "$EVENT_BEFORE" =~ ^0+$ ]]; then
+              mapfile -t changed < <(
+                git diff-tree --root --no-commit-id --name-only -r "$GITHUB_SHA"
+              )
+            else
+              mapfile -t changed < <(
+                git diff --name-only "$EVENT_BEFORE" "$GITHUB_SHA"
+              )
+            fi
+            for path in "${changed[@]}"; do
+              if [[ "$path" =~ ^\.github/agent-ops/[A-Za-z0-9._-]+\.json$ ]]; then
+                requests+=("$path")
+              fi
+            done
+          fi
+          if (( ${#requests[@]} > 1 )); then
+            printf 'exactly zero or one operation request is allowed per push; got:\n' >&2
+            printf '  %s\n' "${requests[@]}" >&2
+            exit 2
+          fi
+          request=""
+          if (( ${#requests[@]} == 1 )); then
+            request="${requests[0]}"
+          fi
+          printf 'path=%s\n' "$request" >> "$GITHUB_OUTPUT"
+          printf 'request=%s\n' "${request:-<default inspect>}"
+
+      - name: Execute tracker-native operation
+        shell: bash
+        env:
+          REQUEST_PATH: ${{ steps.request.outputs.path }}
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/agent-operation-report.json"
+          commit_message="${RUNNER_TEMP}/agent-operation-commit-message.txt"
+          args=(
+            --repo .
+            --report "$report"
+            --commit-message "$commit_message"
+          )
+          if [[ -n "$REQUEST_PATH" ]]; then
+            args+=(--request "$REQUEST_PATH")
+          fi
+          python3 scripts/agent_remote_ops.py "${args[@]}"
+
+      - name: Commit tracker mutation atomically
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit_message="${RUNNER_TEMP}/agent-operation-commit-message.txt"
+          if git diff --quiet -- .beads; then
+            if [[ -s "$commit_message" ]]; then
+              echo "operation reported a mutation but .beads is unchanged" >&2
+              exit 3
+            fi
+            echo "read-only operation; no tracker commit required"
+            exit 0
+          fi
+          if [[ ! -s "$commit_message" ]]; then
+            echo "read-only operation changed .beads; refusing to commit" >&2
+            git status --short -- .beads >&2
+            exit 3
+          fi
+          git add .beads
+          while IFS= read -r path; do
+            [[ "$path" == .beads/* ]] || {
+              echo "refusing unexpected staged path: $path" >&2
+              exit 3
+            }
+          done < <(git diff --cached --name-only)
+          git diff --cached --check
+          git config user.name "FrankenManim Agent Ops"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -F "$commit_message"
+          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "main moved after this operation began; refusing non-fast-forward tracker push" >&2
+            exit 4
+          fi
+          git push origin HEAD:main
