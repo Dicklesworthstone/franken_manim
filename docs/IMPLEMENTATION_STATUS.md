@@ -1,7 +1,8 @@
 # FrankenManim implementation status
 
 **Status date:** 2026-09-02 UTC / America/New_York  
-**Substantive checkpoint:** `fffc469e99ac6e9b79e66ddd890fc98238e3f3c9`  
+**Substantive source-and-test checkpoint:** `c2f045340943e3a2c8e241535453653a1d835d87`  
+**Documentation checkpoint:** this file and the claim-guard/executor contracts were trued up after that source checkpoint.  
 **Authority rule:** this document summarizes evidence; `.beads/issues.jsonl` remains the task and dependency authority.
 
 ## How to read this document
@@ -12,34 +13,125 @@ FrankenManim is pre-1.0. A capability is listed as implemented only when a concr
 
 | Surface | Current implementation state | Evidence boundary |
 |---|---|---|
-| Native Rust library | The composition root, scene runtime, mobject/animation stack, native text and math, retained renderer, codecs, output pipeline, and built-in scene corpus exist as workspace crates. | Ordinary workspace checks run through `scripts/check.sh`; platform certification remains a separate matrix. |
+| Native Rust library | The composition root, scene runtime, mobject/animation stack, native text and math, retained renderer, codecs, output pipeline, and built-in scene corpus exist as workspace crates. The Menagerie includes boolean, data, drawing, graph, field, image, model, and 3D families, although individual compatibility and release obligations remain open. | Ordinary workspace checks run through `scripts/check.sh`; platform certification remains a separate matrix. |
 | `fmn` CLI | Typed render, doctor, batch, and Studio surfaces exist. Human `doctor --quiet` semantics are owned by the shared dispatcher. Batch robot output includes terminal per-job records, and executable smoke covers a real tiny render plus native artifact and manifest publication. | The complete shipping feature shape is exercised by `cargo test -p fmn-cli --features batch --test cli_smoke` when the exact local gate runs. |
 | Studio | Supervisor/worker, replay, event, inspection, and presentation foundations exist. | Platform and real-browser presentation evidence is not inferred from local Rust tests. |
 | `fmn-python` portal | A separately installed CPython wheel exposes the pinned `manimlib` namespace with native and authored compatibility behavior. Explicit bootstrap refusals are mechanically inventoried and must be named. | `fm-5wq.4` remains open. A named refusal or reviewed ledger row is not implemented behavior. |
 | WASM/browser | wasm32 render/player foundations and a package gate exist. | The npm/real-browser release gate is opt-in and independent of ordinary local source checks. |
 | Distribution | Tagged `v0.1.0` through `v0.4.0` are prereleases. | Cross-platform artifacts, hardware-specific execution, clean wheels, and certification require their own receipts. |
 
-## Recently completed tranche: governed autonomous scope
+## Recently completed tranche: full task-semantic claim binding
 
-### Planner schema version 4
+The autonomous claim guard no longer treats the narrow `agent_brief.Issue` model as the complete task contract.
 
-`scripts/agent_next.py` now owns one exact autonomous-workstream grammar:
+### Claim-graph version 3
+
+`scripts/agent_task_semantics.py` now reads the exact exported Beads JSONL authority and binds every task-semantic field not represented by the broad planner model.
+
+The claim graph includes:
+
+- the established core planning fields: ID, title, status, priority, issue type, assignee, normalized update time, dependencies, and complete comment objects;
+- descriptions, design, acceptance criteria, and notes;
+- owners, estimates, creation/source metadata, due/defer values, and labels;
+- every unknown future top-level extension field;
+- every non-core dependency-record field, including metadata, thread identity, and creation metadata.
+
+The canonicalization deliberately ignores only representation order with no task meaning:
+
+- issue-row order;
+- dependency-array order;
+- JSON object-key order at every depth;
+- label order.
+
+Comment order and ordinary array order remain significant. Duplicate labels remain represented.
+
+### Stable ledger projection
+
+The semantic loader proves that the broad planning projection and the full semantic projection describe one stable ledger state:
+
+1. open the JSONL authority as a no-follow regular file;
+2. read under the existing 32 MiB and per-line limits;
+3. strictly decode each row and derive both the full semantics and an `agent_brief.Issue` projection from the same bytes;
+4. run the established bounded `agent_brief` loader;
+5. repeat the full semantic/core read;
+6. require matching before/after digests and projections;
+7. require the established loader's issue map to equal the core map derived from the stable bytes.
+
+This catches mutation during loading, including a change that would affect only descriptions, labels, estimates, or unknown metadata while leaving broad planner output unchanged.
+
+Unknown nested metadata is bounded before planning by a per-record depth limit of 64 and node limit of 100,000. Duplicate keys, non-finite JSON constants, invalid UTF-8, unpaired surrogates, blank rows, missing final LF, excessive files/lines/issues, and projection disagreement fail closed.
+
+### Post-export semantic invariant
+
+The executor already recalculates `after_graph_sha256` after `br sync --flush-only`. That path now checks the remembered full task semantics before emitting the digest.
+
+For the exact guarded ledger path:
+
+- every exported task-semantic value on the selected issue must remain unchanged;
+- every exported task-semantic value on every unrelated issue must remain unchanged;
+- the existing core delta still permits only `open` → `in_progress`, assignment to the requested actor, a non-regressing timestamp, and optionally one exact transition comment;
+- represented issue membership must remain unchanged.
+
+The remembered semantic baseline is context-local and scoped to the absolute ledger path. A guard created for another fixture, worktree, or repository cannot contaminate verification.
+
+### Regression surface
+
+`scripts/test_agent_task_semantics.py` contains focused cases for:
+
+- token invalidation across every major task-semantic field and unknown nested extensions;
+- dependency metadata changes;
+- harmless row/dependency/label/object-key order normalization;
+- the permitted claim-core transition;
+- selected and unrelated semantic drift;
+- nested-metadata depth refusal;
+- mutation between projections;
+- a broad core projection that does not match the core projection derived from the same stable bytes.
+
+The suite is compiled and executed by `scripts/check.sh` before the executor tests.
+
+### Representative commits
+
+- `5811d5c` added the full task-semantic reader and canonical projection.
+- `43feb35` bound the projection into claim-graph/input generation.
+- `2df9d98` scoped remembered postconditions to one exact ledger path.
+- `ce33db7` preserved the public guard/token envelope while versioning graph semantics.
+- `fb964b1` added the focused semantic test suite.
+- `3a8ff75` ratcheted the graph/input grammar to version 3.
+- `d35685f` added the new suite to the mandatory repository gate.
+- `6ec8f5a` proved the broad and semantic projections came from one stable source state.
+- `c2f0453` added direct core-projection disagreement coverage.
+
+## Agent control-plane versions
+
+| Layer | Current contract | Role |
+|---|---:|---|
+| Broad snapshot | `agent_brief` snapshot version 5 | Bounded parsing, blocking integrity, broad queues, stale/unowned diagnostics. Not a claim authority. |
+| Leaf planner | `fmn.agent.next` version 4 | Governed workstream classification, leafhood, containment integrity, activation, and recommendation. |
+| Claim guard | `fmn.agent.claim-guard` version 2 | Stable JSON/token envelope for graph/plan/policy/schema-bound revalidation. |
+| Claim input | `fmn.agent.claim-input` version 3 | Complete graph, plan, policy, and schema input to the token digest. |
+| Claim graph | `fmn.agent.claim-graph` version 3 | Canonical core graph plus complete exported task semantics. |
+| Task semantics | `fmn.agent.task-semantics` version 1 | Top-level and dependency fields outside `agent_brief.Issue`. |
+| Claim executor | `fmn.agent.claim` version 6 | Atomic Beads claim, structured response proof, explicit export, semantic invariant, and core delta receipt. |
+| Human brief | deterministic Markdown | Planner-normalized human context and atomic publication. |
+
+The public token remains:
+
+```text
+v2:<claim-sha256>:<issue-id-or-none>
+```
+
+Old tokens do not validate against graph/input version 3 because those versions and the full graph content participate in the digest.
+
+## Governed autonomous scope
+
+`scripts/agent_next.py` owns one exact autonomous-workstream grammar:
 
 ```text
 G0
 W1 through W11
 ```
 
-A valid prefix begins at the first title character and is followed by a word boundary or `:`. This accepts titles such as `G0: spike`, `W7: drawings`, and `W5/fm-4wt: SIMD`. It rejects `W0`, `W12`, `W999`, lower-case `w10`, and embedded `prefix W10` as `UNSCOPED`.
-
-This is a semantic contract, not display decoration:
-
-- open unscoped leaves remain visible but never enter autonomous ranking;
-- when only unscoped leaves remain, `--require` exits `3` with no stdout;
-- a governed leaf wins even when an unscoped leaf has a lower numeric priority;
-- any active unscoped issue makes planner integrity invalid and causes exit `1` before token or mutation;
-- `G0` counts toward the four-workstream activation cap;
-- `G0` plus four W-streams is a five-stream breach.
+A valid prefix begins at the first title character and is followed by a word boundary or `:`. Open unscoped leaves remain visible but never enter autonomous ranking. Any active unscoped issue invalidates the plan, and `G0` counts toward the four-workstream activation cap.
 
 Recommendation order remains:
 
@@ -50,53 +142,7 @@ Recommendation order remains:
 5. most recently updated;
 6. lexical issue ID.
 
-### Token and executor propagation
-
-`agent_claim_guard.py` remains schema `fmn.agent.claim-guard` version `2`, with token spelling:
-
-```text
-v2:<claim-sha256>:<issue-id-or-none>
-```
-
-Its schema contract dynamically includes `fmn.agent.next` version `4`. Old tokens issued under planner versions 2 or 3 therefore fail revalidation without changing token syntax.
-
-Direct guard regressions cover:
-
-- an unscoped-only graph producing the stable `none` token and exit `3` under `--require`;
-- a valid `G0` active lane selecting a `G0` leaf ahead of new-stream work;
-- invalid `W12` work remaining unscoped;
-- an active unscoped issue suppressing token publication with exit `1`.
-
-`agent_claim.py` consumes that guard, so unscoped work cannot reach its atomic Beads mutation path as a valid recommendation.
-
-### Deterministic human brief
-
-`scripts/generate_agent_brief.py` now consumes the exact planner scope and activation result before publication.
-
-It:
-
-- normalizes broad queue labels to `G0`, `W1`–`W11`, or `UNSCOPED`;
-- uses the planner's activation count rather than the broad projection's historical grouping;
-- suppresses an unscoped broad priority instead of presenting it as actionable;
-- keeps unscoped open leaves visible in the leaf-plan census;
-- refuses active unscoped issues before stdout or file replacement;
-- refuses `G0` plus four W-streams as a `5/4` cap breach;
-- preserves broad non-leaf context while making the planner section the only claim contract.
-
-Focused generator regressions cover G0 rendering, an unscoped broad priority, unscoped active refusal across every publication mode, strict activation-cap refusal, and deterministic output.
-
-## Agent control-plane versions
-
-| Layer | Current contract | Role |
-|---|---:|---|
-| Broad snapshot | `agent_brief` snapshot version 5 | Bounded parsing, blocking integrity, broad queues, stale/unowned diagnostics. Not a claim authority. |
-| Leaf planner | `fmn.agent.next` version 4 | Governed workstream classification, leafhood, containment integrity, activation, and recommendation. |
-| Claim guard | `fmn.agent.claim-guard` version 2 | Graph/plan/policy/schema-bound token. |
-| Claim graph | `fmn.agent.claim-graph` version 2 | Canonical represented-field graph used in token and delta evidence. |
-| Claim executor | `fmn.agent.claim` version 6 | Atomic Beads claim, structured response proof, explicit export, and represented-field delta receipt. |
-| Human brief | deterministic Markdown | Planner-normalized human context and atomic publication. |
-
-The direct `agent_brief.py` workstream labels remain broad diagnostic grouping. `agent_next.py` is the only authority for governed scope and activation, and generated Markdown is normalized to that result before publication.
+`scripts/generate_agent_brief.py` normalizes its human presentation to this planner result. The direct `agent_brief.py` workstream grouping remains broad, diagnostic, and non-authoritative.
 
 ## Atomic guarded claim execution
 
@@ -107,13 +153,13 @@ br update ISSUE --claim --actor ASSIGNEE --json [--transition-comment TEXT]
 br sync --flush-only
 ```
 
-The executor keeps token revalidation, Beads' storage-level unassigned compare-and-set, response validation, export, and postcondition verification under one shared-common-directory advisory lock.
+The executor keeps token revalidation, Beads' storage-level unassigned compare-and-set, response validation, export, semantic preservation, and core postcondition verification under one shared-common-directory advisory lock.
 
 ### Atomic response proof
 
 The version-6 executor rejects successful child output unless it is:
 
-- UTF-8 strict JSON;
+- strict UTF-8 JSON;
 - free of duplicate keys and non-finite constants;
 - no deeper than 64 decoded levels;
 - no larger than 100,000 decoded nodes;
@@ -147,23 +193,19 @@ git status
 
 The old token must never be replayed blindly.
 
-## Canonical planning-graph boundary
+## SVG untrusted-input hardening
 
-The token and post-export claim delta currently bind the fields represented by `agent_brief.Issue`:
+The preserved 17-byte `svg_document` fuzz input exposed a valid-UTF-8 panic: the tokenizer sliced a fixed nine-byte DOCTYPE probe through the first byte of a two-byte character.
 
-- ID;
-- title;
-- status;
-- priority;
-- issue type;
-- assignee;
-- normalized update timestamp;
-- dependencies;
-- comments.
+The public SVG path now performs a bounded UTF-8-safe admission pass before the private parser can inspect fixed ASCII prefixes. Permanent tests cover the exact reproducer, case-insensitive DOCTYPE rejection, and markup-like multibyte text inside quoted attributes. The finding README records the root cause and source-level resolution.
 
-The executor verifies unchanged represented issue membership, unchanged represented non-target records, and only the expected represented target transition.
+A follow-up removed an unnecessary clone of every retained SVG shape during `emit_svg_document`; admitted documents now emit directly from their shape slice.
 
-The following persisted Beads fields are **not yet bound**: description, design, acceptance criteria, notes, owner, estimate, due/defer values, labels, and unknown extension metadata. A successful version-6 receipt is not raw-record or whole-database identity. `br show` immediately before claiming remains mandatory, and expanding this field set is a high-value future hardening task.
+Evidence boundary:
+
+- the source-level panic path and regression are fixed;
+- a sanitizer replay of the original fuzz target has not been executed in this editing environment;
+- the admission facade currently performs a second bounded scan before the private parser. Collapsing that facade into a byte-safe tokenizer probe is a reasonable later simplification, not a current public safety gap.
 
 ## Python portal truthfulness
 
@@ -186,13 +228,13 @@ The Python/Rust namespace policy also prevents Rust-only snake_case helpers from
 - each refusal falls only through implementation or an evidence-backed tier/exclusion;
 - no W10 or G4 closure is claimed here.
 
-### Expand the canonical claim graph
-
-Task-semantic fields outside `agent_brief.Issue` can currently change without changing `graph_sha256`. The next hardening step is to bind the complete task-semantic record while preserving deterministic canonicalization and harmless row-order independence.
-
 ### Unify broad display scope
 
 The autonomous planner and generated human brief use the exact governed vocabulary. The direct broad snapshot retains its historical display classifier and is explicitly non-authoritative. Moving the shared classifier into one common module would reduce conceptual duplication, provided broad compatibility and snapshot versioning are handled deliberately.
+
+### Tracker-native reconciliation
+
+The full claim graph now binds every field that Beads exports in JSONL, but `.beads/issues.jsonl` must still be mutated through `br`, never reconstructed from connector output. Tracker descriptions and status should be reconciled from a real checkout with tracker-native commands when available.
 
 ### Distributed coordination
 
@@ -220,6 +262,11 @@ python3 scripts/agent_brief.py --format json --check
 python3 scripts/agent_next.py --format json --check
 python3 scripts/generate_agent_brief.py --stdout
 
+# Focused full-semantic claim tests
+python3 scripts/test_agent_task_semantics.py
+python3 scripts/test_agent_claim_guard.py
+python3 scripts/test_agent_claim.py
+
 # Guarded atomic claim
 token="$(python3 scripts/agent_claim_guard.py --require)"
 issue="${token##*:}"
@@ -234,15 +281,15 @@ python3 scripts/agent_claim.py \
     --dry-run
 ```
 
-## Evidence for this tranche
+## Evidence for this checkpoint
 
-The exact `agent_next.py` blob passed Python bytecode compilation and a focused 12-case planner harness using a faithful `agent_brief` test seam. That harness covered non-epic containers, active-stream preference, blocker pressure, G0, all W1–W11 prefixes, invalid W-prefixes, unscoped-only state, active unscoped refusal, containment cycles, a 1,500-node hierarchy, activation limits, canonical JSON, and distinct no-work exits.
+Before the final stable-core projection test was added, the authored semantic module and guard passed Python bytecode compilation and a focused seven-case stub-backed test run. The committed suite now contains eight focused tests and is wired into `scripts/check.sh`.
 
-The committed planner, guard, and generator suites are already invoked by `scripts/check.sh`. This editing environment did not contain an exact complete repository checkout, Cargo/Rust toolchain, `br`, or UBS. Therefore the full repository gate, live-ledger planner result, Beads mutation, Rust axes, wheel/browser gates, and platform matrices are **not** represented as executed against `fffc469`.
+This editing environment cannot resolve `github.com` from a container checkout, so it did not contain an exact complete repository tree, Cargo/Rust toolchain state, `br`, or UBS execution context. GitHub Actions runs triggered by the incremental commits remained queued or pending without jobs and were not used as acceptance evidence.
+
+Therefore the complete repository gate, exact current Python suite, live-ledger planner result, Beads mutation, Rust axes, sanitizer replay, wheel/browser gates, and platform matrices are **not** represented as executed against `c2f0453`.
 
 No `.beads/` file was manually reconstructed or replaced. Tracker state was left unchanged because tracker-native `br` execution was unavailable.
-
-GitHub Actions is not a correctness dependency and was not used as acceptance evidence.
 
 ## Truthfulness rules for future updates
 
@@ -251,5 +298,6 @@ GitHub Actions is not a correctness dependency and was not used as acceptance ev
 - Do not infer hardware or artifact evidence from another platform.
 - Do not close a parent merely because one child or one census reaches 100%.
 - Distinguish broad readiness from governed leaf claimability.
-- Scope autonomous work to `G0` or `W1`–`W11`, issue a fresh token, complete external coordination, and use the atomic executor.
+- Scope autonomous work to `G0` or `W1` through `W11`, issue a fresh token, complete external coordination, and use the atomic executor.
+- Treat claim-graph v3 as complete exported task semantics, not raw Beads database identity.
 - Keep target-state design in the comprehensive plan and current-state evidence here.
