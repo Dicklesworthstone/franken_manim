@@ -37,7 +37,10 @@ def ledger_as_of(issues: dict[str, agent_brief.Issue]):
     return max(issue.updated_at for issue in issues.values())
 
 
-def _context_row(issue: agent_brief.Issue) -> dict[str, Any]:
+def _context_row(
+    issue: agent_brief.Issue,
+    issues: dict[str, agent_brief.Issue],
+) -> dict[str, Any]:
     return {
         "id": issue.id,
         "priority": issue.priority,
@@ -47,7 +50,7 @@ def _context_row(issue: agent_brief.Issue) -> dict[str, Any]:
         "assignee": issue.assignee,
         "updated_at": issue.updated_at.isoformat().replace("+00:00", "Z"),
         "title": agent_brief.compact_title(issue.title),
-        "blockers": list(agent_brief.unresolved_blockers(issue, {})),
+        "blockers": list(agent_brief.unresolved_blockers(issue, issues)),
         "latest_comment": agent_brief.latest_comment(issue),
     }
 
@@ -86,7 +89,7 @@ def normalize_snapshot_scope(
         key=agent_brief.issue_sort_key,
     )
     snapshot["unscoped_active"] = [
-        _context_row(issue) for issue in strict_unscoped[:limit]
+        _context_row(issue, issues) for issue in strict_unscoped[:limit]
     ]
     snapshot["counts"]["unscoped_active"] = len(strict_unscoped)
     snapshot["activation"] = plan["activation"]
