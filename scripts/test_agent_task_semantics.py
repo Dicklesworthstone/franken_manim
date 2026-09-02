@@ -260,6 +260,26 @@ class AgentTaskSemanticsTests(unittest.TestCase):
             with self.assertRaisesRegex(semantics.SemanticError, "cannot read.*injected"):
                 semantics.load_task_semantics(path)
 
+    def test_claim_graph_requires_full_semantic_provenance(self) -> None:
+        path = self.ledger([record()])
+        semantic_issues = agent_brief.load_issues(path)
+        self.assertIsInstance(semantic_issues, semantics.SemanticIssues)
+        with self.assertRaisesRegex(guard.GuardError, "full task-semantic loader"):
+            guard.canonical_graph(dict(semantic_issues))
+
+    def test_semantic_contract_versions_invalidate_the_token(self) -> None:
+        path = self.ledger([record()])
+        original = self.build(path)["token"]
+        patches = (
+            mock.patch.object(guard, "CLAIM_GRAPH_VERSION", guard.CLAIM_GRAPH_VERSION + 1),
+            mock.patch.object(guard, "CLAIM_INPUT_VERSION", guard.CLAIM_INPUT_VERSION + 1),
+            mock.patch.object(semantics, "SCHEMA_VERSION", semantics.SCHEMA_VERSION + 1),
+        )
+        for patch in patches:
+            with self.subTest(patch=patch):
+                with patch:
+                    self.assertNotEqual(self.build(path)["token"], original)
+
 
 if __name__ == "__main__":
     unittest.main()
