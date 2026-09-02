@@ -6,8 +6,10 @@ module adds the narrower question an autonomous worker actually needs answered:
 which *scoped, unassigned, dependency-ready leaf* is the best collision-free
 next claim? A non-epic parent with live ``parent-child`` descendants is a
 container, not a leaf. Unscoped work stays visible for human repair but can
-never be selected autonomously. Among otherwise equal candidates, work that
-immediately releases more blocked issues wins deterministically.
+never be selected autonomously. Exact ``agent:claim:*`` labels separate normal
+autonomous work from manual decisions and externally gated evidence. Among
+otherwise equal candidates, work that immediately releases more blocked issues
+wins deterministically.
 """
 
 from __future__ import annotations
@@ -21,6 +23,11 @@ from pathlib import Path
 from typing import Any
 
 import agent_brief
+import agent_task_semantics
+
+agent_task_semantics.install_loader()
+
+import agent_claim_policy
 
 SCHEMA = "fmn.agent.next"
 SCHEMA_VERSION = 4
@@ -107,7 +114,11 @@ def containment_cycles(
 ) -> tuple[tuple[str, ...], ...]:
     """Return live ``parent-child`` cycles as deterministic SCCs."""
 
-    live_ids = {issue.id for issue in issues.values() if issue.status in agent_brief.OPEN_STATUSES}
+    live_ids = {
+        issue.id
+        for issue in issues.values()
+        if issue.status in agent_brief.OPEN_STATUSES
+    }
     adjacency = {
         issue_id: tuple(child for child in children.get(issue_id, ()) if child in live_ids)
         for issue_id in live_ids
@@ -162,6 +173,11 @@ def build_plan(
         activation_cap=activation_cap,
         limit=limit,
     )
+    try:
+        policies, all_policy_violations = agent_claim_policy.classify_issues(issues)
+    except agent_claim_policy.ClaimPolicyError as exc:
+        raise PlanError(str(exc)) from exc
+
     children = live_children(issues)
     hierarchy_cycles = containment_cycles(issues, children)
     direct, immediate = blocker_pressure(issues)
@@ -175,7 +191,10 @@ def build_plan(
         issue
         for issue in dependency_ready
         if issue.assignee is None
-        and (issue.issue_type in agent_brief.NON_CLAIMABLE_TYPES or children.get(issue.id))
+        and (
+            issue.issue_type in agent_brief.NON_CLAIMABLE_TYPES
+            or children.get(issue.id)
+        )
     ]
     leaf_candidates = [
         issue
@@ -184,7 +203,20 @@ def build_plan(
         and issue.issue_type not in agent_brief.NON_CLAIMABLE_TYPES
         and not children.get(issue.id)
     ]
-    leaves = [issue for issue in leaf_candidates if governed_workstream(issue) != UNSCOPED]
+    scoped_leaves = [
+        issue
+        for issue in leaf_candidates
+        if governed_workstream(issue) != UNSCOPED
+    ]
+    leaves = [issue for issue in scoped_leaves if policies[issue.id].autonomous]
+    non_autonomous_ready = [
+        issue
+        for issue in scoped_leaves
+        if not policies[issue.id].autonomous and policies[issue.id].mode != "invalid"
+    ]
+    invalid_policy_ready = [
+        issue for issue in scoped_leaves if policies[issue.id].mode == "invalid"
+    ]
     unscoped_leaves = [
         issue for issue in leaf_candidates if governed_workstream(issue) == UNSCOPED
     ]
@@ -197,6 +229,16 @@ def build_plan(
         ),
         key=agent_brief.issue_sort_key,
     )
+    live_ids = {
+        issue.id
+        for issue in issues.values()
+        if issue.status in agent_brief.OPEN_STATUSES
+    }
+    policy_violations = [
+        violation
+        for violation in all_policy_violations
+        if violation["issue_id"] in live_ids
+    ]
     active_workstreams = {
         governed_workstream(issue)
         for issue in issues.values()
@@ -212,13 +254,19 @@ def build_plan(
     base_integrity = base["integrity"]
     blocking_ok = bool(base_integrity["within_contract"])
     integrity = {
-        "ok": blocking_ok and not hierarchy_cycles and not unscoped_active,
+        "ok": (
+            blocking_ok
+            and not hierarchy_cycles
+            and not unscoped_active
+            and not policy_violations
+        ),
         "blocking_within_contract": blocking_ok,
         "blocking_cycles": base_integrity["blocking_cycles"],
         "containment_cycles": [list(component) for component in hierarchy_cycles],
         "missing_blockers": base_integrity["missing_blockers"],
         "missing_links": base_integrity["missing_links"],
         "unscoped_active": [issue.id for issue in unscoped_active],
+        "claim_policy_violations": policy_violations,
     }
 
     recommendation: agent_brief.Issue | None = None
@@ -229,18 +277,33 @@ def build_plan(
         reason = "parent-child containment cycles must be repaired before claiming work"
     elif unscoped_active:
         reason = "unscoped active claims must be scoped or released before claiming work"
+    elif policy_violations:
+        reason = "claim-policy labels must be repaired before claiming work"
     else:
         active_leaves = [
             issue for issue in leaves if governed_workstream(issue) in active_workstreams
         ]
         candidates = active_leaves or leaves
         if not candidates:
-            if unscoped_leaves:
-                reason = "only unscoped leaves remain; add a governed workstream prefix before claiming"
+            if non_autonomous_ready and unscoped_leaves:
+                reason = (
+                    "no autonomous leaf exists; ready leaves require manual/external "
+                    "handling or governed workstream scope"
+                )
+            elif non_autonomous_ready:
+                reason = "only manual/external dependency-ready leaves remain"
+            elif unscoped_leaves:
+                reason = (
+                    "only unscoped leaves remain; add a governed workstream prefix "
+                    "before claiming"
+                )
             else:
                 reason = "no dependency-ready unassigned leaf exists"
         elif not active_leaves and len(active_workstreams) >= activation_cap:
-            reason = "activation cap is full and no claimable leaf belongs to an active workstream"
+            reason = (
+                "activation cap is full and no claimable leaf belongs to an active "
+                "workstream"
+            )
         else:
             recommendation = min(
                 candidates,
@@ -251,15 +314,24 @@ def build_plan(
                 ),
             )
             if active_leaves:
-                reason = f"best leaf in already-active {governed_workstream(recommendation)}"
+                reason = (
+                    f"best leaf in already-active {governed_workstream(recommendation)}"
+                )
             else:
-                reason = f"best leaf; claiming it activates {governed_workstream(recommendation)}"
+                reason = (
+                    f"best leaf; claiming it activates "
+                    f"{governed_workstream(recommendation)}"
+                )
             if immediate.get(recommendation.id, 0):
                 reason += (
-                    f"; completion immediately unblocks {immediate[recommendation.id]} live issue(s)"
+                    f"; completion immediately unblocks "
+                    f"{immediate[recommendation.id]} live issue(s)"
                 )
             elif direct.get(recommendation.id, 0):
-                reason += f"; it participates in blocking {direct[recommendation.id]} live issue(s)"
+                reason += (
+                    f"; it participates in blocking "
+                    f"{direct[recommendation.id]} live issue(s)"
+                )
 
     def row(issue: agent_brief.Issue) -> dict[str, Any]:
         return {
@@ -273,6 +345,7 @@ def build_plan(
             "live_children": list(children.get(issue.id, ())),
             "direct_unblocks": direct.get(issue.id, 0),
             "immediate_unblocks": immediate.get(issue.id, 0),
+            "claim_policy": policies[issue.id].as_dict(),
         }
 
     activates = bool(
@@ -286,6 +359,7 @@ def build_plan(
         "as_of": as_of.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "integrity": integrity,
         "activation": activation,
+        "claim_policy": agent_claim_policy.contract(),
         "recommendation": {
             "issue": row(recommendation) if recommendation is not None else None,
             "reason": reason,
@@ -293,16 +367,34 @@ def build_plan(
         },
         "counts": {
             "claimable_leaves": len(leaves),
+            "non_autonomous_ready": len(non_autonomous_ready),
+            "manual_ready": sum(
+                policies[issue.id].mode == "manual"
+                for issue in non_autonomous_ready
+            ),
+            "external_ready": sum(
+                policies[issue.id].mode == "external"
+                for issue in non_autonomous_ready
+            ),
+            "invalid_policy_ready": len(invalid_policy_ready),
             "unscoped_leaves": len(unscoped_leaves),
             "unscoped_active": len(unscoped_active),
             "assigned_ready": len(assigned),
             "ready_containers": len(containers),
             "non_epic_containers": sum(
-                issue.issue_type not in agent_brief.NON_CLAIMABLE_TYPES for issue in containers
+                issue.issue_type not in agent_brief.NON_CLAIMABLE_TYPES
+                for issue in containers
             ),
             "containment_cycles": len(hierarchy_cycles),
+            "claim_policy_violations": len(policy_violations),
         },
         "claimable_leaves": [row(issue) for issue in sorted(leaves, key=sort)[:limit]],
+        "non_autonomous_ready": [
+            row(issue) for issue in sorted(non_autonomous_ready, key=sort)[:limit]
+        ],
+        "invalid_policy_ready": [
+            row(issue) for issue in sorted(invalid_policy_ready, key=sort)[:limit]
+        ],
         "unscoped_leaves": [
             row(issue) for issue in sorted(unscoped_leaves, key=sort)[:limit]
         ],
@@ -327,7 +419,11 @@ def render_json(plan: dict[str, Any]) -> str:
 def render_markdown(plan: dict[str, Any]) -> str:
     recommendation = plan["recommendation"]
     issue = recommendation["issue"]
-    selected = "none" if issue is None else f"P{issue['priority']} `{issue['id']}` [{issue['workstream']}]"
+    selected = (
+        "none"
+        if issue is None
+        else f"P{issue['priority']} `{issue['id']}` [{issue['workstream']}]"
+    )
     lines = [
         "# FrankenManim claim plan",
         "",
@@ -335,32 +431,54 @@ def render_markdown(plan: dict[str, Any]) -> str:
         "",
         f"- Graph integrity: **{'valid' if plan['integrity']['ok'] else 'INVALID'}**.",
         (
-            f"- Active workstreams: **{plan['activation']['count']}/{plan['activation']['cap']}**; "
-            + (", ".join(f"`{item}`" for item in plan["activation"]["active_workstreams"]) or "none")
+            f"- Active workstreams: **{plan['activation']['count']}/"
+            f"{plan['activation']['cap']}**; "
+            + (
+                ", ".join(
+                    f"`{item}`" for item in plan["activation"]["active_workstreams"]
+                )
+                or "none"
+            )
             + "."
         ),
         f"- Recommended next: **{selected}** — {recommendation['reason']}.",
         (
-            f"- Queues: {plan['counts']['claimable_leaves']} scoped claimable leaves, "
+            f"- Queues: {plan['counts']['claimable_leaves']} autonomous leaves, "
+            f"{plan['counts']['non_autonomous_ready']} manual/external leaves, "
             f"{plan['counts']['unscoped_leaves']} unscoped leaves, "
             f"{plan['counts']['ready_containers']} ready containers, "
             f"{plan['counts']['assigned_ready']} assigned-ready, "
             f"{plan['counts']['containment_cycles']} containment cycles."
         ),
         "",
-        "A task with any live `parent-child` descendant is a container even when its issue type is not `epic`.",
+        (
+            "A task with any live `parent-child` descendant is a container even "
+            "when its issue type is not `epic`."
+        ),
         "Unscoped issues are diagnostic state only and are never autonomous claim candidates.",
+        (
+            "Exact `agent:claim:manual` and `agent:claim:external` labels keep "
+            "ready work visible while excluding it from autonomous claims."
+        ),
         "",
     ]
     for component in plan["integrity"]["containment_cycles"]:
         lines.append(
-            "- Parent-child cycle: " + " → ".join(f"`{issue_id}`" for issue_id in component)
+            "- Parent-child cycle: "
+            + " → ".join(f"`{issue_id}`" for issue_id in component)
         )
     for issue_id in plan["integrity"]["unscoped_active"]:
         lines.append(f"- Unscoped active claim: `{issue_id}`")
+    for violation in plan["integrity"]["claim_policy_violations"]:
+        labels = ", ".join(f"`{label}`" for label in violation["labels"]) or "none"
+        lines.append(
+            f"- Claim-policy violation `{violation['code']}` on "
+            f"`{violation['issue_id']}`; labels: {labels}."
+        )
     if (
         plan["integrity"]["containment_cycles"]
         or plan["integrity"]["unscoped_active"]
+        or plan["integrity"]["claim_policy_violations"]
     ):
         lines.append("")
     return _bounded_output("\n".join(lines))
@@ -370,7 +488,11 @@ def parse_as_of(
     value: str | None, issues: dict[str, agent_brief.Issue]
 ) -> dt.datetime:
     if value is not None:
-        return agent_brief.parse_timestamp(value, field="--as-of", issue_id="command line")
+        return agent_brief.parse_timestamp(
+            value,
+            field="--as-of",
+            issue_id="command line",
+        )
     return max(
         (issue.updated_at for issue in issues.values()),
         default=dt.datetime(1970, 1, 1, tzinfo=UTC),
@@ -404,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
             activation_cap=args.activation_cap,
             limit=args.limit,
         )
-    except agent_brief.BriefError as exc:
+    except (agent_brief.BriefError, PlanError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

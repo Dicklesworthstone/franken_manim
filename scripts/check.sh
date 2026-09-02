@@ -11,6 +11,7 @@ python3 -m py_compile \
     scripts/agent_brief.py \
     scripts/agent_next.py \
     scripts/agent_task_semantics.py \
+    scripts/agent_claim_policy.py \
     scripts/agent_claim_guard.py \
     scripts/agent_claim.py \
     scripts/generate_agent_brief.py \
@@ -19,6 +20,7 @@ python3 -m py_compile \
     scripts/test_agent_next.py \
     scripts/test_agent_next_output.py \
     scripts/test_agent_scope.py \
+    scripts/test_agent_claim_policy.py \
     scripts/test_agent_claim_guard.py \
     scripts/test_agent_task_semantics.py \
     scripts/test_agent_claim.py \
@@ -32,6 +34,7 @@ python3 scripts/test_agent_brief_strict_json.py
 python3 scripts/test_agent_next.py
 python3 scripts/test_agent_next_output.py
 python3 scripts/test_agent_scope.py
+python3 scripts/test_agent_claim_policy.py
 python3 scripts/test_agent_claim_guard.py
 python3 scripts/test_agent_task_semantics.py
 python3 scripts/test_agent_claim.py
@@ -40,8 +43,10 @@ python3 scripts/test_generate_agent_brief.py
 python3 scripts/test_generate_agent_brief_io.py
 # Render the complete live ledger through every operational projection without
 # mutating documentation. The claim planner proves that non-epic parents with
-# live children cannot be returned as autonomous leaf work. The claim guard
-# then revalidates the exact graph, policy, schema contract, and recommendation.
+# live children cannot be returned as autonomous leaf work. Exact claim-policy
+# labels additionally keep manual or externally gated leaves visible without
+# allowing them to become autonomous recommendations. The claim guard then
+# revalidates the exact graph, policy, schema contract, and recommendation.
 # When work is claimable, the executor additionally acquires its repository-
 # local lock and renders the exact atomic `br update --claim` argv plus bounded
 # timeout/output policy in dry-run mode; it never invokes br or mutates Beads.
