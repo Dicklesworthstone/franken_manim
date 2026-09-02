@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -27,25 +26,12 @@ SCHEMA = "fmn.agent.next"
 SCHEMA_VERSION = 4
 MAX_PLAN_OUTPUT_BYTES = 4 * 1024 * 1024
 UTC = dt.timezone.utc
-UNSCOPED = "UNSCOPED"
-GOVERNED_WORKSTREAM_RE = re.compile(
-    r"^(?:(?P<g0>G0)|W(?P<number>[1-9]|1[01]))(?:\b|:)"
-)
+UNSCOPED = agent_brief.UNSCOPED
+governed_workstream = agent_brief.governed_workstream
 
 
 class PlanError(ValueError):
     pass
-
-
-def governed_workstream(issue: agent_brief.Issue) -> str:
-    """Return the exact governance workstream encoded by an issue title."""
-
-    match = GOVERNED_WORKSTREAM_RE.match(issue.title)
-    if match is None:
-        return UNSCOPED
-    if match.group("g0") is not None:
-        return "G0"
-    return f"W{match.group('number')}"
 
 
 def live_children(issues: dict[str, agent_brief.Issue]) -> dict[str, tuple[str, ...]]:
