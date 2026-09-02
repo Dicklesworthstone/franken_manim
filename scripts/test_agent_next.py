@@ -123,6 +123,65 @@ class AgentNextTests(unittest.TestCase):
         self.assertEqual(selected["id"], "fm-a")
         self.assertEqual(selected["immediate_unblocks"], 2)
 
+    def test_unscoped_open_leaf_is_visible_but_never_claimable(self) -> None:
+        rows = [issue("fm-unscoped", "Maintenance without a workstream", priority=0)]
+        plan = self.plan(rows)
+        self.assertTrue(plan["integrity"]["ok"])
+        self.assertIsNone(plan["recommendation"]["issue"])
+        self.assertIn("only unscoped leaves remain", plan["recommendation"]["reason"])
+        self.assertEqual(plan["counts"]["claimable_leaves"], 0)
+        self.assertEqual(plan["counts"]["unscoped_leaves"], 1)
+        self.assertEqual(plan["unscoped_leaves"][0]["id"], "fm-unscoped")
+
+        path = self.ledger(rows)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = agent_next.main(["--ledger", str(path), "--require"])
+        self.assertEqual(status, 3)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("no claimable recommendation", stderr.getvalue())
+
+    def test_scoped_leaf_wins_over_a_higher_priority_unscoped_leaf(self) -> None:
+        plan = self.plan(
+            [
+                issue("fm-unscoped", "Maintenance without a workstream", priority=0),
+                issue("fm-scoped", "W10: governed work", priority=3),
+            ]
+        )
+        self.assertTrue(plan["integrity"]["ok"])
+        self.assertEqual(plan["recommendation"]["issue"]["id"], "fm-scoped")
+        self.assertEqual(plan["counts"]["claimable_leaves"], 1)
+        self.assertEqual(plan["counts"]["unscoped_leaves"], 1)
+
+    def test_unscoped_active_claim_invalidates_the_plan(self) -> None:
+        rows = [
+            issue(
+                "fm-unscoped-active",
+                "Maintenance without a workstream",
+                "in_progress",
+                assignee="agent",
+            ),
+            issue("fm-scoped", "W10: governed work"),
+        ]
+        plan = self.plan(rows)
+        self.assertFalse(plan["integrity"]["ok"])
+        self.assertEqual(
+            plan["integrity"]["unscoped_active"], ["fm-unscoped-active"]
+        )
+        self.assertEqual(plan["counts"]["unscoped_active"], 1)
+        self.assertIsNone(plan["recommendation"]["issue"])
+        self.assertIn("unscoped active claims", plan["recommendation"]["reason"])
+
+        path = self.ledger(rows)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = agent_next.main(["--ledger", str(path), "--require"])
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("task-graph integrity failed", stderr.getvalue())
+
     def test_parent_child_cycles_fail_before_plan_publication(self) -> None:
         rows = [
             issue("fm-a", "W10: a", parent="fm-b"),
@@ -198,7 +257,7 @@ class AgentNextTests(unittest.TestCase):
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
         )
         self.assertEqual(payload["schema"], "fmn.agent.next")
-        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["version"], 3)
         self.assertTrue(payload["integrity"]["ok"])
         self.assertEqual(payload["recommendation"]["issue"]["id"], "fm-next")
 
