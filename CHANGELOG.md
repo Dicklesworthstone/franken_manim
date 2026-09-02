@@ -2,142 +2,130 @@
 
 This is the evidence-bounded project changelog for **franken_manim**, a sovereign deterministic rewrite of 3Blue1Brown's `manim` in pure Rust with a separately installed `manimlib`-compatible Python portal.
 
-The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` are prereleases. Source, compatibility rulings, task state, and release evidence remain distinct:
+The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` are prereleases. Source behavior, compatibility rulings, task state, and release evidence remain distinct:
 
 - source code says what behavior exists;
 - `API_SCHEMA.tsv` plus `API_OVERLAY.tsv` say what compatibility status is claimed;
-- `.beads/issues.jsonl` says what work is open or blocked;
+- `.beads/issues.jsonl` says what work is open, active, blocked, or closed;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased substantive source-and-test checkpoint covered here is **[`c699278`](https://github.com/Dicklesworthstone/franken_manim/commit/c699278da29c8979772529d28cbc13f6491c2f37)** on 2026-09-01 UTC. Later documentation commits truth up that implementation state.
+The current unreleased substantive source-and-test checkpoint covered here is **[`fffc469`](https://github.com/Dicklesworthstone/franken_manim/commit/fffc469e99ac6e9b79e66ddd890fc98238e3f3c9)** on 2026-09-02 UTC. Later documentation commits truth up that implementation state.
+
+---
+
+## Unreleased — scoped autonomous planning
+
+### Added
+
+- An exact autonomous-workstream grammar in `scripts/agent_next.py`:
+  - `G0`;
+  - `W1` through `W11`;
+  - beginning at the first title character and followed by a word boundary or `:`.
+- Explicit `unscoped_leaves` and `unscoped_active` planner evidence.
+- Human-brief normalization that uses the planner's governed activation state and workstream labels rather than the broad projection's historical grouping.
+- Cross-layer regressions proving the same scope policy reaches the planner, claim token, generated human brief, and activation cap.
+
+### Changed
+
+- `fmn.agent.next` advanced to schema version `4`.
+- Open unscoped leaves remain visible for repair but never enter autonomous ranking.
+- A valid governed leaf wins even when an unscoped leaf has a numerically higher priority.
+- Any active unscoped issue invalidates the planner before token, executor, or brief publication.
+- `G0` now counts as one real active workstream. `G0` plus four W-streams is a five-stream cap breach.
+- The generated brief checks the planner's activation result, suppresses an unscoped broad priority, and labels `G0` and invalid W-prefixes consistently with the claim contract.
+- Claim tokens automatically bind planner version 4 through the existing schema contract; older planner tokens cannot revalidate.
+
+### Fixed
+
+- An issue without a governed workstream prefix can no longer be selected or atomically claimed by autonomous tooling.
+- Titles such as `W12: ...`, `W999: ...`, lower-case `w10: ...`, or embedded `prefix W10: ...` can no longer masquerade as governed workstreams.
+- `G0` is no longer omitted from the activation count.
+- The deterministic human brief can no longer accept a `G0` plus four-W-stream cap breach because its broad snapshot happened to classify `G0` as unscoped.
+- A broad unscoped priority can no longer appear beside a different leaf-safe recommendation as though both were actionable.
+
+### Representative commits
+
+- [`88354b6`](https://github.com/Dicklesworthstone/franken_manim/commit/88354b68bc926580a1472196b0ad6476bc00f969) — refuse unscoped autonomous claims.
+- [`57d8c3c`](https://github.com/Dicklesworthstone/franken_manim/commit/57d8c3c1c9ce1a460ce738e76af7a3172a627ea9) — lock scoped-only leaf planning.
+- [`29c61d1`](https://github.com/Dicklesworthstone/franken_manim/commit/29c61d158d0812a5a1f45aa9b2f71e60f376fd1f) — enforce `G0` and `W1`–`W11` as the governed vocabulary.
+- [`4ba640a`](https://github.com/Dicklesworthstone/franken_manim/commit/4ba640a1f49e123a0743e5f04ba3385b56888b43) — lock the exact workstream grammar.
+- [`73bf062`](https://github.com/Dicklesworthstone/franken_manim/commit/73bf06220dbdd920f95c3bc17b97006749902952) — align deterministic human rendering with the planner scope.
+- [`b66f06e`](https://github.com/Dicklesworthstone/franken_manim/commit/b66f06e5f6e1f0584e2cd9830d119e8c47d71329) — preserve blocker truth while normalizing rows.
+- [`1abc050`](https://github.com/Dicklesworthstone/franken_manim/commit/1abc050bb60623859bd2209d55744501fbb871f0) — cover G0, unscoped priorities, unscoped active claims, and strict cap refusal.
+- [`fffc469`](https://github.com/Dicklesworthstone/franken_manim/commit/fffc469e99ac6e9b79e66ddd890fc98238e3f3c9) — propagate scoped semantics through claim-guard tokens.
+
+### Evidence boundary
+
+A focused 12-case planner harness passed against the exact planner blob using a faithful `agent_brief` test seam, and the planner source passed Python bytecode compilation. The committed test suites are part of the existing `scripts/check.sh` gate, but this editing environment did not contain the full exact checkout, Cargo toolchain, `br`, or UBS. Therefore the complete repository gate, Rust axes, live-ledger projection, and tracker mutation are not claimed as executed for this tranche.
 
 ---
 
 ## Unreleased — atomic guarded Beads claims
 
-### Added
+### Added and changed
 
-- Storage-level atomic claim execution through Beads' dedicated primitive:
+- `scripts/agent_claim.py` uses Beads' storage-level atomic claim primitive:
 
   ```text
   br update ISSUE --claim --actor ASSIGNEE --json [--transition-comment TEXT]
   ```
 
-  This replaces the former generic `--status in_progress --assignee ...` mutation in the autonomous claim path.
-- Strict validation of the successful Beads JSON response before the explicit export step.
-  - UTF-8 and JSON syntax are required.
-  - Duplicate object keys and non-finite numeric constants are rejected.
-  - Success-path stderr is refused.
-  - Exactly one updated issue must be reported.
-  - ID, title, priority, status, assignee, and timestamp must match the guarded transition.
-  - Both the ordinary issue-array response and the `{updated, warnings}` capacity-warning envelope are accepted.
-- `atomic_claim` evidence in successful mutating receipts, including response shape, issue, assignee, status, timestamp, and warning count.
-- Caller-configurable combined child-output production budget:
-  - CLI: `--command-output-budget-bytes`;
-  - default: 16 MiB per child command;
-  - maximum: 1 GiB;
-  - exact-bound output succeeds and the first byte beyond the bound triggers process-tree cleanup.
+- `fmn.agent.claim` is schema version `6`.
+- Atomic response JSON is bounded by byte, structural-depth, and node-count limits and rejects duplicate keys, malformed UTF-8, non-finite numbers, malformed envelopes, multiple updated rows, identity drift, and success-path stderr.
+- The response timestamp must agree with the explicitly exported JSONL row.
+- Successful mutation receipts include normalized atomic-response evidence and a represented-field post-export claim delta.
+- The clone-local lock lives in Git's shared `commondir`, so the primary checkout and linked worktrees contend on one persistent inode.
 
-### Changed
+### Resource policy
 
-- Claim receipt schema `fmn.agent.claim` advanced to version `5`.
-- `executor_policy` now names `beads.update.claim/v1` and records the timeout, retained per-stream bytes, and configured combined production ceiling.
-- The successful proof chain is now explicit and two-stage:
-  1. strict semantic validation of Beads' atomic JSON response;
-  2. exact comparison of the complete exported parsed graph before and after `br sync --flush-only`.
-- The atomic response timestamp must equal the exported issue timestamp.
-- The mandatory gate's live-ledger dry-run now renders the exact atomic claim argv and explicit timeout/output-budget policy.
+Each `br update --claim` and `br sync --flush-only` child has:
 
-### Fixed
+- a default 60-second wall-clock deadline, configurable up to 3,600 seconds;
+- a default 16 MiB combined stdout/stderr production budget, configurable up to 1 GiB;
+- a 1 MiB retained diagnostic ceiling per stream;
+- bounded process-tree termination and reader cleanup.
 
-- A direct manual status/assignee update can no longer win the local interval between guard validation and the selected issue's storage-level unassigned check.
-- A zero exit from `br update` is no longer accepted as claim evidence when its machine response is absent, malformed, ambiguous, or semantically inconsistent.
-- Capacity-warning envelopes no longer require an unsafe fallback to human output parsing.
-- The previously documented configurable output ceiling is now implemented by the CLI and injected-runner contract rather than existing only as a fixed internal constant.
+A stalled, continuously producing, or inherited-pipe child cannot hold the claim lock indefinitely. Exit `5` means no verified receipt, not proof that native tracker state is unchanged.
 
-### Representative commits
+### Canonical-graph boundary
 
-- [`531ddbc`](https://github.com/Dicklesworthstone/franken_manim/commit/531ddbcc180a34a0ec97580572d8411504259205) — use Beads' atomic claim primitive, strict JSON response proof, version-5 receipts, and configurable output budget.
-- [`c800299`](https://github.com/Dicklesworthstone/franken_manim/commit/c800299c2a4125c974b32762b620fda42ed61c32) — lock atomic argv, ordinary/envelope response semantics, malformed-success refusal, timestamp agreement, and exact graph deltas.
-- [`cc71d1c`](https://github.com/Dicklesworthstone/franken_manim/commit/cc71d1c2f7798d49eaa56fdb472b9b0507028870) — exercise configurable output ceilings with real child processes and CLI refusal cases.
-- [`c699278`](https://github.com/Dicklesworthstone/franken_manim/commit/c699278da29c8979772529d28cbc13f6491c2f37) — make atomic claim composition part of the mandatory dry-run gate.
+The token and post-export delta currently bind the field set represented by `agent_brief.Issue`: ID, title, status, priority, issue type, assignee, normalized update timestamp, dependencies, and comments.
 
-### Evidence boundary
-
-The exact replacement source and test bytes passed Python bytecode compilation. Twenty-eight focused tests passed locally against those exact files: fourteen executor/receipt tests and fourteen real-child-process resource tests. Because the editing environment did not contain the repository checkout, the executor suite used minimal interface-compatible parser/planner/guard modules for its local composition run. Blob SHA-1 identities for the three committed Python files matched the GitHub content SHAs.
-
-The complete repository-native Python suite, `scripts/check.sh`, Cargo, Clippy, rustdoc, WASM, wheel, browser, and release axes are not claimed as run at `c699278`.
-
-No Beads record was created, claimed, or closed from this environment because tracker-native `br` execution was unavailable. The authoritative `.beads/issues.jsonl` was deliberately left untouched rather than reconstructed from connector output.
+Description, design, acceptance criteria, notes, owner, estimates, dates, labels, and unknown extension fields are not yet included. A version-6 receipt is not raw JSONL or whole-database identity; `br show` and external coordination remain mandatory before invocation.
 
 ---
 
-## Unreleased — bounded-output, exact-delta guarded claims
+## Unreleased — graph- and policy-bound recommendations
 
-- Each child command has a shared total-produced-byte budget across stdout and stderr. Every produced chunk is counted before retained surplus is discarded; overflow triggers bounded process-tree cleanup.
-- After explicit JSONL export, issue membership must be identical, every non-target issue must be unchanged, and the target may change only through the requested status, assignee, non-regressing timestamp, and optional exact appended transition comment.
-- Successful mutating receipts carry normalized `claim_delta` evidence.
-
-Representative commits: [`06bab2a`](https://github.com/Dicklesworthstone/franken_manim/commit/06bab2acbae2e92d649dc6314432193171e28cb3), [`15e7d25`](https://github.com/Dicklesworthstone/franken_manim/commit/15e7d25315d968e622fc65ca2cd58d219a88b486), [`2350609`](https://github.com/Dicklesworthstone/franken_manim/commit/2350609ba27a9ccd4f34988e0101330ac32e62cf), [`240bcc9`](https://github.com/Dicklesworthstone/franken_manim/commit/240bcc9bcea7c32100fa88b1f966aa40609f6c53), and [`0d56b27`](https://github.com/Dicklesworthstone/franken_manim/commit/0d56b27ec734fd6e60305faadbe28a69d7808a19).
-
----
-
-## Unreleased — bounded claim-command lifetime
-
-- Every production `br update` and `br sync --flush-only` invocation has a finite independent timeout: 60 seconds by default and at most 3,600 seconds.
-- POSIX cleanup targets the complete child process group. Windows uses a new process group, best-effort `taskkill.exe /T /F`, and direct-child fallback.
-- Process waits and output-reader joins are bounded; inherited descendant pipes cannot strand the repository claim lock indefinitely.
-
-Representative commits: [`47cdf1f`](https://github.com/Dicklesworthstone/franken_manim/commit/47cdf1fa5af31ee3c4427b0b255435a8422c0246), [`da07b21`](https://github.com/Dicklesworthstone/franken_manim/commit/da07b210ba096d98ded4548d0960d1ef7eb5b606), [`d3b79e6`](https://github.com/Dicklesworthstone/franken_manim/commit/d3b79e6a15ca8f10ab846e92e245cf35b511336f), and [`301684d`](https://github.com/Dicklesworthstone/franken_manim/commit/301684d670eadced9c948a3859438f9aa8d755a1).
+- `agent_claim_guard.py` emits tokens of the form `v2:<claim-sha256>:<issue-id-or-none>`.
+- The claim digest binds the canonical planning graph, complete planner output, policy values, and parser/planner/guard schema contract.
+- `graph_sha256` remains graph-only evidence; `claim_sha256` is the complete token digest.
+- Issue-row and dependency-array ordering are canonicalized, while semantic graph, policy, schema, or planner-output changes invalidate the token.
+- The literal issue ID `none` is reserved for the no-recommendation sentinel.
+- The unsafe broad `agent_brief.py --format next` spelling has been retired.
 
 ---
 
-## Unreleased — guarded claim execution and strict ledger grammar
+## Unreleased — deterministic agent control plane
 
-- `scripts/agent_claim.py` keeps token revalidation, mutation, explicit export, and postconditions inside one process and one shared-common-directory advisory-lock scope.
-- A primary checkout and linked worktrees contend on one persistent lock inode.
-- `.git` and `commondir` markers use bounded no-follow regular-file reads where supported.
-- The strict ledger parser rejects malformed framing, duplicate keys and IDs, invalid statuses and timestamps, malformed optional arrays/comments/dependencies, self/duplicate edges, unquoted non-finite constants, and bounded-resource violations.
-- The canonical claim-graph grammar is version `2`.
-
-Representative commits include [`23dec4b`](https://github.com/Dicklesworthstone/franken_manim/commit/23dec4baa9a677703f31106f9fc0542733a68bf7), [`2e7a80b`](https://github.com/Dicklesworthstone/franken_manim/commit/2e7a80ba2020276213a8aad524624e7fe468e207), [`6169519`](https://github.com/Dicklesworthstone/franken_manim/commit/6169519af2bf586f19effeda10f4c2e71b39ebaa), [`4546c8f`](https://github.com/Dicklesworthstone/franken_manim/commit/4546c8f1631a6c67bc9d03a892972608bad1a0e1), [`bc09262`](https://github.com/Dicklesworthstone/franken_manim/commit/bc09262de628b3ea7fbebd1a9f8793fa7517f37c), [`6f1584d`](https://github.com/Dicklesworthstone/franken_manim/commit/6f1584dbc903d2920a9133e32d500daade279c36), [`95187b9`](https://github.com/Dicklesworthstone/franken_manim/commit/95187b950fdb078ffaea71d48008b5defeb678ca), and [`f96c3eb`](https://github.com/Dicklesworthstone/franken_manim/commit/f96c3eb12bdbafa7822e989d1a39702df28215a2).
-
----
-
-## Unreleased — graph-and-policy-bound claim revalidation
-
-- `scripts/agent_claim_guard.py` issues `v2:<claim-sha256>:<issue-id-or-none>` tokens.
-- The digest binds the canonical graph, complete `fmn.agent.next` plan, normalized policy, and parser/planner/guard schemas.
-- `graph_sha256` remains graph-only; `claim_sha256` is the complete token identity.
-- The literal issue ID `none` is reserved for the no-recommendation token subject.
-
-Representative commits: [`6a6b3c8`](https://github.com/Dicklesworthstone/franken_manim/commit/6a6b3c8fe52b34095958d3fe0e68ef55c62b6536), [`93877d4`](https://github.com/Dicklesworthstone/franken_manim/commit/93877d486254a61a1eee85c2c2c7dda22bd45f8f), [`5629a41`](https://github.com/Dicklesworthstone/franken_manim/commit/5629a41349d1fb0f4574ab8b8473348becd6a312), and [`d7a1716`](https://github.com/Dicklesworthstone/franken_manim/commit/d7a17163399c7347c39869bf09aa8744fceda5e4).
+- The Beads reader uses bounded regular-file input and strict JSONL framing.
+- Duplicate JSON keys and IDs, invalid UTF-8, blank records, missing final LF, non-finite constants, malformed optional arrays, invalid statuses/timestamps, ownership errors, self-edges, duplicate edges, and finite resource-budget violations fail closed.
+- Blocking and containment cycles suppress claims.
+- Planner output and generated Markdown derive time from the newest ledger record rather than wall clock.
+- Generated brief publication uses descriptor-bound reads, exclusive temporary creation, flush, fsync, and atomic replacement.
+- Hosted GitHub Actions availability is not part of the correctness authority chain.
 
 ---
 
-## Unreleased — strict deterministic task control plane
+## Unreleased — CLI and portal truthfulness
 
-- Broad situational state and autonomous leaf selection are separate.
-- Non-epic issues with live children are containers, not leaves.
-- Missing blockers and blocking/containment cycles fail before plan, brief, token, or claim publication.
-- Planner output is ledger-time-derived, canonical, bounded, and wall-clock independent.
-- Deterministic brief publication uses bounded descriptor reads, exclusive temporary creation, fsync, and atomic replacement.
-- The unsafe legacy `agent_brief.py --format next` output is retired.
-
-Representative commits include [`9839a38`](https://github.com/Dicklesworthstone/franken_manim/commit/9839a3862dfca41083ad8f0a5b680edfd3cd17d9), [`9bf1d20`](https://github.com/Dicklesworthstone/franken_manim/commit/9bf1d20f94f3bd8d3cf252badfe57bb215236f2f), [`dcad037`](https://github.com/Dicklesworthstone/franken_manim/commit/dcad037a2bf52e010efa97b0cd1bb838e3f63cf4), [`f6c23f6`](https://github.com/Dicklesworthstone/franken_manim/commit/f6c23f65fa3f16d524589f1f4dba4b7ec654dcd0), and [`204eabf`](https://github.com/Dicklesworthstone/franken_manim/commit/204eabfdada854ad55d14de9c466fda652f1bd2f).
-
----
-
-## Unreleased — executable boundaries and portal truthfulness
-
-- The shipped `fmn` process publishes stdout and stderr independently and preserves typed exits across closed pipes.
-- Successful human `doctor --quiet` suppression is owned by the reusable dispatcher, while robot records and typed failures remain visible.
-- Batch robot mode emits terminal per-job success records and has a real one-scene artifact/manifest smoke.
-- Rust-only snake_case helpers cannot leak into the pinned Reference Python wildcard namespace.
-- Explicit portal refusals are parsed into a canonical bounded inventory and anonymous placeholders fail the mandatory gate.
-- `fm-5wq.4` remains open: reviewed parity and inventoried refusals are not universal callable implementation.
-
-Representative commits include [`b5518dd`](https://github.com/Dicklesworthstone/franken_manim/commit/b5518dd41fb21ffcd3d53e64c66779ace46e4d2d), [`d1cdc02`](https://github.com/Dicklesworthstone/franken_manim/commit/d1cdc0202b4810d86bb9800dc879bce1a9befae6), [`82d915e`](https://github.com/Dicklesworthstone/franken_manim/commit/82d915ee34285ea7ab2198e76e831ee23bf88250), and [`0fc2fc7`](https://github.com/Dicklesworthstone/franken_manim/commit/0fc2fc7fd4ec5f7a21820faf471228797b72670e).
+- The shipped `fmn` process publishes stdout and stderr independently and preserves typed exits when downstream pipes close.
+- Human `doctor --quiet` behavior is owned by the reusable dispatcher; robot records and typed failures remain visible.
+- Batch robot mode emits explicit terminal per-job success records.
+- A shipped-binary smoke renders a tiny FMTL scene and verifies native PNG and machine/human manifest publication.
+- Rust-only snake_case geometry helpers cannot leak into the pinned Reference wildcard namespace.
+- Explicit Python portal refusals are parsed into a canonical bounded inventory; anonymous placeholders fail the mandatory gate.
+- `fm-5wq.4` remains open: reviewed parity rows and inventoried refusals are not universal callable implementation.
 
 ---
 
@@ -145,26 +133,26 @@ Representative commits include [`b5518dd`](https://github.com/Dicklesworthstone/
 
 | Version | Date | Evidence-bounded summary |
 |---|---:|---|
-| Project inception | 2026-07-20 | Revision-4 plan, workspace governance, Beads graph, and architecture doctrine. |
-| [`v0.1.0`](https://github.com/Dicklesworthstone/franken_manim/releases/tag/v0.1.0) prerelease | 2026-08-15 | Early native preview: standalone CLI, scene/runtime foundations, renderer, and output stack. |
-| [`v0.2.0`](https://github.com/Dicklesworthstone/franken_manim/releases/tag/v0.2.0) prerelease | 2026-08-16 | Python-render preview producing real retained-renderer PNG sequences. |
-| [`v0.3.0`](https://github.com/Dicklesworthstone/franken_manim/releases/tag/v0.3.0) prerelease | 2026-08-16, published 2026-08-17 | Source-unedited final-still preview for the locked seed corpus. |
-| [`v0.4.0`](https://github.com/Dicklesworthstone/franken_manim/releases/tag/v0.4.0) prerelease | 2026-08-18 | Native Studio/Metal and threaded-browser preview; installer and WASM package foundations. |
-| Current unreleased line | 2026-08-19 onward | Portal convergence, Studio/runtime hardening, distribution gates, executable truthfulness, and fail-closed agent operations. |
+| Project inception | 2026-07-20 | Revision-4 comprehensive plan, workspace governance, Beads graph, and architecture doctrine. |
+| `v0.1.0` prerelease | 2026-08-15 | Early native preview: standalone CLI, scene/runtime foundations, renderer, and output stack. |
+| `v0.2.0` prerelease | 2026-08-16 | Production Python-render preview: portal scenes produce retained-renderer PNG sequences. |
+| `v0.3.0` prerelease | 2026-08-16; published 2026-08-17 | Source-unedited final-still preview for the locked seed corpus. |
+| `v0.4.0` prerelease | 2026-08-18 | Native Studio/Metal and threaded-browser preview; installer and WASM package foundations. |
+| Current unreleased line | 2026-08-19 onward | Portal convergence, Studio/runtime hardening, distribution gates, executable smoke, and fail-closed agent operations. |
 
 ## Major implementation phases
 
-1. **Substrate and semantics:** deterministic constants, color, rates, RNG, canonicalization, rational frame time, QuadPath geometry, Marionette state, Choreo timelines, native text, and math.
-2. **Rendering and media:** analytic fills/strokes, retained rendering, camera/depth/lighting/textures, native codecs, ffmpeg boundary, FMTL, and WASM foundations.
-3. **Front doors and Gauntlet:** Rust API, `fmn`, optional Python portal, Studio supervisor/worker, API schema and parity ledger, self-goldens, differential, determinism, fuzzing, performance, and packaging gates.
-4. **Portal convergence and truthfulness:** authored `manimlib` compatibility, precise capability refusals, wheel/bridge tests, and namespace/refusal ratchets.
-5. **Agent operations:** strict graph parsing, leaf planning, stale-plan tokens, atomic Beads compare-and-set, shared locking, structured response proof, exact exported deltas, and bounded subprocess resources.
+1. **Substrate and semantics:** constants, color, rates, RNG, numeric canonicalization, rational frame time, QuadPath geometry, Marionette state, Choreo timelines, native text, and math.
+2. **Rendering and media:** analytic fills/strokes, retained tiles, camera/depth/lighting/textures, native codecs, ffmpeg boundary, FMTL, and WASM foundations.
+3. **Front doors and Gauntlet:** Rust API, `fmn`, optional CPython portal, Studio supervisor/worker, API schema, Parity Ledger, self-goldens, differential tests, determinism, fuzzing, performance, and packaging gates.
+4. **Portal convergence:** authored `manimlib` compatibility, precise capability refusals, executable wheel/bridge tests, and namespace/refusal ratchets.
+5. **Agent operations:** strict graph parsing, governed leaf planning, stale-plan tokens, atomic claims, shared-local locking, structured response proof, represented-field deltas, and bounded subprocess resources.
 
 ## Current evidence boundaries
 
-The following are **not** inferred from a focused source probe:
+The following are not inferred from a focused source probe or from documentation:
 
-- the complete local repository gate;
+- the complete local repository gate on the latest commit;
 - cross-platform release artifacts;
 - real aarch64 topology evidence;
 - platform-native SIMD and certified bit-identity matrices;
@@ -173,14 +161,14 @@ The following are **not** inferred from a focused source probe:
 - ffmpeg/video-container equivalence receipts;
 - closure of `fm-5wq.4` or the W10 epic.
 
-Hosted GitHub Actions availability is not a correctness dependency. The authoritative gate is `scripts/check.sh` on an exact local or owned-host checkout, with the source commit and opt-in release axes recorded alongside the result.
+Hosted GitHub Actions availability is not a correctness dependency. The authoritative gate is `scripts/check.sh` run on an exact local or owned-host checkout, with the source commit and opt-in release axes recorded alongside the result.
 
 ## Agent notes
 
 - Start with `docs/IMPLEMENTATION_STATUS.md` for present-tense evidence.
-- Issue a fresh guard token, complete external coordination, and use `scripts/agent_claim.py` for the atomic claim.
+- Use `agent_next.py` for governed selection, `agent_claim_guard.py` for the bound token, and `agent_claim.py` for atomic mutation.
 - Treat `agent_brief.py` as broad situational context only.
-- Treat Beads as authoritative; commit the executor's resulting `.beads/` export explicitly.
-- On exit `5`, inspect Beads and the working tree before any retry; never replay the old token.
+- Treat Beads as authoritative; commit the `.beads/` export explicitly after every mutation.
+- On executor exit `5`, inspect Beads and the working tree before doing anything else; never replay the old token blindly.
 - Never replace `.beads/issues.jsonl` from truncated connector output.
-- Never turn “reviewed,” “compiled,” “inventoried,” or “historically green” into a stronger implementation or release claim.
+- Do not turn “reviewed,” “compiled,” “inventoried,” or “historically green” into a stronger implementation or release claim.
