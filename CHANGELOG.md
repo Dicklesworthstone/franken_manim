@@ -9,7 +9,102 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open, active, blocked, or closed;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased substantive source-and-test checkpoint covered here is **[`fffc469`](https://github.com/Dicklesworthstone/franken_manim/commit/fffc469e99ac6e9b79e66ddd890fc98238e3f3c9)** on 2026-09-02 UTC. Later documentation commits truth up that implementation state.
+The current unreleased substantive source-and-test checkpoint covered here is **`c2f045340943e3a2c8e241535453653a1d835d87`** on 2026-09-02 UTC. Later documentation commits truth up that implementation state.
+
+---
+
+## Unreleased — full task-semantic guarded claims
+
+### Added
+
+- `scripts/agent_task_semantics.py`, a bounded semantic projection over the exported Beads JSONL authority.
+- Claim binding for every top-level issue field outside `agent_brief.Issue`, including:
+  - description, design, acceptance criteria, and notes;
+  - owner, estimate, creation/source metadata, due/defer values, and labels;
+  - unknown future extension fields.
+- Claim binding for non-core dependency-record fields, including metadata, thread identity, creation metadata, and unknown future extensions.
+- A stable-source proof that derives both full semantics and the broad core model from the same bytes, brackets the established loader with identical before/after reads, and requires all projections to agree.
+- Per-record depth and node limits for unknown nested metadata.
+- A context-local, exact-ledger-path semantic postcondition used by the existing post-export graph digest.
+- `scripts/test_agent_task_semantics.py`, wired into `scripts/check.sh`.
+
+### Changed
+
+- `fmn.agent.claim-graph` advanced from version 2 to version 3.
+- `fmn.agent.claim-input` advanced from version 2 to version 3.
+- The public guard JSON envelope remains `fmn.agent.claim-guard` version 2.
+- The public token spelling remains:
+
+  ```text
+  v2:<claim-sha256>:<issue-id-or-none>
+  ```
+
+- The executor receipt remains `fmn.agent.claim` version 6; its embedded graph/input schema contract now identifies the stronger version-3 semantic proof.
+- Issue-row order, dependency-array order, JSON object-key order, and label order are normalized as harmless representation ordering. Comment order and ordinary array order remain significant.
+- `after_graph_sha256` now requires every exported task-semantic field on every issue to remain unchanged before calculating the post-export graph digest.
+
+### Fixed
+
+- Changing a task's description, design, acceptance criteria, notes, owner, estimate, dates, labels, source metadata, dependency metadata, or unknown extension fields now invalidates a previously issued claim token.
+- A claim can no longer receive a verified receipt after changing an unmodeled field on the selected issue.
+- A claim can no longer receive a verified receipt after changing an unmodeled field on an unrelated issue.
+- The semantic projection and broad planning projection can no longer silently come from different ledger states.
+- An ABA-style read window in which the ledger changes while being projected is rejected whenever the broad/core or semantic views disagree.
+- Remembered postcondition state is scoped to the exact absolute ledger path, preventing one fixture, worktree, or repository from contaminating another.
+
+### Focused regression inventory
+
+The new suite covers:
+
+- token invalidation for every major task-semantic field and unknown nested metadata;
+- dependency metadata binding;
+- harmless row, dependency, label, and object-key order normalization;
+- the permitted `open` → `in_progress` core transition;
+- semantic drift on selected and unrelated issues;
+- unknown-metadata depth refusal;
+- mutation between projections;
+- disagreement between the established core loader and the core projection derived from the same stable bytes.
+
+### Representative commits
+
+- `5811d5c` — canonicalize complete task-semantic Beads fields.
+- `43feb35` — bind complete semantics into the guarded claim graph.
+- `2df9d98` — scope postcondition state to one ledger path.
+- `ce33db7` — preserve the v2 guard/token envelope while versioning graph semantics.
+- `fb964b1` — add full-semantic guard regressions.
+- `3a8ff75` — ratchet graph/input grammar to version 3.
+- `d35685f` — execute the semantic suite in the mandatory repository gate.
+- `6ec8f5a` — prove semantic and broad projections share one stable source state.
+- `c2f0453` — refuse a core projection not derived from the same stable bytes.
+
+### Evidence boundary
+
+The authored semantic module and guard passed Python bytecode compilation, and a focused stub-backed seven-case run passed before the final projection-disagreement regression was added. The committed suite now contains eight tests and is part of `scripts/check.sh`.
+
+This editing environment could not resolve `github.com` for an exact container checkout. GitHub Actions runs triggered by the incremental commits remained pending or queued without jobs. Therefore the complete repository gate, exact current Python suite, live-ledger projection, `br` mutation, Rust axes, UBS, and platform matrices are not claimed as executed for this tranche.
+
+---
+
+## Unreleased — SVG UTF-8 parser hardening
+
+### Fixed
+
+- The preserved 17-byte `svg_document` fuzz reproducer no longer reaches a Rust string-slice panic. The original tokenizer used a fixed nine-byte DOCTYPE slice that could end inside a valid two-byte UTF-8 character.
+- The public SVG path now validates bytes and fixed-width markup probes at a UTF-8-safe admission boundary before invoking the private parser.
+- Case-insensitive DOCTYPE refusal remains intact.
+- Markup-like multibyte text inside a quoted attribute is not misclassified as a tokenizer-level declaration.
+- `emit_svg_document` no longer clones the complete retained shape tree merely to call the established emitter.
+
+### Added
+
+- A permanent regression using the exact 17-byte fuzz input.
+- Mixed-case DOCTYPE regressions.
+- A quoted-attribute multibyte regression.
+- A finding README that records root cause, resolution, and the remaining sanitizer-replay boundary.
+
+### Evidence boundary
+
+The source-level panic path is fixed and the regression is committed. A sanitizer replay of the original fuzz target has not been run in this editing environment. The public admission facade currently performs one extra bounded scan before the private parser; collapsing it into a byte-safe tokenizer probe is a later simplification, not a current public safety gap.
 
 ---
 
@@ -33,7 +128,7 @@ The current unreleased substantive source-and-test checkpoint covered here is **
 - Any active unscoped issue invalidates the planner before token, executor, or brief publication.
 - `G0` now counts as one real active workstream. `G0` plus four W-streams is a five-stream cap breach.
 - The generated brief checks the planner's activation result, suppresses an unscoped broad priority, and labels `G0` and invalid W-prefixes consistently with the claim contract.
-- Claim tokens automatically bind planner version 4 through the existing schema contract; older planner tokens cannot revalidate.
+- Claim tokens bind planner version 4 through the schema contract; older planner tokens cannot revalidate.
 
 ### Fixed
 
@@ -45,18 +140,14 @@ The current unreleased substantive source-and-test checkpoint covered here is **
 
 ### Representative commits
 
-- [`88354b6`](https://github.com/Dicklesworthstone/franken_manim/commit/88354b68bc926580a1472196b0ad6476bc00f969) — refuse unscoped autonomous claims.
-- [`57d8c3c`](https://github.com/Dicklesworthstone/franken_manim/commit/57d8c3c1c9ce1a460ce738e76af7a3172a627ea9) — lock scoped-only leaf planning.
-- [`29c61d1`](https://github.com/Dicklesworthstone/franken_manim/commit/29c61d158d0812a5a1f45aa9b2f71e60f376fd1f) — enforce `G0` and `W1`–`W11` as the governed vocabulary.
-- [`4ba640a`](https://github.com/Dicklesworthstone/franken_manim/commit/4ba640a1f49e123a0743e5f04ba3385b56888b43) — lock the exact workstream grammar.
-- [`73bf062`](https://github.com/Dicklesworthstone/franken_manim/commit/73bf06220dbdd920f95c3bc17b97006749902952) — align deterministic human rendering with the planner scope.
-- [`b66f06e`](https://github.com/Dicklesworthstone/franken_manim/commit/b66f06e5f6e1f0584e2cd9830d119e8c47d71329) — preserve blocker truth while normalizing rows.
-- [`1abc050`](https://github.com/Dicklesworthstone/franken_manim/commit/1abc050bb60623859bd2209d55744501fbb871f0) — cover G0, unscoped priorities, unscoped active claims, and strict cap refusal.
-- [`fffc469`](https://github.com/Dicklesworthstone/franken_manim/commit/fffc469e99ac6e9b79e66ddd890fc98238e3f3c9) — propagate scoped semantics through claim-guard tokens.
-
-### Evidence boundary
-
-A focused 12-case planner harness passed against the exact planner blob using a faithful `agent_brief` test seam, and the planner source passed Python bytecode compilation. The committed test suites are part of the existing `scripts/check.sh` gate, but this editing environment did not contain the full exact checkout, Cargo toolchain, `br`, or UBS. Therefore the complete repository gate, Rust axes, live-ledger projection, and tracker mutation are not claimed as executed for this tranche.
+- `88354b6` — refuse unscoped autonomous claims.
+- `57d8c3c` — lock scoped-only leaf planning.
+- `29c61d1` — enforce `G0` and `W1`–`W11` as the governed vocabulary.
+- `4ba640a` — lock the exact workstream grammar.
+- `73bf062` — align deterministic human rendering with the planner scope.
+- `b66f06e` — preserve blocker truth while normalizing rows.
+- `1abc050` — cover G0, unscoped priorities, unscoped active claims, and strict cap refusal.
+- `fffc469` — propagate scoped semantics through claim-guard tokens.
 
 ---
 
@@ -73,8 +164,9 @@ A focused 12-case planner harness passed against the exact planner blob using a 
 - `fmn.agent.claim` is schema version `6`.
 - Atomic response JSON is bounded by byte, structural-depth, and node-count limits and rejects duplicate keys, malformed UTF-8, non-finite numbers, malformed envelopes, multiple updated rows, identity drift, and success-path stderr.
 - The response timestamp must agree with the explicitly exported JSONL row.
-- Successful mutation receipts include normalized atomic-response evidence and a represented-field post-export claim delta.
+- Successful mutation receipts include normalized atomic-response evidence and a core-field post-export claim delta.
 - The clone-local lock lives in Git's shared `commondir`, so the primary checkout and linked worktrees contend on one persistent inode.
+- Claim-input/claim-graph version 3 adds a separate full task-semantic invariant around that core delta.
 
 ### Resource policy
 
@@ -87,20 +179,20 @@ Each `br update --claim` and `br sync --flush-only` child has:
 
 A stalled, continuously producing, or inherited-pipe child cannot hold the claim lock indefinitely. Exit `5` means no verified receipt, not proof that native tracker state is unchanged.
 
-### Canonical-graph boundary
+### Canonical authority boundary
 
-The token and post-export delta currently bind the field set represented by `agent_brief.Issue`: ID, title, status, priority, issue type, assignee, normalized update timestamp, dependencies, and comments.
+The guard and executor now bind all task semantics exported in `.beads/issues.jsonl`, not merely the fields modeled by `agent_brief.Issue`.
 
-Description, design, acceptance criteria, notes, owner, estimates, dates, labels, and unknown extension fields are not yet included. A version-6 receipt is not raw JSONL or whole-database identity; `br show` and external coordination remain mandatory before invocation.
+This is still a semantic projection rather than a raw-byte or whole-database identity. Harmless JSON/row ordering is normalized, and fields Beads does not export cannot be proven. `br show` and external coordination remain mandatory immediately before invocation.
 
 ---
 
 ## Unreleased — graph- and policy-bound recommendations
 
 - `agent_claim_guard.py` emits tokens of the form `v2:<claim-sha256>:<issue-id-or-none>`.
-- The claim digest binds the canonical planning graph, complete planner output, policy values, and parser/planner/guard schema contract.
+- The claim digest binds the canonical full-semantic graph, complete planner output, policy values, and parser/planner/guard schema contract.
 - `graph_sha256` remains graph-only evidence; `claim_sha256` is the complete token digest.
-- Issue-row and dependency-array ordering are canonicalized, while semantic graph, policy, schema, or planner-output changes invalidate the token.
+- Issue-row, dependency-array, object-key, and label ordering are canonicalized, while semantic graph, policy, schema, or planner-output changes invalidate the token.
 - The literal issue ID `none` is reserved for the no-recommendation sentinel.
 - The unsafe broad `agent_brief.py --format next` spelling has been retired.
 
@@ -110,6 +202,7 @@ Description, design, acceptance criteria, notes, owner, estimates, dates, labels
 
 - The Beads reader uses bounded regular-file input and strict JSONL framing.
 - Duplicate JSON keys and IDs, invalid UTF-8, blank records, missing final LF, non-finite constants, malformed optional arrays, invalid statuses/timestamps, ownership errors, self-edges, duplicate edges, and finite resource-budget violations fail closed.
+- Full task-semantic projection adds bounded nested metadata, stable cross-projection reads, and post-export semantic invariants.
 - Blocking and containment cycles suppress claims.
 - Planner output and generated Markdown derive time from the newest ledger record rather than wall clock.
 - Generated brief publication uses descriptor-bound reads, exclusive temporary creation, flush, fsync, and atomic replacement.
@@ -138,7 +231,7 @@ Description, design, acceptance criteria, notes, owner, estimates, dates, labels
 | `v0.2.0` prerelease | 2026-08-16 | Production Python-render preview: portal scenes produce retained-renderer PNG sequences. |
 | `v0.3.0` prerelease | 2026-08-16; published 2026-08-17 | Source-unedited final-still preview for the locked seed corpus. |
 | `v0.4.0` prerelease | 2026-08-18 | Native Studio/Metal and threaded-browser preview; installer and WASM package foundations. |
-| Current unreleased line | 2026-08-19 onward | Portal convergence, Studio/runtime hardening, distribution gates, executable smoke, and fail-closed agent operations. |
+| Current unreleased line | 2026-08-19 onward | Portal convergence, Studio/runtime hardening, distribution gates, executable smoke, parser hardening, and fail-closed agent operations. |
 
 ## Major implementation phases
 
@@ -146,13 +239,14 @@ Description, design, acceptance criteria, notes, owner, estimates, dates, labels
 2. **Rendering and media:** analytic fills/strokes, retained tiles, camera/depth/lighting/textures, native codecs, ffmpeg boundary, FMTL, and WASM foundations.
 3. **Front doors and Gauntlet:** Rust API, `fmn`, optional CPython portal, Studio supervisor/worker, API schema, Parity Ledger, self-goldens, differential tests, determinism, fuzzing, performance, and packaging gates.
 4. **Portal convergence:** authored `manimlib` compatibility, precise capability refusals, executable wheel/bridge tests, and namespace/refusal ratchets.
-5. **Agent operations:** strict graph parsing, governed leaf planning, stale-plan tokens, atomic claims, shared-local locking, structured response proof, represented-field deltas, and bounded subprocess resources.
+5. **Agent operations:** strict graph parsing, governed leaf planning, full-semantic stale-plan tokens, atomic claims, shared-local locking, structured response proof, semantic/core deltas, and bounded subprocess resources.
 
 ## Current evidence boundaries
 
 The following are not inferred from a focused source probe or from documentation:
 
 - the complete local repository gate on the latest commit;
+- sanitizer replay of the repaired SVG fuzz input;
 - cross-platform release artifacts;
 - real aarch64 topology evidence;
 - platform-native SIMD and certified bit-identity matrices;
