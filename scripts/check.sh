@@ -36,11 +36,10 @@ python3 scripts/test_generate_agent_brief_io.py
 # Render the complete live ledger through every operational projection without
 # mutating documentation. The claim planner proves that non-epic parents with
 # live children cannot be returned as autonomous leaf work. The claim guard
-# then revalidates the exact graph, policy, schema contract, and recommendation
-# it just issued before any later gate can rely on that coordination surface.
+# then revalidates the exact graph, policy, schema contract, and recommendation.
 # When work is claimable, the executor additionally acquires its repository-
-# local lock and validates the exact intended br argv in dry-run mode; it never
-# invokes br or mutates Beads from this verification path.
+# local lock and renders the exact atomic `br update --claim` argv plus bounded
+# timeout/output policy in dry-run mode; it never invokes br or mutates Beads.
 python3 scripts/agent_next.py --format json --check >/dev/null
 claim_token="$(python3 scripts/agent_claim_guard.py --format token)"
 python3 scripts/agent_claim_guard.py \
@@ -52,6 +51,8 @@ if [[ "$claim_id" != "none" ]]; then
         --expect-token "$claim_token" \
         --issue "$claim_id" \
         --assignee fmn-check-gate \
+        --command-timeout-seconds 60 \
+        --command-output-budget-bytes 16777216 \
         --dry-run >/dev/null
 fi
 python3 scripts/generate_agent_brief.py --stdout >/dev/null
