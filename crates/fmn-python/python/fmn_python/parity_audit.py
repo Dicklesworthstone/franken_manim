@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import json
 from dataclasses import dataclass
 from types import ModuleType
@@ -14,12 +15,25 @@ SCHEMA_VERSION = 1
 MAX_OVERLAY_BYTES = 8 * 1024 * 1024
 MAX_STATUS_ROWS = 100_000
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_DETAIL_CHARS = 4_096
 IMPLEMENTED_STATUSES = frozenset({"same", "improved"})
 KNOWN_STATUSES = frozenset({"same", "improved", "tiered", "excluded", "unreviewed"})
+_PLACEHOLDER_MARKER = "_fmn_schema_placeholder"
+_PLACEHOLDER_KIND = "_fmn_schema_placeholder_kind"
+_PLACEHOLDER_SYMBOL = "_fmn_schema_placeholder_symbol"
+_MISSING = object()
 
 
 class ParityAuditError(ValueError):
     pass
+
+
+class _QualifiedLookupError(Exception):
+    def __init__(self, path: str, error: Exception, *, missing: bool) -> None:
+        self.path = path
+        self.error = error
+        self.missing = missing
+        super().__init__(f"{path}: {type(error).__name__}: {error}")
 
 
 @dataclass(frozen=True)
@@ -37,6 +51,26 @@ class StatusRow:
     @property
     def qualified(self) -> str:
         return self.symbol.split(":", 1)[1]
+
+
+@dataclass(frozen=True)
+class _ResolvedComponent:
+    path: str
+    value: Any
+
+
+@dataclass(frozen=True)
+class _PlaceholderIdentity:
+    path: str
+    kind: str
+    symbol: str
+
+
+def _bounded_detail(value: object) -> str:
+    text = str(value)
+    if len(text) <= MAX_DETAIL_CHARS:
+        return text
+    return text[: MAX_DETAIL_CHARS - 1] + "…"
 
 
 def _overlay_bytes(text: str) -> bytes:
@@ -84,11 +118,72 @@ def parse_status_rows(text: str) -> tuple[StatusRow, ...]:
     return tuple(rows)
 
 
-def _resolve_qualified(module: ModuleType, qualified: str) -> Any:
+def _resolve_qualified(module: ModuleType, qualified: str) -> tuple[_ResolvedComponent, ...]:
     value: Any = module
+    resolved: list[_ResolvedComponent] = []
+    components: list[str] = []
     for component in qualified.split("."):
-        value = getattr(value, component)
-    return value
+        components.append(component)
+        path = ".".join(components)
+        try:
+            candidate = inspect.getattr_static(value, component, _MISSING)
+        except Exception as exc:
+            raise _QualifiedLookupError(path, exc, missing=False) from exc
+        if candidate is _MISSING:
+            try:
+                candidate = getattr(value, component)
+            except AttributeError as exc:
+                raise _QualifiedLookupError(path, exc, missing=True) from exc
+            except Exception as exc:
+                raise _QualifiedLookupError(path, exc, missing=False) from exc
+        value = candidate
+        resolved.append(_ResolvedComponent(path, value))
+    return tuple(resolved)
+
+
+def _placeholder_identity(component: _ResolvedComponent) -> _PlaceholderIdentity | None:
+    try:
+        namespace = vars(component.value)
+    except (TypeError, AttributeError):
+        return None
+    if namespace.get(_PLACEHOLDER_MARKER) is not True:
+        return None
+    kind = namespace.get(_PLACEHOLDER_KIND)
+    symbol = namespace.get(_PLACEHOLDER_SYMBOL)
+    return _PlaceholderIdentity(
+        path=component.path,
+        kind=kind if isinstance(kind, str) and kind else "unspecified",
+        symbol=symbol if isinstance(symbol, str) and symbol else "unspecified",
+    )
+
+
+def _placeholder_contradiction(
+    row: StatusRow,
+    identity: _PlaceholderIdentity,
+    *,
+    owner: bool,
+) -> dict[str, str]:
+    if owner:
+        detail = (
+            f"runtime owner {row.module_name}:{identity.path} carries "
+            f"{_PLACEHOLDER_MARKER}=True (kind={identity.kind}, "
+            f"declared={identity.symbol}); its resolved member cannot substantiate "
+            f"the {row.status} claim"
+        )
+        code = "reviewed-symbol-has-placeholder-owner"
+    else:
+        detail = (
+            f"runtime value {row.module_name}:{identity.path} carries "
+            f"{_PLACEHOLDER_MARKER}=True (kind={identity.kind}, "
+            f"declared={identity.symbol})"
+        )
+        code = "reviewed-symbol-is-placeholder"
+    return {
+        "symbol": row.symbol,
+        "status": row.status,
+        "code": code,
+        "detail": detail,
+    }
 
 
 def audit_rows(
@@ -109,7 +204,7 @@ def audit_rows(
             try:
                 module = importer(row.module_name)
             except Exception as exc:
-                import_error = f"{type(exc).__name__}: {exc}"
+                import_error = f"{type(exc).__name__}: {_bounded_detail(exc)}"
                 import_errors[row.module_name] = import_error
             else:
                 modules[row.module_name] = module
@@ -125,27 +220,44 @@ def audit_rows(
             )
             continue
         try:
-            value = _resolve_qualified(module, row.qualified)
-        except AttributeError as exc:
+            resolved = _resolve_qualified(module, row.qualified)
+        except _QualifiedLookupError as exc:
             missing_count += 1
             contradictions.append(
                 {
                     "symbol": row.symbol,
                     "status": row.status,
-                    "code": "missing-reviewed-symbol",
-                    "detail": str(exc),
+                    "code": (
+                        "missing-reviewed-symbol"
+                        if exc.missing
+                        else "reviewed-symbol-resolution-failed"
+                    ),
+                    "detail": (
+                        f"{row.module_name}:{exc.path}: "
+                        f"{type(exc.error).__name__}: {_bounded_detail(exc.error)}"
+                    ),
                 }
             )
             continue
-        if bool(getattr(value, "_fmn_schema_placeholder", False)):
+        final_identity = _placeholder_identity(resolved[-1])
+        if final_identity is not None:
             placeholder_count += 1
             contradictions.append(
-                {
-                    "symbol": row.symbol,
-                    "status": row.status,
-                    "code": "reviewed-symbol-is-placeholder",
-                    "detail": "runtime value carries _fmn_schema_placeholder=True",
-                }
+                _placeholder_contradiction(row, final_identity, owner=False)
+            )
+            continue
+        owner_identity = next(
+            (
+                identity
+                for component in reversed(resolved[:-1])
+                if (identity := _placeholder_identity(component)) is not None
+            ),
+            None,
+        )
+        if owner_identity is not None:
+            placeholder_count += 1
+            contradictions.append(
+                _placeholder_contradiction(row, owner_identity, owner=True)
             )
     contradictions.sort(key=lambda row: (row["symbol"], row["code"], row["detail"]))
     status_counts = {
