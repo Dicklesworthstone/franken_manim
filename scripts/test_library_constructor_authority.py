@@ -38,6 +38,11 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
         self.assertIn(old, text, f"fixture token absent: {old!r}")
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
+    def append(self, relative: Path | str, text: str) -> None:
+        path = self.root / relative
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(text)
+
     def assert_audit_error(
         self,
         code: str,
@@ -54,6 +59,11 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
     def test_complete_authority_contract_passes(self) -> None:
         report = audit.audit(self.root)
         self.assertTrue(report["ok"])
+        self.assertEqual(report["version"], 2)
+        self.assertEqual(
+            report["proof_model"],
+            "executable-constructor-routing",
+        )
         self.assertEqual(report["counts"]["authorities"], 16)
         self.assertEqual(report["counts"]["rust_sources"], 5)
         self.assertEqual(report["counts"]["native_bridges"], 13)
@@ -86,11 +96,34 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
             helper="small_dot",
         )
 
+    def test_rust_comment_cannot_impersonate_helper_authority(self) -> None:
+        self.mutate(
+            "crates/fmn-library/src/arc.rs",
+            "Dot::small().point(point)",
+            "Dot::new().point(point) // Dot::small().point(point)",
+        )
+        self.assert_audit_error(
+            "rust-authority-missing",
+            helper="small_dot",
+        )
+
     def test_missing_bridge_authority_fails_scoped(self) -> None:
         self.mutate(
             audit.BRIDGE_PATH,
             "fmn_library::vmobject::vectorized_point(location)",
             "fmn_library::VMobject::from_points(vec![location])",
+        )
+        self.assert_audit_error(
+            "bridge-authority-missing",
+            helper="vectorized_point",
+        )
+
+    def test_rust_comment_cannot_impersonate_bridge_authority(self) -> None:
+        self.mutate(
+            audit.BRIDGE_PATH,
+            "fmn_library::vmobject::vectorized_point(location),",
+            "fmn_library::VMobject::from_points(vec![location]), "
+            "// fmn_library::vmobject::vectorized_point(location)",
         )
         self.assert_audit_error(
             "bridge-authority-missing",
@@ -118,6 +151,35 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
             helper="triangle",
         )
 
+    def test_python_comment_cannot_impersonate_constructor_route(self) -> None:
+        self.mutate(
+            audit.BOOTSTRAP_PATH,
+            "super().__init__(n=3, **kwargs)",
+            "super().__init__(n=4, **kwargs)  "
+            "# super().__init__(n=3, **kwargs)",
+        )
+        self.assert_audit_error(
+            "python-authority-missing",
+            helper="triangle",
+        )
+
+    def test_python_sibling_method_cannot_impersonate_constructor_route(self) -> None:
+        self.mutate(
+            audit.BOOTSTRAP_PATH,
+            "class Triangle(RegularPolygon):\n"
+            "    def __init__(self, **kwargs):\n"
+            "        super().__init__(n=3, **kwargs)",
+            "class Triangle(RegularPolygon):\n"
+            "    def __init__(self, **kwargs):\n"
+            "        super().__init__(n=4, **kwargs)\n\n"
+            "    def authority_decoy(self, **kwargs):\n"
+            "        super().__init__(n=3, **kwargs)",
+        )
+        self.assert_audit_error(
+            "python-authority-missing",
+            helper="triangle",
+        )
+
     def test_inherited_parent_must_still_call_native_builder(self) -> None:
         self.mutate(
             audit.BOOTSTRAP_PATH,
@@ -128,6 +190,44 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
             "python-native-builder-missing",
             helper="small_dot",
         )
+
+    def test_nested_python_code_object_cannot_impersonate_parent_builder(self) -> None:
+        self.mutate(
+            audit.BOOTSTRAP_PATH,
+            "specs = self._build_dot(",
+            "def authority_decoy():\n"
+            "            return self._build_dot(\n"
+            "                _native_shell_factory,\n"
+            "                _vec3(point),\n"
+            "                float(radius),\n"
+            "            )\n"
+            "        specs = self._build_circle(",
+        )
+        self.assert_audit_error(
+            "python-native-builder-missing",
+            helper="small_dot",
+        )
+
+    def test_commented_rust_function_decoy_is_ignored(self) -> None:
+        self.append(
+            "crates/fmn-library/src/vmobject.rs",
+            "\n/*\npub fn vectorized_point(location: Vec3) -> VMobject {\n"
+            "    VMobject::from_points(vec![location])\n}\n*/\n",
+        )
+        report = audit.audit(self.root)
+        self.assertTrue(report["ok"])
+
+    def test_rust_literal_braces_do_not_truncate_function_body(self) -> None:
+        self.mutate(
+            "crates/fmn-library/src/arc.rs",
+            "pub fn small_dot(point: Vec3) -> Dot {\n"
+            "    Dot::small().point(point)",
+            "pub fn small_dot(point: Vec3) -> Dot {\n"
+            "    let _decoy = r#\"}\"#;\n"
+            "    Dot::small().point(point)",
+        )
+        report = audit.audit(self.root)
+        self.assertTrue(report["ok"])
 
     def test_wheel_alias_map_drift_fails_closed(self) -> None:
         self.mutate(
@@ -153,6 +253,10 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
         with mock.patch.object(audit, "MAX_SOURCE_BYTES", 8):
             self.assert_audit_error("source-too-large")
 
+    def test_unterminated_rust_comment_is_typed(self) -> None:
+        self.append("crates/fmn-library/src/arc.rs", "\n/* unterminated")
+        self.assert_audit_error("rust-lex-failed", helper="curved_arrow")
+
     def test_cli_human_and_robot_outputs_are_deterministic(self) -> None:
         for robot in (False, True):
             with self.subTest(robot=robot):
@@ -171,6 +275,10 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
                     payload = json.loads(stdout.getvalue())
                     self.assertEqual(payload["schema"], audit.SCHEMA)
                     self.assertEqual(payload["version"], audit.SCHEMA_VERSION)
+                    self.assertEqual(
+                        payload["proof_model"],
+                        "executable-constructor-routing",
+                    )
                     self.assertEqual(payload["counts"]["authorities"], 16)
                 else:
                     self.assertIn(
