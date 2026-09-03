@@ -255,19 +255,23 @@ def public_namespace(mods: dict[str, Module], root: str) -> dict[str, str]:
 PARAM_ROWS: list[tuple[str, ...]] = []
 
 
-def record_params(owner: str, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-    """Emit one `[params]` row per parameter, in declaration order.
+def parameter_rows(
+    owner: str,
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[tuple[str, ...]]:
+    """Return one `[params]` row per parameter, in declaration order.
 
     Parameter KIND is recorded because the Python front door has to reproduce
     it exactly: a Reference parameter that is positional-or-keyword must not
     become keyword-only in fmn-python, or source-unedited scenes break.
     """
+    rows: list[tuple[str, ...]] = []
     args = fn.args
     ordinal = 0
 
     def emit(arg: ast.arg, kind: str, default: ast.expr | None) -> None:
         nonlocal ordinal
-        PARAM_ROWS.append(
+        rows.append(
             (
                 owner,
                 str(ordinal),
@@ -293,15 +297,75 @@ def record_params(owner: str, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> Non
         emit(arg, "keyword_only", default)
     if args.kwarg is not None:
         emit(args.kwarg, "var_keyword", None)
+    return rows
+
+
+def record_params(owner: str, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    PARAM_ROWS.extend(parameter_rows(owner, fn))
 
 
 def is_property(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     for dec in fn.decorator_list:
         target = dec.func if isinstance(dec, ast.Call) else dec
         name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
-        if name in ("property", "cached_property"):
+        if name in ("property", "cached_property", "getter", "setter", "deleter"):
             return True
     return False
+
+
+def public_class_members(cls: ast.ClassDef) -> dict[str, ast.stmt]:
+    """Return the class namespace entries that survive body execution.
+
+    A Python class body is an ordinary namespace: a later method or assignment
+    replaces an earlier binding with the same name, and ``del`` removes it.
+    The extracted schema must describe that final namespace rather than every
+    transient statement encountered by the AST walk.
+    """
+    members: dict[str, ast.stmt] = {}
+    for item in cls.body:
+        if isinstance(item, ast.Assign):
+            for target in item.targets:
+                if isinstance(target, ast.Name) and (
+                    not target.id.startswith("_") or target.id == "__init__"
+                ):
+                    members[target.id] = item
+        elif isinstance(item, ast.AnnAssign):
+            target = item.target
+            if isinstance(target, ast.Name) and (
+                not target.id.startswith("_") or target.id == "__init__"
+            ):
+                members[target.id] = item
+        elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not item.name.startswith("_") or item.name == "__init__":
+                members[item.name] = item
+        elif isinstance(item, ast.Delete):
+            for target in item.targets:
+                if isinstance(target, ast.Name):
+                    members.pop(target.id, None)
+    return members
+
+
+def class_schema_rows(
+    module_name: str,
+    class_name: str,
+    cls: ast.ClassDef,
+) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+    """Return final class symbol and parameter rows under Python semantics."""
+    symbols: list[tuple[str, ...]] = []
+    params: list[tuple[str, ...]] = []
+    for member_name, item in sorted(public_class_members(cls).items()):
+        qualified = f"{class_name}.{member_name}"
+        if isinstance(item, (ast.Assign, ast.AnnAssign)):
+            default = ast.unparse(item.value) if item.value is not None else None
+            symbols.append(
+                (module_name, qualified, "attribute", "defined", "0", cell(default))
+            )
+            continue
+        assert isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        kind = "property" if is_property(item) else "method"
+        symbols.append((module_name, qualified, kind, "defined", "0", "-"))
+        params.extend(parameter_rows(f"{module_name}:{qualified}", item))
+    return symbols, params
 
 
 # ---------------------------------------------------------------------------
@@ -487,40 +551,15 @@ def main() -> int:
                     cell(bases),
                 )
             )
-            for item in cls.body:
-                # Class-level attributes are public surface, not decoration:
-                # the Reference configures whole lineages through them
-                # (`Checkmark.tex`, `Cross.stroke_color`), and C-9's
-                # `tickness_multiplier` lives here rather than in any
-                # signature. A subclass overriding one is an API act.
-                if isinstance(item, (ast.Assign, ast.AnnAssign)):
-                    targets = (
-                        item.targets if isinstance(item, ast.Assign) else [item.target]
-                    )
-                    for target in targets:
-                        if not isinstance(target, ast.Name) or target.id.startswith("_"):
-                            continue
-                        default = ast.unparse(item.value) if item.value is not None else None
-                        symbol_rows.append(
-                            (
-                                name,
-                                f"{cls_name}.{target.id}",
-                                "attribute",
-                                "defined",
-                                "0",
-                                cell(default),
-                            )
-                        )
-                    continue
-                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                if item.name.startswith("_") and item.name != "__init__":
-                    continue
-                kind = "property" if is_property(item) else "method"
-                symbol_rows.append(
-                    (name, f"{cls_name}.{item.name}", kind, "defined", "0", "-")
-                )
-                record_params(f"{name}:{cls_name}.{item.name}", item)
+            # Class-level attributes are public surface, not decoration:
+            # the Reference configures whole lineages through them
+            # (`Checkmark.tex`, `Cross.stroke_color`), and C-9's
+            # `tickness_multiplier` lives here rather than in any signature.
+            # Apply Python's last-binding-wins class namespace semantics so
+            # transient duplicate definitions never become duplicate rows.
+            class_symbols, class_params = class_schema_rows(name, cls_name, cls)
+            symbol_rows.extend(class_symbols)
+            PARAM_ROWS.extend(class_params)
 
         for fn_name in sorted(mod.functions):
             fn = mod.functions[fn_name]

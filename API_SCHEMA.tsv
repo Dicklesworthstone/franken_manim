@@ -1738,7 +1738,6 @@ manimlib.mobject.types.vectorized_mobject	VMobject.refresh_unit_normal	method	de
 manimlib.mobject.types.vectorized_mobject	VMobject.replace_shader_code	method	defined	0	-
 manimlib.mobject.types.vectorized_mobject	VMobject.reverse_points	method	defined	0	-
 manimlib.mobject.types.vectorized_mobject	VMobject.rotate	method	defined	0	-
-manimlib.mobject.types.vectorized_mobject	VMobject.rotate	method	defined	0	-
 manimlib.mobject.types.vectorized_mobject	VMobject.set_anchors_and_handles	method	defined	0	-
 manimlib.mobject.types.vectorized_mobject	VMobject.set_animating_status	method	defined	0	-
 manimlib.mobject.types.vectorized_mobject	VMobject.set_anti_alias_width	method	defined	0	-
@@ -5768,14 +5767,9 @@ manimlib.mobject.types.vectorized_mobject:VMobject.replace_shader_code	3	program
 manimlib.mobject.types.vectorized_mobject:VMobject.reverse_points	0	self	positional_or_keyword	-	-
 manimlib.mobject.types.vectorized_mobject:VMobject.reverse_points	1	recurse	positional_or_keyword	bool	True
 manimlib.mobject.types.vectorized_mobject:VMobject.rotate	0	self	positional_or_keyword	-	-
-manimlib.mobject.types.vectorized_mobject:VMobject.rotate	0	self	positional_or_keyword	-	-
-manimlib.mobject.types.vectorized_mobject:VMobject.rotate	1	angle	positional_or_keyword	float	-
 manimlib.mobject.types.vectorized_mobject:VMobject.rotate	1	angle	positional_or_keyword	float	-
 manimlib.mobject.types.vectorized_mobject:VMobject.rotate	2	axis	positional_or_keyword	Vect3	OUT
-manimlib.mobject.types.vectorized_mobject:VMobject.rotate	2	axis	positional_or_keyword	Vect3	OUT
 manimlib.mobject.types.vectorized_mobject:VMobject.rotate	3	about_point	positional_or_keyword	Vect3 | None	None
-manimlib.mobject.types.vectorized_mobject:VMobject.rotate	3	about_point	positional_or_keyword	Vect3 | None	None
-manimlib.mobject.types.vectorized_mobject:VMobject.rotate	4	kwargs	var_keyword	-	-
 manimlib.mobject.types.vectorized_mobject:VMobject.rotate	4	kwargs	var_keyword	-	-
 manimlib.mobject.types.vectorized_mobject:VMobject.set_anchors_and_handles	0	self	positional_or_keyword	-	-
 manimlib.mobject.types.vectorized_mobject:VMobject.set_anchors_and_handles	1	anchors	positional_or_keyword	Vect3Array	-
