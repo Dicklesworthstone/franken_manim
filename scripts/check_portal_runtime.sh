@@ -11,4 +11,4 @@ if not path:
 print(f"auditing imported manimlib: {path}")
 PY
 
-python3 scripts/audit_portal_runtime.py --overlay API_OVERLAY.tsv --check
+python3 -m fmn_python --audit-parity --robot
