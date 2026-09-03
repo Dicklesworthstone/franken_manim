@@ -1,0 +1,440 @@
+name: API schema class namespace repair
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/api-schema-class-namespace-repair.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: api-schema-class-namespace-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.repository == 'Dicklesworthstone/franken_manim'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: target/api-schema-repair
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Fast-forward to current main
+        shell: bash
+        run: git pull --ff-only origin main
+
+      - name: Model the final Python class namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/gen_api_schema.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''PARAM_ROWS: list[tuple[str, ...]] = []
+
+
+def record_params(owner: str, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    """Emit one `[params]` row per parameter, in declaration order.
+
+    Parameter KIND is recorded because the Python front door has to reproduce
+    it exactly: a Reference parameter that is positional-or-keyword must not
+    become keyword-only in fmn-python, or source-unedited scenes break.
+    """
+    args = fn.args
+    ordinal = 0
+
+    def emit(arg: ast.arg, kind: str, default: ast.expr | None) -> None:
+        nonlocal ordinal
+        PARAM_ROWS.append(
+            (
+                owner,
+                str(ordinal),
+                arg.arg,
+                kind,
+                cell(ast.unparse(arg.annotation) if arg.annotation else None),
+                cell(ast.unparse(default) if default is not None else None),
+            )
+        )
+        ordinal += 1
+
+    # positional-only, then positional-or-keyword: defaults right-align across
+    # the two lists taken together.
+    positional = list(args.posonlyargs) + list(args.args)
+    pad = len(positional) - len(args.defaults)
+    for i, arg in enumerate(positional):
+        kind = "positional_only" if i < len(args.posonlyargs) else "positional_or_keyword"
+        emit(arg, kind, args.defaults[i - pad] if i >= pad else None)
+
+    if args.vararg is not None:
+        emit(args.vararg, "var_positional", None)
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+        emit(arg, "keyword_only", default)
+    if args.kwarg is not None:
+        emit(args.kwarg, "var_keyword", None)
+
+
+def is_property(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for dec in fn.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+        if name in ("property", "cached_property"):
+            return True
+    return False
+'''
+          new = '''PARAM_ROWS: list[tuple[str, ...]] = []
+
+
+def parameter_rows(
+    owner: str,
+    fn: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[tuple[str, ...]]:
+    """Return one `[params]` row per parameter, in declaration order.
+
+    Parameter KIND is recorded because the Python front door has to reproduce
+    it exactly: a Reference parameter that is positional-or-keyword must not
+    become keyword-only in fmn-python, or source-unedited scenes break.
+    """
+    rows: list[tuple[str, ...]] = []
+    args = fn.args
+    ordinal = 0
+
+    def emit(arg: ast.arg, kind: str, default: ast.expr | None) -> None:
+        nonlocal ordinal
+        rows.append(
+            (
+                owner,
+                str(ordinal),
+                arg.arg,
+                kind,
+                cell(ast.unparse(arg.annotation) if arg.annotation else None),
+                cell(ast.unparse(default) if default is not None else None),
+            )
+        )
+        ordinal += 1
+
+    # positional-only, then positional-or-keyword: defaults right-align across
+    # the two lists taken together.
+    positional = list(args.posonlyargs) + list(args.args)
+    pad = len(positional) - len(args.defaults)
+    for i, arg in enumerate(positional):
+        kind = "positional_only" if i < len(args.posonlyargs) else "positional_or_keyword"
+        emit(arg, kind, args.defaults[i - pad] if i >= pad else None)
+
+    if args.vararg is not None:
+        emit(args.vararg, "var_positional", None)
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+        emit(arg, "keyword_only", default)
+    if args.kwarg is not None:
+        emit(args.kwarg, "var_keyword", None)
+    return rows
+
+
+def record_params(owner: str, fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    PARAM_ROWS.extend(parameter_rows(owner, fn))
+
+
+def is_property(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for dec in fn.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+        if name in ("property", "cached_property", "getter", "setter", "deleter"):
+            return True
+    return False
+
+
+def public_class_members(cls: ast.ClassDef) -> dict[str, ast.stmt]:
+    """Return the class namespace entries that survive body execution.
+
+    A Python class body is an ordinary namespace: a later method or assignment
+    replaces an earlier binding with the same name, and ``del`` removes it.
+    The extracted schema must describe that final namespace rather than every
+    transient statement encountered by the AST walk.
+    """
+    members: dict[str, ast.stmt] = {}
+    for item in cls.body:
+        if isinstance(item, ast.Assign):
+            for target in item.targets:
+                if isinstance(target, ast.Name) and (
+                    not target.id.startswith("_") or target.id == "__init__"
+                ):
+                    members[target.id] = item
+        elif isinstance(item, ast.AnnAssign):
+            target = item.target
+            if isinstance(target, ast.Name) and (
+                not target.id.startswith("_") or target.id == "__init__"
+            ):
+                members[target.id] = item
+        elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not item.name.startswith("_") or item.name == "__init__":
+                members[item.name] = item
+        elif isinstance(item, ast.Delete):
+            for target in item.targets:
+                if isinstance(target, ast.Name):
+                    members.pop(target.id, None)
+    return members
+
+
+def class_schema_rows(
+    module_name: str,
+    class_name: str,
+    cls: ast.ClassDef,
+) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+    """Return final class symbol and parameter rows under Python semantics."""
+    symbols: list[tuple[str, ...]] = []
+    params: list[tuple[str, ...]] = []
+    for member_name, item in sorted(public_class_members(cls).items()):
+        qualified = f"{class_name}.{member_name}"
+        if isinstance(item, (ast.Assign, ast.AnnAssign)):
+            default = ast.unparse(item.value) if item.value is not None else None
+            symbols.append(
+                (module_name, qualified, "attribute", "defined", "0", cell(default))
+            )
+            continue
+        assert isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        kind = "property" if is_property(item) else "method"
+        symbols.append((module_name, qualified, kind, "defined", "0", "-"))
+        params.extend(parameter_rows(f"{module_name}:{qualified}", item))
+    return symbols, params
+'''
+          if text.count(old) != 1:
+              raise SystemExit("expected one legacy parameter/classification block")
+          text = text.replace(old, new, 1)
+
+          old_loop = '''            for item in cls.body:
+                # Class-level attributes are public surface, not decoration:
+                # the Reference configures whole lineages through them
+                # (`Checkmark.tex`, `Cross.stroke_color`), and C-9's
+                # `tickness_multiplier` lives here rather than in any
+                # signature. A subclass overriding one is an API act.
+                if isinstance(item, (ast.Assign, ast.AnnAssign)):
+                    targets = (
+                        item.targets if isinstance(item, ast.Assign) else [item.target]
+                    )
+                    for target in targets:
+                        if not isinstance(target, ast.Name) or target.id.startswith("_"):
+                            continue
+                        default = ast.unparse(item.value) if item.value is not None else None
+                        symbol_rows.append(
+                            (
+                                name,
+                                f"{cls_name}.{target.id}",
+                                "attribute",
+                                "defined",
+                                "0",
+                                cell(default),
+                            )
+                        )
+                    continue
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if item.name.startswith("_") and item.name != "__init__":
+                    continue
+                kind = "property" if is_property(item) else "method"
+                symbol_rows.append(
+                    (name, f"{cls_name}.{item.name}", kind, "defined", "0", "-")
+                )
+                record_params(f"{name}:{cls_name}.{item.name}", item)
+'''
+          new_loop = '''            # Class-level attributes are public surface, not decoration:
+            # the Reference configures whole lineages through them
+            # (`Checkmark.tex`, `Cross.stroke_color`), and C-9's
+            # `tickness_multiplier` lives here rather than in any signature.
+            # Apply Python's last-binding-wins class namespace semantics so
+            # transient duplicate definitions never become duplicate rows.
+            class_symbols, class_params = class_schema_rows(name, cls_name, cls)
+            symbol_rows.extend(class_symbols)
+            PARAM_ROWS.extend(class_params)
+'''
+          if text.count(old_loop) != 1:
+              raise SystemExit("expected one legacy class member loop")
+          path.write_text(text.replace(old_loop, new_loop, 1), encoding="utf-8")
+          PY
+
+      - name: Register extractor regression in the mandatory gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/check.sh")
+          text = path.read_text(encoding="utf-8")
+          old = '''echo "==> Python geometry helper alias and authority policy"
+          python3 -m py_compile \\
+              crates/fmn-python/python/fmn_python/library_constructor_authority.py \\
+              scripts/check_python_helper_aliases.py \\
+          '''
+          new = '''echo "==> Python API extractor and geometry helper authority policy"
+          python3 -m py_compile \\
+              scripts/gen_api_schema.py \\
+              scripts/test_gen_api_schema.py \\
+              crates/fmn-python/python/fmn_python/library_constructor_authority.py \\
+              scripts/check_python_helper_aliases.py \\
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("expected one helper-policy compile block")
+          text = text.replace(old, new, 1)
+          old = '''    scripts/check_library_constructor_authority.py \\
+              scripts/test_library_constructor_authority.py
+          python3 scripts/check_python_helper_aliases.py
+          '''
+          new = '''    scripts/check_library_constructor_authority.py \\
+              scripts/test_library_constructor_authority.py
+          python3 scripts/test_gen_api_schema.py
+          python3 scripts/check_python_helper_aliases.py
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("expected one helper-policy execution block")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Reconcile extracted and authored schema authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          schema = Path("API_SCHEMA.tsv")
+          lines = schema.read_text(encoding="utf-8").splitlines()
+          seen_symbols: set[tuple[str, str]] = set()
+          seen_params: set[tuple[str, str, str]] = set()
+          section = None
+          output: list[str] = []
+          removed: list[tuple[str, tuple[str, ...]]] = []
+          for line in lines:
+              if line.startswith("["):
+                  section = line
+              if line and not line.startswith("#"):
+                  fields = line.split("\t")
+                  if section == "[symbols]" and len(fields) == 6:
+                      key = (fields[0], fields[1])
+                      if key in seen_symbols:
+                          removed.append(("symbol", key))
+                          continue
+                      seen_symbols.add(key)
+                  elif section == "[params]" and len(fields) == 6:
+                      key = (fields[0], fields[1], fields[2])
+                      if key in seen_params:
+                          removed.append(("param", key))
+                          continue
+                      seen_params.add(key)
+              output.append(line)
+
+          expected = [
+              ("symbol", ("manimlib.mobject.types.vectorized_mobject", "VMobject.rotate")),
+              ("param", ("manimlib.mobject.types.vectorized_mobject:VMobject.rotate", "0", "self")),
+              ("param", ("manimlib.mobject.types.vectorized_mobject:VMobject.rotate", "1", "angle")),
+              ("param", ("manimlib.mobject.types.vectorized_mobject:VMobject.rotate", "2", "axis")),
+              ("param", ("manimlib.mobject.types.vectorized_mobject:VMobject.rotate", "3", "about_point")),
+              ("param", ("manimlib.mobject.types.vectorized_mobject:VMobject.rotate", "4", "kwargs")),
+          ]
+          if removed != expected:
+              raise SystemExit(f"unexpected schema duplicates: {removed!r}")
+          schema.write_text("\n".join(output) + "\n", encoding="utf-8")
+
+          overlay = Path("API_OVERLAY.tsv")
+          text = overlay.read_text(encoding="utf-8")
+          old_digest = "ledger_reviewed_digest\te3f3b235aea308ed61a7816c73480bada5d9eb3627740ad25fd4d555ff3b181d"
+          new_digest = "ledger_reviewed_digest\tc44adfd61e5e19d75baf965576b862f31292bcce7e48310c513bbf2052ed340e"
+          if text.count(old_digest) != 1:
+              raise SystemExit("reviewed-ledger digest was not the expected pre-repair identity")
+          overlay.write_text(text.replace(old_digest, new_digest, 1), encoding="utf-8")
+          PY
+
+      - name: Verify extractor and helper policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/gen_api_schema.py \
+            scripts/test_gen_api_schema.py \
+            scripts/check_python_helper_aliases.py \
+            scripts/test_python_helper_aliases.py \
+            scripts/check_library_constructor_authority.py \
+            scripts/test_library_constructor_authority.py
+          PYTHONPATH=scripts python3 scripts/test_gen_api_schema.py
+          python3 scripts/check_python_helper_aliases.py
+          python3 scripts/test_python_helper_aliases.py
+          python3 scripts/check_library_constructor_authority.py
+          python3 scripts/test_library_constructor_authority.py
+
+      - name: Regenerate and verify all schema-derived artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPDATE_API_ARTIFACTS=1 cargo test --locked -p fmn-conformance --test api_schema
+          cargo test --locked -p fmn-conformance --test api_schema
+          git diff --check
+
+      - name: Commit the semantic repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Jeff Emanuel"
+          git config user.email "35050222+Dicklesworthstone@users.noreply.github.com"
+          git add \
+            API_SCHEMA.tsv \
+            API_OVERLAY.tsv \
+            scripts/gen_api_schema.py \
+            scripts/test_gen_api_schema.py \
+            scripts/check.sh \
+            crates/fmn-cli/src/generated.rs \
+            crates/fmn-config/src/generated.rs \
+            docs/api/cli_flags.md \
+            docs/api/ledger.tsv \
+            docs/api/out_of_tier.tsv \
+            docs/api/parity_coverage.svg \
+            docs/api/schema.md
+          git add -u
+          git commit -m "fix(schema): model final Python class namespaces" -m "Collapse transient class-body definitions under Python's last-binding-wins semantics, preserve property setter identity, remove the duplicate VMobject.rotate symbol and parameter rows, advance the reviewed-ledger ratchet, and regenerate every dependent artifact. The mandatory gate now locks the extractor regression before helper-policy validation." -m "Relates-to: fm-5wq.4.141"
+          git pull --rebase origin main
+          PYTHONPATH=scripts python3 scripts/test_gen_api_schema.py
+          python3 scripts/check_python_helper_aliases.py
+          cargo test --locked -p fmn-conformance --test api_schema
+          git push origin HEAD:main
+
+      - name: Leave a read-only manual verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .github/workflows/api-schema-class-namespace-repair.yml <<'YAML'
+          name: API schema class namespace verification
+
+          on:
+            workflow_dispatch:
+
+          permissions:
+            contents: read
+
+          jobs:
+            verify:
+              runs-on: ubuntu-latest
+              timeout-minutes: 45
+              env:
+                CARGO_TARGET_DIR: target/api-schema-verification
+              steps:
+                - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+                  with:
+                    persist-credentials: false
+                - name: Verify final class namespace extraction
+                  run: |
+                    PYTHONPATH=scripts python3 scripts/test_gen_api_schema.py
+                    python3 scripts/check_python_helper_aliases.py
+                    cargo test --locked -p fmn-conformance --test api_schema
+          YAML
+          git add .github/workflows/api-schema-class-namespace-repair.yml
+          git commit -m "ci(schema): retain read-only schema verifier" -m "Replace the completed write-enabled repair bootstrap with an explicit manual verification lane for class-namespace extraction, helper alias policy, and schema-derived artifact drift."
+          git pull --rebase origin main
+          git push origin HEAD:main
