@@ -76,9 +76,13 @@ python3 scripts/audit_portal_refusals.py --check >/dev/null
 
 echo "==> Python portal runtime-parity audit contract"
 python3 -m py_compile \
+    crates/fmn-python/python/fmn_python/parity_audit.py \
+    crates/fmn-python/python/fmn_python/__main__.py \
     scripts/audit_portal_runtime.py \
-    scripts/test_audit_portal_runtime.py
+    scripts/test_audit_portal_runtime.py \
+    scripts/test_portal_parity_cli.py
 python3 scripts/test_audit_portal_runtime.py
+python3 scripts/test_portal_parity_cli.py
 
 echo "==> Python geometry helper alias policy"
 python3 scripts/check_python_helper_aliases.py
