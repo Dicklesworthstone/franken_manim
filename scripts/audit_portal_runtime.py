@@ -21,6 +21,7 @@ from fmn_python.parity_audit import (  # noqa: E402
     MAX_OVERLAY_BYTES,
     ParityAuditError as AuditError,
     StatusRow,
+    audit_overlay,
     audit_rows,
     parse_status_rows,
     render_json,
@@ -51,8 +52,7 @@ def make_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = make_parser().parse_args(argv)
     try:
-        rows = parse_status_rows(_read_bounded(args.overlay))
-        report = audit_rows(rows)
+        report = audit_overlay(_read_bounded(args.overlay))
         output = render_json(report)
     except AuditError as exc:
         print(f"error: {exc}", file=sys.stderr)
