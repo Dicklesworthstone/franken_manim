@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -130,16 +131,19 @@ class RuntimeAuditTests(unittest.TestCase):
                 with self.assertRaises(audit.AuditError):
                     audit.parse_status_rows(text)
 
-    def test_json_envelope_is_stable(self) -> None:
+    def test_json_envelope_binds_exact_overlay_bytes(self) -> None:
         module = self.module("fake_portal.json")
         module.x = 1
-        report = audit.audit_rows(
-            audit.parse_status_rows(status_text(row("fake_portal.json:x")))
-        )
+        text = status_text(row("fake_portal.json:x"))
+        report = audit.audit_overlay(text)
         payload = json.loads(audit.render_json(report))
         self.assertEqual(payload["schema"], "fmn.portal.runtime-audit")
         self.assertEqual(payload["version"], 1)
         self.assertTrue(payload["ok"])
+        self.assertEqual(
+            payload["overlay_sha256"],
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
 
     def test_main_check_returns_one_without_hiding_report(self) -> None:
         module = self.module("fake_portal.cli")
@@ -149,19 +153,22 @@ class RuntimeAuditTests(unittest.TestCase):
 
         placeholder._fmn_schema_placeholder = True
         module.placeholder = placeholder
+        text = status_text(row("fake_portal.cli:placeholder"))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "overlay.tsv"
-            path.write_text(
-                status_text(row("fake_portal.cli:placeholder")),
-                encoding="utf-8",
-            )
+            path.write_text(text, encoding="utf-8")
             stdout = io.StringIO()
             stderr = io.StringIO()
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = audit.main(["--overlay", str(path), "--check"])
+        payload = json.loads(stdout.getvalue())
         self.assertEqual(code, 1)
         self.assertEqual(stderr.getvalue(), "")
-        self.assertFalse(json.loads(stdout.getvalue())["ok"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["overlay_sha256"],
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
 
 
 if __name__ == "__main__":
