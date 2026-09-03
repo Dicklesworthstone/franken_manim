@@ -9,10 +9,20 @@ in the bootstrap embedded in the extension.
 from fmn_python import (
     _ensure_exclusive_manimlib_namespace as _ensure_exclusive_manimlib_namespace,
 )
+from fmn_python.schema_provenance import (
+    SchemaProvenanceError as _SchemaProvenanceError,
+    apply_schema_placeholder_provenance as _apply_schema_placeholder_provenance,
+)
 
 _ensure_exclusive_manimlib_namespace()
 
 from . import manimlib as _native
+
+try:
+    _apply_schema_placeholder_provenance(_native)
+except _SchemaProvenanceError as error:
+    raise ImportError(f"invalid manimlib schema provenance: {error}") from error
+del _SchemaProvenanceError, _apply_schema_placeholder_provenance
 
 
 # The Rust API deliberately exposes ergonomic snake_case constructors, while
