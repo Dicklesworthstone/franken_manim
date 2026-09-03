@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 import audit_portal_runtime as audit
+from fmn_python.schema_provenance import SCHEMA_PROVENANCE_VERSION
 
 
 def status_text(*rows: str) -> str:
@@ -193,6 +194,33 @@ class RuntimeAuditTests(unittest.TestCase):
             {item["code"] for item in report["contradictions"]},
             {"missing-reviewed-symbol", "module-import-failed"},
         )
+
+    def test_manimlib_rows_require_schema_provenance(self) -> None:
+        module = types.ModuleType("manimlib.audit_fixture")
+        module.value = 1
+        rows = audit.parse_status_rows(
+            status_text(row("manimlib.audit_fixture:value"))
+        )
+        importer = lambda _name: module
+
+        missing = audit.audit_rows(rows, importer=importer)
+        self.assertFalse(missing["ok"])
+        self.assertEqual(
+            missing["contradictions"][0]["code"],
+            "runtime-schema-provenance-missing",
+        )
+
+        module._fmn_schema_provenance_version = SCHEMA_PROVENANCE_VERSION + 1
+        mismatched = audit.audit_rows(rows, importer=importer)
+        self.assertFalse(mismatched["ok"])
+        self.assertEqual(
+            mismatched["contradictions"][0]["code"],
+            "runtime-schema-provenance-version-mismatch",
+        )
+
+        module._fmn_schema_provenance_version = SCHEMA_PROVENANCE_VERSION
+        valid = audit.audit_rows(rows, importer=importer)
+        self.assertTrue(valid["ok"])
 
     def test_dynamic_resolution_failure_is_a_bounded_contradiction(self) -> None:
         module = self.module("fake_portal.dynamic_failure")
