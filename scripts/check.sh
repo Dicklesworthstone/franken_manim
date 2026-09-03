@@ -76,11 +76,15 @@ python3 scripts/audit_portal_refusals.py --check >/dev/null
 
 echo "==> Python portal runtime-parity audit contract"
 python3 -m py_compile \
+    crates/fmn-python/python/fmn_python/schema_provenance.py \
     crates/fmn-python/python/fmn_python/parity_audit.py \
     crates/fmn-python/python/fmn_python/__main__.py \
+    crates/fmn-python/python/manimlib/__init__.py \
     scripts/audit_portal_runtime.py \
+    scripts/test_schema_provenance.py \
     scripts/test_audit_portal_runtime.py \
     scripts/test_portal_parity_cli.py
+python3 scripts/test_schema_provenance.py
 python3 scripts/test_audit_portal_runtime.py
 python3 scripts/test_portal_parity_cli.py
 
