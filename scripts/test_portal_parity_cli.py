@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
 import io
 import json
@@ -53,7 +54,7 @@ class PortalParityCliTests(unittest.TestCase):
         self.assertIn("1 SAME/IMPROVED rows", stdout)
         self.assertEqual(stderr, "")
 
-    def test_robot_contradiction_is_structured_and_exit_one(self) -> None:
+    def test_robot_contradiction_is_structured_and_binds_overlay(self) -> None:
         module = self.module("fake_cli.placeholder")
 
         def placeholder():
@@ -61,8 +62,9 @@ class PortalParityCliTests(unittest.TestCase):
 
         placeholder._fmn_schema_placeholder = True
         module.value = placeholder
+        text = overlay("fake_cli.placeholder:value", "improved")
         code, stdout, stderr = self.invoke(
-            self.native(overlay("fake_cli.placeholder:value", "improved")),
+            self.native(text),
             "--audit-parity",
             "--robot",
         )
@@ -71,6 +73,10 @@ class PortalParityCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["counts"]["runtime_placeholders"], 1)
         self.assertEqual(payload["contradictions"][0]["code"], "reviewed-symbol-is-placeholder")
+        self.assertEqual(
+            payload["overlay_sha256"],
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
         self.assertEqual(stderr, "")
 
     def test_human_contradiction_writes_detail_to_stderr(self) -> None:
