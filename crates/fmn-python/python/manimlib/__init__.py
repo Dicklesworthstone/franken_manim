@@ -84,19 +84,10 @@ for _rust_helper, _reference_class in _REFERENCE_CLASS_BY_RUST_HELPER.items():
             f"{_reference_module}.{_reference_class} is not the root "
             "constructor identity"
         )
-del (
-    _REFERENCE_CLASS_BY_RUST_HELPER,
-    _rust_helper,
-    _reference_class,
-    _reference_module,
-    _reference_value,
-    _module,
-)
-del (
-    _CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER,
-    _CONTRACT_REFERENCE_MODULE_BY_RUST_HELPER,
-    _sys,
-)
+del _REFERENCE_CLASS_BY_RUST_HELPER, _rust_helper, _reference_class, _reference_module
+del _reference_value, _module
+del _CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER
+del _CONTRACT_REFERENCE_MODULE_BY_RUST_HELPER, _sys
 
 
 for _name in dir(_native):
