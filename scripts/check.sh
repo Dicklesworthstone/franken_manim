@@ -92,9 +92,17 @@ python3 scripts/test_audit_portal_runtime.py
 python3 scripts/test_portal_parity_cli.py
 python3 scripts/test_verify_portal_runtime_receipt.py
 
-echo "==> Python geometry helper alias policy"
+echo "==> Python geometry helper alias and authority policy"
+python3 -m py_compile \
+    crates/fmn-python/python/fmn_python/library_constructor_authority.py \
+    scripts/check_python_helper_aliases.py \
+    scripts/test_python_helper_aliases.py \
+    scripts/check_library_constructor_authority.py \
+    scripts/test_library_constructor_authority.py
 python3 scripts/check_python_helper_aliases.py
 python3 scripts/test_python_helper_aliases.py
+python3 scripts/check_library_constructor_authority.py
+python3 scripts/test_library_constructor_authority.py
 
 echo "==> native installer smoke"
 bash scripts/test_install.sh
