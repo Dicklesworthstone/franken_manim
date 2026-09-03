@@ -1,0 +1,90 @@
+name: Finalize RNG Migration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/finalize-rng-migration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-rng-migration
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install governed toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-07-05 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          rustup override set nightly-2026-07-05
+
+      - name: Admit only the dependency-free random core
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("SUITE_ALLOWLIST.tsv")
+          text = path.read_text(encoding="utf-8")
+          row = (
+              "fnp-random-core\t0.2.0\tgit+franken_numpy@SUITE.lock\t-\t-\t"
+              "MIT+rider\tno\tno\tno\tno\tforbid\truntime\t"
+              "fm-ai1: dependency-free SeedSequence and PCG64DXSM authority; no OS entropy, ndarray, rayon, or distribution surface; rev must equal the SUITE.lock franken_numpy pin\t"
+              "fm\tsuite-lock-ritual\n"
+          )
+          if row in text:
+              raise SystemExit(0)
+          anchor = next(
+              line
+              for line in text.splitlines(keepends=True)
+              if line.startswith("fnp-ndarray\t0.2.0\tgit+franken_numpy@SUITE.lock\t")
+          )
+          text = text.replace(anchor, anchor + row, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Refresh and verify the exact dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check -p fmn-core --all-targets
+          cargo test -p fmn-core
+          cargo check --target wasm32-unknown-unknown -p fmn-core
+          cargo test -p fmn-conformance --test governed_closure
+          cargo fmt --all -- --check
+          cargo clippy -p fmn-core --all-targets -- -D warnings
+          git diff --check
+
+      - name: Commit generated closure state on unchanged main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add Cargo.lock SUITE_ALLOWLIST.tsv
+          if git diff --cached --quiet; then
+            echo "RNG migration lock state already current"
+            exit 0
+          fi
+          git config user.name "FrankenManim RNG Migration"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "build(core): lock dependency-free RNG authority" -m "Refresh Cargo.lock and the governed allowlist from the exact tested fm-ai1 source cutover."
+          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "main moved after verification; refusing to attach generated lock state to an untested tree" >&2
+            exit 4
+          fi
+          git push origin HEAD:main
