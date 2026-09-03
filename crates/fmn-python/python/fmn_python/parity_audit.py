@@ -160,8 +160,11 @@ def _resolve_qualified(module: ModuleType, qualified: str) -> tuple[_ResolvedCom
 
 
 def _placeholder_identity(component: _ResolvedComponent) -> _PlaceholderIdentity | None:
+    value = component.value
+    if isinstance(value, (classmethod, staticmethod)):
+        value = value.__func__
     try:
-        namespace = vars(component.value)
+        namespace = vars(value)
     except (TypeError, AttributeError):
         return None
     if namespace.get(_PLACEHOLDER_MARKER) is not True:
