@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 from dataclasses import dataclass
@@ -38,9 +39,18 @@ class StatusRow:
         return self.symbol.split(":", 1)[1]
 
 
-def parse_status_rows(text: str) -> tuple[StatusRow, ...]:
-    if len(text.encode("utf-8")) > MAX_OVERLAY_BYTES:
+def _overlay_bytes(text: str) -> bytes:
+    try:
+        payload = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ParityAuditError(f"overlay is not valid UTF-8 text: {exc}") from exc
+    if len(payload) > MAX_OVERLAY_BYTES:
         raise ParityAuditError(f"overlay exceeds {MAX_OVERLAY_BYTES}-byte limit")
+    return payload
+
+
+def parse_status_rows(text: str) -> tuple[StatusRow, ...]:
+    _overlay_bytes(text)
     section: str | None = None
     rows: list[StatusRow] = []
     seen: set[str] = set()
@@ -158,6 +168,17 @@ def audit_rows(
     }
 
 
+def audit_overlay(
+    overlay: str,
+    *,
+    importer: Callable[[str], ModuleType] = importlib.import_module,
+) -> dict[str, Any]:
+    payload = _overlay_bytes(overlay)
+    report = audit_rows(parse_status_rows(overlay), importer=importer)
+    report["overlay_sha256"] = hashlib.sha256(payload).hexdigest()
+    return report
+
+
 def audit_embedded_overlay(native_module: ModuleType) -> dict[str, Any]:
     try:
         overlay = getattr(native_module, "_API_OVERLAY_TSV")
@@ -165,7 +186,7 @@ def audit_embedded_overlay(native_module: ModuleType) -> dict[str, Any]:
         raise ParityAuditError("native portal does not expose its embedded API overlay") from exc
     if not isinstance(overlay, str):
         raise ParityAuditError("embedded API overlay is not text")
-    return audit_rows(parse_status_rows(overlay))
+    return audit_overlay(overlay)
 
 
 def render_json(report: dict[str, Any]) -> str:
