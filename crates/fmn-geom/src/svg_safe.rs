@@ -7,11 +7,11 @@
 //! fixed-width probe is checked at a character boundary, and only then does
 //! the document parser run.
 
+use crate::svg_parser;
 pub use crate::svg_parser::{
     DEFAULT_SVG_TOLERANCE, LineCap, LineJoin, Paint, SvgError, SvgLimits, SvgShape, SvgStyle,
     emit_path_data, emit_svg,
 };
-use crate::svg_parser;
 
 const UNSUPPORTED_DECLARATION: &str = concat!(
     "unsupported markup declaration (only elements, comments, CDATA, ",
@@ -112,10 +112,7 @@ fn validate_fixed_markup_probes(text: &str) -> Result<(), SvgError> {
             && bytes.len() - start >= b"<!doctype".len()
             && !text.is_char_boundary(start + b"<!doctype".len())
         {
-            let line = 1 + bytes[..start]
-                .iter()
-                .filter(|byte| **byte == b'\n')
-                .count();
+            let line = 1 + bytes[..start].iter().filter(|byte| **byte == b'\n').count();
             return Err(SvgError::Malformed {
                 line,
                 message: UNSUPPORTED_DECLARATION.to_owned(),

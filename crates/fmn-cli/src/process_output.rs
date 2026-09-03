@@ -37,11 +37,7 @@ impl PublicationError {
     }
 }
 
-fn write_stream(
-    stream: Stream,
-    writer: &mut dyn Write,
-    bytes: &[u8],
-) -> Option<PublicationError> {
+fn write_stream(stream: Stream, writer: &mut dyn Write, bytes: &[u8]) -> Option<PublicationError> {
     if bytes.is_empty() {
         return None;
     }
@@ -116,7 +112,12 @@ mod tests {
         let mut stdout = RecordingWriter::failing(io::ErrorKind::BrokenPipe);
         let mut stderr = RecordingWriter::default();
         assert_eq!(
-            publish(&mut stdout, &mut stderr, b"ordinary output\n", b"typed error\n"),
+            publish(
+                &mut stdout,
+                &mut stderr,
+                b"ordinary output\n",
+                b"typed error\n"
+            ),
             Ok(())
         );
         assert_eq!(stdout.writes, 1);

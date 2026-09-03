@@ -38,10 +38,8 @@ impl Fixture {
     fn new() -> Self {
         for _ in 0..1_024 {
             let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "fmn-cli-smoke-{}-{sequence}",
-                std::process::id()
-            ));
+            let root = std::env::temp_dir()
+                .join(format!("fmn-cli-smoke-{}-{sequence}", std::process::id()));
             match fs::create_dir(&root) {
                 Ok(()) => return Self { root },
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -83,10 +81,7 @@ fn run(fixture: &Fixture, args: Vec<OsString>) -> Output {
 
 #[cfg(feature = "batch")]
 fn args(values: &[&str]) -> Vec<OsString> {
-    values
-        .iter()
-        .map(|value| OsString::from(*value))
-        .collect()
+    values.iter().map(|value| OsString::from(*value)).collect()
 }
 
 #[cfg(feature = "batch")]
@@ -230,7 +225,10 @@ fn shipped_doctor_robot_stream_has_the_complete_versioned_schema() {
 
     let lines = stdout(&output).lines().collect::<Vec<_>>();
     assert_eq!(
-        lines.iter().map(|line| record_kind(line)).collect::<Vec<_>>(),
+        lines
+            .iter()
+            .map(|line| record_kind(line))
+            .collect::<Vec<_>>(),
         [
             "topology",
             "execution_plan",
@@ -261,7 +259,10 @@ fn shipped_batch_renders_a_synthetic_scene_and_publishes_its_manifest() {
     assert!(stderr(&output).is_empty());
     let lines = stdout(&output).lines().collect::<Vec<_>>();
     assert_eq!(
-        lines.iter().map(|line| record_kind(line)).collect::<Vec<_>>(),
+        lines
+            .iter()
+            .map(|line| record_kind(line))
+            .collect::<Vec<_>>(),
         ["render", "batch"]
     );
     assert!(lines[0].contains("\"source\":\"compiled\""));
@@ -279,10 +280,9 @@ fn shipped_batch_renders_a_synthetic_scene_and_publishes_its_manifest() {
     let png = fs::read(&batch.artifact).expect("batch publishes its PNG");
     assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     assert!(png.len() > 8);
-    let manifest_binary =
-        fs::read(&batch.manifest_binary).expect("batch publishes manifest.fmnp");
-    let manifest_text = fs::read_to_string(&batch.manifest_text)
-        .expect("batch publishes UTF-8 manifest.txt");
+    let manifest_binary = fs::read(&batch.manifest_binary).expect("batch publishes manifest.fmnp");
+    let manifest_text =
+        fs::read_to_string(&batch.manifest_text).expect("batch publishes UTF-8 manifest.txt");
     assert!(!manifest_binary.is_empty());
     assert!(!manifest_text.is_empty());
 
