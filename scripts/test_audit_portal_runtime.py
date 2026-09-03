@@ -80,6 +80,59 @@ class RuntimeAuditTests(unittest.TestCase):
         self.assertIn("kind=function", contradiction["detail"])
         self.assertIn("declared=fake_portal.placeholder:function", contradiction["detail"])
 
+    def test_wrapped_placeholder_descriptors_fail_reviewed_claims(self) -> None:
+        module = self.module("fake_portal.wrapped_placeholder")
+
+        def static_unavailable():
+            raise NotImplementedError
+
+        def class_unavailable(cls):
+            raise NotImplementedError(cls)
+
+        mark_placeholder(
+            static_unavailable,
+            kind="method",
+            symbol="fake_portal.wrapped_placeholder:Widget.static_unavailable",
+        )
+        mark_placeholder(
+            class_unavailable,
+            kind="method",
+            symbol="fake_portal.wrapped_placeholder:Widget.class_unavailable",
+        )
+
+        class Widget:
+            static_unavailable = staticmethod(static_unavailable)
+            class_unavailable = classmethod(class_unavailable)
+
+        module.Widget = Widget
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(
+                    row(
+                        "fake_portal.wrapped_placeholder:Widget.static_unavailable",
+                        "same",
+                    ),
+                    row(
+                        "fake_portal.wrapped_placeholder:Widget.class_unavailable",
+                        "improved",
+                    ),
+                )
+            )
+        )
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["counts"]["runtime_placeholders"], 2)
+        self.assertEqual(
+            {item["symbol"] for item in report["contradictions"]},
+            {
+                "fake_portal.wrapped_placeholder:Widget.static_unavailable",
+                "fake_portal.wrapped_placeholder:Widget.class_unavailable",
+            },
+        )
+        self.assertEqual(
+            {item["code"] for item in report["contradictions"]},
+            {"reviewed-symbol-is-placeholder"},
+        )
+
     def test_synthesized_class_identity_fails_reviewed_claim(self) -> None:
         module = self.module("fake_portal.placeholder_class")
 
