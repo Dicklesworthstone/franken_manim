@@ -33,45 +33,45 @@ jobs:
           from pathlib import Path
 
           path = Path("scripts/agent_claim.py")
-          text = path.read_text(encoding="utf-8")
-          old = '''        try:
-              after = agent_brief.load_issues(ledger)
-              after_graph_sha256 = agent_claim_guard.graph_digest(after)
-          except (agent_brief.BriefError, agent_claim_guard.GuardError) as exc:
-              raise ClaimError(f"post-claim ledger verification failed: {exc}", 5) from exc
-          claim_delta = _verify_claim_only_delta(
-              issues,
-              after,
-              issue_id,
-              assignee,
-              transition_comment,
+          lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+          graph_line = "            after_graph_sha256 = agent_claim_guard.graph_digest(after)\n"
+          broad_catch = "        except (agent_brief.BriefError, agent_claim_guard.GuardError) as exc:\n"
+          narrow_catch = "        except agent_brief.BriefError as exc:\n"
+          claim_start = "        claim_delta = _verify_claim_only_delta(\n"
+
+          if lines.count(graph_line) != 1:
+              raise SystemExit("expected exactly one post-claim graph digest")
+          if lines.count(broad_catch) != 1:
+              raise SystemExit("expected exactly one broad post-claim catch")
+          if lines.count(claim_start) != 1:
+              raise SystemExit("expected exactly one claim-delta call")
+
+          lines.remove(graph_line)
+          lines[lines.index(broad_catch)] = narrow_catch
+          claim_index = lines.index(claim_start)
+          lines[claim_index:claim_index] = [
+              "        # Prove the narrow transaction shape before authenticating the whole graph.\n",
+              "        # Otherwise broader task-semantic drift can mask the precise membership,\n",
+              "        # unrelated-issue, or target-field contradiction that actually occurred.\n",
+          ]
+          claim_index = lines.index(claim_start)
+          claim_end = next(
+              index
+              for index in range(claim_index + 1, len(lines))
+              if lines[index] == "        )\n"
           )
-          '''
-          new = '''        try:
-              after = agent_brief.load_issues(ledger)
-          except agent_brief.BriefError as exc:
-              raise ClaimError(f"post-claim ledger verification failed: {exc}", 5) from exc
-          # Prove the narrow transaction shape before authenticating the whole graph.
-          # Otherwise broader task-semantic drift can mask the precise membership,
-          # unrelated-issue, or target-field contradiction that actually occurred.
-          claim_delta = _verify_claim_only_delta(
-              issues,
-              after,
-              issue_id,
-              assignee,
-              transition_comment,
-          )
-          try:
-              after_graph_sha256 = agent_claim_guard.graph_digest(after)
-          except agent_claim_guard.GuardError as exc:
-              raise ClaimError(f"post-claim ledger verification failed: {exc}", 5) from exc
-          '''
-          if text.count(old) != 1:
-              raise SystemExit("expected exactly one claim postcondition block")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          lines[claim_end + 1:claim_end + 1] = [
+              "        try:\n",
+              "            after_graph_sha256 = agent_claim_guard.graph_digest(after)\n",
+              "        except agent_claim_guard.GuardError as exc:\n",
+              "            raise ClaimError(f\"post-claim ledger verification failed: {exc}\", 5) from exc\n",
+          ]
+          path.write_text("".join(lines), encoding="utf-8")
           PY
           python3 -m py_compile scripts/agent_claim.py scripts/test_agent_claim.py
           python3 scripts/test_agent_claim.py
+          python3 scripts/test_agent_claim_guard.py
           git diff --check
           git config user.name "Jeff Emanuel"
           git config user.email "35050222+Dicklesworthstone@users.noreply.github.com"
