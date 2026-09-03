@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, Callable
 
+from .schema_provenance import SCHEMA_PROVENANCE_VERSION
+
 SCHEMA = "fmn.portal.runtime-audit"
 SCHEMA_VERSION = 1
 MAX_OVERLAY_BYTES = 8 * 1024 * 1024
@@ -21,6 +23,7 @@ KNOWN_STATUSES = frozenset({"same", "improved", "tiered", "excluded", "unreviewe
 _PLACEHOLDER_MARKER = "_fmn_schema_placeholder"
 _PLACEHOLDER_KIND = "_fmn_schema_placeholder_kind"
 _PLACEHOLDER_SYMBOL = "_fmn_schema_placeholder_symbol"
+_PROVENANCE_VERSION = "_fmn_schema_provenance_version"
 _MISSING = object()
 
 
@@ -186,6 +189,32 @@ def _placeholder_contradiction(
     }
 
 
+def _provenance_contradiction(row: StatusRow, module: ModuleType) -> dict[str, str] | None:
+    if row.module_name != "manimlib" and not row.module_name.startswith("manimlib."):
+        return None
+    observed = vars(module).get(_PROVENANCE_VERSION, _MISSING)
+    if observed == SCHEMA_PROVENANCE_VERSION:
+        return None
+    if observed is _MISSING:
+        code = "runtime-schema-provenance-missing"
+        detail = (
+            f"imported module {row.module_name} has no {_PROVENANCE_VERSION}; "
+            f"expected version {SCHEMA_PROVENANCE_VERSION} before reviewing symbols"
+        )
+    else:
+        code = "runtime-schema-provenance-version-mismatch"
+        detail = (
+            f"imported module {row.module_name} reports {_PROVENANCE_VERSION}="
+            f"{_bounded_detail(repr(observed))}; expected {SCHEMA_PROVENANCE_VERSION}"
+        )
+    return {
+        "symbol": row.symbol,
+        "status": row.status,
+        "code": code,
+        "detail": detail,
+    }
+
+
 def audit_rows(
     rows: tuple[StatusRow, ...],
     *,
@@ -218,6 +247,11 @@ def audit_rows(
                     "detail": import_error or "module importer returned no module",
                 }
             )
+            continue
+        provenance_contradiction = _provenance_contradiction(row, module)
+        if provenance_contradiction is not None:
+            missing_count += 1
+            contradictions.append(provenance_contradiction)
             continue
         try:
             resolved = _resolve_qualified(module, row.qualified)
