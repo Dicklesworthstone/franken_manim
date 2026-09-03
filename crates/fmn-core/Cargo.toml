@@ -8,6 +8,7 @@ description = "Types, units, constants, color, the RNG stream, and contract knob
 
 [dependencies]
 fmn-dmath.workspace = true
+fnp-random-core.workspace = true
 
 [lints]
 workspace = true
