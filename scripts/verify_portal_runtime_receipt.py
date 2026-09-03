@@ -18,6 +18,8 @@ RECEIPT_VERSION = 1
 MAX_REPORT_BYTES = 4 * 1024 * 1024
 MAX_AUTHORITY_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
+MAX_JSON_DEPTH = 32
+MAX_JSON_NODES = 100_000
 STATUS_NAMES = ("excluded", "improved", "same", "tiered", "unreviewed")
 REPORT_KEYS = frozenset(
     {
@@ -96,6 +98,22 @@ def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _validate_structure(value: Any) -> None:
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_JSON_NODES:
+            raise _invalid(f"report exceeds {MAX_JSON_NODES}-node limit")
+        if depth > MAX_JSON_DEPTH:
+            raise _invalid(f"report exceeds {MAX_JSON_DEPTH}-level depth limit")
+        if isinstance(current, dict):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+
+
 def _load_report(path: Path) -> dict[str, Any]:
     payload = _read_bounded(path, label="audit report", limit=MAX_REPORT_BYTES)
     text = _decode_utf8(payload, label="audit report")
@@ -105,8 +123,11 @@ def _load_report(path: Path) -> dict[str, Any]:
             object_pairs_hook=_object_pairs,
             parse_constant=_reject_constant,
         )
-    except json.JSONDecodeError as exc:
-        raise _invalid(f"audit report is not valid JSON: {exc}") from exc
+    except ReceiptError:
+        raise
+    except (json.JSONDecodeError, RecursionError, ValueError, OverflowError) as exc:
+        raise _invalid(f"audit report is not valid bounded JSON: {exc}") from exc
+    _validate_structure(value)
     if not isinstance(value, dict):
         raise _invalid("audit report must be a JSON object")
     return value
