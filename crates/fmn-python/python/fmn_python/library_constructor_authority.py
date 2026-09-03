@@ -180,7 +180,7 @@ LIBRARY_CONSTRUCTOR_AUTHORITIES: Final = (
         rust_function="vector",
         rust_authority_token="Arrow::vector(direction)",
         bridge_function="_build_arrow",
-        bridge_authority_token="fmn_library::Arrow::new",
+        bridge_authority_token="fmn_library::line::Arrow::new",
         rationale=(
             "Vector is the Reference's origin-anchored Arrow facade and therefore "
             "inherits Arrow's native geometry and tip-installation authority."
