@@ -63,12 +63,8 @@ for _rust_helper, _reference_class in _REFERENCE_CLASS_BY_RUST_HELPER.items():
         raise ImportError(
             f"Reference constructor class {_reference_class!r} is missing from manimlib"
         )
-del (
-    _CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER,
-    _REFERENCE_CLASS_BY_RUST_HELPER,
-    _rust_helper,
-    _reference_class,
-)
+del _REFERENCE_CLASS_BY_RUST_HELPER, _rust_helper, _reference_class
+del _CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER
 
 
 for _name in dir(_native):
