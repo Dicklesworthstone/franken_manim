@@ -142,11 +142,26 @@ Every gate G0–G5 has a named owner responsible for convening review and record
 | G1 | Core 2D | primitive self-goldens; {1,4,16} thread proof; path/kernel fixtures; Look Gallery verdicts |
 | G2 | The Native Word | tier-1 published-rule verification; span-map fixtures; ratchet dashboard; Gallery verdicts; PG-1(G2) and PG-7 |
 | G3 | Depth & Motion | 3D/lighting/camera fixtures; Studio baseline; OQ-12 declaration; PG-3 and PG-A when applicable |
-| G4a | The Python Gallery | frozen video corpus; structural runs; Gallery review; TeX gaps; PG-8 class table |
+| G4a | The Python Gallery | frozen video corpus; structural runs; Gallery review; TeX gaps; PG-8 class table; clean-wheel runtime parity report with exact overlay identity |
 | G4b | Certified Reproducibility | certified-matrix bit manifests; PG-5; PG-1(G4); provenance samples |
 | G5 | Distribution & Leapfrogs | release artifacts by tier; selection UX; reproducible-release proof; annex and ratchet records |
 
 A gate passes only when the owner records a verdict against the committed packet. **The packet is the pass.**
+
+### W10/G4 portal parity evidence
+
+A reviewed row in `API_OVERLAY.tsv` is an authored compatibility claim, not runtime proof. For any W10 or G4 handoff that relies on `same` or `improved` rows, the evidence packet must include a report from a freshly installed wheel produced by:
+
+```bash
+scripts/check_portal_runtime.sh
+```
+
+That gate proves two independent properties:
+
+1. the installed wheel's own `fmn-python --audit-parity --robot` resolves every reviewed SAME/IMPROVED symbol to a non-placeholder runtime value; and
+2. the wheel's embedded `API_OVERLAY.tsv` SHA-256 exactly matches the checkout being adjudicated.
+
+A source-only `scripts/check.sh` result, static refusal inventory, import census, generated coverage percentage, or self-audit implementation existing in the tree cannot substitute for this clean-wheel receipt. A nonzero runtime audit is a finding to resolve by real implementation or an evidence-backed overlay correction; it is not waived by the fact that the row was previously reviewed.
 
 ---
 
@@ -170,15 +185,16 @@ When an ADR amends the plan, the plan is edited in the same commit or the ADR re
 A workstream may not hand off with failing gates or unwritten fixtures.
 
 1. `scripts/check.sh` is green on one named, unchanged committed source HEAD. A partial run, uncommitted tree, different commit, or hosted-only result is not this evidence.
-2. UBS is run over changed files; criticals are fixed or explicitly adjudicated in the handoff.
-3. New or changed behavior carries tests or fixtures in the same tranche. Self-golden drift is adjudicated, never reflexively re-blessed.
-4. New semantic divergences from the Reference have Behavior Notes.
-5. Beads is trued up: finished work closed with reasons, unfinished claims released with status comments, and follow-ups filed. Ready human/external obligations carry the exact ADR-0023 claim-kind label instead of an invented dependency or prose-only convention.
-6. Run `br sync --flush-only`, then stage and commit `.beads/`.
-7. Re-run `python3 scripts/agent_next.py --format json --check` against the exported post-mutation ledger.
-8. If a next leaf exists, issue a fresh guard token for handoff. A pre-mutation token is stale by construction.
-9. Release Agent Mail reservations and post a handoff in the Bead thread.
-10. Record exact commits, commands actually run, source HEAD, remaining evidence gaps, and the current next-leaf/no-work/refusal state.
+2. For W10/G4 portal parity claims, `scripts/check_portal_runtime.sh` is additionally green against a freshly installed wheel from that same source checkpoint, and its robot report/overlay hash are retained.
+3. UBS is run over changed files; criticals are fixed or explicitly adjudicated in the handoff.
+4. New or changed behavior carries tests or fixtures in the same tranche. Self-golden drift is adjudicated, never reflexively re-blessed.
+5. New semantic divergences from the Reference have Behavior Notes.
+6. Beads is trued up: finished work closed with reasons, unfinished claims released with status comments, and follow-ups filed. Ready human/external obligations carry the exact ADR-0023 claim-kind label instead of an invented dependency or prose-only convention.
+7. Run `br sync --flush-only`, then stage and commit `.beads/`.
+8. Re-run `python3 scripts/agent_next.py --format json --check` against the exported post-mutation ledger.
+9. If a next leaf exists, issue a fresh guard token for handoff. A pre-mutation token is stale by construction.
+10. Release Agent Mail reservations and post a handoff in the Bead thread.
+11. Record exact commits, commands actually run, source HEAD, remaining evidence gaps, and the current next-leaf/no-work/refusal state.
 
 If tracker-native `br` execution is unavailable, do not reconstruct `.beads/issues.jsonl` from a truncated connector response. Leave the tracker untouched and state the limitation.
 
@@ -194,6 +210,7 @@ If tracker-native `br` execution is unavailable, do not reconstruct `.beads/issu
 | Missing blocker, blocking cycle, or containment cycle | no new claim until repaired |
 | Planner, guard, or executor nonzero exit | no autonomous claim from that plan/token |
 | Claim exit `5` | inspect tracker/native state before retry |
+| Current-wheel SAME/IMPROVED runtime contradiction or overlay-hash mismatch | no W10/G4 compatibility handoff until implemented or correctly reclassified |
 | Core PG-1 through PG-3 regression | all annex work pauses |
 | Purity misclassification | effect class demotes to stateful until root-caused |
 | Unadjudicated self-golden drift | introducing change reverts |
