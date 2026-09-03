@@ -21,6 +21,13 @@ def row(symbol: str, status: str = "same") -> str:
     return f"{symbol}\t{status}\tevidence\ttests\tnote"
 
 
+def mark_placeholder(value, *, kind: str, symbol: str):
+    value._fmn_schema_placeholder = True
+    value._fmn_schema_placeholder_kind = kind
+    value._fmn_schema_placeholder_symbol = symbol
+    return value
+
+
 class RuntimeAuditTests(unittest.TestCase):
     def module(self, name: str) -> types.ModuleType:
         module = types.ModuleType(name)
@@ -57,10 +64,38 @@ class RuntimeAuditTests(unittest.TestCase):
         def unavailable():
             raise NotImplementedError
 
-        unavailable._fmn_schema_placeholder = True
+        mark_placeholder(
+            unavailable,
+            kind="function",
+            symbol="fake_portal.placeholder:function",
+        )
         module.function = unavailable
         rows = audit.parse_status_rows(status_text(row("fake_portal.placeholder:function")))
         report = audit.audit_rows(rows)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["counts"]["runtime_placeholders"], 1)
+        contradiction = report["contradictions"][0]
+        self.assertEqual(contradiction["code"], "reviewed-symbol-is-placeholder")
+        self.assertIn("kind=function", contradiction["detail"])
+        self.assertIn("declared=fake_portal.placeholder:function", contradiction["detail"])
+
+    def test_synthesized_class_identity_fails_reviewed_claim(self) -> None:
+        module = self.module("fake_portal.placeholder_class")
+
+        class Generated:
+            pass
+
+        mark_placeholder(
+            Generated,
+            kind="class",
+            symbol="fake_portal.placeholder_class:Generated",
+        )
+        module.Generated = Generated
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(row("fake_portal.placeholder_class:Generated"))
+            )
+        )
         self.assertFalse(report["ok"])
         self.assertEqual(report["counts"]["runtime_placeholders"], 1)
         self.assertEqual(
@@ -68,13 +103,68 @@ class RuntimeAuditTests(unittest.TestCase):
             "reviewed-symbol-is-placeholder",
         )
 
+    def test_placeholder_owner_invalidates_inherited_lifecycle_member(self) -> None:
+        module = self.module("fake_portal.placeholder_owner")
+
+        class Generated:
+            def setup(self):
+                return None
+
+        mark_placeholder(
+            Generated,
+            kind="class",
+            symbol="fake_portal.placeholder_owner:Generated",
+        )
+        module.Generated = Generated
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(row("fake_portal.placeholder_owner:Generated.setup"))
+            )
+        )
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["counts"]["runtime_placeholders"], 1)
+        contradiction = report["contradictions"][0]
+        self.assertEqual(
+            contradiction["code"],
+            "reviewed-symbol-has-placeholder-owner",
+        )
+        self.assertIn("fake_portal.placeholder_owner:Generated", contradiction["detail"])
+
+    def test_placeholder_marker_is_direct_not_inherited(self) -> None:
+        module = self.module("fake_portal.direct_marker")
+
+        class Generated:
+            pass
+
+        mark_placeholder(
+            Generated,
+            kind="class",
+            symbol="fake_portal.direct_marker:Generated",
+        )
+
+        class Authored(Generated):
+            value = 7
+
+        module.Authored = Authored
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(row("fake_portal.direct_marker:Authored.value"))
+            )
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["counts"]["runtime_placeholders"], 0)
+
     def test_tiered_and_excluded_placeholders_do_not_claim_implementation(self) -> None:
         module = self.module("fake_portal.boundary")
 
         def unavailable():
             raise NotImplementedError
 
-        unavailable._fmn_schema_placeholder = True
+        mark_placeholder(
+            unavailable,
+            kind="function",
+            symbol="fake_portal.boundary:tiered",
+        )
         module.tiered = unavailable
         module.excluded = unavailable
         rows = audit.parse_status_rows(
@@ -103,6 +193,47 @@ class RuntimeAuditTests(unittest.TestCase):
             {item["code"] for item in report["contradictions"]},
             {"missing-reviewed-symbol", "module-import-failed"},
         )
+
+    def test_dynamic_resolution_failure_is_a_bounded_contradiction(self) -> None:
+        module = self.module("fake_portal.dynamic_failure")
+        message = "x" * 10_000
+
+        def dynamic(name):
+            raise RuntimeError(f"{name}:{message}")
+
+        module.__getattr__ = dynamic
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(row("fake_portal.dynamic_failure:explodes"))
+            )
+        )
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["counts"]["missing_reviewed"], 1)
+        contradiction = report["contradictions"][0]
+        self.assertEqual(
+            contradiction["code"],
+            "reviewed-symbol-resolution-failed",
+        )
+        self.assertLess(len(contradiction["detail"]), 4_300)
+        self.assertTrue(contradiction["detail"].endswith("…"))
+
+    def test_static_resolution_does_not_execute_descriptors(self) -> None:
+        module = self.module("fake_portal.descriptor")
+
+        class ExplosiveDescriptor:
+            def __get__(self, instance, owner):
+                raise RuntimeError("descriptor executed")
+
+        class Widget:
+            member = ExplosiveDescriptor()
+
+        module.Widget = Widget
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(row("fake_portal.descriptor:Widget.member"))
+            )
+        )
+        self.assertTrue(report["ok"])
 
     def test_contradictions_are_sorted_by_symbol(self) -> None:
         module = self.module("fake_portal.sort")
@@ -151,7 +282,11 @@ class RuntimeAuditTests(unittest.TestCase):
         def placeholder():
             raise NotImplementedError
 
-        placeholder._fmn_schema_placeholder = True
+        mark_placeholder(
+            placeholder,
+            kind="function",
+            symbol="fake_portal.cli:placeholder",
+        )
         module.placeholder = placeholder
         text = status_text(row("fake_portal.cli:placeholder"))
         with tempfile.TemporaryDirectory() as directory:
