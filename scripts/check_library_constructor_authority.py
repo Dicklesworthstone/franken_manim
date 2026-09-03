@@ -23,7 +23,7 @@ from fmn_python.library_constructor_authority import (  # noqa: E402
 )
 
 SCHEMA = "fmn.library-constructor-authority-audit"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_BYTES = 256 * 1024
 BOOTSTRAP_PATH = Path("crates/fmn-python/python/manimlib_bootstrap.py")
@@ -117,15 +117,276 @@ def _top_level_class(
     return matches[0]
 
 
-def _node_source(text: str, node: ast.AST) -> str:
-    if not hasattr(node, "lineno") or not hasattr(node, "end_lineno"):
-        return ""
-    lines = text.splitlines(keepends=True)
-    return "".join(lines[node.lineno - 1 : node.end_lineno])
+def _direct_method(
+    class_node: ast.ClassDef,
+    *,
+    name: str,
+    path: Path,
+    helper: str,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    matches = [
+        node
+        for node in class_node.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == name
+    ]
+    if len(matches) != 1:
+        raise _error(
+            "python-method-count",
+            f"{path}: expected one direct {class_node.name}.{name}, "
+            f"found {len(matches)}",
+            helper=helper,
+            path=path,
+        )
+    return matches[0]
 
 
 def _base_spelling(node: ast.ClassDef) -> str:
     return ", ".join(ast.unparse(base) for base in node.bases)
+
+
+class _ExecutableCallCollector(ast.NodeVisitor):
+    """Collect calls while refusing to treat nested code objects as evidence."""
+
+    def __init__(self) -> None:
+        self.calls: list[ast.Call] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.calls.append(node)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        del node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        del node
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        del node
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        del node
+
+
+def _executable_calls(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[ast.Call]:
+    collector = _ExecutableCallCollector()
+    for statement in function.body:
+        collector.visit(statement)
+    return collector.calls
+
+
+def _call_target(call: ast.Call) -> str:
+    return ast.unparse(call.func)
+
+
+def _expected_call(
+    token: str,
+    *,
+    path: Path,
+    helper: str,
+) -> tuple[str, str | ast.Call]:
+    stripped = token.strip()
+    if stripped.endswith("("):
+        target = stripped[:-1].strip()
+        if not target:
+            raise _error(
+                "python-authority-contract",
+                f"{path}: empty callable target in {token!r}",
+                helper=helper,
+                path=path,
+            )
+        return "target", target
+    try:
+        expression = ast.parse(stripped, mode="eval").body
+    except SyntaxError as exc:
+        raise _error(
+            "python-authority-contract",
+            f"{path}: invalid authority call {token!r}: {exc}",
+            helper=helper,
+            path=path,
+        ) from exc
+    if not isinstance(expression, ast.Call):
+        raise _error(
+            "python-authority-contract",
+            f"{path}: authority token is not a call: {token!r}",
+            helper=helper,
+            path=path,
+        )
+    return "exact", expression
+
+
+def _has_expected_call(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    token: str,
+    *,
+    path: Path,
+    helper: str,
+) -> bool:
+    mode, expected = _expected_call(token, path=path, helper=helper)
+    calls = _executable_calls(function)
+    if mode == "target":
+        assert isinstance(expected, str)
+        return any(_call_target(call) == expected for call in calls)
+    assert isinstance(expected, ast.Call)
+    expected_dump = ast.dump(expected, include_attributes=False)
+    return any(
+        ast.dump(call, include_attributes=False) == expected_dump
+        for call in calls
+    )
+
+
+def _require_expected_call(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    token: str,
+    *,
+    path: Path,
+    helper: str,
+    owner: str,
+    code: str,
+) -> None:
+    if not _has_expected_call(function, token, path=path, helper=helper):
+        raise _error(
+            code,
+            f"{path}: {owner}.__init__ lacks executable call {token!r}",
+            helper=helper,
+            path=path,
+        )
+
+
+def _blank_non_newlines(buffer: list[str], text: str, start: int, end: int) -> None:
+    for index in range(start, end):
+        if text[index] not in "\r\n":
+            buffer[index] = " "
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    for prefix in ("br", "cr", "r"):
+        if not text.startswith(prefix, start):
+            continue
+        cursor = start + len(prefix)
+        hashes = 0
+        while cursor < len(text) and text[cursor] == "#":
+            hashes += 1
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != '"':
+            continue
+        delimiter = '"' + ("#" * hashes)
+        closing = text.find(delimiter, cursor + 1)
+        return None if closing < 0 else closing + len(delimiter)
+    return -1
+
+
+def _rust_quoted_end(text: str, quote: int) -> int | None:
+    cursor = quote + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return None
+
+
+def _rust_char_end(text: str, quote: int) -> int | None:
+    cursor = quote + 1
+    if cursor >= len(text):
+        return None
+    if text[cursor] == "\\":
+        cursor += 2
+        if cursor < len(text) and text[cursor - 1] in {"u", "x"}:
+            while cursor < len(text) and text[cursor] != "'":
+                cursor += 1
+    else:
+        cursor += 1
+    if cursor < len(text) and text[cursor] == "'":
+        return cursor + 1
+    return None
+
+
+def _rust_code_mask(
+    text: str,
+    *,
+    path: Path,
+    helper: str | None = None,
+) -> str:
+    """Blank comments and literals while preserving byte positions/newlines."""
+
+    masked = list(text)
+    cursor = 0
+    while cursor < len(text):
+        if text.startswith("//", cursor):
+            end = text.find("\n", cursor + 2)
+            end = len(text) if end < 0 else end
+            _blank_non_newlines(masked, text, cursor, end)
+            cursor = end
+            continue
+        if text.startswith("/*", cursor):
+            start = cursor
+            depth = 1
+            cursor += 2
+            while cursor < len(text) and depth:
+                if text.startswith("/*", cursor):
+                    depth += 1
+                    cursor += 2
+                elif text.startswith("*/", cursor):
+                    depth -= 1
+                    cursor += 2
+                else:
+                    cursor += 1
+            if depth:
+                raise _error(
+                    "rust-lex-failed",
+                    f"{path}: unterminated block comment",
+                    helper=helper,
+                    path=path,
+                )
+            _blank_non_newlines(masked, text, start, cursor)
+            continue
+
+        raw_end = _rust_raw_string_end(text, cursor)
+        if raw_end is None:
+            raise _error(
+                "rust-lex-failed",
+                f"{path}: unterminated raw string",
+                helper=helper,
+                path=path,
+            )
+        if raw_end >= 0:
+            _blank_non_newlines(masked, text, cursor, raw_end)
+            cursor = raw_end
+            continue
+
+        quote = cursor
+        if text[cursor] in {"b", "c"} and cursor + 1 < len(text):
+            if text[cursor + 1] == '"':
+                quote = cursor + 1
+        if text[quote] == '"':
+            end = _rust_quoted_end(text, quote)
+            if end is None:
+                raise _error(
+                    "rust-lex-failed",
+                    f"{path}: unterminated string literal",
+                    helper=helper,
+                    path=path,
+                )
+            _blank_non_newlines(masked, text, cursor, end)
+            cursor = end
+            continue
+
+        char_quote = cursor
+        if text[cursor] == "b" and cursor + 1 < len(text) and text[cursor + 1] == "'":
+            char_quote = cursor + 1
+        if text[char_quote] == "'":
+            end = _rust_char_end(text, char_quote)
+            if end is not None:
+                _blank_non_newlines(masked, text, cursor, end)
+                cursor = end
+                continue
+        cursor += 1
+    return "".join(masked)
 
 
 def _rust_function_block(
@@ -136,16 +397,16 @@ def _rust_function_block(
     helper: str,
     top_level_public: bool,
 ) -> str:
+    code = _rust_code_mask(text, path=path, helper=helper)
     if top_level_public:
         pattern = re.compile(
             rf"(?m)^pub\s+fn\s+{re.escape(name)}(?:<[^>\n]+>)?\s*\("
         )
     else:
         pattern = re.compile(
-            rf"(?m)^(?P<indent>[ \t]+)fn\s+"
-            rf"{re.escape(name)}(?:<[^>\n]+>)?\s*\("
+            rf"(?m)^[ \t]+fn\s+{re.escape(name)}(?:<[^>\n]+>)?\s*\("
         )
-    matches = list(pattern.finditer(text))
+    matches = list(pattern.finditer(code))
     if len(matches) != 1:
         kind = "top-level public" if top_level_public else "bridge"
         raise _error(
@@ -155,8 +416,7 @@ def _rust_function_block(
             path=path,
         )
     match = matches[0]
-    indent = "" if top_level_public else match.group("indent")
-    opening = text.find("{", match.end())
+    opening = code.find("{", match.end())
     if opening < 0:
         raise _error(
             "rust-function-unclosed",
@@ -164,19 +424,20 @@ def _rust_function_block(
             helper=helper,
             path=path,
         )
-    closing = re.search(
-        rf"(?m)^{re.escape(indent)}}}\s*$",
-        text[opening + 1 :],
+    depth = 0
+    for cursor in range(opening, len(code)):
+        if code[cursor] == "{":
+            depth += 1
+        elif code[cursor] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[match.start() : cursor + 1]
+    raise _error(
+        "rust-function-unclosed",
+        f"{path}: function {name} has no scoped closing brace",
+        helper=helper,
+        path=path,
     )
-    if closing is None:
-        raise _error(
-            "rust-function-unclosed",
-            f"{path}: function {name} has no scoped closing brace",
-            helper=helper,
-            path=path,
-        )
-    end = opening + 1 + closing.end()
-    return text[match.start() : end]
 
 
 def _literal_assignment(
@@ -276,7 +537,7 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
         if record.rust_authority_token not in rust_block:
             raise _error(
                 "rust-authority-missing",
-                f"{rust_path}: {record.rust_function} lacks "
+                f"{rust_path}: {record.rust_function} lacks executable "
                 f"{record.rust_authority_token!r}",
                 helper=helper,
                 path=rust_path,
@@ -297,15 +558,20 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
                 helper=helper,
                 path=bootstrap_path,
             )
-        class_source = _node_source(bootstrap_text, class_node)
-        if record.python_authority_token not in class_source:
-            raise _error(
-                "python-authority-missing",
-                f"{bootstrap_path}: {record.reference_class} lacks "
-                f"{record.python_authority_token!r}",
-                helper=helper,
-                path=bootstrap_path,
-            )
+        constructor = _direct_method(
+            class_node,
+            name="__init__",
+            path=bootstrap_path,
+            helper=helper,
+        )
+        _require_expected_call(
+            constructor,
+            record.python_authority_token,
+            path=bootstrap_path,
+            helper=helper,
+            owner=record.reference_class,
+            code="python-authority-missing",
+        )
 
         if (
             record.native_builder is not None
@@ -317,16 +583,20 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
                 path=bootstrap_path,
                 helper=helper,
             )
-            authority_source = _node_source(bootstrap_text, authority_node)
-            authority_call = f"self.{record.native_builder}("
-            if authority_call not in authority_source:
-                raise _error(
-                    "python-native-builder-missing",
-                    f"{bootstrap_path}: {record.python_authority_class} lacks "
-                    f"{authority_call!r}",
-                    helper=helper,
-                    path=bootstrap_path,
-                )
+            authority_constructor = _direct_method(
+                authority_node,
+                name="__init__",
+                path=bootstrap_path,
+                helper=helper,
+            )
+            _require_expected_call(
+                authority_constructor,
+                f"self.{record.native_builder}(",
+                path=bootstrap_path,
+                helper=helper,
+                owner=record.python_authority_class,
+                code="python-native-builder-missing",
+            )
 
         if record.bridge_function is not None:
             bridge_block = _rust_function_block(
@@ -339,7 +609,7 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
             if record.bridge_authority_token not in bridge_block:
                 raise _error(
                     "bridge-authority-missing",
-                    f"{bridge_path}: {record.bridge_function} lacks "
+                    f"{bridge_path}: {record.bridge_function} lacks executable "
                     f"{record.bridge_authority_token!r}",
                     helper=helper,
                     path=bridge_path,
@@ -378,6 +648,7 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
         "schema": SCHEMA,
         "version": SCHEMA_VERSION,
         "ok": True,
+        "proof_model": "executable-constructor-routing",
         "counts": {
             "authorities": len(records),
             "rust_sources": len(rust_sources),
