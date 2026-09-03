@@ -5,8 +5,9 @@ The native Rust API intentionally exposes ergonomic snake_case constructor
 helpers. The pinned manimlib Reference exports CamelCase classes instead. This
 gate keeps those two front doors distinct: every Reference class must remain in
 the extracted schema, no Rust-only helper may leak into Python wildcard
-exports, the package import guard must enforce the same mapping, and the
-installed-wheel smoke must construct every corresponding Reference class.
+exports, the package import guard must enforce root and qualified-module
+identity, and the installed-wheel smoke must construct every corresponding
+Reference class through those same identities.
 """
 
 from __future__ import annotations
@@ -50,9 +51,15 @@ REFERENCE_CONSTRUCTOR_ALIASES: dict[str, tuple[str, str]] = {
 }
 
 WRAPPER_MAPPING_NAME = "_REFERENCE_CLASS_BY_RUST_HELPER"
+WRAPPER_CONTRACT_CLASS_MAPPING_NAME = "_CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER"
+WRAPPER_CONTRACT_MODULE_MAPPING_NAME = "_CONTRACT_REFERENCE_MODULE_BY_RUST_HELPER"
 WRAPPER_HELPER_NAME = "_rust_helper"
 WRAPPER_CLASS_NAME = "_reference_class"
 WRAPPER_NATIVE_NAME = "_native"
+WRAPPER_SYS_NAME = "_sys"
+WRAPPER_REFERENCE_MODULE_NAME = "_reference_module"
+WRAPPER_MODULE_OBJECT_NAME = "_module"
+WRAPPER_REFERENCE_VALUE_NAME = "_reference_value"
 WHEEL_MAPPING_NAME = "REFERENCE_CONSTRUCTOR_ALIASES"
 WHEEL_VERIFY_FUNCTION = "verify_reference_constructor_aliases"
 WHEEL_BUILDERS_NAME = "builders"
@@ -60,6 +67,9 @@ WHEEL_ALIAS_NAME = "alias"
 WHEEL_MODULE_NAME = "module_name"
 WHEEL_CLASS_NAME = "class_name"
 WHEEL_ROOT_NAME = "manimlib"
+WHEEL_SYS_NAME = "sys"
+WHEEL_CONSTRUCTOR_NAME = "constructor"
+WHEEL_REQUIRE_NAME = "require"
 
 
 class AliasPolicyError(ValueError):
@@ -72,6 +82,50 @@ class Symbol:
     name: str
     kind: str
     exported: bool
+
+
+class _ExecutableNodeCollector(ast.NodeVisitor):
+    """Visit one function body without accepting evidence from nested code."""
+
+    def __init__(self) -> None:
+        self.assignments: list[ast.Assign | ast.AnnAssign] = []
+        self.calls: list[ast.Call] = []
+        self.loops: list[ast.For] = []
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.assignments.append(node)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.assignments.append(node)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.calls.append(node)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        self.loops.append(node)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        del node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        del node
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        del node
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        del node
+
+
+def _collect_executable(statements: list[ast.stmt]) -> _ExecutableNodeCollector:
+    collector = _ExecutableNodeCollector()
+    for statement in statements:
+        collector.visit(statement)
+    return collector
 
 
 def read_bounded(path: Path, limit: int) -> str:
@@ -192,7 +246,11 @@ def mapping_drift(
     )
 
 
-def function_node(tree: ast.Module, path: Path, function_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+def function_node(
+    tree: ast.Module,
+    path: Path,
+    function_name: str,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
     functions = [
         node
         for node in tree.body
@@ -215,11 +273,19 @@ def function_names(tree: ast.Module) -> set[str]:
 
 
 def function_calls(tree: ast.Module, path: Path, function_name: str) -> set[str]:
-    calls: set[str] = set()
-    for node in ast.walk(function_node(tree, path, function_name)):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            calls.add(node.func.id)
-    return calls
+    function = function_node(tree, path, function_name)
+    return {
+        node.func.id
+        for node in _collect_executable(function.body).calls
+        if isinstance(node.func, ast.Name)
+    }
+
+
+def exact_expression(node: ast.AST, source: str) -> bool:
+    expected = ast.parse(source, mode="eval").body
+    return ast.dump(node, include_attributes=False) == ast.dump(
+        expected, include_attributes=False
+    )
 
 
 def named_items_call(node: ast.expr, mapping_name: str) -> bool:
@@ -281,7 +347,71 @@ def raises_import_error(node: ast.If) -> bool:
     )
 
 
+def assignment_matches(node: ast.AST, target_name: str, expression: str) -> bool:
+    if isinstance(node, ast.Assign):
+        if len(node.targets) != 1:
+            return False
+        target = node.targets[0]
+        value = node.value
+    elif isinstance(node, ast.AnnAssign):
+        target = node.target
+        value = node.value
+    else:
+        return False
+    return (
+        value is not None
+        and isinstance(target, ast.Name)
+        and target.id == target_name
+        and exact_expression(value, expression)
+    )
+
+
+def _one_direct_index(
+    body: list[ast.stmt],
+    predicate: Any,
+    *,
+    path: Path,
+    description: str,
+) -> int:
+    matches = [index for index, node in enumerate(body) if predicate(node)]
+    if len(matches) != 1:
+        raise AliasPolicyError(
+            f"{path}: expected one {description}, found {len(matches)}"
+        )
+    return matches[0]
+
+
 def verify_wrapper_guard(tree: ast.Module, path: Path) -> None:
+    class_contracts = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and exact_expression(
+            node.test,
+            f"{WRAPPER_MAPPING_NAME} != {WRAPPER_CONTRACT_CLASS_MAPPING_NAME}",
+        )
+        and raises_import_error(node)
+    ]
+    if len(class_contracts) != 1:
+        raise AliasPolicyError(
+            f"{path}: wrapper must compare its literal class map with the authority manifest"
+        )
+    module_contracts = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and exact_expression(
+            node.test,
+            f"set({WRAPPER_MAPPING_NAME}) != "
+            f"set({WRAPPER_CONTRACT_MODULE_MAPPING_NAME})",
+        )
+        and raises_import_error(node)
+    ]
+    if len(module_contracts) != 1:
+        raise AliasPolicyError(
+            f"{path}: wrapper must compare helper keys with the authority module map"
+        )
+
     loops = [
         node
         for node in tree.body
@@ -297,51 +427,130 @@ def verify_wrapper_guard(tree: ast.Module, path: Path) -> None:
             f"{path}: expected one import-guard loop over {WRAPPER_MAPPING_NAME}, "
             f"found {len(loops)}"
         )
-    direct_ifs = [node for node in loops[0].body if isinstance(node, ast.If)]
-    helper_guards = [
-        node
-        for node in direct_ifs
-        if is_hasattr_test(
-            node.test,
-            WRAPPER_NATIVE_NAME,
-            WRAPPER_HELPER_NAME,
-            negated=False,
-        )
-        and raises_import_error(node)
+    loop = loops[0]
+    helper_index = _one_direct_index(
+        loop.body,
+        lambda node: (
+            isinstance(node, ast.If)
+            and is_hasattr_test(
+                node.test,
+                WRAPPER_NATIVE_NAME,
+                WRAPPER_HELPER_NAME,
+                negated=False,
+            )
+            and raises_import_error(node)
+        ),
+        path=path,
+        description="Rust-only helper ImportError guard",
+    )
+    class_index = _one_direct_index(
+        loop.body,
+        lambda node: (
+            isinstance(node, ast.If)
+            and is_hasattr_test(
+                node.test,
+                WRAPPER_NATIVE_NAME,
+                WRAPPER_CLASS_NAME,
+                negated=True,
+            )
+            and raises_import_error(node)
+        ),
+        path=path,
+        description="missing Reference class ImportError guard",
+    )
+    reference_module_index = _one_direct_index(
+        loop.body,
+        lambda node: assignment_matches(
+            node,
+            WRAPPER_REFERENCE_MODULE_NAME,
+            f"{WRAPPER_CONTRACT_MODULE_MAPPING_NAME}[{WRAPPER_HELPER_NAME}]",
+        ),
+        path=path,
+        description="qualified Reference module assignment",
+    )
+    module_lookup_index = _one_direct_index(
+        loop.body,
+        lambda node: assignment_matches(
+            node,
+            WRAPPER_MODULE_OBJECT_NAME,
+            f"{WRAPPER_SYS_NAME}.modules.get({WRAPPER_REFERENCE_MODULE_NAME})",
+        ),
+        path=path,
+        description="qualified Reference module lookup",
+    )
+    module_guard_index = _one_direct_index(
+        loop.body,
+        lambda node: (
+            isinstance(node, ast.If)
+            and exact_expression(
+                node.test,
+                f"{WRAPPER_MODULE_OBJECT_NAME} is None",
+            )
+            and raises_import_error(node)
+        ),
+        path=path,
+        description="missing qualified Reference module ImportError guard",
+    )
+    reference_value_index = _one_direct_index(
+        loop.body,
+        lambda node: assignment_matches(
+            node,
+            WRAPPER_REFERENCE_VALUE_NAME,
+            f"getattr({WRAPPER_NATIVE_NAME}, {WRAPPER_CLASS_NAME})",
+        ),
+        path=path,
+        description="root constructor identity assignment",
+    )
+    identity_guard_index = _one_direct_index(
+        loop.body,
+        lambda node: (
+            isinstance(node, ast.If)
+            and exact_expression(
+                node.test,
+                f"vars({WRAPPER_MODULE_OBJECT_NAME}).get({WRAPPER_CLASS_NAME}) "
+                f"is not {WRAPPER_REFERENCE_VALUE_NAME}",
+            )
+            and raises_import_error(node)
+        ),
+        path=path,
+        description="qualified constructor identity ImportError guard",
+    )
+    ordered = [
+        helper_index,
+        class_index,
+        reference_module_index,
+        module_lookup_index,
+        module_guard_index,
+        reference_value_index,
+        identity_guard_index,
     ]
-    class_guards = [
-        node
-        for node in direct_ifs
-        if is_hasattr_test(
-            node.test,
-            WRAPPER_NATIVE_NAME,
-            WRAPPER_CLASS_NAME,
-            negated=True,
-        )
-        and raises_import_error(node)
-    ]
-    if len(helper_guards) != 1:
+    if ordered != sorted(ordered):
         raise AliasPolicyError(
-            f"{path}: import guard must reject every Rust-only helper with ImportError"
-        )
-    if len(class_guards) != 1:
-        raise AliasPolicyError(
-            f"{path}: import guard must reject every missing Reference class with ImportError"
+            f"{path}: constructor import guards are not ordered before qualified use"
         )
 
-    required_cleanup = {
-        WRAPPER_MAPPING_NAME,
-        WRAPPER_HELPER_NAME,
-        WRAPPER_CLASS_NAME,
-    }
-    cleanup_sets = [
-        {target.id for target in node.targets if isinstance(target, ast.Name)}
+    cleanup_names = {
+        target.id
         for node in tree.body
         if isinstance(node, ast.Delete)
-    ]
-    if not any(required_cleanup <= names for names in cleanup_sets):
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    required_cleanup = {
+        WRAPPER_MAPPING_NAME,
+        WRAPPER_CONTRACT_CLASS_MAPPING_NAME,
+        WRAPPER_CONTRACT_MODULE_MAPPING_NAME,
+        WRAPPER_HELPER_NAME,
+        WRAPPER_CLASS_NAME,
+        WRAPPER_SYS_NAME,
+        WRAPPER_REFERENCE_MODULE_NAME,
+        WRAPPER_MODULE_OBJECT_NAME,
+        WRAPPER_REFERENCE_VALUE_NAME,
+    }
+    missing_cleanup = sorted(required_cleanup - cleanup_names)
+    if missing_cleanup:
         raise AliasPolicyError(
-            f"{path}: import guard does not delete its private mapping and loop variables"
+            f"{path}: import guard does not delete private names {missing_cleanup}"
         )
 
 
@@ -351,9 +560,7 @@ def local_lambda_dict_keys(
     name: str,
 ) -> set[str]:
     matches: list[ast.Dict] = []
-    for node in ast.walk(function):
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-            continue
+    for node in _collect_executable(function.body).assignments:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
             continue
@@ -390,7 +597,12 @@ def wheel_loop_target(node: ast.expr) -> bool:
     )
 
 
-def call_named_pair(node: ast.AST, function_name: str, first: str, second: str) -> bool:
+def call_named_pair(
+    node: ast.AST,
+    function_name: str,
+    first: str,
+    second: str,
+) -> bool:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -417,6 +629,16 @@ def builder_invocation(node: ast.AST) -> bool:
     )
 
 
+def require_condition(node: ast.AST, expression: str) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == WHEEL_REQUIRE_NAME
+        and len(node.args) >= 1
+        and exact_expression(node.args[0], expression)
+    )
+
+
 def verify_wheel_probe(tree: ast.Module, path: Path) -> None:
     function = function_node(tree, path, WHEEL_VERIFY_FUNCTION)
     expected_classes = {
@@ -430,24 +652,45 @@ def verify_wheel_probe(tree: ast.Module, path: Path) -> None:
             f"wheel constructor table drift: missing={missing}, extra={extra}"
         )
 
+    function_nodes = _collect_executable(function.body)
     loops = [
         node
-        for node in ast.walk(function)
-        if isinstance(node, ast.For)
-        and wheel_loop_target(node.target)
+        for node in function_nodes.loops
+        if wheel_loop_target(node.target)
         and named_items_call(node.iter, WHEEL_MAPPING_NAME)
     ]
     if len(loops) != 1:
         raise AliasPolicyError(
             f"{path}: expected one runtime loop over {WHEEL_MAPPING_NAME}, found {len(loops)}"
         )
-    nodes = list(ast.walk(loops[0]))
+    nodes = _collect_executable(loops[0].body).calls
     if not any(
         call_named_pair(node, "getattr", WHEEL_ROOT_NAME, WHEEL_CLASS_NAME)
         for node in nodes
     ):
         raise AliasPolicyError(
             f"{path}: wheel probe does not resolve each Reference class from manimlib"
+        )
+    if not any(
+        require_condition(
+            node,
+            f"{WHEEL_MODULE_NAME} in {WHEEL_SYS_NAME}.modules",
+        )
+        for node in nodes
+    ):
+        raise AliasPolicyError(
+            f"{path}: wheel probe does not require each qualified module to exist"
+        )
+    if not any(
+        require_condition(
+            node,
+            f"getattr({WHEEL_SYS_NAME}.modules[{WHEEL_MODULE_NAME}], "
+            f"{WHEEL_CLASS_NAME}, None) is {WHEEL_CONSTRUCTOR_NAME}",
+        )
+        for node in nodes
+    ):
+        raise AliasPolicyError(
+            f"{path}: wheel probe does not require qualified constructor identity"
         )
     if not any(builder_invocation(node) for node in nodes):
         raise AliasPolicyError(
@@ -550,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "Python geometry alias policy: "
         f"{len(REFERENCE_CONSTRUCTOR_ALIASES)} Reference classes verified; "
-        "schema, import guard, and constructed-wheel probe agree; "
+        "schema, root/qualified import guards, and constructed-wheel probe agree; "
         "no Rust-only helpers exported"
     )
     return 0
