@@ -1,0 +1,319 @@
+name: Canonical branch reconciliation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/canonical-branch-reconciliation-2026-09-03.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: canonical-branch-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: preserve unique work, mirror master, remove other branches
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      WORKFLOW_PATH: .github/workflows/canonical-branch-reconciliation-2026-09-03.yml
+      START_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Reconcile every remote branch conservatively
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "FrankenManim Canonical Branch Reconciler"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
+          test "$(git rev-parse origin/main)" = "$START_SHA"
+
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import datetime as dt
+          import json
+          import os
+          import re
+          import shlex
+          import subprocess
+          from pathlib import Path
+
+          START_SHA = os.environ["START_SHA"]
+          WORKFLOW_PATH = os.environ["WORKFLOW_PATH"]
+          REPORT_JSON = Path("/tmp/branch-reconciliation.json")
+          REPORT_MD = Path("/tmp/branch-reconciliation.md")
+          PROBE_BRANCH = re.compile(r"^agent/(?:probe-[0-9]+|tool-probe)$")
+          EPHEMERAL_EXACT = {
+              ".github/workflows/agent-beads-ops.yml",
+              "scripts/agent_remote_ops.py",
+          }
+          EPHEMERAL_PREFIXES = (
+              ".github/agent-ops/",
+              ".agent-probe/",
+              "tmp/agent-probe/",
+          )
+
+          def run(*args: str, check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+              completed = subprocess.run(
+                  list(args),
+                  text=True,
+                  input=input_text,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  check=False,
+              )
+              if check and completed.returncode != 0:
+                  raise RuntimeError(
+                      f"{shlex.join(args)} failed with {completed.returncode}\n"
+                      f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+                  )
+              return completed
+
+          def output(*args: str) -> str:
+              return run(*args).stdout.strip()
+
+          def commit_paths(sha: str) -> list[str]:
+              raw = run(
+                  "git",
+                  "diff-tree",
+                  "--no-commit-id",
+                  "--name-only",
+                  "-r",
+                  "-z",
+                  sha,
+              ).stdout
+              return [item for item in raw.split("\0") if item]
+
+          def is_ephemeral_probe(branch: str, sha: str, subject: str, paths: list[str]) -> bool:
+              if PROBE_BRANCH.fullmatch(branch) is None:
+                  return False
+              if "probe" not in subject.lower():
+                  return False
+              if not paths:
+                  return True
+              return all(
+                  path in EPHEMERAL_EXACT
+                  or path.startswith(EPHEMERAL_PREFIXES)
+                  or "probe" in Path(path).name.lower()
+                  for path in paths
+              )
+
+          refs: list[tuple[str, str, str]] = []
+          for line in output(
+              "git",
+              "for-each-ref",
+              "--format=%(refname)%09%(objectname)",
+              "refs/remotes/origin",
+          ).splitlines():
+              ref, tip = line.split("\t", 1)
+              prefix = "refs/remotes/origin/"
+              if not ref.startswith(prefix):
+                  continue
+              branch = ref[len(prefix):]
+              if branch in {"HEAD", "main", "master"}:
+                  continue
+              refs.append((branch, ref, tip))
+
+          report: dict[str, object] = {
+              "schema": "fmn.canonical-branch-reconciliation",
+              "version": 1,
+              "started_main": START_SHA,
+              "branches": [],
+              "integrated_commits": [],
+              "archived_tips": [],
+          }
+          branch_rows: list[dict[str, object]] = []
+          integrated: list[dict[str, object]] = []
+          archived: list[dict[str, str]] = []
+
+          for branch, ref, tip in sorted(refs):
+              cherry = run("git", "cherry", "origin/main", ref).stdout.splitlines()
+              unique = [line[2:] for line in cherry if line.startswith("+ ")]
+              equivalent = [line[2:] for line in cherry if line.startswith("- ")]
+              row: dict[str, object] = {
+                  "branch": branch,
+                  "tip": tip,
+                  "patch_equivalent_commits": equivalent,
+                  "unique_commits": [],
+              }
+              unique_rows: list[dict[str, object]] = []
+              for sha in unique:
+                  subject = output("git", "show", "-s", "--format=%s", sha)
+                  parents = output("git", "show", "-s", "--format=%P", sha).split()
+                  paths = commit_paths(sha)
+                  commit_row: dict[str, object] = {
+                      "sha": sha,
+                      "subject": subject,
+                      "paths": paths,
+                  }
+                  if is_ephemeral_probe(branch, sha, subject, paths):
+                      commit_row["action"] = "archived-ephemeral-probe"
+                  elif len(parents) != 1:
+                      commit_row["action"] = "refused-merge-commit-needs-human-harmonization"
+                      unique_rows.append(commit_row)
+                      row["unique_commits"] = unique_rows
+                      branch_rows.append(row)
+                      report["branches"] = branch_rows
+                      REPORT_JSON.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                      raise RuntimeError(
+                          f"{branch} contains non-patch-equivalent merge commit {sha}; "
+                          "refusing deletion until its parents are harmonized explicitly"
+                      )
+                  else:
+                      picked = run("git", "cherry-pick", "-x", sha, check=False)
+                      if picked.returncode != 0:
+                          conflicts = output(
+                              "git", "diff", "--name-only", "--diff-filter=U"
+                          ).splitlines()
+                          run("git", "cherry-pick", "--abort", check=False)
+                          commit_row["action"] = "refused-conflict-needs-human-harmonization"
+                          commit_row["conflicts"] = conflicts
+                          unique_rows.append(commit_row)
+                          row["unique_commits"] = unique_rows
+                          branch_rows.append(row)
+                          report["branches"] = branch_rows
+                          REPORT_JSON.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                          raise RuntimeError(
+                              f"{branch} commit {sha} conflicts in {conflicts}; "
+                              "refusing deletion rather than discarding useful work"
+                          )
+                      new_sha = output("git", "rev-parse", "HEAD")
+                      commit_row["action"] = "integrated-onto-main"
+                      commit_row["canonical_sha"] = new_sha
+                      integrated.append(
+                          {
+                              "source_branch": branch,
+                              "source_sha": sha,
+                              "canonical_sha": new_sha,
+                              "subject": subject,
+                          }
+                      )
+                  unique_rows.append(commit_row)
+              row["unique_commits"] = unique_rows
+              branch_rows.append(row)
+              if unique:
+                  safe_branch = re.sub(r"[^A-Za-z0-9._/-]+", "-", branch).strip("./-")
+                  tag = (
+                      f"archive/branch/{safe_branch}/"
+                      f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d')}-{tip[:12]}"
+                  )
+                  run("git", "tag", tag, tip)
+                  archived.append({"branch": branch, "tip": tip, "tag": tag})
+
+          report["branches"] = branch_rows
+          report["integrated_commits"] = integrated
+          report["archived_tips"] = archived
+          report["pre_cleanup_head"] = output("git", "rev-parse", "HEAD")
+          report["code_changed"] = output("git", "rev-parse", "HEAD") != START_SHA
+          REPORT_JSON.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+          lines = [
+              "# Canonical branch reconciliation",
+              "",
+              f"Started from main `{START_SHA}`.",
+              "",
+          ]
+          for row in branch_rows:
+              lines.extend(
+                  [
+                      f"## `{row['branch']}`",
+                      "",
+                      f"Tip: `{row['tip']}`",
+                      "",
+                  ]
+              )
+              commits = row["unique_commits"]
+              if not commits:
+                  lines.append("No non-patch-equivalent commits relative to main.")
+              else:
+                  for commit in commits:
+                      lines.append(
+                          f"- `{commit['sha'][:12]}` {commit['subject']} — "
+                          f"**{commit['action']}**"
+                      )
+              lines.append("")
+          lines.extend(
+              [
+                  "## Summary",
+                  "",
+                  f"Integrated commits: **{len(integrated)}**",
+                  "",
+                  f"Archived unique branch tips: **{len(archived)}**",
+                  "",
+              ]
+          )
+          REPORT_MD.write_text("\n".join(lines), encoding="utf-8")
+          print(REPORT_MD.read_text(encoding="utf-8"))
+          PY
+
+          if ! git diff --quiet "$START_SHA"..HEAD; then
+            echo "Substantive branch work was integrated; running the exact mandatory repository gate."
+            git diff --check "$START_SHA"..HEAD
+            scripts/check.sh
+          else
+            echo "No non-patch-equivalent product change required integration."
+          fi
+
+          # Remove this one-shot mechanism from the canonical tree before publication.
+          git rm "$WORKFLOW_PATH"
+          git commit -m "chore(repo): complete canonical branch reconciliation"
+
+          # Publication is atomic with respect to main movement: no branch is removed
+          # unless the harmonized tree first lands as a fast-forward on current main.
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$START_SHA"
+          git push origin HEAD:refs/heads/main
+
+          # Preserve the exact history of every branch that had a genuinely unique
+          # commit, even when the commit was an intentionally ephemeral probe.
+          python3 - <<'PY'
+          import json, subprocess
+          report = json.load(open('/tmp/branch-reconciliation.json', encoding='utf-8'))
+          for item in report['archived_tips']:
+              subprocess.run(['git', 'push', 'origin', f"refs/tags/{item['tag']}:refs/tags/{item['tag']}"], check=True)
+          PY
+
+          canonical_sha="$(git rev-parse HEAD)"
+          old_master="$(git ls-remote --heads origin refs/heads/master | awk '{print $1}')"
+          if [[ -n "$old_master" ]]; then
+            git push \
+              --force-with-lease="refs/heads/master:${old_master}" \
+              origin HEAD:refs/heads/master
+          else
+            git push origin HEAD:refs/heads/master
+          fi
+
+          mapfile -t extra_branches < <(
+            git ls-remote --heads origin \
+              | awk '{sub("refs/heads/", "", $2); print $2}' \
+              | grep -v -E '^(main|master)$' \
+              | LC_ALL=C sort
+          )
+          for branch in "${extra_branches[@]}"; do
+            git push origin --delete "$branch"
+          done
+
+          mapfile -t final_refs < <(git ls-remote --heads origin | LC_ALL=C sort -k2)
+          printf '%s\n' "${final_refs[@]}"
+          [[ "${#final_refs[@]}" -eq 2 ]]
+          [[ "${final_refs[0]}" == "$canonical_sha refs/heads/main" ]]
+          [[ "${final_refs[1]}" == "$canonical_sha refs/heads/master" ]]
+
+          {
+            echo "## Final canonical branch state"
+            echo
+            echo "- main: \`$canonical_sha\`"
+            echo "- master: \`$canonical_sha\`"
+            echo "- other branches: **0**"
+            echo
+            cat /tmp/branch-reconciliation.md
+          } >> "$GITHUB_STEP_SUMMARY"
