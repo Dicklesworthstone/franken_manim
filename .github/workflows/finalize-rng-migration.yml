@@ -65,9 +65,16 @@ jobs:
           cargo check -p fmn-core --all-targets
           cargo test -p fmn-core
           cargo check --target wasm32-unknown-unknown -p fmn-core
-          cargo test -p fmn-conformance --test governed_closure
+          cargo test -p fmn-conformance --test governed_closure \
+            workspace_closure_is_exactly_the_governed_universe -- --exact
+          cargo test -p fmn-conformance --test governed_closure \
+            git_dependencies_ride_their_suite_lock_pins -- --exact
+          cargo test -p fmn-conformance --test governed_closure \
+            suite_lock_parses_and_matches_the_pinned_toolchain -- --exact
+          cargo test -p fmn-conformance --test franken_numpy_pin
           cargo fmt --all -- --check
           cargo clippy -p fmn-core --all-targets -- -D warnings
+          cargo clippy -p fmn-conformance --test franken_numpy_pin -- -D warnings
           git diff --check
 
       - name: Commit generated closure state on unchanged main
