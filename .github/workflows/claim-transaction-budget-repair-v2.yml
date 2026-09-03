@@ -1,0 +1,69 @@
+name: One-shot claim transaction budget repair v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/claim-transaction-budget-repair-v2.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: claim-transaction-budget-repair-v2
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Reconcile current main
+        run: |
+          set -euo pipefail
+          git pull --rebase origin main
+
+      - name: Apply source-guarded repair
+        run: |
+          set -euo pipefail
+          python3 scripts/_apply_claim_transaction_budget.py
+
+      - name: Verify focused claim executor
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/agent_claim.py \
+            scripts/test_agent_claim.py \
+            scripts/test_agent_claim_subprocess.py \
+            scripts/test_agent_claim_transaction.py
+          python3 scripts/test_agent_claim.py
+          python3 scripts/test_agent_claim_subprocess.py
+          python3 scripts/test_agent_claim_transaction.py
+          bash -n scripts/check.sh
+          git diff --check
+
+      - name: Commit repair and remove bootstraps
+        run: |
+          set -euo pipefail
+          git config user.name "Jeff Emanuel"
+          git config user.email "35050222+Dicklesworthstone@users.noreply.github.com"
+          git rm \
+            .github/workflows/claim-transaction-budget-2026-09-03.yml \
+            .github/workflows/claim-transaction-budget-repair-v2.yml \
+            scripts/_apply_claim_transaction_budget.py
+          git add \
+            scripts/agent_claim.py \
+            scripts/test_agent_claim.py \
+            scripts/test_agent_claim_subprocess.py \
+            scripts/test_agent_claim_transaction.py \
+            scripts/check.sh
+          git commit \
+            -m "fix(agent): bound the complete claim transaction" \
+            -m "Share one absolute deadline and one produced-byte ceiling across br update, response validation, br sync, and postcondition authentication. Record the version-7 transaction policy and usage, and lock renewal and aggregation regressions." \
+            -m "Relates-to: fm-5wq.4"
+          git push origin HEAD:main
