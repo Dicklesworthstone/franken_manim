@@ -1,8 +1,8 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-09-02 UTC / America/New_York  
-**Substantive source-and-test checkpoint:** `2a4071fc7db969b68652256a343de58cc63a8224`  
-**Governance checkpoint:** ADR-0023 and `docs/GOVERNANCE.md` through `19e1e8b0014f5e4dd68aebc0520cd7ba9fb98283`; this file is the subsequent status true-up.  
+**Status date:** 2026-09-02 America/New_York / 2026-09-03 UTC  
+**Substantive source-and-test checkpoint:** `7aeb3f40a763998d07b43b74613f3c6becc49207`  
+**Agent-governance checkpoint:** ADR-0023 and `docs/GOVERNANCE.md` through `19e1e8b0014f5e4dd68aebc0520cd7ba9fb98283`.  
 **Authority rule:** this document summarizes evidence. `.beads/issues.jsonl` remains the task, status, and dependency authority; the Revision-4 comprehensive plan remains the design authority.
 
 ## How to read this document
@@ -13,10 +13,14 @@ Source correctness, compatibility adjudication, tracker state, release packaging
 
 ## Executive state
 
-The repository has a broad native Rust implementation, a separately installed Python compatibility portal, a deterministic agent control plane, and multiple platform/release gates. The highest-risk current gap is no longer native crate structure; it is semantic convergence and evidence discipline at the boundaries:
+The repository has a broad native Rust implementation, a separately installed Python compatibility portal, a deterministic agent control plane, and multiple platform/release gates. The highest-risk current gap is semantic convergence and evidence discipline at the boundaries rather than native crate structure.
 
-- the Python portal still contains explicit and placeholder compatibility gaps;
-- reviewed ledger coverage must not be confused with callable behavior;
+The W10 portal now has a machine-enforced distinction between **reviewed parity claims** and **runtime truth**: a wheel can audit every `same`/`improved` overlay row against its actually imported namespace, reject schema placeholders or missing symbols, and report the SHA-256 of the exact embedded overlay bytes. The clean-wheel wrapper additionally rejects a wheel whose embedded overlay differs from the checkout. This is a truthfulness mechanism, not evidence that the current wheel has zero contradictions; that installed-wheel gate has not been executed in this editing environment.
+
+The remaining program-level risks are therefore explicit:
+
+- real portal placeholders/refusals still need to be converted into callable semantics or evidence-backed tiers/exclusions;
+- a reviewed ledger row must not be confused with a passing runtime self-audit;
 - real-hardware, pinned-host, clean-wheel, browser, and release claims require their own receipts;
 - autonomous agents must distinguish executable work from human decisions and external-evidence tasks;
 - no Beads state may be reconstructed or hand-edited when tracker-native `br` execution is unavailable.
@@ -26,11 +30,50 @@ The repository has a broad native Rust implementation, a separately installed Py
 | Surface | Current implementation state | Evidence boundary |
 |---|---|---|
 | Native Rust library | The composition root, scene runtime, mobject/animation stack, native text and math, retained renderer, codecs, output pipeline, and built-in scene corpus exist as workspace crates. Menagerie families include boolean, data, drawing, graph, field, image, model, and 3D surfaces. | Ordinary source checks run through `scripts/check.sh`. Platform certification and gate verdicts remain separate. |
-| `fmn` CLI | Typed render, doctor, batch, and Studio surfaces exist. Batch robot output includes terminal per-job records; CLI smoke covers a tiny render and native artifact/manifest publication. | The shipping feature shape is exercised by the feature-specific commands in `scripts/check.sh`; a queued hosted run is not the named local/owned-host gate. |
+| `fmn` CLI | Typed render, doctor, batch, and Studio surfaces exist. Batch robot output includes terminal per-job records; CLI smoke covers a tiny render and native artifact/manifest publication. | The shipping feature shape is exercised by feature-specific commands in `scripts/check.sh`; a queued hosted run is not the named local/owned-host gate. |
 | Studio | Supervisor/worker, replay, event, inspection, and presentation foundations exist. | Platform-native and real-browser presentation evidence is not inferred from Rust unit tests. |
-| `fmn-python` portal | A separately installed CPython wheel exposes the pinned `manimlib` namespace with native and authored compatibility behavior. Explicit bootstrap refusals are mechanically inventoried. | `fm-5wq.4` remains in progress. A named refusal, imported symbol, or reviewed ledger row is not callable semantic completion. |
+| `fmn-python` portal | A separately installed CPython wheel exposes the pinned `manimlib` namespace with native and authored compatibility behavior. Explicit bootstrap refusals are mechanically inventoried. The wheel now ships `fmn-python --audit-parity [--robot]`, backed by one shared runtime audit module. | `fm-5wq.4` remains in progress. A named refusal, imported symbol, reviewed ledger row, or existence of the auditor is not callable semantic completion. A current clean wheel must actually pass `scripts/check_portal_runtime.sh`. |
 | WASM/browser | wasm32 render/player foundations and an npm/package gate exist. | The npm/real-browser release gate is opt-in and independent of ordinary source checks. |
 | Distribution | Tagged `v0.1.0` through `v0.4.0` are prereleases. | Cross-platform artifacts, hardware-specific execution, clean wheels, and certified reproducibility require independent receipts. |
+
+## W10 runtime parity truth model
+
+The portal has two complementary truthfulness ratchets.
+
+### Explicit refusal inventory
+
+`scripts/audit_portal_refusals.py` statically inventories authored `NotImplementedError`/capability refusals in the bootstrap. It proves that known refusal sites are named and mechanically visible. It does **not** prove that a reviewed symbol is callable.
+
+### Runtime SAME/IMPROVED audit
+
+`crates/fmn-python/python/fmn_python/parity_audit.py` is the single semantic implementation used by both checkout tooling and the installed product. It parses only the authored `[status]` section of `API_OVERLAY.tsv` and treats `same` and `improved` as implementation claims.
+
+For every such row, the audit imports the recorded module and resolves the qualified symbol. It fails the claim when:
+
+- the module cannot be imported;
+- the reviewed symbol is missing;
+- the runtime value carries `_fmn_schema_placeholder=True`.
+
+`tiered`, `excluded`, and `unreviewed` rows are intentionally not treated as implementation claims. The report is schema `fmn.portal.runtime-audit` version 1 and contains deterministic counts, sorted contradictions, and `overlay_sha256`, the SHA-256 of the exact UTF-8 overlay bytes audited.
+
+The installed wheel exposes the same proof directly:
+
+```bash
+fmn-python --audit-parity
+fmn-python --audit-parity --robot
+python3 -m fmn_python --audit-parity --robot
+```
+
+Audit-mode exits are typed:
+
+- `0`: all reviewed SAME/IMPROVED runtime claims resolved to non-placeholder values;
+- `1`: at least one runtime contradiction;
+- `2`: malformed embedded audit contract or invalid audit arguments;
+- existing namespace-collision behavior remains capability exit `4` before native use.
+
+`scripts/check_portal_runtime.sh` is the clean-wheel boundary. It first imports the installed `manimlib`, invokes the wheel's own robot self-audit, preserves that exit, then compares the report's `overlay_sha256` with the checkout `API_OVERLAY.tsv`. A semantically green but stale wheel therefore fails rather than proving an obsolete ledger.
+
+The mandatory source gate does **not** pretend to execute that installed-wheel boundary. Instead `scripts/check.sh` byte-compiles and runs hermetic regressions for the shared parser/resolver and wheel-facing CLI. Actual installed-wheel behavior stays a separate release/evidence lane.
 
 ## Agent control plane
 
@@ -91,19 +134,11 @@ Non-epic issues with live `parent-child` descendants are containers, not leaves.
 
 ## Full task-semantic claim binding
 
-The claim graph no longer treats the narrow broad-planner model as the complete task contract. `scripts/agent_task_semantics.py` binds:
-
-- descriptions, design, acceptance criteria, and notes;
-- owners, estimates, creation/source metadata, due/defer values, and labels;
-- every unknown future top-level extension field;
-- every non-core dependency-record field, including metadata and thread identity;
-- complete comment objects and their meaningful order.
+The claim graph no longer treats the narrow broad-planner model as the complete task contract. `scripts/agent_task_semantics.py` binds descriptions/design/acceptance/notes, owners and estimates, source/due/defer metadata, labels, future extension fields, extended dependency records, and complete comments.
 
 Issue-row order, dependency-array order, object-key order, and label order are normalized as representation only. Duplicate labels remain represented. Comment order and ordinary array order remain significant.
 
 The loader brackets the established bounded parser with stable before/after reads and requires the broad/core projection, semantic projection, and source digests to agree. Unknown nested metadata is bounded by depth and node ceilings. The executor preserves all task-semantic fields on the selected issue and every unrelated issue across an atomic claim export.
-
-This closes the earlier gap in which a description, label, estimate, dependency extension, or unrelated semantic field could change without invalidating a token or verified receipt.
 
 ## Atomic guarded claim execution
 
@@ -129,17 +164,16 @@ Those numbers are a dated diagnostic, not an implementation percentage. The gove
 - reviewed ledger coverage is not universal callable implementation;
 - refusal inventory coverage is not implementation coverage;
 - SAME/IMPROVED requires real callable semantics and focused evidence;
+- a runtime self-audit tool existing is not the same thing as that audit passing;
 - representative clean-wheel semantics remain required across API families;
 - each refusal falls only through implementation or an evidence-backed tier/exclusion;
 - no W10, G4, or 1.0 closure is claimed here.
-
-`scripts/audit_portal_refusals.py` provides a bounded canonical inventory. It is a truthfulness ratchet, not a success metric.
 
 ## Current open obligations
 
 ### 1. W10 semantic surface
 
-Continue converting high-value portal placeholders/refusals into real behavior with focused tests and update the Parity Ledger only when callable semantics exist. Prefer load-bearing base classes and shared mechanisms over isolated leaf wrappers so each tranche collapses many downstream gaps.
+Run the new runtime audit against freshly built clean wheels and treat every reported contradiction as a direct truth defect: either implement the reviewed symbol, or correct the overlay to a justified tier/exclusion. Continue converting high-value shared portal placeholders/refusals into real behavior with focused tests. Prefer load-bearing base classes and shared mechanisms over isolated leaf wrappers so each tranche collapses many downstream gaps.
 
 ### 2. Tracker-native classification and reconciliation
 
@@ -168,17 +202,17 @@ A green source test is not a gate verdict. The named owner or delegated reviewer
 # Mandatory local or owned-host repository gate
 scripts/check.sh
 
+# Runtime parity truth from a current installed wheel
+fmn-python --audit-parity --robot
+scripts/check_portal_runtime.sh
+
+# Checkout-side runtime auditor (useful when the portal is importable here)
+python3 scripts/audit_portal_runtime.py --check
+
 # Whole graph, governed plan, and human context
 python3 scripts/agent_brief.py --format json --check
 python3 scripts/agent_next.py --format json --check
 python3 scripts/generate_agent_brief.py --stdout
-
-# Focused agent-control tests
-python3 scripts/test_agent_scope.py
-python3 scripts/test_agent_claim_policy.py
-python3 scripts/test_agent_task_semantics.py
-python3 scripts/test_agent_claim_guard.py
-python3 scripts/test_agent_claim.py
 
 # Guarded atomic claim
 token="$(python3 scripts/agent_claim_guard.py --require)"
@@ -196,32 +230,36 @@ python3 scripts/agent_claim.py \
 
 ## Evidence for this checkpoint
 
-For source checkpoint `2a4071fc`:
+For substantive checkpoint `7aeb3f40`:
 
-- the four changed Git blobs were byte-verified against locally computed Git object hashes before publication;
-- the new and modified Python files passed bytecode compilation in the editing environment;
-- `scripts/check.sh` passed shell syntax validation;
-- seven focused claim-policy cases passed against a faithful minimal semantic-loader harness;
-- the commit was published as a strict non-forced fast-forward from the audited `main` head.
+- the repository contains one shared wheel/checkout runtime parity implementation rather than duplicated parsers;
+- `same`/`improved` runtime claims fail closed on module-import failure, missing symbols, and `_fmn_schema_placeholder=True` values;
+- the installed product exposes deterministic human and robot self-audit surfaces with typed exits;
+- every valid audit report binds the exact embedded overlay by SHA-256;
+- `scripts/check_portal_runtime.sh` rejects a wheel whose embedded overlay hash differs from the checkout;
+- hermetic regressions cover real reviewed callables, placeholders, missing modules/symbols, tiered/excluded exemptions, malformed/duplicate status rows, deterministic ordering, CLI argument/error behavior, and overlay identity;
+- those regression files are wired into the mandatory source gate.
 
-This environment did not contain a complete native checkout, Cargo/Rust execution context, tracker-native `br`, Agent Mail, UBS, release credentials, real platform hardware, or browser/package infrastructure. Hosted GitHub Actions runs triggered by the incremental commits were queued or pending without completed jobs and were not used as acceptance evidence.
+This connector editing environment did **not** execute the Python regressions, build or install the current wheel, run `scripts/check_portal_runtime.sh`, run the complete Cargo/Rust repository gate, execute UBS, call tracker-native `br`, use Agent Mail, exercise release credentials, or produce hardware/browser/platform receipts. Hosted GitHub Actions runs triggered by the incremental commits were pending or cancelled by newer `main` pushes and are not used as acceptance evidence.
 
-Therefore the complete repository gate, exact current live-ledger plan, Beads mutation, Rust axes, UBS, sanitizer replay, wheel/browser gates, and platform matrices are **not** represented as executed for this checkpoint. No `.beads/` file was reconstructed or replaced.
+Therefore this checkpoint claims the **implementation of the runtime truth mechanism and its committed tests**, not a passing parity verdict for the current wheel. No `.beads/` file was reconstructed or replaced.
 
 ## Protocol for the next agent
 
 1. Read `AGENTS.md`, the comprehensive plan, this status file, ADR-0022, ADR-0023, and the exact Bead before editing.
 2. Run the broad check and guarded planner. Treat every nonzero result as a refusal, not a hint.
-3. Inspect `main`, reservations, peers, and the recommended Bead; then use the guarded atomic executor.
-4. Prefer shared mechanisms and base abstractions that retire many portal or runtime gaps together.
-5. Keep implementation, tests, tracker transition, and evidence in the same small tranche.
-6. Commit directly to `main` only as an atomic fast-forward; never batch unrelated work into a giant final commit.
-7. Record what actually ran, what remains external, and why any claimed capability is earned.
+3. For W10 work, build/install a fresh wheel and run `scripts/check_portal_runtime.sh`; use contradictions as a prioritized semantic defect queue.
+4. Inspect `main`, reservations, peers, and the recommended Bead; then use the guarded atomic executor.
+5. Prefer shared mechanisms and base abstractions that retire many portal or runtime gaps together.
+6. Keep implementation, tests, tracker transition, and evidence in the same small tranche.
+7. Commit directly to `main` only as an atomic fast-forward; never batch unrelated work into a giant final commit.
+8. Record what actually ran, what remains external, and why any claimed capability is earned.
 
 ## Truthfulness rules for future updates
 
 - Record exact commands and the source commit they exercised.
-- Do not convert “compiled,” “reviewed,” “inventoried,” “imported,” “queued,” or “pending” into “implemented” or “green.”
+- Do not convert “compiled,” “reviewed,” “inventoried,” “imported,” “auditable,” “queued,” or “pending” into “implemented,” “compatible,” or “green.”
+- A runtime-audit implementation does not prove an audit pass; preserve the actual report and overlay hash when claiming one.
 - Do not infer hardware or artifact evidence from another platform.
 - Do not close a parent merely because one child or one census reaches 100%.
 - Distinguish broad readiness, autonomous claimability, human decisions, and external evidence.
