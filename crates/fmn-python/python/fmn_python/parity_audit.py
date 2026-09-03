@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, Callable
 
-from .schema_provenance import SCHEMA_PROVENANCE_VERSION
+from .schema_provenance import (
+    MAX_SCHEMA_BYTES,
+    SCHEMA_PROVENANCE_VERSION,
+)
 
 SCHEMA = "fmn.portal.runtime-audit"
 SCHEMA_VERSION = 1
@@ -24,6 +27,10 @@ _PLACEHOLDER_MARKER = "_fmn_schema_placeholder"
 _PLACEHOLDER_KIND = "_fmn_schema_placeholder_kind"
 _PLACEHOLDER_SYMBOL = "_fmn_schema_placeholder_symbol"
 _PROVENANCE_VERSION = "_fmn_schema_provenance_version"
+_PROVENANCE_COUNTS = "_fmn_schema_provenance_counts"
+_PROVENANCE_COUNT_KEYS = frozenset(
+    {"schema_rows", "modules", "classes", "constructors", "functions", "methods"}
+)
 _MISSING = object()
 
 
@@ -76,14 +83,22 @@ def _bounded_detail(value: object) -> str:
     return text[: MAX_DETAIL_CHARS - 1] + "…"
 
 
-def _overlay_bytes(text: str) -> bytes:
+def _text_bytes(text: str, *, label: str, limit: int) -> bytes:
     try:
         payload = text.encode("utf-8")
     except UnicodeEncodeError as exc:
-        raise ParityAuditError(f"overlay is not valid UTF-8 text: {exc}") from exc
-    if len(payload) > MAX_OVERLAY_BYTES:
-        raise ParityAuditError(f"overlay exceeds {MAX_OVERLAY_BYTES}-byte limit")
+        raise ParityAuditError(f"{label} is not valid UTF-8 text: {exc}") from exc
+    if len(payload) > limit:
+        raise ParityAuditError(f"{label} exceeds {limit}-byte limit")
     return payload
+
+
+def _overlay_bytes(text: str) -> bytes:
+    return _text_bytes(text, label="overlay", limit=MAX_OVERLAY_BYTES)
+
+
+def _schema_bytes(text: str) -> bytes:
+    return _text_bytes(text, label="API schema", limit=MAX_SCHEMA_BYTES)
 
 
 def parse_status_rows(text: str) -> tuple[StatusRow, ...]:
@@ -215,6 +230,57 @@ def _provenance_contradiction(row: StatusRow, module: ModuleType) -> dict[str, s
     }
 
 
+def _embedded_provenance(native_module: ModuleType) -> dict[str, Any]:
+    version = vars(native_module).get(_PROVENANCE_VERSION, _MISSING)
+    if version is _MISSING:
+        raise ParityAuditError(
+            f"native portal has no {_PROVENANCE_VERSION}; package assembly is incomplete"
+        )
+    if version != SCHEMA_PROVENANCE_VERSION:
+        raise ParityAuditError(
+            f"native portal reports {_PROVENANCE_VERSION}={version!r}; "
+            f"expected {SCHEMA_PROVENANCE_VERSION}"
+        )
+    raw_counts = vars(native_module).get(_PROVENANCE_COUNTS, _MISSING)
+    if not isinstance(raw_counts, tuple):
+        raise ParityAuditError(
+            f"native portal {_PROVENANCE_COUNTS} must be a tuple of key/value pairs"
+        )
+    counts: dict[str, int] = {}
+    for index, item in enumerate(raw_counts):
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise ParityAuditError(
+                f"native portal {_PROVENANCE_COUNTS}[{index}] is not a key/value pair"
+            )
+        key, value = item
+        if not isinstance(key, str) or key not in _PROVENANCE_COUNT_KEYS:
+            raise ParityAuditError(
+                f"native portal {_PROVENANCE_COUNTS}[{index}] has unknown key {key!r}"
+            )
+        if key in counts:
+            raise ParityAuditError(
+                f"native portal {_PROVENANCE_COUNTS} repeats key {key!r}"
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ParityAuditError(
+                f"native portal {_PROVENANCE_COUNTS}[{key!r}] is not a nonnegative integer"
+            )
+        counts[key] = value
+    missing = sorted(_PROVENANCE_COUNT_KEYS - counts.keys())
+    if missing:
+        raise ParityAuditError(
+            f"native portal {_PROVENANCE_COUNTS} omits {', '.join(missing)}"
+        )
+    if counts["schema_rows"] == 0 or counts["modules"] == 0:
+        raise ParityAuditError(
+            f"native portal {_PROVENANCE_COUNTS} reports an empty assembly"
+        )
+    return {
+        "version": version,
+        "counts": {key: counts[key] for key in sorted(counts)},
+    }
+
+
 def audit_rows(
     rows: tuple[StatusRow, ...],
     *,
@@ -330,9 +396,20 @@ def audit_embedded_overlay(native_module: ModuleType) -> dict[str, Any]:
         overlay = getattr(native_module, "_API_OVERLAY_TSV")
     except AttributeError as exc:
         raise ParityAuditError("native portal does not expose its embedded API overlay") from exc
+    try:
+        schema = getattr(native_module, "_API_SCHEMA_TSV")
+    except AttributeError as exc:
+        raise ParityAuditError("native portal does not expose its embedded API schema") from exc
     if not isinstance(overlay, str):
         raise ParityAuditError("embedded API overlay is not text")
-    return audit_overlay(overlay)
+    if not isinstance(schema, str):
+        raise ParityAuditError("embedded API schema is not text")
+    schema_payload = _schema_bytes(schema)
+    provenance = _embedded_provenance(native_module)
+    report = audit_overlay(overlay)
+    report["api_schema_sha256"] = hashlib.sha256(schema_payload).hexdigest()
+    report["schema_provenance"] = provenance
+    return report
 
 
 def render_json(report: dict[str, Any]) -> str:

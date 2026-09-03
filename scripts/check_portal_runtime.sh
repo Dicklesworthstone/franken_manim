@@ -22,22 +22,42 @@ if [[ "$audit_status" -ne 0 ]]; then
     exit "$audit_status"
 fi
 
-python3 - "$report_file" API_OVERLAY.tsv <<'PY'
+python3 - "$report_file" API_SCHEMA.tsv API_OVERLAY.tsv <<'PY'
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 report_path = pathlib.Path(sys.argv[1])
-overlay_path = pathlib.Path(sys.argv[2])
+schema_path = pathlib.Path(sys.argv[2])
+overlay_path = pathlib.Path(sys.argv[3])
 report = json.loads(report_path.read_text(encoding="utf-8"))
-embedded = report.get("overlay_sha256")
-if not isinstance(embedded, str) or len(embedded) != 64:
-    raise SystemExit("installed-wheel parity report omitted a valid overlay_sha256")
-checkout = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
-if embedded != checkout:
+if report.get("schema") != "fmn.portal.runtime-audit" or report.get("version") != 1:
+    raise SystemExit("installed-wheel parity report has an unknown schema contract")
+if report.get("ok") is not True:
+    raise SystemExit("installed-wheel parity report is not a successful audit")
+
+
+def require_digest(field):
+    value = report.get(field)
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise SystemExit(f"installed-wheel parity report omitted a valid {field}")
+    return value
+
+
+embedded_schema = require_digest("api_schema_sha256")
+embedded_overlay = require_digest("overlay_sha256")
+checkout_schema = hashlib.sha256(schema_path.read_bytes()).hexdigest()
+checkout_overlay = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
+if embedded_schema != checkout_schema:
     raise SystemExit(
-        f"installed wheel embeds stale API_OVERLAY.tsv: wheel={embedded} checkout={checkout}"
+        f"installed wheel embeds stale API_SCHEMA.tsv: wheel={embedded_schema} checkout={checkout_schema}"
     )
-print(f"overlay identity: {checkout}")
+if embedded_overlay != checkout_overlay:
+    raise SystemExit(
+        f"installed wheel embeds stale API_OVERLAY.tsv: wheel={embedded_overlay} checkout={checkout_overlay}"
+    )
+print(f"schema identity: {checkout_schema}")
+print(f"overlay identity: {checkout_overlay}")
 PY

@@ -17,10 +17,30 @@ if str(PORTAL_PYTHON) not in sys.path:
     sys.path.insert(0, str(PORTAL_PYTHON))
 
 cli = importlib.import_module("fmn_python.__main__")
+from fmn_python.schema_provenance import SCHEMA_PROVENANCE_VERSION
 
 
 def overlay(symbol: str, status: str = "same") -> str:
     return f"[status]\n{symbol}\t{status}\tevidence\ttests\tnote\n"
+
+
+def schema() -> str:
+    return "[symbols]\nfake_cli.fixture\tvalue\tconstant\tdefined\t1\t1\n"
+
+
+def provenance_counts() -> tuple[tuple[str, int], ...]:
+    return tuple(
+        sorted(
+            {
+                "schema_rows": 1,
+                "modules": 1,
+                "classes": 0,
+                "constructors": 0,
+                "functions": 0,
+                "methods": 0,
+            }.items()
+        )
+    )
 
 
 class PortalParityCliTests(unittest.TestCase):
@@ -33,6 +53,9 @@ class PortalParityCliTests(unittest.TestCase):
     def native(self, text: str) -> types.ModuleType:
         module = types.ModuleType("fake_native")
         module._API_OVERLAY_TSV = text
+        module._API_SCHEMA_TSV = schema()
+        module._fmn_schema_provenance_version = SCHEMA_PROVENANCE_VERSION
+        module._fmn_schema_provenance_counts = provenance_counts()
         return module
 
     def invoke(self, native: types.ModuleType, *args: str):
@@ -54,7 +77,7 @@ class PortalParityCliTests(unittest.TestCase):
         self.assertIn("1 SAME/IMPROVED rows", stdout)
         self.assertEqual(stderr, "")
 
-    def test_robot_contradiction_is_structured_and_binds_overlay(self) -> None:
+    def test_robot_contradiction_binds_both_api_authorities(self) -> None:
         module = self.module("fake_cli.placeholder")
 
         def placeholder():
@@ -63,8 +86,9 @@ class PortalParityCliTests(unittest.TestCase):
         placeholder._fmn_schema_placeholder = True
         module.value = placeholder
         text = overlay("fake_cli.placeholder:value", "improved")
+        native = self.native(text)
         code, stdout, stderr = self.invoke(
-            self.native(text),
+            native,
             "--audit-parity",
             "--robot",
         )
@@ -76,6 +100,17 @@ class PortalParityCliTests(unittest.TestCase):
         self.assertEqual(
             payload["overlay_sha256"],
             hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(
+            payload["api_schema_sha256"],
+            hashlib.sha256(native._API_SCHEMA_TSV.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(
+            payload["schema_provenance"],
+            {
+                "version": SCHEMA_PROVENANCE_VERSION,
+                "counts": dict(provenance_counts()),
+            },
         )
         self.assertEqual(stderr, "")
 
@@ -109,6 +144,20 @@ class PortalParityCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertFalse(payload["ok"])
         self.assertIn("no [status] rows", payload["error"])
+        self.assertEqual(stderr, "")
+
+    def test_invalid_embedded_provenance_has_typed_robot_error(self) -> None:
+        native = self.native(overlay("fake_cli.any:value"))
+        del native._fmn_schema_provenance_counts
+        code, stdout, stderr = self.invoke(
+            native,
+            "--audit-parity",
+            "--robot",
+        )
+        payload = json.loads(stdout)
+        self.assertEqual(code, 2)
+        self.assertFalse(payload["ok"])
+        self.assertIn("must be a tuple", payload["error"])
         self.assertEqual(stderr, "")
 
 
