@@ -235,7 +235,7 @@ jobs:
 
           lock = Path("Cargo.lock")
           text = lock.read_text(encoding="utf-8")
-          if text.count(old_pin) != 3 or 'name = "fnp-random"' in text:
+          if text.count(old_pin) != 6 or 'name = "fnp-random"' in text:
               raise SystemExit("unexpected Cargo.lock FrankenNumPy graph")
           text = text.replace(old_pin, new_pin)
           core_old = 'name = "fmn-core"\nversion = "0.4.0"\ndependencies = [\n "fmn-dmath",\n]'
