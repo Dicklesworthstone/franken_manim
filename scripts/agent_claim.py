@@ -1012,9 +1012,11 @@ def execute_claim(
         )
         try:
             after = agent_brief.load_issues(ledger)
-            after_graph_sha256 = agent_claim_guard.graph_digest(after)
-        except (agent_brief.BriefError, agent_claim_guard.GuardError) as exc:
+        except agent_brief.BriefError as exc:
             raise ClaimError(f"post-claim ledger verification failed: {exc}", 5) from exc
+        # Prove the narrow transaction shape before authenticating the whole graph.
+        # Otherwise broader task-semantic drift can mask the precise membership,
+        # unrelated-issue, or target-field contradiction that actually occurred.
         claim_delta = _verify_claim_only_delta(
             issues,
             after,
@@ -1022,6 +1024,10 @@ def execute_claim(
             assignee,
             transition_comment,
         )
+        try:
+            after_graph_sha256 = agent_claim_guard.graph_digest(after)
+        except agent_claim_guard.GuardError as exc:
+            raise ClaimError(f"post-claim ledger verification failed: {exc}", 5) from exc
         if atomic_claim["updated_at"] != claim_delta["updated_at_after"]:
             raise ClaimError(
                 "br update --claim JSON timestamp disagreed with the exported ledger",
