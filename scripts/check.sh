@@ -81,12 +81,16 @@ python3 -m py_compile \
     crates/fmn-python/python/fmn_python/__main__.py \
     crates/fmn-python/python/manimlib/__init__.py \
     scripts/audit_portal_runtime.py \
+    scripts/verify_portal_runtime_receipt.py \
     scripts/test_schema_provenance.py \
     scripts/test_audit_portal_runtime.py \
-    scripts/test_portal_parity_cli.py
+    scripts/test_portal_parity_cli.py \
+    scripts/test_verify_portal_runtime_receipt.py
+bash -n scripts/check_portal_runtime.sh
 python3 scripts/test_schema_provenance.py
 python3 scripts/test_audit_portal_runtime.py
 python3 scripts/test_portal_parity_cli.py
+python3 scripts/test_verify_portal_runtime_receipt.py
 
 echo "==> Python geometry helper alias policy"
 python3 scripts/check_python_helper_aliases.py
