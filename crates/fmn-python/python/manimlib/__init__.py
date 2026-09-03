@@ -9,6 +9,9 @@ in the bootstrap embedded in the extension.
 from fmn_python import (
     _ensure_exclusive_manimlib_namespace as _ensure_exclusive_manimlib_namespace,
 )
+from fmn_python.library_constructor_authority import (
+    REFERENCE_CLASS_BY_RUST_HELPER as _CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER,
+)
 from fmn_python.schema_provenance import (
     SchemaProvenanceError as _SchemaProvenanceError,
     apply_schema_placeholder_provenance as _apply_schema_placeholder_provenance,
@@ -47,6 +50,10 @@ _REFERENCE_CLASS_BY_RUST_HELPER = {
     "dashed_vmobject": "DashedVMobject",
     "v_highlight": "VHighlight",
 }
+if _REFERENCE_CLASS_BY_RUST_HELPER != _CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER:
+    raise ImportError(
+        "manimlib constructor alias guard drifted from the authority manifest"
+    )
 for _rust_helper, _reference_class in _REFERENCE_CLASS_BY_RUST_HELPER.items():
     if hasattr(_native, _rust_helper):
         raise ImportError(
@@ -56,7 +63,12 @@ for _rust_helper, _reference_class in _REFERENCE_CLASS_BY_RUST_HELPER.items():
         raise ImportError(
             f"Reference constructor class {_reference_class!r} is missing from manimlib"
         )
-del _REFERENCE_CLASS_BY_RUST_HELPER, _rust_helper, _reference_class
+del (
+    _CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER,
+    _REFERENCE_CLASS_BY_RUST_HELPER,
+    _rust_helper,
+    _reference_class,
+)
 
 
 for _name in dir(_native):
