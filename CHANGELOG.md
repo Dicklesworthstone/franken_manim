@@ -9,7 +9,86 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open, active, blocked, or closed;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased substantive source-and-test checkpoint covered here is **`2a4071fc7db969b68652256a343de58cc63a8224`** on 2026-09-02 UTC. ADR-0023, governance, and implementation-status commits after that checkpoint record the operational contract and evidence boundary without claiming additional runtime behavior.
+The current unreleased substantive source-and-test checkpoint covered here is **`7aeb3f40a763998d07b43b74613f3c6becc49207`** on 2026-09-02 America/New_York / 2026-09-03 UTC. Documentation commits after that checkpoint record the resulting evidence boundary without claiming a clean-wheel parity pass that was not executed here.
+
+---
+
+## Unreleased — W10 runtime parity truth gate
+
+### Added
+
+- `crates/fmn-python/python/fmn_python/parity_audit.py`, the one runtime interpreter for the authored `[status]` section of `API_OVERLAY.tsv`.
+- Machine schema `fmn.portal.runtime-audit` version 1 with deterministic counts, sorted contradictions, status counts, and the SHA-256 of the exact overlay bytes audited.
+- Installed-product self-audit entry points:
+
+  ```text
+  fmn-python --audit-parity
+  fmn-python --audit-parity --robot
+  python3 -m fmn_python --audit-parity --robot
+  ```
+
+- `scripts/audit_portal_runtime.py`, a checkout wrapper that deliberately reuses the wheel's shared parser/resolver contract.
+- `scripts/check_portal_runtime.sh`, an explicit clean-wheel gate that invokes the installed product's own robot audit and verifies the embedded overlay SHA-256 against the checkout.
+- `scripts/test_audit_portal_runtime.py` and `scripts/test_portal_parity_cli.py`, both wired into `scripts/check.sh`.
+
+### Changed
+
+- `same` and `improved` overlay rows are now mechanically treated as runtime implementation claims rather than passive reviewed metadata.
+- `tiered`, `excluded`, and `unreviewed` rows remain visible classifications but are not falsely interpreted as callable-equivalence promises.
+- A wheel self-audits the `API_OVERLAY.tsv` bytes embedded into its native extension, not an arbitrary checkout file.
+- Checkout-side and wheel-side auditing share one Python implementation so agents, source gates, and release hosts do not develop different meanings of “implemented.”
+- The mandatory source gate runs hermetic parser/resolver and wheel-CLI contract tests but does not pretend that those tests prove a freshly installed wheel.
+
+### Fixed
+
+- A dynamic schema fallback carrying `_fmn_schema_placeholder=True` can no longer silently coexist with a `same` or `improved` compatibility claim without producing a runtime contradiction.
+- A missing reviewed symbol or a module import failure is now a fail-closed contradiction rather than an implicit success because the ledger row had already been reviewed.
+- A stale wheel can no longer self-audit an old embedded overlay and be mistaken for evidence about the current checkout: the clean-wheel gate compares exact SHA-256 identities after the runtime audit passes.
+- Audit mode refuses unrelated scene/CLI arguments instead of accidentally mixing a compatibility proof with normal rendering behavior.
+
+### Typed audit exits
+
+- exit `0`: every reviewed SAME/IMPROVED row resolved to a real non-placeholder runtime value;
+- exit `1`: at least one runtime contradiction;
+- exit `2`: malformed audit contract or invalid audit arguments;
+- namespace collision remains the existing capability exit `4` before native use.
+
+### Focused regression inventory
+
+The committed tests cover:
+
+- reviewed real functions and methods;
+- schema-placeholder contradictions;
+- missing reviewed symbols and failed module imports;
+- tiered/excluded exemptions;
+- duplicate, unknown, malformed, and empty status sections;
+- deterministic contradiction ordering;
+- human and robot CLI success/failure behavior;
+- strict audit argument refusal;
+- typed malformed-embedded-overlay errors;
+- exact `overlay_sha256` binding in the shared report and installed-product robot output.
+
+### Representative commits
+
+- `813dffd` — add the runtime parity contradiction auditor.
+- `5df21a6` — lock the initial resolver/parser regressions.
+- `f7bf091` — add an installed-wheel parity gate.
+- `d835b72` — wire the runtime-audit contract into the mandatory source gate.
+- `45cd080` — ship the canonical audit logic in `fmn_python`.
+- `cdb1181` — expose `fmn-python --audit-parity [--robot]`.
+- `9e9eb18` — remove duplicate checkout/wheel audit semantics.
+- `b7406a0` — make the clean-wheel gate invoke the installed product's self-audit.
+- `0cc8776` — cover the installed audit CLI hermetically.
+- `fd41d02` — execute both runtime-audit suites in the source gate.
+- `531de60` / `797a745` — bind wheel and checkout reports to exact overlay bytes.
+- `90177c5` — reject stale clean-wheel overlay evidence.
+- `e580088` / `7aeb3f4` — regression-lock the overlay identity proof at both layers.
+
+### Evidence boundary
+
+This tranche implements the runtime truth mechanism, the packaged self-audit surface, the clean-wheel freshness gate, and committed hermetic regressions. The connector editing environment did **not** execute those Python tests, build/install the current wheel, run `scripts/check_portal_runtime.sh`, run the complete Cargo/Rust gate, execute UBS, mutate Beads with native `br`, or produce platform/hardware/browser receipts. Hosted Actions runs were pending or cancelled by newer main pushes and are not acceptance evidence.
+
+Accordingly, this changelog does **not** claim that the current portal has zero SAME/IMPROVED contradictions. `fm-5wq.4` remains open; a fresh installed wheel must actually pass the new gate, and any contradiction must be resolved by real implementation or an evidence-backed overlay correction.
 
 ---
 
@@ -254,7 +333,7 @@ This is still a semantic projection rather than a raw-byte or whole-database ide
 - `agent_claim_guard.py` emits tokens of the form `v2:<claim-sha256>:<issue-id-or-none>`.
 - The claim digest binds the canonical full-semantic graph, complete planner output, policy values, and parser/planner/guard schema contract.
 - `graph_sha256` remains graph-only evidence; `claim_sha256` is the complete token digest.
-- Issue-row, dependency-array, object-key, and label ordering are canonicalized, while semantic graph, policy, schema, or planner-output changes invalidate the token.
+- Issue-row, dependency-array, object-key order, and label ordering are canonicalized, while semantic graph, policy, schema, or planner-output changes invalidate the token.
 - The literal issue ID `none` is reserved for the no-recommendation sentinel.
 - The unsafe broad `agent_brief.py --format next` spelling has been retired.
 
@@ -280,7 +359,8 @@ This is still a semantic projection rather than a raw-byte or whole-database ide
 - A shipped-binary smoke renders a tiny FMTL scene and verifies native PNG and machine/human manifest publication.
 - Rust-only snake_case geometry helpers cannot leak into the pinned Reference wildcard namespace.
 - Explicit Python portal refusals are parsed into a canonical bounded inventory; anonymous placeholders fail the mandatory gate.
-- `fm-5wq.4` remains open: reviewed parity rows and inventoried refusals are not universal callable implementation.
+- Reviewed SAME/IMPROVED portal rows can now be checked against actual runtime values with `fmn-python --audit-parity`, while the clean-wheel wrapper also proves overlay freshness.
+- `fm-5wq.4` remains open: reviewed parity rows, inventoried refusals, and an audit mechanism are not universal callable implementation.
 
 ---
 
@@ -300,7 +380,7 @@ This is still a semantic projection rather than a raw-byte or whole-database ide
 1. **Substrate and semantics:** constants, color, rates, RNG, numeric canonicalization, rational frame time, QuadPath geometry, Marionette state, Choreo timelines, native text, and math.
 2. **Rendering and media:** analytic fills/strokes, retained tiles, camera/depth/lighting/textures, native codecs, ffmpeg boundary, FMTL, and WASM foundations.
 3. **Front doors and Gauntlet:** Rust API, `fmn`, optional CPython portal, Studio supervisor/worker, API schema, Parity Ledger, self-goldens, differential tests, determinism, fuzzing, performance, and packaging gates.
-4. **Portal convergence:** authored `manimlib` compatibility, precise capability refusals, executable wheel/bridge tests, and namespace/refusal ratchets.
+4. **Portal convergence:** authored `manimlib` compatibility, precise capability refusals, runtime parity self-auditing, executable wheel/bridge tests, and namespace/refusal ratchets.
 5. **Agent operations:** strict graph parsing, governed leaf planning, exact claim-kind classification, full-semantic stale-plan tokens, atomic claims, shared-local locking, structured response proof, semantic/core deltas, and bounded subprocess resources.
 
 ## Current evidence boundaries
@@ -308,6 +388,7 @@ This is still a semantic projection rather than a raw-byte or whole-database ide
 The following are not inferred from a focused source probe or from documentation:
 
 - the complete local repository gate on the latest commit;
+- an actual passing `scripts/check_portal_runtime.sh` result for the current wheel;
 - sanitizer replay of the repaired SVG fuzz input;
 - cross-platform release artifacts;
 - real aarch64 topology evidence;
@@ -318,15 +399,16 @@ The following are not inferred from a focused source probe or from documentation
 - ffmpeg/video-container equivalence receipts;
 - closure of `fm-5wq.4` or the W10 epic.
 
-Hosted GitHub Actions availability is not a correctness dependency. The authoritative gate is `scripts/check.sh` run on an exact local or owned-host checkout, with the source commit and opt-in release axes recorded alongside the result.
+Hosted GitHub Actions availability is not a correctness dependency. The authoritative source gate is `scripts/check.sh` run on an exact local or owned-host checkout; installed-wheel parity additionally requires the explicit runtime gate, with source commit and artifact/overlay identity recorded alongside the result.
 
 ## Agent notes
 
 - Start with `docs/IMPLEMENTATION_STATUS.md` for present-tense evidence.
 - Use `agent_next.py` for governed selection, `agent_claim_guard.py` for the bound token, and `agent_claim.py` for atomic mutation.
 - Treat `agent_brief.py` as broad situational context only.
+- For W10, build/install a fresh wheel and run `scripts/check_portal_runtime.sh`; a reported contradiction is a direct implementation-or-ledger defect, not something to waive informally.
 - Treat Beads as authoritative; commit the `.beads/` export explicitly after every tracker-native mutation.
 - Use exact ADR-0023 labels to distinguish autonomous, manual, and externally gated ready work; do not infer work kind from prose.
 - On executor exit `5`, inspect Beads and the working tree before doing anything else; never replay the old token blindly.
 - Never replace `.beads/issues.jsonl` from truncated connector output.
-- Do not turn “reviewed,” “compiled,” “inventoried,” “queued,” or “historically green” into a stronger implementation or release claim.
+- Do not turn “reviewed,” “compiled,” “inventoried,” “auditable,” “queued,” or “historically green” into a stronger implementation or release claim.
