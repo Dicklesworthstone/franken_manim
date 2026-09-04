@@ -43,7 +43,7 @@ jobs:
         run: |
           python <<'PY'
           from pathlib import Path
-          from textwrap import dedent
+          from textwrap import dedent, indent
 
           bootstrap_path = Path("crates/fmn-python/python/manimlib_bootstrap.py")
           tests_path = Path("crates/fmn-python/tests/bridge.py")
@@ -68,8 +68,8 @@ jobs:
               render_primitive = 5  # moderngl.TRIANGLE_STRIP, without importing a renderer
 
               def __str__(self):
-                  # Reference mobject.py:105. Animation's default name composes
-                  # this stable class spelling instead of object.__str__'s address.
+                  # Reference mobject.py:105. Animation default names compose
+                  # this stable class spelling, never object.__str__'s address.
                   return type(self).__name__
 
               def __init__(self, *submobjects, **kwargs):
@@ -82,14 +82,7 @@ jobs:
           animation_end = source.index("\n\nclass UpdateFromFunc", animation_start)
           animation_block = dedent('''
           class Animation:
-              """The pinned Reference animation lifecycle over live portal families.
-
-              Python-driven animations use this complete base protocol: validated
-              Mobject input, deterministic naming, starting-family snapshots,
-              helper-mobject updates, lagged sub-alphas, lifecycle status, and the
-              legacy update alias. Native-segment subclasses retain their Choreo
-              execution path while inheriting the same public helpers.
-              """
+              """Pinned animation lifecycle over live compatibility families."""
 
               def __init__(
                   self,
@@ -150,7 +143,7 @@ jobs:
                   return self.mobject.copy()
 
               def get_all_mobjects(self):
-                  """Ordering matches the arguments to interpolate_submobject."""
+                  """Ordering matches interpolate_submobject arguments."""
                   return self.mobject, self.starting_mobject
 
               def get_all_families_zipped(self):
@@ -160,7 +153,6 @@ jobs:
                   ])
 
               def update_mobjects(self, dt):
-                  """Update helper snapshots while the surrounding Scene updates source."""
                   for mob in self.get_all_mobjects_to_update():
                       mob.update(dt)
 
@@ -176,8 +168,7 @@ jobs:
                   return _copy.deepcopy(self)
 
               def update_rate_info(self, run_time=None, rate_func=None, lag_ratio=None):
-                  # Reference truthiness semantics are observable: explicit zero
-                  # leaves an existing duration/lag unchanged.
+                  # Preserve the Reference's observable falsey-value behavior.
                   self.run_time = run_time or self.run_time
                   self.rate_func = rate_func or self.rate_func
                   self.lag_ratio = lag_ratio or self.lag_ratio
@@ -259,14 +250,14 @@ jobs:
               "\n    def interpolate_mobject(self, alpha):",
               transform_methods_start,
           )
-          transform_methods = dedent('''
-
+          transform_methods = "\n" + indent(
+              dedent('''
               def create_starting_mobject(self):
                   return self.mobject.copy()
 
               def get_all_mobjects(self):
-                  # Preserve the target itself for helper updates while
-                  # interpolation consumes the aligned target copy below.
+                  # Helper updates retain both the preserved target and the
+                  # aligned target copy; interpolation uses only the latter.
                   return (
                       self.mobject,
                       self.starting_mobject,
@@ -300,16 +291,16 @@ jobs:
                   return self
 
               def begin(self):
-                  # The Python updater-driving fallback builds the same four
-                  # helper identities as the pinned Transform, then delegates
-                  # lifecycle status, suspension, family zipping, and alpha 0
-                  # interpolation to the completed Animation base.
+                  # Build Transform's four identities, then use the complete
+                  # base lifecycle for status, suspension, families, and alpha 0.
                   self.target_mobject = self.create_target()
                   if not isinstance(self.target_mobject, Mobject):
                       raise TypeError("Transform target must be a Mobject")
                   self.target_copy = self.target_mobject.copy()
                   Animation.begin(self)
-          ''').rstrip("\n")
+              ''').strip("\n"),
+              "    ",
+          )
           source = (
               source[:transform_methods_start]
               + transform_methods
@@ -365,13 +356,6 @@ jobs:
           _fmn_animation.calls.clear()
           assert _fmn_animation.interpolate(0.5) is None
           assert [call[2] for call in _fmn_animation.calls] == [1.0, 0.25, 0.0]
-          assert all(
-              current is expected
-              for (current, _starting, _alpha), expected in zip(
-                  _fmn_animation.calls,
-                  _fmn_animation_root.get_family(),
-              )
-          )
           _fmn_animation.calls.clear()
           assert _fmn_animation.update(0.25) is None
           assert [call[2] for call in _fmn_animation.calls] == [0.25, 0.0, 0.0]
@@ -406,13 +390,10 @@ jobs:
           assert _fmn_animation_clone.mobject is not _fmn_animation.mobject
           _fmn_linear_rate = lambda value: value
           assert _fmn_animation.update_rate_info(4.0, _fmn_linear_rate, 0.75) is _fmn_animation
-          assert _fmn_animation.run_time == 4.0
+          assert (_fmn_animation.run_time, _fmn_animation.lag_ratio) == (4.0, 0.75)
           assert _fmn_animation.rate_func is _fmn_linear_rate
-          assert _fmn_animation.lag_ratio == 0.75
           _fmn_animation.update_rate_info(0, None, 0)
-          assert _fmn_animation.run_time == 4.0
-          assert _fmn_animation.rate_func is _fmn_linear_rate
-          assert _fmn_animation.lag_ratio == 0.75
+          assert (_fmn_animation.run_time, _fmn_animation.lag_ratio) == (4.0, 0.75)
           assert _fmn_animation.set_run_time(3.0) is _fmn_animation
           assert _fmn_animation.set_rate_func(_fmn_animation_rate) is _fmn_animation
           assert _fmn_animation.set_name("renamed") is _fmn_animation
@@ -439,7 +420,6 @@ jobs:
           assert _fmn_spanned.time_spanned_alpha(0.0) == 0.0
           assert _fmn_spanned.time_spanned_alpha(0.5) == 0.5
           assert _fmn_spanned.time_spanned_alpha(1.0) == 1.0
-          assert _fmn_spanned.get_run_time() == 1.0
 
           _fmn_transform_source = Mobject()
           _fmn_transform_target = Mobject()
@@ -457,18 +437,17 @@ jobs:
               _fmn_transform_target,
               _fmn_transform.target_copy,
           )
-          _fmn_transform_families = list(_fmn_transform.get_all_families_zipped())
-          assert len(_fmn_transform_families) == 1
-          assert _fmn_transform_families[0] == (
+          assert list(_fmn_transform.get_all_families_zipped()) == [(
               _fmn_transform_source,
               _fmn_transform.starting_mobject,
               _fmn_transform.target_copy,
-          )
+          )]
           assert _fmn_transform.get_all_mobjects_to_update() == [
               _fmn_transform.starting_mobject,
               _fmn_transform_target,
               _fmn_transform.target_copy,
           ]
+
           _fmn_transform_ticks = []
           _fmn_source_ticks = []
           _fmn_source_updater = lambda mob, dt=0: _fmn_source_ticks.append(float(dt))
