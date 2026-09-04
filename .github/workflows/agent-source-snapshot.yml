@@ -53,7 +53,8 @@ jobs:
             --git https://github.com/Dicklesworthstone/beads_rust \
             --rev 5c6406411c456fe19ec8bcfe1210a840bee43a56 \
             --bin br \
-            --root "$RUNNER_TEMP/br-install"
+            --root "$RUNNER_TEMP/br-install" \
+            beads_rust
           echo "$RUNNER_TEMP/br-install/bin" >> "$GITHUB_PATH"
 
       - name: Create and claim the regression bead through br
