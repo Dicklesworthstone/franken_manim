@@ -1,83 +1,16 @@
-name: Repair RNG Reservation Imports
+# Archived after a zero-job workflow-parser failure.
+# The complete historical body remains available in Git history before the quarantine commit.
+name: "Archived: Repair Rng Reservation Imports"
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/repair-rng-reservation-imports.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
-
-concurrency:
-  group: repair-rng-reservation-imports
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  repair:
+  archived:
+    if: ${{ false }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Patch authoritative imports
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path(".github/workflows/implement-rng-reservations.yml")
-          text = path.read_text(encoding="utf-8")
-          old = '          use crate::{Pcg64Dxsm, RngCursor, RngCursorError, RngRangeError};\n'
-          new = '''          use crate::{
-              rng::Pcg64Dxsm,
-              rng_cursor::{RngCursor, RngCursorError},
-              rng_sampling::RngRangeError,
-          };
-'''
-          if old in text:
-              text = text.replace(old, new, 1)
-          elif new not in text:
-              raise SystemExit("reservation import block drifted")
-          path.write_text(text, encoding="utf-8")
-          PY
-
-      - name: Publish the repair atomically
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm .github/workflows/repair-rng-reservation-imports.yml
-          git add .github/workflows/implement-rng-reservations.yml
-          git config user.name "FrankenManim Reservation Import Repair"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix(ci): generate reservation imports from source modules" -m "Avoid depending on an incidental crate-root Pcg64Dxsm re-export; bind each new runtime type to its authoritative module path."
-          git fetch origin main master
-          git rebase origin/main
-          git push --atomic origin HEAD:main HEAD:master
-
-      - name: Dispatch after cursor/sampling is verified
-        shell: bash
-        run: |
-          set -euo pipefail
-          for _ in $(seq 1 120); do
-            if curl --fail --silent \
-              "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/artifacts/implementation/rng-cursor-sampling-receipt.json" \
-              | grep -Fq '"result": "pass"'; then
-              gh api --method POST \
-                "repos/${GITHUB_REPOSITORY}/actions/workflows/implement-rng-reservations.yml/dispatches" \
-                -f ref=main
-              exit 0
-            fi
-            sleep 20
-          done
-          echo "cursor/sampling receipt did not become ready" >&2
-          exit 2
+      - run: echo "This superseded one-shot is intentionally inert."

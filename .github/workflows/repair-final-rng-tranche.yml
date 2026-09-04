@@ -1,93 +1,16 @@
-name: Repair Final RNG Tranche
+# Archived after a zero-job workflow-parser failure.
+# The complete historical body remains available in Git history before the quarantine commit.
+name: "Archived: Repair Final Rng Tranche"
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/repair-final-rng-tranche.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
-
-concurrency:
-  group: repair-final-rng-tranche
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  repair:
+  archived:
+    if: ${{ false }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Repair status discovery and clean-tree proof
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path(".github/workflows/finalize-rng-replay-tranche.yml")
-          text = path.read_text(encoding="utf-8")
-          old_status = '''          grep -R -Fq 'replayable RNG cursors and sampling' \\
-            IMPLEMENTATION_STATUS.md docs/IMPLEMENTATION_STATUS.md docs/implementation_status.md 2>/dev/null
-'''
-          new_status = '''          status_match=0
-          for status in IMPLEMENTATION_STATUS.md docs/IMPLEMENTATION_STATUS.md docs/implementation_status.md; do
-            if [[ -f "$status" ]] && grep -Fq 'replayable RNG cursors and sampling' "$status"; then
-              status_match=1
-            fi
-          done
-          [[ "$status_match" -eq 1 ]] || {
-            echo "implementation status does not record the cursor/sampling tranche" >&2
-            exit 6
-          }
-'''
-          if old_status in text:
-              text = text.replace(old_status, new_status, 1)
-          elif new_status not in text:
-              raise SystemExit("final status discovery anchor drifted")
-
-          old_clean = '''            bash scripts/check.sh
-            git diff --check
-
-            tested_sha="$(git rev-parse HEAD)"
-'''
-          new_clean = '''            bash scripts/check.sh
-            git diff --check
-            git diff --exit-code
-            git diff --cached --exit-code
-
-            tested_sha="$(git rev-parse HEAD)"
-'''
-          if old_clean in text:
-              text = text.replace(old_clean, new_clean, 1)
-          elif new_clean not in text:
-              raise SystemExit("final clean-tree gate anchor drifted")
-
-          path.write_text(text, encoding="utf-8")
-          PY
-
-      - name: Publish and explicitly dispatch the corrected final verifier
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm .github/workflows/repair-final-rng-tranche.yml
-          git add .github/workflows/finalize-rng-replay-tranche.yml
-          git config user.name "FrankenManim Final Verification Repair"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix(ci): require a clean final RNG verification tree" -m "Discover the real implementation-status file without treating absent candidates as errors, and prove the mandatory Gauntlet left no uncommitted generated drift before recording the tested parent."
-          git fetch origin main master
-          git rebase origin/main
-          git push --atomic origin HEAD:main HEAD:master
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/finalize-rng-replay-tranche.yml/dispatches" \
-            -f ref=main
+      - run: echo "This superseded one-shot is intentionally inert."

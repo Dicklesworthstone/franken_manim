@@ -1,119 +1,16 @@
-name: Repair RNG Reservations
+# Archived after a zero-job workflow-parser failure.
+# The complete historical body remains available in Git history before the quarantine commit.
+name: "Archived: Repair Rng Reservations"
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/repair-rng-reservations.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
-
-concurrency:
-  group: repair-rng-reservations
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  repair:
+  archived:
+    if: ${{ false }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Repair the generated Rust source
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path(".github/workflows/implement-rng-reservations.yml")
-          text = path.read_text(encoding="utf-8")
-
-          old_import = '''          use crate::{
-              Pcg64Dxsm, RngCursor, RngCursorError, RngRangeError,
-              rng_sampling::sample_below_with,
-          };
-'''
-          new_import = '''          use crate::{Pcg64Dxsm, RngCursor, RngCursorError, RngRangeError};
-'''
-          if old_import in text:
-              text = text.replace(old_import, new_import, 1)
-          elif new_import not in text:
-              raise SystemExit("reservation production import anchor drifted")
-
-          old_test_import = '''          mod tests {
-              use super::*;
-'''
-          new_test_import = '''          mod tests {
-              use super::*;
-              use crate::rng_sampling::sample_below_with;
-'''
-          if new_test_import not in text:
-              if text.count(old_test_import) != 1:
-                  raise SystemExit("reservation test import anchor drifted")
-              text = text.replace(old_test_import, new_test_import, 1)
-
-          text = text.replace(
-              '                      assert_eq!(reservation.finish_exact().is_ok(), true);',
-              '                      assert_eq!(reservation.remaining(), 0);',
-              1,
-          )
-          if "finish_exact().is_ok(), true" in text:
-              raise SystemExit("borrowed finish_exact assertion remains")
-
-          old_first = '''                  let first = reservation.next_u64().expect("first");
-                  assert_ne!(first, 0);
-'''
-          new_first = '''                  let _ = reservation.next_u64().expect("first");
-'''
-          if old_first in text:
-              text = text.replace(old_first, new_first, 1)
-          elif new_first not in text:
-              raise SystemExit("reservation first-draw test anchor drifted")
-
-          path.write_text(text, encoding="utf-8")
-          PY
-
-      - name: Publish the repair atomically
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm .github/workflows/repair-rng-reservations.yml
-          git add .github/workflows/implement-rng-reservations.yml
-          git config user.name "FrankenManim Reservation Repair"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix(ci): repair reservation source and tests" -m "Keep the shared sampler import test-only, inspect remaining budget without moving through iter_mut, and use a direct boolean assertion so warning-denied builds can proceed."
-          git fetch origin main master
-          git rebase origin/main
-          git push --atomic origin HEAD:main HEAD:master
-
-      - name: Wait for the cursor foundation and dispatch reservations
-        shell: bash
-        run: |
-          set -euo pipefail
-          ready=0
-          for _ in $(seq 1 120); do
-            if curl --fail --silent \
-              "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/artifacts/implementation/rng-cursor-sampling-receipt.json" \
-              | grep -Fq '"result": "pass"'; then
-              ready=1
-              break
-            fi
-            sleep 20
-          done
-          if [[ "$ready" -ne 1 ]]; then
-            echo "cursor/sampling implementation did not publish a passing receipt" >&2
-            exit 2
-          fi
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/implement-rng-reservations.yml/dispatches" \
-            -f ref=main
+      - run: echo "This superseded one-shot is intentionally inert."

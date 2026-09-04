@@ -1,92 +1,16 @@
-name: Repair RNG Cursor Import
+# Archived after a zero-job workflow-parser failure.
+# The complete historical body remains available in Git history before the quarantine commit.
+name: "Archived: Repair Rng Cursor Import"
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/repair-rng-cursor-import.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
-
-concurrency:
-  group: repair-rng-cursor-import
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  repair:
+  archived:
+    if: ${{ false }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Replace the wrapping-sensitive source anchor
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path(".github/workflows/implement-rng-cursor-and-sampling.yml")
-          text = path.read_text(encoding="utf-8")
-          old = '''          import_anchor = "use crate::rng::{\\n    KEYED_FORK_LAYOUT_VERSION, Pcg64Dxsm, RNG_LAYOUT_VERSION,\\n};\\n"
-          import_replacement = (
-              import_anchor
-              + "use crate::rng_sampling::{RngRangeError, sample_below_with};\\n"
-          )
-          if "sample_below_with" not in cursor:
-              if cursor.count(import_anchor) != 1:
-                  raise SystemExit("rng_cursor import anchor drifted")
-              cursor = cursor.replace(import_anchor, import_replacement, 1)
-'''
-          new = '''          if "use crate::rng_sampling::{" not in cursor:
-              import re
-
-              matches = list(
-                  re.finditer(
-                      r"use crate::rng::\\{.*?\\};\\n",
-                      cursor,
-                      flags=re.DOTALL,
-                  )
-              )
-              if len(matches) != 1:
-                  raise SystemExit(
-                      f"expected one formatted crate::rng import, found {len(matches)}"
-                  )
-              insertion = matches[0].end()
-              cursor = (
-                  cursor[:insertion]
-                  + "use crate::rng_sampling::{RngRangeError, sample_below_with};\\n"
-                  + cursor[insertion:]
-              )
-'''
-          if old in text:
-              text = text.replace(old, new, 1)
-          elif new not in text:
-              raise SystemExit("cursor import generation block drifted")
-          path.write_text(text, encoding="utf-8")
-          PY
-
-      - name: Publish and explicitly dispatch the corrected implementation
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm .github/workflows/repair-rng-cursor-import.yml
-          git add .github/workflows/implement-rng-cursor-and-sampling.yml
-          git config user.name "FrankenManim Cursor Import Repair"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix(ci): make cursor sampling import patch rustfmt-proof" -m "Locate the formatted crate::rng use item structurally before adding the sampling import; do not depend on line wrapping."
-          git fetch origin main master
-          git rebase origin/main
-          git push --atomic origin HEAD:main HEAD:master
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/implement-rng-cursor-and-sampling.yml/dispatches" \
-            -f ref=main
+      - run: echo "This superseded one-shot is intentionally inert."

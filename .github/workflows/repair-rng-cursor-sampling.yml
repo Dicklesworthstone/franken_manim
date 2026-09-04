@@ -1,112 +1,16 @@
-name: Repair RNG Cursor and Sampling
+# Archived after a zero-job workflow-parser failure.
+# The complete historical body remains available in Git history before the quarantine commit.
+name: "Archived: Repair Rng Cursor Sampling"
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/repair-rng-cursor-sampling.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
-
-concurrency:
-  group: repair-rng-cursor-and-sampling
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  repair:
+  archived:
+    if: ${{ false }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Repair exact source generation and final-gate ordering
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path(".github/workflows/implement-rng-cursor-and-sampling.yml")
-          text = path.read_text(encoding="utf-8")
-
-          old_anchor = '          test_anchor = "    fn rewind_returns_to_the_captured_nonseed_origin() {\\n"\n'
-          new_anchor = '          test_anchor = "    #[test]\\n    fn rewind_returns_to_the_captured_nonseed_origin() {\\n"\n'
-          if old_anchor in text:
-              text = text.replace(old_anchor, new_anchor, 1)
-          elif new_anchor not in text:
-              raise SystemExit("cursor sampling test anchor drifted")
-
-          text = text.replace(
-              "            Self::Cursor(error) => error.fmt(formatter),",
-              "            Self::Cursor(error) => fmt::Display::fmt(error, formatter),",
-              1,
-          )
-          text = text.replace(
-              "            Self::Range(error) => error.fmt(formatter),",
-              "            Self::Range(error) => fmt::Display::fmt(error, formatter),",
-              1,
-          )
-          if "=> error.fmt(formatter)" in text:
-              raise SystemExit("ambiguous composite error formatting remains")
-
-          early_gate = '''          cargo test -p fmn-core
-          cargo test -p fmn-core --test rng_parity
-          cargo check --target wasm32-unknown-unknown -p fmn-core
-          bash scripts/check.sh
-
-          python3 - <<'PY'
-'''
-          delayed_gate = '''          cargo test -p fmn-core
-          cargo test -p fmn-core --test rng_parity
-          cargo check --target wasm32-unknown-unknown -p fmn-core
-
-          python3 - <<'PY'
-'''
-          if early_gate in text:
-              text = text.replace(early_gate, delayed_gate, 1)
-          elif delayed_gate not in text:
-              raise SystemExit("final documentation gate anchor drifted")
-
-          post_docs = '''          PY
-
-          git diff --check
-          git add README.md CHANGELOG.md artifacts/implementation/rng-cursor-sampling-receipt.json
-'''
-          post_docs_with_gate = '''          PY
-
-          git diff --check
-          bash scripts/check.sh
-          git add README.md CHANGELOG.md artifacts/implementation/rng-cursor-sampling-receipt.json
-'''
-          if post_docs in text:
-              text = text.replace(post_docs, post_docs_with_gate, 1)
-          elif post_docs_with_gate not in text:
-              raise SystemExit("post-documentation full-gate anchor drifted")
-
-          path.write_text(text, encoding="utf-8")
-          PY
-
-      - name: Publish the repaired workflow and explicitly dispatch it
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm .github/workflows/repair-rng-cursor-sampling.yml
-          git add .github/workflows/implement-rng-cursor-and-sampling.yml
-          git config user.name "FrankenManim Cursor Migration Repair"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix(ci): repair cursor/sampling source generation" -m "Preserve the following unit test attribute, use unambiguous Display dispatch, and run the mandatory Gauntlet on the final documented tree before landing."
-          git fetch origin main master
-          git rebase origin/main
-          git push --atomic origin HEAD:main HEAD:master
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/implement-rng-cursor-and-sampling.yml/dispatches" \
-            -f ref=main
+      - run: echo "This superseded one-shot is intentionally inert."
