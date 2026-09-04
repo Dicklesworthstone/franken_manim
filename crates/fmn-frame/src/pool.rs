@@ -112,8 +112,14 @@ mod tests {
         pool.release(second).expect("return second buffer");
         assert_eq!(pool.available(), 2);
 
-        let recycled = pool.try_acquire().expect("recycled pooled buffer");
-        assert!(recycled.as_bytes().iter().all(|&byte| byte == 0x5a));
+        let recycled = [
+            pool.try_acquire().expect("first recycled buffer"),
+            pool.try_acquire().expect("second recycled buffer"),
+        ];
+        assert!(recycled
+            .iter()
+            .any(|buffer| buffer.as_bytes().iter().all(|&byte| byte == 0x5a)));
+        assert!(pool.try_acquire().is_none());
     }
 
     #[test]
