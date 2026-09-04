@@ -9,7 +9,34 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - `.beads/issues.jsonl` says what work is open, active, blocked, or closed;
 - gates and retained artifacts say what was actually exercised.
 
-The current unreleased substantive source-and-test checkpoint covered here is **`7aeb3f40a763998d07b43b74613f3c6becc49207`** on 2026-09-02 America/New_York / 2026-09-03 UTC. Documentation commits after that checkpoint record the resulting evidence boundary without claiming a clean-wheel parity pass that was not executed here.
+The latest repair checkpoint covered here is **`225b589d6281800723990479c991bc6e13e113fd`** on 2026-09-04. Its production animation changes are `ff49cd4b` and `dd2bdce0`; its executable runtime-audit test restoration is `225b589d`. The earlier **`7aeb3f40a763998d07b43b74613f3c6becc49207`** checkpoint remains documented below as historical runtime-audit work. None of these entries implies a clean-wheel parity pass that was not executed.
+
+---
+
+## Unreleased — 2026-09-04 Python animation dispatch repairs
+
+### Fixed
+
+- `AnimationGroup`, `LaggedStart`, `Succession`, and `LaggedStartMap` can again construct their native specifications after the wheel installs its semantic continuation. The validator now admits the deferred `None` root only for actual `AnimationGroup` instances, not for an arbitrary class advertising a group-like `_native_kind`. Ordinary animation targets remain strictly validated; Choreo's deferred timing values remain intact.
+- `CyclicReplace` and `Swap` retain their targetless native contract. The installed `Transform._native_target` no longer invents a copied target for a class whose `_target_attr` is `None`.
+- `Transform.interpolate_mobject` now reaches the installed family dispatcher instead of shadowing it with the old straight-only bootstrap implementation. This restores per-member lag, time-span remapping, path dispatch, style/uniform interpolation, and subclass `interpolate_submobject` hooks. A subclass's whole-mobject override remains authoritative.
+- Point-free mobjects skip nonexistent constant data rows while continuing to interpolate uniforms. Locked record fields and locked uniforms remain untouched.
+- The new Transform dispatch method participates in the package's existing public method-name, qualified-name, and module normalization.
+- Restored the runtime-audit regression source corrupted in `91cd47a7`, preserving its intended post-class staticmethod/classmethod binding fix and every original audit assertion. The corrupt blob failed byte compilation before any test could run; the restored suite passes all 15 tests.
+
+### Regression coverage and evidence
+
+`scripts/test_animation_semantics_installer.py` is wired into `scripts/check.sh` alongside byte compilation of the shipped installer. Its 13 tests compile the actual bootstrap animation class definitions and apply the actual shipped installer, with only Rust-backed mobject storage replaced by a small NumPy fixture. Constructor and interpolation failures were reproduced before their respective fixes and all 13 tests pass afterward.
+
+Also passed: schema provenance (3), runtime audit (15), parity CLI (6), runtime receipt verification (8), Python helper aliases (26), and library constructor authority (18): **89 focused Python tests total**, using CPython 3.13.5 and NumPy 2.3.5. Changed Python files byte-compile and `bash -n scripts/check.sh` passes. Uploaded source blobs were matched to the Git blob hashes of the tested local bytes.
+
+`crates/fmn-python/tests/animation_semantics.py` gained native-facing constructor and subclass-hook cases, but those cases were **not executed** here. The focused fixture tests do not certify Rust storage, native alignment, renderer output, an installed wheel, or cross-platform behavior. No complete Cargo gate, Rust formatting/lint gate, UBS run, or clean-wheel audit is claimed.
+
+### Remaining scope
+
+These are repairs to the already-shipped package continuation, not a completed composite-animation implementation or a native-bootstrap cutover. Direct-extension activation, full native acceptance integration, and clean-wheel execution remain separate work. Existing one-shot workflows and historical source files were left in place; no new workflow, branch, dependency, or file deletion was needed.
+
+The unchanged Beads export still records `fm-5wq.4` and `fm-ai1` as in progress. Tracker-native `br` was unavailable, so this pass did not claim, close, or reconstruct any Bead. The earlier continuation narratives must not be used as evidence that those parent tasks or the missing native integration are complete.
 
 ---
 

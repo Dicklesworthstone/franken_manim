@@ -1,7 +1,8 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-09-02 America/New_York / 2026-09-03 UTC  
-**Substantive source-and-test checkpoint:** `7aeb3f40a763998d07b43b74613f3c6becc49207`  
+**Status date:** 2026-09-04  
+**Latest repair checkpoint:** `225b589d6281800723990479c991bc6e13e113fd` (animation fixes `ff49cd4b` / `dd2bdce0`, runtime-audit test restoration `225b589d`).  
+**Historical runtime-audit checkpoint:** `7aeb3f40a763998d07b43b74613f3c6becc49207`.  
 **Agent-governance checkpoint:** ADR-0023 and `docs/GOVERNANCE.md` through `19e1e8b0014f5e4dd68aebc0520cd7ba9fb98283`.  
 **Authority rule:** this document summarizes evidence. `.beads/issues.jsonl` remains the task, status, and dependency authority; the Revision-4 comprehensive plan remains the design authority.
 
@@ -35,6 +36,44 @@ The remaining program-level risks are therefore explicit:
 | `fmn-python` portal | A separately installed CPython wheel exposes the pinned `manimlib` namespace with native and authored compatibility behavior. Explicit bootstrap refusals are mechanically inventoried. The wheel now ships `fmn-python --audit-parity [--robot]`, backed by one shared runtime audit module. | `fm-5wq.4` remains in progress. A named refusal, imported symbol, reviewed ledger row, or existence of the auditor is not callable semantic completion. A current clean wheel must actually pass `scripts/check_portal_runtime.sh`. |
 | WASM/browser | wasm32 render/player foundations and an npm/package gate exist. | The npm/real-browser release gate is opt-in and independent of ordinary source checks. |
 | Distribution | Tagged `v0.1.0` through `v0.4.0` are prereleases. | Cross-platform artifacts, hardware-specific execution, clean wheels, and certified reproducibility require independent receipts. |
+
+## 2026-09-04 animation repair checkpoint
+
+The live source audit found that earlier continuation reports overstated completion: the package initializer installs `manimlib/_animation_semantics.py`, but the direct PyO3 bootstrap has not been unified with that installer. A workflow intended to perform an activation or composition cutover is not the cutover itself. The older standalone continuation and activation machinery remain historical source, not evidence of executed native behavior.
+
+Three incremental commits repair concrete failures without replacing native Choreo scheduling:
+
+| Commit | Landed change | Focused evidence |
+|---|---|---|
+| `ff49cd4b1f8f572b5e1fd5f1175e4de5dc4f2532` | Preserve deferred composition roots and timing sentinels; validate ordinary targets; restore targetless `CyclicReplace`/`Swap` lowering. | Six real-bootstrap Python contract tests pass after reproducing constructor and target-resolution failures. |
+| `dd2bdce0ebd121268a68352783fc3bf649191fea` | Route Transform through installed family/lag/path/subclass dispatch; keep whole-mobject overrides; interpolate uniforms on point-free roots; normalize the new method's provenance. | Expand the contract suite to 13 tests; five new interpolation failures reproduced before the fix and resolved afterward. |
+| `225b589d6281800723990479c991bc6e13e113fd` | Restore executable runtime-audit test text while retaining the intended descriptor fixture repair. | Corrupted live blob fails byte compilation; restored UTF-8 source and all 15 runtime-audit tests pass. |
+
+The composition exception is limited by class identity (`isinstance` against `AnimationGroup`), not by a forgeable `_native_kind` label. The Transform repair replaces the stale concrete override which previously bypassed installed submobject hooks and rejected curved paths. Geometry follows the supplied path; record styles and uniforms follow their separate interpolation rules. Locked fields and subclass whole-mobject overrides retain their meaning.
+
+### Executed validation
+
+All of the following passed on the exact local source bytes uploaded into those commits, with CPython 3.13.5 and NumPy 2.3.5:
+
+| Command | Tests passed |
+|---|---:|
+| `python scripts/test_animation_semantics_installer.py -v` | 13 |
+| `python scripts/test_schema_provenance.py` | 3 |
+| `python scripts/test_audit_portal_runtime.py -v` | 15 |
+| `python scripts/test_portal_parity_cli.py` | 6 |
+| `python scripts/test_verify_portal_runtime_receipt.py` | 8 |
+| `python scripts/test_python_helper_aliases.py` | 26 |
+| `python scripts/test_library_constructor_authority.py` | 18 |
+
+Total: **89 focused Python tests**. Changed Python files also passed `py_compile`, and `scripts/check.sh` passed `bash -n`. Git blob hashes returned by the connector matched the tested local files before publication.
+
+### Limits and remaining integration
+
+The new contract suite executes real bootstrap animation definitions and the shipped installer, but replaces Rust mobject storage with a NumPy fixture. It deliberately does not simulate or certify native data/family alignment. Its curved-path test proves dispatch and separation of point fields from styles, not native arc-kernel correctness. Additional cases in `crates/fmn-python/tests/animation_semantics.py` were byte-compiled but not run with the native extension.
+
+No Rust toolchain or `br` was available in this editing environment. The full `scripts/check.sh`, native bridge acceptance, installed-wheel semantics/parity, Rust formatting/Clippy, and UBS are **not verified by this checkpoint**. Direct-extension/bootstrap unification and a permanent native acceptance invocation still require implementation and execution. There is no claim of completed `AnimationGroup`/`Succession` lifecycle support, a complete portal, or a 1.0 gate.
+
+The complete exported Beads ledger was inspected without mutation. It still records `fm-5wq.4` and `fm-ai1` as in progress; the canonical planner recommends `fm-5wq.4.141` on that ledger. No task was claimed or closed, and JSONL was not hand-edited. The fixes were published through fast-forward updates to the existing canonical refs; no extra branch, new workflow, dependency change, or file deletion was introduced.
 
 ## W10 runtime parity truth model
 
@@ -209,6 +248,9 @@ scripts/check_portal_runtime.sh
 # Checkout-side runtime auditor (useful when the portal is importable here)
 python3 scripts/audit_portal_runtime.py --check
 
+# Focused installer contracts (NumPy fixture; not a native/wheel verdict)
+python3 scripts/test_animation_semantics_installer.py -v
+
 # Whole graph, governed plan, and human context
 python3 scripts/agent_brief.py --format json --check
 python3 scripts/agent_next.py --format json --check
@@ -228,7 +270,7 @@ python3 scripts/agent_claim.py \
     --dry-run
 ```
 
-## Evidence for this checkpoint
+## Historical evidence for the runtime-audit checkpoint
 
 For substantive checkpoint `7aeb3f40`:
 
@@ -240,7 +282,7 @@ For substantive checkpoint `7aeb3f40`:
 - hermetic regressions cover real reviewed callables, placeholders, missing modules/symbols, tiered/excluded exemptions, malformed/duplicate status rows, deterministic ordering, CLI argument/error behavior, and overlay identity;
 - those regression files are wired into the mandatory source gate.
 
-This connector editing environment did **not** execute the Python regressions, build or install the current wheel, run `scripts/check_portal_runtime.sh`, run the complete Cargo/Rust repository gate, execute UBS, call tracker-native `br`, use Agent Mail, exercise release credentials, or produce hardware/browser/platform receipts. Hosted GitHub Actions runs triggered by the incremental commits were pending or cancelled by newer `main` pushes and are not used as acceptance evidence.
+At that earlier checkpoint, the connector editing environment did **not** execute the Python regressions, build or install the current wheel, run `scripts/check_portal_runtime.sh`, run the complete Cargo/Rust repository gate, execute UBS, call tracker-native `br`, use Agent Mail, exercise release credentials, or produce hardware/browser/platform receipts. Hosted GitHub Actions runs triggered by those incremental commits were pending or cancelled by newer `main` pushes and are not used as acceptance evidence. The separately bounded Python execution evidence from 2026-09-04 is recorded above.
 
 Therefore this checkpoint claims the **implementation of the runtime truth mechanism and its committed tests**, not a passing parity verdict for the current wheel. No `.beads/` file was reconstructed or replaced.
 
