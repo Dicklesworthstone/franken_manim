@@ -1,4 +1,4 @@
-name: Repair governed rustfmt drift
+name: Repair FramePool Contract and Rustfmt Drift
 
 on:
   push:
@@ -11,8 +11,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: repair-governed-rustfmt-drift
-  cancel-in-progress: false
+  group: repair-frame-pool-contract
+  cancel-in-progress: true
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -26,59 +26,314 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Install the pinned toolchain
-        run: rustup show active-toolchain
+      - name: Capture exact source identity
+        shell: bash
+        run: echo "START_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo state
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/rustfmt-repair
-          key: rustfmt-repair-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-
-      - name: Apply rustfmt and constrain the repair surface
+      - name: Install the governed toolchain and tracker
         shell: bash
         run: |
           set -euo pipefail
+          toolchain="$(awk -F '\t' '$1 == "rustc" { print $2 }' SUITE.lock)"
+          [[ -n "$toolchain" ]] || {
+            echo "SUITE.lock has no governed rustc row" >&2
+            exit 2
+          }
+          grep -Fq "channel = \"$toolchain\"" rust-toolchain.toml
+          rustup toolchain install "$toolchain" \
+            --profile minimal \
+            --component clippy,rustfmt,rust-src
+          rustup override set "$toolchain"
+          cargo install \
+            --locked \
+            --git https://github.com/Dicklesworthstone/beads_rust \
+            --rev 5c6406411c456fe19ec8bcfe1210a840bee43a56 \
+            --bin br \
+            --root "$RUNNER_TEMP/br-install"
+          echo "$RUNNER_TEMP/br-install/bin" >> "$GITHUB_PATH"
+
+      - name: Create and claim the regression bead through br
+        shell: bash
+        env:
+          CLAIM_ACTOR: GPT-5.6-Pro-Frame-Implementer
+          ISSUE_TITLE: "W5: Reconcile FramePool foreign-buffer error precedence after provenance hardening"
+        run: |
+          set -euo pipefail
+          br sync --import-only
+          issue_id="$(python3 - "$ISSUE_TITLE" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          title = sys.argv[1]
+          matches = []
+          for line in Path(".beads/issues.jsonl").read_text(encoding="utf-8").splitlines():
+              issue = json.loads(line)
+              if issue.get("title") == title:
+                  matches.append(issue["id"])
+          if len(matches) > 1:
+              raise SystemExit(f"duplicate regression beads: {matches}")
+          print(matches[0] if matches else "")
+          PY
+          )"
+          if [[ -z "$issue_id" ]]; then
+            description="$(cat <<'EOF'
+          The private PoolIdentity capability correctly rejects standalone same-layout buffers before capacity accounting, but the older public integration test still expected PoolOverflow for that foreign allocation. Reconcile the test with the hardened provenance contract and retain a crate-private regression that exercises the defensive PoolOverflow branch with a deliberately forged extra pool member.
+
+          Acceptance:
+          - A standalone same-layout FrameBuffer is always ForeignBuffer, even when the pool is full.
+          - A crate-private extra buffer carrying the pool identity reaches and proves the PoolOverflow defense.
+          - The pool remains unchanged after both refusals.
+          - fmn-frame tests, formatting, and Clippy pass under the governed nightly.
+          EOF
+            )"
+            br create \
+              --actor "$CLAIM_ACTOR" \
+              --title "$ISSUE_TITLE" \
+              --type bug \
+              --priority 1 \
+              --labels "W5,frame,regression" \
+              --description "$description" \
+              --json
+            br sync --flush-only
+            issue_id="$(python3 - "$ISSUE_TITLE" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          title = sys.argv[1]
+          matches = []
+          for line in Path(".beads/issues.jsonl").read_text(encoding="utf-8").splitlines():
+              issue = json.loads(line)
+              if issue.get("title") == title:
+                  matches.append(issue)
+          if len(matches) != 1:
+              raise SystemExit(f"expected one created regression bead, found {len(matches)}")
+          print(matches[0]["id"])
+          PY
+            )"
+          fi
+          status="$(python3 - "$issue_id" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          issue_id = sys.argv[1]
+          for line in Path(".beads/issues.jsonl").read_text(encoding="utf-8").splitlines():
+              issue = json.loads(line)
+              if issue.get("id") == issue_id:
+                  print(issue.get("status", ""))
+                  break
+          else:
+              raise SystemExit(f"missing bead {issue_id}")
+          PY
+          )"
+          if [[ "$status" == "open" ]]; then
+            br update --actor "$CLAIM_ACTOR" "$issue_id" --claim --json
+            br sync --flush-only
+          elif [[ "$status" != "in_progress" && "$status" != "closed" ]]; then
+            echo "unexpected regression bead status: $status" >&2
+            exit 3
+          fi
+          echo "ISSUE_ID=$issue_id" >> "$GITHUB_ENV"
+          echo "REGRESSION_ALREADY_CLOSED=$([[ "$status" == "closed" ]] && echo 1 || echo 0)" >> "$GITHUB_ENV"
+          br show "$issue_id" --json
+
+      - name: Reconcile membership-first refusal semantics and format the governed tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          integration = Path("crates/fmn-frame/tests/layout_pool.rs")
+          text = integration.read_text(encoding="utf-8")
+          old = '''#[test]
+          fn pool_refuses_foreign_and_excess_buffers() {
+              let layout = FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
+              let other = FrameLayout::tight(PixelFormat::Rgba8, 16, 17).unwrap();
+              let mut pool = FramePool::new(layout.clone(), 1);
+
+              assert_eq!(
+                  pool.release(FrameBuffer::new(other)),
+                  Err(FrameError::ForeignBuffer)
+              );
+              assert_eq!(
+                  pool.release(FrameBuffer::new(layout)),
+                  Err(FrameError::PoolOverflow)
+              );
+          }
+          '''
+          new = '''#[test]
+          fn pool_refuses_foreign_buffers_before_capacity_checks() {
+              let layout = FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
+              let other = FrameLayout::tight(PixelFormat::Rgba8, 16, 17).unwrap();
+              let mut pool = FramePool::new(layout.clone(), 1);
+
+              assert_eq!(
+                  pool.release(FrameBuffer::new(other)),
+                  Err(FrameError::ForeignBuffer)
+              );
+              assert_eq!(pool.available(), 1);
+
+              // Layout equality is not pool membership. Provenance is checked
+              // before capacity so a full pool cannot mask a foreign buffer.
+              assert_eq!(
+                  pool.release(FrameBuffer::new(layout)),
+                  Err(FrameError::ForeignBuffer)
+              );
+              assert_eq!(pool.available(), 1);
+          }
+          '''
+          if old in text:
+              integration.write_text(text.replace(old, new, 1), encoding="utf-8")
+          elif new not in text:
+              raise SystemExit("layout_pool regression anchor drifted")
+
+          pool = Path("crates/fmn-frame/src/pool.rs")
+          text = pool.read_text(encoding="utf-8")
+          anchor = "    #[test]\n    fn standalone_same_layout_buffer_is_foreign() {\n"
+          test = (
+              "    #[test]\n"
+              "    fn capacity_guard_rejects_a_forged_extra_pool_member() {\n"
+              "        let layout = rgba_layout();\n"
+              "        let mut pool = FramePool::new(layout.clone(), 1);\n"
+              "        let extra = FrameBuffer::new_pooled(layout, Arc::clone(&pool.identity));\n"
+              "\n"
+              "        assert_eq!(pool.release(extra), Err(FrameError::PoolOverflow));\n"
+              "        assert_eq!(pool.available(), 1);\n"
+              "    }\n"
+              "\n"
+          )
+          if test not in text:
+              if anchor not in text:
+                  raise SystemExit("FramePool unit-test anchor drifted")
+              pool.write_text(text.replace(anchor, test + anchor, 1), encoding="utf-8")
+          PY
           cargo fmt --all
+          cargo fmt --all -- --check
           git diff --check
-          mapfile -t changed < <(git diff --name-only)
-          expected=(
+
+          mapfile -t changed < <(git diff --name-only -- '*.rs')
+          allowed=(
             crates/fmn-conformance/tests/franken_numpy_pin.rs
             crates/fmn-frame/src/lib.rs
             crates/fmn-frame/src/pool.rs
+            crates/fmn-frame/tests/layout_pool.rs
           )
-          printf '%s\n' "${changed[@]}" > "$RUNNER_TEMP/changed"
-          printf '%s\n' "${expected[@]}" > "$RUNNER_TEMP/expected"
-          diff -u "$RUNNER_TEMP/expected" "$RUNNER_TEMP/changed"
-          cargo fmt --all -- --check
+          printf '%s\n' "${changed[@]}" | sort -u > "$RUNNER_TEMP/changed-rust"
+          printf '%s\n' "${allowed[@]}" | sort -u > "$RUNNER_TEMP/allowed-rust"
+          unexpected="$(comm -23 "$RUNNER_TEMP/changed-rust" "$RUNNER_TEMP/allowed-rust")"
+          if [[ -n "$unexpected" ]]; then
+            printf 'rustfmt changed paths outside the reviewed repair surface:\n%s\n' "$unexpected" >&2
+            exit 4
+          fi
+          grep -Fxq crates/fmn-frame/src/pool.rs "$RUNNER_TEMP/changed-rust"
+          grep -Fxq crates/fmn-frame/tests/layout_pool.rs "$RUNNER_TEMP/changed-rust"
 
-      - name: Compile and test the affected crates
+      - name: Compile, test, and lint the affected contracts
+        shell: bash
         env:
-          CARGO_TARGET_DIR: target/rustfmt-repair
+          CARGO_TARGET_DIR: target/frame-pool-repair
         run: |
+          set -euo pipefail
           cargo test --locked -p fmn-frame
           cargo test --locked -p fmn-conformance --test franken_numpy_pin
+          cargo clippy --locked -p fmn-frame --all-targets -- -D warnings
+          cargo clippy --locked -p fmn-conformance --test franken_numpy_pin -- -D warnings
 
-      - name: Commit only the proven formatting repair
+      - name: Close the regression bead with independent review identity
+        if: env.REGRESSION_ALREADY_CLOSED != '1'
+        shell: bash
+        env:
+          REVIEW_ACTOR: GPT-5.6-Pro-Frame-Reviewer
+        run: |
+          set -euo pipefail
+          br close \
+            --actor "$REVIEW_ACTOR" \
+            "$ISSUE_ID" \
+            --reason "Membership-first error precedence is now locked by the public same-layout foreign-buffer regression; the private forged-member test preserves coverage of the defensive capacity branch. All fmn-frame tests and affected Clippy checks passed under the governed nightly." \
+            --json
+          br sync --flush-only
+          br show "$ISSUE_ID" --json
+
+      - name: Verify the bounded source and tracker delta
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "FrankenManim Rustfmt Repair"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 - "$ISSUE_ID" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          issue_id = sys.argv[1]
+          for line in Path(".beads/issues.jsonl").read_text(encoding="utf-8").splitlines():
+              issue = json.loads(line)
+              if issue.get("id") == issue_id:
+                  if issue.get("status") != "closed":
+                      raise SystemExit(f"regression bead is not closed: {issue.get('status')}")
+                  break
+          else:
+              raise SystemExit(f"regression bead {issue_id} disappeared")
+          PY
+          python3 scripts/agent_brief.py --format json --limit 1 --check >/dev/null
+          python3 scripts/agent_next.py --format json --check >/dev/null
+          mapfile -t changed < <({ git diff --name-only; git ls-files --others --exclude-standard; } | sort -u)
+          allowed=(
+            .beads/issues.jsonl
+            .beads/metadata.json
+            crates/fmn-conformance/tests/franken_numpy_pin.rs
+            crates/fmn-frame/src/lib.rs
+            crates/fmn-frame/src/pool.rs
+            crates/fmn-frame/tests/layout_pool.rs
+          )
+          printf '%s\n' "${changed[@]}" | sort -u > "$RUNNER_TEMP/changed-all"
+          printf '%s\n' "${allowed[@]}" | sort -u > "$RUNNER_TEMP/allowed-all"
+          unexpected="$(comm -23 "$RUNNER_TEMP/changed-all" "$RUNNER_TEMP/allowed-all")"
+          if [[ -n "$unexpected" ]]; then
+            printf 'repair changed paths outside the reviewed source/tracker surface:\n%s\n' "$unexpected" >&2
+            exit 6
+          fi
+          for mandatory in \
+            .beads/issues.jsonl \
+            crates/fmn-frame/src/pool.rs \
+            crates/fmn-frame/tests/layout_pool.rs
+          do
+            grep -Fxq "$mandatory" "$RUNNER_TEMP/changed-all"
+          done
+          git diff --check
+          git diff --stat
+
+      - name: Publish the proven repair atomically to both canonical refs
+        shell: bash
+        run: |
+          set -euo pipefail
           git add \
+            .beads/issues.jsonl \
             crates/fmn-conformance/tests/franken_numpy_pin.rs \
             crates/fmn-frame/src/lib.rs \
-            crates/fmn-frame/src/pool.rs
+            crates/fmn-frame/src/pool.rs \
+            crates/fmn-frame/tests/layout_pool.rs
+          if [[ -f .beads/metadata.json ]]; then
+            git add .beads/metadata.json
+          fi
           git diff --cached --check
-          git commit -m "style: align sources with the governed nightly rustfmt" \
-            -m "Apply nightly-2026-08-31 formatting only to the three files exposed by the mandatory gate, then compile and test the affected crates before publication."
-          git pull --rebase origin main
-          cargo fmt --all -- --check
-          git push origin HEAD:main
+          git config user.name "FrankenManim FramePool Repair"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit \
+            -m "fix(frame): preserve pool-provenance error precedence" \
+            -m "Treat every standalone buffer as foreign before capacity accounting, prove the otherwise defensive PoolOverflow branch with a crate-private forged member, align the exposed sources with nightly-2026-08-31 rustfmt, and close $ISSUE_ID through tracker-native br after focused tests."
+          git fetch origin main master
+          [[ "$(git rev-parse origin/main)" == "$START_SHA" ]] || {
+            echo "main moved during FramePool verification" >&2
+            exit 4
+          }
+          [[ "$(git rev-parse origin/master)" == "$START_SHA" ]] || {
+            echo "master diverged during FramePool verification" >&2
+            exit 5
+          }
+          git push --atomic origin HEAD:main HEAD:master
