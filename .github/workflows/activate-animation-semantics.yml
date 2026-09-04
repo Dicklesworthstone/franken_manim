@@ -7,6 +7,9 @@ on:
       - ".github/workflows/activate-animation-semantics.yml"
       - "scripts/activate_animation_semantics.py"
       - "Cargo.lock"
+  workflow_run:
+    workflows: ["Complete fm-ai1 RNG Cutover"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
