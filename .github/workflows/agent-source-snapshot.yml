@@ -49,6 +49,7 @@ jobs:
             --component clippy,rustfmt,rust-src
           rustup override set "$toolchain"
           cargo install \
+            --debug \
             --locked \
             --git https://github.com/Dicklesworthstone/beads_rust \
             --rev 5c6406411c456fe19ec8bcfe1210a840bee43a56 \
@@ -244,8 +245,8 @@ jobs:
           set -euo pipefail
           cargo test --locked -p fmn-frame
           cargo test --locked -p fmn-conformance --test franken_numpy_pin
-          cargo clippy --locked -p fmn-frame --all-targets -- -D warnings
-          cargo clippy --locked -p fmn-conformance --test franken_numpy_pin -- -D warnings
+          cargo clippy --locked -p fmn-frame --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p fmn-conformance --test franken_numpy_pin --no-deps -- -D warnings
 
       - name: Close the regression bead with independent review identity
         if: env.REGRESSION_ALREADY_CLOSED != '1'
