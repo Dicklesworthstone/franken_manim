@@ -19,102 +19,39 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: true
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install Python test dependency
+      - name: Install Python dependency
         run: python -m pip install --disable-pip-version-check numpy
-
-      - name: Embed the semantic continuation and focused acceptance suite
-        shell: bash
+      - name: Patch the embedded loader and test harness
+        run: python scripts/activate_animation_semantics.py
+      - name: Validate Python sources
         run: |
-          set -euo pipefail
-          python <<'PY'
-          from pathlib import Path
-
-          path = Path("crates/fmn-python/src/lib.rs")
-          source = path.read_text(encoding="utf-8")
-
-          old_bootstrap = '''    let source = CString::new(include_str!("../python/manimlib_bootstrap.py"))
-        .expect("embedded bootstrap contains no NUL");
-    let globals = module.dict();
-    let result = py.run(source.as_c_str(), Some(&globals), Some(&globals));
-    module.delattr("_FMN_MODULE")?;
-    result
-'''
-          new_bootstrap = '''    let bootstrap_source = CString::new(include_str!("../python/manimlib_bootstrap.py"))
-        .expect("embedded bootstrap contains no NUL");
-    let animation_source = CString::new(include_str!("../python/animation_semantics.py"))
-        .expect("embedded animation semantics contain no NUL");
-    let globals = module.dict();
-    let result: PyResult<()> = (|| {
-        py.run(bootstrap_source.as_c_str(), Some(&globals), Some(&globals))?;
-        py.run(animation_source.as_c_str(), Some(&globals), Some(&globals))?;
-        Ok(())
-    })();
-    module.delattr("_FMN_MODULE")?;
-    result
-'''
-          if source.count(old_bootstrap) != 1:
-              raise SystemExit("execute_bootstrap anchor drifted")
-          source = source.replace(old_bootstrap, new_bootstrap, 1)
-
-          old_test = '''            let source = CString::new(include_str!("../tests/bridge.py"))
-                .expect("test source contains no NUL");
-            py.run(source.as_c_str(), Some(globals), Some(globals))
-                .expect("Python bridge acceptance suite");
-'''
-          new_test = old_test + '''            globals
-                .set_item(
-                    "__file__",
-                    concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/tests/animation_semantics.py"
-                    ),
-                )
-                .expect("set animation semantic suite source path");
-            let animation_source =
-                CString::new(include_str!("../tests/animation_semantics.py"))
-                    .expect("animation semantic test source contains no NUL");
-            py.run(animation_source.as_c_str(), Some(globals), Some(globals))
-                .expect("Python Animation semantic acceptance suite");
-'''
-          if source.count(old_test) != 1:
-              raise SystemExit("bridge acceptance anchor drifted")
-          source = source.replace(old_test, new_test, 1)
-          path.write_text(source, encoding="utf-8")
-          PY
-
-      - name: Validate and test the activated surface
-        shell: bash
-        run: |
-          set -euo pipefail
+          python -m py_compile scripts/activate_animation_semantics.py
           python -m py_compile crates/fmn-python/python/animation_semantics.py
           python -m py_compile crates/fmn-python/tests/animation_semantics.py
+          git diff --check
+      - name: Format and test
+        run: |
           cargo fmt --all
           git diff --check
           cargo test --locked -p fmn-python
           cargo test --locked -p fmn-conformance
-
-      - name: Commit activation and retire the one-shot
-        shell: bash
+      - name: Commit activation
         run: |
-          set -euo pipefail
           git config user.name "FrankenManim Animation Semantics"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add crates/fmn-python/src/lib.rs
           git rm .github/workflows/activate-animation-semantics.yml
-          git commit -m "feat(python): activate complete Animation semantics" -m "Execute the pinned semantic continuation after bootstrap construction, run its dedicated acceptance suite inside the production PyO3 harness, and retire the one-shot only after fmn-python and conformance tests pass."
+          git rm scripts/activate_animation_semantics.py
+          git commit -m "feat(python): activate complete Animation semantics" -m "Execute the pinned semantic continuation after bootstrap construction, run its dedicated acceptance suite inside the production PyO3 harness, and retire the activation machinery only after fmn-python and conformance tests pass."
           git pull --rebase origin main
           git push origin HEAD:main
