@@ -28,7 +28,7 @@ edition	2024
 
 [repos]
 # repo	commit	notes
-franken_numpy	646eba2363eee7e2622ad0fe8a34174c3c755266	fnp-* workspace; RNG + arrays; fmn-core consumes the dependency-free fnp-random-core SeedSequence/PCG64DXSM authority (fm-ai1), Marionette consumes fnp-dtype + fnp-ndarray for §8.2 zero-copy NumPy export, and the Gauntlet consumes fnp-io for .npy interchange; the full fnp-random distribution/entropy/parallel surface is not in the native closure
+franken_numpy	a15d5c32e9330b555b0a653058bcfcff22fcb4ec	fnp-* workspace; RNG + arrays; fmn-core consumes the dependency-free fnp-random-core SeedSequence/PCG64DXSM authority (fm-ai1), Marionette consumes fnp-dtype + fnp-ndarray for §8.2 zero-copy NumPy export, and the Gauntlet consumes fnp-io for .npy interchange; the full fnp-random distribution/entropy/parallel surface is not in the native closure; this pin includes the upstream native/wasm/vector/Clippy/zero-dependency proof and generated lock receipt
 frankenscipy	5b1441b13a0997901ad2f9835c30072f87ca93b2	fsci-* workspace; solves/quadrature/assignment
 franken_markdown	82588865c453b175cb1263b36e30f5b9b1941a2e	workspace since fm-ydw: fmd-font (unchanged d7cda47) and fmd-math (core fm-wgl + placement fm-hk9 + span maps fm-70s + extensions fm-kg9 + tier-2 fm-j5t: sizes, \substack, align/center surfaces, symbol growth, islands resume surrounding style) consumed as git deps at this rev
 franken_networkx	9d710b1c33e99412c94de7fa4de2f7ce4954110f	enhanced-tier Graph mobjects; never blocks core gates
