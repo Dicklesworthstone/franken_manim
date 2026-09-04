@@ -1,103 +1,19 @@
-name: Quarantine malformed one-shot workflows
+name: "Archived: Workflow Quarantine Generator"
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/agent-source-snapshot.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
-
-concurrency:
-  group: quarantine-malformed-one-shot-workflows
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  quarantine:
+  archived:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 2
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Preserve malformed sources as comments and remove automatic triggers
+      - name: Explain archival
         shell: bash
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          paths = [
-              Path(".github/workflows/add-keyed-rng-forks.yml"),
-              Path(".github/workflows/consolidate-rng-implementation-chain.yml"),
-              Path(".github/workflows/extend-rng-replay-api.yml"),
-              Path(".github/workflows/implement-rng-cursor-and-sampling.yml"),
-              Path(".github/workflows/repair-deterministic-rng-jobs.yml"),
-              Path(".github/workflows/repair-final-rng-tranche.yml"),
-              Path(".github/workflows/repair-rng-cursor-import.yml"),
-              Path(".github/workflows/repair-rng-cursor-sampling.yml"),
-              Path(".github/workflows/repair-rng-reservation-imports.yml"),
-              Path(".github/workflows/repair-rng-reservations.yml"),
-          ]
-          marker = "# Archived malformed one-shot workflow; original source follows verbatim as comments."
-          for path in paths:
-              source = path.read_text(encoding="utf-8")
-              if source.startswith(marker):
-                  continue
-              title = path.stem.replace("-", " ").title()
-              preserved = "\n".join("# " + line for line in source.splitlines())
-              archived = f'''{marker}
-          # It remains in Git history and below for forensic use, but it cannot run on pushes.
-          name: "Archived: {title}"
-
-          on:
-            workflow_dispatch:
-
-          permissions:
-            contents: read
-
-          jobs:
-            archived:
-              if: ${{{{ false }}}}
-              runs-on: ubuntu-24.04
-              steps:
-                - run: echo "This historical one-shot is intentionally inert."
-
-          # -----------------------------------------------------------------------------
-          # Original malformed source at archival time:
-          {preserved}
-          '''
-              path.write_text(archived, encoding="utf-8")
-          PY
-          git diff --check
-
-      - name: Commit the atomic quarantine
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "FrankenManim Workflow Quarantine"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            .github/workflows/add-keyed-rng-forks.yml \
-            .github/workflows/consolidate-rng-implementation-chain.yml \
-            .github/workflows/extend-rng-replay-api.yml \
-            .github/workflows/implement-rng-cursor-and-sampling.yml \
-            .github/workflows/repair-deterministic-rng-jobs.yml \
-            .github/workflows/repair-final-rng-tranche.yml \
-            .github/workflows/repair-rng-cursor-import.yml \
-            .github/workflows/repair-rng-cursor-sampling.yml \
-            .github/workflows/repair-rng-reservation-imports.yml \
-            .github/workflows/repair-rng-reservations.yml
-          if git diff --cached --quiet; then
-            echo "Malformed workflows are already quarantined."
-            exit 0
-          fi
-          git commit -m "ci: quarantine malformed RNG one-shot workflows" \
-            -m "Preserve each broken generator verbatim as comments while replacing its executable surface with a valid manual-only skipped job. This restores workflow-parser signal without deleting historical files."
-          git pull --rebase origin main
-          git push origin HEAD:main
+          echo "This superseded one-shot workflow is intentionally inert."
+          echo "Original generator blob: a52f8c97ddbf9aaa46745685526d272430c64f06"
+          echo "The complete source remains available in repository history."
