@@ -11,12 +11,12 @@ permissions:
 
 concurrency:
   group: complete-base-animation-semantics
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   implement:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,16 +38,31 @@ jobs:
       - name: Install Python test dependency
         run: python -m pip install --disable-pip-version-check numpy
 
-      - name: Implement pinned Animation base semantics and regressions
+      - name: Implement pinned base and Transform semantics
         shell: bash
         run: |
           python <<'PY'
           from pathlib import Path
-          from textwrap import dedent, indent
+          from textwrap import dedent
 
-          bootstrap_path = Path("crates/fmn-python/python/manimlib_bootstrap.py")
-          tests_path = Path("crates/fmn-python/tests/bridge.py")
-          source = bootstrap_path.read_text(encoding="utf-8")
+          bootstrap = Path("crates/fmn-python/python/manimlib_bootstrap.py")
+          tests = Path("crates/fmn-python/tests/bridge.py")
+          source = bootstrap.read_text(encoding="utf-8")
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label} anchor count is {count}, expected 1")
+              return text.replace(old, new, 1)
+
+          def replace_between(text, start, end, replacement, label):
+              start_index = text.find(start)
+              if start_index < 0:
+                  raise SystemExit(f"{label} start anchor is missing")
+              end_index = text.find(end, start_index + len(start))
+              if end_index < 0:
+                  raise SystemExit(f"{label} end anchor is missing")
+              return text[:start_index] + replacement + text[end_index:]
 
           mobject_anchor = dedent('''
           class Mobject(_BridgeMobject):
@@ -68,21 +83,58 @@ jobs:
               render_primitive = 5  # moderngl.TRIANGLE_STRIP, without importing a renderer
 
               def __str__(self):
-                  # Reference mobject.py:105. Animation default names compose
-                  # this stable class spelling, never object.__str__'s address.
+                  # Reference mobject.py:105. Animation names depend on this
+                  # stable class spelling rather than an address-bearing repr.
                   return type(self).__name__
 
               def __init__(self, *submobjects, **kwargs):
           ''').lstrip("\n")
-          if mobject_anchor not in source:
-              raise SystemExit("Mobject insertion anchor drifted")
-          source = source.replace(mobject_anchor, mobject_replacement, 1)
+          source = replace_once(
+              source,
+              mobject_anchor,
+              mobject_replacement,
+              "Mobject.__str__",
+          )
 
-          animation_start = source.index("\nclass Animation:\n") + 1
-          animation_end = source.index("\n\nclass UpdateFromFunc", animation_start)
+          interpolation_start = "\n    def interpolate(self, mobject1, mobject2, alpha, path_func=None):"
+          interpolation_end = "\n    def set_data(self, data):"
+          interpolation_block = dedent('''
+
+              def interpolate(self, mobject1, mobject2, alpha, path_func=None):
+                  if path_func is None:
+                      path_func = getattr(_FMN_ROOT, "straight_path")
+                  locked = getattr(self, "locked_data_keys", ())
+                  const = getattr(self, "const_data_keys", ())
+                  keys = [key for key in self.data.dtype.names if key not in locked]
+                  if keys:
+                      self.note_changed_data()
+                  for key in keys:
+                      data1 = mobject1.data[key]
+                      data2 = mobject2.data[key]
+                      if key in const:
+                          data1 = data1[0]
+                          data2 = data2[0]
+                      if key in self.pointlike_data_keys:
+                          value = path_func(data1, data2, alpha)
+                      else:
+                          value = _interpolate(data1, data2, alpha)
+                      self.data[key][:] = value
+                  return self
+          ''').rstrip("\n")
+          source = replace_between(
+              source,
+              interpolation_start,
+              interpolation_end,
+              interpolation_block,
+              "Mobject.interpolate",
+          )
+
+          animation_start = "\nclass Animation:\n"
+          animation_end = "\n\nclass UpdateFromFunc"
           animation_block = dedent('''
+
           class Animation:
-              """Pinned animation lifecycle over live compatibility families."""
+              """The pinned Python animation lifecycle over live families."""
 
               def __init__(
                   self,
@@ -95,6 +147,7 @@ jobs:
                   remover=False,
                   final_alpha_value=1.0,
                   suspend_mobject_updating=False,
+                  **kwargs,
               ):
                   self._validate_input_type(mobject)
                   self.mobject = mobject
@@ -106,15 +159,27 @@ jobs:
                   self.final_alpha_value = final_alpha_value
                   self.lag_ratio = lag_ratio
                   self.suspend_mobject_updating = suspend_mobject_updating
+                  self.__dict__.update(kwargs)
 
               def _validate_input_type(self, mobject):
                   if not isinstance(mobject, Mobject):
                       raise TypeError("Animation only works for Mobjects.")
 
+              def _ensure_runtime_defaults(self):
+                  # Native specs retain None as "derive in Choreo". A manual
+                  # Python lifecycle needs the Reference defaults instead.
+                  if self.run_time is None:
+                      self.run_time = 1.0
+                  if self.rate_func is None:
+                      self.rate_func = getattr(_FMN_ROOT, "smooth", _smooth_rate)
+                  if self.lag_ratio is None:
+                      self.lag_ratio = 0.0
+
               def __str__(self):
-                  return self.name
+                  return getattr(self, "name", type(self).__name__)
 
               def begin(self):
+                  self._ensure_runtime_defaults()
                   if self.time_span is not None:
                       _start, end = self.time_span
                       self.run_time = max(end, self.run_time)
@@ -148,19 +213,19 @@ jobs:
 
               def get_all_families_zipped(self):
                   return zip(*[
-                      mob.get_family()
-                      for mob in self.get_all_mobjects()
+                      mobject.get_family()
+                      for mobject in self.get_all_mobjects()
                   ])
 
               def update_mobjects(self, dt):
-                  for mob in self.get_all_mobjects_to_update():
-                      mob.update(dt)
+                  for mobject in self.get_all_mobjects_to_update():
+                      mobject.update(dt)
 
               def get_all_mobjects_to_update(self):
                   items = [
-                      mob
-                      for mob in self.get_all_mobjects()
-                      if mob is not self.mobject
+                      mobject
+                      for mobject in self.get_all_mobjects()
+                      if mobject is not self.mobject
                   ]
                   return list(reversed(dict.fromkeys(reversed(items))))
 
@@ -168,7 +233,7 @@ jobs:
                   return _copy.deepcopy(self)
 
               def update_rate_info(self, run_time=None, rate_func=None, lag_ratio=None):
-                  # Preserve the Reference's observable falsey-value behavior.
+                  # The Reference intentionally treats falsey values as absent.
                   self.run_time = run_time or self.run_time
                   self.rate_func = rate_func or self.rate_func
                   self.lag_ratio = lag_ratio or self.lag_ratio
@@ -237,27 +302,175 @@ jobs:
                   return self
 
               def is_remover(self):
-                  return self.remover
-          ''').strip("\n")
-          source = source[:animation_start] + animation_block + source[animation_end:]
+                  return getattr(self, "remover", False)
+          ''').rstrip("\n")
+          source = replace_between(
+              source,
+              animation_start,
+              animation_end,
+              animation_block,
+              "Animation",
+          )
 
-          transform_start = source.index("\nclass Transform(_NativeAnimation):")
-          transform_methods_start = source.index(
-              "\n    def create_starting_mobject(self):",
-              transform_start,
+          native_start = "\nclass _NativeAnimation(Animation):\n"
+          native_end = "\n\nclass ShowPartial"
+          native_block = dedent('''
+
+          class _NativeAnimation(Animation):
+              _native_kind = None
+              _target_attr = None
+
+              def __init__(
+                  self,
+                  mobject,
+                  run_time=None,
+                  rate_func=None,
+                  lag_ratio=None,
+                  time_span=None,
+                  final_alpha_value=1.0,
+                  suspend_mobject_updating=False,
+                  name="",
+                  remover=False,
+                  **kwargs,
+              ):
+                  _refuse_unrouted(
+                      type(self).__name__ + "()",
+                      [(key, True) for key in sorted(kwargs)],
+                  )
+                  self.mobject = mobject
+                  self.run_time = run_time
+                  self.rate_func = rate_func
+                  self.lag_ratio = lag_ratio
+                  self.time_span = (
+                      None
+                      if time_span is None
+                      else (float(time_span[0]), float(time_span[1]))
+                  )
+                  self.final_alpha_value = float(final_alpha_value)
+                  self.suspend_mobject_updating = bool(suspend_mobject_updating)
+                  suffix = str(mobject) if isinstance(mobject, Mobject) else ""
+                  self.name = name or type(self).__name__ + suffix
+                  self.remover = bool(remover)
+
+              def _native_params(self):
+                  return {}
+
+              def _native_target(self):
+                  return getattr(self, self._target_attr) if self._target_attr else None
+          ''').rstrip("\n")
+          source = replace_between(
+              source,
+              native_start,
+              native_end,
+              native_block,
+              "_NativeAnimation",
           )
-          transform_methods_end = source.index(
-              "\n    def interpolate_mobject(self, alpha):",
-              transform_methods_start,
-          )
-          transform_methods = "\n" + indent(
-              dedent('''
-              def create_starting_mobject(self):
+
+          transform_start = "\nclass Transform(_NativeAnimation):\n"
+          transform_end = "\n\nclass Fade(Transform):"
+          transform_block = dedent('''
+
+          class Transform(_NativeAnimation):
+              _native_kind = "transform"
+              _target_attr = "target_mobject"
+              replace_mobject_with_target_in_scene = False
+
+              def __init__(
+                  self,
+                  mobject,
+                  target_mobject=None,
+                  path_arc=0.0,
+                  path_arc_axis=_OUT,
+                  path_func=None,
+                  **kwargs,
+              ):
+                  # Portal arc factories carry native path metadata. Arbitrary
+                  # Python path callables still refuse at the Choreo boundary.
+                  if path_func is not None:
+                      routed_arc = getattr(path_func, "_fmn_path_arc", None)
+                      if routed_arc is None:
+                          _refuse_unrouted("Transform()", [("path_func", True)])
+                      path_arc = float(routed_arc)
+                      path_arc_axis = getattr(
+                          path_func,
+                          "_fmn_path_axis",
+                          path_arc_axis,
+                      )
+                  if not isinstance(mobject, Mobject):
+                      raise TypeError(
+                          "Transform expects a Mobject; got "
+                          + type(mobject).__name__
+                      )
+                  super().__init__(mobject, **kwargs)
+                  self.target_mobject = target_mobject
+                  self.path_arc = float(path_arc)
+                  self.path_arc_axis = _vec3(path_arc_axis)
+                  self.path_func = path_func
+                  self.init_path_func()
+
+              def init_path_func(self):
+                  if self.path_func is not None:
+                      return
+                  if self.path_arc == 0.0:
+                      self.path_func = getattr(_FMN_ROOT, "straight_path")
+                  else:
+                      self.path_func = getattr(_FMN_ROOT, "path_along_arc")(
+                          self.path_arc,
+                          self.path_arc_axis,
+                      )
+
+              def _native_params(self):
+                  return {
+                      "path_arc": self.path_arc,
+                      "path_arc_axis": self.path_arc_axis,
+                  }
+
+              def _allows_deferred_target(self):
+                  return True
+
+              def create_target(self):
+                  # The portal's in-place Transform spelling resolves at play
+                  # time to a copy of the then-current source state.
+                  if getattr(self, "target_mobject", None) is not None:
+                      return self.target_mobject
                   return self.mobject.copy()
 
+              def check_target_mobject_validity(self):
+                  if not isinstance(self.target_mobject, Mobject):
+                      raise TypeError("Transform target must be a Mobject")
+
+              def _native_target(self):
+                  if self._target_attr is None:
+                      return None
+                  self.target_mobject = self.create_target()
+                  return self.target_mobject
+
+              def begin(self):
+                  self.target_mobject = self.create_target()
+                  self.check_target_mobject_validity()
+                  if self.mobject.is_aligned_with(self.target_mobject):
+                      self.target_copy = self.target_mobject
+                  else:
+                      self.target_copy = self.target_mobject.copy()
+                  self.mobject.align_data_and_family(self.target_copy)
+                  Animation.begin(self)
+                  if not self.mobject.has_updaters():
+                      self.mobject.lock_matching_data(
+                          self.starting_mobject,
+                          self.target_copy,
+                      )
+
+              def finish(self):
+                  Animation.finish(self)
+                  self.mobject.unlock_data()
+
+              def clean_up_from_scene(self, scene):
+                  Animation.clean_up_from_scene(self, scene)
+                  if self.replace_mobject_with_target_in_scene:
+                      scene.remove(self.mobject)
+                      scene.add(self.target_mobject)
+
               def get_all_mobjects(self):
-                  # Helper updates retain both the preserved target and the
-                  # aligned target copy; interpolation uses only the latter.
                   return (
                       self.mobject,
                       self.starting_mobject,
@@ -267,8 +480,8 @@ jobs:
 
               def get_all_families_zipped(self):
                   return zip(*[
-                      mob.get_family()
-                      for mob in (
+                      mobject.get_family()
+                      for mobject in (
                           self.mobject,
                           self.starting_mobject,
                           self.target_copy,
@@ -289,32 +502,55 @@ jobs:
                       self.path_func,
                   )
                   return self
-
-              def begin(self):
-                  # Build Transform's four identities, then use the complete
-                  # base lifecycle for status, suspension, families, and alpha 0.
-                  self.target_mobject = self.create_target()
-                  if not isinstance(self.target_mobject, Mobject):
-                      raise TypeError("Transform target must be a Mobject")
-                  self.target_copy = self.target_mobject.copy()
-                  Animation.begin(self)
-              ''').strip("\n"),
-              "    ",
+          ''').rstrip("\n")
+          source = replace_between(
+              source,
+              transform_start,
+              transform_end,
+              transform_block,
+              "Transform",
           )
-          source = (
-              source[:transform_methods_start]
-              + transform_methods
-              + source[transform_methods_end:]
-          )
-          bootstrap_path.write_text(source, encoding="utf-8")
 
-          tests = tests_path.read_text(encoding="utf-8")
-          marker = "# Base Animation semantic surface (fm-5wq.4)."
-          if marker in tests:
-              raise SystemExit("base Animation regression marker already exists")
+          copy_transform_old = dedent('''
+          class ReplacementTransform(Transform):
+              _native_kind = "replacement_transform"
+
+
+          class TransformFromCopy(Transform):
+              _native_kind = "transform_from_copy"
+
+              def __init__(self, mobject, target_mobject, **kwargs):
+                  super().__init__(mobject, target_mobject, **kwargs)
+          ''')
+          copy_transform_new = dedent('''
+          class ReplacementTransform(Transform):
+              _native_kind = "replacement_transform"
+              replace_mobject_with_target_in_scene = True
+
+
+          class TransformFromCopy(Transform):
+              _native_kind = "transform_from_copy"
+              replace_mobject_with_target_in_scene = True
+
+              def __init__(self, mobject, target_mobject, **kwargs):
+                  super().__init__(mobject.copy(), target_mobject, **kwargs)
+          ''')
+          source = replace_once(
+              source,
+              copy_transform_old,
+              copy_transform_new,
+              "replacement/copy transforms",
+          )
+
+          bootstrap.write_text(source, encoding="utf-8")
+
+          test_source = tests.read_text(encoding="utf-8")
+          marker = "# Base Animation and Transform semantic surface (fm-5wq.4)."
+          if marker in test_source:
+              raise SystemExit("Animation regression marker already exists")
           regression = dedent('''
 
-          # Base Animation semantic surface (fm-5wq.4).
+          # Base Animation and Transform semantic surface (fm-5wq.4).
           class _FmnBaseAnimationProbe(Animation):
               def __init__(self, mobject, **kwargs):
                   self.calls = []
@@ -384,7 +620,6 @@ jobs:
           ]
           del _fmn_animation.get_all_mobjects
 
-          _fmn_animation.calls.clear()
           _fmn_animation_clone = _fmn_animation.copy()
           assert _fmn_animation_clone is not _fmn_animation
           assert _fmn_animation_clone.mobject is not _fmn_animation.mobject
@@ -421,8 +656,16 @@ jobs:
           assert _fmn_spanned.time_spanned_alpha(0.5) == 0.5
           assert _fmn_spanned.time_spanned_alpha(1.0) == 1.0
 
-          _fmn_transform_source = Mobject()
-          _fmn_transform_target = Mobject()
+          _fmn_native_animation = ShowCreation(Line())
+          assert str(_fmn_native_animation) == "ShowCreationLine"
+          assert _fmn_native_animation.is_remover() is False
+
+          _fmn_transform_source = Mobject().set_points([[0.0, 0.0, 0.0]])
+          _fmn_transform_target = Mobject().set_points([
+              [0.0, 0.0, 0.0],
+              [1.0, 0.0, 0.0],
+              [2.0, 0.0, 0.0],
+          ])
           _fmn_transform = Transform(
               _fmn_transform_source,
               _fmn_transform_target,
@@ -431,22 +674,21 @@ jobs:
           )
           _fmn_transform.begin()
           assert _fmn_transform_source.is_changing()
-          assert _fmn_transform.get_all_mobjects() == (
+          assert _fmn_transform.target_copy is not _fmn_transform_target
+          assert _fmn_transform_source.get_num_points() == 3
+          assert _fmn_transform.starting_mobject.get_num_points() == 3
+          assert len(_fmn_transform.families) == 1
+          assert _fmn_transform.families[0] == (
               _fmn_transform_source,
               _fmn_transform.starting_mobject,
-              _fmn_transform_target,
               _fmn_transform.target_copy,
           )
-          assert list(_fmn_transform.get_all_families_zipped()) == [(
-              _fmn_transform_source,
-              _fmn_transform.starting_mobject,
-              _fmn_transform.target_copy,
-          )]
-          assert _fmn_transform.get_all_mobjects_to_update() == [
-              _fmn_transform.starting_mobject,
-              _fmn_transform_target,
-              _fmn_transform.target_copy,
-          ]
+          assert "rgba" in _fmn_transform_source.locked_data_keys
+          _fmn_transform.interpolate(0.5)
+          assert _np.allclose(
+              _fmn_transform_source.get_points()[-1],
+              [1.0, 0.0, 0.0],
+          )
 
           _fmn_transform_ticks = []
           _fmn_source_ticks = []
@@ -463,6 +705,11 @@ jobs:
                   ),
                   call=False,
               )
+          assert _fmn_transform.get_all_mobjects_to_update() == [
+              _fmn_transform.starting_mobject,
+              _fmn_transform_target,
+              _fmn_transform.target_copy,
+          ]
           _fmn_transform.update_mobjects(0.2)
           assert _fmn_transform_ticks == [
               ("start", 0.2),
@@ -473,18 +720,62 @@ jobs:
           _fmn_transform_source.remove_updater(_fmn_source_updater)
           _fmn_transform.finish()
           assert not _fmn_transform_source.is_changing()
+          assert _fmn_transform_source.locked_data_keys == set()
+
+          _fmn_arc_source = Mobject().set_points([[1.0, 0.0, 0.0]])
+          _fmn_arc_target = Mobject().set_points([[-1.0, 0.0, 0.0]])
+          _fmn_arc_source.set_color("#000000")
+          _fmn_arc_target.set_color("#FFFFFF")
+          _fmn_arc_transform = Transform(
+              _fmn_arc_source,
+              _fmn_arc_target,
+              path_arc=_math.pi,
+              run_time=1.0,
+              rate_func=_fmn_linear_rate,
+          )
+          _fmn_arc_transform.begin()
+          assert _fmn_arc_transform.target_copy is _fmn_arc_target
+          assert _fmn_arc_transform.get_all_mobjects_to_update() == [
+              _fmn_arc_transform.starting_mobject,
+              _fmn_arc_target,
+          ]
+          _fmn_arc_transform.interpolate(0.5)
+          _fmn_arc_midpoint = _fmn_arc_source.get_points()[0]
+          assert abs(float(_fmn_arc_midpoint[0])) < 1e-5
+          assert abs(abs(float(_fmn_arc_midpoint[1])) - 1.0) < 1e-5
+          assert _np.allclose(
+              _fmn_arc_source.data["rgba"][0, :3],
+              [0.5, 0.5, 0.5],
+              atol=1e-6,
+          )
+          _fmn_arc_transform.finish()
+
+          _fmn_copy_source = Mobject().set_points([[0.0, 0.0, 0.0]])
+          _fmn_copy_target = Mobject().set_points([[1.0, 0.0, 0.0]])
+          _fmn_copy_transform = TransformFromCopy(
+              _fmn_copy_source,
+              _fmn_copy_target,
+          )
+          assert _fmn_copy_transform.mobject is not _fmn_copy_source
+          assert _np.array_equal(
+              _fmn_copy_transform.mobject.get_points(),
+              _fmn_copy_source.get_points(),
+          )
+          assert ReplacementTransform.replace_mobject_with_target_in_scene
+          assert TransformFromCopy.replace_mobject_with_target_in_scene
           ''').rstrip() + "\n"
-          tests_path.write_text(tests.rstrip() + regression, encoding="utf-8")
+          tests.write_text(test_source.rstrip() + regression, encoding="utf-8")
           PY
 
-      - name: Validate Python syntax and source hygiene
+      - name: Validate source shape
         run: |
           python -m py_compile crates/fmn-python/python/manimlib_bootstrap.py
           python -m py_compile crates/fmn-python/tests/bridge.py
           git diff --check
+          cargo fmt --all -- --check
 
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
+      - name: Verify frame-pool invariant repair
+        run: cargo test --locked -p fmn-frame
 
       - name: Run Python portal contract suite
         run: cargo test --locked -p fmn-python
@@ -492,14 +783,14 @@ jobs:
       - name: Run API conformance suite
         run: cargo test --locked -p fmn-conformance
 
-      - name: Commit substantive implementation
+      - name: Commit implementation
         run: |
           git config user.name "FrankenManim implementation agent"
           git config user.email "actions@users.noreply.github.com"
           git add crates/fmn-python/python/manimlib_bootstrap.py crates/fmn-python/tests/bridge.py
           git commit \
-            -m "fix(python): complete base Animation semantics" \
-            -m "Implement the pinned Animation lifecycle, family zipping, helper updates, lagged sub-alpha calculation, fluent rate/name surface, deep copy, validation, and stable Mobject naming. Complete the Python Transform helper-family contract and add permanent portal regressions." \
+            -m "fix(python): complete base Animation and Transform semantics" \
+            -m "Implement the pinned lifecycle, validation, deterministic naming, helper updates, family zipping, lagged sub-alpha calculation, deep copy, and fluent rate/name API. Complete Transform alignment, target preservation, data locking, point-path versus style interpolation, arc-path fallback, replacement cleanup, and TransformFromCopy source isolation with permanent portal regressions." \
             -m "Relates-to: fm-5wq.4"
 
       - name: Rebase and push directly to main
