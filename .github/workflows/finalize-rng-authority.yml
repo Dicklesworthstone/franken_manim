@@ -1,0 +1,109 @@
+name: Finalize RNG Authority
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/finalize-rng-authority.yml"
+      - "Cargo.toml"
+      - "SUITE.lock"
+      - "crates/fmn-core/Cargo.toml"
+      - "crates/fmn-core/src/rng.rs"
+      - "crates/fmn-core/tests/rng_parity.rs"
+      - "crates/fmn-conformance/tests/franken_numpy_pin.rs"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-rng-authority
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Capture exact source identity
+        shell: bash
+        run: echo "START_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install governed toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-07-05 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          rustup override set nightly-2026-07-05
+
+      - name: Admit only fnp-random-core
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("SUITE_ALLOWLIST.tsv")
+          lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+          row = (
+              "fnp-random-core\t0.2.0\tgit+franken_numpy@SUITE.lock\t-\t-\t"
+              "MIT+rider\tno\tno\tno\tno\tforbid\truntime\t"
+              "fm-ai1: dependency-free SeedSequence and PCG64DXSM authority; no host entropy, ndarray, rayon, or distribution surface; rev must equal the SUITE.lock franken_numpy pin\t"
+              "fm\tsuite-lock-ritual\n"
+          )
+          matches = [index for index, line in enumerate(lines) if line.startswith("fnp-random-core\t")]
+          if len(matches) > 1:
+              raise SystemExit(f"duplicate fnp-random-core allowlist rows: {matches}")
+          if matches:
+              lines[matches[0]] = row
+          else:
+              anchors = [index for index, line in enumerate(lines) if line.startswith("fnp-ndarray\t0.2.0\tgit+franken_numpy@SUITE.lock\t")]
+              if len(anchors) != 1:
+                  raise SystemExit(f"expected one fnp-ndarray allowlist anchor, found {len(anchors)}")
+              lines.insert(anchors[0] + 1, row)
+          path.write_text("".join(lines), encoding="utf-8")
+          PY
+
+      - name: Regenerate and verify the exact RNG closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check -p fmn-core --all-targets
+          cargo test -p fmn-core
+          cargo check --target wasm32-unknown-unknown -p fmn-core
+          cargo test -p fmn-conformance --test franken_numpy_pin
+          cargo test -p fmn-conformance --test governed_closure \
+            workspace_closure_is_exactly_the_governed_universe -- --exact
+          cargo test -p fmn-conformance --test governed_closure \
+            git_dependencies_ride_their_suite_lock_pins -- --exact
+          cargo test -p fmn-conformance --test governed_closure \
+            suite_lock_parses_and_matches_the_pinned_toolchain -- --exact
+          cargo fmt --all -- --check
+          cargo clippy -p fmn-core --all-targets -- -D warnings
+          cargo clippy -p fmn-conformance --test franken_numpy_pin -- -D warnings
+          git diff --check
+
+      - name: Publish generated lock and allowlist on unchanged main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add Cargo.lock SUITE_ALLOWLIST.tsv
+          if git diff --cached --quiet; then
+            echo "RNG closure authorities are already current"
+            exit 0
+          fi
+          git config user.name "FrankenManim RNG Authority"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "build(core): lock the verified RNG authority" -m "Record the generated Cargo.lock and governed allowlist after the exact fm-ai1 native, wasm32, parity, source-identity, and minimal-closure checks passed."
+          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$START_SHA" ]]; then
+            echo "main moved after verification; refusing to publish authorities for an untested tree" >&2
+            exit 4
+          fi
+          git push origin HEAD:main
