@@ -1,0 +1,157 @@
+name: FM AI1 Watchdog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fm-ai1-watchdog.yml"
+      - "artifacts/fm-ai1-completion.json"
+  workflow_dispatch:
+  schedule:
+    - cron: "11 * * * *"
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: fm-ai1-watchdog
+  cancel-in-progress: false
+
+jobs:
+  bound-retries:
+    if: github.repository == 'Dicklesworthstone/franken_manim'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Classify live cutover state
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/fm-ai1-completion.json")
+          valid = False
+          if path.exists():
+              try:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+                  valid = payload.get("verdict") == "pass" and str(payload.get("schema", "")).startswith("franken-manim.fm-ai1-completion.v")
+              except (OSError, json.JSONDecodeError):
+                  valid = False
+          Path("/tmp/receipt-state").write_text("complete\n" if valid else "pending\n", encoding="utf-8")
+          PY
+          receipt_state="$(cat /tmp/receipt-state)"
+          if [[ "$receipt_state" == complete ]]; then
+            echo "kind=complete" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          finalizer_failures="$(gh run list --workflow fm-ai1-finalizer.yml --limit 20 --json conclusion --jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled")] | length' 2>/dev/null || echo 0)"
+          audit_failures="$(gh run list --workflow fm-ai1-wasm-audit-refresh.yml --limit 20 --json conclusion --jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out")] | length' 2>/dev/null || echo 0)"
+          pin_failures="$(gh run list --workflow fm-ai1-pin-align.yml --limit 20 --json conclusion --jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out")] | length' 2>/dev/null || echo 0)"
+          if (( finalizer_failures >= 3 || audit_failures >= 3 || pin_failures >= 3 )); then
+            echo "kind=blocked" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=pending" >> "$GITHUB_OUTPUT"
+          fi
+          echo "finalizer_failures=$finalizer_failures" >> "$GITHUB_OUTPUT"
+          echo "audit_failures=$audit_failures" >> "$GITHUB_OUTPUT"
+          echo "pin_failures=$pin_failures" >> "$GITHUB_OUTPUT"
+
+      - name: Leave bounded retries active while below threshold
+        if: steps.state.outputs.kind == 'pending'
+        run: |
+          echo "fm-ai1 remains pending below the bounded retry threshold"
+          echo "finalizer failures: ${{ steps.state.outputs.finalizer_failures }}"
+          echo "wasm-audit failures: ${{ steps.state.outputs.audit_failures }}"
+          echo "pin-alignment failures: ${{ steps.state.outputs.pin_failures }}"
+
+      - name: Capture bounded terminal diagnostics
+        if: steps.state.outputs.kind == 'blocked'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/fm-ai1-blocked
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          payload = {
+              "schema": "franken-manim.fm-ai1-blocked.v1",
+              "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "reason": "temporary cutover workflows crossed the bounded terminal-failure threshold; retries were stopped without closing fm-ai1",
+              "failure_counts": {
+                  "finalizer": int(os.environ.get("FINALIZER_FAILURES", "0")),
+                  "wasm_audit": int(os.environ.get("AUDIT_FAILURES", "0")),
+                  "pin_alignment": int(os.environ.get("PIN_FAILURES", "0")),
+              },
+          }
+          Path("artifacts/fm-ai1-blocked/summary.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          for workflow in fm-ai1-finalizer.yml fm-ai1-wasm-audit-refresh.yml fm-ai1-pin-align.yml; do
+            run_id="$(gh run list --workflow "$workflow" --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
+            [[ -z "$run_id" ]] && continue
+            gh run view "$run_id" --json databaseId,workflowName,status,conclusion,headSha,createdAt,updatedAt,url > "artifacts/fm-ai1-blocked/${workflow%.yml}.run.json" || true
+            gh run view "$run_id" --log-failed 2>&1 | tail -n 400 > "artifacts/fm-ai1-blocked/${workflow%.yml}.failed-tail.txt" || true
+          done
+        env:
+          FINALIZER_FAILURES: ${{ steps.state.outputs.finalizer_failures }}
+          AUDIT_FAILURES: ${{ steps.state.outputs.audit_failures }}
+          PIN_FAILURES: ${{ steps.state.outputs.pin_failures }}
+
+      - name: Remove temporary workflows after success or bounded failure
+        if: steps.state.outputs.kind == 'complete' || steps.state.outputs.kind == 'blocked'
+        shell: bash
+        run: |
+          set -euo pipefail
+          obsolete=(
+            .github/workflows/fm-ai1-authority-verifier-v2.yml
+            .github/workflows/fm-ai1-authority-verifier.yml
+            .github/workflows/fm-ai1-live-attestor.yml
+            .github/workflows/fm-ai1-pdf-attestor.yml
+            .github/workflows/fm-ai1-finalizer.yml
+            .github/workflows/fm-ai1-wasm-audit-refresh.yml
+            .github/workflows/fm-ai1-pin-align.yml
+            .github/workflows/converge-rng-authority-cutover.yml
+            .github/workflows/complete-rng-authority-cutover.yml
+            .github/workflows/finalize-rng-migration.yml
+          )
+          for path in "${obsolete[@]}"; do
+            [[ -e "$path" ]] && rm -f "$path"
+          done
+          git rm -f .github/workflows/fm-ai1-watchdog.yml
+          git add .github/workflows
+          if [[ "${{ steps.state.outputs.kind }}" == blocked ]]; then
+            git add artifacts/fm-ai1-blocked
+          fi
+          git diff --cached --check
+          git config user.name "FrankenManim FM-AI1 Watchdog"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ "${{ steps.state.outputs.kind }}" == complete ]]; then
+            git commit -m "chore(ci): retire completed RNG cutover workflows"
+          else
+            git commit -m "test(core): preserve bounded RNG cutover failure diagnostics" \
+              -m "Stop repeated temporary workflow failures, retain run metadata and bounded failed-log tails, and leave fm-ai1 open for a concrete repair."
+          fi
+          final_sha="$(git rev-parse HEAD)"
+          parent="$(git rev-parse HEAD^)"
+          git fetch origin main
+          [[ "$(git rev-parse origin/main)" == "$parent" ]] || {
+            echo "main moved during watchdog publication; the hourly watchdog will retry" >&2
+            exit 12
+          }
+          git push origin "$final_sha:refs/heads/main"
+          git push origin "$final_sha:refs/heads/master"
