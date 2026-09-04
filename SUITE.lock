@@ -23,7 +23,7 @@
 # YAML dependency anywhere in the checker.
 
 [toolchain]
-rustc	nightly-2026-07-05
+rustc	nightly-2026-08-31
 edition	2024
 
 [repos]
