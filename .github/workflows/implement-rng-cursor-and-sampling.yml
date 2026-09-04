@@ -1,0 +1,1190 @@
+name: Implement RNG Cursor and Sampling
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/implement-rng-cursor-and-sampling.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: implement-rng-cursor-and-sampling
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install governed toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-07-05 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          rustup override set nightly-2026-07-05
+          python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+
+      - name: Require the completed RNG authority foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f artifacts/implementation/fm-ai1-rng-authority-receipt.json
+          grep -Fq 'inner: fnp_random_core::Pcg64Dxsm' crates/fmn-core/src/rng.rs
+          grep -Fq 'pub fn advance(&mut self, draws: u128)' crates/fmn-core/src/rng.rs
+          grep -Fq 'pub fn fill_u64(&mut self, output: &mut [u64])' crates/fmn-core/src/rng.rs
+          grep -Fq 'pub const KEYED_FORK_LAYOUT_VERSION: u32 = 1;' crates/fmn-core/src/rng.rs
+          grep -Fq '"id":"fm-ai1"' .beads/issues.jsonl
+          grep -F '"id":"fm-ai1"' .beads/issues.jsonl | grep -Fq '"status":"closed"'
+
+      - name: Add versioned replay checkpoints and absolute stream cursors
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > crates/fmn-core/src/rng_cursor.rs <<'RS'
+          //! Versioned deterministic RNG checkpoints and seekable replay cursors.
+          //!
+          //! A checkpoint is self-validating: its current PCG state must equal
+          //! its recorded origin advanced by its logical draw position. The
+          //! fixed-width encoding is independent of host endianness and serde.
+
+          use core::fmt;
+
+          use crate::rng::{
+              KEYED_FORK_LAYOUT_VERSION, Pcg64Dxsm, RNG_LAYOUT_VERSION,
+          };
+
+          const CHECKPOINT_MAGIC: [u8; 8] = *b"FMNRNGC1";
+
+          /// Current fixed-width checkpoint encoding version.
+          pub const RNG_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+          /// Exact encoded checkpoint size in bytes.
+          pub const RNG_CHECKPOINT_ENCODED_LEN: usize = 100;
+
+          /// A portable, fixed-width replay checkpoint.
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub struct RngCheckpoint {
+              rng_layout_version: u32,
+              keyed_fork_layout_version: u32,
+              position: u128,
+              origin_state: [u64; 2],
+              origin_increment: [u64; 2],
+              state: [u64; 2],
+              increment: [u64; 2],
+          }
+
+          impl RngCheckpoint {
+              /// Logical raw-draw position relative to the captured origin.
+              #[must_use]
+              pub const fn position(&self) -> u128 {
+                  self.position
+              }
+
+              /// Scene RNG layout version captured by this checkpoint.
+              #[must_use]
+              pub const fn rng_layout_version(&self) -> u32 {
+                  self.rng_layout_version
+              }
+
+              /// Arbitrary-key fork layout version captured by this checkpoint.
+              #[must_use]
+              pub const fn keyed_fork_layout_version(&self) -> u32 {
+                  self.keyed_fork_layout_version
+              }
+
+              /// Current split PCG state and increment.
+              #[must_use]
+              pub const fn state(&self) -> ([u64; 2], [u64; 2]) {
+                  (self.state, self.increment)
+              }
+
+              /// Origin split PCG state and increment.
+              #[must_use]
+              pub const fn origin_state(&self) -> ([u64; 2], [u64; 2]) {
+                  (self.origin_state, self.origin_increment)
+              }
+
+              /// Encode using the canonical little-endian 100-byte format.
+              #[must_use]
+              pub fn to_bytes(&self) -> [u8; RNG_CHECKPOINT_ENCODED_LEN] {
+                  let mut output = [0_u8; RNG_CHECKPOINT_ENCODED_LEN];
+                  output[..8].copy_from_slice(&CHECKPOINT_MAGIC);
+                  write_u32(&mut output, 8, RNG_CHECKPOINT_SCHEMA_VERSION);
+                  write_u32(&mut output, 12, self.rng_layout_version);
+                  write_u32(&mut output, 16, self.keyed_fork_layout_version);
+                  write_u128(&mut output, 20, self.position);
+                  write_u128(&mut output, 36, join_words(self.origin_state));
+                  write_u128(&mut output, 52, join_words(self.origin_increment));
+                  write_u128(&mut output, 68, join_words(self.state));
+                  write_u128(&mut output, 84, join_words(self.increment));
+                  output
+              }
+
+              /// Decode and validate a canonical checkpoint.
+              pub fn from_bytes(input: &[u8]) -> Result<Self, RngCheckpointError> {
+                  if input.len() != RNG_CHECKPOINT_ENCODED_LEN {
+                      return Err(RngCheckpointError::WrongLength {
+                          expected: RNG_CHECKPOINT_ENCODED_LEN,
+                          actual: input.len(),
+                      });
+                  }
+                  if input[..8] != CHECKPOINT_MAGIC {
+                      return Err(RngCheckpointError::InvalidMagic);
+                  }
+                  let schema = read_u32(input, 8);
+                  if schema != RNG_CHECKPOINT_SCHEMA_VERSION {
+                      return Err(RngCheckpointError::UnsupportedSchema(schema));
+                  }
+                  let checkpoint = Self {
+                      rng_layout_version: read_u32(input, 12),
+                      keyed_fork_layout_version: read_u32(input, 16),
+                      position: read_u128(input, 20),
+                      origin_state: split_words(read_u128(input, 36)),
+                      origin_increment: split_words(read_u128(input, 52)),
+                      state: split_words(read_u128(input, 68)),
+                      increment: split_words(read_u128(input, 84)),
+                  };
+                  checkpoint.validate()?;
+                  Ok(checkpoint)
+              }
+
+              fn validate(&self) -> Result<(), RngCheckpointError> {
+                  if self.rng_layout_version != RNG_LAYOUT_VERSION {
+                      return Err(RngCheckpointError::UnsupportedRngLayout(
+                          self.rng_layout_version,
+                      ));
+                  }
+                  if self.keyed_fork_layout_version != KEYED_FORK_LAYOUT_VERSION {
+                      return Err(RngCheckpointError::UnsupportedKeyedForkLayout(
+                          self.keyed_fork_layout_version,
+                      ));
+                  }
+                  if self.origin_increment != self.increment
+                      || join_words(self.increment) & 1 == 0
+                  {
+                      return Err(RngCheckpointError::StreamIdentityMismatch);
+                  }
+                  let mut expected =
+                      Pcg64Dxsm::restore(self.origin_state, self.origin_increment);
+                  expected.advance(self.position);
+                  if expected.state() != (self.state, self.increment) {
+                      return Err(RngCheckpointError::InconsistentState);
+                  }
+                  Ok(())
+              }
+          }
+
+          /// A seekable stream that tracks the exact number of raw PCG draws.
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub struct RngCursor {
+              origin_state: [u64; 2],
+              origin_increment: [u64; 2],
+              generator: Pcg64Dxsm,
+              position: u128,
+          }
+
+          impl RngCursor {
+              /// Capture an arbitrary generator state as logical position zero.
+              #[must_use]
+              pub fn new(generator: Pcg64Dxsm) -> Self {
+                  let (origin_state, origin_increment) = generator.state();
+                  Self {
+                      origin_state,
+                      origin_increment,
+                      generator,
+                      position: 0,
+                  }
+              }
+
+              /// Construct a cursor at `PCG64DXSM(seed)` position zero.
+              #[must_use]
+              pub fn from_seed(seed: u64) -> Self {
+                  Self::new(Pcg64Dxsm::from_seed(seed))
+              }
+
+              /// Restore a fully validated checkpoint.
+              pub fn from_checkpoint(
+                  checkpoint: &RngCheckpoint,
+              ) -> Result<Self, RngCheckpointError> {
+                  checkpoint.validate()?;
+                  Ok(Self {
+                      origin_state: checkpoint.origin_state,
+                      origin_increment: checkpoint.origin_increment,
+                      generator: Pcg64Dxsm::restore(
+                          checkpoint.state,
+                          checkpoint.increment,
+                      ),
+                      position: checkpoint.position,
+                  })
+              }
+
+              /// Current logical raw-draw position.
+              #[must_use]
+              pub const fn position(&self) -> u128 {
+                  self.position
+              }
+
+              /// Current split PCG state.
+              #[must_use]
+              pub fn state(&self) -> ([u64; 2], [u64; 2]) {
+                  self.generator.state()
+              }
+
+              /// Borrow the underlying generator for state inspection only.
+              #[must_use]
+              pub const fn generator(&self) -> &Pcg64Dxsm {
+                  &self.generator
+              }
+
+              /// Consume the cursor and return the positioned generator.
+              #[must_use]
+              pub fn into_generator(self) -> Pcg64Dxsm {
+                  self.generator
+              }
+
+              /// Capture a portable checkpoint at the current position.
+              #[must_use]
+              pub fn checkpoint(&self) -> RngCheckpoint {
+                  let (state, increment) = self.generator.state();
+                  RngCheckpoint {
+                      rng_layout_version: RNG_LAYOUT_VERSION,
+                      keyed_fork_layout_version: KEYED_FORK_LAYOUT_VERSION,
+                      position: self.position,
+                      origin_state: self.origin_state,
+                      origin_increment: self.origin_increment,
+                      state,
+                      increment,
+                  }
+              }
+
+              /// Draw one raw word and advance the logical position atomically.
+              pub fn next_u64(&mut self) -> Result<u64, RngCursorError> {
+                  let next_position = self
+                      .position
+                      .checked_add(1)
+                      .ok_or(RngCursorError::PositionOverflow)?;
+                  let value = self.generator.next_u64();
+                  self.position = next_position;
+                  Ok(value)
+              }
+
+              /// Draw one NumPy-compatible `[0, 1)` double.
+              pub fn next_f64(&mut self) -> Result<f64, RngCursorError> {
+                  let next_position = self
+                      .position
+                      .checked_add(1)
+                      .ok_or(RngCursorError::PositionOverflow)?;
+                  let value = self.generator.next_f64();
+                  self.position = next_position;
+                  Ok(value)
+              }
+
+              /// Fill caller-owned raw-word storage with exact draw accounting.
+              pub fn fill_u64(
+                  &mut self,
+                  output: &mut [u64],
+              ) -> Result<(), RngCursorError> {
+                  let draws = output.len() as u128;
+                  let next_position = self
+                      .position
+                      .checked_add(draws)
+                      .ok_or(RngCursorError::PositionOverflow)?;
+                  self.generator.fill_u64(output);
+                  self.position = next_position;
+                  Ok(())
+              }
+
+              /// Fill caller-owned double storage with exact draw accounting.
+              pub fn fill_f64(
+                  &mut self,
+                  output: &mut [f64],
+              ) -> Result<(), RngCursorError> {
+                  let draws = output.len() as u128;
+                  let next_position = self
+                      .position
+                      .checked_add(draws)
+                      .ok_or(RngCursorError::PositionOverflow)?;
+                  self.generator.fill_f64(output);
+                  self.position = next_position;
+                  Ok(())
+              }
+
+              /// Advance relative to the current position in logarithmic time.
+              pub fn advance(&mut self, draws: u128) -> Result<(), RngCursorError> {
+                  let next_position = self
+                      .position
+                      .checked_add(draws)
+                      .ok_or(RngCursorError::PositionOverflow)?;
+                  self.generator.advance(draws);
+                  self.position = next_position;
+                  Ok(())
+              }
+
+              /// Seek to an absolute position, including backwards, in O(log n).
+              pub fn seek(&mut self, position: u128) {
+                  self.generator =
+                      Pcg64Dxsm::restore(self.origin_state, self.origin_increment);
+                  self.generator.advance(position);
+                  self.position = position;
+              }
+
+              /// Return to the captured origin.
+              pub fn rewind(&mut self) {
+                  self.seek(0);
+              }
+          }
+
+          /// Cursor errors leave the stream unchanged for the rejected action.
+          #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+          pub enum RngCursorError {
+              /// The logical draw counter would exceed `u128::MAX`.
+              PositionOverflow,
+          }
+
+          impl fmt::Display for RngCursorError {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  match self {
+                      Self::PositionOverflow => {
+                          formatter.write_str("RNG cursor position overflow")
+                      }
+                  }
+              }
+          }
+
+          impl std::error::Error for RngCursorError {}
+
+          /// Canonical checkpoint decoding or consistency failure.
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub enum RngCheckpointError {
+              WrongLength { expected: usize, actual: usize },
+              InvalidMagic,
+              UnsupportedSchema(u32),
+              UnsupportedRngLayout(u32),
+              UnsupportedKeyedForkLayout(u32),
+              StreamIdentityMismatch,
+              InconsistentState,
+          }
+
+          impl fmt::Display for RngCheckpointError {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  match self {
+                      Self::WrongLength { expected, actual } => write!(
+                          formatter,
+                          "RNG checkpoint length {actual} does not equal {expected}"
+                      ),
+                      Self::InvalidMagic => formatter.write_str("invalid RNG checkpoint magic"),
+                      Self::UnsupportedSchema(version) => {
+                          write!(formatter, "unsupported RNG checkpoint schema {version}")
+                      }
+                      Self::UnsupportedRngLayout(version) => {
+                          write!(formatter, "unsupported RNG layout version {version}")
+                      }
+                      Self::UnsupportedKeyedForkLayout(version) => write!(
+                          formatter,
+                          "unsupported keyed-fork layout version {version}"
+                      ),
+                      Self::StreamIdentityMismatch => {
+                          formatter.write_str("RNG checkpoint stream identity mismatch")
+                      }
+                      Self::InconsistentState => formatter.write_str(
+                          "RNG checkpoint current state is not reachable from its origin and position",
+                      ),
+                  }
+              }
+          }
+
+          impl std::error::Error for RngCheckpointError {}
+
+          fn join_words(words: [u64; 2]) -> u128 {
+              (u128::from(words[0]) << 64) | u128::from(words[1])
+          }
+
+          fn split_words(value: u128) -> [u64; 2] {
+              [(value >> 64) as u64, value as u64]
+          }
+
+          fn write_u32(output: &mut [u8], offset: usize, value: u32) {
+              output[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+          }
+
+          fn write_u128(output: &mut [u8], offset: usize, value: u128) {
+              output[offset..offset + 16].copy_from_slice(&value.to_le_bytes());
+          }
+
+          fn read_u32(input: &[u8], offset: usize) -> u32 {
+              let mut bytes = [0_u8; 4];
+              bytes.copy_from_slice(&input[offset..offset + 4]);
+              u32::from_le_bytes(bytes)
+          }
+
+          fn read_u128(input: &[u8], offset: usize) -> u128 {
+              let mut bytes = [0_u8; 16];
+              bytes.copy_from_slice(&input[offset..offset + 16]);
+              u128::from_le_bytes(bytes)
+          }
+
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+
+              #[test]
+              fn absolute_seek_matches_direct_jump_ahead_in_both_directions() {
+                  let positions = [0_u128, 1, 2, 17, 257, 65_537, 1_u128 << 80];
+                  let mut cursor = RngCursor::from_seed(0x0ddc_0ffe_e15e_beef);
+                  for &position in &positions {
+                      cursor.seek(position);
+                      let mut expected =
+                          Pcg64Dxsm::from_seed(0x0ddc_0ffe_e15e_beef);
+                      expected.advance(position);
+                      assert_eq!(cursor.position(), position);
+                      assert_eq!(cursor.state(), expected.state());
+                  }
+                  for &position in positions.iter().rev() {
+                      cursor.seek(position);
+                      let mut expected =
+                          Pcg64Dxsm::from_seed(0x0ddc_0ffe_e15e_beef);
+                      expected.advance(position);
+                      assert_eq!(cursor.state(), expected.state());
+                  }
+              }
+
+              #[test]
+              fn bulk_fills_track_exact_draw_counts_and_state() {
+                  let mut cursor = RngCursor::from_seed(42);
+                  let mut words = [0_u64; 1_025];
+                  let mut doubles = [0.0_f64; 513];
+                  cursor.fill_u64(&mut words).expect("word fill");
+                  cursor.fill_f64(&mut doubles).expect("double fill");
+                  assert_eq!(cursor.position(), 1_538);
+
+                  let mut expected = Pcg64Dxsm::from_seed(42);
+                  let expected_words: Vec<u64> =
+                      (0..words.len()).map(|_| expected.next_u64()).collect();
+                  let expected_doubles: Vec<u64> = (0..doubles.len())
+                      .map(|_| expected.next_f64().to_bits())
+                      .collect();
+                  assert_eq!(words.as_slice(), expected_words.as_slice());
+                  assert_eq!(
+                      doubles.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                      expected_doubles
+                  );
+                  assert_eq!(cursor.state(), expected.state());
+              }
+
+              #[test]
+              fn checkpoint_bytes_round_trip_and_preserve_the_future() {
+                  let mut cursor = RngCursor::from_seed(u64::MAX);
+                  cursor.advance(1_u128 << 96).expect("large seek");
+                  let mut prefix = [0_u64; 31];
+                  cursor.fill_u64(&mut prefix).expect("prefix fill");
+                  let checkpoint = cursor.checkpoint();
+                  let bytes = checkpoint.to_bytes();
+                  assert_eq!(bytes.len(), RNG_CHECKPOINT_ENCODED_LEN);
+                  let decoded = RngCheckpoint::from_bytes(&bytes).expect("decode");
+                  assert_eq!(decoded, checkpoint);
+                  let mut restored = RngCursor::from_checkpoint(&decoded).expect("restore");
+                  let mut left = [0_u64; 257];
+                  let mut right = [0_u64; 257];
+                  cursor.fill_u64(&mut left).expect("left fill");
+                  restored.fill_u64(&mut right).expect("right fill");
+                  assert_eq!(left, right);
+                  assert_eq!(cursor.position(), restored.position());
+                  assert_eq!(cursor.state(), restored.state());
+              }
+
+              #[test]
+              fn checkpoint_validation_rejects_corruption_and_version_drift() {
+                  let bytes = RngCursor::from_seed(7).checkpoint().to_bytes();
+                  let mut bad_magic = bytes;
+                  bad_magic[0] ^= 0xff;
+                  assert_eq!(
+                      RngCheckpoint::from_bytes(&bad_magic),
+                      Err(RngCheckpointError::InvalidMagic)
+                  );
+
+                  let mut bad_schema = bytes;
+                  write_u32(&mut bad_schema, 8, RNG_CHECKPOINT_SCHEMA_VERSION + 1);
+                  assert_eq!(
+                      RngCheckpoint::from_bytes(&bad_schema),
+                      Err(RngCheckpointError::UnsupportedSchema(
+                          RNG_CHECKPOINT_SCHEMA_VERSION + 1
+                      ))
+                  );
+
+                  let mut bad_layout = bytes;
+                  write_u32(&mut bad_layout, 12, RNG_LAYOUT_VERSION + 1);
+                  assert_eq!(
+                      RngCheckpoint::from_bytes(&bad_layout),
+                      Err(RngCheckpointError::UnsupportedRngLayout(
+                          RNG_LAYOUT_VERSION + 1
+                      ))
+                  );
+
+                  let mut impossible_position = bytes;
+                  write_u128(&mut impossible_position, 20, 1);
+                  assert_eq!(
+                      RngCheckpoint::from_bytes(&impossible_position),
+                      Err(RngCheckpointError::InconsistentState)
+                  );
+
+                  assert!(matches!(
+                      RngCheckpoint::from_bytes(&bytes[..99]),
+                      Err(RngCheckpointError::WrongLength {
+                          expected: 100,
+                          actual: 99
+                      })
+                  ));
+              }
+
+              #[test]
+              fn overflow_is_rejected_without_mutating_the_stream() {
+                  let mut cursor = RngCursor::from_seed(99);
+                  cursor.seek(u128::MAX);
+                  let before = cursor.clone();
+                  assert_eq!(
+                      cursor.next_u64(),
+                      Err(RngCursorError::PositionOverflow)
+                  );
+                  assert_eq!(cursor, before);
+                  let mut output = [0_u64; 1];
+                  assert_eq!(
+                      cursor.fill_u64(&mut output),
+                      Err(RngCursorError::PositionOverflow)
+                  );
+                  assert_eq!(cursor, before);
+              }
+
+              #[test]
+              fn rewind_returns_to_the_captured_nonseed_origin() {
+                  let mut base = Pcg64Dxsm::from_seed(123);
+                  base.advance(7_777);
+                  let origin = base.state();
+                  let mut cursor = RngCursor::new(base);
+                  cursor.advance(999).expect("advance");
+                  cursor.rewind();
+                  assert_eq!(cursor.position(), 0);
+                  assert_eq!(cursor.state(), origin);
+              }
+          }
+          RS
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/fmn-core/src/lib.rs")
+          source = path.read_text(encoding="utf-8")
+          declaration = "pub mod rng_cursor;\n"
+          reexport = (
+              "pub use rng_cursor::{\n"
+              "    RNG_CHECKPOINT_ENCODED_LEN, RNG_CHECKPOINT_SCHEMA_VERSION, RngCheckpoint,\n"
+              "    RngCheckpointError, RngCursor, RngCursorError,\n"
+              "};\n"
+          )
+          if declaration not in source:
+              source += "\n" + declaration
+          if reexport not in source:
+              source += reexport
+          path.write_text(source, encoding="utf-8")
+          PY
+
+          cargo fmt --all
+          cargo check -p fmn-core --all-targets
+          cargo test -p fmn-core rng_cursor
+          cargo check --target wasm32-unknown-unknown -p fmn-core
+          cargo clippy -p fmn-core --all-targets -- -D warnings
+          git diff --check
+
+          git add crates/fmn-core/src/lib.rs crates/fmn-core/src/rng_cursor.rs
+          git config user.name "FrankenManim RNG Replay"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat(core): add versioned seekable RNG replay cursors" -m "Add a fixed-width self-validating checkpoint format, exact logical draw accounting, logarithmic absolute seek/rewind, atomic overflow refusal, caller-buffer fills, and future-identical checkpoint restoration."
+
+      - name: Add unbiased bounded sampling, shuffle, and sample-prefix APIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > crates/fmn-core/src/rng_sampling.rs <<'RS'
+          //! Deterministic unbiased integer sampling and in-place permutations.
+
+          use core::{fmt, ops::Range};
+
+          use crate::rng::Pcg64Dxsm;
+
+          /// Invalid bounded-range or sampling request.
+          #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+          pub enum RngRangeError {
+              ZeroUpperBound,
+              EmptyRange,
+              EmptyPopulation,
+              PopulationTooLarge,
+              SampleTooLarge { requested: usize, population: usize },
+          }
+
+          impl fmt::Display for RngRangeError {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  match self {
+                      Self::ZeroUpperBound => {
+                          formatter.write_str("RNG upper bound must be nonzero")
+                      }
+                      Self::EmptyRange => formatter.write_str("RNG range must be nonempty"),
+                      Self::EmptyPopulation => {
+                          formatter.write_str("cannot choose from an empty population")
+                      }
+                      Self::PopulationTooLarge => formatter.write_str(
+                          "population length cannot be represented by the RNG index domain",
+                      ),
+                      Self::SampleTooLarge {
+                          requested,
+                          population,
+                      } => write!(
+                          formatter,
+                          "sample size {requested} exceeds population {population}"
+                      ),
+                  }
+              }
+          }
+
+          impl std::error::Error for RngRangeError {}
+
+          pub(crate) fn sample_below_with<F>(
+              mut next_u64: F,
+              upper: u64,
+          ) -> Result<(u64, u128), RngRangeError>
+          where
+              F: FnMut() -> u64,
+          {
+              if upper == 0 {
+                  return Err(RngRangeError::ZeroUpperBound);
+              }
+              let threshold = upper.wrapping_neg() % upper;
+              let mut draws = 0_u128;
+              loop {
+                  draws += 1;
+                  let word = next_u64();
+                  let product = u128::from(word) * u128::from(upper);
+                  let low = product as u64;
+                  if low >= threshold {
+                      return Ok(((product >> 64) as u64, draws));
+                  }
+              }
+          }
+
+          impl Pcg64Dxsm {
+              /// Uniform integer in `[0, upper)` using Lemire rejection.
+              pub fn uniform_below(&mut self, upper: u64) -> Result<u64, RngRangeError> {
+                  sample_below_with(|| self.next_u64(), upper).map(|(value, _)| value)
+              }
+
+              /// Uniform integer in the nonempty half-open range.
+              pub fn uniform_range(
+                  &mut self,
+                  range: Range<u64>,
+              ) -> Result<u64, RngRangeError> {
+                  if range.start >= range.end {
+                      return Err(RngRangeError::EmptyRange);
+                  }
+                  let width = range.end - range.start;
+                  self.uniform_below(width).map(|offset| range.start + offset)
+              }
+
+              /// Uniform valid index for a nonempty slice length.
+              pub fn choose_index(&mut self, len: usize) -> Result<usize, RngRangeError> {
+                  if len == 0 {
+                      return Err(RngRangeError::EmptyPopulation);
+                  }
+                  let upper =
+                      u64::try_from(len).map_err(|_| RngRangeError::PopulationTooLarge)?;
+                  usize::try_from(self.uniform_below(upper)?)
+                      .map_err(|_| RngRangeError::PopulationTooLarge)
+              }
+
+              /// Deterministic unbiased Fisher-Yates shuffle.
+              pub fn shuffle<T>(&mut self, values: &mut [T]) -> Result<(), RngRangeError> {
+                  for upper in (2..=values.len()).rev() {
+                      let selected = self.choose_index(upper)?;
+                      values.swap(upper - 1, selected);
+                  }
+                  Ok(())
+              }
+
+              /// Move an unbiased sample without replacement into the prefix.
+              ///
+              /// The order within the returned prefix is itself random. The
+              /// untouched suffix contains the remaining values in a defined
+              /// but unspecified permutation.
+              pub fn sample_prefix<'a, T>(
+                  &mut self,
+                  values: &'a mut [T],
+                  count: usize,
+              ) -> Result<&'a mut [T], RngRangeError> {
+                  if count > values.len() {
+                      return Err(RngRangeError::SampleTooLarge {
+                          requested: count,
+                          population: values.len(),
+                      });
+                  }
+                  for index in 0..count {
+                      let width = values.len() - index;
+                      let offset = self.choose_index(width)?;
+                      values.swap(index, index + offset);
+                  }
+                  Ok(&mut values[..count])
+              }
+          }
+
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+
+              #[test]
+              fn rejection_path_uses_the_next_word_without_modulo_bias() {
+                  let mut words = [0_u64, u64::MAX].into_iter();
+                  let (value, draws) = sample_below_with(
+                      || words.next().expect("scripted word"),
+                      10,
+                  )
+                  .expect("sample");
+                  assert_eq!(draws, 2);
+                  assert_eq!(value, 9);
+              }
+
+              #[test]
+              fn zero_bound_refuses_without_consuming_state() {
+                  let mut generator = Pcg64Dxsm::from_seed(42);
+                  let before = generator.state();
+                  assert_eq!(
+                      generator.uniform_below(0),
+                      Err(RngRangeError::ZeroUpperBound)
+                  );
+                  assert_eq!(generator.state(), before);
+              }
+
+              #[test]
+              fn bounded_samples_never_escape_their_domain() {
+                  let bounds = [1_u64, 2, 3, 7, 10, 255, 256, 257, 65_537, u64::MAX];
+                  for &bound in &bounds {
+                      let mut generator = Pcg64Dxsm::from_seed(bound);
+                      for _ in 0..20_000 {
+                          let value = generator.uniform_below(bound).expect("bounded sample");
+                          assert!(value < bound, "{value} escaped upper bound {bound}");
+                      }
+                  }
+              }
+
+              #[test]
+              fn power_of_two_sampling_uses_the_expected_high_bits() {
+                  let mut sampled = Pcg64Dxsm::from_seed(123);
+                  let mut raw = Pcg64Dxsm::from_seed(123);
+                  for bits in 1..64 {
+                      let upper = 1_u64 << bits;
+                      let word = raw.next_u64();
+                      let expected = word >> (64 - bits);
+                      assert_eq!(sampled.uniform_below(upper), Ok(expected));
+                  }
+              }
+
+              #[test]
+              fn range_sampling_is_deterministic_and_half_open() {
+                  let mut left = Pcg64Dxsm::from_seed(9);
+                  let mut right = Pcg64Dxsm::from_seed(9);
+                  for _ in 0..10_000 {
+                      let a = left.uniform_range(17..1_000_003).expect("left range");
+                      let b = right.uniform_range(17..1_000_003).expect("right range");
+                      assert_eq!(a, b);
+                      assert!((17..1_000_003).contains(&a));
+                  }
+                  assert_eq!(
+                      left.uniform_range(5..5),
+                      Err(RngRangeError::EmptyRange)
+                  );
+              }
+
+              #[test]
+              fn shuffle_is_repeatable_and_preserves_the_permutation() {
+                  let original: Vec<u32> = (0..4_096).collect();
+                  let mut left = original.clone();
+                  let mut right = original.clone();
+                  Pcg64Dxsm::from_seed(777)
+                      .shuffle(&mut left)
+                      .expect("left shuffle");
+                  Pcg64Dxsm::from_seed(777)
+                      .shuffle(&mut right)
+                      .expect("right shuffle");
+                  assert_eq!(left, right);
+                  assert_ne!(left, original);
+                  left.sort_unstable();
+                  assert_eq!(left, original);
+              }
+
+              #[test]
+              fn sample_prefix_is_without_replacement_and_bounds_checked() {
+                  let mut values: Vec<u32> = (0..1_000).collect();
+                  let sample = Pcg64Dxsm::from_seed(314)
+                      .sample_prefix(&mut values, 250)
+                      .expect("sample prefix");
+                  let mut sorted = sample.to_vec();
+                  sorted.sort_unstable();
+                  sorted.dedup();
+                  assert_eq!(sorted.len(), 250);
+                  assert!(sorted.iter().all(|value| *value < 1_000));
+
+                  let before = values.clone();
+                  assert_eq!(
+                      Pcg64Dxsm::from_seed(314).sample_prefix(&mut values, 1_001),
+                      Err(RngRangeError::SampleTooLarge {
+                          requested: 1_001,
+                          population: 1_000
+                      })
+                  );
+                  assert_eq!(values, before);
+              }
+
+              #[test]
+              fn empty_and_singleton_shuffle_consume_no_words() {
+                  let mut generator = Pcg64Dxsm::from_seed(88);
+                  let before = generator.state();
+                  let mut empty: [u8; 0] = [];
+                  let mut singleton = [7_u8];
+                  generator.shuffle(&mut empty).expect("empty shuffle");
+                  generator
+                      .shuffle(&mut singleton)
+                      .expect("singleton shuffle");
+                  assert_eq!(generator.state(), before);
+                  assert_eq!(singleton, [7]);
+              }
+          }
+          RS
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lib_path = Path("crates/fmn-core/src/lib.rs")
+          lib = lib_path.read_text(encoding="utf-8")
+          declaration = "pub mod rng_sampling;\n"
+          reexport = "pub use rng_sampling::RngRangeError;\n"
+          if declaration not in lib:
+              lib += declaration
+          if reexport not in lib:
+              lib += reexport
+          lib_path.write_text(lib, encoding="utf-8")
+
+          cursor_path = Path("crates/fmn-core/src/rng_cursor.rs")
+          cursor = cursor_path.read_text(encoding="utf-8")
+          import_anchor = "use crate::rng::{\n    KEYED_FORK_LAYOUT_VERSION, Pcg64Dxsm, RNG_LAYOUT_VERSION,\n};\n"
+          import_replacement = (
+              import_anchor
+              + "use crate::rng_sampling::{RngRangeError, sample_below_with};\n"
+          )
+          if "sample_below_with" not in cursor:
+              if cursor.count(import_anchor) != 1:
+                  raise SystemExit("rng_cursor import anchor drifted")
+              cursor = cursor.replace(import_anchor, import_replacement, 1)
+
+          method_anchor = '''    /// Return to the captured origin.
+    pub fn rewind(&mut self) {
+        self.seek(0);
+    }
+'''
+          methods = method_anchor + '''
+
+    /// Sample uniformly from `[0, upper)` while accounting for every
+    /// rejection draw. The operation is transactional on error.
+    pub fn uniform_below(
+        &mut self,
+        upper: u64,
+    ) -> Result<u64, RngCursorSamplingError> {
+        let mut trial = self.clone();
+        let (value, draws) =
+            sample_below_with(|| trial.generator.next_u64(), upper)?;
+        trial.position = trial
+            .position
+            .checked_add(draws)
+            .ok_or(RngCursorError::PositionOverflow)?;
+        *self = trial;
+        Ok(value)
+    }
+
+    /// Sample uniformly from a nonempty half-open range with exact draw
+    /// accounting and transactional failure behavior.
+    pub fn uniform_range(
+        &mut self,
+        range: core::ops::Range<u64>,
+    ) -> Result<u64, RngCursorSamplingError> {
+        if range.start >= range.end {
+            return Err(RngRangeError::EmptyRange.into());
+        }
+        let width = range.end - range.start;
+        self.uniform_below(width)
+            .map(|offset| range.start + offset)
+    }
+'''
+          if "pub fn uniform_below(" not in cursor:
+              if cursor.count(method_anchor) != 1:
+                  raise SystemExit("rng_cursor method anchor drifted")
+              cursor = cursor.replace(method_anchor, methods, 1)
+
+          error_anchor = "impl std::error::Error for RngCursorError {}\n"
+          error_block = error_anchor + '''
+
+/// Combined range-validation or cursor-position failure during sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RngCursorSamplingError {
+    Cursor(RngCursorError),
+    Range(RngRangeError),
+}
+
+impl fmt::Display for RngCursorSamplingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cursor(error) => error.fmt(formatter),
+            Self::Range(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for RngCursorSamplingError {}
+
+impl From<RngCursorError> for RngCursorSamplingError {
+    fn from(error: RngCursorError) -> Self {
+        Self::Cursor(error)
+    }
+}
+
+impl From<RngRangeError> for RngCursorSamplingError {
+    fn from(error: RngRangeError) -> Self {
+        Self::Range(error)
+    }
+}
+'''
+          if "pub enum RngCursorSamplingError" not in cursor:
+              if cursor.count(error_anchor) != 1:
+                  raise SystemExit("rng_cursor error anchor drifted")
+              cursor = cursor.replace(error_anchor, error_block, 1)
+
+          test_anchor = "    fn rewind_returns_to_the_captured_nonseed_origin() {\n"
+          sampling_tests = '''    #[test]
+    fn cursor_bounded_sampling_accounts_for_rejections_exactly() {
+        let mut cursor = RngCursor::from_seed(1234);
+        let mut direct = Pcg64Dxsm::from_seed(1234);
+        for &upper in &[1_u64, 3, 10, 257, 65_537, u64::MAX] {
+            for _ in 0..1_000 {
+                let before = direct.state();
+                let mut draws = 0_u128;
+                let (expected, counted) = sample_below_with(
+                    || {
+                        draws += 1;
+                        direct.next_u64()
+                    },
+                    upper,
+                )
+                .expect("direct sample");
+                assert_eq!(draws, counted);
+                assert_eq!(cursor.uniform_below(upper), Ok(expected));
+                assert_eq!(cursor.state(), direct.state());
+                assert_ne!(before, direct.state());
+            }
+        }
+        let mut replay = Pcg64Dxsm::from_seed(1234);
+        replay.advance(cursor.position());
+        assert_eq!(cursor.state(), replay.state());
+    }
+
+    #[test]
+    fn cursor_sampling_errors_are_transactional() {
+        let mut cursor = RngCursor::from_seed(55);
+        let before = cursor.clone();
+        assert_eq!(
+            cursor.uniform_below(0),
+            Err(RngCursorSamplingError::Range(
+                RngRangeError::ZeroUpperBound
+            ))
+        );
+        assert_eq!(cursor, before);
+        assert_eq!(
+            cursor.uniform_range(9..9),
+            Err(RngCursorSamplingError::Range(RngRangeError::EmptyRange))
+        );
+        assert_eq!(cursor, before);
+
+        cursor.seek(u128::MAX);
+        let before_overflow = cursor.clone();
+        assert_eq!(
+            cursor.uniform_below(1),
+            Err(RngCursorSamplingError::Cursor(
+                RngCursorError::PositionOverflow
+            ))
+        );
+        assert_eq!(cursor, before_overflow);
+    }
+
+'''
+          if "fn cursor_bounded_sampling_accounts_for_rejections_exactly()" not in cursor:
+              location = cursor.find(test_anchor)
+              if location < 0:
+                  raise SystemExit("rng_cursor test insertion anchor drifted")
+              cursor = cursor[:location] + sampling_tests + cursor[location:]
+
+          cursor_path.write_text(cursor, encoding="utf-8")
+
+          lib = lib_path.read_text(encoding="utf-8")
+          old = "    RngCheckpointError, RngCursor, RngCursorError,\n"
+          new = "    RngCheckpointError, RngCursor, RngCursorError, RngCursorSamplingError,\n"
+          if old in lib:
+              lib = lib.replace(old, new, 1)
+          elif "RngCursorSamplingError" not in lib:
+              raise SystemExit("rng_cursor re-export anchor drifted")
+          lib_path.write_text(lib, encoding="utf-8")
+          PY
+
+          cargo fmt --all
+          cargo check -p fmn-core --all-targets
+          cargo test -p fmn-core rng_sampling
+          cargo test -p fmn-core rng_cursor
+          cargo test -p fmn-core --test rng_parity
+          cargo check --target wasm32-unknown-unknown -p fmn-core
+          cargo clippy -p fmn-core --all-targets -- -D warnings
+          git diff --check
+
+          git add crates/fmn-core/src/lib.rs crates/fmn-core/src/rng_cursor.rs crates/fmn-core/src/rng_sampling.rs
+          git commit -m "feat(core): add unbiased bounded sampling and permutations" -m "Add Lemire rejection for exact half-open integer ranges, deterministic Fisher-Yates shuffle, in-place sampling without replacement, and transactional cursor sampling whose logical position counts every rejection draw."
+
+      - name: Run the complete product gate and update living documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p fmn-core
+          cargo test -p fmn-core --test rng_parity
+          cargo check --target wasm32-unknown-unknown -p fmn-core
+          bash scripts/check.sh
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import subprocess
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          changelog_path = Path("CHANGELOG.md")
+          changelog = changelog_path.read_text(encoding="utf-8")
+          marker = "### Replayable RNG cursors and unbiased sampling (2026-09-03)"
+          if marker not in changelog:
+              entry = (
+                  "\n" + marker + "\n\n"
+                  "- Added a fixed-width, little-endian, self-validating RNG checkpoint format bound to both scene and keyed-fork layout versions.\n"
+                  "- Added `RngCursor` with exact raw-draw accounting, logarithmic absolute seek/rewind, atomic overflow refusal, caller-buffer fills, and future-identical restoration.\n"
+                  "- Added unbiased bounded/range sampling, deterministic Fisher-Yates shuffle, and in-place sampling without replacement; cursor sampling accounts for every rejection draw transactionally.\n"
+                  "- Locked the new surfaces under native, wasm32, NumPy-vector, corruption, state-equivalence, and full mandatory-Gauntlet tests.\n"
+              )
+              first_break = changelog.find("\n", changelog.find("#"))
+              changelog = changelog[: first_break + 1] + entry + changelog[first_break + 1 :]
+              changelog_path.write_text(changelog, encoding="utf-8")
+
+          readme_path = Path("README.md")
+          readme = readme_path.read_text(encoding="utf-8")
+          heading = "### Replay checkpoints and sampling"
+          if heading not in readme:
+              section = (
+                  "\n" + heading + "\n\n"
+                  "`RngCursor` turns a PCG64DXSM stream into a replayable logical tape: callers can seek or rewind to an absolute raw-draw position in logarithmic time, checkpoint it into a fixed 100-byte host-independent record, and restore only checkpoints whose state is provably reachable from their recorded origin. Bulk fills and rejection sampling update the position by the exact number of consumed raw words.\n\n"
+                  "`Pcg64Dxsm` also provides unbiased half-open integer ranges, deterministic Fisher-Yates shuffling, and in-place sampling without replacement. Invalid bounds and oversized samples refuse before mutating user data or RNG state.\n"
+              )
+              insertion = readme.find("\n## Architecture")
+              if insertion < 0:
+                  insertion = readme.find("\n## ")
+              if insertion < 0:
+                  insertion = len(readme)
+              readme = readme[:insertion] + section + readme[insertion:]
+              readme_path.write_text(readme, encoding="utf-8")
+
+          status_candidates = [
+              Path("IMPLEMENTATION_STATUS.md"),
+              Path("docs/IMPLEMENTATION_STATUS.md"),
+              Path("docs/implementation_status.md"),
+          ]
+          status_path = next((path for path in status_candidates if path.exists()), status_candidates[-1])
+          status = status_path.read_text(encoding="utf-8") if status_path.exists() else "# Implementation Status\n"
+          status_marker = "## 2026-09-03: replayable RNG cursors and sampling"
+          if status_marker not in status:
+              status += (
+                  "\n" + status_marker + "\n\n"
+                  "**Implemented and fully gated:** versioned self-validating RNG checkpoints; exact-position cursors with absolute seek/rewind and caller-owned bulk fills; unbiased bounded/range draws; deterministic full shuffles; and in-place samples without replacement. The committed tests cover corrupted records, unknown versions, impossible origin/state/position tuples, overflow atomicity, rejection-draw accounting, deterministic permutation preservation, NumPy vector stability, and native/wasm builds.\n"
+              )
+              status_path.parent.mkdir(parents=True, exist_ok=True)
+              status_path.write_text(status, encoding="utf-8")
+
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          receipt = {
+              "schema_version": 1,
+              "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "tested_source_sha_before_docs": head,
+              "features": [
+                  "fixed-width self-validating RNG checkpoints",
+                  "absolute logarithmic seek and rewind",
+                  "exact raw-draw cursor accounting",
+                  "unbiased bounded and ranged integers",
+                  "deterministic Fisher-Yates shuffle",
+                  "in-place sampling without replacement",
+              ],
+              "verified": [
+                  "cargo test -p fmn-core",
+                  "cargo test -p fmn-core --test rng_parity",
+                  "cargo check --target wasm32-unknown-unknown -p fmn-core",
+                  "bash scripts/check.sh",
+              ],
+              "source_sha256": {
+                  "rng_cursor.rs": hashlib.sha256(Path("crates/fmn-core/src/rng_cursor.rs").read_bytes()).hexdigest(),
+                  "rng_sampling.rs": hashlib.sha256(Path("crates/fmn-core/src/rng_sampling.rs").read_bytes()).hexdigest(),
+                  "rng_vectors.txt": hashlib.sha256(Path("crates/fmn-core/fixtures/rng_vectors.txt").read_bytes()).hexdigest(),
+              },
+              "result": "pass",
+          }
+          receipt_path = Path("artifacts/implementation/rng-cursor-sampling-receipt.json")
+          receipt_path.parent.mkdir(parents=True, exist_ok=True)
+          receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+          git diff --check
+          git add README.md CHANGELOG.md artifacts/implementation/rng-cursor-sampling-receipt.json
+          for status in IMPLEMENTATION_STATUS.md docs/IMPLEMENTATION_STATUS.md docs/implementation_status.md; do
+            [[ -e "$status" ]] && git add "$status"
+          done
+          git commit -m "docs(core): record replay cursor and sampling implementation" -m "Document the exact checkpoint, seek, draw-accounting, bounded sampling, shuffle, and sample-without-replacement contracts after the full mandatory Gauntlet passed; record a machine-readable source/evidence receipt."
+
+      - name: Remove transient machinery and publish all tested commits canonically
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/implement-rng-cursor-and-sampling.yml
+          for stale in \
+            .github/workflows/complete-fm-ai1.yml \
+            .github/workflows/extend-rng-replay-api.yml \
+            .github/workflows/add-keyed-rng-forks.yml \
+            .github/workflows/record-rng-implementation-receipt.yml \
+            .github/workflows/finalize-rng-migration.yml \
+            .github/workflows/dispatch-fm-ai1-chain.yml \
+            .github/workflows/retry-fm-ai1-when-upstream-ready.yml \
+            .github/workflows/repair-final-rng-receipt-cleanup.yml \
+            .github/workflows/optimize-rng-chain-gates.yml; do
+            [[ -e "$stale" ]] && git rm "$stale" || true
+          done
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(ci): retire completed RNG migration machinery" -m "Keep only permanent gates after the authority, replay, keyed-fork, cursor, and sampling implementations are recorded and green."
+          fi
+
+          git fetch origin main master
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            git rebase origin/main
+            cargo test -p fmn-core
+            cargo test -p fmn-core --test rng_parity
+            cargo check --target wasm32-unknown-unknown -p fmn-core
+            bash scripts/check.sh
+          fi
+          git push --atomic origin HEAD:main HEAD:master
