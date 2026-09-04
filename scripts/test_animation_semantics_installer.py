@@ -189,5 +189,106 @@ class NativeCompositionContractTests(unittest.TestCase):
             n.Transform(n.Mobject(), object())._native_target()
 
 
+class TransformDispatchTests(unittest.TestCase):
+    def setUp(self):
+        self.native = make_native()
+
+    def family_transform(self, **kwargs):
+        n = self.native
+        source = n.Mobject(n.Mobject(), n.Mobject())
+        target = source.copy()
+        for member in target.get_family():
+            member.data["point"][:, 0] = 2.0
+        return n.Transform(source, target, **kwargs)
+
+    def test_lag_ratio_and_rate_are_applied_per_family_member(self):
+        transform = self.family_transform(lag_ratio=0.5, rate_func=lambda alpha: alpha * alpha)
+        transform.begin()
+        transform.interpolate(0.5)
+        positions = [float(member.data["point"][0, 0]) for member in transform.mobject.get_family()]
+        self.assertEqual(positions, [2.0, 0.5, 0.0])
+        transform.finish()
+        self.assertFalse(transform.mobject.animating)
+        self.assertTrue(all(not member.locked_data_keys for member in transform.mobject.get_family()))
+
+    def test_time_span_is_remapped_before_lag_and_rate(self):
+        transform = self.family_transform(
+            run_time=1.0, time_span=(0.25, 0.75), lag_ratio=0.5,
+            rate_func=lambda alpha: alpha * alpha,
+        )
+        transform.begin()
+        transform.update(0.375)
+        positions = [float(member.data["point"][0, 0]) for member in transform.mobject.get_family()]
+        self.assertEqual(positions, [0.5, 0.0, 0.0])
+
+    def test_subclass_submobject_hook_is_not_bypassed(self):
+        n = self.native
+        class Probe(n.Transform):
+            def interpolate_submobject(self, live, start, target, alpha):
+                self.calls.append((live, start, target, alpha))
+        source, target = n.Mobject(), n.Mobject()
+        transform = Probe(source, target, rate_func=lambda alpha: alpha)
+        transform.calls = []
+        transform.begin()
+        transform.interpolate(0.5)
+        self.assertEqual([call[3] for call in transform.calls], [0.0, 0.5])
+        self.assertIs(transform.calls[-1][0], source)
+        self.assertIs(transform.calls[-1][1], transform.starting_mobject)
+        self.assertIs(transform.calls[-1][2], target)
+
+    def test_subclass_whole_mobject_override_remains_authoritative(self):
+        n = self.native
+        class Probe(n.Transform):
+            def interpolate_mobject(self, alpha):
+                self.calls.append(alpha)
+        transform = Probe(n.Mobject(), n.Mobject())
+        transform.calls = []
+        transform.begin()
+        transform.interpolate(0.25)
+        self.assertEqual(transform.calls, [0.0, 0.25])
+
+    def test_curved_path_only_receives_pointlike_fields(self):
+        n = self.native
+        calls = []
+        def curve(start, end, alpha):
+            calls.append((start.shape, end.shape, alpha))
+            value = n.straight_path(start, end, alpha)
+            value[..., 1] += math.sin(math.pi * alpha)
+            return value
+        curve._fmn_path_arc = math.pi
+        source = n.Mobject(points=((1.0, 0.0, 0.0),))
+        target = n.Mobject(points=((-1.0, 0.0, 0.0),))
+        target.data["rgba"][:] = 1.0
+        target.uniforms["shading"] = (1.0, 0.5, 0.25)
+        transform = n.Transform(source, target, path_func=curve, rate_func=lambda alpha: alpha)
+        transform.begin()
+        transform.interpolate(0.5)
+        np.testing.assert_allclose(source.data["point"][0], [0.0, 1.0, 0.0])
+        np.testing.assert_allclose(source.data["rgba"][0], [0.5] * 4)
+        np.testing.assert_allclose(source.uniforms["shading"], [0.5, 0.25, 0.125])
+        self.assertEqual(calls, [((1, 3), (1, 3), 0.0), ((1, 3), (1, 3), 0.5)])
+
+    def test_empty_constant_records_still_interpolate_uniforms(self):
+        n = self.native
+        source, target = n.Mobject(points=()), n.Mobject(points=())
+        source.const_data_keys = ("rgba",)
+        target.uniforms["shading"] = (1.0, 0.5, 0.25)
+        self.assertIs(source.interpolate(source.copy(), target, 0.5), source)
+        self.assertEqual(source.changes, 0)
+        np.testing.assert_allclose(source.uniforms["shading"], [0.5, 0.25, 0.125])
+
+    def test_locked_fields_and_uniforms_are_preserved(self):
+        n = self.native
+        source, target = n.Mobject(), n.Mobject(points=((2.0, 0.0, 0.0),))
+        source.locked_data_keys = {"rgba"}
+        source.locked_uniform_keys = {"shading"}
+        target.data["rgba"][:] = 1.0
+        target.uniforms["shading"] = (1.0, 0.5, 0.25)
+        source.interpolate(source.copy(), target, 0.5)
+        np.testing.assert_allclose(source.data["point"][0], [1.0, 0.0, 0.0])
+        np.testing.assert_array_equal(source.data["rgba"], np.zeros((1, 4)))
+        self.assertEqual(source.uniforms["shading"], (0.0, 0.0, 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()

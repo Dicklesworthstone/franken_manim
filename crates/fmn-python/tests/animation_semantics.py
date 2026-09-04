@@ -6,9 +6,15 @@ import numpy as np
 
 from manimlib import (
     Animation,
+    AnimationGroup,
+    CyclicReplace,
+    LaggedStart,
+    LaggedStartMap,
     Mobject,
     ReplacementTransform,
     ShowCreation,
+    Succession,
+    Swap,
     Transform,
     TransformFromCopy,
     VMobject,
@@ -244,3 +250,33 @@ scene_probe = SceneProbe()
 replacement.clean_up_from_scene(scene_probe)
 assert scene_probe.removed == [replacement_source]
 assert scene_probe.added == [replacement_target]
+
+# The wheel installer must preserve the native composition specification.
+# Choreo derives its mobject root and timing; the Python constructor must not
+# reject the intentional None sentinel before Scene.play can lower the group.
+composition_children = [Animation(Mobject()), Animation(Mobject())]
+for composition_class in (AnimationGroup, LaggedStart, Succession):
+    composition = composition_class(*composition_children)
+    assert composition.mobject is None
+    assert composition.run_time is None
+    assert composition.animations == composition_children
+    assert str(composition) == composition_class.__name__
+mapped_members = Mobject(Mobject(), Mobject())
+mapped = LaggedStartMap(Animation, mapped_members)
+assert [child.mobject for child in mapped.animations] == list(mapped_members)
+for targetless_class in (CyclicReplace, Swap):
+    targetless = targetless_class(Mobject(), Mobject())
+    assert targetless._native_target() is None
+
+# A Transform subclass's leaf hook must survive the installed dispatch.
+class TransformHookProbe(Transform):
+    def interpolate_submobject(self, current, starting, target, alpha):
+        self.seen_alphas.append(float(alpha))
+
+
+hook_probe = TransformHookProbe(Mobject(), Mobject(), rate_func=linear_rate)
+hook_probe.seen_alphas = []
+hook_probe.begin()
+hook_probe.interpolate(0.5)
+assert hook_probe.seen_alphas == [0.0, 0.5]
+hook_probe.finish()

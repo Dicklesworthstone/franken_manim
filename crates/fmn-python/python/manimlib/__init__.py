@@ -69,6 +69,7 @@ _SEMANTIC_METHODS = {
         "clean_up_from_scene",
         "get_all_mobjects",
         "get_all_families_zipped",
+        "interpolate_mobject",
         "interpolate_submobject",
     ),
     _native.TransformFromCopy: ("__init__",),

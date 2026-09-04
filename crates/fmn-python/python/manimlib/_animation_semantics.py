@@ -47,6 +47,10 @@ def install(native):
         data_keys = [
             key for key in self.data.dtype.names if key not in locked_data
         ]
+        # Point-free family roots can still carry animated uniforms. They
+        # have no first record from which to broadcast a constant data field.
+        if len(self.data) == 0:
+            data_keys = []
         if data_keys:
             self.note_changed_data()
         for key in data_keys:
@@ -361,6 +365,12 @@ def install(native):
         )
         return self
 
+    def transform_interpolate_mobject(self, alpha):
+        # Replace Transform's bootstrap-local straight-only implementation;
+        # otherwise it shadows Animation's family/lag dispatch and none of
+        # the installed path, style, uniform, or subclass hooks can run.
+        Animation.interpolate_mobject(self, alpha)
+
     def transform_from_copy_init(self, mobject, target_mobject, **kwargs):
         Transform.__init__(self, mobject.copy(), target_mobject, **kwargs)
 
@@ -403,6 +413,7 @@ def install(native):
     Transform.clean_up_from_scene = transform_cleanup
     Transform.get_all_mobjects = transform_all_mobjects
     Transform.get_all_families_zipped = transform_families
+    Transform.interpolate_mobject = transform_interpolate_mobject
     Transform.interpolate_submobject = transform_submobject
     ReplacementTransform.replace_mobject_with_target_in_scene = True
     TransformFromCopy.replace_mobject_with_target_in_scene = True
