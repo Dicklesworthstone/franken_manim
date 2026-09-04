@@ -832,6 +832,7 @@ name = "fmn-core"
 version = "0.4.0"
 dependencies = [
  "fmn-dmath",
+ "fnp-random-core",
 ]
 
 [[package]]
@@ -1045,7 +1046,7 @@ dependencies = [
 [[package]]
 name = "fnp-dtype"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=8d7415dc48887efc8925b9c2536ceec1d0a2bb9c#8d7415dc48887efc8925b9c2536ceec1d0a2bb9c"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=a15d5c32e9330b555b0a653058bcfcff22fcb4ec#a15d5c32e9330b555b0a653058bcfcff22fcb4ec"
 dependencies = [
  "half",
 ]
@@ -1053,7 +1054,7 @@ dependencies = [
 [[package]]
 name = "fnp-io"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=8d7415dc48887efc8925b9c2536ceec1d0a2bb9c#8d7415dc48887efc8925b9c2536ceec1d0a2bb9c"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=a15d5c32e9330b555b0a653058bcfcff22fcb4ec#a15d5c32e9330b555b0a653058bcfcff22fcb4ec"
 dependencies = [
  "bytemuck",
  "crc32fast",
@@ -1063,7 +1064,12 @@ dependencies = [
 [[package]]
 name = "fnp-ndarray"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=8d7415dc48887efc8925b9c2536ceec1d0a2bb9c#8d7415dc48887efc8925b9c2536ceec1d0a2bb9c"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=a15d5c32e9330b555b0a653058bcfcff22fcb4ec#a15d5c32e9330b555b0a653058bcfcff22fcb4ec"
+
+[[package]]
+name = "fnp-random-core"
+version = "0.2.0"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=a15d5c32e9330b555b0a653058bcfcff22fcb4ec#a15d5c32e9330b555b0a653058bcfcff22fcb4ec"
 
 [[package]]
 name = "fnx-classes"

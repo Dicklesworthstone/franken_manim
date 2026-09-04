@@ -173,6 +173,7 @@ num-bigint	0.4.8	crates-io	c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd3
 # SUITE.lock franken_numpy pin (governed_closure enforces).
 fnp-dtype	0.2.0	git+franken_numpy@SUITE.lock	-	-	MIT+rider	no	no	no	no	forbid	runtime	§8.2 (fm-n1b): the structured-record dtype model — DType/StructuredField supply RecordDType's field offsets and itemsize for the zero-copy export; rev must equal the SUITE.lock franken_numpy pin	fm	suite-lock-ritual
 fnp-ndarray	0.2.0	git+franken_numpy@SUITE.lock	-	-	MIT+rider	no	no	no	no	forbid	runtime	§8.2 (fm-n1b): the NdLayout stride engine — shape/stride/writeability and as_strided view legality for whole-record and field-scoped exports; data-ownership-free, so it describes foreign memory natively; same SUITE.lock franken_numpy pin	fm	suite-lock-ritual
+fnp-random-core	0.2.0	git+franken_numpy@SUITE.lock	-	-	MIT+rider	no	no	no	no	forbid	runtime	fm-ai1: dependency-free SeedSequence and PCG64DXSM authority; no OS entropy, ndarray, rayon, or distribution surface; rev must equal the SUITE.lock franken_numpy pin	fm	suite-lock-ritual
 half	2.7.1	crates-io	6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b	alloc,default,std	MIT OR Apache-2.0	no	no	no	no	expansion	runtime	fnp-dtype's f16/bf16 scalar support through the pinned franken_numpy gateway	fm	with-franken-numpy-pin
 crunchy	0.2.4	crates-io	460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5	default,limit_128	MIT	yes	no	no	no	expansion	runtime	half's loop-unrolling macro generator through the pinned franken_numpy gateway	fm	with-franken-numpy-pin
 
