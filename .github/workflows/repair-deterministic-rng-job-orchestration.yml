@@ -32,59 +32,43 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('.github/workflows/implement-deterministic-rng-jobs.yml')
-          source = path.read_text(encoding='utf-8')
+          path = Path(".github/workflows/implement-deterministic-rng-jobs.yml")
+          source = path.read_text(encoding="utf-8")
           source = source.replace(
-              '  cancel-in-progress: false\n',
-              '  cancel-in-progress: true\n',
+              "  cancel-in-progress: false\n",
+              "  cancel-in-progress: true\n",
               1,
           ).replace(
-              '    timeout-minutes: 180\n',
-              '    timeout-minutes: 75\n',
+              "    timeout-minutes: 180\n",
+              "    timeout-minutes: 75\n",
               1,
           )
-          old = '''      - name: Wait for the verified replay/reservation foundation
-        shell: bash
-        run: |
-          set -euo pipefail
-          receipt="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/artifacts/implementation/rng-replay-tranche-final.json"
-          for cycle in $(seq 1 240); do
-            if curl --fail --silent "$receipt" | grep -Fq '\"result\": \"pass\"'; then
-              exit 0
-            fi
-            if (( cycle == 1 || cycle % 30 == 0 )); then
-              if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/finalize-rng-replay-tranche.yml?ref=main" >/dev/null 2>&1; then
-                gh api --method POST \\
-                  "repos/${GITHUB_REPOSITORY}/actions/workflows/finalize-rng-replay-tranche.yml/dispatches" \\
-                  -f ref=main || true
-              fi
-            fi
-            sleep 30
-          done
-          echo "verified replay/reservation foundation did not become ready" >&2
-          exit 2
-'''
-          new = '''      - name: Require the verified replay/reservation foundation
-        shell: bash
-        run: |
-          set -euo pipefail
-          receipt="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/artifacts/implementation/rng-replay-tranche-final.json"
-          if curl --fail --silent "$receipt" | grep -Fq '\"result\": \"pass\"'; then
-            exit 0
-          fi
-          if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/finalize-rng-replay-tranche.yml?ref=main" >/dev/null 2>&1; then
-            gh api --method POST \\
-              "repos/${GITHUB_REPOSITORY}/actions/workflows/finalize-rng-replay-tranche.yml/dispatches" \\
-              -f ref=main || true
-          fi
-          echo "deterministic RNG jobs are not ready: rng-replay-tranche-final.json is absent or non-passing" >&2
-          echo "Dispatched the finalizer once; re-run this workflow after the receipt records result=pass." >&2
-          exit 2
-'''
-          if old not in source:
-              raise SystemExit('blocking dependency guard anchor drifted')
-          source = source.replace(old, new, 1)
-          path.write_text(source, encoding='utf-8')
+          start_marker = "      - name: Wait for the verified replay/reservation foundation\n"
+          end_marker = "      - name: Refresh to latest canonical main and install the toolchain\n"
+          start = source.find(start_marker)
+          end = source.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit("deterministic RNG dependency guard anchors drifted")
+          replacement = "\n".join([
+              "      - name: Require the verified replay/reservation foundation",
+              "        shell: bash",
+              "        run: |",
+              "          set -euo pipefail",
+              "          receipt=\"https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/artifacts/implementation/rng-replay-tranche-final.json\"",
+              "          if curl --fail --silent \"$receipt\" | grep -Fq '\"result\": \"pass\"'; then",
+              "            exit 0",
+              "          fi",
+              "          if gh api \"repos/${GITHUB_REPOSITORY}/contents/.github/workflows/finalize-rng-replay-tranche.yml?ref=main\" >/dev/null 2>&1; then",
+              "            gh api --method POST \\",
+              "              \"repos/${GITHUB_REPOSITORY}/actions/workflows/finalize-rng-replay-tranche.yml/dispatches\" \\",
+              "              -f ref=main || true",
+              "          fi",
+              "          echo \"deterministic RNG jobs are not ready: rng-replay-tranche-final.json is absent or non-passing\" >&2",
+              "          echo \"Dispatched the finalizer once; re-run this workflow after the receipt records result=pass.\" >&2",
+              "          exit 2",
+              "",
+          ])
+          path.write_text(source[:start] + replacement + source[end:], encoding="utf-8")
           PY
           git diff --check
 
@@ -95,6 +79,7 @@ jobs:
           git config user.name "FrankenManim orchestration repair"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github/workflows/implement-deterministic-rng-jobs.yml
+          git rm .github/workflows/repair-deterministic-rng-job-orchestration.yml
           git commit -m "ci: make deterministic RNG job dependency fail fast" -m "Cancel stale attempts, dispatch the replay finalizer once, and release the runner immediately when the prerequisite receipt is not yet passing instead of polling for up to two hours."
           git pull --rebase origin main
           git push origin HEAD:main
