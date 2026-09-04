@@ -90,7 +90,8 @@ pub enum FrameError {
         /// Workers successfully started before the refusal.
         spawned: usize,
     },
-    /// A buffer with a foreign layout was released into a pool.
+    /// A buffer without this pool's private ownership capability, or with a
+    /// foreign layout, was released into the pool.
     ForeignBuffer,
     /// More buffers were released than the pool owns.
     PoolOverflow,
@@ -151,7 +152,7 @@ impl std::fmt::Display for FrameError {
                 "CPU render team requested {requested} workers, but only {spawned} could be started"
             ),
             Self::ForeignBuffer => {
-                write!(f, "buffer layout does not match the pool's layout")
+                write!(f, "buffer does not belong to this pool or has a foreign layout")
             }
             Self::PoolOverflow => write!(f, "pool release would exceed its capacity"),
             Self::FormatMismatch { expected, got } => {
@@ -183,6 +184,14 @@ mod tests {
             }
             .to_string(),
             "CPU render team requested 4 workers, but only 1 could be started"
+        );
+    }
+
+    #[test]
+    fn foreign_buffer_refusal_names_pool_membership() {
+        assert_eq!(
+            FrameError::ForeignBuffer.to_string(),
+            "buffer does not belong to this pool or has a foreign layout"
         );
     }
 }
