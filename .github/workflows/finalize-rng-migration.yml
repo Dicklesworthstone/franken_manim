@@ -5,6 +5,14 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/finalize-rng-migration.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "SUITE.lock"
+      - "SUITE_ALLOWLIST.tsv"
+      - "crates/fmn-core/Cargo.toml"
+      - "crates/fmn-core/src/rng.rs"
+      - "crates/fmn-core/tests/rng_parity.rs"
+      - "crates/fmn-conformance/tests/franken_numpy_pin.rs"
   workflow_dispatch:
 
 permissions:
@@ -21,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: true
 
