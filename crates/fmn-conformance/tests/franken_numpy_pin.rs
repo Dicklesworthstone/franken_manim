@@ -12,6 +12,8 @@ const CONSUMED_FNP_PACKAGES: &[&str] = &[
     "fnp-random-core",
 ];
 
+type PackageBlocks = BTreeMap<String, Vec<String>>;
+
 fn repo_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(name)
 }
@@ -46,19 +48,32 @@ fn suite_pin(document: &str, repo: &str) -> String {
         .to_owned()
 }
 
-fn package_blocks(lock: &str) -> BTreeMap<String, String> {
-    let mut packages = BTreeMap::new();
+fn package_blocks(lock: &str) -> PackageBlocks {
+    let mut packages = PackageBlocks::new();
     for block in lock.split("\n[[package]]\n").skip(1) {
         let name = block
             .lines()
             .find_map(|line| line.strip_prefix("name = \"")?.strip_suffix('"'))
             .unwrap_or_else(|| std::panic::panic_any("Cargo.lock package lacks a canonical name"));
-        assert!(
-            packages.insert(name.to_owned(), block.to_owned()).is_none(),
-            "Cargo.lock contains duplicate package {name}"
-        );
+        packages
+            .entry(name.to_owned())
+            .or_default()
+            .push(block.to_owned());
     }
     packages
+}
+
+fn unique_package_block<'a>(packages: &'a PackageBlocks, name: &str) -> &'a str {
+    let blocks = packages
+        .get(name)
+        .unwrap_or_else(|| std::panic::panic_any(format!("Cargo.lock lacks {name}")));
+    assert_eq!(
+        blocks.len(),
+        1,
+        "Cargo.lock must contain exactly one governed {name} package, found {}",
+        blocks.len()
+    );
+    &blocks[0]
 }
 
 fn source_from_block<'a>(name: &str, block: &'a str) -> &'a str {
@@ -101,9 +116,7 @@ fn every_consumed_franken_numpy_package_resolves_to_the_suite_pin() {
     let packages = package_blocks(&lock);
 
     for package in CONSUMED_FNP_PACKAGES {
-        let block = packages
-            .get(*package)
-            .unwrap_or_else(|| std::panic::panic_any(format!("Cargo.lock lacks {package}")));
+        let block = unique_package_block(&packages, package);
         let source = source_from_block(package, block);
         assert!(
             source.starts_with("git+https://github.com/Dicklesworthstone/franken_numpy?rev="),
@@ -120,9 +133,7 @@ fn every_consumed_franken_numpy_package_resolves_to_the_suite_pin() {
 fn fmn_core_consumes_only_the_dependency_free_rng_primitive() {
     let lock = read_repo_file("Cargo.lock");
     let packages = package_blocks(&lock);
-    let core = packages
-        .get("fmn-core")
-        .unwrap_or_else(|| std::panic::panic_any("Cargo.lock lacks fmn-core"));
+    let core = unique_package_block(&packages, "fmn-core");
     let core_dependencies = dependencies_from_block(core);
     assert!(
         core_dependencies.iter().any(|dependency| *dependency == "fnp-random-core"),
@@ -139,11 +150,21 @@ fn fmn_core_consumes_only_the_dependency_free_rng_primitive() {
         "full fnp-random entered the native Cargo.lock instead of the dependency-free core"
     );
 
-    let random_core = packages
-        .get("fnp-random-core")
-        .unwrap_or_else(|| std::panic::panic_any("Cargo.lock lacks fnp-random-core"));
+    let random_core = unique_package_block(&packages, "fnp-random-core");
     assert!(
         dependencies_from_block(random_core).is_empty(),
         "fnp-random-core is no longer dependency-free"
     );
+}
+
+#[test]
+fn lock_parser_preserves_multiple_versions_without_weakening_governed_uniqueness() {
+    let synthetic = concat!(
+        "# preamble\n[[package]]\nname = \"shared\"\nversion = \"1.0.0\"\n\n",
+        "[[package]]\nname = \"shared\"\nversion = \"2.0.0\"\n\n",
+        "[[package]]\nname = \"governed\"\nversion = \"3.0.0\"\n"
+    );
+    let packages = package_blocks(synthetic);
+    assert_eq!(packages.get("shared").map(Vec::len), Some(2));
+    assert_eq!(unique_package_block(&packages, "governed").lines().next(), Some("name = \"governed\""));
 }
