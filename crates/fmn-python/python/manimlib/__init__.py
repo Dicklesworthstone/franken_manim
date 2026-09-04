@@ -1,9 +1,9 @@
 """FrankenManim's supported ``manimlib`` package surface.
 
 The implementation lives in the private, CPython-versioned ``manimlib``
-extension.  This initializer only re-exports that module's public schema;
-geometry, animation, rendering, and compatibility semantics remain native or
-in the bootstrap embedded in the extension.
+extension.  This initializer re-exports that module's public schema and applies
+small Python semantic continuations directly to its existing class objects;
+geometry, rendering, and engine state remain native.
 """
 
 import sys as _sys
@@ -23,6 +23,10 @@ from fmn_python.schema_provenance import (
 _ensure_exclusive_manimlib_namespace()
 
 from . import manimlib as _native
+from ._animation_semantics import install as _install_animation_semantics
+
+_install_animation_semantics(_native)
+del _install_animation_semantics
 
 try:
     _apply_schema_placeholder_provenance(_native)
