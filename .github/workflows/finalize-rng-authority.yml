@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: finalize-rng-authority
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   finalize:
