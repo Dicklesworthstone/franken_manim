@@ -119,6 +119,25 @@ jobs:
                       else:
                           value = _interpolate(data1, data2, alpha)
                       self.data[key][:] = value
+                  locked_uniforms = getattr(self, "locked_uniform_keys", ())
+                  for key in self.uniforms:
+                      if key in locked_uniforms:
+                          continue
+                      if key not in mobject1.uniforms or key not in mobject2.uniforms:
+                          continue
+                      value1 = mobject1.uniforms[key]
+                      value2 = mobject2.uniforms[key]
+                      if isinstance(value1, _np.ndarray) or isinstance(value2, _np.ndarray):
+                          value = _interpolate(value1, value2, alpha)
+                      elif isinstance(value1, (list, tuple)) or isinstance(value2, (list, tuple)):
+                          value = _interpolate(
+                              _np.asarray(value1, dtype=float),
+                              _np.asarray(value2, dtype=float),
+                              alpha,
+                          ).tolist()
+                      else:
+                          value = _interpolate(value1, value2, alpha)
+                      self.uniforms[key] = value
                   return self
           ''').rstrip("\n")
           source = replace_between(
@@ -551,6 +570,10 @@ jobs:
           regression = dedent('''
 
           # Base Animation and Transform semantic surface (fm-5wq.4).
+          _np = np
+          _math = math
+
+
           class _FmnBaseAnimationProbe(Animation):
               def __init__(self, mobject, **kwargs):
                   self.calls = []
@@ -726,6 +749,8 @@ jobs:
           _fmn_arc_target = Mobject().set_points([[-1.0, 0.0, 0.0]])
           _fmn_arc_source.set_color("#000000")
           _fmn_arc_target.set_color("#FFFFFF")
+          _fmn_arc_source.set_shading(0.0, 0.0, 0.0)
+          _fmn_arc_target.set_shading(1.0, 0.5, 0.25)
           _fmn_arc_transform = Transform(
               _fmn_arc_source,
               _fmn_arc_target,
@@ -746,6 +771,11 @@ jobs:
           assert _np.allclose(
               _fmn_arc_source.data["rgba"][0, :3],
               [0.5, 0.5, 0.5],
+              atol=1e-6,
+          )
+          assert _np.allclose(
+              _fmn_arc_source.get_shading(),
+              [0.5, 0.25, 0.125],
               atol=1e-6,
           )
           _fmn_arc_transform.finish()
@@ -790,7 +820,7 @@ jobs:
           git add crates/fmn-python/python/manimlib_bootstrap.py crates/fmn-python/tests/bridge.py
           git commit \
             -m "fix(python): complete base Animation and Transform semantics" \
-            -m "Implement the pinned lifecycle, validation, deterministic naming, helper updates, family zipping, lagged sub-alpha calculation, deep copy, and fluent rate/name API. Complete Transform alignment, target preservation, data locking, point-path versus style interpolation, arc-path fallback, replacement cleanup, and TransformFromCopy source isolation with permanent portal regressions." \
+            -m "Implement the pinned lifecycle, validation, deterministic naming, helper updates, family zipping, lagged sub-alpha calculation, deep copy, and fluent rate/name API. Complete Transform alignment, target preservation, data locking, point-path versus style and uniform interpolation, arc-path fallback, replacement cleanup, and TransformFromCopy source isolation with permanent portal regressions." \
             -m "Relates-to: fm-5wq.4"
 
       - name: Rebase and push directly to main
