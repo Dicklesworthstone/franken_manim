@@ -1,0 +1,33 @@
+name: Agent source snapshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/agent-source-snapshot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Package exact source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .git target
+          tar --exclude='./.git' --exclude='./target' -czf /tmp/franken-manim-source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: franken-manim-source
+          path: /tmp/franken-manim-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
