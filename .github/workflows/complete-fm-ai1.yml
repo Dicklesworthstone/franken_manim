@@ -1,0 +1,309 @@
+name: Complete fm-ai1 RNG Cutover
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/complete-fm-ai1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: complete-fm-ai1-rng-cutover
+  cancel-in-progress: false
+
+jobs:
+  complete:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install governed toolchain and browser prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-07-05 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          rustup override set nightly-2026-07-05
+          python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+
+      - name: Resolve the tested upstream authority
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_sha="$(git ls-remote https://github.com/Dicklesworthstone/franken_numpy.git refs/heads/main | awk '{print $1}')"
+          [[ "$upstream_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "could not resolve FrankenNumPy main" >&2
+            exit 2
+          }
+          git clone --depth 1 https://github.com/Dicklesworthstone/franken_numpy.git "${RUNNER_TEMP}/franken_numpy"
+          grep -Fq 'fnp-random-core = { path = "../fnp-random-core" }' "${RUNNER_TEMP}/franken_numpy/crates/fnp-random/Cargo.toml"
+          grep -Fq 'core: fnp_random_core::Pcg64Dxsm' "${RUNNER_TEMP}/franken_numpy/crates/fnp-random/src/lib.rs"
+          test ! -e "${RUNNER_TEMP}/franken_numpy/.github/workflows/centralize-pcg64dxsm.yml"
+          cargo +nightly-2026-07-05 test --manifest-path "${RUNNER_TEMP}/franken_numpy/crates/fnp-random-core/Cargo.toml"
+          echo "sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Advance the governed pin and refresh closure metadata
+        env:
+          FNP_SHA: ${{ steps.upstream.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          sha = os.environ["FNP_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", sha):
+              raise SystemExit(f"invalid upstream SHA {sha!r}")
+
+          cargo_path = Path("Cargo.toml")
+          cargo = cargo_path.read_text(encoding="utf-8")
+          pattern = re.compile(
+              r'^(fnp-(?:dtype|ndarray|io|random-core) = \{ git = "https://github.com/Dicklesworthstone/franken_numpy", rev = ")[0-9a-f]{40}(".*)$',
+              re.MULTILINE,
+          )
+          cargo, count = pattern.subn(lambda match: match.group(1) + sha + match.group(2), cargo)
+          if count != 4:
+              raise SystemExit(f"expected four governed fnp dependency pins, changed {count}")
+          cargo_path.write_text(cargo, encoding="utf-8")
+
+          suite_path = Path("SUITE.lock")
+          suite = suite_path.read_text(encoding="utf-8")
+          suite, count = re.subn(
+              r"^franken_numpy\t[0-9a-f]{40}\t",
+              f"franken_numpy\t{sha}\t",
+              suite,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if count != 1:
+              raise SystemExit("SUITE.lock FrankenNumPy row was not uniquely updated")
+          suite_path.write_text(suite, encoding="utf-8")
+
+          allowlist_path = Path("SUITE_ALLOWLIST.tsv")
+          allowlist = allowlist_path.read_text(encoding="utf-8")
+          row = (
+              "fnp-random-core\t0.2.0\tgit+franken_numpy@SUITE.lock\t-\t-\t"
+              "MIT+rider\tno\tno\tno\tno\tforbid\truntime\t"
+              "fm-ai1: dependency-free SeedSequence and PCG64DXSM authority; no OS entropy, ndarray, rayon, or distribution surface; rev must equal the SUITE.lock franken_numpy pin\t"
+              "fm\tsuite-lock-ritual\n"
+          )
+          if not any(line.startswith("fnp-random-core\t") for line in allowlist.splitlines()):
+              anchor = next(
+                  line
+                  for line in allowlist.splitlines(keepends=True)
+                  if line.startswith("fnp-ndarray\t0.2.0\tgit+franken_numpy@SUITE.lock\t")
+              )
+              allowlist = allowlist.replace(anchor, anchor + row, 1)
+          allowlist_path.write_text(allowlist, encoding="utf-8")
+
+          rng = Path("crates/fmn-core/src/rng.rs").read_text(encoding="utf-8")
+          required = [
+              "pub use fnp_random_core::SeedSequence;",
+              "inner: fnp_random_core::Pcg64Dxsm,",
+              "fnp_random_core::Pcg64Dxsm::from_split_state",
+          ]
+          missing = [marker for marker in required if marker not in rng]
+          if missing:
+              raise SystemExit(f"fmn-core wrapper is incomplete: {missing}")
+          forbidden = ["const CHEAP_MULTIPLIER", "const DEFAULT_MULTIPLIER", "fn hashmix(", "fn mix("]
+          leaked = [marker for marker in forbidden if marker in rng]
+          if leaked:
+              raise SystemExit(f"duplicate RNG primitive remains in fmn-core: {leaked}")
+
+          beads_path = Path(".beads/issues.jsonl")
+          bead_lines = beads_path.read_text(encoding="utf-8").splitlines()
+          found = False
+          now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+          for index, line in enumerate(bead_lines):
+              issue = json.loads(line)
+              if issue.get("id") != "fm-ai1":
+                  continue
+              found = True
+              if issue.get("status") != "closed":
+                  issue["status"] = "closed"
+                  issue["updated_at"] = now
+                  issue["closed_at"] = now
+                  issue["close_reason"] = (
+                      "Removed fmn-core's duplicate SeedSequence/PCG64DXSM implementation and delegated the preserved public wrapper, split-state journal, named substreams, and frame-keyed forks to FrankenNumPy's dependency-free fnp-random-core. Advanced all fnp pins together, admitted the exact package in the governed closure, locked source identity and absence of full fnp-random, retained the complete NumPy-generated vector suite, compiled native and wasm32 paths, refreshed browser/WASM evidence, and passed the mandatory Gauntlet."
+                  )
+                  bead_lines[index] = json.dumps(issue, separators=(",", ":"), ensure_ascii=False)
+              break
+          if not found:
+              raise SystemExit("fm-ai1 is absent from .beads/issues.jsonl")
+          beads_path.write_text("\n".join(bead_lines) + "\n", encoding="utf-8")
+          PY
+
+          cargo check -p fmn-core --all-targets
+
+      - name: Prove semantic parity and the minimal native/wasm closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p fmn-core
+          cargo test -p fmn-core --test rng_parity
+          cargo check --target wasm32-unknown-unknown -p fmn-core
+          cargo test -p fmn-conformance --test governed_closure \
+            workspace_closure_is_exactly_the_governed_universe -- --exact
+          cargo test -p fmn-conformance --test governed_closure \
+            suite_lock_parses_and_matches_the_pinned_toolchain -- --exact
+          cargo test -p fmn-conformance --test franken_numpy_pin
+          cargo clippy -p fmn-core --all-targets -- -D warnings
+          cargo clippy -p fmn-conformance --test franken_numpy_pin -- -D warnings
+
+      - name: Re-run affected WASM execution and packaging evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash wasm-smoke/run.sh
+          bash scripts/check_wasm_package.sh
+
+      - name: Refresh truthful documentation and authority digests
+        env:
+          FNP_SHA: ${{ steps.upstream.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import re
+          from pathlib import Path
+
+          sha = os.environ["FNP_SHA"]
+          suite_digest = hashlib.sha256(Path("SUITE.lock").read_bytes()).hexdigest()
+          lock_digest = hashlib.sha256(Path("Cargo.lock").read_bytes()).hexdigest()
+
+          wasm_path = Path("docs/wasm_audit.md")
+          wasm = wasm_path.read_text(encoding="utf-8")
+          wasm = re.sub(
+              r"\*\*Status:\*\*.*?\nThe always-on",
+              "**Status:** re-derived 2026-09-03 after fm-ai1 moved fmn-core's NumPy-compatible SeedSequence/PCG64DXSM primitive to the dependency-free fnp-random-core package. The target build, Node smoke, packaged browser surface, and governed closure were re-run under the new exact FrankenNumPy pin; the RNG vector corpus remains bit-identical and the core adds no transitive packages.\nThe always-on",
+              wasm,
+              count=1,
+              flags=re.DOTALL,
+          )
+          wasm = re.sub(
+              r"- `SUITE\.lock` SHA-256: `[0-9a-f]{64}`",
+              f"- `SUITE.lock` SHA-256: `{suite_digest}`",
+              wasm,
+              count=1,
+          )
+          wasm = re.sub(
+              r"- `Cargo\.lock` SHA-256: `[0-9a-f]{64}`",
+              f"- `Cargo.lock` SHA-256: `{lock_digest}`",
+              wasm,
+              count=1,
+          )
+          graph_marker = "| `fmn-wasm`, `fmn-anim`, `fmn-cache`, `fmn-codec`, `fmn-config`, `fmn-core`, `fmn-dmath`, `fmn-frame`, `fmn-geom`, `fmn-hash`, `fmn-mobject`, `fmn-platform`, `fmn-render`, `fmn-scene` |"
+          graph_note = (
+              "\n`fmn-core` now reaches `fnp-random-core` at FrankenNumPy commit `"
+              + sha
+              + "`. That package contains only safe deterministic SeedSequence/PCG64DXSM state transforms, has zero dependencies, and was compiled directly for wasm32 in this re-derivation. The full `fnp-random` distribution, entropy, ndarray, and rayon surfaces remain outside the browser graph.\n"
+          )
+          if graph_note.strip() not in wasm:
+              insertion = wasm.find("\n", wasm.find(graph_marker))
+              if insertion < 0:
+                  raise SystemExit("WASM graph table anchor drifted")
+              wasm = wasm[: insertion + 1] + graph_note + wasm[insertion + 1 :]
+          wasm = wasm.replace(
+              "| `franken_numpy`, `frankenscipy`, `franken_networkx`, `frankenpandas` | not consumed by the current wasm graph; any future subset requires its own target build and governed-closure update |",
+              "| full `franken_numpy` array/I/O/distribution surfaces, `frankenscipy`, `franken_networkx`, `frankenpandas` | not consumed by the current wasm graph; the sole exception is the dependency-free `fnp-random-core` primitive explicitly built and audited above |",
+          )
+          wasm_path.write_text(wasm, encoding="utf-8")
+
+          changelog_path = Path("CHANGELOG.md")
+          changelog = changelog_path.read_text(encoding="utf-8")
+          marker = "### RNG authority cutover (2026-09-03)"
+          if marker not in changelog:
+              entry = (
+                  "\n" + marker + "\n\n"
+                  "- Completed `fm-ai1`: `fmn-core` now delegates NumPy-compatible `SeedSequence` and `PCG64DXSM` transitions to the zero-dependency `fnp-random-core` package while preserving the public RNG API, split-state journals, named substreams, frame forks, and exact generated vectors.\n"
+                  "- Advanced every FrankenNumPy workspace dependency to one governed commit and added a permanent source-identity/minimal-closure regression.\n"
+                  "- Re-ran native, wasm32, Node smoke, browser-package, closure, Clippy, and mandatory-Gauntlet evidence under the new pin.\n"
+              )
+              first_break = changelog.find("\n", changelog.find("#"))
+              changelog = changelog[: first_break + 1] + entry + changelog[first_break + 1 :]
+              changelog_path.write_text(changelog, encoding="utf-8")
+
+          status_candidates = [
+              Path("IMPLEMENTATION_STATUS.md"),
+              Path("docs/IMPLEMENTATION_STATUS.md"),
+              Path("docs/implementation_status.md"),
+          ]
+          status_path = next((path for path in status_candidates if path.exists()), status_candidates[-1])
+          status = status_path.read_text(encoding="utf-8") if status_path.exists() else "# Implementation Status\n"
+          status_marker = "## 2026-09-03: governed RNG authority"
+          if status_marker not in status:
+              status += (
+                  "\n" + status_marker + "\n\n"
+                  "**Complete:** `fm-ai1`. The semantic root no longer owns a second RNG algorithm. `fmn-core::rng` is a scene-layout wrapper over `fnp-random-core`, with the existing NumPy vector fixture, state restoration, substream isolation, and frame-order invariance tests unchanged at the product boundary. The native and wasm dependency closure admits only the zero-dependency primitive, not the full FrankenNumPy random engine.\n"
+              )
+              status_path.parent.mkdir(parents=True, exist_ok=True)
+              status_path.write_text(status, encoding="utf-8")
+
+          readme_path = Path("README.md")
+          readme = readme_path.read_text(encoding="utf-8")
+          readme_marker = "### Deterministic RNG authority"
+          if readme_marker not in readme:
+              section = (
+                  "\n" + readme_marker + "\n\n"
+                  "FrankenManim's named substreams and frame-keyed forks are backed by FrankenNumPy's dependency-free `fnp-random-core`, not a local copy of PCG64DXSM. The scene-facing API and NumPy-generated parity vectors remain stable, while the governed closure excludes OS entropy, ndarray, rayon, and the full distribution engine from `fmn-core`.\n"
+              )
+              insertion = readme.find("\n## Architecture")
+              if insertion < 0:
+                  insertion = readme.find("\n## ")
+              if insertion < 0:
+                  insertion = len(readme)
+              readme = readme[:insertion] + section + readme[insertion:]
+              readme_path.write_text(readme, encoding="utf-8")
+          PY
+          cargo fmt --all
+          git diff --check
+
+      - name: Run the full mandatory Gauntlet on the documented tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/check.sh
+
+      - name: Commit the fully earned cutover directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/complete-fm-ai1.yml
+          git add .beads/issues.jsonl Cargo.toml Cargo.lock SUITE.lock SUITE_ALLOWLIST.tsv \
+            crates/fmn-core crates/fmn-conformance/tests/franken_numpy_pin.rs \
+            README.md CHANGELOG.md docs/wasm_audit.md IMPLEMENTATION_STATUS.md \
+            docs/IMPLEMENTATION_STATUS.md docs/implementation_status.md 2>/dev/null || true
+          git add -A
+          git config user.name "FrankenManim RNG Cutover"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "refactor(core): complete the FrankenNumPy RNG cutover" -m "Close fm-ai1 by advancing the governed FrankenNumPy pin, locking fnp-random-core as the sole PCG64DXSM authority, preserving all scene-level RNG semantics and vector parity, refreshing the exact closure and WASM evidence, and passing the full mandatory Gauntlet on the committed tree."
+
+          for attempt in 1 2 3; do
+            git fetch origin main
+            remote="$(git rev-parse origin/main)"
+            if git merge-base --is-ancestor "$remote" HEAD; then
+              git push origin HEAD:main
+              exit 0
+            fi
+            echo "main advanced during validation; rebasing attempt $attempt and re-running the mandatory gate"
+            git rebase origin/main
+            cargo test -p fmn-core --test rng_parity
+            cargo test -p fmn-conformance --test franken_numpy_pin
+            bash scripts/check.sh
+          done
+          echo "main continued moving after three fully revalidated rebases" >&2
+          exit 4
