@@ -234,73 +234,159 @@ class RuntimeAuditTests(unittest.TestCase):
         self.assertEqual(report["counts"]["runtime_placeholders"], 0)
 
     def test_missing_reviewed_symbol_and_module_fail_closed(self) -> None:
-        self.module("fakeWÜÜ[›Z\ÜÚ[™×ÜÞ[X›ÛŠBˆ›ÝÜÈH]Y]œ\œÙWÜÝ]\×Ü›ÝÜÊˆÝ]\×Ý^
-ˆ›ÝÊ™˜ZÙWÜÜ[›Z\ÜÚ[™×ÜÞ[X›Û››ÜHŠKˆ›ÝÊ™˜ZÙWÜÜ[››×ÜÝXÚÛ[Ù[N››ÜHŠKˆ
-Bˆ
-Bˆ™\ÜH]Y]˜]Y]Ü›ÝÜÊ›ÝÜÊBˆÙ[‹˜\ÜÙ\˜[ÙJ™\ÜÈ›ÚÈ—JBˆÙ[‹˜\ÜÙ\\]X[
-™\ÜÈ˜ÛÝ[È—VÈ›Z\ÜÚ[™×Ü™]šY]ÙY—KŠBˆÙ[‹˜\ÜÙ\\]X[
-ˆÚ][VÈ˜ÛÙH—H›Üˆ][H[ˆ™\ÜÈ˜ÛÛ˜YXÝ[ÛœÈ—_KˆÈ›Z\ÜÚ[™Ë\™]šY]ÙY\Þ[X›Û‹›[Ù[KZ[\ÜY˜Z[YŸKˆ
-B‚ˆYˆ\ÝÛX[š[[X—Ü›ÝÜ×Ü™\]Z\™WÜØÚ[XWÜ›Ý™[˜[˜ÙJÙ[ŠHOˆ›Û™N‚ˆ[Ù[HH\\Ë“[Ù[U\J›X[š[[X‹˜]Y]Ùš^\™HŠBˆ[Ù[K˜[YHHBˆ›ÝÜÈH]Y]œ\œÙWÜÝ]\×Ü›ÝÜÊˆÝ]\×Ý^
-›ÝÊ›X[š[[X‹˜]Y]Ùš^\™N˜[YHŠJBˆ
-Bˆ[\Ü\ˆH[X™HÛ˜[YNˆ[Ù[B‚ˆZ\ÜÚ[™ÈH]Y]˜]Y]Ü›ÝÜÊ›ÝÜË[\Ü\Z[\Ü\ŠBˆÙ[‹˜\ÜÙ\˜[ÙJZ\ÜÚ[™ÖÈ›ÚÈ—JBˆÙ[‹˜\ÜÙ\\]X[
-ˆZ\ÜÚ[™ÖÈ˜ÛÛ˜YXÝ[ÛœÈ—VÌVÈ˜ÛÙH—Kˆœ[[YK\ØÚ[XK\›Ý™[˜[˜ÙK[Z\ÜÚ[™È‹ˆ
-B‚ˆ[Ù[K—Ù›[—ÜØÚ[XWÜ›Ý™[˜[˜ÙWÝ™\œÚ[ÛˆHÐÒPWÔ“Õ‘SSÑWÕ‘T”ÒSÓˆ
-ÈBˆZ\ÛX]ÚYH]Y]˜]Y]Ü›ÝÜÊ›ÝÜË[\Ü\Z[\Ü\ŠBˆÙ[‹˜\ÜÙ\˜[ÙJZ\ÛX]ÚYÈ›ÚÈ—JBˆÙ[‹˜\ÜÙ\\]X[
-ˆZ\ÛX]ÚYÈ˜ÛÛ˜YXÝ[ÛœÈ—VÌVÈ˜ÛÙH—Kˆœ[[YK\ØÚ[XK\›Ý™[˜[˜ÙK]™\œÚ[Û‹[Z\ÛX]Ú‹ˆ
-B‚ˆ[Ù[K—Ù›[—ÜØÚ[XWÜ›Ý™[˜[˜ÙWÝ™\œÚ[ÛˆHÐÒSPWÔ“Õ‘SSÑWÕ‘T”ÒSÓ‚ˆ˜[YH]Y]˜]Y]Ü›ÝÜÊ›ÝÜË[\Ü\Z[\Ü\ŠBˆÙ[‹˜\ÜÙ\YJ˜[YÈ›ÚÈ—JB‚ˆYˆ\ÝÙ[˜[ZX×Ü™\ÛÛ][Û—Ù˜Z[\™WÚ\×ØWØ›Ý[™YØÛÛ˜YXÝ[ÛŠÙ[ŠHOˆ›Û™N‚ˆ[Ù[HHÙ[‹›[Ù[J™˜ZÙWÜÜ[™[˜[ZX×Ù˜Z[\™HŠBˆY\ÜØYÙHHžˆ
-ˆLÌ‚ˆYˆ[˜[ZXÊ˜[YJN‚ˆ˜Z\ÙH[[YQ\œ›ÜŠˆžÛ˜[Y_NžÛY\ÜØYÙ_HŠB‚ˆ[Ù[K—×ÙÙ]]—×ÈH[˜[ZXÂˆ™\ÜH]Y]˜]Y]Ü›ÝÜÊˆ]Y]œ\œÙWÜÝ]\×Ü›ÝÜÊˆÝ]\×Ý^
-›ÝÊ™˜ZÙWÜÜ[™[˜[ZX×Ù˜Z[\™N™^Ù\ÈŠJBˆ
-Bˆ
-BˆÙ[‹˜\ÜÙ\˜[ÙJ™\ÜÈ›ÚÈ—JBˆÙ[‹˜\ÜÙ\\]X[
-™\ÜÈ˜ÛÝ[È—VÈ›Z\ÜÚ[™×Ü™]šY]ÙY—KJBˆÛÛ˜YXÝ[ÛˆH™\ÜÈ˜ÛÛ˜YXÝ[ÛœÈ—VÌBˆÙ[‹˜\ÜÙ\\]X[
-ˆÛÛ˜YXÝ[Û–È˜ÛÙH—Kˆœ™]šY]ÙY\Þ[X›Û\™\ÛÛ][Û‹Y˜Z[Y‹ˆ
-BˆÙ[‹˜\ÜÙ\\ÜÊ[ŠÛÛ˜YXÝ[Û–È™]Z[—JKÌÌ
-BˆÙ[‹˜\ÜÙ\YJÛÛ˜YXÝ[Û–È™]Z[—K™[™ÝÚ]
-¸ )ˆŠJB‚ˆYˆ\ÝÜÝ]X×Ü™\ÛÛ][Û—ÙÙ\×Û›ÝÙ^XÝ]WÙ\ØÜš\ÜœÊÙ[ŠHOˆ›Û™N‚ˆ[Ù[HHÙ[‹›[Ù[J™˜ZÙWÜÜ[™\ØÜš\ÜˆŠB‚ˆÛ\ÜÈ^ÜÚ]™Q\ØÜš\ÜŽ‚ˆYˆ×ÙÙ]×ÊÙ[‹[œÝ[˜ÙKÝÛ™\ŠN‚ˆ˜Z\ÙH[[YQ\œ›ÜŠ™\ØÜš\Üˆ^XÝ]YŠB‚ˆÛ\ÜÈÚYÙ]‚ˆY[X™\ˆH^ÜÚ]™Q\ØÜš\ÜŠ
-B‚ˆ[Ù[K•ÚYÙ]HÚYÙ]ˆ™\ÜH]Y]˜]Y]Ü›ÝÜÊˆ]Y]œ\œÙWÜÝ]\×Ü›ÝÜÊˆÝ]\×Ý^
-›ÝÊ™˜ZÙWÜÜ[™\ØÜš\ÜŽ•ÚYÙ]›Y[X™\ˆŠJBˆ
-Bˆ
-BˆÙ[‹˜\ÜÙ\YJ™\ÜÈ›ÚÈ—JB‚ˆYˆ\ÝØÛÛ˜YXÝ[Ûœ×Ø\™WÜÛÜYØžWÜÞ[X›Û
-Ù[ŠHOˆ›Û™N‚ˆ[Ù[HHÙ[‹›[Ù[J™˜ZÙWÜÜ[œÛÜŠBˆ›ÝÜÈH]Y]œ\œÙWÜÝ]\×Ü›ÝÜÊˆÝ]\×Ý^
-ˆ›ÝÊ™˜ZÙWÜÜ[œÛÜž™]HŠKˆ›ÝÊ™˜ZÙWÜÜ[œÛÜ˜[HŠKˆ
-Bˆ
-Bˆ™\ÜH]Y]˜]Y]Ü›ÝÜÊ›ÝÜÊBˆÙ[‹˜\ÜÙ\\]X[
-ˆÚ][VÈœÞ[X›Û—H›Üˆ][H[ˆ™\ÜÈ˜ÛÛ˜YXÝ[ÛœÈ—WKˆÈ™˜ZÙWÜÜ[œÛÜ˜[H‹™˜ZÙWÜÜ[œÛÜž™]H—Kˆ
-B‚ˆYˆ\ÝÜ\œÙ\—Ü™Z™XÝ×Ù\XØ]WÝ[šÛ›ÝÛ—Ø[™ÛX[›Ü›YYÜ›ÝÜÊÙ[ŠHOˆ›Û™N‚ˆØ\Ù\ÈH
-ˆÝ]\×Ý^
-›ÝÊ™˜ZÙNžŠK›ÝÊ™˜ZÙNžŠJKˆÝ]\×Ý^
-›ÝÊ™˜ZÙNž‹œ™][™ŠJKˆ–ÜÝ]\×W™˜ZÙNžØ[YWÛ×™]×ˆ‹ˆ–ÜÝ]\×W›Z\ÜÚ[™ËXÛÛÛ—Ø[YWW—ˆ‹ˆ–ÜÝ]\×Wˆ‹ˆ
-Bˆ›Üˆ^[ˆØ\Ù\Î‚ˆÚ]Ù[‹œÝX•\Ý
-^]^
-N‚ˆÚ]Ù[‹˜\ÜÙ\˜Z\Ù\Ê]Y]]Y]\œ›ÜŠN‚ˆ]Y]œ\œÙWÜÝ]\×Ü›ÝÜÊ^
-B‚ˆYˆ\ÝÚœÛÛ—Ù[™[ÜWØš[™×Ù^XÝÛÝ™\›^WØž]\ÊÙ[ŠHOˆ›Û™N‚ˆ[Ù[HHÙ[‹›[Ù[J™˜ZÙWÜÜ[šœÛÛˆŠBˆ[Ù[KžHBˆ^HÝ]\×Ý^
-›ÝÊ™˜ZÙWÜÜ[šœÛÛŽžŠJBˆ™\ÜH]Y]˜]Y]ÛÝ™\›^J^
-Bˆ^[ØYHœÛÛ‹›ØYÊ]Y]œ™[™\—ÚœÛÛŠ™\Ü
-JBˆÙ[‹˜\ÜÙ\\]X[
-^[ØYÈœØÚ[XH—K™›[‹œÜ[œ[[YKX]Y]ŠBˆÙ[‹˜\ÜÙ\\]X[
-^[ØYÈ™\œÚ[Ûˆ—KJBˆÙ[‹˜\ÜÙ\YJ^[ØYÈ›ÚÈ—JBˆÙ[‹˜\ÜÙ\\]X[
-ˆ^[ØYÈ›Ý™\›^WÜÚLMˆ—Kˆ\ÚX‹œÚLMŠ^™[˜ÛÙJ]‹NŠJKš^YÙ\Ý
+        self.module("fake_portal.missing_symbol")
+        rows = audit.parse_status_rows(
+            status_text(
+                row("fake_portal.missing_symbol:nope"),
+                row("fake_portal.no_such_module:nope"),
+            )
+        )
+        report = audit.audit_rows(rows)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["counts"]["missing_reviewed"], 2)
+        self.assertEqual(
+            {item["code"] for item in report["contradictions"]},
+            {"missing-reviewed-symbol", "module-import-failed"},
+        )
 
-Kˆ
-B‚ˆYˆ\ÝÛXZ[—ØÚXÚ×Ü™]\›œ×ÛÛ™WÝÚ]Ý]ÚY[™×Ü™\Ü
-Ù[ŠHOˆ›Û™N‚ˆ[Ù[HHÙ[‹›[Ù[J™˜ZÙWÜÜ[˜ÛHŠB‚ˆYˆXÙZÛ\Š
-N‚ˆ˜Z\ÙH›Ý[\[Y[Y\œ›Ü‚‚ˆX\š×ÜXÙZÛ\ŠˆXÙZÛ\‹ˆÚ[™H™[˜Ý[Ûˆ‹ˆÞ[X›ÛH™˜ZÙWÜÜ[˜ÛNœXÙZÛ\ˆ‹ˆ
-Bˆ[Ù[KœXÙZÛ\ˆHXÙZÛ\‚ˆ^HÝ]\×Ý^
-›ÝÊ™˜ZÙWÜÜ[˜ÛNœXÙZÛ\ˆŠJBˆÚ][\š[K•[\Ü˜\žQ\™XÝÜžJ
-H\È\™XÝÜžN‚ˆ]H]
-\™XÝÜžJHÈ›Ý™\›^KÝˆ‚ˆ]Üš]WÝ^
-^[˜ÛÙ[™ÏH]‹NŠBˆÝÝ]H[Ë”Ýš[™ÒSÊ
-BˆÝ\œˆH[Ë”Ýš[™ÒSÊ
-BˆÚ]ÛÛ^X‹œ™Y\™XÝÜÝÝ]
-ÝÝ]
-KÛÛ^X‹œ™Y\™XÝÜÝ\œŠÝ\œŠN‚ˆÛÙHH]Y]›XZ[ŠÈ‹K[Ý™\›^H‹ÝŠ]
-K‹KXÚXÚÈ—JBˆ^[ØYHœÛÛ‹›ØYÊÝÝ]™Ù]˜[YJ
-JBˆÙ[‹˜\ÜÙ\\]X[
-ÛÙKJBˆÙ[‹˜\ÜÙ\\]X[
-Ý\œ‹™Ù]˜[YJ
-KˆŠBˆÙ[‹˜\ÜÙ\˜[ÙJ^[ØYÈ›ÚÈ—JBˆÙ[‹˜\ÜÙ\\]X[
-ˆ^[ØYÈ›Ý™\›^WÜÚLMˆ—Kˆ\ÚX‹œÚLMŠ^™[˜ÛÙJ]‹NŠJKš^YÙ\Ý
+    def test_manimlib_rows_require_schema_provenance(self) -> None:
+        module = types.ModuleType("manimlib.audit_fixture")
+        module.value = 1
+        rows = audit.parse_status_rows(
+            status_text(row("manimlib.audit_fixture:value"))
+        )
+        importer = lambda _name: module
 
-Kˆ
-B‚‚šYˆ×Û˜[YW×ÈOH—×ÛXZ[—×ÈŽ‚ˆ[š]\Ý›XZ[Š
-B
+        missing = audit.audit_rows(rows, importer=importer)
+        self.assertFalse(missing["ok"])
+        self.assertEqual(
+            missing["contradictions"][0]["code"],
+            "runtime-schema-provenance-missing",
+        )
+
+        module._fmn_schema_provenance_version = SCHEMA_PROVENANCE_VERSION + 1
+        mismatched = audit.audit_rows(rows, importer=importer)
+        self.assertFalse(mismatched["ok"])
+        self.assertEqual(
+            mismatched["contradictions"][0]["code"],
+            "runtime-schema-provenance-version-mismatch",
+        )
+
+        module._fmn_schema_provenance_version = SCHEMA_PROVENANCE_VERSION
+        valid = audit.audit_rows(rows, importer=importer)
+        self.assertTrue(valid["ok"])
+
+    def test_dynamic_resolution_failure_is_a_bounded_contradiction(self) -> None:
+        module = self.module("fake_portal.dynamic_failure")
+        message = "x" * 10_000
+
+        def dynamic(name):
+            raise RuntimeError(f"{name}:{message}")
+
+        module.__getattr__ = dynamic
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(row("fake_portal.dynamic_failure:explodes"))
+            )
+        )
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["counts"]["missing_reviewed"], 1)
+        contradiction = report["contradictions"][0]
+        self.assertEqual(
+            contradiction["code"],
+            "reviewed-symbol-resolution-failed",
+        )
+        self.assertLess(len(contradiction["detail"]), 4_300)
+        self.assertTrue(contradiction["detail"].endswith("â€¦"))
+
+    def test_static_resolution_does_not_execute_descriptors(self) -> None:
+        module = self.module("fake_portal.descriptor")
+
+        class ExplosiveDescriptor:
+            def __get__(self, instance, owner):
+                raise RuntimeError("descriptor executed")
+
+        class Widget:
+            member = ExplosiveDescriptor()
+
+        module.Widget = Widget
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(row("fake_portal.descriptor:Widget.member"))
+            )
+        )
+        self.assertTrue(report["ok"])
+
+    def test_contradictions_are_sorted_by_symbol(self) -> None:
+        module = self.module("fake_portal.sort")
+        rows = audit.parse_status_rows(
+            status_text(
+                row("fake_portal.sort:zeta"),
+                row("fake_portal.sort:alpha"),
+            )
+        )
+        report = audit.audit_rows(rows)
+        self.assertEqual(
+            [item["symbol"] for item in report["contradictions"]],
+            ["fake_portal.sort:alpha", "fake_portal.sort:zeta"],
+        )
+
+    def test_parser_rejects_duplicate_unknown_and_malformed_rows(self) -> None:
+        cases = (
+            status_text(row("fake:x"), row("fake:x")),
+            status_text(row("fake:x", "pretend")),
+            "[status]\nfake:x\tsame\ttoo\tfew\n",
+            "[status]\nmissing-colon\tsame\te\tt\tn\n",
+            "[status]\n",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                with self.assertRaises(audit.AuditError):
+                    audit.parse_status_rows(text)
+
+    def test_json_envelope_binds_exact_overlay_bytes(self) -> None:
+        module = self.module("fake_portal.json")
+        module.x = 1
+        text = status_text(row("fake_portal.json:x"))
+        report = audit.audit_overlay(text)
+        payload = json.loads(audit.render_json(report))
+        self.assertEqual(payload["schema"], "fmn.portal.runtime-audit")
+        self.assertEqual(payload["version"], 1)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            payload["overlay_sha256"],
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    def test_main_check_returns_one_without_hiding_report(self) -> None:
+        module = self.module("fake_portal.cli")
+
+        def placeholder():
+            raise NotImplementedError
+
+        mark_placeholder(
+            placeholder,
+            kind="function",
+            symbol="fake_portal.cli:placeholder",
+        )
+        module.placeholder = placeholder
+        text = status_text(row("fake_portal.cli:placeholder"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "overlay.tsv"
+            path.write_text(text, encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = audit.main(["--overlay", str(path), "--check"])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["overlay_sha256"],
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
