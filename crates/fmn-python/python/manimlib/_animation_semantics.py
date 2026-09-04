@@ -249,7 +249,11 @@ def install(native):
         remover=False,
         **kwargs,
     ):
-        self._validate_input_type(mobject)
+        # Native compositions derive their root from their members in Choreo.
+        # None is an internal sentinel for that class family, not a generally
+        # valid Animation target. Do not trust a spoofable _native_kind string.
+        if mobject is not None or not isinstance(self, g["AnimationGroup"]):
+            self._validate_input_type(mobject)
         refuse_unrouted(
             type(self).__name__ + "()",
             [(key, True) for key in sorted(kwargs)],
@@ -265,7 +269,8 @@ def install(native):
         )
         self.final_alpha_value = float(final_alpha_value)
         self.suspend_mobject_updating = bool(suspend_mobject_updating)
-        self.name = name or type(self).__name__ + str(mobject)
+        suffix = "" if mobject is None else str(mobject)
+        self.name = name or type(self).__name__ + suffix
         self.remover = bool(remover)
 
     def init_path_func(self):
@@ -288,6 +293,10 @@ def install(native):
             raise TypeError("Transform target must be a Mobject")
 
     def native_target(self):
+        # CyclicReplace/Swap carry multiple source mobjects rather than a
+        # Transform target. Their native constructor owns those destinations.
+        if self._target_attr is None:
+            return None
         self.target_mobject = self.create_target()
         self.check_target_mobject_validity()
         return self.target_mobject
