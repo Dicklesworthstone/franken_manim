@@ -1,0 +1,254 @@
+name: FM AI1 Live Attestor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fm-ai1-live-attestor.yml"
+      - "artifacts/fm-ai1-completion.json"
+  workflow_dispatch:
+  schedule:
+    - cron: "3,13,23,33,43,53 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fm-ai1-live-attestor
+  cancel-in-progress: false
+
+jobs:
+  attest:
+    if: github.repository == 'Dicklesworthstone/franken_manim'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Decide whether the completed cutover is present
+        id: readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          receipt_path = Path("artifacts/fm-ai1-completion.json")
+          if not receipt_path.exists():
+              Path("/tmp/fm-ai1-ready").write_text("no\n", encoding="utf-8")
+              raise SystemExit(0)
+          receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+          if receipt.get("verdict") != "pass" or not str(receipt.get("schema", "")).startswith("franken-manim.fm-ai1-completion.v"):
+              raise SystemExit("fm-ai1 completion receipt is present but invalid")
+
+          issues = [json.loads(line) for line in Path(".beads/issues.jsonl").read_text(encoding="utf-8").splitlines() if line]
+          bead = next((issue for issue in issues if issue.get("id") == "fm-ai1"), None)
+          if bead is None or bead.get("status") != "closed" or not bead.get("close_reason"):
+              raise SystemExit("fm-ai1 receipt exists but the bead is not truthfully closed")
+
+          required_markers = {
+              "README.md": "<!-- fm-ai1-readme:start -->",
+              "CHANGELOG.md": "<!-- fm-ai1-changelog:start -->",
+          }
+          for path, marker in required_markers.items():
+              if marker not in Path(path).read_text(encoding="utf-8"):
+                  raise SystemExit(f"{path} lacks {marker}")
+          status_candidates = [
+              Path("IMPLEMENTATION_STATUS.md"),
+              Path("docs/IMPLEMENTATION_STATUS.md"),
+              Path("docs/implementation_status.md"),
+              Path("docs/status.md"),
+          ]
+          if not any(path.exists() and "<!-- fm-ai1-status:start -->" in path.read_text(encoding="utf-8") for path in status_candidates):
+              raise SystemExit("no implementation-status document records fm-ai1")
+
+          suite = Path("SUITE.lock").read_text(encoding="utf-8")
+          rows = [line for line in suite.splitlines() if line.startswith("franken_numpy\t")]
+          if len(rows) != 1:
+              raise SystemExit(f"expected one franken_numpy suite row, found {len(rows)}")
+          pin = rows[0].split("\t", 2)[1]
+          if re.fullmatch(r"[0-9a-f]{40}", pin) is None:
+              raise SystemExit(f"invalid FrankenNumPy pin {pin!r}")
+          cargo = Path("Cargo.toml").read_text(encoding="utf-8")
+          for package in ("fnp-dtype", "fnp-ndarray", "fnp-io", "fnp-random-core"):
+              match = re.search(
+                  rf'^{re.escape(package)} = \{{ git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "([0-9a-f]{{40}})"',
+                  cargo,
+                  re.MULTILINE,
+              )
+              if match is None or match.group(1) != pin:
+                  raise SystemExit(f"{package} does not share the governed FrankenNumPy pin {pin}")
+          if receipt.get("franken_numpy_pin") != pin:
+              raise SystemExit(
+                  f"receipt pin {receipt.get('franken_numpy_pin')} disagrees with current governed pin {pin}"
+              )
+
+          rng = Path("crates/fmn-core/src/rng.rs").read_text(encoding="utf-8")
+          for marker in ("pub use fnp_random_core::SeedSequence", "fnp_random_core::Pcg64Dxsm"):
+              if marker not in rng:
+                  raise SystemExit(f"fmn-core RNG wrapper lacks {marker!r}")
+          lock = Path("Cargo.lock").read_text(encoding="utf-8")
+          if '\nname = "fnp-random-core"\n' not in lock:
+              raise SystemExit("Cargo.lock lacks fnp-random-core")
+          if '\nname = "fnp-random"\n' in lock:
+              raise SystemExit("full fnp-random entered the governed native lock")
+
+          temporary = [
+              ".github/workflows/fm-ai1-authority-verifier-v2.yml",
+              ".github/workflows/fm-ai1-authority-verifier.yml",
+              ".github/workflows/converge-rng-authority-cutover.yml",
+              ".github/workflows/complete-rng-authority-cutover.yml",
+              ".github/workflows/finalize-rng-migration.yml",
+          ]
+          leftovers = [path for path in temporary if Path(path).exists()]
+          if leftovers:
+              Path("/tmp/fm-ai1-leftovers.json").write_text(json.dumps(leftovers), encoding="utf-8")
+              Path("/tmp/fm-ai1-ready").write_text("cleanup\n", encoding="utf-8")
+          else:
+              Path("/tmp/fm-ai1-ready").write_text("yes\n", encoding="utf-8")
+          Path("/tmp/fm-ai1-pin").write_text(pin + "\n", encoding="utf-8")
+          PY
+          readiness="$(cat /tmp/fm-ai1-ready)"
+          echo "state=$readiness" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the implementation verifier
+        if: steps.readiness.outputs.state == 'no'
+        run: echo "The completion receipt is not on live main yet; the scheduled attestor will retry."
+
+      - name: Remove stale one-shot workflows after a valid receipt
+        if: steps.readiness.outputs.state == 'cleanup'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for name in json.loads(Path("/tmp/fm-ai1-leftovers.json").read_text(encoding="utf-8")):
+              path = Path(name)
+              if path.exists():
+                  path.unlink()
+          PY
+          git add .github/workflows
+          git config user.name "FrankenManim FM-AI1 Attestor"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(ci): retire completed RNG cutover machinery"
+          git fetch origin main
+          [[ "$(git rev-parse origin/main)" == "$(git rev-parse HEAD^)" ]] || exit 0
+          git push origin HEAD:main
+
+      - name: Install governed toolchain for independent locked tests
+        if: steps.readiness.outputs.state == 'yes'
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-07-05 --profile minimal --component clippy --target wasm32-unknown-unknown
+          rustup override set nightly-2026-07-05
+
+      - name: Independently re-run focused live-state gates
+        if: steps.readiness.outputs.state == 'yes'
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-core
+          cargo check --locked --target wasm32-unknown-unknown -p fmn-core
+          cargo test --locked -p fmn-conformance --test franken_numpy_pin
+          cargo test --locked -p fmn-conformance --test governed_closure workspace_closure_is_exactly_the_governed_universe -- --exact
+
+      - name: Verify the pre-attestation canonical branch state
+        if: steps.readiness.outputs.state == 'yes'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t heads < <(git ls-remote --heads origin | awk '{name=$2; sub("^refs/heads/", "", name); print name}' | sort)
+          [[ "${heads[*]}" == "main master" ]] || {
+            printf 'unexpected remote heads before attestation:\n  %s\n' "${heads[@]}" >&2
+            exit 10
+          }
+          main_sha="$(git ls-remote --heads origin refs/heads/main | awk '{print $1}')"
+          master_sha="$(git ls-remote --heads origin refs/heads/master | awk '{print $1}')"
+          [[ "$main_sha" == "$master_sha" && "$main_sha" == "$(git rev-parse HEAD)" ]] || {
+            echo "pre-attestation mirror mismatch: checkout=$(git rev-parse HEAD) main=$main_sha master=$master_sha" >&2
+            exit 11
+          }
+
+      - name: Emit the live attestation seal
+        if: steps.readiness.outputs.state == 'yes'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import binascii
+          import hashlib
+          import json
+          import struct
+          import zlib
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          def png_chunk(kind: bytes, payload: bytes) -> bytes:
+              return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", binascii.crc32(kind + payload) & 0xffffffff)
+
+          width = height = 64
+          row = b"\x00" + b"\x20\xc8\x58" * width
+          pixels = row * height
+          png = b"\x89PNG\r\n\x1a\n"
+          png += png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+          png += png_chunk(b"tEXt", b"status\x00fm-ai1 live attestation passed")
+          png += png_chunk(b"IDAT", zlib.compress(pixels, 9))
+          png += png_chunk(b"IEND", b"")
+          image_path = Path("artifacts/fm-ai1-live-attested.png")
+          image_path.write_bytes(png)
+
+          receipt_path = Path("artifacts/fm-ai1-completion.json")
+          attestation = {
+              "schema": "franken-manim.fm-ai1-live-attestation.v1",
+              "attested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "live_main": __import__("subprocess").check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "franken_numpy_pin": Path("/tmp/fm-ai1-pin").read_text(encoding="utf-8").strip(),
+              "completion_receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+              "focused_gates": [
+                  "cargo test --locked -p fmn-core",
+                  "cargo check --locked --target wasm32-unknown-unknown -p fmn-core",
+                  "cargo test --locked -p fmn-conformance --test franken_numpy_pin",
+                  "workspace_closure_is_exactly_the_governed_universe",
+              ],
+              "pre_attestation_remote_heads": ["main", "master"],
+              "pre_attestation_main_equals_master": True,
+              "verdict": "pass",
+          }
+          Path("artifacts/fm-ai1-live-attestation.json").write_text(
+              json.dumps(attestation, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Publish the seal and self-remove
+        if: steps.readiness.outputs.state == 'yes'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -f .github/workflows/fm-ai1-live-attestor.yml
+          git add artifacts/fm-ai1-live-attestation.json artifacts/fm-ai1-live-attested.png
+          git diff --cached --check
+          git config user.name "FrankenManim FM-AI1 Attestor"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "test(core): attest the live RNG authority cutover" \
+            -m "Independently re-run locked native, wasm32, source-identity, and governed-closure gates; seal the matching receipt/bead/docs state; and record the exact pre-attestation main/master mirror."
+          final_sha="$(git rev-parse HEAD)"
+          parent="$(git rev-parse HEAD^)"
+          git fetch origin main
+          [[ "$(git rev-parse origin/main)" == "$parent" ]] || {
+            echo "main moved during the short attestation window; scheduled retry will regenerate the seal" >&2
+            exit 12
+          }
+          git push origin "$final_sha:refs/heads/main"
+          git push origin "$final_sha:refs/heads/master"
+          mapfile -t heads < <(git ls-remote --heads origin | awk '{name=$2; sub("^refs/heads/", "", name); print name}' | sort)
+          [[ "${heads[*]}" == "main master" ]] || exit 13
+          main_sha="$(git ls-remote --heads origin refs/heads/main | awk '{print $1}')"
+          master_sha="$(git ls-remote --heads origin refs/heads/master | awk '{print $1}')"
+          [[ "$main_sha" == "$master_sha" && "$main_sha" == "$final_sha" ]] || exit 14
