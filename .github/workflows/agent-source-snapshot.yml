@@ -1,19 +1,84 @@
-name: "Archived: Workflow Quarantine Generator"
+name: Repair governed rustfmt drift
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/agent-source-snapshot.yml"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: repair-governed-rustfmt-drift
+  cancel-in-progress: false
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
-  archived:
+  repair:
     runs-on: ubuntu-24.04
-    timeout-minutes: 2
+    timeout-minutes: 90
     steps:
-      - name: Explain archival
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Cargo state
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/rustfmt-repair
+          key: rustfmt-repair-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+
+      - name: Apply rustfmt and constrain the repair surface
         shell: bash
         run: |
-          echo "This superseded one-shot workflow is intentionally inert."
-          echo "Original generator blob: a52f8c97ddbf9aaa46745685526d272430c64f06"
-          echo "The complete source remains available in repository history."
+          set -euo pipefail
+          cargo fmt --all
+          git diff --check
+          mapfile -t changed < <(git diff --name-only)
+          expected=(
+            crates/fmn-conformance/tests/franken_numpy_pin.rs
+            crates/fmn-frame/src/lib.rs
+            crates/fmn-frame/src/pool.rs
+          )
+          printf '%s\n' "${changed[@]}" > "$RUNNER_TEMP/changed"
+          printf '%s\n' "${expected[@]}" > "$RUNNER_TEMP/expected"
+          diff -u "$RUNNER_TEMP/expected" "$RUNNER_TEMP/changed"
+          cargo fmt --all -- --check
+
+      - name: Compile and test the affected crates
+        env:
+          CARGO_TARGET_DIR: target/rustfmt-repair
+        run: |
+          cargo test --locked -p fmn-frame
+          cargo test --locked -p fmn-conformance --test franken_numpy_pin
+
+      - name: Commit only the proven formatting repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "FrankenManim Rustfmt Repair"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            crates/fmn-conformance/tests/franken_numpy_pin.rs \
+            crates/fmn-frame/src/lib.rs \
+            crates/fmn-frame/src/pool.rs
+          git diff --cached --check
+          git commit -m "style: align sources with the governed nightly rustfmt" \
+            -m "Apply nightly-2026-08-31 formatting only to the three files exposed by the mandatory gate, then compile and test the affected crates before publication."
+          git pull --rebase origin main
+          cargo fmt --all -- --check
+          git push origin HEAD:main
