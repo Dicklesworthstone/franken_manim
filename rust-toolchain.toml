@@ -4,7 +4,7 @@
 # Matches asupersync's deliberate pin so the FrankenSuite resolves one
 # nightly. Bump deliberately, together with any std-API migration the new
 # nightly requires and a SUITE.lock update.
-channel = "nightly-2026-07-05"
+channel = "nightly-2026-08-31"
 components = ["rustfmt", "clippy", "rust-src"]
 # check.sh's wasm axis (and the W5 demo) build for wasm32 on every profile;
 # listing the target here makes rustup install it with the toolchain, so CI
