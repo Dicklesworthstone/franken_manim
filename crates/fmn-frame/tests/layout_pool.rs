@@ -156,7 +156,7 @@ fn pool_steady_state_is_allocation_free() {
 }
 
 #[test]
-fn pool_refuses_foreign_and_excess_buffers() {
+fn pool_refuses_foreign_buffers_before_capacity_checks() {
     let layout = FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
     let other = FrameLayout::tight(PixelFormat::Rgba8, 16, 17).unwrap();
     let mut pool = FramePool::new(layout.clone(), 1);
@@ -165,8 +165,13 @@ fn pool_refuses_foreign_and_excess_buffers() {
         pool.release(FrameBuffer::new(other)),
         Err(FrameError::ForeignBuffer)
     );
+    assert_eq!(pool.available(), 1);
+
+    // Layout equality is not pool membership. Provenance is checked
+    // before capacity so a full pool cannot mask a foreign buffer.
     assert_eq!(
         pool.release(FrameBuffer::new(layout)),
-        Err(FrameError::PoolOverflow)
+        Err(FrameError::ForeignBuffer)
     );
+    assert_eq!(pool.available(), 1);
 }

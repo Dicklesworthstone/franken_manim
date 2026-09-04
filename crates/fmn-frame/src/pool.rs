@@ -116,10 +116,22 @@ mod tests {
             pool.try_acquire().expect("first recycled buffer"),
             pool.try_acquire().expect("second recycled buffer"),
         ];
-        assert!(recycled
-            .iter()
-            .any(|buffer| buffer.as_bytes().iter().all(|&byte| byte == 0x5a)));
+        assert!(
+            recycled
+                .iter()
+                .any(|buffer| buffer.as_bytes().iter().all(|&byte| byte == 0x5a))
+        );
         assert!(pool.try_acquire().is_none());
+    }
+
+    #[test]
+    fn capacity_guard_rejects_a_forged_extra_pool_member() {
+        let layout = rgba_layout();
+        let mut pool = FramePool::new(layout.clone(), 1);
+        let extra = FrameBuffer::new_pooled(layout, Arc::clone(&pool.identity));
+
+        assert_eq!(pool.release(extra), Err(FrameError::PoolOverflow));
+        assert_eq!(pool.available(), 1);
     }
 
     #[test]
@@ -141,10 +153,7 @@ mod tests {
         let mut second_pool = FramePool::new(layout, 1);
         let foreign = second_pool.try_acquire().expect("foreign pooled buffer");
 
-        assert_eq!(
-            first_pool.release(foreign),
-            Err(FrameError::ForeignBuffer)
-        );
+        assert_eq!(first_pool.release(foreign), Err(FrameError::ForeignBuffer));
         assert_eq!(first_pool.available(), 1);
         assert_eq!(second_pool.available(), 0);
     }

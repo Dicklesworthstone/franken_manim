@@ -5,23 +5,21 @@
 use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
 
 const MAX_AUTHORITY_BYTES: u64 = 8 * 1024 * 1024;
-const CONSUMED_FNP_PACKAGES: &[&str] = &[
-    "fnp-dtype",
-    "fnp-io",
-    "fnp-ndarray",
-    "fnp-random-core",
-];
+const CONSUMED_FNP_PACKAGES: &[&str] = &["fnp-dtype", "fnp-io", "fnp-ndarray", "fnp-random-core"];
 
 type PackageBlocks = BTreeMap<String, Vec<String>>;
 
 fn repo_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(name)
 }
 
 fn read_repo_file(name: &str) -> String {
     let path = repo_path(name);
-    let file = File::open(&path)
-        .unwrap_or_else(|error| std::panic::panic_any(format!("opening {}: {error}", path.display())));
+    let file = File::open(&path).unwrap_or_else(|error| {
+        std::panic::panic_any(format!("opening {}: {error}", path.display()))
+    });
     let mut bytes = Vec::new();
     file.take(MAX_AUTHORITY_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -136,12 +134,12 @@ fn fmn_core_consumes_only_the_dependency_free_rng_primitive() {
     let core = unique_package_block(&packages, "fmn-core");
     let core_dependencies = dependencies_from_block(core);
     assert!(
-        core_dependencies.iter().any(|dependency| *dependency == "fnp-random-core"),
+        core_dependencies.contains(&"fnp-random-core"),
         "fmn-core does not depend on fnp-random-core: {core_dependencies:?}"
     );
     for forbidden in ["fnp-random", "fnp-ndarray", "rayon", "getrandom 0.4.3"] {
         assert!(
-            core_dependencies.iter().all(|dependency| *dependency != forbidden),
+            !core_dependencies.contains(&forbidden),
             "fmn-core directly depends on forbidden RNG-adjacent package {forbidden}: {core_dependencies:?}"
         );
     }
@@ -166,5 +164,8 @@ fn lock_parser_preserves_multiple_versions_without_weakening_governed_uniqueness
     );
     let packages = package_blocks(synthetic);
     assert_eq!(packages.get("shared").map(Vec::len), Some(2));
-    assert_eq!(unique_package_block(&packages, "governed").lines().next(), Some("name = \"governed\""));
+    assert_eq!(
+        unique_package_block(&packages, "governed").lines().next(),
+        Some("name = \"governed\"")
+    );
 }

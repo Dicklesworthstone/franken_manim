@@ -152,7 +152,10 @@ impl std::fmt::Display for FrameError {
                 "CPU render team requested {requested} workers, but only {spawned} could be started"
             ),
             Self::ForeignBuffer => {
-                write!(f, "buffer does not belong to this pool or has a foreign layout")
+                write!(
+                    f,
+                    "buffer does not belong to this pool or has a foreign layout"
+                )
             }
             Self::PoolOverflow => write!(f, "pool release would exceed its capacity"),
             Self::FormatMismatch { expected, got } => {
