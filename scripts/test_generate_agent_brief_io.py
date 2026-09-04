@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import generate_agent_brief as generator
@@ -36,6 +37,26 @@ class GenerateAgentBriefIoTests(unittest.TestCase):
             encoding="utf-8",
         )
         return ledger, output
+
+    def test_identity_fingerprint_detects_reused_inode_metadata(self) -> None:
+        owned = SimpleNamespace(
+            st_dev=11,
+            st_ino=29,
+            st_size=4096,
+            st_mtime_ns=101,
+            st_ctime_ns=103,
+        )
+        substitute = SimpleNamespace(
+            st_dev=11,
+            st_ino=29,
+            st_size=8,
+            st_mtime_ns=107,
+            st_ctime_ns=109,
+        )
+        self.assertNotEqual(
+            generator._file_identity(owned),
+            generator._file_identity(substitute),
+        )
 
     def test_replace_failure_removes_only_the_temporary_file_it_created(self) -> None:
         ledger, output = self.fixture()

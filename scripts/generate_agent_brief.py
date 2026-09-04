@@ -156,8 +156,17 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _file_identity(metadata: os.stat_result) -> tuple[int, int]:
-    return metadata.st_dev, metadata.st_ino
+FileIdentity = tuple[int, int, int, int, int]
+
+
+def _file_identity(metadata: os.stat_result) -> FileIdentity:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _open_existing_regular(path: Path):
@@ -207,7 +216,7 @@ def read_existing(path: Path) -> str:
         raise GenerateError(f"cannot read generated agent brief {path}: {exc}") from exc
 
 
-def _remove_owned_temporary(path: Path, identity: tuple[int, int]) -> str | None:
+def _remove_owned_temporary(path: Path, identity: FileIdentity) -> str | None:
     try:
         current = os.lstat(path)
     except FileNotFoundError:
@@ -245,15 +254,21 @@ def write_atomic(path: Path, document: str) -> None:
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor: int | None = None
-    identity: tuple[int, int] | None = None
+    identity: FileIdentity | None = None
     try:
         descriptor = os.open(temporary, flags, 0o644)
         identity = _file_identity(os.fstat(descriptor))
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             descriptor = None
-            handle.write(document)
-            handle.flush()
-            os.fsync(handle.fileno())
+            try:
+                handle.write(document)
+                handle.flush()
+                os.fsync(handle.fileno())
+            finally:
+                try:
+                    identity = _file_identity(os.fstat(handle.fileno()))
+                except OSError:
+                    pass
         os.replace(temporary, path)
     except OSError as exc:
         if descriptor is not None:
