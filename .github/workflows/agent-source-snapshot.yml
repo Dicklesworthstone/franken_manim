@@ -34,7 +34,7 @@ jobs:
         shell: bash
         run: echo "START_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Install the governed toolchain and tracker
+      - name: Install the governed toolchain and verified tracker binary
         shell: bash
         run: |
           set -euo pipefail
@@ -48,15 +48,25 @@ jobs:
             --profile minimal \
             --component clippy,rustfmt,rust-src
           rustup override set "$toolchain"
-          cargo install \
-            --debug \
-            --locked \
-            --git https://github.com/Dicklesworthstone/beads_rust \
-            --rev 5c6406411c456fe19ec8bcfe1210a840bee43a56 \
-            --bin br \
-            --root "$RUNNER_TEMP/br-install" \
-            beads_rust
-          echo "$RUNNER_TEMP/br-install/bin" >> "$GITHUB_PATH"
+
+          archive="$RUNNER_TEMP/br-0.5.10-linux_amd64.tar.gz"
+          extract_dir="$RUNNER_TEMP/br-extract"
+          install_dir="$RUNNER_TEMP/br/bin"
+          curl -fsSL \
+            https://github.com/Dicklesworthstone/beads_rust/releases/download/v0.5.10/br-0.5.10-linux_amd64.tar.gz \
+            -o "$archive"
+          echo "1956c808601588a7ab7ee807f1f54a4453387b02eddfbf4469a86abdc7ecf366  $archive" \
+            | sha256sum --check --strict
+          mkdir -p "$extract_dir" "$install_dir"
+          tar -xzf "$archive" -C "$extract_dir"
+          br_path="$(find "$extract_dir" -type f -name br -perm -u+x -print -quit)"
+          [[ -n "$br_path" ]] || {
+            echo "verified beads_rust archive contains no executable br binary" >&2
+            exit 3
+          }
+          install -m 0755 "$br_path" "$install_dir/br"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/br" version
 
       - name: Create and claim the regression bead through br
         shell: bash
@@ -145,7 +155,7 @@ jobs:
           echo "REGRESSION_ALREADY_CLOSED=$([[ "$status" == "closed" ]] && echo 1 || echo 0)" >> "$GITHUB_ENV"
           br show "$issue_id" --json
 
-      - name: Reconcile membership-first refusal semantics and format the governed tree
+      - name: Reconcile membership-first refusal semantics and governed lint drift
         shell: bash
         run: |
           set -euo pipefail
@@ -215,6 +225,25 @@ jobs:
               if anchor not in text:
                   raise SystemExit("FramePool unit-test anchor drifted")
               pool.write_text(text.replace(anchor, test + anchor, 1), encoding="utf-8")
+
+          pin_test = Path("crates/fmn-conformance/tests/franken_numpy_pin.rs")
+          text = pin_test.read_text(encoding="utf-8")
+          replacements = (
+              (
+                  'core_dependencies.iter().any(|dependency| *dependency == "fnp-random-core")',
+                  'core_dependencies.contains(&"fnp-random-core")',
+              ),
+              (
+                  'core_dependencies.iter().all(|dependency| *dependency != forbidden)',
+                  '!core_dependencies.contains(&forbidden)',
+              ),
+          )
+          for old_lint, new_lint in replacements:
+              if old_lint in text:
+                  text = text.replace(old_lint, new_lint, 1)
+              elif new_lint not in text:
+                  raise SystemExit(f"FrankenNumPy pin lint anchor drifted: {old_lint}")
+          pin_test.write_text(text, encoding="utf-8")
           PY
           cargo fmt --all
           cargo fmt --all -- --check
@@ -234,6 +263,7 @@ jobs:
             printf 'rustfmt changed paths outside the reviewed repair surface:\n%s\n' "$unexpected" >&2
             exit 4
           fi
+          grep -Fxq crates/fmn-conformance/tests/franken_numpy_pin.rs "$RUNNER_TEMP/changed-rust"
           grep -Fxq crates/fmn-frame/src/pool.rs "$RUNNER_TEMP/changed-rust"
           grep -Fxq crates/fmn-frame/tests/layout_pool.rs "$RUNNER_TEMP/changed-rust"
 
@@ -302,6 +332,7 @@ jobs:
           fi
           for mandatory in \
             .beads/issues.jsonl \
+            crates/fmn-conformance/tests/franken_numpy_pin.rs \
             crates/fmn-frame/src/pool.rs \
             crates/fmn-frame/tests/layout_pool.rs
           do
