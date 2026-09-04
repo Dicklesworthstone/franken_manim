@@ -11,6 +11,7 @@ from manimlib import (
     ShowCreation,
     Transform,
     TransformFromCopy,
+    VMobject,
 )
 
 
@@ -116,8 +117,8 @@ assert spanned.time_spanned_alpha(0.0) == 0.0
 assert spanned.time_spanned_alpha(0.5) == 0.5
 assert spanned.time_spanned_alpha(1.0) == 1.0
 
-native_animation = ShowCreation(Mobject().set_points([[0.0, 0.0, 0.0]]))
-assert str(native_animation) == "ShowCreationMobject"
+native_animation = ShowCreation(VMobject().set_points([[0.0, 0.0, 0.0]]))
+assert str(native_animation) == "ShowCreationVMobject"
 assert native_animation.is_remover() is False
 
 source = Mobject().set_points([[0.0, 0.0, 0.0]])
