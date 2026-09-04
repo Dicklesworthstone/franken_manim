@@ -28,6 +28,62 @@ from ._animation_semantics import install as _install_animation_semantics
 _install_animation_semantics(_native)
 del _install_animation_semantics
 
+_SEMANTIC_METHODS = {
+    _native.Mobject: ("__str__", "interpolate"),
+    _native.Animation: (
+        "__init__",
+        "_validate_input_type",
+        "_ensure_runtime_defaults",
+        "__str__",
+        "begin",
+        "finish",
+        "create_starting_mobject",
+        "get_all_mobjects",
+        "get_all_families_zipped",
+        "get_all_mobjects_to_update",
+        "update_mobjects",
+        "copy",
+        "update_rate_info",
+        "interpolate",
+        "update",
+        "time_spanned_alpha",
+        "interpolate_mobject",
+        "interpolate_submobject",
+        "get_sub_alpha",
+        "set_run_time",
+        "get_run_time",
+        "set_rate_func",
+        "get_rate_func",
+        "set_name",
+        "is_remover",
+        "clean_up_from_scene",
+    ),
+    _native._NativeAnimation: ("__init__",),
+    _native.Transform: (
+        "init_path_func",
+        "create_target",
+        "check_target_mobject_validity",
+        "_native_target",
+        "begin",
+        "finish",
+        "clean_up_from_scene",
+        "get_all_mobjects",
+        "get_all_families_zipped",
+        "interpolate_submobject",
+    ),
+    _native.TransformFromCopy: ("__init__",),
+}
+for _semantic_class, _semantic_names in _SEMANTIC_METHODS.items():
+    for _semantic_name in _semantic_names:
+        _semantic_function = vars(_semantic_class)[_semantic_name]
+        _semantic_function.__name__ = _semantic_name
+        _semantic_function.__qualname__ = (
+            f"{_semantic_class.__qualname__}.{_semantic_name}"
+        )
+        _semantic_function.__module__ = _semantic_class.__module__
+del _SEMANTIC_METHODS, _semantic_class, _semantic_names
+del _semantic_name, _semantic_function
+
 try:
     _apply_schema_placeholder_provenance(_native)
 except _SchemaProvenanceError as error:
