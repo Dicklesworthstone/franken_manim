@@ -21,7 +21,7 @@ pub(crate) struct PoolIdentity;
 
 /// A single frame's pixel storage.
 ///
-/// The allocation happens once, in [`FrameBuffer::new`]; everything
+/// Each buffer's pixel allocation is created once at construction; everything
 /// afterwards is slicing. Buffers are meant to be pooled
 /// ([`crate::FramePool`]) so the render hot path never allocates,
 /// resizes, or frees frame-sized memory (PG-6).
