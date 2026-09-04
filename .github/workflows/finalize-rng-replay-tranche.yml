@@ -13,12 +13,12 @@ permissions:
 
 concurrency:
   group: finalize-rng-replay-tranche
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   finalize:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 75
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -28,45 +28,38 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Explicitly advance unfinished implementation stages
+      - name: Require completed implementation receipts
         shell: bash
         run: |
           set -euo pipefail
           cursor_receipt="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/artifacts/implementation/rng-cursor-sampling-receipt.json"
           reservation_receipt="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/artifacts/implementation/rng-reservation-receipt.json"
+          missing=()
 
-          cursor_ready=0
-          reservation_ready=0
-          for cycle in $(seq 1 240); do
-            if curl --fail --silent "$cursor_receipt" | grep -Fq '"result": "pass"'; then
-              cursor_ready=1
+          if ! curl --fail --silent "$cursor_receipt" | grep -Fq '"result": "pass"'; then
+            missing+=("rng-cursor-sampling-receipt.json")
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/implement-rng-cursor-and-sampling.yml?ref=main" >/dev/null 2>&1; then
+              gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/implement-rng-cursor-and-sampling.yml/dispatches" \
+                -f ref=main || true
             fi
-            if curl --fail --silent "$reservation_receipt" | grep -Fq '"result": "pass"'; then
-              reservation_ready=1
-            fi
-            if [[ "$cursor_ready" -eq 1 && "$reservation_ready" -eq 1 ]]; then
-              exit 0
-            fi
+          fi
 
-            if (( cycle == 1 || cycle % 30 == 0 )); then
-              if [[ "$cursor_ready" -eq 0 ]]; then
-                if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/implement-rng-cursor-and-sampling.yml?ref=main" >/dev/null 2>&1; then
-                  gh api --method POST \
-                    "repos/${GITHUB_REPOSITORY}/actions/workflows/implement-rng-cursor-and-sampling.yml/dispatches" \
-                    -f ref=main || true
-                fi
-              elif [[ "$reservation_ready" -eq 0 ]]; then
-                if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/implement-rng-reservations.yml?ref=main" >/dev/null 2>&1; then
-                  gh api --method POST \
-                    "repos/${GITHUB_REPOSITORY}/actions/workflows/implement-rng-reservations.yml/dispatches" \
-                    -f ref=main || true
-                fi
-              fi
+          if ! curl --fail --silent "$reservation_receipt" | grep -Fq '"result": "pass"'; then
+            missing+=("rng-reservation-receipt.json")
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/implement-rng-reservations.yml?ref=main" >/dev/null 2>&1; then
+              gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/implement-rng-reservations.yml/dispatches" \
+                -f ref=main || true
             fi
-            sleep 30
-          done
-          echo "implementation receipts did not both reach pass" >&2
-          exit 2
+          fi
+
+          if (( ${#missing[@]} > 0 )); then
+            printf 'RNG replay finalization is not ready; dispatched available producers for:\n' >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            echo "Re-run this finalizer after every listed receipt records result=pass." >&2
+            exit 2
+          fi
 
       - name: Refresh to the exact latest canonical source
         shell: bash
