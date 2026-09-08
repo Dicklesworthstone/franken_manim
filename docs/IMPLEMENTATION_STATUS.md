@@ -144,6 +144,7 @@ This checklist implements the user's explicit request for a detailed, persistent
     - [x] Forward remover flags through the shared constructor and replace the obsolete arc-refusal witness with an analytic midpoint, endpoint and updater-detachment check; the initial installed wheel passes the full bridge script.
     - [x] Reproduce `Scene.play` bypassing a Transform subclass against the native library; route overrides through the existing Choreo callback boundary and observe the regression pass.
     - [ ] Reverify helper `update_mobjects(dt)`, cleanup and FocusOn/Flash helper initialization after the complete callback lifecycle is enabled. Retain the explicit intermediate-alpha and exact-dt assertions.
+    - [ ] Preserve native-created composition roots in Python scene inspection. The real render scenario reproduced an empty `Scene.mobjects` after `Succession`; hydrate missing proxies, retain existing child identities, synchronize parent edges, and verify later remove/add operations.
   - [ ] Register a real lifecycle/parity render scenario with deterministic logs and failure artifacts.
     - [x] Add `lifecycle.python_animation_semantics.v1` and its named focused test; correct the initial `ScenarioClass` spelling compile error.
     - [ ] Execute the registered scenario, decode its native PNGs and inspect its deterministic log/failure-artifact behavior.
@@ -151,14 +152,21 @@ This checklist implements the user's explicit request for a detailed, persistent
     - [x] Qualify CPython 3.13.15, NumPy 2.5.2 and Maturin 1.14.1; build and install an actual wheel. Its full bridge script passes with the workspace version supplied independently.
     - [ ] Rebuild the final callback fixes into a fresh wheel/environment and run both real-extension acceptance scripts plus the overlay-bound runtime receipt. The initial wheel predates the subclass repair.
     - [x] Add both acceptance scripts to the permanent installed-wheel check, before its runtime audit.
+    - [x] Execute the initial wheel's runtime audit against the exact current overlay/schema: terminal exit 1, 112 contradictions (107 placeholders and 5 missing symbols). Keep these failures visible; the receipt is not a parity pass.
   - [ ] Run required source gates, review the final diff, reverify acceptance with a fresh review pass, commit only owned work, then close only if complete.
 - [ ] Restore prerequisites that prevent reliable full validation.
   - [ ] `fm-9fo8`: repair the unused internal SVG emitter without suppressing warnings or changing public SVG semantics; execute the existing SVG tests and Clippy.
     - [x] Remove only the unreachable parser-local function; preserve public safe emission. Workspace Clippy now exits 0 after four separate iterator warnings were also repaired without arithmetic/order changes.
-    - [ ] Obtain existing SVG test and complete workspace-test receipts before closing.
+    - [x] Execute existing SVG tests: 16 filtered unit tests pass, followed by an explicit integration invocation with 5 SVG and 2 UTF-8 tests passing and none filtered. The first filter ran zero integration tests and supplies no integration evidence.
+    - [ ] Obtain the complete workspace-test receipt before closing.
   - [ ] `fm-5wq.7`: inspect RCH source exclusions and restore the tracked corpus fixture in remote inputs; qualify pinned WASM target and CPython tools without deleting artifacts or disturbing peer jobs.
   - [ ] Obtain terminal full `cargo test`, Clippy, formatting and `scripts/check.sh` receipts; classify source failures separately from worker failures and repair actual roots.
 - [ ] `fm-7wm.6`: rebuild current WASM target/Node/browser packages, verify fresh-consumer serial/threaded output, and only then update the stale lock-bound audit.
+  - [x] Re-derive the actual wasm dependency tree: it now includes fnp-random-core and fsci-linalg/fft/runtime, contradicting the old audit's absence claim.
+  - [x] Qualify the pinned wasm32 nightly target, wasm-bindgen 0.2.127 and Binaryen 117 with verified archive hashes; install Node 22.22.1, webpack 5.109.2, webpack-cli 7.2.2 and Chrome 152 on the owned worker.
+  - [ ] Run the target build and Node smoke with current locks; retain terminal exits and output hashes.
+  - [ ] Run the existing fresh-consumer browser/package gate, including serial/threaded byte comparison and the COOP/COEP negative case; preserve its actual source-dirty status.
+  - [ ] Update the audit's dependency statements and lock hashes only after those executions pass.
 - [ ] `fm-5wq.4.143`: bind authored parity claims to actual native and installed-wheel semantic witnesses, including intermediate state and wrong-behavior negative controls; coordinate existing `.141` helper scope.
 - [ ] `fm-5wq.4.144`: wire Python rendering to the native complete input closure, canonical artifact/provenance publication and replay; test successful certification and actual incomplete-input refusals.
 - [ ] `fm-5wq.4.145`: connect remaining Python console/output options to Reel; exercise real decoded outputs and encoder/error paths.
