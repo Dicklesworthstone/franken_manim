@@ -27,7 +27,7 @@ PY
 done
 
 report_file="$(mktemp)"
-trap 'rm -f "$report_file"' EXIT
+echo "retaining installed-wheel parity receipt: $report_file" >&2
 set +e
 python3 -m fmn_python --audit-parity --robot >"$report_file"
 audit_status=$?
