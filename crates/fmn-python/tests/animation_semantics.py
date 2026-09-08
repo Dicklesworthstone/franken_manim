@@ -9,6 +9,7 @@ from manimlib import (
     AnimationGroup,
     Circle,
     CyclicReplace,
+    Group,
     LaggedStart,
     LaggedStartMap,
     Mobject,
@@ -353,7 +354,9 @@ def timeline_point():
 # Changing a group's wall-clock duration preserves its member timeline.
 # Compare Python and native leaves at every observed frame, including any
 # final refresh, with an independent first-frame value and intermediate state.
-for play_override in (False, True):
+for play_override, timeline_rate in (
+    (False, None), (True, linear_rate), (False, "linear"), (True, "linear"),
+):
     timeline_source, timeline_native, timeline_observer = (
         timeline_point(), timeline_point(), timeline_point()
     )
@@ -372,9 +375,10 @@ for play_override in (False, True):
             run_time=0.1, rate_func=linear_rate,
         ),
         run_time=-1 if play_override else 0.2,
+        rate_func=None if play_override else timeline_rate,
     )
     if play_override:
-        timeline_scene.play(timeline_group, run_time=0.2, rate_func=linear_rate)
+        timeline_scene.play(timeline_group, run_time=0.2, rate_func=timeline_rate)
     else:
         timeline_scene.play(timeline_group)
     assert len(mixed_samples) >= 6, mixed_samples
@@ -430,6 +434,65 @@ for python_first in (True, False):
     ), (python_first, mixed_successive_samples)
     expected_start = 0.0 if python_first else 1.0
     assert mixed_successive_events[0][2] == expected_start, mixed_successive_events
+
+# Mixed simultaneous leaves also preserve argument order on shared records.
+for python_last in (True, False):
+    shared_source, shared_observer = timeline_point(), timeline_point()
+    shared_samples = []
+    shared_observer.add_updater(
+        lambda mob, dt: shared_samples.append(shared_source.get_x()) if dt > 0 else None,
+        call=False,
+    )
+    shared_python = TimelineMove(shared_source, 2.0, [], run_time=0.1)
+    shared_native = Transform(
+        shared_source, shared_source.copy().set_x(1.0), run_time=0.1, rate_func=linear_rate,
+    )
+    shared_members = (shared_native, shared_python) if python_last else (shared_python, shared_native)
+    Scene().add(shared_source, shared_observer).play(AnimationGroup(*shared_members))
+    end = 2.0 if python_last else 1.0
+    assert np.allclose(shared_samples[:3], [end * k / 3 for k in (1, 2, 3)], atol=1e-6), shared_samples
+
+# A host exception releases a begun native child's locks and suspension
+# without snapping the partial frame to its endpoint.
+class FailingTimelineMove(TimelineMove):
+    def interpolate_mobject(self, alpha):
+        if alpha > 0.0:
+            raise RuntimeError("mixed-leaf failure witness")
+        super().interpolate_mobject(alpha)
+
+
+failed_source = timeline_point()
+failed_scene = Scene().add(failed_source)
+try:
+    failed_scene.play(AnimationGroup(
+        Transform(
+            failed_source, failed_source.copy().set_x(1.0), run_time=0.1,
+            rate_func=linear_rate, suspend_mobject_updating=True,
+        ),
+        FailingTimelineMove(failed_source, 2.0, [], run_time=0.1),
+    ))
+except RuntimeError as error:
+    assert str(error) == "mixed-leaf failure witness", error
+else:
+    raise AssertionError("mixed composition swallowed the host exception")
+assert 0.0 < failed_source.get_x() < 1.0, failed_source.get_x()
+assert not failed_source.locked_data_keys
+assert not failed_source._is_updating_suspended()
+
+# TransformFromCopy's public constructor owns exactly one source copy. The
+# native play must remove it after replacement, without an orphaned family.
+copy_source = Group(timeline_point(), timeline_point().shift((0.0, 1.0, 0.0)))
+copy_target = copy_source.copy().shift((2.0, 0.0, 0.0))
+copy_animation = TransformFromCopy(copy_source, copy_target, run_time=0.1, rate_func=linear_rate)
+constructor_copy = copy_animation.mobject
+assert constructor_copy is not copy_source
+copy_scene = Scene().add(copy_source)
+copy_scene.play(copy_animation)
+assert copy_scene.mobjects == [copy_source, copy_target], copy_scene.mobjects
+assert constructor_copy not in copy_scene.get_mobject_family_members()
+assert copy_scene._engine_facts()[:2] == (2, 6), copy_scene._engine_facts()
+assert np.allclose(copy_source.get_center(), [0.0, 0.5, 0.0])
+assert np.allclose(copy_target.get_center(), [2.0, 0.5, 0.0])
 
 # Nested coarse sampling still runs every crossed child in order (BN-11).
 coarse_source, coarse_events = timeline_point(), []
@@ -487,6 +550,21 @@ def render_animation_lifecycle(destination, seed):
             assert self.get_mobject_family_members() == [root, square]
             root.add(circle)
             assert self.get_mobject_family_members() == [root, square, circle]
+            # The published frames include a mixed, same-object succession;
+            # the native second child must capture the Python endpoint.
+            mixed_positions = []
+            circle.add_updater(
+                lambda mob, dt: mixed_positions.append(square.get_x()) if dt > 0 else None,
+                call=False,
+            )
+            self.play(Succession(
+                TimelineMove(square, 0.0, [], run_time=0.1),
+                Transform(square, square.copy().set_x(1.0), run_time=0.1, rate_func=linear_rate),
+            ))
+            assert np.allclose(
+                mixed_positions[:6], [-1.0 + k / 3.0 for k in range(1, 7)], atol=1e-5,
+            ), mixed_positions
+            circle.clear_updaters()
             self.wait(1.0 / 30.0)
 
     scene = AnimationLifecycleScene()

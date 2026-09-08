@@ -15,6 +15,7 @@ import contextlib as _contextlib
 import copy as _copy
 import difflib as _difflib
 import functools as _functools
+import hashlib as _hashlib
 import enum as _enum
 import xml.etree.ElementTree as _xml_etree
 import importlib as _importlib
@@ -482,6 +483,9 @@ def _install_live_state(mobject):
     mobject.event_listners = []
     mobject.saved_state = None
     mobject.target = None
+    mobject.locked_data_keys = set()
+    mobject.const_data_keys = set()
+    mobject.locked_uniform_keys = set()
     # Reference __init__ (mobject.py:92-93) style seeds. Constructors in
     # the native-build family bypass Mobject.__init__ entirely, so the
     # seeds live here where every construction path passes; copy and
@@ -1272,6 +1276,11 @@ class Mobject(_BridgeMobject):
             )
         self.shift(mobject.get_center() - self.get_center())
         return self
+
+    def surround(self, mobject, dim_to_match=0, stretch=False, buff=_MED_SMALL_BUFF):
+        self.replace(mobject, dim_to_match, stretch)
+        length = mobject.length_over_dim(dim_to_match)
+        return self.scale((length + buff) / length)
 
     def stretch_to_fit_width(self, width, **kwargs):
         return self.rescale_to_fit(width, 0, stretch=True, **kwargs)
@@ -2717,7 +2726,12 @@ class Mobject(_BridgeMobject):
         return pickle.dumps(self)
 
     def deserialize(self, data):
-        self.become(pickle.loads(data))
+        """Restore a trusted host-Python pickle, which may execute Python code.
+
+        This compatibility method is not an untrusted asset or replay reader.
+        Only pass bytes from a trusted Python producer, as with pickle.loads.
+        """
+        self.become(pickle.loads(data))  # ubs:ignore -- trusted host-code pickle protocol required by plan 8.3/15.2; no asset-reader caller
         return self
 
     def pointwise_become_partial(self, mobject, a, b):
@@ -9388,7 +9402,7 @@ class Bubble(VGroup):
 
     def pin_to(self, mobject, auto_flip=False):
         mob_center = mobject.get_center()
-        want_to_flip = _np.sign(mob_center[0]) != _np.sign(self.direction[0])
+        want_to_flip = _np.sign(mob_center[0]) != _np.sign(self.direction[0])  # ubs:ignore -- numeric coordinate signs, not secret signatures
         if want_to_flip and auto_flip:
             self.flip()
         boundary_point = mobject.get_bounding_box_point(_UP - self.direction)
@@ -14340,6 +14354,7 @@ class ProgressDisplay:
 
 
 class Scene(_SceneCore):
+    random_seed = 0
     pan_sensitivity = 0.5
     scroll_sensitivity = 20
     drag_to_pan = True
@@ -14348,6 +14363,7 @@ class Scene(_SceneCore):
     default_camera_config = dict()
     default_file_writer_config = dict()
     samples = 0
+    default_frame_orientation = (0, 0)
     show_animation_progress = False
 
     def __init__(self, *args, **kwargs):
@@ -14368,6 +14384,8 @@ class Scene(_SceneCore):
         # out of the drawable Stage, but it must still exist before the first
         # update crossing so initialization never contaminates frame work.
         self.frame = CameraFrame()
+        self.frame.reorient(*self.default_frame_orientation)
+        self.frame.make_orientation_default()
         self.num_plays = 0
         self.undo_stack = []
         self.redo_stack = []
@@ -14599,7 +14617,7 @@ class Scene(_SceneCore):
             frames = max(2, int(round(float(run_time_hint) * 30.0)))
             return [float(value(k / frames)) for k in range(frames + 1)]
 
-        def build_spec(proto, nested):
+        def build_spec(proto, nested, composition_members=None):
             if isinstance(proto, _AnimationBuilder):
                 if proto.overridden_animation is not None:
                     return build_spec(proto.build(), nested)
@@ -14656,7 +14674,7 @@ class Scene(_SceneCore):
                 if proto.time_span is not None:
                     params["time_span"] = proto.time_span
                 if isinstance(proto, AnimationGroup):
-                    params["members"] = [
+                    params["members"] = composition_members if composition_members is not None else [
                         build_spec(member, True) for member in proto.animations
                     ]
                     params["lag_ratio"] = float(
@@ -14753,6 +14771,26 @@ class Scene(_SceneCore):
                 "Animation classes; got " + type(proto).__name__
             )
 
+        def build_callback_composition(proto, effective_run_time=None, effective_rate=None):
+            children, members = [], []
+            for member in proto.animations:
+                if isinstance(member, Animation) and _requires_python_animation(member):
+                    member._ensure_runtime_defaults()
+                    child, spec = member, build_spec(member, True)
+                elif isinstance(member, AnimationGroup) and _python_composition_members(member):
+                    child, spec = build_callback_composition(member)
+                else:
+                    core = self._native_animation_driver(build_spec(member, True))
+                    child = _NativeCompositionLeaf(self, core)
+                    spec = ("native_callback", None, None, core.get_run_time(),
+                            None, None, {"driver": core})
+                children.append(child)
+                members.append(spec)
+            driver = _CompositionCallbackDriver(
+                proto, children, run_time=effective_run_time, rate_func=effective_rate,
+            )
+            return driver, build_spec(proto, False, composition_members=members)
+
         specs = []
         callbacks = []
         camera_pair = None
@@ -14813,20 +14851,27 @@ class Scene(_SceneCore):
             ):
                 # fm-5wq.4.88: a composition carrying Python-driven leaves
                 # gets one driver callback in the same release window.
-                callbacks.append(_CompositionCallbackDriver(
-                    proto, run_time=run_time, rate_func=rate_func,
-                ))
+                driver, spec = build_callback_composition(proto, run_time, rate_func)
+                callbacks.append(driver)
+                specs.append(spec)
+                continue
             else:
                 callbacks.append(None)
             specs.append(build_spec(proto, False))
-        return self._play_animations(
-            specs,
-            callbacks,
-            camera_pair,
-            None if run_time is None else float(run_time),
-            rate_payload(rate_func, "play", run_time or 1.0),
-            None if lag_ratio is None else float(lag_ratio),
-        )
+        try:
+            return self._play_animations(
+                specs,
+                callbacks,
+                camera_pair,
+                None if run_time is None else float(run_time),
+                rate_payload(rate_func, "play", run_time or 1.0),
+                None if lag_ratio is None else float(lag_ratio),
+            )
+        except BaseException:
+            for callback in callbacks:
+                if isinstance(callback, _CompositionCallbackDriver):
+                    callback.abort()
+            raise
 
     def wait(
         self,
@@ -15006,7 +15051,7 @@ class Scene(_SceneCore):
         keys = _pinned_manim_config().key_bindings
         ctrl = int(modifiers) & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)
         shift = int(modifiers) & _PYGLET_MOD_SHIFT
-        if char == keys.reset:
+        if char == keys.reset:  # ubs:ignore -- keyboard reset shortcut, not a reset token
             self.play(self.camera.frame.animate.to_default_state())
         elif char == "z" and ctrl and shift:
             # D5: the Reference tests ctrl-z before ctrl-shift-z, so redo
@@ -15399,11 +15444,6 @@ class ThreeDScene(Scene):
     samples = 4
     default_frame_orientation = (-30, 70)
     always_depth_test = True
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.frame.reorient(*self.default_frame_orientation)
-        self.frame.make_orientation_default()
 
     def add(self, *mobjects, set_depth_test=True, perp_stroke=True):
         for mobject in mobjects:
@@ -19026,11 +19066,13 @@ def _python_composition_members(group):
 
 
 def _composition_member_run_time(member):
+    if hasattr(member, "get_run_time"):
+        return float(member.get_run_time())
     run_time = getattr(member, "run_time", None)
     return 1.0 if run_time is None else float(run_time)
 
 
-def _composition_timings(group):
+def _composition_timings(group, children):
     """fmn-anim composition.rs `build_timings`, mirrored: member k spans
     [start, start + run_time_k] and the next member starts at
     `start + run_time_k * lag_ratio`."""
@@ -19041,7 +19083,7 @@ def _composition_timings(group):
     )
     timings = []
     curr = 0.0
-    for member in group.animations:
+    for member in children:
         start = curr
         end = start + _composition_member_run_time(member)
         timings.append((member, start, end))
@@ -19068,29 +19110,64 @@ def _composition_timeline_position(group, alpha, max_end, run_time=None, rate_fu
     return rate(float(alpha)) * max_end
 
 
-class _CompositionCallbackDriver:
-    """The one top-level release-window callback for a composition that
-    carries Python-driven members (fm-5wq.4.88): the native group drives
-    its native members and the python_callback placeholder slots; this
-    driver runs the Python leaves at the mirrored sub-alphas in the same
-    release window."""
+class _NativeCompositionLeaf:
+    """Call the real native leaf lifecycle with the Stage released between calls."""
 
-    def __init__(self, group, run_time=None, rate_func=None):
+    def __init__(self, scene, core):
+        self.scene, self.core = scene, core
+
+    def get_run_time(self):
+        return self.core.get_run_time()
+
+    def begin(self):
+        self.core.begin()
+
+    def update_mobjects(self, dt):
+        self.core.update_mobjects(dt)
+
+    def interpolate(self, alpha):
+        self.core.interpolate(alpha)
+
+    def finish(self):
+        self.core.finish(self.scene)
+
+    def clean_up_from_scene(self, scene):
+        self.core.clean_up_from_scene()
+
+    def abort(self):
+        self.core.abort()
+
+
+class _CompositionCallbackDriver:
+    """Ordered native/Python child lifecycle on Choreo's release boundary.
+
+    The native group retains timing slots and scene-root structure. Every
+    actual leaf runs here in argument order, so a native child's begin sees
+    the preceding Python child's final state and conversely.
+    """
+
+    def __init__(self, group, children, run_time=None, rate_func=None):
         self.group = group
         self.run_time = run_time
-        self.rate_func = rate_func
-        self.timings, self.max_end = _composition_timings(group)
-        self.children = []
-        for member, _, _ in self.timings:
-            if isinstance(member, Animation) and _requires_python_animation(member):
-                child = member
-            elif isinstance(member, AnimationGroup):
-                child = _CompositionCallbackDriver(member)
-            else:
-                child = None
-            self.children.append(child)
+        self.rate_func = group.rate_func if rate_func is None else rate_func
+        if isinstance(self.rate_func, str):
+            name = self.rate_func
+            self.rate_func = next(
+                (function for function, catalog_name in _RATE_FUNC_NAMES.items()
+                 if catalog_name == name), None,
+            )
+            if self.rate_func is None:
+                raise ValueError("unknown rate function: " + name)
+        self.children = children
+        self.timings, self.max_end = _composition_timings(group, children)
         self.successive = group._native_kind in {"succession", "show_creation_then_fade_out"}
         self.active = 0
+
+    def get_run_time(self):
+        duration = self.run_time if self.run_time is not None else self.group.run_time
+        duration = self.max_end if duration is None else float(duration)
+        span = self.group.time_span
+        return max(duration, span[1]) if span is not None else duration
 
     def begin(self):
         self.active = 0
@@ -19107,7 +19184,7 @@ class _CompositionCallbackDriver:
 
     def interpolate(self, alpha):
         time = _composition_timeline_position(
-            self.group, float(alpha), self.max_end, self.run_time, self.rate_func,
+            self.group, float(alpha), self.max_end, self.get_run_time(), self.rate_func,
         )
         if self.successive:
             target = 0
@@ -19133,7 +19210,7 @@ class _CompositionCallbackDriver:
             if child is not None:
                 _, start, end = self.timings[index]
                 duration = end - start
-                sub = 1.0 if duration <= 0 else min(max((time - start) / duration, 0.0), 1.0)
+                sub = 0.0 if duration == 0 else min(max((time - start) / duration, 0.0), 1.0)
                 child.interpolate(sub)
 
     def finish(self):
@@ -19150,6 +19227,11 @@ class _CompositionCallbackDriver:
         for child in self.children:
             if child is not None:
                 child.clean_up_from_scene(scene)
+
+    def abort(self):
+        for child in self.children:
+            if isinstance(child, (_NativeCompositionLeaf, _CompositionCallbackDriver)):
+                child.abort()
 
 
 class Flash(AnimationGroup):
@@ -21648,6 +21730,9 @@ def _install_simple_functions():
     def choose(n, k):
         return _math.comb(n, k)
 
+    def hash_string(string, n_bytes=16):
+        return _hashlib.sha256(string.encode()).hexdigest()[:n_bytes]
+
     def clip(a, min_a, max_a):
         if a < min_a:
             return min_a
@@ -21669,6 +21754,7 @@ def _install_simple_functions():
         "choose": choose,
         "clip": clip,
         "fdiv": fdiv,
+        "hash_string": hash_string,
         "sigmoid": sigmoid,
     }
     module = _ensure_module("manimlib.utils.simple_functions")

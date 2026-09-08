@@ -301,6 +301,7 @@ utility_signatures = {
     simple_utils.choose: "(n, k)",
     simple_utils.clip: "(a, min_a, max_a)",
     simple_utils.fdiv: "(a, b, zero_over_zero_value=None)",
+    simple_utils.hash_string: "(string, n_bytes=16)",
     simple_utils.sigmoid: "(x)",
     space_utils.angle_between_vectors: "(v1, v2)",
     space_utils.angle_of_vector: "(vector)",
@@ -312,7 +313,7 @@ utility_signatures = {
     path_utils.path_along_arc: "(arc_angle, axis=array([0., 0., 1.]))",
     path_utils.straight_path: "(start_points, end_points, alpha)",
 }
-assert len(utility_signatures) == 34
+assert len(utility_signatures) == 35
 for function, declared_call_shape in utility_signatures.items():
     actual_call_shape = str(inspect.signature(function))
     assert actual_call_shape == declared_call_shape
@@ -396,6 +397,12 @@ else:
     raise AssertionError("malformed color text was accepted")
 
 assert simple_utils.choose(8, 3) == 56
+assert simple_utils.hash_string("abc") == "ba7816bf8f01cfea"
+assert simple_utils.hash_string("abc", 64) == (
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+)
+assert simple_utils.hash_string("abc", 0) == ""
+assert simple_utils.hash_string("", 8) == "e3b0c442"
 assert simple_utils.clip(-2.0, -1.0, 1.0) == -1.0
 assert simple_utils.clip(2.0, -1.0, 1.0) == 1.0
 assert simple_utils.clip(0.25, -1.0, 1.0) == 0.25
@@ -1416,6 +1423,23 @@ else:
 assert not hasattr(failed_three_d_camera, "_core")
 
 scene_module = importlib.import_module("manimlib.scene.scene")
+assert scene_module.Scene.random_seed == 0
+assert scene_module.Scene.default_frame_orientation == (0, 0)
+
+
+class OrientedBaseScene(scene_module.Scene):
+    default_frame_orientation = (25, 40, 10)
+
+
+oriented_base_scene = OrientedBaseScene()
+assert np.allclose(
+    oriented_base_scene.frame.get_euler_angles(), np.deg2rad([25.0, 40.0, 10.0]),
+)
+oriented_base_scene.frame.reorient(0, 0, 0)
+oriented_base_scene.frame.to_default_state()
+assert np.allclose(
+    oriented_base_scene.frame.get_euler_angles(), np.deg2rad([25.0, 40.0, 10.0]),
+)
 assert scene_module.ThreeDScene.__bases__ == (scene_module.Scene,)
 assert scene_module.ThreeDScene.samples == 4
 assert scene_module.ThreeDScene.default_frame_orientation == (-30, 70)
@@ -7609,7 +7633,7 @@ assert tuple(inspect.signature(indication.FlashAround).parameters) == (
     "n_inserted_curves",
     "kwargs",
 )
-assert inspect.signature(indication.FlashUnder) == inspect.signature(
+assert inspect.signature(indication.FlashUnder) == inspect.signature(  # ubs:ignore -- public Python call signatures, not cryptographic material
     indication.FlashAround
 )
 assert tuple(inspect.signature(indication.ShowPassingFlashAround).parameters) == (
@@ -18508,7 +18532,7 @@ assert copied_leaf.parents == [copied_mid]
 assert copied_mid.parents == [copied_top]
 
 # Pickle round-trips rebuild parents from the children lists alone.
-revived = pickle.loads(pickle.dumps(top))
+revived = pickle.loads(pickle.dumps(top))  # ubs:ignore -- round-trip of this test's own trusted object graph
 assert revived.parents == []
 revived_mid = revived.submobjects[0]
 revived_leaf = revived_mid.submobjects[0]
@@ -19305,6 +19329,20 @@ wrapper.surround(wrapped, buff=0.75)
 assert wrapper.get_width() == 3.5
 assert wrapper.get_height() == 3.5
 assert np.allclose(wrapper.get_center(), wrapped.get_center())
+
+# The base Mobject contract scales around the matched dimension; unlike the
+# rectangle override, its buffer is the total added span in that dimension.
+base_wrapped = Mobject().set_points([[1.0, 1.0, 0.0], [5.0, 3.0, 0.0]])
+base_wrapper = Mobject().set_points([[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]])
+base_scene = Scene().add(base_wrapped, base_wrapper)
+assert base_wrapper.surround(base_wrapped, buff=1.0) is base_wrapper
+assert np.allclose(base_wrapper.get_center(), [3.0, 2.0, 0.0])
+assert np.allclose([base_wrapper.get_width(), base_wrapper.get_height()], [5.0, 5.0])
+assert base_wrapper._is_bound()
+assert base_scene.mobjects == [base_wrapped, base_wrapper]
+assert base_wrapper.surround(base_wrapped, dim_to_match=1, stretch=True, buff=0.5) is base_wrapper
+assert np.allclose([base_wrapper.get_width(), base_wrapper.get_height()], [5.0, 2.5])
+assert np.allclose(base_wrapped.get_points(), [[1.0, 1.0, 0.0], [5.0, 3.0, 0.0]])
 
 
 # ---------------------------------------------------------------------------

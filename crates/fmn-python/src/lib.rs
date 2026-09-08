@@ -7666,22 +7666,28 @@ impl PyScene {
         }
     }
 
-    /// Cut T2 (fm-d3gt): drive the engine's six-step play contract
-    /// (`fmn_scene::Scene::play`) for MoveToTarget-shaped animations.
-    /// Both proxies must already be arena-resident in this scene; the
-    /// bootstrap adopts them beforehand. Rendering is a later tranche:
-    /// captures flow through a frame-counting probe sink whose recorded
-    /// alphas are returned (ordered, one per captured frame).
-    /// A camera lerp (cut T3) may ride the segment: `camera` is the
-    /// `(live_core, target_core)` pair; with no mobject pairs the segment
-    /// is a native wait carrying the camera. State-exact at every capture
-    /// boundary and set exactly to the target state at segment end.
-    /// Each spec is `(kind, mobject, target, run_time, rate_func,
-    /// lag_ratio, params)` and builds one native fmn-anim animation.
-    /// Composition kinds (`animation_group`, `lagged_start`, `succession`)
-    /// carry nested specs under `params["members"]` and the construction
-    /// lag under `params["lag_ratio"]`; the native module owns the group
-    /// timing derivation (`build_timings`, the Reference's rule).
+    /// Construct the ordinary native animation for ordered lifecycle calls
+    /// inside a mixed composition. Endpoints are already adopted by Python;
+    /// construction does not begin the animation or capture its start state.
+    fn _native_animation_driver(
+        &self,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<PyNativeAnimationDriver> {
+        let spec = parse_anim_spec(&self.engine, spec)?;
+        let animation = build_native_animation(self.engine.borrow_mut().stage_mut(), spec)?;
+        Ok(PyNativeAnimationDriver {
+            engine: Rc::clone(&self.engine),
+            animation,
+            begun: false,
+            finished: false,
+        })
+    }
+
+    /// Drive Choreo's six-step play contract and the active output session.
+    /// Specs are `(kind, mobject, target, run_time, rate_func, lag_ratio,
+    /// params)`, with composition members under `params["members"]`.
+    /// Native groups derive the timing slots; ordered host callbacks run
+    /// between Stage borrows. An optional camera track shares the segment.
     #[pyo3(signature = (specs, callbacks, camera, run_time, rate_func, lag_ratio))]
     fn _play_animations(
         slf: &Bound<'_, Self>,
@@ -8167,6 +8173,79 @@ fn scene_error(error: fmn_scene::SceneError) -> PyErr {
     }
 }
 
+/// A native leaf driven inside an ordered mixed-composition release window.
+/// Each method borrows the Stage only for native work. The enclosing Python
+/// driver can therefore finish one child before the next native child takes
+/// its starting copy, with no Scene borrow crossing a host callback.
+#[pyclass(unsendable, name = "_NativeAnimationDriver")]
+struct PyNativeAnimationDriver {
+    engine: Engine,
+    animation: Box<dyn fmn_anim::Animation>,
+    begun: bool,
+    finished: bool,
+}
+
+#[pymethods]
+impl PyNativeAnimationDriver {
+    fn get_run_time(&self) -> f64 {
+        self.animation.get_run_time()
+    }
+
+    fn begin(&mut self) -> PyResult<()> {
+        self.begun = true;
+        self.finished = false;
+        self.animation
+            .begin(self.engine.borrow_mut().stage_mut())
+            .map_err(anim_error)
+    }
+
+    fn update_mobjects(&mut self, dt: f64) {
+        self.animation
+            .update_mobjects(self.engine.borrow_mut().stage_mut(), dt);
+    }
+
+    fn interpolate(&mut self, alpha: f64) -> PyResult<()> {
+        self.animation
+            .interpolate(self.engine.borrow_mut().stage_mut(), alpha);
+        self.animation
+            .deferred_error()
+            .map_or(Ok(()), |error| Err(anim_error(error)))
+    }
+
+    fn finish(&mut self, scene: &Bound<'_, PyScene>) -> PyResult<()> {
+        if !same_engine(&self.engine, &scene.borrow().engine) {
+            return Err(ForeignStageError::new_err(
+                "animation belongs to another Scene",
+            ));
+        }
+        if self.begun && !self.finished {
+            self.animation.finish(self.engine.borrow_mut().stage_mut());
+            self.finished = true;
+            let mut resumed = Vec::new();
+            self.animation
+                .collect_resumed_updater_mobjects(&mut resumed);
+            run_resumed_python_updaters(scene, &resumed)?;
+        }
+        self.animation
+            .deferred_error()
+            .map_or(Ok(()), |error| Err(anim_error(error)))
+    }
+
+    fn clean_up_from_scene(&mut self) {
+        if self.finished {
+            self.animation
+                .clean_up_from_scene(self.engine.borrow_mut().stage_mut());
+        }
+    }
+
+    fn abort(&mut self) {
+        if self.begun && !self.finished {
+            self.animation.abort(self.engine.borrow_mut().stage_mut());
+            self.finished = true;
+        }
+    }
+}
+
 /// Timing/lifecycle slot for a top-level Python-authored Animation.
 ///
 /// Its interpolation is intentionally empty: Choreo yields immediately after
@@ -8331,9 +8410,23 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
             .collect::<PyResult<Vec<_>>>()?,
         None => Vec::new(),
     };
+    let mob = if kind == "native_callback" {
+        let driver = params.get_item("driver")?.ok_or_else(|| {
+            PyValueError::new_err("native_callback requires its native animation driver")
+        })?;
+        let driver = driver.cast::<PyNativeAnimationDriver>()?.borrow();
+        if !same_engine(engine, &driver.engine) {
+            return Err(ForeignStageError::new_err(
+                "animation belongs to another Scene",
+            ));
+        }
+        Some(driver.animation.state().mobject())
+    } else {
+        mobject.as_ref().map(&resolve).transpose()?
+    };
     Ok(AnimSpec {
         kind,
-        mob: mobject.as_ref().map(&resolve).transpose()?,
+        mob,
         target: target.as_ref().map(&resolve).transpose()?,
         run_time,
         rate,
@@ -8474,7 +8567,9 @@ fn build_native_animation(
             | "transform_matching_tex"
     );
     let mut animation: Box<dyn fmn_anim::Animation> = match spec.kind.as_str() {
-        "python_callback" => Box::new(PythonAnimationSlot::new(need_mob(spec.mob)?, spec.remover)),
+        "python_callback" | "native_callback" => {
+            Box::new(PythonAnimationSlot::new(need_mob(spec.mob)?, spec.remover))
+        }
         "animation_group" | "lagged_start" => {
             let mut members = Vec::with_capacity(spec.members.len());
             for member in spec.members {
@@ -10762,6 +10857,22 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("native Animation/Transform acceptance suite");
+            let failed_source = globals
+                .get_item("failed_source")
+                .expect("read mixed-callback abort witness")
+                .expect("mixed-callback abort witness ran");
+            let failed_source = failed_source.cast::<BridgeMobject>().expect("native proxy");
+            with_stage(failed_source, |stage, mob| {
+                let entry = stage
+                    .get(mob)
+                    .expect("aborted animation retains its source");
+                assert!(
+                    entry.buffer.locked_keys().is_empty(),
+                    "callback abort releases actual native record locks"
+                );
+                assert!(!stage.is_updating_suspended(mob));
+            })
+            .expect("read native abort state");
         });
     }
 

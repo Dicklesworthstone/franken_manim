@@ -378,6 +378,10 @@ def install(native):
 
     def transform_from_copy_init(self, mobject, target_mobject, **kwargs):
         Transform.__init__(self, mobject.copy(), target_mobject, **kwargs)
+        # The public constructor already froze the source copy. The native
+        # replacement transform must consume that exact object; invoking the
+        # native copy constructor again would leave this first copy rooted.
+        self._native_kind = "replacement_transform"
 
     Mobject.__str__ = mobject_str
     Mobject.interpolate = mobject_interpolate
