@@ -2515,10 +2515,10 @@ impl<'a> GradientField<'a> {
         };
 
         // Exact at a station, and exact on an edge.
-        for i in 0..n {
+        for (i, &param) in self.params[..n].iter().enumerate() {
             let di = d(i);
             if di[0] * di[0] + di[1] * di[1] <= Self::TOUCH_SQ {
-                return self.params[i];
+                return param;
             }
         }
         for i in 0..n {
@@ -2543,7 +2543,7 @@ impl<'a> GradientField<'a> {
         let mut t_prev = wrap;
         let mut num = 0.0;
         let mut den = 0.0;
-        for i in 0..n {
+        for (i, &param) in self.params[..n].iter().enumerate() {
             let t_i = if i + 1 < n {
                 tan_half(i, i + 1).unwrap_or(0.0)
             } else {
@@ -2553,7 +2553,7 @@ impl<'a> GradientField<'a> {
             let r = (di[0] * di[0] + di[1] * di[1]).sqrt();
             if r > 0.0 {
                 let w = (t_prev + t_i) / r;
-                num += w * self.params[i];
+                num += w * param;
                 den += w;
             }
             t_prev = t_i;
@@ -2596,10 +2596,10 @@ impl<'a> GradientField<'a> {
             Some((ri * rj - dot) / cross)
         };
 
-        for i in 0..n {
+        for (i, &param) in self.params[..n].iter().enumerate() {
             let di = d(i);
             if di[0] * di[0] + di[1] * di[1] <= Self::TOUCH_SQ {
-                return self.params[i];
+                return param;
             }
         }
         for i in 0..n {

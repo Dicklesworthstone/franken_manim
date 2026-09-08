@@ -2145,8 +2145,8 @@ impl<'a> FrameJob<'a> {
                 if t < self.binning.tile_count() {
                     match aa {
                         RenderAa::Forced(samples) => {
-                            for i in 0..w {
-                                worker.acc[i] = self.composite_pixel_supersampled::<K>(
+                            for (i, pixel) in worker.acc[..w].iter_mut().enumerate() {
+                                *pixel = self.composite_pixel_supersampled::<K>(
                                     t,
                                     x_lo + i as u32,
                                     py,
