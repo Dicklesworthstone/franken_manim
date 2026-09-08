@@ -351,7 +351,20 @@ def render_animation_lifecycle(destination, seed):
                 ),
             )
             assert np.allclose(square.get_center(), [-1.0, -1.0, 0.0], atol=1e-5)
-            assert square in self.mobjects and circle in self.mobjects
+            roots = self.mobjects
+            assert len(roots) == 1, roots
+            root = roots[0]
+            assert root.submobjects == [square, circle]
+            assert self.mobjects[0] is root
+            assert root in square.parents and root in circle.parents
+            assert self.get_mobject_family_members() == [root, square, circle]
+            # A projected container is a live Stage identity: changing its
+            # Python family must affect subsequent native captures too.
+            root.remove(circle)
+            assert root.submobjects == [square] and root not in circle.parents
+            assert self.get_mobject_family_members() == [root, square]
+            root.add(circle)
+            assert self.get_mobject_family_members() == [root, square, circle]
             self.wait(1.0 / 30.0)
 
     scene = AnimationLifecycleScene()

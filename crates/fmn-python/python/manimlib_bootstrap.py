@@ -320,13 +320,20 @@ class _LiveSubmobjects(list):
         owner = self._owner_ref()
         if owner is None:
             raise ReferenceError("the owning Mobject has been collected")
+        owner._replace_submobjects(candidate)
+        self._replace_projection(candidate)
+
+    def _replace_projection(self, candidate):
+        """Refresh Python edges after native code has already changed them."""
+        owner = self._owner_ref()
+        if owner is None:
+            raise ReferenceError("the owning Mobject has been collected")
         # Maintain the Reference's parent back-edges (mobject.py:465/480):
         # every child newly placed under this owner records it and every
         # child detached here drops it. Identity membership keeps shared
         # descendants (legal multi-parent graphs) coherent.
         added = [child for child in candidate if child not in self]
         removed = [child for child in self if child not in candidate]
-        owner._replace_submobjects(candidate)
         list.clear(self)
         list.extend(self, candidate)
         for child in added:
@@ -3906,6 +3913,13 @@ class VMobject(Mobject):
 
 def _native_shell_factory():
     shell = VMobject.__new__(VMobject)
+    _install_live_state(shell)
+    return shell
+
+
+def _native_scene_shell_factory(vector_records):
+    cls = VMobject if vector_records else Group
+    shell = cls.__new__(cls)
     _install_live_state(shell)
     return shell
 
@@ -14484,7 +14498,7 @@ class Scene(_SceneCore):
 
     @property
     def mobjects(self):
-        return self._engine_roots()
+        return self._engine_roots(_native_scene_shell_factory)
 
     def get_time(self):
         return self.time()

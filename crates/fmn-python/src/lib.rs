@@ -7490,13 +7490,72 @@ impl PyScene {
             .collect()
     }
 
-    fn _engine_roots<'py>(slf: &Bound<'py, Self>) -> Vec<Py<PyAny>> {
+    fn _engine_roots<'py>(
+        slf: &Bound<'py, Self>,
+        shell_factory: &Bound<'py, PyAny>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
         let py = slf.py();
-        let roots = slf.borrow().engine.borrow().stage().roots().to_vec();
-        roots
+        let engine = Rc::clone(&slf.borrow().engine);
+        // Choreo can create composition containers without a Python proxy.
+        // Snapshot the native graph first, then release the Stage borrow
+        // before allocating shells or touching Python family/back edges.
+        let (roots, graph) = {
+            let runtime = engine.borrow();
+            let stage = runtime.stage();
+            let roots = stage.roots().to_vec();
+            let mut seen = HashSet::new();
+            let mut graph = Vec::new();
+            for root in &roots {
+                for mob in stage.family(*root) {
+                    if seen.insert(mob) {
+                        let entry = stage.get(mob).ok_or_else(|| {
+                            StaleHandleError::new_err("scene family contains a stale handle")
+                        })?;
+                        graph.push((
+                            mob,
+                            entry.buffer.schema().offset("fill_rgba").is_some(),
+                            entry.submobjects.clone(),
+                        ));
+                    }
+                }
+            }
+            (roots, graph)
+        };
+        let mut proxies = HashMap::with_capacity(graph.len());
+        for (mob, vector_records, _) in &graph {
+            let proxy = if let Some(proxy) = live_proxy(py, slf, *mob) {
+                proxy
+            } else {
+                let proxy = shell_factory.call1((*vector_records,))?;
+                {
+                    let bridge = proxy.cast::<BridgeMobject>()?;
+                    let mut cell = bridge.borrow_mut();
+                    cell.nursery = None;
+                    cell.engine = Some(Rc::clone(&engine));
+                    cell.mob = Some(*mob);
+                    cell.initialized = true;
+                }
+                engine
+                    .borrow_mut()
+                    .stage_mut()
+                    .pin(*mob)
+                    .map_err(stage_error)?;
+                register_proxy(py, slf, *mob, &proxy)?;
+                proxy.setattr("_scene", slf)?;
+                proxy
+            };
+            proxies.insert(*mob, proxy);
+        }
+        for (mob, _, children) in &graph {
+            let children = PyList::new(py, children.iter().map(|child| &proxies[child]))?;
+            proxies[mob]
+                .getattr("submobjects")?
+                .call_method1("_replace_projection", (children,))?;
+        }
+        Ok(roots
             .into_iter()
-            .filter_map(|mob| live_proxy(py, slf, mob).map(Bound::unbind))
-            .collect()
+            .map(|mob| proxies[&mob].clone().unbind())
+            .collect())
     }
 
     /// Rung 0 (always-correct default): Python updater callbacks run with
