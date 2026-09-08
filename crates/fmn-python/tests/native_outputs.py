@@ -182,6 +182,22 @@ class ReversedLight(Point):
         return -super().get_center()
 class OverriddenLightChanges(LightChanges):
     light_class = ReversedLight
+class EscapedMarkup(Scene):
+    def construct(self):
+        escaped = "".join(map(MarkupText.escape_markup_char, "a < b & c > d"))
+        self.add(MarkupText(escaped))
+class LiteralMarkup(Scene):
+    def construct(self):
+        self.add(Text("a < b & c > d"))
+class RectangleFlash(Scene):
+    def construct(self):
+        target = Square().set_fill(WHITE, opacity=1).set_stroke(width=0)
+        self.add(target)
+        self.play(ShowPassingFlashAround(
+            target, stroke_color=BLUE, stroke_width=8, buff=0.3,
+            run_time=0.5, rate_func=linear,
+        ))
+        self.wait(0.125)
 class Soundtrack(Scene):
     def construct(self):
         from pathlib import Path
@@ -457,6 +473,39 @@ for light_scene, light_name in (("LightChanges", "light-changes.gif"),
     light_samples.append([float(frame[26:28, 47:49].mean()) for frame in light_frames])
 assert light_samples[0][0] > 230 and light_samples[0][1] < 25, light_samples
 assert np.allclose(light_samples[1], light_samples[0][::-1], atol=1), light_samples
+
+markup_pngs = []
+for markup_scene, markup_name in (("EscapedMarkup", "escaped-markup.png"),
+                                   ("LiteralMarkup", "literal-markup.png")):
+    markup_destination = output_root / markup_name
+    code, markup_report = console(str(source), markup_scene, "--format", "png",
+                                   "--resolution", "192x108", "--threads", "1",
+                                   "--video_dir", str(markup_destination))
+    assert code == 0 and markup_report["frame_count"] == 1, markup_report
+    markup_pngs.append(markup_destination.read_bytes())
+    markup_image = manimlib.ImageMobject(str(markup_destination))
+    xs = ((np.arange(192) + 0.5) / 192 - 0.5) * markup_image.get_width()
+    ys = ((np.arange(108) + 0.5) / 108 - 0.5) * markup_image.get_height()
+    assert any(max(markup_image.point_to_rgb((x, y, 0))) > 0.5
+               for y in ys for x in xs), "markup image contains no visible glyphs"
+assert markup_pngs[0] == markup_pngs[1], "escaped markup changed literal text rendering"
+
+rectangle_destination = output_root / "rectangle-flash.gif"
+code, rectangle_report = console(str(source), "RectangleFlash", "--format", "gif",
+                                 "--fps", "8", "--resolution", "192x108", "--threads", "1",
+                                 "--video_dir", str(rectangle_destination))
+assert code == 0 and rectangle_report["frame_count"] == 5, rectangle_report
+rectangle_frames, rectangle_delays = read_gif(rectangle_destination)
+assert len(rectangle_frames) == 5 and all(delay > 0 for delay in rectangle_delays)
+rectangle_blue_counts = []
+for frame in rectangle_frames:
+    rgb = frame.astype(np.int16)
+    rectangle_blue_counts.append(np.count_nonzero(
+        (rgb[:, :, 2] > rgb[:, :, 0] + 40) & (rgb[:, :, 1] > rgb[:, :, 0] + 40)
+    ))
+    assert np.all(frame[54, 96] > 230), "flash removed or obscured its target"
+assert max(rectangle_blue_counts[1:-1]) > 4, rectangle_blue_counts
+assert rectangle_blue_counts[-1] == 0, "flash helper survived cleanup"
 
 video_formats = video_frames = 0
 ffmpeg = shutil.which("ffmpeg")

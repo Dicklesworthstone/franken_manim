@@ -6111,6 +6111,20 @@ assert np.allclose(surround_box[0][:2], target_box[0][:2] - 0.25)
 assert np.allclose(surround_box[2][:2], target_box[2][:2] + 0.25)
 assert surround.get_stroke_color() == manimlib.BLUE
 assert np.allclose(surround.get_stroke_width(), 2.0)
+channel_surround = shape_matchers.SurroundingRectangle(
+    box_group, color=manimlib.BLUE, stroke_color=manimlib.RED,
+    fill_color=manimlib.GREEN, fill_opacity=0.3,
+)
+assert channel_surround.get_stroke_color() == manimlib.RED
+assert channel_surround.get_fill_color() == manimlib.GREEN
+channel_surround.set_buff(0.5)
+assert channel_surround.get_stroke_color() == manimlib.RED
+assert channel_surround.get_fill_color() == manimlib.GREEN
+fallback_surround = shape_matchers.SurroundingRectangle(
+    box_group, color=manimlib.BLUE, stroke_color=None, fill_color=None,
+)
+assert fallback_surround.get_stroke_color() == manimlib.BLUE
+assert fallback_surround.get_fill_color() == manimlib.BLUE
 surround.set_buff(0.5)
 assert np.allclose(surround.get_bounding_box()[0][:2], target_box[0][:2] - 0.5)
 empty_surround = shape_matchers.SurroundingRectangle(Mobject())
@@ -7655,8 +7669,9 @@ assert indication.VShowPassingFlash.__bases__ == (manimlib.Animation,)
 assert indication.FlashAround.__bases__ == (indication.VShowPassingFlash,)
 assert indication.FlashUnder.__bases__ == (indication.FlashAround,)
 assert indication.ShowPassingFlashAround.__bases__ == (
-    indication.VShowPassingFlash,
+    indication.AnimationOnSurroundingRectangle,
 )
+assert indication.ShowPassingFlashAround.RectAnimationType is indication.ShowPassingFlash
 assert tuple(inspect.signature(indication.FlashAround).parameters) == (
     "mobject",
     "time_width",
@@ -7916,11 +7931,15 @@ tracked_flash = indication.ShowPassingFlashAround(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
-assert isinstance(tracked_flash.mobject, shape_matchers.SurroundingRectangle)
-assert tracked_flash.mobject.get_stroke_color() == manimlib.BLUE
+assert isinstance(tracked_flash.rectangle, shape_matchers.SurroundingRectangle)
+assert tracked_flash.rectangle.get_stroke_color() == manimlib.BLUE
+tracked_full_path = tracked_flash.rectangle.get_points().copy()
+tracked_full_length = tracked_flash.rectangle.get_arc_length()
 tracked_samples = []
-tracked_flash.mobject.add_updater(
-    lambda mob: tracked_samples.append(mob.get_stroke_widths().copy()),
+tracked_flash.rectangle.add_updater(
+    lambda mob: tracked_samples.append((
+        mob.get_arc_length(), mob.get_center().copy(), tracked_target.get_center().copy(),
+    )),
     call=False,
 )
 tracked_target.add_updater(
@@ -7929,14 +7948,38 @@ tracked_target.add_updater(
 )
 tracked_scene.play(tracked_flash)
 assert any(
-    widths.max() > 0.0 and not np.allclose(widths, widths[0])
-    for widths in tracked_samples
+    np.isclose(length, 0.1 * tracked_full_length)
+    for length, _, _ in tracked_samples
 )
-assert np.allclose(
-    tracked_flash.mobject.get_center(),
-    tracked_target.get_center(),
+assert all(np.allclose(center, target) for _, center, target in tracked_samples)
+# ShowPassingFlash restores its original complete path after the final sample,
+# then removes the helper. Tracking is asserted above while the helper is live.
+assert np.array_equal(tracked_flash.rectangle.get_points(), tracked_full_path)
+assert tracked_flash.rectangle not in tracked_scene.get_mobjects()
+assert tracked_target in tracked_scene.get_mobjects()
+
+custom_flash_rectangles = []
+
+
+class AuthoredRectangleFlash(indication.ShowPassingFlash):
+    def __init__(self, rectangle, **kwargs):
+        custom_flash_rectangles.append(rectangle)
+        super().__init__(rectangle, **kwargs)
+
+
+class AuthoredFlashAround(indication.ShowPassingFlashAround):
+    RectAnimationType = AuthoredRectangleFlash
+
+
+custom_around = AuthoredFlashAround(
+    tracked_target, run_time=2.0 / 30.0, rate_func=manimlib.linear,
 )
-assert tracked_flash.mobject not in tracked_scene.get_mobjects()
+assert len(custom_flash_rectangles) == 1
+assert custom_flash_rectangles[0] is custom_around.rectangle
+assert isinstance(custom_around.animations[0], AuthoredRectangleFlash)
+tracked_scene.play(custom_around)
+assert custom_around.rectangle not in tracked_scene.get_mobjects()
+assert tracked_target in tracked_scene.get_mobjects()
 
 for flash_type in (
     indication.FlashAround,
@@ -11827,6 +11870,34 @@ assert all(
     for group in markup_betas
 )
 assert markup_text.get_part_by_text("β", index=1)[0] is markup_text.submobjects[2]
+
+# Public escaping is a one-token operation; callers can safely compose native
+# markup from literal text without accidentally interpreting author content.
+markup_entities = {
+    "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;",
+}
+assert manimlib.MarkupText.MARKUP_ENTITY_DICT == markup_entities
+native_tagged_text = {
+    tag: manimlib.MarkupText(f"<{tag}>x</{tag}>")
+    for tag in manimlib.MarkupText.MARKUP_TAGS
+}
+assert all(mob.get_all_points().size > 0 for mob in native_tagged_text.values())
+assert (native_tagged_text["big"].get_width()
+        > manimlib.Text("x").get_width()
+        > native_tagged_text["small"].get_width())
+for char, entity in markup_entities.items():
+    assert manimlib.MarkupText.escape_markup_char(char) == entity
+    assert manimlib.MarkupText.unescape_markup_char(entity) == char
+    assert manimlib.Text.escape_markup_char(char) == entity
+for literal in ("β", "&unknown;", "&#65;", "ab", "<b>", "", "&lt;&gt;"):
+    assert manimlib.MarkupText.escape_markup_char(literal) == literal
+    assert manimlib.MarkupText.unescape_markup_char(literal) == literal
+literal_markup_text = 'a < b & "c" > \'d\''
+escaped_markup_text = "".join(map(manimlib.MarkupText.escape_markup_char, literal_markup_text))
+native_literal_text = manimlib.Text(literal_markup_text)
+native_escaped_text = manimlib.MarkupText(escaped_markup_text)
+assert len(native_escaped_text) == len(native_literal_text) > 8
+assert np.array_equal(native_escaped_text.get_all_points(), native_literal_text.get_all_points())
 
 markup_signature = inspect.signature(manimlib.MarkupText)
 assert markup_signature.parameters["font_size"].default == 48

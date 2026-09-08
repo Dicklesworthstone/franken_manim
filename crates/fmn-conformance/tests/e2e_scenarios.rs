@@ -1270,6 +1270,9 @@ fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
         "background-changes.gif",
         "light-changes.gif",
         "overridden-light.gif",
+        "escaped-markup.png",
+        "literal-markup.png",
+        "rectangle-flash.gif",
     ] {
         let bytes = std::fs::read(root.join(name))
             .map_err(|error| fail(format!("read native output {name}: {error}")))?;
@@ -3554,6 +3557,9 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         "background-changes.gif".to_owned(),
         "light-changes.gif".to_owned(),
         "overridden-light.gif".to_owned(),
+        "escaped-markup.png".to_owned(),
+        "literal-markup.png".to_owned(),
+        "rectangle-flash.gif".to_owned(),
     ];
     if std::env::var("FMN_REQUIRE_FFMPEG").as_deref() == Ok("1") {
         portal_output_inventory

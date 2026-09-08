@@ -4574,7 +4574,12 @@ class SurroundingRectangle(Rectangle):
             self.buff,
         )
         _hang_native_children(self, specs)
-        kwargs.setdefault("color", color)
+        # This constructor's color is the fallback for each channel. An
+        # explicit stroke/fill color must survive the native style pass.
+        if kwargs.get("fill_color") is None:
+            kwargs["fill_color"] = color
+        if kwargs.get("stroke_color") is None:
+            kwargs["stroke_color"] = color
         _apply_vmobject_style_kwargs(self, kwargs)
         if mobject.is_fixed_in_frame():
             self.fix_in_frame()
@@ -7770,6 +7775,31 @@ class MarkupText(StringMobject):
 
     _native_markup = True
     _hoist_descendant_records = False
+
+    MARKUP_TAGS = {
+        "b": {"font_weight": "bold"},
+        "big": {"font_size": "larger"},
+        "i": {"font_style": "italic"},
+        "s": {"strikethrough": "true"},
+        "sub": {"baseline_shift": "subscript", "font_scale": "subscript"},
+        "sup": {"baseline_shift": "superscript", "font_scale": "superscript"},
+        "small": {"font_size": "smaller"},
+        "tt": {"font_family": "monospace"},
+        "u": {"underline": "single"},
+    }
+    MARKUP_ENTITY_DICT = {
+        "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;",
+    }
+
+    @staticmethod
+    def escape_markup_char(substr: str) -> str:
+        return MarkupText.MARKUP_ENTITY_DICT.get(substr, substr)
+
+    @staticmethod
+    def unescape_markup_char(substr: str) -> str:
+        return {value: key for key, value in MarkupText.MARKUP_ENTITY_DICT.items()}.get(
+            substr, substr
+        )
 
     def __init__(
         self,
@@ -18379,37 +18409,6 @@ class FlashUnder(FlashAround):
         return Underline(mobject, buff=buff, stretch_factor=1.0)
 
 
-class ShowPassingFlashAround(VShowPassingFlash):
-    """Track a native surrounding rectangle while its stroke sweeps."""
-
-    def __init__(
-        self,
-        mobject,
-        stroke_width=2.0,
-        stroke_color=_YELLOW,
-        buff=_SMALL_BUFF,
-        **kwargs,
-    ):
-        if not isinstance(mobject, _BridgeMobject):
-            raise TypeError(f"{type(self).__name__} expects a Mobject")
-        rect = SurroundingRectangle(
-            mobject,
-            stroke_width=stroke_width,
-            color=stroke_color,
-            buff=buff,
-        )
-        # The Reference's ShowPassingFlash works on continuous path bounds.
-        # Our native VShowPassingFlash samples per-record stroke widths, so
-        # densify the same rectangle before sweeping it to keep the wrapper
-        # visually continuous rather than exposing four coarse edge samples.
-        rect.insert_n_curves(100)
-        rect.set_points(rect.get_points_without_null_curves())
-        rect.add_updater(lambda surrounding: surrounding.move_to(mobject))
-        kwargs.setdefault("time_width", 0.1)
-        kwargs.setdefault("taper_width", 0.0)
-        super().__init__(rect, **kwargs)
-
-
 class ApplyWave(Animation):
     _native_kind = "apply_wave"
 
@@ -19544,7 +19543,7 @@ class AnimationOnSurroundingRectangle(AnimationGroup):
     ):
         if not isinstance(mobject, _BridgeMobject):
             raise TypeError(
-                type(self).__name__ + " expects a Mobject to surround"
+                type(self).__name__ + " expects a Mobject"
             )
         if self.RectAnimationType is Animation:
             raise NotImplementedError(
@@ -19562,6 +19561,10 @@ class AnimationOnSurroundingRectangle(AnimationGroup):
             lambda rectangle: rectangle.move_to(self.mobject_to_surround)
         )
         super().__init__(self.RectAnimationType(self.rectangle, **kwargs))
+
+
+class ShowPassingFlashAround(AnimationOnSurroundingRectangle):
+    RectAnimationType = ShowPassingFlash
 
 
 class ShowCreationThenDestructionAround(AnimationOnSurroundingRectangle):
