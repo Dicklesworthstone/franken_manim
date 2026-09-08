@@ -407,6 +407,30 @@ assert timeline_events == [
 assert len(timeline_first.helper_ticks) == 3, timeline_first.helper_ticks
 assert len(timeline_second.helper_ticks) >= 3, timeline_second.helper_ticks
 
+# Native and Python leaves share the same succession lifecycle, even when
+# both mutate one object. The second begin must see the first final state.
+for python_first in (True, False):
+    mixed_source, mixed_observer = timeline_point(), timeline_point()
+    mixed_successive_samples, mixed_successive_events = [], []
+    mixed_observer.add_updater(
+        lambda mob, dt: mixed_successive_samples.append(mixed_source.get_x())
+        if dt > 0 else None, call=False,
+    )
+    mixed_members = [
+        TimelineMove(mixed_source, destination, mixed_successive_events, run_time=0.1)
+        if (index == 0) == python_first else Transform(
+            mixed_source, mixed_source.copy().set_x(destination),
+            run_time=0.1, rate_func=linear_rate,
+        )
+        for index, destination in enumerate((1.0, 2.0))
+    ]
+    Scene().add(mixed_source, mixed_observer).play(Succession(*mixed_members))
+    assert np.allclose(
+        mixed_successive_samples[:6], [k / 3.0 for k in range(1, 7)], atol=1e-6,
+    ), (python_first, mixed_successive_samples)
+    expected_start = 0.0 if python_first else 1.0
+    assert mixed_successive_events[0][2] == expected_start, mixed_successive_events
+
 # Nested coarse sampling still runs every crossed child in order (BN-11).
 coarse_source, coarse_events = timeline_point(), []
 Scene().play(AnimationGroup(Succession(*[
