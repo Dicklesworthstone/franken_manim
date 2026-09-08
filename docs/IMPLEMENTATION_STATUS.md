@@ -136,9 +136,9 @@ This checklist implements the user's explicit request for a detailed, persistent
 
 - [x] Recheck source, original audit changes, current planner, inbox and reservations; claim `fm-5wq.4.142` as SilentTurtle.
 - [ ] `fm-5wq.4.142`: connect the existing production animation implementation.
-  - [ ] Trace installed package, direct extension and embedded Gauntlet initialization; preserve module/class identities and source provenance.
-  - [ ] Execute the same idempotent semantic installer in every production route; remove the duplicate package-only activation step without deleting files.
-  - [ ] Register the existing real-extension animation acceptance suite alongside bridge acceptance; reject missing installer and zero matched tests.
+  - [x] Trace installed package, direct extension and embedded Gauntlet initialization; preserve module/class identities and source provenance.
+  - [x] Execute the same idempotent semantic installer in every production route; remove the duplicate package-only activation step without deleting files. The named native animation suite passed on the second run, including identity preservation and missing-installer rejection; installed-wheel acceptance remains below.
+  - [x] Register the existing real-extension animation acceptance suite alongside bridge acceptance; reject missing installer and guard against zero matched tests in `scripts/check.sh`.
   - [ ] Resolve any real native family/alignment, curved-path, composition, updater, cleanup or subclass-dispatch failures exposed by activation.
   - [ ] Register a real lifecycle/parity render scenario with deterministic logs and failure artifacts.
   - [ ] Build and install the current wheel in supported CPython; execute both acceptance suites and runtime parity audit.
@@ -157,6 +157,8 @@ This checklist implements the user's explicit request for a detailed, persistent
 - [ ] Existing release owners: build a repaired wheel with asymmetric-text orientation acceptance; make documented examples match the released snapshot reader; qualify install/publication/signing prerequisites.
 - [ ] Existing performance owners: run real front-door producers on qualified hosts, then use measured bottlenecks to choose CPU work; retain optional CUDA's actual external prerequisites.
 - [ ] After each substantive unit: update this TODO and its owning bead with exact evidence, run appropriate checks, and preserve all remaining acceptance until fulfilled.
+
+Current execution receipts live in `/tmp/fmn-gap-execution-20260908/`. The first native run executed two suites and exposed nested uniform interpolation and invalid legacy lifecycle witnesses. The second ran the animation suite successfully and found one additional bridge witness constructing a targetless base Animation; that witness now supplies a real Mobject. Supported CPython 3.13.15 with NumPy 2.5.2 and the exact pinned WASM target have been installed in the selected worker's development environment. The CPython test launcher also needs that interpreter's shared-library directory; the failed launch is retained separately from semantic test results. Source-gate and installed-wheel qualification remain in progress.
 
 ## How to read this document
 
