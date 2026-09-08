@@ -8162,8 +8162,26 @@ explicit_target_scene = Scene()
 explicit_target_mover = geometry.Rectangle(width=0.5, height=0.5)
 explicit_target_scene.add(explicit_target_mover)
 explicit_target_mover.generate_target().shift([1.25, 0.0, 0.0])
+
+
+class ValidatedMoveToTarget(manimlib.MoveToTarget):
+    def check_validity_of_input(self, mobject):
+        self.validated_source = mobject
+        super().check_validity_of_input(mobject)
+
+
+validated_move = ValidatedMoveToTarget(explicit_target_mover)
+assert validated_move.validated_source is explicit_target_mover
+assert validated_move.target_mobject is explicit_target_mover.target
+assert validated_move.check_validity_of_input(explicit_target_mover) is None
+try:
+    ValidatedMoveToTarget(Mobject())
+except Exception as error:
+    assert str(error) == "MoveToTarget called on mobject without attribute 'target'"
+else:
+    raise AssertionError("MoveToTarget accepted an unset target")
 explicit_target_scene.play(
-    manimlib.MoveToTarget(explicit_target_mover),
+    validated_move,
     run_time=1.0 / 30.0,
     rate_func=manimlib.linear,
 )
@@ -15241,14 +15259,37 @@ dbtf_scene.play(
 assert np.allclose(full_square.data["fill_rgba"][:, 3], 1.0)
 assert np.allclose(full_square.data["stroke_width"], 4.0)
 
-# Write keeps its DrawBorderThenFill inheritance surface: the -1 sentinels
-# leave native family-derived timing in charge and stroke_width stays off the
-# write spec (the native parameterization owns it).
+# Write exposes its Reference timing helpers and passes their actual results
+# to the native animation, including results supplied by subclass overrides.
 write_probe = creation.Write(_dbtf_square())
 assert isinstance(write_probe, creation.DrawBorderThenFill)
-assert write_probe.run_time is None
-assert write_probe.lag_ratio is None
+assert write_probe.run_time == 1
+assert write_probe.lag_ratio == 0.2
+assert write_probe.compute_run_time(14, -1) == 1
+assert write_probe.compute_run_time(15, -1) == 2
+assert write_probe.compute_run_time(99, 0) == 0
+assert write_probe.compute_lag_ratio(19, -1) == 0.2
+assert math.isclose(write_probe.compute_lag_ratio(39, -1), 0.1)
+assert write_probe.compute_lag_ratio(99, 0) == 0
 assert write_probe._native_params() == {}
+
+
+class TimedWrite(creation.Write):
+    def compute_run_time(self, family_size, run_time):
+        self.timing_family_size = family_size
+        return 2.0 / 30.0
+
+    def compute_lag_ratio(self, family_size, lag_ratio):
+        self.lag_family_size = family_size
+        return 0.0
+
+
+timed_write = TimedWrite(_dbtf_square())
+assert timed_write.timing_family_size == timed_write.lag_family_size == 1
+timed_write_scene = Scene()
+timed_write_scene.play(timed_write)
+assert math.isclose(timed_write_scene.time, 2.0 / 30.0)
+assert np.allclose(timed_write.mobject.data["fill_rgba"][:, 3], 1.0)
 
 # fm-5wq.4.57: TransformMatchingStrings matches by string identity over the
 # longest matching blocks of the two glyph-key sequences — native span parts,
@@ -15348,6 +15389,31 @@ else:
 # fm-5wq.4.58: the subset reveals play through Choreo's native mechanism —
 # the group's child list is rewritten each frame from the construction-time
 # snapshot.
+
+
+class SubsetHook(creation_animation.ShowIncreasingSubsets):
+    def update_submobject_list(self, index):
+        self.last_subset_index = index
+        super().update_submobject_list(index)
+
+
+hook_children = [Mobject().set_points([[float(i), 0.0, 0.0]]) for i in range(3)]
+hook_group = manimlib.Group(*hook_children)
+hook_scene = Scene().add(hook_group)
+hook_animation = SubsetHook(hook_group, rate_func=manimlib.linear)
+hook_animation.update_submobject_list(-1)
+assert list(hook_group.submobjects) == hook_children[:2]
+assert hook_children[2].parents == []
+hook_animation.interpolate_mobject(1.0)
+assert hook_animation.last_subset_index == 3
+assert list(hook_group.submobjects) == hook_children
+assert hook_children[2].parents == [hook_group]
+assert hook_scene._engine_facts()[:2] == (1, 4)
+one_hook = creation_animation.ShowSubmobjectsOneByOne(hook_group)
+one_hook.update_submobject_list(2)
+assert list(hook_group.submobjects) == [hook_children[1]]
+one_hook.update_submobject_list(0)
+assert list(hook_group.submobjects) == []
 
 subset_children = [
     geometry.Rectangle(width=0.5, height=0.5),

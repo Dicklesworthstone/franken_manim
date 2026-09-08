@@ -17294,7 +17294,6 @@ class Write(DrawBorderThenFill):
         stroke_color=None,
         **kwargs,
     ):
-        # -1 keeps the native auto values (family-size-derived timing).
         super().__init__(
             vmobject,
             run_time=None if run_time == -1 else run_time,
@@ -17303,6 +17302,19 @@ class Write(DrawBorderThenFill):
             stroke_color=stroke_color,
             **kwargs,
         )
+        family_size = len(vmobject.family_members_with_points())
+        self.run_time = self.compute_run_time(family_size, run_time)
+        self.lag_ratio = self.compute_lag_ratio(family_size, lag_ratio)
+
+    def compute_run_time(self, family_size, run_time):
+        if run_time < 0:
+            return 1 if family_size < 15 else 2
+        return run_time
+
+    def compute_lag_ratio(self, family_size, lag_ratio):
+        if lag_ratio < 0:
+            return min(4.0 / (family_size + 1.0), 0.2)
+        return lag_ratio
 
     def _native_params(self):
         if self.stroke_color is None:
@@ -17382,9 +17394,9 @@ class ShowIncreasingSubsets(Animation):
             index = int(_np.ceil(value))
         else:
             index = int(_np.round(value))  # ties-to-even, IntRound::Round
-        self._update_submobject_list(index)
+        self.update_submobject_list(index)
 
-    def _update_submobject_list(self, index):
+    def update_submobject_list(self, index):
         # creation.py:196 / creation.py:207, with Python-slice clamping
         # and set_submobjects' identity short-circuit.
         count = len(self.all_submobs)
@@ -17394,8 +17406,7 @@ class ShowIncreasingSubsets(Animation):
             clipped = int(min(max(index, 0), count - 1))
             desired = [] if clipped == 0 else [self.all_submobs[clipped - 1]]
         else:
-            clipped = int(min(max(index, 0), count))
-            desired = self.all_submobs[:clipped]
+            desired = self.all_submobs[:index]
         if list(self.mobject.submobjects) != desired:
             self.mobject.set_submobjects(list(desired))
 
@@ -18556,10 +18567,12 @@ class ApplyComplexFunction(ApplyMethod):
 
 class MoveToTarget(Transform):
     def __init__(self, mobject, **kwargs):
-        target = getattr(mobject, "target", None)
-        if target is None:
+        self.check_validity_of_input(mobject)
+        super().__init__(mobject, mobject.target, **kwargs)
+
+    def check_validity_of_input(self, mobject):
+        if getattr(mobject, "target", None) is None:
             raise Exception("MoveToTarget called on mobject without attribute 'target'")
-        super().__init__(mobject, target, **kwargs)
 
 
 class _MethodAnimation(MoveToTarget):
