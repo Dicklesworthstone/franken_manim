@@ -140,11 +140,22 @@ This checklist implements the user's explicit request for a detailed, persistent
   - [x] Execute the same idempotent semantic installer in every production route; remove the duplicate package-only activation step without deleting files. The named native animation suite passed on the second run, including identity preservation and missing-installer rejection; installed-wheel acceptance remains below.
   - [x] Register the existing real-extension animation acceptance suite alongside bridge acceptance; reject missing installer and guard against zero matched tests in `scripts/check.sh`.
   - [ ] Resolve any real native family/alignment, curved-path, composition, updater, cleanup or subclass-dispatch failures exposed by activation.
+    - [x] Preserve numeric nested uniforms and discrete flags/joint styles during interpolation; actual native acceptance passes.
+    - [x] Forward remover flags through the shared constructor and replace the obsolete arc-refusal witness with an analytic midpoint, endpoint and updater-detachment check; the initial installed wheel passes the full bridge script.
+    - [x] Reproduce `Scene.play` bypassing a Transform subclass against the native library; route overrides through the existing Choreo callback boundary and observe the regression pass.
+    - [ ] Reverify helper `update_mobjects(dt)`, cleanup and FocusOn/Flash helper initialization after the complete callback lifecycle is enabled. Retain the explicit intermediate-alpha and exact-dt assertions.
   - [ ] Register a real lifecycle/parity render scenario with deterministic logs and failure artifacts.
+    - [x] Add `lifecycle.python_animation_semantics.v1` and its named focused test; correct the initial `ScenarioClass` spelling compile error.
+    - [ ] Execute the registered scenario, decode its native PNGs and inspect its deterministic log/failure-artifact behavior.
   - [ ] Build and install the current wheel in supported CPython; execute both acceptance suites and runtime parity audit.
+    - [x] Qualify CPython 3.13.15, NumPy 2.5.2 and Maturin 1.14.1; build and install an actual wheel. Its full bridge script passes with the workspace version supplied independently.
+    - [ ] Rebuild the final callback fixes into a fresh wheel/environment and run both real-extension acceptance scripts plus the overlay-bound runtime receipt. The initial wheel predates the subclass repair.
+    - [x] Add both acceptance scripts to the permanent installed-wheel check, before its runtime audit.
   - [ ] Run required source gates, review the final diff, reverify acceptance with a fresh review pass, commit only owned work, then close only if complete.
 - [ ] Restore prerequisites that prevent reliable full validation.
   - [ ] `fm-9fo8`: repair the unused internal SVG emitter without suppressing warnings or changing public SVG semantics; execute the existing SVG tests and Clippy.
+    - [x] Remove only the unreachable parser-local function; preserve public safe emission. Workspace Clippy now exits 0 after four separate iterator warnings were also repaired without arithmetic/order changes.
+    - [ ] Obtain existing SVG test and complete workspace-test receipts before closing.
   - [ ] `fm-5wq.7`: inspect RCH source exclusions and restore the tracked corpus fixture in remote inputs; qualify pinned WASM target and CPython tools without deleting artifacts or disturbing peer jobs.
   - [ ] Obtain terminal full `cargo test`, Clippy, formatting and `scripts/check.sh` receipts; classify source failures separately from worker failures and repair actual roots.
 - [ ] `fm-7wm.6`: rebuild current WASM target/Node/browser packages, verify fresh-consumer serial/threaded output, and only then update the stale lock-bound audit.
@@ -159,6 +170,8 @@ This checklist implements the user's explicit request for a detailed, persistent
 - [ ] After each substantive unit: update this TODO and its owning bead with exact evidence, run appropriate checks, and preserve all remaining acceptance until fulfilled.
 
 Current execution receipts live in `/tmp/fmn-gap-execution-20260908/`. The first native run executed two suites and exposed nested uniform interpolation and invalid legacy lifecycle witnesses. The second ran the animation suite successfully and found one additional bridge witness constructing a targetless base Animation; that witness now supplies a real Mobject. Supported CPython 3.13.15 with NumPy 2.5.2 and the exact pinned WASM target have been installed in the selected worker's development environment. The CPython test launcher also needs that interpreter's shared-library directory; the failed launch is retained separately from semantic test results. Source-gate and installed-wheel qualification remain in progress.
+
+Later receipts: `installed-bridge-with-version.log` exits 0 for the initial installed wheel; `subclass-before.log` reproduces the real Scene.play override bypass. `production-callback-hooks.log` executes two native suites: animation acceptance passes, while bridge acceptance exposes missing FocusOn helper state after helper updates are connected. That state initialization is now repaired and awaits the next run. `clippy-4.log` has terminal remote exit 0. The RCH native build compiled successfully but artifact retrieval failed with exit 102; the separately recorded Maturin wheel build and installation supply the actual wheel evidence, not a claim that RCH retrieval succeeded. No implementation bead has been closed on these partial receipts.
 
 ## How to read this document
 
