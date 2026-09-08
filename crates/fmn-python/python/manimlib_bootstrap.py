@@ -22689,7 +22689,7 @@ def _portal_cli_help():
     return """usage: fmn-python [--robot] --version
        fmn-python [--robot] --list-scenes SOURCE.py
        fmn-python [--robot] --construct-only SOURCE.py [SCENE]
-       fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence|gif|y4m|wav]
+       fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence|gif|y4m|wav|mp4|mov]
                   [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
                   [--video_dir PATH]
        fmn-python studio SOURCE.py [SCENE]
@@ -22697,7 +22697,9 @@ def _portal_cli_help():
 The wheel renders standard-mode final-state PNGs, PNG sequences, GIF and y4m through the
 same retained Lumen CPU renderer and ordered Reel sink as the native front
 door. WAV output mixes Scene.add_sound cues with the native Reel mixer.
-Certified output, video containers, opener flags, write-all, and Studio
+MP4 and MOV use the optional governed ffmpeg encoder and mux that same native
+soundtrack after scene execution. Encoded video is always uncertified.
+Certified output, opener flags, write-all, and Studio
 remain precise capability refusals until their complete contracts are
 connected."""
 
@@ -22771,10 +22773,10 @@ def _portal_cli_render_arguments(arguments):
         positionals.append(argument)
         index += 1
 
-    if values["format"] not in ("png", "png_sequence", "gif", "y4m", "wav"):
+    if values["format"] not in ("png", "png_sequence", "gif", "y4m", "wav", "mp4", "mov"):
         raise RuntimeError(
             f"CAPABILITY: portal output format {values['format']!r} is not connected; "
-            "use --format png, png_sequence, gif, y4m, or wav"
+            "use --format png, png_sequence, gif, y4m, wav, mp4, or mov"
         )
     if len(positionals) not in (1, 2):
         raise ValueError("render requires SOURCE.py and accepts one optional SCENE")
@@ -22936,6 +22938,11 @@ def _console_main():
                 threads,
                 int(scene.random_seed or 0),
             )
+        except _CapabilityError as error:
+            return _portal_cli_emit(
+                4, "capability", "render-capability-unavailable", str(error), robot,
+                source=source, scene=selected, destination=destination,
+            )
         except Exception as error:
             return _portal_cli_emit(
                 6,
@@ -22992,6 +22999,11 @@ def _console_main():
                 destination=destination,
             )
         output_details = {}
+        if render_values["format"] in ("mp4", "mov"):
+            output_details = {
+                "certified": False,
+                "ffmpeg_invocations": scene._render_invocations,
+            }
         if render_values["format"] == "wav":
             output_details = {"sample_frames": int(frame_count), "sample_rate": 48000, "channels": 2}
         unit = "sample frames" if render_values["format"] == "wav" else "frames"

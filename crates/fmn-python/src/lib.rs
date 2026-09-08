@@ -110,6 +110,33 @@ enum PortalFrameFormat {
     PngSequence,
     Gif,
     Y4m,
+    Mp4,
+    Mov,
+}
+
+struct PortalArtifactReport {
+    path: PathBuf,
+    frame_count: u64,
+    bytes: u64,
+    digest: fmn_output::ArtifactDigest,
+    invocations: Vec<fmn_output::InvocationReport>,
+}
+
+impl From<NativeArtifactReport> for PortalArtifactReport {
+    fn from(report: NativeArtifactReport) -> Self {
+        Self {
+            path: report.path,
+            frame_count: report.frame_count,
+            bytes: report.bytes,
+            digest: report.digest,
+            invocations: Vec::new(),
+        }
+    }
+}
+
+enum PortalReceipt {
+    Native(SinkReceipt<NativeArtifactReport>),
+    Video(SinkReceipt<fmn_output::FfmpegArtifactReport>),
 }
 
 enum PortalOutputFormat {
@@ -195,60 +222,18 @@ impl PortalRenderSession {
         }
     }
 
-    fn finish(self, scene: &Scene) -> PyResult<(NativeArtifactReport, String, usize)> {
+    fn finish(self, scene: &Scene) -> PyResult<(PortalArtifactReport, String, usize)> {
         match self {
             // ubs:ignore — finalizes frame publication; no security token or randomness is generated.
-            Self::Frames(session) => session.finish(),
+            Self::Frames(session) => session.finish(scene),
             Self::Soundtrack {
                 destination,
                 threads,
             } => {
-                let requests = scene.sound_requests();
-                if requests.is_empty() {
-                    return Err(PyRuntimeError::new_err(
-                        "WAV output requires at least one Scene.add_sound cue",
-                    ));
-                }
+                let mix = mix_portal_soundtrack(scene, threads)?.ok_or_else(|| {
+                    PyRuntimeError::new_err("WAV output requires at least one Scene.add_sound cue")
+                })?;
                 let config = fmn_output::MixerConfig::default();
-                let time = scene.time();
-                let timeline_frames =
-                    fmn_output::frames_to_samples(time.frames(), time.fps(), config.sample_rate)
-                        .map_err(native_error)?;
-                let mut mixer = fmn_output::SoundMixer::new(config)
-                    .map_err(native_error)?
-                    .with_timeline_frames(u64::try_from(timeline_frames).map_err(native_error)?);
-                let fs = fmn_platform::fs::StdFs;
-                for request in requests {
-                    let bytes = fmn_platform::fs::FileSystem::read_bounded(
-                        &fs,
-                        &request.sound_file,
-                        64 * 1024 * 1024,
-                    )
-                    .map_err(|error| {
-                        PyOSError::new_err(format!(
-                            "sound cue {}: {error}",
-                            request.sound_file.display(),
-                        ))
-                    })?;
-                    let audio = fmn_codec::decode_wav(&bytes, &fmn_codec::WavLimits::default())
-                        .map_err(|error| {
-                            PyValueError::new_err(format!(
-                                "sound cue {} is not decodable PCM WAV: {error}",
-                                request.sound_file.display(),
-                            ))
-                        })?;
-                    mixer
-                        .add(fmn_output::SoundCue {
-                            audio,
-                            frame: request.time.frames(),
-                            fps: request.time.fps(),
-                            time_offset: request.time_offset,
-                            gain: request.gain,
-                            gain_to_background: request.gain_to_background,
-                        })
-                        .map_err(native_error)?;
-                }
-                let mix = mixer.mix(threads).map_err(native_error)?;
                 // S16 stereo plus the WAV header, bounded by Reel's native
                 // timeline budget. Reel performs atomic publication only
                 // after every cue has decoded and the complete mix succeeds.
@@ -258,7 +243,7 @@ impl PortalRenderSession {
                     .and_then(|bytes| bytes.checked_add(1024))
                     .ok_or_else(|| PyOverflowError::new_err("WAV artifact budget overflow"))?;
                 let report = fmn_output::publish_wav(
-                    &fs,
+                    &fmn_platform::fs::StdFs,
                     &fmn_output::WavPublicationConfig {
                         destination,
                         format: fmn_codec::SampleFormat::S16,
@@ -270,12 +255,12 @@ impl PortalRenderSession {
                 )
                 .map_err(native_error)?;
                 Ok((
-                    NativeArtifactReport {
-                        kind: fmn_output::NativeArtifactKind::Wav,
+                    PortalArtifactReport {
                         path: report.path,
                         frame_count: report.sample_frames,
                         bytes: report.bytes,
                         digest: report.digest,
+                        invocations: Vec::new(),
                     },
                     "native-sound-mixer".to_owned(),
                     threads,
@@ -283,6 +268,50 @@ impl PortalRenderSession {
             }
         }
     }
+}
+
+fn mix_portal_soundtrack(scene: &Scene, threads: usize) -> PyResult<Option<fmn_output::MixReport>> {
+    let requests = scene.sound_requests();
+    if requests.is_empty() {
+        return Ok(None);
+    }
+    let config = fmn_output::MixerConfig::default();
+    let time = scene.time();
+    let timeline_frames =
+        fmn_output::frames_to_samples(time.frames(), time.fps(), config.sample_rate)
+            .map_err(native_error)?;
+    let mut mixer = fmn_output::SoundMixer::new(config)
+        .map_err(native_error)?
+        .with_timeline_frames(u64::try_from(timeline_frames).map_err(native_error)?);
+    let fs = fmn_platform::fs::StdFs;
+    for request in requests {
+        let bytes =
+            fmn_platform::fs::FileSystem::read_bounded(&fs, &request.sound_file, 64 * 1024 * 1024)
+                .map_err(|error| {
+                    PyOSError::new_err(format!(
+                        "sound cue {}: {error}",
+                        request.sound_file.display(),
+                    ))
+                })?;
+        let audio =
+            fmn_codec::decode_wav(&bytes, &fmn_codec::WavLimits::default()).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "sound cue {} is not decodable PCM WAV: {error}",
+                    request.sound_file.display(),
+                ))
+            })?;
+        mixer
+            .add(fmn_output::SoundCue {
+                audio,
+                frame: request.time.frames(),
+                fps: request.time.fps(),
+                time_offset: request.time_offset,
+                gain: request.gain,
+                gain_to_background: request.gain_to_background,
+            })
+            .map_err(native_error)?;
+    }
+    mixer.mix(threads).map(Some).map_err(native_error)
 }
 
 /// One fmn-python render generation, retained across every `play` and `wait`.
@@ -293,7 +322,8 @@ struct PortalFrameSession {
     renderer: RetainedFrameRenderer,
     camera: Camera,
     emitter: Option<OrderedEmitter>,
-    receipt: SinkReceipt<NativeArtifactReport>,
+    receipt: PortalReceipt,
+    soundtrack: Option<fmn_output::FfmpegSoundtrack>,
     rgba8_scratch: Option<FrameBuffer>,
     next_sequence: u64,
 }
@@ -327,7 +357,11 @@ impl PortalFrameSession {
         config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
 
         // ubs:ignore — compares a public output-format enum, not a secret.
-        let output_format = if format == PortalFrameFormat::Y4m {
+        let yuv_output = matches!(
+            format,
+            PortalFrameFormat::Y4m | PortalFrameFormat::Mp4 | PortalFrameFormat::Mov
+        );
+        let output_format = if yuv_output {
             fmn_runtime::OutputPixelFormat::Nv12
         } else {
             fmn_runtime::OutputPixelFormat::Rgba8
@@ -386,7 +420,7 @@ impl PortalFrameSession {
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
         // ubs:ignore — compares a public output-format enum, not a secret.
-        let pixel_format = if format == PortalFrameFormat::Y4m {
+        let pixel_format = if yuv_output {
             PixelFormat::Nv12
         } else {
             PixelFormat::Rgba8
@@ -394,7 +428,7 @@ impl PortalFrameSession {
         let output_layout = FrameLayout::tight(pixel_format, width, height)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         // ubs:ignore — compares a public output-format enum, not a secret.
-        let rgba8_scratch = if format == PortalFrameFormat::Y4m {
+        let rgba8_scratch = if yuv_output {
             Some(FrameBuffer::new(
                 FrameLayout::tight(PixelFormat::Rgba8, width, height)
                     .map_err(|error| PyValueError::new_err(error.to_string()))?,
@@ -429,6 +463,7 @@ impl PortalFrameSession {
         )
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let fs: Arc<dyn fmn_platform::fs::FileSystem> = Arc::new(fmn_platform::fs::StdFs);
+        let mut soundtrack = None;
         let (binding, receipt) = match format {
             PortalFrameFormat::Png | PortalFrameFormat::PngSequence => {
                 let target = if single_frame {
@@ -440,7 +475,7 @@ impl PortalFrameSession {
                         digits: 6,
                     }
                 };
-                PngSink::new(
+                let (binding, receipt) = PngSink::new(
                     fs,
                     PngSinkConfig {
                         target,
@@ -458,38 +493,113 @@ impl PortalFrameSession {
                     "python-png"
                 } else {
                     "python-png-sequence"
-                })
+                });
+                (binding, PortalReceipt::Native(receipt))
             }
-            PortalFrameFormat::Gif => GifSink::new(
-                fs,
-                GifSinkConfig {
-                    destination,
-                    width,
-                    height,
-                    fps: (fps, 1),
-                    loop_forever: true,
-                    first_sequence: 0,
-                    limits,
-                    profile: None,
-                },
-            )
-            .map_err(|error| PyValueError::new_err(error.to_string()))?
-            .into_binding("python-gif"),
-            PortalFrameFormat::Y4m => Y4mSink::new(
-                fs,
-                Y4mSinkConfig {
-                    destination,
-                    width,
-                    height,
-                    fps: (fps, 1),
-                    colorspace: fmn_codec::Y4mColorspace::C420Mpeg2,
-                    first_sequence: 0,
-                    limits,
-                    profile: None,
-                },
-            )
-            .map_err(|error| PyValueError::new_err(error.to_string()))?
-            .into_binding("python-y4m"),
+            PortalFrameFormat::Gif => {
+                let (binding, receipt) = GifSink::new(
+                    fs,
+                    GifSinkConfig {
+                        destination,
+                        width,
+                        height,
+                        fps: (fps, 1),
+                        loop_forever: true,
+                        first_sequence: 0,
+                        limits,
+                        profile: None,
+                    },
+                )
+                .map_err(|error| PyValueError::new_err(error.to_string()))?
+                .into_binding("python-gif");
+                (binding, PortalReceipt::Native(receipt))
+            }
+            PortalFrameFormat::Y4m => {
+                let (binding, receipt) = Y4mSink::new(
+                    fs,
+                    Y4mSinkConfig {
+                        destination,
+                        width,
+                        height,
+                        fps: (fps, 1),
+                        colorspace: fmn_codec::Y4mColorspace::C420Mpeg2,
+                        first_sequence: 0,
+                        limits,
+                        profile: None,
+                    },
+                )
+                .map_err(|error| PyValueError::new_err(error.to_string()))?
+                .into_binding("python-y4m");
+                (binding, PortalReceipt::Native(receipt))
+            }
+            PortalFrameFormat::Mp4 | PortalFrameFormat::Mov => {
+                use fmn_platform::process::{
+                    FfmpegLocator as _, StdFfmpegLocator, StdProcessRunner,
+                };
+                let runner: Arc<dyn fmn_platform::process::ProcessRunner> =
+                    Arc::new(StdProcessRunner);
+                let executable = StdFfmpegLocator::from_host_path()
+                    .locate_ffmpeg(std::path::Path::new(&config.file_writer.ffmpeg_bin))
+                    .map_err(|error| {
+                        CapabilityError::new_err(format!(
+                            "ffmpeg is unavailable: {error}; {}",
+                            fmn_output::NATIVE_ALTERNATIVE
+                        ))
+                    })?;
+                let workdir_root = std::env::temp_dir();
+                let tool =
+                    fmn_output::FfmpegTool::resolve(executable, runner.as_ref(), &workdir_root)
+                        .map_err(|error| {
+                            CapabilityError::new_err(format!("ffmpeg boundary: {error}"))
+                        })?;
+                let capabilities = fmn_output::EncoderCapabilities::probe(&tool, runner.as_ref())
+                    .map_err(|error| {
+                    CapabilityError::new_err(format!("ffmpeg encoders: {error}"))
+                })?;
+                if !capabilities.offers(&config.file_writer.video_codec) {
+                    return Err(CapabilityError::new_err(format!(
+                        "installed ffmpeg does not offer encoder {:?}; {}",
+                        config.file_writer.video_codec,
+                        fmn_output::NATIVE_ALTERNATIVE,
+                    )));
+                }
+                let sink = fmn_output::FfmpegSink::new(
+                    runner,
+                    fmn_output::FfmpegSinkConfig {
+                        tool,
+                        capabilities,
+                        job: fmn_output::VideoJob {
+                            width,
+                            height,
+                            fps: (fps, 1),
+                            wire: fmn_output::WireFormat::Nv12,
+                            color: fmn_output::ColorDescription::video_bt709(),
+                            // ubs:ignore — compares a public media format, not a secret.
+                            container: if format == PortalFrameFormat::Mp4 {
+                                fmn_output::Container::Mp4
+                            } else {
+                                fmn_output::Container::Mov
+                            },
+                            encoder: fmn_output::EncoderChoice::Named(
+                                config.file_writer.video_codec.clone(),
+                            ),
+                            crf: None,
+                        },
+                        audio: None,
+                        destination,
+                        workdir_root,
+                        job_limits: fmn_output::JobLimits::default(),
+                        first_sequence: 0,
+                        limits,
+                        profile: None,
+                    },
+                )
+                .map_err(native_error)?;
+                let (sink, completion) = sink.with_deferred_soundtrack().map_err(native_error)?;
+                soundtrack = Some(completion);
+                let (binding, receipt) = sink.into_binding("python-ffmpeg-video");
+                (binding, PortalReceipt::Video(receipt))
+            }
         };
         let emitter = OrderedEmitter::new(
             EmitterConfig::new(output_layout, plan.frames_in_flight, 0)
@@ -511,6 +621,7 @@ impl PortalFrameSession {
                 camera,
                 emitter: Some(emitter),
                 receipt,
+                soundtrack,
                 rgba8_scratch,
                 next_sequence: 0,
             },
@@ -584,17 +695,31 @@ impl PortalFrameSession {
         self.cancel_and_join();
     }
 
-    fn finish(mut self) -> PyResult<(NativeArtifactReport, String, usize)> {
+    fn finish(mut self, scene: &Scene) -> PyResult<(PortalArtifactReport, String, usize)> {
         let renderer = self.renderer.config();
+        if let Some(soundtrack) = self.soundtrack.take() {
+            soundtrack
+                .finish(mix_portal_soundtrack(scene, renderer.threads)?)
+                .map_err(native_error)?;
+        }
         self.emitter
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("portal render generation is already closed"))?
             .finish()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        let report = self
-            .receipt
-            .take()
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let report = match &self.receipt {
+            PortalReceipt::Native(receipt) => receipt.take().map_err(native_error)?.into(),
+            PortalReceipt::Video(receipt) => {
+                let report = receipt.take().map_err(native_error)?;
+                PortalArtifactReport {
+                    path: report.boundary.destination,
+                    frame_count: report.frame_count,
+                    bytes: report.boundary.artifact_bytes,
+                    digest: report.boundary.artifact_digest,
+                    invocations: report.boundary.invocations,
+                }
+            }
+        };
         Ok((report, renderer.engine.closure_string(), renderer.threads))
     }
 
@@ -718,6 +843,7 @@ struct PyScene {
     proxies: RefCell<HashMap<Mob, Py<PyAny>>>,
     /// Optional production output session shared by every play/wait sink.
     render: Arc<Mutex<Option<PortalRenderSession>>>,
+    render_invocations: Vec<fmn_output::InvocationReport>,
 }
 
 /// Owns one pinned RecordBuffer generation while a NumPy array exports it.
@@ -7432,7 +7558,11 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
             "a portal render generation is already active",
         ));
     }
-    slf.borrow_mut().engine = replacement;
+    {
+        let mut scene = slf.borrow_mut();
+        scene.engine = replacement;
+        scene.render_invocations.clear();
+    }
     *render = Some(session);
     Ok(())
 }
@@ -7448,6 +7578,7 @@ impl PyScene {
             engine: Rc::new(EngineState::new(runtime)),
             proxies: RefCell::new(HashMap::new()),
             render: Arc::new(Mutex::new(None)),
+            render_invocations: Vec::new(),
         })
     }
 
@@ -7511,8 +7642,8 @@ impl PyScene {
         )
     }
 
-    /// Select a native Reel format without changing the scene clock or
-    /// publication protocol. No format here invokes an external encoder.
+    /// Select a Reel format without changing the scene clock or publication
+    /// protocol. Video containers use only the governed ffmpeg boundary.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (destination, format, width, height, fps, threads, seed))]
     fn _begin_native_output(
@@ -7531,9 +7662,11 @@ impl PyScene {
             "gif" => PortalOutputFormat::Frames(PortalFrameFormat::Gif),
             "y4m" => PortalOutputFormat::Frames(PortalFrameFormat::Y4m),
             "wav" => PortalOutputFormat::Wav,
+            "mp4" => PortalOutputFormat::Frames(PortalFrameFormat::Mp4),
+            "mov" => PortalOutputFormat::Frames(PortalFrameFormat::Mov),
             _ => {
                 return Err(CapabilityError::new_err(
-                    "native portal output requires png, png_sequence, gif, y4m, or wav",
+                    "portal output requires png, png_sequence, gif, y4m, wav, mp4, or mov",
                 ));
             }
         };
@@ -7610,6 +7743,7 @@ impl PyScene {
             .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?;
         // ubs:ignore — finalizes a frame-render session; no token, secret, or randomness exists.
         let (report, engine, threads) = session.finish(&engine.borrow())?;
+        slf.borrow_mut().render_invocations = report.invocations;
         Ok((
             report.path.to_string_lossy().into_owned(),
             report.frame_count,
@@ -7618,6 +7752,50 @@ impl PyScene {
             engine,
             threads,
         ))
+    }
+
+    #[getter]
+    fn _render_invocations(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
+        let invocations = PyList::empty(slf.py());
+        for invocation in &slf.borrow().render_invocations {
+            let fact = PyDict::new(slf.py());
+            let provenance = &invocation.provenance;
+            fact.set_item("tool_path", provenance.tool_path.to_string_lossy().as_ref())?;
+            fact.set_item("tool_sha256", &provenance.tool_sha256_hex)?;
+            fact.set_item("tool_version", &provenance.tool_version)?;
+            fact.set_item(
+                "bound_tool_path",
+                provenance.bound_tool_path.to_string_lossy().as_ref(),
+            )?;
+            fact.set_item("process_mechanism", &provenance.process_mechanism)?;
+            fact.set_item("process_policy_version", provenance.process_policy_version)?;
+            let image = PyDict::new(slf.py());
+            image.set_item(
+                "format",
+                match provenance.native_image.format {
+                    fmn_platform::process::NativeExecutableFormat::Elf64 => "elf64",
+                    fmn_platform::process::NativeExecutableFormat::MachO64 => "macho64",
+                    fmn_platform::process::NativeExecutableFormat::MachOUniversal => {
+                        "macho-universal"
+                    }
+                    fmn_platform::process::NativeExecutableFormat::Pe32Plus => "pe32plus",
+                },
+            )?;
+            image.set_item(
+                "architecture",
+                match provenance.native_image.architecture {
+                    fmn_platform::process::NativeExecutableArchitecture::X86_64 => "x86_64",
+                    fmn_platform::process::NativeExecutableArchitecture::Aarch64 => "aarch64",
+                },
+            )?;
+            image.set_item("file_bytes", provenance.native_image.file_bytes)?;
+            image.set_item("policy_version", provenance.native_image.policy_version)?;
+            fact.set_item("native_image", image)?;
+            fact.set_item("encoder", &provenance.encoder)?;
+            fact.set_item("argv", &provenance.argv)?;
+            invocations.append(fact)?;
+        }
+        Ok(invocations.unbind())
     }
 
     #[pyo3(signature = (*mobjects))]
@@ -10682,11 +10860,12 @@ pub fn run_portal_gauntlet_png_still(
 }
 
 /// Run the same decoded GIF/y4m/WAV acceptance as the native binary and clean wheel.
-/// Returns observed frames, formats, refused publications, thread replays, and samples.
+/// `FMN_REQUIRE_FFMPEG=1` requires real encoder acceptance in addition to the
+/// always-run absence refusal.
 #[cfg(feature = "gauntlet")]
 pub fn run_portal_gauntlet_native_outputs(
     destination: &std::path::Path,
-) -> Result<(u64, u64, u64, u64, u64), String> {
+) -> Result<PortalOutputGauntletReport, String> {
     with_python_test_module("native output Gauntlet", |py, _module, globals| {
         globals
             .set_item("_fmn_output_root", destination.to_string_lossy().as_ref())
@@ -10701,14 +10880,41 @@ pub fn run_portal_gauntlet_native_outputs(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "native output suite emitted no report".to_owned())?;
         let read = |name| -> PyResult<u64> { report.get_item(name)?.extract() };
-        Ok((
-            read("frames").map_err(|error| error.to_string())?,
-            read("formats").map_err(|error| error.to_string())?,
-            read("publication_failures").map_err(|error| error.to_string())?,
-            read("thread_replays").map_err(|error| error.to_string())?,
-            read("sample_frames").map_err(|error| error.to_string())?,
-        ))
+        Ok(PortalOutputGauntletReport {
+            frames: read("frames").map_err(|error| error.to_string())?,
+            formats: read("formats").map_err(|error| error.to_string())?,
+            publication_failures: read("publication_failures")
+                .map_err(|error| error.to_string())?,
+            thread_replays: read("thread_replays").map_err(|error| error.to_string())?,
+            sample_frames: read("sample_frames").map_err(|error| error.to_string())?,
+            video_formats: read("video_formats").map_err(|error| error.to_string())?,
+            video_frames: read("video_frames").map_err(|error| error.to_string())?,
+            video_capability_refusals: read("video_capability_refusals")
+                .map_err(|error| error.to_string())?,
+        })
     })
+}
+
+/// Observations from independently decoded portal artifacts and planted failures.
+#[cfg(feature = "gauntlet")]
+#[derive(Debug)]
+pub struct PortalOutputGauntletReport {
+    /// Frames decoded from each native motion artifact.
+    pub frames: u64,
+    /// Native formats exercised.
+    pub formats: u64,
+    /// Native publication failures that preserved the destination.
+    pub publication_failures: u64,
+    /// Native artifacts replayed across thread counts.
+    pub thread_replays: u64,
+    /// Stereo sample frames decoded from the native WAV.
+    pub sample_frames: u64,
+    /// Encoded video formats exercised (zero without ffmpeg).
+    pub video_formats: u64,
+    /// Frames decoded across the motion video artifacts.
+    pub video_frames: u64,
+    /// Forced missing-encoder refusals, including on qualified hosts.
+    pub video_capability_refusals: u64,
 }
 
 /// Exercise the shared Animation/Transform lifecycle through native PNG output.

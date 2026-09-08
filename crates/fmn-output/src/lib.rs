@@ -69,10 +69,11 @@ pub use provenance::{
     PROVENANCE_SCHEMA, ProvenanceManifest, StructuralField,
 };
 pub use sinks::{
-    FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, GifSink, GifSinkConfig, NativeArtifactKind,
-    NativeArtifactReport, OutputProfile, PngSink, PngSinkConfig, PngTarget, ReceiptError,
-    SinkAdapterError, SinkLimits, SinkReceipt, SvgPublicationConfig, SvgPublicationReport,
-    WavPublicationConfig, WavPublicationReport, Y4mSink, Y4mSinkConfig, publish_svg, publish_wav,
+    FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegSoundtrack, GifSink, GifSinkConfig,
+    NativeArtifactKind, NativeArtifactReport, OutputProfile, PngSink, PngSinkConfig, PngTarget,
+    ReceiptError, SinkAdapterError, SinkLimits, SinkReceipt, SvgPublicationConfig,
+    SvgPublicationReport, WavPublicationConfig, WavPublicationReport, Y4mSink, Y4mSinkConfig,
+    publish_svg, publish_wav,
 };
 pub use sound::{
     COMPILED_MIX_LANES, COMPILED_MIX_TIER, DitherPolicy, MixKernel, MixReport, MixerConfig,

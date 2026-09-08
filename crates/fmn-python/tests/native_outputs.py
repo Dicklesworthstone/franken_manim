@@ -4,8 +4,11 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import pathlib
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import wave
@@ -175,6 +178,15 @@ class FailingSound(Soundtrack):
     def construct(self):
         super().construct()
         raise RuntimeError("soundtrack-after-composition")
+class VideoSoundtrack(Scene):
+    def construct(self):
+        from pathlib import Path
+        square = Square(side_length=1, fill_color=WHITE, fill_opacity=1, stroke_width=0)
+        self.add(square.shift(UP))
+        self.wait(1 / 4)
+        # The encoder has already accepted frames before this cue exists.
+        self.add_sound(str(Path(__file__).with_name("tone.wav")))
+        self.wait(1 / 4)
 """)
 
 reports, artifacts = {}, {}
@@ -350,7 +362,100 @@ for scene_name, failure_code, message in (
             assert not failed.exists()
         publication_failures += 1
 
+video_formats = video_frames = 0
+ffmpeg = shutil.which("ffmpeg")
+# Absence is always exercised, including on fully qualified encoder hosts.
+prior_path = os.environ.get("PATH")
+try:
+    os.environ["PATH"] = str(output_root)
+    missing_destination = output_root / "missing-encoder.mp4"
+    missing_destination.write_bytes(b"preserve missing-encoder destination")
+    code, missing_encoder = console(str(source), "MovingWhiteSquare", "--format", "mp4",
+                                    "--resolution", "96x54", "--threads", "1",
+                                    "--video_dir", str(missing_destination))
+    assert code == 4 and missing_encoder["exit"]["identity"] == "capability", missing_encoder
+    assert "ffmpeg" in missing_encoder["message"] and "native" in missing_encoder["message"]
+    assert missing_destination.read_bytes() == b"preserve missing-encoder destination"
+finally:
+    if prior_path is None:
+        os.environ.pop("PATH", None)
+    else:
+        os.environ["PATH"] = prior_path
+
+if os.environ.get("FMN_REQUIRE_FFMPEG") == "1":
+    assert ffmpeg, "required real ffmpeg acceptance cannot run without the encoder"
+
+if ffmpeg:
+    def decode_video(path, audio=False):
+        output = (["-map", "0:a:0", "-ac", "2", "-ar", "48000", "-f", "s16le"]
+                  if audio else ["-map", "0:v:0", "-frames:v", "16", "-pix_fmt", "rgb24", "-f", "rawvideo"])
+        return subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-i", str(path),
+                               *output, "pipe:1"], capture_output=True, timeout=30, check=False)
+
+    for format_name in ("mp4", "mov"):
+        destination = output_root / ("motion." + format_name)
+        arguments = (str(source), "MovingWhiteSquare", "--format", format_name,
+                     "--resolution", "96x54", "--fps", "30", "--threads", "1")
+        code, report = console(*arguments, "--video_dir", str(destination))
+        assert code == 0 and report["frame_count"] == 4, report
+        assert report["certified"] is False
+        invocations = report["ffmpeg_invocations"]
+        assert len(invocations) == 1, "no-cue video must not fabricate an audio track"
+        assert invocations[0]["tool_sha256"] == hashlib.sha256(pathlib.Path(ffmpeg).read_bytes()).hexdigest()  # ubs:ignore — public executable fingerprint, not a secret or authentication token.
+        assert invocations[0]["bound_tool_path"] != invocations[0]["tool_path"]
+        assert invocations[0]["encoder"] == "libx264"
+        assert invocations[0]["process_mechanism"] and invocations[0]["process_policy_version"] > 0
+        decoded = decode_video(destination)
+        assert decoded.returncode == 0, decoded.stderr
+        frames = np.frombuffer(decoded.stdout, dtype=np.uint8).reshape(-1, 54, 96, 3)
+        assert len(frames) == 4
+        video_centers = []
+        for frame in frames:
+            ys, xs = np.nonzero(frame.mean(axis=2) > 200)
+            assert len(xs) > 10 and ys.mean() < 54 / 2 - 3
+            video_centers.append(float(xs.mean()))
+        assert video_centers[0] < 48 < video_centers[2]
+        assert video_centers[1] - video_centers[0] > 5
+        assert video_centers[2] - video_centers[1] > 5
+        assert decode_video(destination, audio=True).returncode != 0
+        for scene_name, expected_code in (("FailingScene", 5), ("MissingSound", 6)):
+            failed = output_root / f"{scene_name}.{format_name}"
+            failed.write_bytes(b"preserve existing encoded video")
+            code, error = console(str(source), scene_name, *arguments[2:], "--video_dir", str(failed))
+            assert code == expected_code, error
+            assert failed.read_bytes() == b"preserve existing encoded video"
+        video_formats += 1
+        video_frames += len(frames)
+
+    tone = (np.sin(2 * np.pi * 1000 * np.arange(6000) / 48000) * 8192).astype("<i2")
+    with wave.open(str(output_root / "tone.wav"), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(48000)
+        output.writeframes(tone.tobytes())
+    destination = output_root / "soundtrack.mp4"
+    code, report = console(str(source), "VideoSoundtrack", "--format", "mp4",
+                           "--resolution", "96x54", "--fps", "8", "--threads", "1",
+                           "--video_dir", str(destination))
+    assert code == 0 and report["frame_count"] == 4, report
+    assert len(report["ffmpeg_invocations"]) == 2
+    first, mux = report["ffmpeg_invocations"]
+    assert first["bound_tool_path"] == mux["bound_tool_path"]
+    assert any(pair == ["-c:v", "copy"] for pair in (mux["argv"][i:i+2] for i in range(len(mux["argv"]) - 1)))
+    decoded = decode_video(destination, audio=True)
+    assert decoded.returncode == 0, decoded.stderr
+    audio = np.frombuffer(decoded.stdout, dtype="<i2").reshape(-1, 2).astype(float)
+    # AAC is lossy and can retain a padded final packet. Check the actual
+    # signal and call-site timing, never encoded byte identity or exact PCM.
+    assert 24000 <= len(audio) < 25024
+    assert np.sqrt(np.mean(audio[1000:10000] ** 2)) < 32
+    assert np.sqrt(np.mean(audio[13000:17000] ** 2)) > 4000
+    assert np.sqrt(np.mean(audio[20000:23000] ** 2)) < 32
+    correlation = np.corrcoef(audio[13000:17000, 0], tone[1000:5000].astype(float))[0, 1]
+    assert correlation > 0.95, "late scene cue lost its sample-clock position"
+
 native_output_report = {"frames": len(gif_frames), "formats": len(reports),
                         "publication_failures": publication_failures,
                         "thread_replays": thread_replays, "centers": centers,
-                        "sample_frames": samples.shape[0]}
+                        "sample_frames": samples.shape[0], "video_formats": video_formats,
+                        "video_frames": video_frames, "video_capability_refusals": 1}

@@ -1867,6 +1867,141 @@ mod ffmpeg_boundary {
     }
 
     #[test]
+    fn deferred_soundtrack_is_explicit_and_muxes_the_completed_native_pcm() {
+        for with_audio in [false, true] {
+            let (root, tool, runner) = fake_tool(&format!("deferred-audio-{with_audio}"));
+            let destination = root.join("final.mp4");
+            let sink = FfmpegSink::new(
+                runner.clone(),
+                ffmpeg_config(
+                    tool,
+                    &root,
+                    WireFormat::Rgba8,
+                    destination.clone(),
+                    None,
+                    None,
+                ),
+            )
+            .expect("video sink");
+            let (mut sink, soundtrack) =
+                sink.with_deferred_soundtrack().expect("completion handle");
+            let receipt = sink.receipt();
+            let (frame, _) = padded_frame(PixelFormat::Rgba8, 10);
+            write_direct(&mut sink, 7, &frame);
+            assert!(!destination.exists());
+            let mix = with_audio.then(mix_report);
+            let expected = mix.as_ref().map(|mix| {
+                mix.wav_bytes(SampleFormat::S16, DitherPolicy::None)
+                    .unwrap()
+            });
+            soundtrack
+                .finish(mix)
+                .expect("complete after frame production");
+            sink.prepare_finish().expect("private preparation");
+            assert!(!destination.exists(), "preparation cannot publish");
+            sink.commit_finish().expect("publish");
+            let report = receipt.take().expect("receipt");
+            assert_eq!(
+                report.boundary.invocations.len(),
+                if with_audio { 2 } else { 1 }
+            );
+            if let Some(expected) = expected {
+                let argv = &report.boundary.invocations[1].provenance.argv;
+                let audio = argv
+                    .windows(2)
+                    .filter(|pair| pair[0] == "-i")
+                    .nth(1)
+                    .expect("audio input");
+                assert_eq!(
+                    std::fs::read(&audio[1]).expect("private native WAV"),
+                    expected
+                );
+                assert!(argv.windows(2).any(|pair| pair == ["-c:v", "copy"]));
+                assert_eq!(std::fs::read(destination).unwrap(), b"muxed-artifact");
+            } else {
+                assert_eq!(std::fs::read(destination).unwrap(), b"video-artifact");
+            }
+        }
+    }
+
+    #[test]
+    fn unresolved_or_dropped_soundtrack_cannot_publish_video() {
+        for drop_completion in [false, true] {
+            let (root, tool, runner) = fake_tool(&format!("unfinished-audio-{drop_completion}"));
+            let destination = root.join("existing.mp4");
+            std::fs::write(&destination, b"keep prior render").unwrap();
+            let sink = FfmpegSink::new(
+                runner,
+                ffmpeg_config(
+                    tool,
+                    &root,
+                    WireFormat::Rgba8,
+                    destination.clone(),
+                    None,
+                    None,
+                ),
+            )
+            .expect("video sink");
+            let (mut sink, completion) = sink.with_deferred_soundtrack().unwrap();
+            let mut completion = Some(completion);
+            let (frame, _) = padded_frame(PixelFormat::Rgba8, 10);
+            write_direct(&mut sink, 7, &frame);
+            if drop_completion {
+                drop(completion.take());
+            }
+            // ubs:ignore — finalizes an output sink, not a hash or security token.
+            let completed = sink.finish();
+            let error = completed.expect_err("unfinished soundtrack must refuse");
+            assert!(error.message().contains("soundtrack was not finalized"));
+            assert_eq!(std::fs::read(&destination).unwrap(), b"keep prior render");
+            if let Some(completion) = completion {
+                assert!(
+                    completion.finish(None).is_err(),
+                    "late completion cannot revive a failed sink"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_deferred_pcm_and_cancelled_completion_preserve_the_destination() {
+        for cancel in [false, true] {
+            let (root, tool, runner) = fake_tool(&format!("invalid-deferred-pcm-{cancel}"));
+            let destination = root.join("existing.mp4");
+            std::fs::write(&destination, b"prior video").unwrap();
+            let sink = FfmpegSink::new(
+                runner,
+                ffmpeg_config(
+                    tool,
+                    &root,
+                    WireFormat::Rgba8,
+                    destination.clone(),
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+            let (mut sink, completion) = sink.with_deferred_soundtrack().unwrap();
+            let (frame, _) = padded_frame(PixelFormat::Rgba8, 10);
+            write_direct(&mut sink, 7, &frame);
+            if cancel {
+                sink.abort();
+                assert!(completion.finish(Some(mix_report())).is_err());
+                assert!(sink.finish().is_err());
+            } else {
+                let mut mix = mix_report();
+                mix.audio.channels = 0;
+                completion.finish(Some(mix)).unwrap();
+                assert!(
+                    sink.finish().is_err(),
+                    "invalid PCM must not reach publication"
+                );
+            }
+            assert_eq!(std::fs::read(destination).unwrap(), b"prior video");
+        }
+    }
+
+    #[test]
     fn ffmpeg_abort_cancels_the_live_process_without_replacing_the_destination() {
         let (root, tool, runner) = fake_tool("abort");
         let destination = root.join("existing.mp4");

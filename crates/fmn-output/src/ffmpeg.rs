@@ -1130,11 +1130,11 @@ struct ToolSession {
 impl ToolSession {
     fn create(parent: &Path) -> Result<Arc<Self>, BoundaryError> {
         let parent = canonical_workdir_parent(parent)?;
+        // A name discriminator, not an authentication secret: exclusive
+        // directory creation, permissions and identity checks grant ownership.
+        let process_id = std::process::id();
         for sequence in 0..WORKDIR_CREATE_ATTEMPTS {
-            let root = parent.join(format!(
-                "fmn-ffmpeg-session-{}-{sequence}",
-                std::process::id()
-            ));
+            let root = parent.join(format!("fmn-ffmpeg-session-{process_id}-{sequence}"));
             if let Some(root) = claim_owned_directory(&root)? {
                 return Ok(Arc::new(Self {
                     parent,
@@ -1173,12 +1173,13 @@ impl ToolSession {
     }
 
     fn make_probe_workdir(&self) -> Result<OwnedWorkdir, BoundaryError> {
+        let process_id = std::process::id();
         for _ in 0..WORKDIR_CREATE_ATTEMPTS {
             let sequence = self.next_probe.fetch_add(1, Ordering::Relaxed);
             let path = self
                 .root
                 .path()
-                .join(format!("fmn-probe-{}-{sequence}", std::process::id()));
+                .join(format!("fmn-probe-{process_id}-{sequence}"));
             if let Some(workdir) = self.claim_child(&path)? {
                 return Ok(workdir);
             }
@@ -1222,6 +1223,7 @@ impl Boundary {
         workdir_parent: PathBuf,
     ) -> Result<Self, BoundaryError> {
         let workdir_parent = canonical_workdir_parent(&workdir_parent)?;
+        // ubs:ignore — compares public canonical filesystem paths, not secrets.
         if workdir_parent != tool.session.parent {
             return Err(BoundaryError::Workdir {
                 detail: format!(
@@ -1344,6 +1346,7 @@ impl Boundary {
     }
 
     fn make_workdir(&self) -> Result<OwnedWorkdir, BoundaryError> {
+        let process_id = std::process::id();
         for _ in 0..WORKDIR_CREATE_ATTEMPTS {
             let sequence = self.next_job.fetch_add(1, Ordering::Relaxed);
             let dir = self
@@ -1351,7 +1354,7 @@ impl Boundary {
                 .session
                 .root
                 .path()
-                .join(format!("fmn-job-{}-{sequence}", std::process::id()));
+                .join(format!("fmn-job-{process_id}-{sequence}"));
             if let Some(workdir) = self.tool.session.claim_child(&dir)? {
                 return Ok(workdir);
             }
@@ -1650,6 +1653,47 @@ pub struct StreamingEncode {
 }
 
 impl StreamingEncode {
+    /// Attach a finalized native WAV after frame production, before the
+    /// existing encode/mux preparation. The bytes stay in this job's private
+    /// directory and never become a separately published artifact.
+    ///
+    /// # Errors
+    /// Refuses an existing soundtrack, oversized input, or a changed private
+    /// directory. The normal preparation path still validates every process
+    /// and artifact before publication.
+    pub fn prepare_with_wav(mut self, wav: &[u8]) -> Result<PreparedFfmpegArtifact, BoundaryError> {
+        if self.audio.is_some() {
+            return Err(BoundaryError::Workdir {
+                detail: "streaming ffmpeg already has an audio input".to_owned(),
+            });
+        }
+        if wav.len() as u64 > self.limits.max_artifact_bytes {
+            return Err(BoundaryError::Workdir {
+                detail: "native WAV exceeds the ffmpeg artifact budget".to_owned(),
+            });
+        }
+        self.workdir.verify_current("stage finalized native WAV")?;
+        let audio = self.workdir.join("soundtrack.wav");
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let write = || -> std::io::Result<()> {
+            let mut file = options.open(&audio)?;
+            file.write_all(wav)?;
+            file.sync_all()
+        };
+        write().map_err(|error| BoundaryError::Workdir {
+            detail: format!("stage finalized native WAV: {error}"),
+        })?;
+        self.workdir.verify_current("finish native WAV staging")?;
+        self.audio = Some(audio);
+        self.prepare()
+    }
+
     /// Feed the next tightly packed ordered byte chunk.
     ///
     /// The OS pipe supplies bounded backpressure; the process supervisor can

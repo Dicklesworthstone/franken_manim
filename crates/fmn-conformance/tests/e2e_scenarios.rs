@@ -1225,23 +1225,37 @@ fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome,
 
 fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_native_outputs")?;
-    let (frames, formats, refusals, replays, sample_frames) =
-        manimlib::run_portal_gauntlet_native_outputs(&root)
-            .map_err(|error| fail(format!("decoded Python native outputs: {error}")))?;
+    let manimlib::PortalOutputGauntletReport {
+        frames,
+        formats,
+        publication_failures: refusals,
+        thread_replays: replays,
+        sample_frames,
+        video_formats,
+        video_frames,
+        video_capability_refusals: video_refusals,
+    } = manimlib::run_portal_gauntlet_native_outputs(&root)
+        .map_err(|error| fail(format!("decoded Python native outputs: {error}")))?;
     ctx.event(
         LogEvent::new("e2e.python.native_outputs")
             .field("frames", frames)
             .field("formats", formats)
             .field("publication_failures", refusals)
             .field("thread_replays", replays)
-            .field("sample_frames", sample_frames),
+            .field("sample_frames", sample_frames)
+            .field("video_formats", video_formats)
+            .field("video_frames", video_frames)
+            .field("video_capability_refusals", video_refusals),
     );
     let mut outcome = RunOutcome::ok()
         .with_counter("native_output_frames", frames)
         .with_counter("native_output_formats", formats)
         .with_counter("native_output_publication_failures", refusals)
         .with_counter("native_output_thread_replays", replays)
-        .with_counter("native_output_sample_frames", sample_frames);
+        .with_counter("native_output_sample_frames", sample_frames)
+        .with_counter("video_output_formats", video_formats)
+        .with_counter("video_output_frames", video_frames)
+        .with_counter("video_output_capability_refusals", video_refusals);
     for name in [
         "native_scene.py",
         "motion.gif",
@@ -1255,6 +1269,16 @@ fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
         let bytes = std::fs::read(root.join(name))
             .map_err(|error| fail(format!("read native output {name}: {error}")))?;
         outcome = outcome.with_artifact(name, bytes);
+    }
+    if std::env::var("FMN_REQUIRE_FFMPEG").as_deref() == Ok("1") {
+        if video_formats != 2 || video_frames != 8 {
+            return Err(fail("required real MP4/MOV acceptance did not execute"));
+        }
+        for name in ["motion.mp4", "motion.mov", "soundtrack.mp4", "tone.wav"] {
+            let bytes = std::fs::read(root.join(name))
+                .map_err(|error| fail(format!("read video output {name}: {error}")))?;
+            outcome = outcome.with_artifact(name, bytes);
+        }
     }
     Ok(outcome)
 }
@@ -3511,6 +3535,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    let mut portal_output_inventory = vec![
+        "native_scene.py".to_owned(),
+        "motion.gif".to_owned(),
+        "motion.y4m".to_owned(),
+        "primaries.gif".to_owned(),
+        "primaries.y4m".to_owned(),
+        "soundtrack.wav".to_owned(),
+        "cue.wav".to_owned(),
+        "quiet.wav".to_owned(),
+    ];
+    if std::env::var("FMN_REQUIRE_FFMPEG").as_deref() == Ok("1") {
+        portal_output_inventory
+            .extend(["motion.mp4", "motion.mov", "soundtrack.mp4", "tone.wav"].map(str::to_owned));
+    }
     specs.push(spec(
         "render_matrix.python_portal_native_outputs.v1",
         ScenarioClass::RenderMatrix,
@@ -3518,16 +3556,8 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_portal_native_outputs_run),
         vec![
             Assertion::ExitCode(0),
-            Assertion::FileInventory(vec![
-                "native_scene.py".to_owned(),
-                "motion.gif".to_owned(),
-                "motion.y4m".to_owned(),
-                "primaries.gif".to_owned(),
-                "primaries.y4m".to_owned(),
-                "soundtrack.wav".to_owned(),
-                "cue.wav".to_owned(),
-                "quiet.wav".to_owned(),
-            ]),
+            Assertion::FileInventory(portal_output_inventory),
+            counter_eq("video_output_capability_refusals", 1),
             counter_eq("native_output_frames", 4),
             counter_eq("native_output_formats", 3),
             counter_eq("native_output_publication_failures", 14),

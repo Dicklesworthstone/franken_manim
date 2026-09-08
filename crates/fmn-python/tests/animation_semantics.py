@@ -9,6 +9,9 @@ from manimlib import (
     AnimationGroup,
     Circle,
     CyclicReplace,
+    DrawBorderThenFill,
+    FadeTransform,
+    FadeTransformPieces,
     Group,
     LaggedStart,
     LaggedStartMap,
@@ -22,6 +25,7 @@ from manimlib import (
     Transform,
     TransformFromCopy,
     VMobject,
+    VGroup,
 )
 
 
@@ -42,6 +46,70 @@ except TypeError as error:
 else:
     raise AssertionError("Animation accepted a non-Mobject target")
 assert str(Animation(Mobject())) == "AnimationMobject"
+
+# Public helpers must operate on real native-backed copies and records. A
+# successful animation endpoint alone never exercises these callable contracts.
+outline_source = VGroup(
+    Square(fill_opacity=0.75, stroke_color="#FF0000", stroke_width=5),
+    Circle(fill_opacity=0.5, stroke_color="#00FF00", stroke_width=7).shift((3, 0, 0)),
+)
+outline_source.stroke_behind = True
+outline_points = [mob.get_points().copy() for mob in outline_source.family_members_with_points()]
+outline_animation = DrawBorderThenFill(outline_source, stroke_width=3)
+outline_copy = outline_animation.get_outline()
+assert outline_copy is not outline_source
+assert len(outline_copy.family_members_with_points()) == len(outline_points) == 2
+for index, (actual, original) in enumerate(zip(
+    outline_copy.family_members_with_points(), outline_source.family_members_with_points(),
+)):
+    assert actual is not original
+    assert np.array_equal(actual.get_points(), outline_points[index])
+    assert actual.get_fill_opacity() == 0
+    assert actual.get_stroke_width() == 3
+    assert actual.get_stroke_color() == original.get_stroke_color()
+    assert actual.get_uniforms()["stroke_behind"]
+assert outline_source[0].get_fill_opacity() == 0.75
+assert outline_source[0].get_stroke_width() == 5
+outline_copy.shift((0, 2, 0))
+assert np.array_equal(outline_source[0].get_points(), outline_points[0])
+colored_outline = DrawBorderThenFill(
+    outline_source, stroke_color="#0000FF",
+).get_outline()
+assert all(mob.get_stroke_color().upper() == "#0000FF"
+           for mob in colored_outline.family_members_with_points())
+
+ghost_source = Square(side_length=2, fill_opacity=0.8, stroke_width=3)
+ghost_target = Square(side_length=1).stretch(3, 0).shift((4, 2, 0))
+ghost_target.set_uniform(flat_stroke=True, fixed_orientation_center=(4.0, 2.0, 0.0))
+ghost_target_points = ghost_target.get_points().copy()
+ghost = FadeTransform(ghost_source, ghost_target, stretch=True)
+assert ghost.ghost_to(ghost_source, ghost_target) is None
+assert np.allclose(ghost_source.get_center(), ghost_target.get_center())
+assert np.allclose([ghost_source.get_width(), ghost_source.get_height()], [3, 1])
+assert ghost_source.get_fill_opacity() == ghost_source.get_stroke_opacity() == 0
+assert ghost_source.get_uniforms()["flat_stroke"]
+assert np.allclose(ghost_source.get_uniforms()["fixed_orientation_center"], [4, 2, 0])
+assert np.array_equal(ghost_target.get_points(), ghost_target_points)
+
+aspect_source = Square(side_length=2)
+aspect_ghost = FadeTransform(aspect_source, ghost_target, stretch=False, dim_to_match=1)
+aspect_ghost.ghost_to(aspect_source, ghost_target)
+assert np.allclose([aspect_source.get_width(), aspect_source.get_height()], [1, 1])
+assert np.allclose(aspect_source.get_center(), ghost_target.get_center())
+
+piece_source = VGroup(Square(), Square().shift((2, 0, 0)))
+piece_target = VGroup(Square().scale(0.25).shift((-3, 1, 0)),
+                      Square().scale(0.75).shift((4, -2, 0)))
+piece_targets = [mob.get_points().copy() for mob in piece_target.submobjects]
+pieces = FadeTransformPieces(piece_source, piece_target)
+assert pieces.ghost_to(piece_source, piece_target) is None
+assert len(piece_source.submobjects) == len(piece_target.submobjects) == 2
+for actual, target, before in zip(piece_source, piece_target, piece_targets):
+    assert np.allclose(actual.get_center(), target.get_center())
+    assert np.allclose([actual.get_width(), actual.get_height()],
+                       [target.get_width(), target.get_height()])
+    assert actual.get_fill_opacity() == actual.get_stroke_opacity() == 0
+    assert np.array_equal(target.get_points(), before)
 
 root = Mobject(Mobject(), Mobject())
 square_rate = lambda value: value * value

@@ -17,7 +17,7 @@ gauntlet = []
 [dependencies]
 fmn-core.workspace = true
 fmn-config.workspace = true
-fmn-platform = { workspace = true, default-features = false }
+fmn-platform = { workspace = true, features = ["exact-process"] }
 fmn-frame.workspace = true
 fmn-codec.workspace = true
 fmn-mobject.workspace = true
@@ -25,7 +25,7 @@ fmn-anim.workspace = true
 fmn-render.workspace = true
 fmn-library.workspace = true
 fmn-scene.workspace = true
-fmn-output = { workspace = true, default-features = false }
+fmn-output = { workspace = true, features = ["exact-process"] }
 fmn-runtime.workspace = true
 pyo3.workspace = true
 

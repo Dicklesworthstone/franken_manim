@@ -9,8 +9,8 @@ description = "Filesystem/process/clock/AssetFetcher capability traits plus Hard
 [features]
 # Native exact-image spawning is part of the ordinary platform surface, but
 # consumers which only need deterministic filesystem/clock/profile traits may
-# opt out.  That keeps the optional CPython portal from linking a complete
-# process-supervision runtime it cannot currently reach.
+# opt out. The optional CPython portal enables it explicitly for Reel's
+# governed ffmpeg encode/mux boundary; it never launches an interpreter.
 default = ["exact-process"]
 exact-process = ["dep:asupersync"]
 

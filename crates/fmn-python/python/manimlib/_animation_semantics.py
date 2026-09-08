@@ -16,6 +16,9 @@ def install(native):
     Transform = g["Transform"]
     ReplacementTransform = g["ReplacementTransform"]
     TransformFromCopy = g["TransformFromCopy"]
+    DrawBorderThenFill = g["DrawBorderThenFill"]
+    FadeTransform = g["FadeTransform"]
+    FadeTransformPieces = g["FadeTransformPieces"]
 
     def mobject_str(self):
         return type(self).__name__
@@ -428,6 +431,31 @@ def install(native):
     TransformFromCopy.replace_mobject_with_target_in_scene = True
     TransformFromCopy.__init__ = transform_from_copy_init
 
+    def draw_border_get_outline(self):
+        """Expose a native-backed outline copy without changing the source."""
+        outline = self.mobject.copy()
+        outline.set_fill(opacity=0)
+        for member in outline.family_members_with_points():
+            member.set_stroke(
+                color=self.stroke_color or member.get_stroke_color(),
+                width=self.stroke_width,
+                behind=self.mobject.stroke_behind,
+            )
+        return outline
+
+    def fade_transform_ghost_to(self, source, target):
+        source.replace(target, stretch=self.stretch, dim_to_match=self.dim_to_match)
+        source.set_uniform(**target.get_uniforms())
+        source.set_opacity(0)
+
+    def fade_transform_pieces_ghost_to(self, source, target):
+        for source_member, target_member in zip(source.get_family(), target.get_family()):
+            FadeTransform.ghost_to(self, source_member, target_member)
+
+    DrawBorderThenFill.get_outline = draw_border_get_outline
+    FadeTransform.ghost_to = fade_transform_ghost_to
+    FadeTransformPieces.ghost_to = fade_transform_pieces_ghost_to
+
     # Both the embedded extension and installed wheel expose these same class
     # objects. Give their methods the public identities before either route
     # applies schema provenance or resolves qualified compatibility imports.
@@ -451,6 +479,9 @@ def install(native):
             "interpolate_mobject", "interpolate_submobject",
         ),
         TransformFromCopy: ("__init__",),
+        DrawBorderThenFill: ("get_outline",),
+        FadeTransform: ("ghost_to",),
+        FadeTransformPieces: ("ghost_to",),
     }
     for cls, names in semantic_methods.items():
         for name in names:

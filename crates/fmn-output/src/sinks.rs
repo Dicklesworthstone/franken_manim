@@ -34,6 +34,7 @@ use fmn_platform::profile::{
 };
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Explicit bounds for a production sink.
@@ -1413,6 +1414,26 @@ pub struct FfmpegSink {
     prepared: Option<PreparedFfmpegArtifact>,
     input_bytes: u64,
     receipt: SinkReceipt<FfmpegArtifactReport>,
+    deferred_soundtrack: Option<Receiver<Option<MixReport>>>,
+}
+
+/// One-use soundtrack completion for a live video sink. Scene construction
+/// must explicitly supply its final mix (or no cues) before emitter finish.
+/// Dropping this handle never authorizes silent publication.
+pub struct FfmpegSoundtrack {
+    sender: SyncSender<Option<MixReport>>,
+}
+
+impl FfmpegSoundtrack {
+    /// Supply the completed scene soundtrack without waiting for video drain.
+    ///
+    /// # Errors
+    /// Returns an error if the sink has already failed or been cancelled.
+    pub fn finish(self, mix: Option<MixReport>) -> Result<(), SinkAdapterError> {
+        self.sender
+            .send(mix)
+            .map_err(|_| SinkAdapterError::Cancelled)
+    }
 }
 
 impl FfmpegSink {
@@ -1466,7 +1487,31 @@ impl FfmpegSink {
             prepared: None,
             input_bytes: 0,
             receipt: SinkReceipt::pending(),
+            deferred_soundtrack: None,
         })
+    }
+
+    /// Connect a soundtrack whose cues become known while frames are emitted.
+    /// The completion handle is bounded to one message and must be resolved
+    /// before [`OrderedEmitter::finish`](crate::OrderedEmitter::finish).
+    ///
+    /// # Errors
+    /// Refuses a second audio source or a sink that has already accepted frames.
+    pub fn with_deferred_soundtrack(
+        mut self,
+    ) -> Result<(Self, FfmpegSoundtrack), SinkAdapterError> {
+        if self.config.audio.is_some()
+            || self.deferred_soundtrack.is_some()
+            || self.stream.is_some()
+            || self.state.lifecycle != AdapterLifecycle::Accepting
+        {
+            return Err(SinkAdapterError::InvalidConfig(
+                "deferred soundtrack requires a fresh sink without an audio source",
+            ));
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.deferred_soundtrack = Some(receiver);
+        Ok((self, FfmpegSoundtrack { sender }))
     }
 
     /// Completion report handle carrying every boundary invocation.
@@ -1559,7 +1604,35 @@ impl FfmpegSink {
             .stream
             .take()
             .ok_or(SinkAdapterError::AlreadyFinalized)?;
-        self.prepared = Some(stream.prepare().map_err(boundary_error)?);
+        let mix = self
+            .deferred_soundtrack
+            .take()
+            .map(|receiver| {
+                receiver.try_recv().map_err(|_| {
+                    SinkAdapterError::InvalidConfig(
+                        "scene soundtrack was not finalized before video publication",
+                    )
+                })
+            })
+            .transpose()?
+            .flatten();
+        self.prepared = Some(if let Some(mix) = mix {
+            preflight_wav_artifact(
+                SampleFormat::S16,
+                DitherPolicy::None,
+                mix.audio.samples.len(),
+                self.config.job_limits.max_artifact_bytes,
+            )?;
+            let wav = mix
+                .wav_bytes(SampleFormat::S16, DitherPolicy::None)
+                .map_err(|error| SinkAdapterError::Codec {
+                    codec: "WAV",
+                    detail: error.to_string(),
+                })?;
+            stream.prepare_with_wav(&wav).map_err(boundary_error)?
+        } else {
+            stream.prepare().map_err(boundary_error)?
+        });
         Ok(())
     }
 
@@ -1582,6 +1655,7 @@ impl FfmpegSink {
         self.state.abort();
         self.stream = None;
         self.prepared = None;
+        self.deferred_soundtrack = None;
     }
 }
 

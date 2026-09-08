@@ -132,8 +132,8 @@ EXPECTED: dict[str, set[str]] = {
     },
     # The optional CPython portal is its own composition root. It consumes the
     # same retained Lumen renderer and native Reel sinks as the standalone CLI,
-    # but fmn-output enters with exact-process disabled so the wheel cannot gain
-    # a subprocess runtime (fm-gqk6, ADR-0017).
+    # including the optional governed ffmpeg boundary. ADR-0017 forbids the
+    # standalone CLI from consuming or launching this host-CPython front door.
     "fmn-python": {
         "fmn-core",
         "fmn-config",

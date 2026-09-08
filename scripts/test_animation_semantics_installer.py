@@ -26,6 +26,7 @@ ANIMATION_CLASSES = {
     "Animation", "_NativeAnimation", "Transform", "ReplacementTransform",
     "TransformFromCopy", "CyclicReplace", "Swap", "AnimationGroup",
     "LaggedStart", "Succession", "LaggedStartMap",
+    "DrawBorderThenFill", "FadeTransform", "FadeTransformPieces",
 }
 ANIMATION_FUNCTIONS = {
     "prepare_animation", "_composition_member_run_time", "_composition_timings",
