@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-cargo build --release --target wasm32-unknown-unknown
+cargo build --locked --release --target wasm32-unknown-unknown
 
 # CARGO_TARGET_DIR may redirect the artifact; honor it, else the crate-local
 # target dir (this crate is a non-member, so its default target is its own).
