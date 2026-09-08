@@ -11,6 +11,7 @@ wasm_bindgen_bin=${FMN_WASM_BINDGEN:-wasm-bindgen}
 wasm_opt_bin=${FMN_WASM_OPT:-wasm-opt}
 webpack_bin=${FMN_WEBPACK:-webpack}
 chrome_bin=${FMN_CHROME:-google-chrome}
+http_user_agent=${FMN_HTTP_USER_AGENT:-fmn-wasm-package-gate}
 
 for command_name in "$wasm_pack_bin" "$wasm_bindgen_bin" "$wasm_opt_bin" \
     "$webpack_bin" "$chrome_bin" npm python3 rustup git gzip; do
@@ -408,6 +409,7 @@ capture_browser_dom() {
     local log=$4
     mkdir -p "$profile"
     "$chrome_bin" --headless=new --disable-gpu --disable-dev-shm-usage \
+        --user-agent="$http_user_agent" \
         --no-first-run --no-default-browser-check --remote-debugging-port=0 \
         --user-data-dir="$profile" "$url" > /dev/null 2> "$log" &
     chrome_pid=$!
@@ -431,12 +433,14 @@ capture_browser_dom() {
     fi
 
     PATH="$js_path" "$node_bin" --experimental-websocket --input-type=module - \
-        "$devtools_port" "$url" > "$dom" <<'JS'
-const [port, expectedUrl] = process.argv.slice(2);
+        "$devtools_port" "$url" "$http_user_agent" > "$dom" <<'JS'
+const [port, expectedUrl, userAgent] = process.argv.slice(2);
 const deadline = Date.now() + 30_000;
 let target;
 while (Date.now() < deadline) {
-  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
+  const targets = await fetch(`http://127.0.0.1:${port}/json/list`, {
+    headers: { "User-Agent": userAgent },
+  }).then((response) => response.json());
   target = targets.find((entry) => entry.type === "page" && entry.url === expectedUrl);
   if (target !== undefined) break;
   await new Promise((resolve) => setTimeout(resolve, 100));
