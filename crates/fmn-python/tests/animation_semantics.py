@@ -355,7 +355,7 @@ def render_animation_lifecycle(destination, seed):
             self.wait(1.0 / 30.0)
 
     scene = AnimationLifecycleScene()
-    scene._begin_render(destination, 96, 54, 30, 1, seed)
+    scene._begin_png_sequence(destination, 96, 54, 30, 1, seed)
     try:
         scene.run()
         return scene._finish_render(
