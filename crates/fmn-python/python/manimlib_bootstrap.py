@@ -17989,11 +17989,11 @@ class FocusOn(Transform):
                 ) from error
         self.opacity = float(opacity)
         self.color = color
-        self.remover = bool(remover)
         super().__init__(
             self.create_starting_mobject(),
             self.create_target(),
             run_time=run_time,
+            remover=remover,
             **kwargs,
         )
         if self._focus_target is not None:
@@ -18107,7 +18107,6 @@ class CircleIndicate(Transform):
         self.stroke_width = float(stroke_width)
         if not _math.isfinite(self.stroke_width) or self.stroke_width < 0:
             raise ValueError("CircleIndicate stroke_width must be non-negative and finite")
-        self.remover = bool(remover)
         circle = Circle(
             stroke_color=self.stroke_color,
             stroke_width=self.stroke_width,
@@ -18119,6 +18118,7 @@ class CircleIndicate(Transform):
             pre_circle,
             circle,
             rate_func=rate_func,
+            remover=remover,
             **kwargs,
         )
 
@@ -19221,10 +19221,10 @@ class ShowCreationThenFadeOut(Succession):
                 "ShowCreationThenFadeOut requires a VMobject or Surface "
                 "family; got " + type(mobject).__name__
             )
-        self.remover = bool(remover)
         super().__init__(
             ShowCreation(mobject),
             FadeOut(mobject),
+            remover=remover,
             **kwargs,
         )
 
@@ -19236,8 +19236,7 @@ class _BroadcastRestore(Restore):
     """Restore one Broadcast ring and apply the outer remover contract."""
 
     def __init__(self, mobject, remover=True, **kwargs):
-        self.remover = bool(remover)
-        super().__init__(mobject, **kwargs)
+        super().__init__(mobject, remover=remover, **kwargs)
 
     def _native_params(self):
         params = super()._native_params()
@@ -19290,7 +19289,6 @@ class Broadcast(LaggedStart):
                     "Broadcast " + name + " must be non-negative and finite"
                 )
         self.color = color
-        self.remover = bool(remover)
         self.circles = VGroup()
         for _ in range(self.n_circles):
             circle = Circle(
@@ -19305,11 +19303,12 @@ class Broadcast(LaggedStart):
             self.circles.add(circle)
         super().__init__(
             *(
-                _BroadcastRestore(circle, remover=self.remover)
+                _BroadcastRestore(circle, remover=remover)
                 for circle in self.circles
             ),
             run_time=run_time,
             lag_ratio=lag_ratio,
+            remover=remover,
             **kwargs,
         )
 
