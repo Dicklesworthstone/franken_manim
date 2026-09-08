@@ -322,6 +322,104 @@ assert np.array_equal(play_hook_source.get_points(), [[0.0, 0.0, 0.0]])
 assert not play_hook_source.locked_data_keys
 
 
+class TimelineMove(Animation):
+    def __init__(self, mobject, destination, events, **kwargs):
+        self.destination = float(destination)
+        self.events = events
+        self.helper_ticks = []
+        super().__init__(mobject, rate_func=linear_rate, **kwargs)
+
+    def begin(self):
+        self.events.append(("begin", self.destination, float(self.mobject.get_x())))
+        super().begin()
+
+    def update_mobjects(self, dt):
+        self.helper_ticks.append(float(dt))
+        super().update_mobjects(dt)
+
+    def interpolate_mobject(self, alpha):
+        start = float(self.starting_mobject.get_x())
+        self.mobject.set_x(start + (self.destination - start) * alpha)
+
+    def finish(self):
+        super().finish()
+        self.events.append(("finish", self.destination, float(self.mobject.get_x())))
+
+
+def timeline_point():
+    return Mobject().set_points([[0.0, 0.0, 0.0]])
+
+
+# Changing a group's wall-clock duration preserves its member timeline.
+# Compare Python and native leaves at every observed frame, including any
+# final refresh, with an independent first-frame value and intermediate state.
+for play_override in (False, True):
+    timeline_source, timeline_native, timeline_observer = (
+        timeline_point(), timeline_point(), timeline_point()
+    )
+    mixed_samples = []
+    timeline_observer.add_updater(
+        lambda mob, dt: mixed_samples.append(
+            (timeline_source.get_x(), timeline_native.get_x())
+        ) if dt > 0 else None,
+        call=False,
+    )
+    timeline_scene = Scene().add(timeline_source, timeline_native, timeline_observer)
+    timeline_group = AnimationGroup(
+        TimelineMove(timeline_source, 1.0, [], run_time=0.1),
+        Transform(
+            timeline_native, timeline_native.copy().set_x(1.0),
+            run_time=0.1, rate_func=linear_rate,
+        ),
+        run_time=-1 if play_override else 0.2,
+    )
+    if play_override:
+        timeline_scene.play(timeline_group, run_time=0.2, rate_func=linear_rate)
+    else:
+        timeline_scene.play(timeline_group)
+    assert len(mixed_samples) >= 6, mixed_samples
+    assert np.allclose(mixed_samples[0], [1.0 / 6.0] * 2, atol=1e-6), mixed_samples
+    assert np.allclose(
+        [pair[0] for pair in mixed_samples],
+        [pair[1] for pair in mixed_samples], atol=1e-6,
+    ), mixed_samples
+    assert any(0.0 < pair[0] < 1.0 for pair in mixed_samples)
+    assert np.allclose(mixed_samples[-1], [1.0, 1.0], atol=1e-6)
+
+# A future Succession child must begin from the previous child's final state;
+# its helpers must not tick while another child is active.
+timeline_source, timeline_observer = timeline_point(), timeline_point()
+successive_samples, timeline_events = [], []
+timeline_observer.add_updater(
+    lambda mob, dt: successive_samples.append(timeline_source.get_x()) if dt > 0 else None,
+    call=False,
+)
+timeline_first = TimelineMove(timeline_source, 1.0, timeline_events, run_time=0.1)
+timeline_second = TimelineMove(timeline_source, 2.0, timeline_events, run_time=0.1)
+Scene().add(timeline_source, timeline_observer).play(
+    Succession(timeline_first, timeline_second, rate_func=linear_rate)
+)
+assert np.allclose(successive_samples[:6], [k / 3.0 for k in range(1, 7)], atol=1e-6), successive_samples
+assert timeline_events == [
+    ("begin", 1.0, 0.0), ("finish", 1.0, 1.0),
+    ("begin", 2.0, 1.0), ("finish", 2.0, 2.0),
+], timeline_events
+assert len(timeline_first.helper_ticks) == 3, timeline_first.helper_ticks
+assert len(timeline_second.helper_ticks) >= 3, timeline_second.helper_ticks
+
+# Nested coarse sampling still runs every crossed child in order (BN-11).
+coarse_source, coarse_events = timeline_point(), []
+Scene().play(AnimationGroup(Succession(*[
+    TimelineMove(coarse_source, destination, coarse_events, run_time=0.1)
+    for destination in (1.0, 2.0, 3.0)
+]), run_time=1.0 / 30.0))
+assert coarse_events == [
+    ("begin", 1.0, 0.0), ("finish", 1.0, 1.0),
+    ("begin", 2.0, 1.0), ("finish", 2.0, 2.0),
+    ("begin", 3.0, 2.0), ("finish", 3.0, 3.0),
+], coarse_events
+
+
 def render_animation_lifecycle(destination, seed):
     """Exercise shared hooks and native composition through real PNG output."""
     class AnimationLifecycleScene(Scene):

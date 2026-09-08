@@ -16781,7 +16781,10 @@ group_cb_probe.add_updater(
 group_cb_scene.add(group_cb_probe)
 group_cb_scene.play(
     manimlib.AnimationGroup(
-        manimlib.FadeIn(group_cb_rect),
+        # Equal member windows retain an intermediate nominal sample when
+        # the group is compressed to two frames. A one-second native leaf
+        # would make the shorter decimal leaf complete at the first frame.
+        manimlib.FadeIn(group_cb_rect, run_time=2.0 / 30.0),
         numbers_animation.ChangeDecimalToValue(
             group_cb_decimal, 6.0, run_time=2.0 / 30.0
         ),

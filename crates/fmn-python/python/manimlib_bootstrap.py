@@ -14813,7 +14813,9 @@ class Scene(_SceneCore):
             ):
                 # fm-5wq.4.88: a composition carrying Python-driven leaves
                 # gets one driver callback in the same release window.
-                callbacks.append(_CompositionCallbackDriver(proto))
+                callbacks.append(_CompositionCallbackDriver(
+                    proto, run_time=run_time, rate_func=rate_func,
+                ))
             else:
                 callbacks.append(None)
             specs.append(build_spec(proto, False))
@@ -19016,10 +19018,10 @@ def _python_composition_members(group):
     native module's; nested groups recurse)."""
     members = []
     for member in group.animations:
-        if isinstance(member, AnimationGroup):
-            members.extend(_python_composition_members(member))
-        elif isinstance(member, Animation) and _requires_python_animation(member):
+        if isinstance(member, Animation) and _requires_python_animation(member):
             members.append(member)
+        elif isinstance(member, AnimationGroup):
+            members.extend(_python_composition_members(member))
     return members
 
 
@@ -19048,50 +19050,22 @@ def _composition_timings(group):
     return timings, max_end
 
 
-def _composition_timeline_position(group, alpha, max_end):
+def _composition_timeline_position(group, alpha, max_end, run_time=None, rate_func=None):
     """fmn-anim composition.rs `timeline_position`: time_span re-window,
-    then the rate curve, scaled onto the timeline. The scale is the
-    group's EXPLICIT run_time when one was given (fm-5wq.4.88: the group
-    alpha the native slot hands the driver is already t / run_time, so
-    rate(alpha) * run_time is absolute seconds and a python leaf's
-    nominal window spans exactly its share of the actual play), falling
-    back to max_end_time — the native group_config default — when the
-    group derives its run_time from the members."""
+    then the rate curve, scaled onto the member timeline. An explicit
+    run_time changes wall-clock duration, not the member interval table.
+    Native group_config uses a linear default (BN-11)."""
     span = getattr(group, "time_span", None)
     if span is not None:
         start, end = span
-        run_time = _composition_member_run_time(group)
+        run_time = _composition_member_run_time(group) if run_time is None else run_time
         alpha = min(max(alpha * run_time - start, 0.0), end - start) / (
             end - start
         )
-    rate = getattr(group, "rate_func", None)
+    rate = getattr(group, "rate_func", None) if rate_func is None else rate_func
     if rate is None:
-        rate = getattr(_FMN_ROOT, "smooth", lambda value: value)
-    scale = max_end
-    explicit = getattr(group, "run_time", None)
-    try:
-        explicit = None if explicit is None else float(explicit)
-    except (TypeError, ValueError):
-        explicit = None
-    if explicit is not None and explicit > 0:
-        scale = explicit
-    return rate(float(alpha)) * scale
-
-
-def _drive_python_composition(group, alpha):
-    """Interpolate every Python-driven leaf at the exact sub-alpha its
-    native placeholder slot occupies: the native group interpolates its
-    members at `Interval.sub_alpha(timeline_position(alpha))`, and this
-    mirror computes the same windows for the Python leaves only."""
-    timings, max_end = _composition_timings(group)
-    time = _composition_timeline_position(group, alpha, max_end)
-    for member, start, end in timings:
-        duration = end - start
-        sub = 1.0 if duration <= 0 else min(max((time - start) / duration, 0.0), 1.0)
-        if isinstance(member, AnimationGroup):
-            _drive_python_composition(member, sub)
-        elif isinstance(member, Animation) and _requires_python_animation(member):
-            member.interpolate(sub)
+        rate = _linear_rate
+    return rate(float(alpha)) * max_end
 
 
 class _CompositionCallbackDriver:
@@ -19101,28 +19075,81 @@ class _CompositionCallbackDriver:
     driver runs the Python leaves at the mirrored sub-alphas in the same
     release window."""
 
-    def __init__(self, group):
+    def __init__(self, group, run_time=None, rate_func=None):
         self.group = group
-        self.members = _python_composition_members(group)
+        self.run_time = run_time
+        self.rate_func = rate_func
+        self.timings, self.max_end = _composition_timings(group)
+        self.children = []
+        for member, _, _ in self.timings:
+            if isinstance(member, Animation) and _requires_python_animation(member):
+                child = member
+            elif isinstance(member, AnimationGroup):
+                child = _CompositionCallbackDriver(member)
+            else:
+                child = None
+            self.children.append(child)
+        self.successive = group._native_kind in {"succession", "show_creation_then_fade_out"}
+        self.active = 0
 
     def begin(self):
-        for member in self.members:
-            member.begin()
+        self.active = 0
+        children = self.children[:1] if self.successive else self.children
+        for child in children:
+            if child is not None:
+                child.begin()
 
     def update_mobjects(self, dt):
-        for member in self.members:
-            member.update_mobjects(dt)
+        children = self.children[self.active:self.active + 1] if self.successive else self.children
+        for child in children:
+            if child is not None:
+                child.update_mobjects(dt)
 
     def interpolate(self, alpha):
-        _drive_python_composition(self.group, float(alpha))
+        time = _composition_timeline_position(
+            self.group, float(alpha), self.max_end, self.run_time, self.rate_func,
+        )
+        if self.successive:
+            target = 0
+            for index, (_, start, _) in enumerate(self.timings):
+                if time >= start:
+                    target = index
+            # Choreo's advance_to: run every crossed member, even when a
+            # coarse frame skips its entire interval. Future helpers must
+            # snapshot the state left by the member just finished.
+            while self.active < target:
+                previous = self.children[self.active]
+                if previous is not None:
+                    previous.finish()
+                self.active += 1
+                following = self.children[self.active]
+                if following is not None:
+                    following.begin()
+            indices = range(self.active, self.active + 1)
+        else:
+            indices = range(len(self.children))
+        for index in indices:
+            child = self.children[index]
+            if child is not None:
+                _, start, end = self.timings[index]
+                duration = end - start
+                sub = 1.0 if duration <= 0 else min(max((time - start) / duration, 0.0), 1.0)
+                child.interpolate(sub)
 
     def finish(self):
-        for member in self.members:
-            member.finish()
+        if self.successive:
+            self.interpolate(self.group.final_alpha_value)
+            children = self.children[self.active:self.active + 1]
+        else:
+            children = self.children
+        for child in children:
+            if child is not None:
+                child.finish()
 
     def clean_up_from_scene(self, scene):
-        for member in self.members:
-            member.clean_up_from_scene(scene)
+        for child in self.children:
+            if child is not None:
+                child.clean_up_from_scene(scene)
 
 
 class Flash(AnimationGroup):
