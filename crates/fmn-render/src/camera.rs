@@ -680,6 +680,24 @@ impl Camera {
         self.background
     }
 
+    /// Change the linear-light background for subsequent captures.
+    ///
+    /// # Errors
+    /// Rejects non-finite components without changing the camera.
+    pub fn set_background(&mut self, background: LinearRgba) -> Result<(), CameraError> {
+        if ![background.r, background.g, background.b, background.a]
+            .iter()
+            .all(|component| component.is_finite())
+        {
+            return Err(CameraError::NonFinite);
+        }
+        if self.background != background {
+            self.background = background;
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     /// Reference point-norm guard.
     #[must_use]
     pub const fn max_allowable_norm(&self) -> f64 {

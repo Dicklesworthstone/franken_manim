@@ -1265,6 +1265,11 @@ fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
         "soundtrack.wav",
         "cue.wav",
         "quiet.wav",
+        "camera-pan.gif",
+        "camera-updater.gif",
+        "background-changes.gif",
+        "light-changes.gif",
+        "overridden-light.gif",
     ] {
         let bytes = std::fs::read(root.join(name))
             .map_err(|error| fail(format!("read native output {name}: {error}")))?;
@@ -3544,6 +3549,11 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         "soundtrack.wav".to_owned(),
         "cue.wav".to_owned(),
         "quiet.wav".to_owned(),
+        "camera-pan.gif".to_owned(),
+        "camera-updater.gif".to_owned(),
+        "background-changes.gif".to_owned(),
+        "light-changes.gif".to_owned(),
+        "overridden-light.gif".to_owned(),
     ];
     if std::env::var("FMN_REQUIRE_FFMPEG").as_deref() == Ok("1") {
         portal_output_inventory

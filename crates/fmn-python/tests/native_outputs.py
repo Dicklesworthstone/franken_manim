@@ -147,6 +147,41 @@ class PrimarySwatches(Scene):
         for x, color in zip((-3, 0, 3), ("#FF0000", "#00FF00", "#0000FF")):
             square = Square(side_length=2, fill_color=color, fill_opacity=1, stroke_width=0)
             self.add(square.shift(x * RIGHT))
+class CameraPan(Scene):
+    def construct(self):
+        self.add(Square(side_length=1, fill_color=WHITE, fill_opacity=1, stroke_width=0))
+        self.wait(1 / 8)
+        self.play(self.frame.animate.shift(2 * RIGHT), run_time=1 / 4, rate_func=linear)
+class BackgroundChanges(Scene):
+    def construct(self):
+        for color in ("#FF0000", "#00FF00", "#0000FF"):
+            self.set_background_color(color)
+            self.wait(1 / 8)
+class CameraUpdater(Scene):
+    def construct(self):
+        self.add(Square(side_length=1, fill_color=WHITE, fill_opacity=1, stroke_width=0))
+        self.frame.add_updater(lambda frame, dt: frame.shift(8 * dt * RIGHT), call=False)
+        self.wait(3 / 8)
+class InvalidCameraAfterCapture(CameraPan):
+    def construct(self):
+        super().construct()
+        self.camera.background_rgba[0] = float("nan")
+        self.wait(1 / 8)
+class LightChanges(Scene):
+    light_class = Point
+    def construct(self):
+        self.add(Square(side_length=2, fill_color=WHITE, fill_opacity=1,
+                        stroke_width=0).set_shading(0, 0, 1))
+        self.camera.light_source = self.light_class()
+        self.add(self.camera.light_source)
+        for z in (10, -10):
+            self.camera.light_source.move_to(z * OUT)
+            self.wait(1 / 8)
+class ReversedLight(Point):
+    def get_center(self):
+        return -super().get_center()
+class OverriddenLightChanges(LightChanges):
+    light_class = ReversedLight
 class Soundtrack(Scene):
     def construct(self):
         from pathlib import Path
@@ -361,6 +396,67 @@ for scene_name, failure_code, message in (
         else:
             assert not failed.exists()
         publication_failures += 1
+
+camera_destination = output_root / "camera-pan.gif"
+code, camera_report = console(str(source), "CameraPan", "--format", "gif",
+                              "--resolution", "96x54", "--fps", "8", "--threads", "1",
+                              "--video_dir", str(camera_destination))
+assert code == 0 and camera_report["frame_count"] == 3, camera_report
+camera_frames, _ = read_gif(camera_destination)
+assert len(camera_frames) == 3
+camera_centers = []
+for camera_frame in camera_frames:
+    camera_y, camera_x = np.nonzero(camera_frame.mean(axis=2) > 200)
+    assert len(camera_x) > 10
+    camera_centers.append(float(camera_x.mean()))
+assert camera_centers[0] > camera_centers[1] > camera_centers[2], camera_centers
+assert camera_centers[0] - camera_centers[-1] > 8, camera_centers
+
+updater_destination = output_root / "camera-updater.gif"
+code, updater_report = console(str(source), "CameraUpdater", "--format", "gif",
+                               "--resolution", "96x54", "--fps", "8", "--threads", "1",
+                               "--video_dir", str(updater_destination))
+assert code == 0 and updater_report["frame_count"] == 3, updater_report
+updater_frames, _ = read_gif(updater_destination)
+assert len(updater_frames) == 3
+updater_centers = []
+for updater_frame in updater_frames:
+    updater_y, updater_x = np.nonzero(updater_frame.mean(axis=2) > 200)
+    assert len(updater_x) > 10
+    updater_centers.append(float(updater_x.mean()))
+assert np.allclose(np.diff(updater_centers), [-6.75, -6.75], atol=0.75), updater_centers
+
+invalid_camera_destination = output_root / "invalid-camera.gif"
+invalid_camera_destination.write_bytes(b"keep prior camera output")
+code, invalid_camera_report = console(str(source), "InvalidCameraAfterCapture", "--format", "gif",
+                                      "--resolution", "96x54", "--fps", "8", "--threads", "1",
+                                      "--video_dir", str(invalid_camera_destination))
+assert code == 6 and "background must be finite" in invalid_camera_report["message"], invalid_camera_report
+assert invalid_camera_destination.read_bytes() == b"keep prior camera output"
+
+background_destination = output_root / "background-changes.gif"
+code, background_report = console(str(source), "BackgroundChanges", "--format", "gif",
+                                  "--resolution", "96x54", "--fps", "8", "--threads", "1",
+                                  "--video_dir", str(background_destination))
+assert code == 0 and background_report["frame_count"] == 3, background_report
+background_frames, _ = read_gif(background_destination)
+assert len(background_frames) == 3
+for background_frame, rgb in zip(background_frames, ([255, 0, 0], [0, 255, 0], [0, 0, 255])):
+    assert np.array_equal(background_frame, np.broadcast_to(rgb, (54, 96, 3)))
+
+light_samples = []
+for light_scene, light_name in (("LightChanges", "light-changes.gif"),
+                                ("OverriddenLightChanges", "overridden-light.gif")):
+    light_destination = output_root / light_name
+    code, light_report = console(str(source), light_scene, "--format", "gif",
+                                 "--resolution", "96x54", "--fps", "8", "--threads", "1",
+                                 "--video_dir", str(light_destination))
+    assert code == 0 and light_report["frame_count"] == 2, light_report
+    light_frames, _ = read_gif(light_destination)
+    assert len(light_frames) == 2
+    light_samples.append([float(frame[26:28, 47:49].mean()) for frame in light_frames])
+assert light_samples[0][0] > 230 and light_samples[0][1] < 25, light_samples
+assert np.allclose(light_samples[1], light_samples[0][::-1], atol=1), light_samples
 
 video_formats = video_frames = 0
 ffmpeg = shutil.which("ffmpeg")

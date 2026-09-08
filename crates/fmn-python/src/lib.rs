@@ -205,9 +205,13 @@ impl PortalRenderSession {
         &mut self,
         frame: fmn_scene::studio_bridge::CameraFrame,
         light_position: [f64; 3],
+        background: Option<fmn_core::color::LinearRgba>,
+        light_mob: Option<Mob>,
     ) -> PyResult<()> {
         match self {
-            Self::Frames(session) => session.bind_camera(frame, light_position),
+            Self::Frames(session) => {
+                session.bind_camera(frame, light_position, background, light_mob)
+            }
             Self::Soundtrack { .. } => Ok(()),
         }
     }
@@ -324,6 +328,7 @@ struct PortalFrameSession {
     emitter: Option<OrderedEmitter>,
     receipt: PortalReceipt,
     soundtrack: Option<fmn_output::FfmpegSoundtrack>,
+    light_mob: Option<Mob>,
     rgba8_scratch: Option<FrameBuffer>,
     next_sequence: u64,
 }
@@ -622,6 +627,7 @@ impl PortalFrameSession {
                 emitter: Some(emitter),
                 receipt,
                 soundtrack,
+                light_mob: None,
                 rgba8_scratch,
                 next_sequence: 0,
             },
@@ -634,6 +640,19 @@ impl PortalFrameSession {
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
         let stage = packet.materialize_stage();
+        if let Some(light) = self.light_mob {
+            if stage.get(light).is_none() {
+                return Err(fmn_scene::IntegrationError::new(
+                    "portal-render",
+                    "camera light handle is stale",
+                ));
+            }
+            self.camera
+                .set_light_source_position(stage.get_center(light))
+                .map_err(|error| {
+                    fmn_scene::IntegrationError::new("portal-render", error.to_string())
+                })?;
+        }
         // Portal coordinates follow manim's +Y-up camera plane, while every
         // FrameBuffer is already in top-row-first output orientation.  The
         // camera route owns that projection (including the Y inversion) for
@@ -679,11 +698,19 @@ impl PortalFrameSession {
         &mut self,
         frame: fmn_scene::studio_bridge::CameraFrame,
         light_position: [f64; 3],
+        background: Option<fmn_core::color::LinearRgba>,
+        light_mob: Option<Mob>,
     ) -> PyResult<()> {
         *self.camera.frame_mut() = frame;
         self.camera
             .set_light_source_position(light_position)
             .map_err(camera_error)?;
+        if let Some(background) = background {
+            self.camera
+                .set_background(background)
+                .map_err(camera_error)?;
+        }
+        self.light_mob = light_mob;
         Ok(())
     }
 
@@ -7501,6 +7528,75 @@ struct PortalRenderRequest {
     format: PortalOutputFormat,
 }
 
+fn portal_has_frame_render(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
+    let render = Arc::clone(&scene.borrow().render);
+    let render = render
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?;
+    Ok(matches!(
+        render.as_ref(),
+        Some(PortalRenderSession::Frames(_))
+    ))
+}
+
+/// Freeze host camera state while no Scene borrow is live. The existing
+/// stepped release boundary then runs native updaters and captures the frame.
+fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+    if !portal_has_frame_render(scene)? {
+        return Ok(());
+    }
+    let camera = scene.getattr("camera")?;
+    let core = camera.getattr("frame")?.getattr("_core")?;
+    let frame = core
+        .extract::<PyRef<'_, PyCameraFrameCore>>()?
+        .frame
+        .clone();
+    let rgba: [f64; 4] = camera.getattr("background_rgba")?.extract()?;
+    if !rgba.iter().all(|component| component.is_finite()) {
+        return Err(PyValueError::new_err(
+            "portal-render: camera background must be finite",
+        ));
+    }
+    let background = fmn_core::color::Srgb {
+        r: rgba[0],
+        g: rgba[1],
+        b: rgba[2],
+    }
+    .to_linear(rgba[3]);
+    let light = camera.getattr("light_source")?;
+    let center_method = light.getattr("get_center")?;
+    let light_position = center_method.call0()?.extract::<[f64; 3]>()?;
+    let default_center = scene
+        .py()
+        .import("manimlib")?
+        .getattr("Mobject")?
+        .getattr("get_center")?;
+    let native_center = center_method
+        .getattr("__func__")
+        .is_ok_and(|method| method.is(&default_center));
+    // A light in this Scene can still move in the native updater phase after
+    // this release. Resolve its position from the immutable captured Stage.
+    let engine = Rc::clone(&scene.borrow().engine);
+    let light_mob = light
+        .extract::<PyRef<'_, BridgeMobject>>()
+        .ok()
+        .and_then(|proxy| {
+            proxy
+                .engine
+                .as_ref()
+                .filter(|owner| native_center && Rc::ptr_eq(owner, &engine))
+                .and(proxy.mob)
+        });
+    let render = Arc::clone(&scene.borrow().render);
+    let mut render = render
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?;
+    if let Some(session) = render.as_mut() {
+        session.bind_camera(frame, light_position, Some(background), light_mob)?;
+    }
+    Ok(())
+}
+
 fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -> PyResult<()> {
     let PortalRenderRequest {
         destination,
@@ -7705,6 +7801,7 @@ impl PyScene {
         camera: Option<PyRef<'_, PyCameraFrameCore>>,
         light_position: Option<[f64; 3]>,
     ) -> PyResult<(String, u64, u64, String, String, usize)> {
+        synchronize_portal_camera(slf)?;
         let engine = Rc::clone(&slf.borrow().engine);
         let render = Arc::clone(&slf.borrow().render);
         match (camera, light_position) {
@@ -7713,7 +7810,7 @@ impl PyScene {
                 .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?
-                .bind_camera(camera.frame.clone(), light_position)?,
+                .bind_camera(camera.frame.clone(), light_position, None, None)?,
             (None, None) => {}
             _ => {
                 return Err(PyValueError::new_err(
@@ -8189,7 +8286,8 @@ impl PyScene {
             resolved.push(parse_anim_spec(&engine, spec)?);
         }
 
-        let release_for_python_updaters = has_python_updaters(slf)?;
+        let release_for_python_updaters =
+            has_python_updaters(slf)? || portal_has_frame_render(slf)?;
         for callback in callbacks.iter().flatten() {
             crossing::record(CrossingClass::MethodDispatch);
             callback.bind(slf.py()).call_method0("begin")?;
@@ -8263,6 +8361,7 @@ impl PyScene {
                         };
                         sink.apply_camera_before_updaters(slf.py(), release.time.to_f64())?;
                         let python_ns = run_python_updaters(slf, release.dt)?;
+                        synchronize_portal_camera(slf)?;
                         let native_start = Instant::now();
                         engine
                             .borrow_mut()
@@ -8274,6 +8373,7 @@ impl PyScene {
                     }
                     sink.finish_camera_before_updaters(slf.py())?;
                     run_python_updaters(slf, 0.0)?;
+                    synchronize_portal_camera(slf)?;
                     engine.borrow_mut().stage_mut().update(0.0);
                     Ok(())
                 })();
@@ -8342,6 +8442,7 @@ impl PyScene {
                     };
                     sink.apply_camera_before_updaters(slf.py(), release.time.to_f64())?;
                     let python_ns = run_python_updaters(slf, release.dt)?;
+                    synchronize_portal_camera(slf)?;
                     let native_start = Instant::now();
                     engine
                         .borrow_mut()
@@ -8389,6 +8490,10 @@ impl PyScene {
                 return Err(error);
             }
             if let Err(error) = run_python_updaters(slf, 0.0) {
+                engine.borrow_mut().abort_stepped_play(play, &mut sink);
+                return Err(error);
+            }
+            if let Err(error) = synchronize_portal_camera(slf) {
                 engine.borrow_mut().abort_stepped_play(play, &mut sink);
                 return Err(error);
             }
@@ -8518,7 +8623,7 @@ impl PyScene {
     ) -> PyResult<()> {
         let engine = Rc::clone(&slf.borrow().engine);
         let has_python_updaters = has_python_updaters(slf)?;
-        if !has_python_updaters && stop_condition.is_none() {
+        if !has_python_updaters && stop_condition.is_none() && !portal_has_frame_render(slf)? {
             let mut sink = PortalSceneSink {
                 render: Arc::clone(&slf.borrow().render),
                 ..PortalSceneSink::default()
@@ -8563,6 +8668,7 @@ impl PyScene {
                 } else {
                     0
                 };
+                synchronize_portal_camera(slf)?;
                 let native_start = Instant::now();
                 engine
                     .borrow_mut()
