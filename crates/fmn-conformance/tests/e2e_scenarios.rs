@@ -3477,7 +3477,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     ));
     specs.push(spec(
         "lifecycle.python_animation_semantics.v1",
-        ScenarioClass::Lifecycle,
+        ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
         Invocation::new(python_portal_animation_lifecycle_run),
         vec![

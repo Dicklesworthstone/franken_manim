@@ -14630,7 +14630,11 @@ class Scene(_SceneCore):
                     spec_args.get("lag_ratio"),
                     spec_params,
                 )
-            if isinstance(proto, Animation) and getattr(proto, "_native_kind", None):
+            if (
+                isinstance(proto, Animation)
+                and getattr(proto, "_native_kind", None)
+                and not _requires_python_animation(proto)
+            ):
                 params = dict(proto._native_params())
                 params["suspend_mobject_updating"] = bool(
                     proto.suspend_mobject_updating
@@ -14781,9 +14785,8 @@ class Scene(_SceneCore):
                     "frame has no camera-track mapping yet; use "
                     "frame.animate or Transform onto a CameraFrame target"
                 )
-            if isinstance(proto, Animation) and not getattr(
-                proto, "_native_kind", None
-            ):
+            if isinstance(proto, Animation) and _requires_python_animation(proto):
+                proto._ensure_runtime_defaults()
                 if run_time is not None:
                     proto.run_time = float(run_time)
                 if rate_func is not None:
@@ -18976,6 +18979,23 @@ class Succession(AnimationGroup):
     _default_lag_ratio = 1.0
 
 
+def _requires_python_animation(animation):
+    """Keep authored Transform hooks on Choreo's existing callback boundary."""
+    if not getattr(animation, "_native_kind", None):
+        return True
+    if not isinstance(animation, Transform) or animation._target_attr is None:
+        return False
+    for name in (
+        "begin", "finish", "update_mobjects", "interpolate",
+        "interpolate_mobject", "interpolate_submobject", "clean_up_from_scene",
+    ):
+        method = getattr(animation, name)
+        implementation = getattr(method, "__func__", method)
+        if implementation is not getattr(Transform, name):
+            return True
+    return False
+
+
 def _python_composition_members(group):
     """fm-5wq.4.88: every Python-driven leaf animation inside a
     composition, recursively (builders and native-kind classes are the
@@ -18984,9 +19004,7 @@ def _python_composition_members(group):
     for member in group.animations:
         if isinstance(member, AnimationGroup):
             members.extend(_python_composition_members(member))
-        elif isinstance(member, Animation) and not getattr(
-            member, "_native_kind", None
-        ):
+        elif isinstance(member, Animation) and _requires_python_animation(member):
             members.append(member)
     return members
 
@@ -19058,9 +19076,7 @@ def _drive_python_composition(group, alpha):
         sub = 1.0 if duration <= 0 else min(max((time - start) / duration, 0.0), 1.0)
         if isinstance(member, AnimationGroup):
             _drive_python_composition(member, sub)
-        elif isinstance(member, Animation) and not getattr(
-            member, "_native_kind", None
-        ):
+        elif isinstance(member, Animation) and _requires_python_animation(member):
             member.interpolate(sub)
 
 
@@ -19079,12 +19095,20 @@ class _CompositionCallbackDriver:
         for member in self.members:
             member.begin()
 
+    def update_mobjects(self, dt):
+        for member in self.members:
+            member.update_mobjects(dt)
+
     def interpolate(self, alpha):
         _drive_python_composition(self.group, float(alpha))
 
     def finish(self):
         for member in self.members:
             member.finish()
+
+    def clean_up_from_scene(self, scene):
+        for member in self.members:
+            member.clean_up_from_scene(scene)
 
 
 class Flash(AnimationGroup):
@@ -22241,8 +22265,8 @@ def _install_mobject_functions():
     def turn_animation_into_updater(animation, cycle=False, **kwargs):
         # mobject_update_utils.py:83 over Python-driven animations: the
         # updater re-applies the animation's own interpolate each frame.
-        # The Transform family carries a straight-path record-lerp
-        # fallback for exactly this driver (fm-5wq.4.91); a spec class
+        # The Transform family uses the shared production semantic
+        # installer, including its path and alignment kernels; a spec class
         # with no per-frame Python interpolate at all still refuses by
         # the missing seam's name rather than silently holding still.
         if not isinstance(animation, Animation):

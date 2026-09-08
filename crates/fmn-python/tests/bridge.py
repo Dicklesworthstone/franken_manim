@@ -16867,9 +16867,8 @@ else:
     raise AssertionError("set_value accepted a string")
 
 # fm-5wq.4.91: turn_animation_into_updater over native-kind classes — the
-# Transform family now carries a straight-path same-structure record-lerp
-# Python fallback, so FadeOut/Transform drive as live updaters; alignment
-# and arc-path cases still refuse by the Choreo seam's name. (The FadeIn
+# Transform family uses the production semantic installer, so both straight
+# and curved Transform paths drive as live updaters. (The FadeIn
 # gate stanza above moved to ShowCreation, which stays seam-refused.)
 try:
     update_utils.turn_animation_into_updater(None)
@@ -16915,20 +16914,26 @@ assert np.allclose(
     transform_updater_square.get_center(), [1.0, 0.0, 0.0], atol=1e-9
 )
 
-# Arc paths stay native machinery: the fallback refuses by the seam's name
-# at begin() rather than drifting a straight lerp under an arc request.
-try:
-    update_utils.turn_animation_into_updater(
-        manimlib.Transform(
-            manimlib.Dot(),
-            manimlib.Dot().shift((1.0, 0.0, 0.0)),
-            path_arc=1.0,
-        )
-    )
-except NotImplementedError as error:
-    assert "persistent-updater seam" in str(error), error
-else:
-    raise AssertionError("the arc-path fallback did not refuse")
+# The installed path kernel must traverse the semicircle, not a straight
+# lerp that happens to reach the same endpoint. Its midpoint is analytic.
+arc_updater_dot = manimlib.Dot()
+arc_updater_scene = InteractiveScene()
+arc_updater_scene.add(arc_updater_dot)
+update_utils.turn_animation_into_updater(
+    manimlib.Transform(
+        arc_updater_dot,
+        arc_updater_dot.copy().shift((1.0, 0.0, 0.0)),
+        path_arc=manimlib.PI,
+    ),
+    run_time=2.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+arc_updater_scene.wait(2.0 / 30.0)
+assert np.allclose(arc_updater_dot.get_center(), [0.5, -0.5, 0.0], atol=1e-6)
+arc_updater_scene.wait(3.0 / 30.0)
+assert np.allclose(arc_updater_dot.get_center(), [1.0, 0.0, 0.0], atol=1e-6)
+assert not arc_updater_dot.updaters
+assert not arc_updater_dot.locked_data_keys
 
 
 # ------------------------------ camera-frame builders merge per play

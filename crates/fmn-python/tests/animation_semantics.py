@@ -295,6 +295,23 @@ hook_probe.interpolate(0.5)
 assert hook_probe.seen_alphas == [0.0, 0.5]
 hook_probe.finish()
 
+# The same override must run through Scene.play, where native-kind lowering
+# previously bypassed Python subclass methods. This hook deliberately leaves
+# points alone, so endpoint-only native interpolation is also a negative.
+play_hook_source = Mobject().set_points([[0.0, 0.0, 0.0]])
+play_hook_target = Mobject().set_points([[1.0, 0.0, 0.0]])
+play_hook_probe = TransformHookProbe(
+    play_hook_source, play_hook_target, rate_func=linear_rate,
+)
+play_hook_probe.seen_alphas = []
+Scene().play(play_hook_probe, run_time=2.0 / 30.0)
+assert play_hook_probe.seen_alphas, "Scene.play bypassed the Transform subclass hook"
+assert any(0.0 < alpha < 1.0 for alpha in play_hook_probe.seen_alphas)
+assert play_hook_probe.seen_alphas[0] == 0.0
+assert play_hook_probe.seen_alphas[-1] == 1.0
+assert np.array_equal(play_hook_source.get_points(), [[0.0, 0.0, 0.0]])
+assert not play_hook_source.locked_data_keys
+
 
 def render_animation_lifecycle(destination, seed):
     """Exercise shared hooks and native composition through real PNG output."""

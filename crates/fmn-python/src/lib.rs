@@ -7787,6 +7787,11 @@ impl PyScene {
                                 continue;
                             };
                             crossing::record(CrossingClass::MethodDispatch);
+                            if callback.bind(slf.py()).hasattr("update_mobjects")? {
+                                callback
+                                    .bind(slf.py())
+                                    .call_method1("update_mobjects", (animation.dt,))?;
+                            }
                             callback
                                 .bind(slf.py())
                                 .call_method1("interpolate", (animation.alpha,))?;
@@ -7813,6 +7818,11 @@ impl PyScene {
                 for callback in callbacks.iter().flatten() {
                     crossing::record(CrossingClass::MethodDispatch);
                     callback.bind(slf.py()).call_method0("finish")?;
+                    if callback.bind(slf.py()).hasattr("clean_up_from_scene")? {
+                        callback
+                            .bind(slf.py())
+                            .call_method1("clean_up_from_scene", (slf,))?;
+                    }
                 }
                 sink.finish_camera_before_updaters(slf.py())?;
                 Ok(())
