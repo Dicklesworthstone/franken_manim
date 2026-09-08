@@ -4201,8 +4201,7 @@ fn python_portal_png_scenario_passes() {
     assert!(report.is_pass(), "{}", report.summary());
 }
 
-/// Focused acceptance for the portal's one-frame final-state route, including
-/// the no-clobber planted negative.
+/// Curved transforms, authored hooks and composition through real PNG output.
 #[test]
 fn python_animation_lifecycle_scenario_passes() {
     let scenario = catalog()
@@ -4213,6 +4212,8 @@ fn python_animation_lifecycle_scenario_passes() {
     assert!(report.is_pass(), "{}", report.summary());
 }
 
+/// Focused acceptance for the portal's one-frame final-state route, including
+/// the no-clobber planted negative.
 #[test]
 fn python_portal_png_still_scenario_passes() {
     let scenario = catalog()

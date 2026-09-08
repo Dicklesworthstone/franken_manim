@@ -18011,9 +18011,9 @@ class FocusOn(Transform):
                 self.lag_ratio = 0.0
 
     def begin(self):
-        if self._focus_target is None:
-            return super().begin()
-        self.interpolate(0.0)
+        # The follow interpolator still needs Transform's helper copies,
+        # family alignment and suspension state for the shared lifecycle.
+        return super().begin()
 
     def interpolate_mobject(self, alpha):
         if self._focus_target is None:
@@ -19193,8 +19193,7 @@ class Flash(AnimationGroup):
         if self._flash_target is None:
             return Animation.begin(self)
         self._follow_sources = [line.copy() for line in self.lines]
-        self.interpolate(0.0)
-        return self
+        return Animation.begin(self)
 
     def interpolate_mobject(self, alpha):
         if self._flash_target is None:

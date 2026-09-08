@@ -284,12 +284,17 @@ for targetless_class in (CyclicReplace, Swap):
 
 # A Transform subclass's leaf hook must survive the installed dispatch.
 class TransformHookProbe(Transform):
+    def update_mobjects(self, dt):
+        self.seen_dts.append(float(dt))
+        super().update_mobjects(dt)
+
     def interpolate_submobject(self, current, starting, target, alpha):
         self.seen_alphas.append(float(alpha))
 
 
 hook_probe = TransformHookProbe(Mobject(), Mobject(), rate_func=linear_rate)
 hook_probe.seen_alphas = []
+hook_probe.seen_dts = []
 hook_probe.begin()
 hook_probe.interpolate(0.5)
 assert hook_probe.seen_alphas == [0.0, 0.5]
@@ -304,11 +309,13 @@ play_hook_probe = TransformHookProbe(
     play_hook_source, play_hook_target, rate_func=linear_rate,
 )
 play_hook_probe.seen_alphas = []
+play_hook_probe.seen_dts = []
 Scene().play(play_hook_probe, run_time=2.0 / 30.0)
 assert play_hook_probe.seen_alphas, "Scene.play bypassed the Transform subclass hook"
 assert any(0.0 < alpha < 1.0 for alpha in play_hook_probe.seen_alphas)
 assert play_hook_probe.seen_alphas[0] == 0.0
 assert play_hook_probe.seen_alphas[-1] == 1.0
+assert np.allclose(play_hook_probe.seen_dts, [0.0, 1.0 / 30.0])
 assert np.array_equal(play_hook_source.get_points(), [[0.0, 0.0, 0.0]])
 assert not play_hook_source.locked_data_keys
 
