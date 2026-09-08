@@ -49,6 +49,7 @@ use std::rc::Rc;
 use fmn_anim::{DeclaredOp, DeclaredUpdater, LadderError};
 use fmn_mobject::{Mob, Stage, UpdaterId};
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::gc::{PyTraverseError, PyVisit};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -110,7 +111,7 @@ fn declared_updater<'py>(
 #[pyclass(unsendable, name = "_BatchedUpdater")]
 pub struct PyBatchedUpdater {
     members: Vec<Py<PyAny>>,
-    callback: Py<PyAny>,
+    callback: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -135,8 +136,23 @@ impl PyBatchedUpdater {
         }
         Ok(Self {
             members: members.into_iter().map(pyo3::Bound::unbind).collect(),
-            callback,
+            callback: Some(callback),
         })
+    }
+
+    // The anchor can also be a member or be captured by the callback.
+    // Expose both native-owned edges so ordinary Python cycle collection
+    // can reclaim an unreachable updater and its scene on the owner thread.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for member in &self.members {
+            visit.call(member)?;
+        }
+        visit.call(&self.callback)
+    }
+
+    fn __clear__(&mut self) {
+        self.members.clear();
+        self.callback = None;
     }
 
     /// Number of group members fixed at construction.
@@ -150,6 +166,9 @@ impl PyBatchedUpdater {
     /// at exactly one mobject (attach with `call=False`).
     #[pyo3(signature = (_anchor, dt))]
     fn __call__(&self, py: Python<'_>, _anchor: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
+        let callback = self.callback.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("_BatchedUpdater has been cleared by garbage collection")
+        })?;
         let views = PyList::empty(py);
         for member in &self.members {
             let proxy = member.bind(py).cast::<BridgeMobject>().map_err(|_| {
@@ -158,7 +177,7 @@ impl PyBatchedUpdater {
             views.append(numpy_array(py, proxy, true)?)?;
         }
         crossing::record(CrossingClass::UpdaterCall);
-        self.callback.call1(py, (views, dt))?;
+        callback.call1(py, (views, dt))?;
         // The callback's view writes accumulate in RecordBuffer state with
         // no per-field crossings; the group's dirty transfer is this one
         // return crossing (conservative whole-field spans via the view

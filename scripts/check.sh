@@ -144,11 +144,11 @@ cargo test -p fmn-cli --features batch --test cli_smoke
 echo "==> cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets"
 cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets
 
-# Cargo accepts a misspelled filter with zero tests and exit 0. Require both
+# Cargo accepts a misspelled filter with zero tests and exit 0. Require all
 # real-extension acceptance suites in the compiled inventory before running.
 echo "==> native Python production acceptance"
 native_acceptance_tests="$(cargo test -p fmn-python --lib -- --list)"
-for suite in production_bridge_acceptance_suite production_animation_semantics_acceptance_suite; do
+for suite in production_bridge_acceptance_suite production_animation_semantics_acceptance_suite production_native_output_acceptance_suite; do
     if [[ $'\n'"$native_acceptance_tests"$'\n' != *$'\n'"tests::$suite: test"$'\n'* ]]; then
         printf 'ERROR: native Python acceptance binary is missing %s\n' "$suite" >&2
         exit 1

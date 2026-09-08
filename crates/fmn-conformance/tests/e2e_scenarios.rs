@@ -1223,6 +1223,42 @@ fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome,
     python_portal_sequence_run(ctx, true)
 }
 
+fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_native_outputs")?;
+    let (frames, formats, refusals, replays, sample_frames) =
+        manimlib::run_portal_gauntlet_native_outputs(&root)
+            .map_err(|error| fail(format!("decoded Python native outputs: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.native_outputs")
+            .field("frames", frames)
+            .field("formats", formats)
+            .field("publication_failures", refusals)
+            .field("thread_replays", replays)
+            .field("sample_frames", sample_frames),
+    );
+    let mut outcome = RunOutcome::ok()
+        .with_counter("native_output_frames", frames)
+        .with_counter("native_output_formats", formats)
+        .with_counter("native_output_publication_failures", refusals)
+        .with_counter("native_output_thread_replays", replays)
+        .with_counter("native_output_sample_frames", sample_frames);
+    for name in [
+        "native_scene.py",
+        "motion.gif",
+        "motion.y4m",
+        "primaries.gif",
+        "primaries.y4m",
+        "soundtrack.wav",
+        "cue.wav",
+        "quiet.wav",
+    ] {
+        let bytes = std::fs::read(root.join(name))
+            .map_err(|error| fail(format!("read native output {name}: {error}")))?;
+        outcome = outcome.with_artifact(name, bytes);
+    }
+    Ok(outcome)
+}
+
 fn python_portal_sequence_run(
     ctx: &mut RunCtx,
     animation_lifecycle: bool,
@@ -3476,6 +3512,40 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_portal_native_outputs.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_native_outputs_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_scene.py".to_owned(),
+                "motion.gif".to_owned(),
+                "motion.y4m".to_owned(),
+                "primaries.gif".to_owned(),
+                "primaries.y4m".to_owned(),
+                "soundtrack.wav".to_owned(),
+                "cue.wav".to_owned(),
+                "quiet.wav".to_owned(),
+            ]),
+            counter_eq("native_output_frames", 4),
+            counter_eq("native_output_formats", 3),
+            counter_eq("native_output_publication_failures", 14),
+            counter_eq("native_output_thread_replays", 3),
+            counter_eq("native_output_sample_frames", 3000),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.native_outputs",
+            vec![
+                FieldPred::u64_eq("frames", 4),
+                FieldPred::u64_eq("formats", 3),
+                FieldPred::u64_eq("publication_failures", 14),
+                FieldPred::u64_eq("thread_replays", 3),
+                FieldPred::u64_eq("sample_frames", 3000),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_animation_semantics.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -4197,6 +4267,17 @@ fn python_portal_png_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_png_sequence.v1")
         .expect("Python portal scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Decoded native GIF/y4m/WAV, ordering, cue placement, and failure atomicity.
+#[test]
+fn python_native_outputs_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_portal_native_outputs.v1")
+        .expect("Python native output scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -1581,6 +1581,7 @@ stop_scroll_listener = event_listener_module.EventListener(
 global_dispatcher.add_listener(stop_scroll_listener)
 stopped_scroll_width = hostless_scene.frame.get_width()
 try:
+    hostless_scene.on_mouse_motion(manimlib.ORIGIN, manimlib.ORIGIN)
     hostless_scene.on_mouse_scroll(manimlib.ORIGIN, (0, 1), 0, 1)
 finally:
     global_dispatcher.remove_listner(stop_scroll_listener)
@@ -2880,6 +2881,39 @@ assert identity_map[scene.mobjects[0]] == "parent"
 del clone
 gc.collect()
 assert reference() is None
+
+
+# Exercise Rust-owned updater cycles through the real scene in native,
+# installed-wheel and registered portal E2E acceptance.
+def batched_scene_cycle_observers(callback_owns_anchor):
+    cycle_scene = Scene()
+    member = Mobject()
+    member.resize(1)
+    member.set_field("point", 0, [0.0, 0.0, 0.0])
+    anchor = Mobject() if callback_owns_anchor else member
+    owner = anchor if callback_owns_anchor else None
+
+    def callback(views, dt, retained_owner=owner):
+        if callback_owns_anchor:
+            assert retained_owner is not None
+        views[0]["point"][:, 0] += dt
+
+    anchor.add_updater(manimlib._BatchedUpdater([member], callback), call=False)
+    cycle_scene.add(anchor, member)
+    gc.collect()
+    cycle_scene.update(0.25)
+    assert member.get_field("point", 0) == [0.25, 0.0, 0.0]
+    return tuple(weakref.ref(obj) for obj in (cycle_scene, anchor, member, callback))
+
+
+for callback_owns_anchor in (False, True):
+    batched_observers = batched_scene_cycle_observers(callback_owns_anchor)
+    gc.collect()
+    gc.collect()
+    assert all(observer() is None for observer in batched_observers), (
+        "an unreachable batched scene retained native objects",
+        callback_owns_anchor,
+    )
 
 
 # Reentrant callbacks and Python exceptions cross the engine boundary intact.
@@ -8535,12 +8569,11 @@ Scene()
 assert python_random == [manimlib.random.random() for _ in range(3)]
 assert np.allclose(numpy_random, np.random.random(3))
 
-# fm-5wq.4: random_seed rides kwargs over the class attribute (the base
-# class carries no random_seed attribute; the constructor's getattr
-# default is 0). An explicit seed re-seeds both RNG modules at every
+# fm-5wq.4: random_seed rides kwargs over the Reference's class default 0.
+# An explicit seed re-seeds both RNG modules at every
 # construct; random_seed=None skips seeding entirely, preserving the live
 # streams mid-sequence.
-assert not hasattr(scene_module.Scene, "random_seed")
+assert scene_module.Scene.random_seed == 0
 assert Scene().random_seed == 0
 seeded_scene = Scene(random_seed=123)
 assert seeded_scene.random_seed == 123
@@ -13765,7 +13798,7 @@ assert isinstance(event_handler.EVENT_DISPATCHER, event_dispatcher_mod.EventDisp
 assert str(inspect.signature(event_listener_mod.EventListener)) == (
     "(mobject, event_type, event_callback)"
 )
-event_dot = geometry.Dot()
+event_dot = geometry.Dot().shift(manimlib.RIGHT)
 event_seen = []
 
 def _on_press(mobject, event_data):
@@ -13779,10 +13812,13 @@ dispatcher.add_listner(press_listener)
 assert dispatcher.get_listners_count() == 1
 assert dispatcher.add_listener is dispatcher.add_listner
 dispatcher.dispatch(
+    manimlib.EventType.MouseMotionEvent, point=manimlib.RIGHT
+)
+dispatcher.dispatch(
     manimlib.EventType.MousePressEvent, point=manimlib.RIGHT
 )
 assert event_seen[0][0] is event_dot
-assert np.allclose(dispatcher.get_mouse_point().get_center(), manimlib.RIGHT)
+assert np.allclose(dispatcher.get_mouse_point(), manimlib.RIGHT)
 dispatcher.dispatch(manimlib.EventType.KeyPressEvent, symbol=32)
 assert dispatcher.is_key_pressed(32)
 dispatcher.remove_listner(press_listener)
@@ -13795,6 +13831,156 @@ except TypeError as error:
     assert str(error) == "EventListener mobject must be a Mobject"
 else:
     raise AssertionError("EventListener accepted a non-Mobject")
+
+
+def _check_event_dispatch_geometry_and_capture():
+    # fm-5wq.4.143: spatial witnesses over native geometry. A fan-out that
+    # ignores the hit test calls both squares and fails the first assertion.
+    event_type = manimlib.EventType
+    listener_type = event_listener_mod.EventListener
+    local = event_dispatcher_mod.EventDispatcher()
+    assert isinstance(local.get_mouse_point(), np.ndarray)
+    assert isinstance(local.get_mouse_drag_point(), np.ndarray)
+    assert np.array_equal(local.get_mouse_point(), np.zeros(3))
+    assert np.array_equal(local.get_mouse_drag_point(), np.zeros(3))
+    left = manimlib.Square().shift(3 * manimlib.LEFT)
+    right = manimlib.Square().shift(3 * manimlib.RIGHT)
+    hits = []
+    left_motion = listener_type(
+        left, event_type.MouseMotionEvent,
+        lambda mob, data: hits.append("left"),
+    )
+    right_motion = listener_type(
+        right, event_type.MouseMotionEvent,
+        lambda mob, data: hits.append("right"),
+    )
+    assert local.add_listner(left_motion) is local
+    local += right_motion
+    assert len(local) == 2
+    hover = left.get_center()
+    assert local(event_type.MouseMotionEvent, point=hover) is None
+    assert hits == ["left"]
+    assert local.get_mouse_point() is hover
+    local(event_type.MouseMotionEvent, point=manimlib.ORIGIN)
+    assert hits == ["left"]
+
+    # Duplicate registrations are observable; removal by a fresh equal
+    # listener removes every registration, retaining the other object's.
+    local += left_motion
+    assert len(local) == 3
+    local(event_type.MouseMotionEvent, point=hover)
+    assert hits == ["left", "left", "left"]
+    local -= listener_type(left, event_type.MouseMotionEvent, left_motion.callback)
+    assert len(local) == 1
+    assert local.remove_listner(left_motion) is local
+    local(event_type.MouseMotionEvent, point=right.get_center())
+    assert hits[-1] == "right"
+
+    drags = []
+    for label, target in (("left", left), ("right", right)):
+        local += listener_type(
+            target, event_type.MouseDragEvent,
+            lambda mob, data, label=label: drags.append(label),
+        )
+    # Capture uses the most recent hover, as in the pinned dispatcher;
+    # press/drag coordinates do not silently rewrite the hover position.
+    local(event_type.MouseMotionEvent, point=hover)
+    local(event_type.MousePressEvent, point=right.get_center())
+    assert [item.mobject for item in local.draggable_object_listners] == [left]
+    drag_point = right.get_center()
+    local(event_type.MouseDragEvent, point=drag_point)
+    assert drags == ["left"]
+    assert local.get_mouse_drag_point() is drag_point
+    assert local.get_mouse_point() is hover
+    local(event_type.MouseReleaseEvent, point=drag_point)
+    assert local.draggable_object_listners == []
+    local(event_type.MouseDragEvent, point=drag_point)
+    assert drags == ["left"]
+    local(event_type.MouseMotionEvent, point=drag_point)
+    local(event_type.MousePressEvent, point=drag_point)
+    local(event_type.MouseDragEvent, point=hover)
+    assert drags == ["left", "right"]
+    local(event_type.MouseReleaseEvent, point=hover)
+
+    # Mouse press/release/scroll use the same spatial filter. Returning
+    # exact False stops later listeners; integer/NumPy false values do not.
+    for mouse_event in (
+        event_type.MousePressEvent, event_type.MouseReleaseEvent,
+        event_type.MouseScrollEvent,
+    ):
+        mouse = event_dispatcher_mod.EventDispatcher()
+        callbacks = []
+        mouse += listener_type(
+            left, mouse_event, lambda mob, data: callbacks.append("left")
+        )
+        mouse += listener_type(
+            right, mouse_event, lambda mob, data: callbacks.append("right")
+        )
+        mouse(event_type.MouseMotionEvent, point=hover)
+        mouse(mouse_event, point=hover)
+        assert callbacks == ["left"], mouse_event
+
+    keys = event_dispatcher_mod.EventDispatcher()
+    returns = []
+
+    def key_callback(value):
+        def record(mob, data):
+            returns.append(value)
+            return value
+        return record
+
+    for value in (0, np.bool_(False), "last"):
+        keys += listener_type(left, event_type.KeyPressEvent, key_callback(value))
+    assert keys(event_type.KeyPressEvent, symbol=32) == "last"
+    assert len(returns) == 3
+    assert keys.is_key_pressed(32)
+    assert not keys.is_key_pressed("32")
+    keys(event_type.KeyReleaseEvent, symbol=32)
+    assert not keys.is_key_pressed(32)
+    keys(event_type.KeyReleaseEvent, symbol=32)
+    returns.clear()
+    keys += listener_type(left, event_type.KeyPressEvent, key_callback(False))
+    keys += listener_type(right, event_type.KeyPressEvent, key_callback("unreached"))
+    assert keys(event_type.KeyPressEvent, symbol=65) is False
+    assert len(returns) == 4 and returns[-1] is False
+
+    # Exercise Scene's actual global-dispatch path without a window. The
+    # captured square receives a drag beyond its bounds; the distant one
+    # receives neither the initial motion nor that captured drag.
+    scene = Scene(drag_to_pan=False)
+    scene.add(left, right)
+    scene_hits = []
+    registrations = []
+    for label, target in (("left", left), ("right", right)):
+        for kind in (event_type.MouseMotionEvent, event_type.MouseDragEvent):
+            registration = listener_type(
+                target, kind,
+                lambda mob, data, label=label, kind=kind:
+                    scene_hits.append((label, kind)),
+            )
+            registrations.append(registration)
+            event_handler.EVENT_DISPATCHER.add_listner(registration)
+    try:
+        scene.on_mouse_motion(hover, manimlib.ORIGIN)
+        scene.on_mouse_press(hover, 1, 0)
+        scene.on_mouse_drag(drag_point, manimlib.RIGHT, 1, 0)
+        scene.on_mouse_release(drag_point, 1, 0)
+        scene.on_mouse_drag(drag_point, manimlib.RIGHT, 1, 0)
+        assert scene_hits == [
+            ("left", event_type.MouseMotionEvent),
+            ("left", event_type.MouseDragEvent),
+        ]
+        assert np.array_equal(scene.mouse_point.get_center(), hover)
+        assert np.array_equal(scene.mouse_drag_point.get_center(), drag_point)
+    finally:
+        for registration in registrations:
+            event_handler.EVENT_DISPATCHER.remove_listner(registration)
+        event_handler.EVENT_DISPATCHER.dispatch(
+            event_type.MouseReleaseEvent, point=drag_point
+        )
+
+
+_check_event_dispatch_geometry_and_capture()
 assert issubclass(manimlib.EndScene, Exception)
 assert manimlib.np is np
 
@@ -15288,7 +15474,7 @@ timed_write = TimedWrite(_dbtf_square())
 assert timed_write.timing_family_size == timed_write.lag_family_size == 1
 timed_write_scene = Scene()
 timed_write_scene.play(timed_write)
-assert math.isclose(timed_write_scene.time, 2.0 / 30.0)
+assert math.isclose(timed_write_scene.time(), 2.0 / 30.0)
 assert np.allclose(timed_write.mobject.data["fill_rgba"][:, 3], 1.0)
 
 # fm-5wq.4.57: TransformMatchingStrings matches by string identity over the
@@ -16858,6 +17044,34 @@ else:
 # fm-5wq.4.88: Python-driven members inside compositions build the same
 # python_callback placeholder slots, and one driver callback mirrors the
 # native window math (build_timings / timeline_position) for the leaves.
+
+# Public timing inspection and mixed native/Python dispatch share Choreo's
+# interval builder. Unequal child durations distinguish the recurrence from
+# equal-index windows, and nested/default/builder members retain real durations.
+timing_children = [
+    manimlib.FadeIn(geometry.Square(), run_time=duration)
+    for duration in (2.0, 3.0, 1.0)
+]
+timing_group = manimlib.AnimationGroup(*timing_children, lag_ratio=0.25)
+assert [entry[0] for entry in timing_group.anims_with_timings] == timing_children
+assert [entry[1:] for entry in timing_group.anims_with_timings] == [
+    (0.0, 2.0), (0.5, 3.5), (1.25, 2.25),
+]
+assert timing_group.max_end_time == timing_group.get_run_time() == 3.5
+assert timing_group.build_animations_with_timings(0.5) is None
+assert timing_group.calculate_max_end_time() is None
+assert timing_group.max_end_time == 4.0 and timing_group.run_time == 3.5
+timing_group.run_time = -1
+timing_group.calculate_max_end_time()
+assert timing_group.run_time == 4.0
+timing_default = manimlib.FadeIn(geometry.Square())
+timing_nested = manimlib.Succession(timing_group, timing_default)
+assert timing_nested.anims_with_timings == [(timing_group, 0.0, 4.0), (timing_default, 4.0, 5.0)]
+assert timing_nested.get_run_time() == 5.0
+timing_builder = geometry.Square().animate(run_time=0.25).shift([1, 0, 0])
+timing_built_group = manimlib.AnimationGroup(timing_builder)
+assert isinstance(timing_built_group.animations[0], manimlib.Animation)
+assert timing_built_group.get_run_time() == 0.25
 
 group_cb_scene = Scene()
 group_cb_rect = geometry.Rectangle(width=1.0, height=1.0)
@@ -18706,7 +18920,7 @@ EventTypeSurface = importlib.import_module(
 dispatcher = event_type_module.EVENT_DISPATCHER
 
 event_host = Mobject()
-event_child = Mobject()
+event_child = manimlib.Square().move_to([1.0, 2.0, 0.0])
 event_host.add(event_child)
 assert event_host.get_event_listners() == []
 assert not event_host.get_has_event_listner()

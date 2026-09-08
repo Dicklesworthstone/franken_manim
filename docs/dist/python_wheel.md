@@ -77,9 +77,9 @@ operations:
 fmn-python [--robot] --version
 fmn-python [--robot] --list-scenes SOURCE.py
 fmn-python [--robot] --construct-only SOURCE.py [SCENE]
-fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence|png]
+fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence|png|gif|y4m|wav]
            [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
-           [--video_dir DIRECTORY]
+           [--video_dir PATH]
 ```
 
 `--construct-only` is an explicit engine-lifecycle diagnostic and reports
@@ -87,12 +87,27 @@ fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence|png]
 PNG-sequence route captures immutable Python-scene lifecycle frames, renders
 them through the shared retained Lumen CPU renderer, and publishes one atomic,
 no-clobber generation through Reel. The `png` route uses the same production
-path and atomically publishes the final captured frame as one still. Their
-success records report
-`rendered=true`, frame and byte counts, the canonical ordered-tree digest,
-engine identity, and render-team width.
+path and atomically publishes the final captured frame as one still. GIF and
+y4m use that retained renderer, clock and ordered emitter with Reel's native
+sinks. GIF records rational-frame delays in centiseconds; y4m uses limited-range
+BT.709 YUV 4:2:0 with left chroma siting and requires even dimensions. These
+success records report `rendered=true`, frame and byte counts, the artifact
+digest (ordered-tree digest for a sequence), engine identity, and render-team
+width. `--video_dir` names the output directory for a PNG sequence and the
+destination file for the other formats.
 
-Certified output (`--reproducible`), non-PNG formats, opener/write-all flags,
+WAV output runs the sampled scene lifecycle without rasterization and mixes
+`Scene.add_sound` cues through Reel. Cue inputs currently must be PCM WAV;
+missing, malformed or over-budget audio fails before atomic publication. At
+least one cue is required. Output is 48 kHz, stereo, signed 16-bit PCM, with
+frame-clock cue placement, `time_offset`, `gain`, and `gain_to_background`.
+Robot output identifies `native-sound-mixer` and reports `sample_frames`,
+`sample_rate`, and `channels`; its `frame_count` also counts sample frames.
+The permanent native, installed-wheel and registered E2E suites independently
+decode GIF/y4m/WAV bytes and check motion, primary colors, cue placement,
+thread-count replay and preservation of destinations after failures.
+
+Certified output (`--reproducible`), ffmpeg video containers, opener/write-all flags,
 and `studio` remain fail-closed capability errors. In particular, the portal
 does not expose a partial certified path before the Python input closure and
 provenance sidecar are complete, and it does not label lifecycle-only work as

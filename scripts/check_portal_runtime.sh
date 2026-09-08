@@ -11,7 +11,7 @@ if not path:
 print(f"auditing imported manimlib: {path}")
 PY
 
-for suite in bridge animation_semantics; do
+for suite in bridge animation_semantics native_outputs; do
     python3 - "$suite" <<'PY'
 import pathlib
 import runpy

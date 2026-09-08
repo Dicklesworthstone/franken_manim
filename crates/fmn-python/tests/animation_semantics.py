@@ -267,13 +267,14 @@ assert scene_probe.removed == [replacement_source]
 assert scene_probe.added == [replacement_target]
 
 # The wheel installer must preserve the native composition specification.
-# Choreo derives its mobject root and timing; the Python constructor must not
-# reject the intentional None sentinel before Scene.play can lower the group.
+# Choreo derives the mobject root at lowering. Public timing is available
+# immediately from that same native interval builder, as in the Reference.
 composition_children = [Animation(Mobject()), Animation(Mobject())]
-for composition_class in (AnimationGroup, LaggedStart, Succession):
+for composition_class, duration in ((AnimationGroup, 1.0), (LaggedStart, 1.05), (Succession, 2.0)):
     composition = composition_class(*composition_children)
     assert composition.mobject is None
-    assert composition.run_time is None
+    assert composition.run_time == composition.max_end_time == duration
+    assert composition.get_run_time() == duration
     assert composition.animations == composition_children
     assert str(composition) == composition_class.__name__
 mapped_members = Mobject(Mobject(), Mobject())

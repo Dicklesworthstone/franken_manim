@@ -72,6 +72,7 @@ class SquareToCircle(Scene):
 ```bash
 # Works today (v0.4.0 portal):
 fmn-python scene.py SquareToCircle --format png_sequence   # real rendered frames; no LaTeX installed, anywhere
+fmn-python scene.py SquareToCircle --format gif            # native animated GIF
 
 # 1.0 target — fails closed today with capability exit 4:
 fmn-python scene.py SquareToCircle -o                # renders and opens
@@ -254,6 +255,8 @@ fmn-python --list-scenes scene.py
 fmn-python --construct-only scene.py SquareToCircle        # lifecycle diagnostic; no pixels claimed
 fmn-python scene.py SquareToCircle --format png_sequence   # real Lumen/Reel frames, atomically published
 fmn-python scene.py SquareToCircle --format png            # atomic final-state still
+fmn-python scene.py SquareToCircle --format gif            # native animated GIF
+fmn-python scene.py SquareToCircle --format y4m            # native YUV video stream
 fmn-python scene.py SquareToCircle --format png_sequence \
   --resolution 640x360 --fps 30 --threads 4 --video_dir ./media
 ```
@@ -272,10 +275,6 @@ fmn-python scene.py SquareToCircle --uhd --transparent --vcodec prores_ks   # 1.
 
 # Certified determinism: the whole input closure content-hashed, bits promised
 fmn-python scene.py SquareToCircle --reproducible     # + sidecar provenance manifest
-
-# Non-PNG native outputs through the portal
-fmn-python scene.py SquareToCircle --format gif
-fmn-python scene.py SquareToCircle --format y4m
 
 # Live iteration: supervisor + crash-isolated worker, checkpoint replay
 fmn-python scene.py SquareToCircle --autoreload
@@ -359,14 +358,17 @@ fmn-python --version                   # portal entry point; distinct from stand
 > **Current pre-1.0 status:** the repository now builds a CPython 3.13
 > `franken-manim` wheel, and a clean virtual environment proves the exact
 > 663-name `manimlib` import surface, scene discovery, and real standard-mode
-> PNG sequences plus atomic final-state PNGs through retained Lumen and Reel.
+> PNG sequences, atomic final-state PNGs, animated GIF and y4m through retained
+> Lumen and Reel. `--format wav` mixes PCM WAV cues added by `Scene.add_sound`
+> into a 48 kHz stereo soundtrack with the same sampled scene lifecycle.
 > The locked eight-scene source-unedited corpus now reaches decodable,
 > non-uniform final PNGs and reproduces their bytes across same-process runs.
 > The live rendering forms are `fmn-python scene.py Scene --format
-> png_sequence` and `--format png`; `--resolution`, `--fps`, `--threads`, and
+> png_sequence`, `--format png`, `--format gif`, `--format y4m`, and
+> `--format wav`; `--resolution`, `--fps`, `--threads`, and
 > `--video_dir` are supported. `--construct-only` remains an
 > explicitly non-rendering lifecycle diagnostic. Certified output
-> (`--reproducible`), video containers, opener/write-all flags, and the Python
+> (`--reproducible`), ffmpeg video containers, opener/write-all flags, and the Python
 > Studio route still fail closed with capability exit 4: their complete input
 > closure, provenance, output, or worker contracts have not landed. See the
 > [wheel/namespace policy](docs/dist/python_wheel.md). The broader commands

@@ -3025,16 +3025,17 @@ class EventListener:
 
 
 class EventDispatcher:
-    """In-process event fan-out; Studio owns the window, this owns listeners."""
+    """Ordered, hit-tested callbacks with press-to-release drag capture."""
 
     def __init__(self):
         self.event_listners = {event_type: [] for event_type in EventType}
-        self.mouse_point = Point()
-        self.mouse_drag_point = Point()
+        self.mouse_point = _np.zeros(3)
+        self.mouse_drag_point = _np.zeros(3)
         self.pressed_keys = set()
-        # The Reference exposes the corrected spelling as the typo's exact
-        # alias. Cache one bound method under both names so instance identity
-        # (`dispatcher.add_listener is dispatcher.add_listner`) is stable.
+        self.draggable_object_listners = []
+        # Preserve the portal's existing corrected-spelling alias. The pinned
+        # Reference declares only add_listner; both portal spellings dispatch
+        # through that same implementation.
         listener_adder = self.add_listner
         self.add_listner = listener_adder
         self.add_listener = listener_adder
@@ -3042,38 +3043,53 @@ class EventDispatcher:
     def add_listner(self, event_listner):
         if not isinstance(event_listner, EventListener):
             raise TypeError("add_listner expects an EventListener")
-        bucket = self.event_listners.setdefault(event_listner.event_type, [])
-        if event_listner not in bucket:
-            bucket.append(event_listner)
+        self.event_listners[event_listner.event_type].append(event_listner)
+        return self
 
     add_listener = add_listner
 
     def remove_listner(self, event_listner):
+        if not isinstance(event_listner, EventListener):
+            raise TypeError("remove_listner expects an EventListener")
         bucket = self.event_listners.get(event_listner.event_type)
-        if not bucket:
-            return
         # Reference event_dispatcher.py:27 removes every value-equal
         # registration, so a fresh equal EventListener targets the original.
-        remaining = [item for item in bucket if item != event_listner]
-        self.event_listners[event_listner.event_type] = remaining
-
+        if bucket:
+            bucket[:] = [item for item in bucket if item != event_listner]
+        return self
 
     def dispatch(self, event_type, **event_data):
-        point = event_data.get("point")
-        if point is not None:
-            if event_type == EventType.MouseDragEvent:
-                self.mouse_drag_point.move_to(point)
-            else:
-                self.mouse_point.move_to(point)
-        symbol = event_data.get("symbol")
-        if event_type == EventType.KeyPressEvent and symbol is not None:
-            self.pressed_keys.add(int(symbol))
-        elif event_type == EventType.KeyReleaseEvent and symbol is not None:
-            self.pressed_keys.discard(int(symbol))
-        for listener in list(self.event_listners.get(event_type, ())):
-            if listener.callback(listener.mobject, event_data) is False:
+        if event_type == EventType.MouseMotionEvent:
+            self.mouse_point = event_data["point"]
+        elif event_type == EventType.MouseDragEvent:
+            self.mouse_drag_point = event_data["point"]
+        elif event_type == EventType.KeyPressEvent:
+            self.pressed_keys.add(event_data["symbol"])
+        elif event_type == EventType.KeyReleaseEvent:
+            self.pressed_keys.discard(event_data["symbol"])
+        elif event_type == EventType.MousePressEvent:
+            self.draggable_object_listners = [
+                listener
+                for listener in self.event_listners[EventType.MouseDragEvent]
+                if listener.mobject.is_point_touching(self.mouse_point)
+            ]
+        elif event_type == EventType.MouseReleaseEvent:
+            self.draggable_object_listners = []
+
+        if event_type == EventType.MouseDragEvent:
+            listeners = self.draggable_object_listners
+            hit_test = False
+        else:
+            listeners = self.event_listners[event_type]
+            hit_test = event_type.value.startswith("mouse")
+        propagate_event = None
+        for listener in listeners:
+            if hit_test and not listener.mobject.is_point_touching(self.mouse_point):
+                continue
+            propagate_event = listener.callback(listener.mobject, event_data)
+            if propagate_event is False:
                 return False
-        return None
+        return propagate_event
 
     def get_listners_count(self):
         return sum(len(bucket) for bucket in self.event_listners.values())
@@ -3085,7 +3101,12 @@ class EventDispatcher:
         return self.mouse_drag_point
 
     def is_key_pressed(self, symbol):
-        return int(symbol) in self.pressed_keys
+        return symbol in self.pressed_keys
+
+    __iadd__ = add_listner
+    __isub__ = remove_listner
+    __call__ = dispatch
+    __len__ = get_listners_count
 
 
 def _event_dispatcher():
@@ -14402,16 +14423,10 @@ class Scene(_SceneCore):
         self.max_num_saved_states = int(
             kwargs.get("max_num_saved_states", type(self).max_num_saved_states)
         )
-        # Reference Scene.__init__ keeps the pointer as two live Point
-        # mobjects on the scene itself, and they are the same Point class
-        # EventDispatcher constructs (dispatch() moves the drag point for
-        # MouseDragEvent and the plain one for everything else), so a scene's
-        # pointer state and a dispatcher's are one kind of object rather than
-        # two lookalikes. InteractiveScene.get_information_label's coordinate
-        # updater reads `mouse_point` every frame; before this it found
-        # nothing and fell back to ORIGIN through its getattr guard.
-        # Two distinct instances, both at ORIGIN: a drag must never drag the
-        # hover point along with it.
+        # Reference Scene.__init__ keeps two live Point mobjects, distinct
+        # from the dispatcher's coordinate arrays. InteractiveScene's label
+        # updater reads the scene's hover Point on every frame. A drag moves
+        # the other Point without changing that hover position.
         self.mouse_point = Point()
         self.mouse_drag_point = Point()
         # Host window is Studio-owned. Pointer/scroll/key chords below stay
@@ -19009,7 +19024,20 @@ class AnimationGroup(_NativeAnimation):
             lag_ratio=type(self)._default_lag_ratio if lag_ratio is None else lag_ratio,
             **kwargs,
         )
-        self.animations = list(animations)
+        self.animations = [
+            prepare_animation(animation) if isinstance(animation, _AnimationBuilder) else animation
+            for animation in animations
+        ]
+        self.build_animations_with_timings(self.lag_ratio)
+        self.calculate_max_end_time()
+
+    def build_animations_with_timings(self, lag_ratio):
+        self.anims_with_timings, _ = _composition_timings(self, self.animations, lag_ratio)
+
+    def calculate_max_end_time(self):
+        self.max_end_time = max((end for _, _, end in self.anims_with_timings), default=0.0)
+        if self.run_time is None or self.run_time < 0:
+            self.run_time = self.max_end_time
 
 
 class ClockPassesTime(AnimationGroup):
@@ -19080,27 +19108,23 @@ def _python_composition_members(group):
 
 def _composition_member_run_time(member):
     if hasattr(member, "get_run_time"):
-        return float(member.get_run_time())
-    run_time = getattr(member, "run_time", None)
+        run_time = member.get_run_time()
+    else:
+        run_time = getattr(member, "run_time", None)
     return 1.0 if run_time is None else float(run_time)
 
 
-def _composition_timings(group, children):
-    """fmn-anim composition.rs `build_timings`, mirrored: member k spans
-    [start, start + run_time_k] and the next member starts at
-    `start + run_time_k * lag_ratio`."""
+def _composition_timings(group, children, lag_ratio=None):
+    """Use Choreo's interval builder for inspection and Python leaf dispatch."""
     lag = float(
         type(group)._default_lag_ratio
         if group.lag_ratio is None
         else group.lag_ratio
+    ) if lag_ratio is None else float(lag_ratio)
+    intervals = _FMN_ROOT._composition_intervals(
+        [_composition_member_run_time(member) for member in children], lag,
     )
-    timings = []
-    curr = 0.0
-    for member in children:
-        start = curr
-        end = start + _composition_member_run_time(member)
-        timings.append((member, start, end))
-        curr = start + (end - start) * lag
+    timings = [(member, start, end) for member, (start, end) in zip(children, intervals)]
     max_end = max((end for _, _, end in timings), default=0.0)
     return timings, max_end
 
@@ -22665,14 +22689,15 @@ def _portal_cli_help():
     return """usage: fmn-python [--robot] --version
        fmn-python [--robot] --list-scenes SOURCE.py
        fmn-python [--robot] --construct-only SOURCE.py [SCENE]
-       fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence]
+       fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence|gif|y4m|wav]
                   [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
-                  [--video_dir DIRECTORY]
+                  [--video_dir PATH]
        fmn-python studio SOURCE.py [SCENE]
 
-The wheel renders standard-mode final-state PNGs and PNG sequences through the
+The wheel renders standard-mode final-state PNGs, PNG sequences, GIF and y4m through the
 same retained Lumen CPU renderer and ordered Reel sink as the native front
-door. Certified output, video containers, opener flags, write-all, and Studio
+door. WAV output mixes Scene.add_sound cues with the native Reel mixer.
+Certified output, video containers, opener flags, write-all, and Studio
 remain precise capability refusals until their complete contracts are
 connected."""
 
@@ -22746,10 +22771,10 @@ def _portal_cli_render_arguments(arguments):
         positionals.append(argument)
         index += 1
 
-    if values["format"] not in ("png", "png_sequence"):
+    if values["format"] not in ("png", "png_sequence", "gif", "y4m", "wav"):
         raise RuntimeError(
             f"CAPABILITY: portal output format {values['format']!r} is not connected; "
-            "use --format png or --format png_sequence"
+            "use --format png, png_sequence, gif, y4m, or wav"
         )
     if len(positionals) not in (1, 2):
         raise ValueError("render requires SOURCE.py and accepts one optional SCENE")
@@ -22897,18 +22922,14 @@ def _console_main():
             output_root = (
                 _pathlib.Path("media") / "videos" / _pathlib.Path(source).stem
             )
-            if render_values["format"] == "png":
-                destination = str(output_root / f"{selected}.png")
-            else:
+            if render_values["format"] == "png_sequence":
                 destination = str(output_root / selected / "frames")
+            else:
+                destination = str(output_root / (selected + "." + render_values["format"]))
         try:
-            begin_render = (
-                scene._begin_png
-                if render_values["format"] == "png"
-                else scene._begin_png_sequence
-            )
-            begin_render(
+            scene._begin_native_output(
                 destination,
+                render_values["format"],
                 width,
                 height,
                 fps,
@@ -22970,11 +22991,15 @@ def _console_main():
                 scene=selected,
                 destination=destination,
             )
+        output_details = {}
+        if render_values["format"] == "wav":
+            output_details = {"sample_frames": int(frame_count), "sample_rate": 48000, "channels": 2}
+        unit = "sample frames" if render_values["format"] == "wav" else "frames"
         return _portal_cli_emit(
             0,
             "success",
             "render",
-            f"rendered {frame_count} PNG frames to {path}",
+            f"rendered {frame_count} {render_values['format']} {unit} to {path}",
             robot,
             source=source,
             scene=selected,
@@ -22988,6 +23013,7 @@ def _console_main():
             engine=engine,
             threads=int(used_threads),
             rendered=True,
+            **output_details,
         )
 
     control = "--construct-only" if construct_only else "--list-scenes"

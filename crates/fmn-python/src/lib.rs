@@ -32,15 +32,15 @@ use std::time::Instant;
 
 use crossing::CrossingClass;
 
-use fmn_frame::convert::rgba16f_to_rgba8;
-use fmn_frame::{FrameLayout, PixelFormat};
+use fmn_frame::convert::{rgba_to_nv12, rgba16f_to_rgba8};
+use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_mobject::{
     JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Snapshot, Stage,
     StageError, Uniforms,
 };
 use fmn_output::{
-    EmitterConfig, NativeArtifactReport, OrderedEmitter, PngSink, PngSinkConfig, PngTarget,
-    SinkLimits, SinkReceipt,
+    EmitterConfig, GifSink, GifSinkConfig, NativeArtifactReport, OrderedEmitter, PngSink,
+    PngSinkConfig, PngTarget, SinkLimits, SinkReceipt, Y4mSink, Y4mSinkConfig,
 };
 use fmn_render::{
     Camera, CameraConfig, EngineIdentity, FrameConfig, RetainedFrameRenderer,
@@ -104,16 +104,25 @@ type AlignedPointRuns = (PointRun, PointRun);
 const PORTAL_MAX_RENDER_FRAMES: u64 = 1_000_000;
 const PORTAL_PICKLE_STATE_VERSION: u8 = 1;
 
-/// One fmn-python render generation, retained across every `play` and `wait`.
-///
-/// Lumen owns the renderer state; Reel owns bounded ordered publication. This
-/// portal adapter owns only their lifetime and the Python-facing report.
-struct PortalRenderSession {
-    renderer: RetainedFrameRenderer,
-    camera: Camera,
-    emitter: Option<OrderedEmitter>,
-    receipt: SinkReceipt<NativeArtifactReport>,
-    next_sequence: u64,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PortalFrameFormat {
+    Png,
+    PngSequence,
+    Gif,
+    Y4m,
+}
+
+enum PortalOutputFormat {
+    Frames(PortalFrameFormat),
+    Wav,
+}
+
+enum PortalRenderSession {
+    Frames(Box<PortalFrameSession>),
+    Soundtrack {
+        destination: PathBuf,
+        threads: usize,
+    },
 }
 
 impl PortalRenderSession {
@@ -122,8 +131,181 @@ impl PortalRenderSession {
         width: u32,
         height: u32,
         fps: u32,
+        threads: usize,
+        format: PortalOutputFormat,
+    ) -> PyResult<(Self, RuntimeConfig)> {
+        match format {
+            PortalOutputFormat::Frames(format) => {
+                let (session, config) =
+                    PortalFrameSession::new(destination, width, height, fps, threads, format)?;
+                Ok((Self::Frames(Box::new(session)), config))
+            }
+            PortalOutputFormat::Wav => {
+                if width == 0 || height == 0 || fps == 0 || threads == 0 {
+                    return Err(PyValueError::new_err(
+                        "output resolution, fps, and thread limit must be nonzero",
+                    ));
+                }
+                let mut config = fmn_config::Config::resolve(&[], None)
+                    .map_err(native_error)?
+                    .config;
+                config.camera.resolution = (width, height);
+                config.camera.fps = fps;
+                // Run the same sampled lifecycle so updaters can add cues at
+                // their real call-site times. Only rasterization is absent.
+                Ok((
+                    Self::Soundtrack {
+                        destination,
+                        threads,
+                    },
+                    RuntimeConfig::from_config(&config),
+                ))
+            }
+        }
+    }
+
+    fn capture(
+        &mut self,
+        packet: fmn_scene::studio_bridge::FramePacket,
+    ) -> Result<(), fmn_scene::IntegrationError> {
+        match self {
+            Self::Frames(session) => session.capture(packet),
+            Self::Soundtrack { .. } => Ok(()),
+        }
+    }
+
+    fn bind_camera(
+        &mut self,
+        frame: fmn_scene::studio_bridge::CameraFrame,
+        light_position: [f64; 3],
+    ) -> PyResult<()> {
+        match self {
+            Self::Frames(session) => session.bind_camera(frame, light_position),
+            Self::Soundtrack { .. } => Ok(()),
+        }
+    }
+
+    fn needs_final_capture(&self) -> bool {
+        matches!(self, Self::Frames(session) if session.frame_count() == 0)
+    }
+
+    fn abort(self) {
+        if let Self::Frames(session) = self {
+            session.abort();
+        }
+    }
+
+    fn finish(self, scene: &Scene) -> PyResult<(NativeArtifactReport, String, usize)> {
+        match self {
+            // ubs:ignore — finalizes frame publication; no security token or randomness is generated.
+            Self::Frames(session) => session.finish(),
+            Self::Soundtrack {
+                destination,
+                threads,
+            } => {
+                let requests = scene.sound_requests();
+                if requests.is_empty() {
+                    return Err(PyRuntimeError::new_err(
+                        "WAV output requires at least one Scene.add_sound cue",
+                    ));
+                }
+                let config = fmn_output::MixerConfig::default();
+                let time = scene.time();
+                let timeline_frames =
+                    fmn_output::frames_to_samples(time.frames(), time.fps(), config.sample_rate)
+                        .map_err(native_error)?;
+                let mut mixer = fmn_output::SoundMixer::new(config)
+                    .map_err(native_error)?
+                    .with_timeline_frames(u64::try_from(timeline_frames).map_err(native_error)?);
+                let fs = fmn_platform::fs::StdFs;
+                for request in requests {
+                    let bytes = fmn_platform::fs::FileSystem::read_bounded(
+                        &fs,
+                        &request.sound_file,
+                        64 * 1024 * 1024,
+                    )
+                    .map_err(|error| {
+                        PyOSError::new_err(format!(
+                            "sound cue {}: {error}",
+                            request.sound_file.display(),
+                        ))
+                    })?;
+                    let audio = fmn_codec::decode_wav(&bytes, &fmn_codec::WavLimits::default())
+                        .map_err(|error| {
+                            PyValueError::new_err(format!(
+                                "sound cue {} is not decodable PCM WAV: {error}",
+                                request.sound_file.display(),
+                            ))
+                        })?;
+                    mixer
+                        .add(fmn_output::SoundCue {
+                            audio,
+                            frame: request.time.frames(),
+                            fps: request.time.fps(),
+                            time_offset: request.time_offset,
+                            gain: request.gain,
+                            gain_to_background: request.gain_to_background,
+                        })
+                        .map_err(native_error)?;
+                }
+                let mix = mixer.mix(threads).map_err(native_error)?;
+                // S16 stereo plus the WAV header, bounded by Reel's native
+                // timeline budget. Reel performs atomic publication only
+                // after every cue has decoded and the complete mix succeeds.
+                let max_artifact_bytes = config
+                    .max_output_frames
+                    .checked_mul(u64::from(config.channels) * 2)
+                    .and_then(|bytes| bytes.checked_add(1024))
+                    .ok_or_else(|| PyOverflowError::new_err("WAV artifact budget overflow"))?;
+                let report = fmn_output::publish_wav(
+                    &fs,
+                    &fmn_output::WavPublicationConfig {
+                        destination,
+                        format: fmn_codec::SampleFormat::S16,
+                        dither: fmn_output::DitherPolicy::None,
+                        max_artifact_bytes,
+                        profile: None,
+                    },
+                    &mix,
+                )
+                .map_err(native_error)?;
+                Ok((
+                    NativeArtifactReport {
+                        kind: fmn_output::NativeArtifactKind::Wav,
+                        path: report.path,
+                        frame_count: report.sample_frames,
+                        bytes: report.bytes,
+                        digest: report.digest,
+                    },
+                    "native-sound-mixer".to_owned(),
+                    threads,
+                ))
+            }
+        }
+    }
+}
+
+/// One fmn-python render generation, retained across every `play` and `wait`.
+///
+/// Lumen owns the renderer state; Reel owns bounded ordered publication. This
+/// portal adapter owns only their lifetime and the Python-facing report.
+struct PortalFrameSession {
+    renderer: RetainedFrameRenderer,
+    camera: Camera,
+    emitter: Option<OrderedEmitter>,
+    receipt: SinkReceipt<NativeArtifactReport>,
+    rgba8_scratch: Option<FrameBuffer>,
+    next_sequence: u64,
+}
+
+impl PortalFrameSession {
+    fn new(
+        destination: PathBuf,
+        width: u32,
+        height: u32,
+        fps: u32,
         max_threads: usize,
-        single_frame: bool,
+        format: PortalFrameFormat,
     ) -> PyResult<(Self, RuntimeConfig)> {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err(
@@ -144,10 +326,16 @@ impl PortalRenderSession {
         config.camera.fps = fps;
         config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
 
+        // ubs:ignore — compares a public output-format enum, not a secret.
+        let output_format = if format == PortalFrameFormat::Y4m {
+            fmn_runtime::OutputPixelFormat::Nv12
+        } else {
+            fmn_runtime::OutputPixelFormat::Rgba8
+        };
         let request = fmn_runtime::PlanRequest::standard(
             fmn_runtime::RenderIntent::Offline,
             fmn_runtime::SurfaceSpec::lumen(width, height),
-            fmn_runtime::OutputPixelFormat::Rgba8,
+            output_format,
         )
         .with_max_cpu_threads(max_threads);
         let plan = fmn_runtime::ExecutionPlan::derive(
@@ -197,10 +385,27 @@ impl PortalRenderSession {
             ..CameraConfig::default()
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        let output_layout = FrameLayout::tight(PixelFormat::Rgba8, width, height)
+        // ubs:ignore — compares a public output-format enum, not a secret.
+        let pixel_format = if format == PortalFrameFormat::Y4m {
+            PixelFormat::Nv12
+        } else {
+            PixelFormat::Rgba8
+        };
+        let output_layout = FrameLayout::tight(pixel_format, width, height)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        // ubs:ignore — compares a public output-format enum, not a secret.
+        let rgba8_scratch = if format == PortalFrameFormat::Y4m {
+            Some(FrameBuffer::new(
+                FrameLayout::tight(PixelFormat::Rgba8, width, height)
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?,
+            ))
+        } else {
+            None
+        };
         let frame_bytes = u64::try_from(output_layout.total_bytes())
             .map_err(|_| PyOverflowError::new_err("render frame size exceeds u64"))?;
+        // ubs:ignore — compares a public output-format enum, not a secret.
+        let single_frame = format == PortalFrameFormat::Png;
         let max_frames = if single_frame {
             1
         } else {
@@ -224,34 +429,68 @@ impl PortalRenderSession {
         )
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let fs: Arc<dyn fmn_platform::fs::FileSystem> = Arc::new(fmn_platform::fs::StdFs);
-        let target = if single_frame {
-            PngTarget::Single(destination)
-        } else {
-            PngTarget::Sequence {
-                directory: destination,
-                stem: "frame".to_owned(),
-                digits: 6,
+        let (binding, receipt) = match format {
+            PortalFrameFormat::Png | PortalFrameFormat::PngSequence => {
+                let target = if single_frame {
+                    PngTarget::Single(destination)
+                } else {
+                    PngTarget::Sequence {
+                        directory: destination,
+                        stem: "frame".to_owned(),
+                        digits: 6,
+                    }
+                };
+                PngSink::new(
+                    fs,
+                    PngSinkConfig {
+                        target,
+                        width,
+                        height,
+                        first_sequence: 0,
+                        compression: fmn_codec::CompressionLevel::Default,
+                        threads: plan.output_team.threads().max(1),
+                        limits,
+                        profile: None,
+                    },
+                )
+                .map_err(|error| PyValueError::new_err(error.to_string()))?
+                .into_binding(if single_frame {
+                    "python-png"
+                } else {
+                    "python-png-sequence"
+                })
             }
+            PortalFrameFormat::Gif => GifSink::new(
+                fs,
+                GifSinkConfig {
+                    destination,
+                    width,
+                    height,
+                    fps: (fps, 1),
+                    loop_forever: true,
+                    first_sequence: 0,
+                    limits,
+                    profile: None,
+                },
+            )
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
+            .into_binding("python-gif"),
+            PortalFrameFormat::Y4m => Y4mSink::new(
+                fs,
+                Y4mSinkConfig {
+                    destination,
+                    width,
+                    height,
+                    fps: (fps, 1),
+                    colorspace: fmn_codec::Y4mColorspace::C420Mpeg2,
+                    first_sequence: 0,
+                    limits,
+                    profile: None,
+                },
+            )
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
+            .into_binding("python-y4m"),
         };
-        let (binding, receipt) = PngSink::new(
-            fs,
-            PngSinkConfig {
-                target,
-                width,
-                height,
-                first_sequence: 0,
-                compression: fmn_codec::CompressionLevel::Default,
-                threads: plan.output_team.threads().max(1),
-                limits,
-                profile: None,
-            },
-        )
-        .map_err(|error| PyValueError::new_err(error.to_string()))?
-        .into_binding(if single_frame {
-            "python-png"
-        } else {
-            "python-png-sequence"
-        });
         let emitter = OrderedEmitter::new(
             EmitterConfig::new(output_layout, plan.frames_in_flight, 0)
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
@@ -272,6 +511,7 @@ impl PortalRenderSession {
                 camera,
                 emitter: Some(emitter),
                 receipt,
+                rgba8_scratch,
                 next_sequence: 0,
             },
             runtime_config,
@@ -300,8 +540,20 @@ impl PortalRenderSession {
             })?
             .reserve(self.next_sequence)
             .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
-        rgba16f_to_rgba8(self.renderer.frame(), reservation.frame_mut())
+        if let Some(rgba8) = &mut self.rgba8_scratch {
+            rgba16f_to_rgba8(self.renderer.frame(), rgba8)
+                .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+            rgba_to_nv12(
+                rgba8,
+                reservation.frame_mut(),
+                ColorRange::Limited,
+                ChromaSiting::Left,
+            )
             .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        } else {
+            rgba16f_to_rgba8(self.renderer.frame(), reservation.frame_mut())
+                .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        }
         reservation
             .publish()
             .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
@@ -354,7 +606,7 @@ impl PortalRenderSession {
     }
 }
 
-impl Drop for PortalRenderSession {
+impl Drop for PortalFrameSession {
     fn drop(&mut self) {
         self.cancel_and_join();
     }
@@ -1076,6 +1328,7 @@ impl PyRecordView {
         }
         let byte_len = isize::try_from(byte_len)
             .map_err(|_| PyOverflowError::new_err("RecordBuffer exceeds Py_ssize_t"))?;
+        // ubs:ignore — CPython buffer-request flag bits are public ABI metadata.
         let format = if flags & ffi::PyBUF_FORMAT == ffi::PyBUF_FORMAT {
             CString::new("B")
                 .expect("static buffer format contains no NUL")
@@ -7112,25 +7365,25 @@ fn has_python_updaters(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
     Ok(false)
 }
 
-struct PortalPngRequest {
+struct PortalRenderRequest {
     destination: String,
     width: u32,
     height: u32,
     fps: u32,
     threads: usize,
     seed: u64,
-    single_frame: bool,
+    format: PortalOutputFormat,
 }
 
-fn begin_portal_png(slf: &Bound<'_, PyScene>, request: PortalPngRequest) -> PyResult<()> {
-    let PortalPngRequest {
+fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -> PyResult<()> {
+    let PortalRenderRequest {
         destination,
         width,
         height,
         fps,
         threads,
         seed,
-        single_frame,
+        format,
     } = request;
     if destination.is_empty() {
         return Err(PyValueError::new_err(
@@ -7155,7 +7408,7 @@ fn begin_portal_png(slf: &Bound<'_, PyScene>, request: PortalPngRequest) -> PyRe
         height,
         fps,
         threads,
-        single_frame,
+        format,
     )?;
     let replacement = match Scene::new(runtime_config, seed) {
         Ok(scene) => Rc::new(EngineState::new(scene)),
@@ -7217,16 +7470,16 @@ impl PyScene {
         threads: usize,
         seed: u64,
     ) -> PyResult<()> {
-        begin_portal_png(
+        begin_portal_render(
             slf,
-            PortalPngRequest {
+            PortalRenderRequest {
                 destination,
                 width,
                 height,
                 fps,
                 threads,
                 seed,
-                single_frame: false,
+                format: PortalOutputFormat::Frames(PortalFrameFormat::PngSequence),
             },
         )
     }
@@ -7244,16 +7497,56 @@ impl PyScene {
         threads: usize,
         seed: u64,
     ) -> PyResult<()> {
-        begin_portal_png(
+        begin_portal_render(
             slf,
-            PortalPngRequest {
+            PortalRenderRequest {
                 destination,
                 width,
                 height,
                 fps,
                 threads,
                 seed,
-                single_frame: true,
+                format: PortalOutputFormat::Frames(PortalFrameFormat::Png),
+            },
+        )
+    }
+
+    /// Select a native Reel format without changing the scene clock or
+    /// publication protocol. No format here invokes an external encoder.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (destination, format, width, height, fps, threads, seed))]
+    fn _begin_native_output(
+        slf: &Bound<'_, Self>,
+        destination: String,
+        format: &str,
+        width: u32,
+        height: u32,
+        fps: u32,
+        threads: usize,
+        seed: u64,
+    ) -> PyResult<()> {
+        let format = match format {
+            "png" => PortalOutputFormat::Frames(PortalFrameFormat::Png),
+            "png_sequence" => PortalOutputFormat::Frames(PortalFrameFormat::PngSequence),
+            "gif" => PortalOutputFormat::Frames(PortalFrameFormat::Gif),
+            "y4m" => PortalOutputFormat::Frames(PortalFrameFormat::Y4m),
+            "wav" => PortalOutputFormat::Wav,
+            _ => {
+                return Err(CapabilityError::new_err(
+                    "native portal output requires png, png_sequence, gif, y4m, or wav",
+                ));
+            }
+        };
+        begin_portal_render(
+            slf,
+            PortalRenderRequest {
+                destination,
+                width,
+                height,
+                fps,
+                threads,
+                seed,
+                format,
             },
         )
     }
@@ -7299,7 +7592,7 @@ impl PyScene {
             .lock()
             .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
             .as_ref()
-            .is_some_and(|session| session.frame_count() == 0);
+            .is_some_and(PortalRenderSession::needs_final_capture);
         if needs_final_capture {
             let mut sink = PortalSceneSink {
                 render: Arc::clone(&render),
@@ -7316,7 +7609,7 @@ impl PyScene {
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?;
         // ubs:ignore — finalizes a frame-render session; no token, secret, or randomness exists.
-        let (report, engine, threads) = session.finish()?;
+        let (report, engine, threads) = session.finish(&engine.borrow())?;
         Ok((
             report.path.to_string_lossy().into_owned(),
             report.frame_count,
@@ -9667,6 +9960,7 @@ fn hoist_descendant_records(root: &mut Mobject, retain_children: bool) -> PyResu
             collect_pointful(child, &mut sources);
         }
         for source in &sources {
+            // ubs:ignore — compares RecordBuffer layouts, not authentication material.
             if source.schema() != &schema {
                 return Err(PyRuntimeError::new_err(
                     "native text descendant schema cannot be hoisted onto its portal shell",
@@ -10061,6 +10355,14 @@ fn install_animation_semantics(
     Ok(())
 }
 
+#[pyfunction]
+fn _composition_intervals(run_times: Vec<f64>, lag_ratio: f64) -> Vec<(f64, f64)> {
+    fmn_anim::composition::build_timings(&run_times, lag_ratio)
+        .into_iter()
+        .map(|interval| (interval.start, interval.end))
+        .collect()
+}
+
 fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BridgeMobject>()?;
     module.add_class::<PyScene>()?;
@@ -10080,6 +10382,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_stats, module)?)?;
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_reset, module)?)?;
     module.add_function(wrap_pyfunction!(report::_crossing_report, module)?)?;
+    module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
     module.add("_StaleHandleError", py.get_type::<StaleHandleError>())?;
     module.add("_ForeignStageError", py.get_type::<ForeignStageError>())?;
     module.add("_FamilyCycleError", py.get_type::<FamilyCycleError>())?;
@@ -10201,6 +10504,24 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
             manimlib(py, &module).expect("initialize manimlib");
             body(py, &module, &suite_globals)
         }));
+        let lifetime_globals = PyDict::new(py);
+        lifetime_globals.set_item("gc", &gc).expect("GC observer");
+        lifetime_globals
+            .set_item("weakref", &weakref)
+            .expect("weak observer");
+        lifetime_globals
+            .set_item("Bridge", py.get_type::<BridgeMobject>())
+            .expect("proxy type");
+        py.run(
+            c"proxies = [\n    (weakref.ref(obj), type(obj).__name__)\n    for obj in gc.get_objects()\n    if isinstance(obj, Bridge)\n]",
+            Some(&lifetime_globals),
+            None,
+        )
+        .expect("observe native proxy lifetimes without retaining them");
+        // Cached classes can own native proxies through class attributes or
+        // callback closures. Drop those strong owners with this worker's GIL,
+        // before Rust thread-local destruction can defer them to another thread.
+        method_cache::clear_for_worker_teardown(py);
         // Python callbacks retain their globals, while suite globals retain
         // PyO3 instances and their callbacks. Some of those extension types
         // are intentionally outside Python's cyclic-GC graph, so the
@@ -10239,8 +10560,32 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         // can change.
         module.dict().clear();
         drop(module);
+        assert_eq!(
+            method_cache::stats().entries,
+            0,
+            "cache must be empty before GC"
+        );
         gc.call_method0("collect")
             .expect("collect suite-owned Python cycles");
+        // Scene class/global cycles can keep native Points alive through the
+        // first collection. The console failure scenario reproduced this
+        // ownership pattern before the dispatcher's state became arrays.
+        // Keep the weak observers below: a second pass is not a waiver for
+        // any proxy that still survives its owner thread.
+        gc.call_method0("collect")
+            .expect("collect remaining scene class/global cycles");
+        py.run(
+            c"survivors = [\n    (name, [type(owner).__name__ for owner in gc.get_referrers(ref())])\n    for ref, name in proxies\n    if ref() is not None\n]",
+            Some(&lifetime_globals),
+            None,
+        )
+        .expect("inspect retained native proxy owners");
+        let survivors: Vec<(String, Vec<String>)> = lifetime_globals
+            .get_item("survivors")
+            .expect("surviving proxy lookup")
+            .expect("surviving proxy observation")
+            .extract()
+            .expect("native proxy lifetime observations");
 
         let old_hook = hook_globals
             .get_item("_fmn_old_unraisablehook")
@@ -10257,6 +10602,10 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         assert!(
             unraisable.is_empty(),
             "{suite}: Python teardown emitted unraisable errors: {unraisable:?}"
+        );
+        assert!(
+            survivors.is_empty(),
+            "{suite}: native proxies survived owner-thread teardown: {survivors:?}"
         );
         let surviving_module = module_weakref.call0().expect("read module weak reference");
         let referrer_types = if surviving_module.is_none() {
@@ -10330,6 +10679,36 @@ pub fn run_portal_gauntlet_png_still(
     seed: u64,
 ) -> Result<PortalGauntletReport, String> {
     run_portal_gauntlet_png(destination, seed, true)
+}
+
+/// Run the same decoded GIF/y4m/WAV acceptance as the native binary and clean wheel.
+/// Returns observed frames, formats, refused publications, thread replays, and samples.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_native_outputs(
+    destination: &std::path::Path,
+) -> Result<(u64, u64, u64, u64, u64), String> {
+    with_python_test_module("native output Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_output_root", destination.to_string_lossy().as_ref())
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(include_str!("../tests/native_outputs.py"))
+            .expect("native output suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let report = globals
+            .get_item("native_output_report")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "native output suite emitted no report".to_owned())?;
+        let read = |name| -> PyResult<u64> { report.get_item(name)?.extract() };
+        Ok((
+            read("frames").map_err(|error| error.to_string())?,
+            read("formats").map_err(|error| error.to_string())?,
+            read("publication_failures").map_err(|error| error.to_string())?,
+            read("thread_replays").map_err(|error| error.to_string())?,
+            read("sample_frames").map_err(|error| error.to_string())?,
+        ))
+    })
 }
 
 /// Exercise the shared Animation/Transform lifecycle through native PNG output.
@@ -10819,6 +11198,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn production_native_output_acceptance_suite() {
+        crate::with_python_test_module("native output acceptance", |py, _module, globals| {
+            let source = CString::new(include_str!("../tests/native_outputs.py"))
+                .expect("native output suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("decoded native GIF/y4m/WAV acceptance suite");
+        });
+    }
+
+    #[test]
     fn production_animation_semantics_acceptance_suite() {
         crate::with_python_test_module("animation acceptance", |py, module, globals| {
             let begin = module
@@ -10977,7 +11367,7 @@ mod tests {
         fn run_on_fresh_thread(suite: &'static str) -> std::thread::ThreadId {
             std::thread::spawn(move || {
                 let owner = std::thread::current().id();
-                crate::with_python_test_module(suite, |_py, module, _globals| {
+                let retained_type = crate::with_python_test_module(suite, |py, module, _globals| {
                     let instance = module
                         .getattr("Mobject")
                         .and_then(|class| class.call0())
@@ -10988,6 +11378,27 @@ mod tests {
                     module
                         .setattr("_teardown_probe", instance)
                         .expect("retain the probe from the temporary module");
+                    let source = CString::new(
+                        "class CachedOwner(Mobject):\n    retained = Mobject()\n    def cached_probe(self):\n        return 7\n",
+                    ).expect("cache probe source");
+                    py.run(source.as_c_str(), Some(&module.dict()), Some(&module.dict()))
+                        .expect("construct cached class with a native-owned attribute");
+                    let class = module.getattr("CachedOwner").expect("cached probe class");
+                    let instance = class.call0().expect("cached probe instance");
+                    let value: u32 = crate::method_cache::call_cached0(&instance, "cached_probe")
+                        .expect("populate the actual native method cache")
+                        .extract().expect("probe return value");
+                    assert_eq!(value, 7);
+                    assert!(crate::method_cache::stats().entries > 0);
+                    py.import("weakref").expect("weakref")
+                        .getattr("ref").expect("weakref.ref")
+                        .call1((class,)).expect("retain only a weak type observer")
+                        .unbind()
+                });
+                Python::attach(|py| {
+                    assert!(retained_type.bind(py).call0().expect("read type lifetime").is_none(),
+                        "worker teardown retained a cached type and its native-owned attributes");
+                    assert_eq!(crate::method_cache::stats().entries, 0);
                 });
                 owner
             })

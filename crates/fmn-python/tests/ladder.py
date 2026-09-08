@@ -18,8 +18,10 @@ Both are the same correctly rounded operations plus exact floor/abs, so
 the bits match. No transcendental functions appear anywhere.
 """
 
+import gc
 import importlib
 import math
+import weakref
 
 import numpy as np
 
@@ -54,6 +56,32 @@ def fresh_mobject():
     for i in range(N_POINTS):
         mob.set_field("point", i, [i * 1.0, -i * 0.5, 0.25])
     return mob
+
+
+def batched_cycle_observers(callback_owns_anchor):
+    anchor = fresh_mobject()
+    member = fresh_mobject() if callback_owns_anchor else anchor
+    if callback_owns_anchor:
+        def callback(views, dt, owner=anchor):
+            assert owner is not None
+    else:
+        def callback(views, dt):
+            pass
+    anchor.add_updater(BatchedUpdater([member], callback), call=False)
+    return weakref.ref(anchor), weakref.ref(member), weakref.ref(callback)
+
+
+# Ordinary attachment can form a cycle through either Rust-owned field.
+# Dropping the user's last references must collect it without clear_updaters
+# or a test-worker teardown reaching into production objects.
+for callback_owns_anchor in (False, True):
+    cycle_observers = batched_cycle_observers(callback_owns_anchor)
+    gc.collect()
+    gc.collect()
+    assert all(observer() is None for observer in cycle_observers), (
+        "BatchedUpdater retained an unreachable owner",
+        callback_owns_anchor,
+    )
 
 
 def scene_state(scene):

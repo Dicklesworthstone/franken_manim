@@ -84,7 +84,7 @@ const QUARTER_ARC_KAPPA: f64 = 0.552_284_749_830_793_6;
 
 // ------------------------------------------------------------------ errors
 
-/// Why byte input could not become an [`SvgDocument`]. Every variant is a
+/// Why byte input could not become a [`crate::SvgDocument`]. Every variant is a
 /// named refusal; the parser never panics on any byte stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SvgError {

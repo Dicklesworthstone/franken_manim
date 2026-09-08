@@ -1,8 +1,9 @@
 """Test the shipped installer against real bootstrap classes without CPython FFI.
 
-The bootstrap's animation definitions are compiled unchanged. Only its Rust
-Mobject storage boundary is replaced by a small NumPy-backed fixture. These are
-Python contract tests, not native renderer or installed-wheel evidence.
+The bootstrap's animation definitions and timing adapters are compiled unchanged.
+Rust storage is replaced by a small NumPy-backed fixture, and the interval builder
+by explicit input/output cases that check delegation. These are Python contract
+tests, not evidence of Rust timing, native rendering or installed-wheel behavior.
 """
 from __future__ import annotations
 
@@ -25,6 +26,9 @@ ANIMATION_CLASSES = {
     "Animation", "_NativeAnimation", "Transform", "ReplacementTransform",
     "TransformFromCopy", "CyclicReplace", "Swap", "AnimationGroup",
     "LaggedStart", "Succession", "LaggedStartMap",
+}
+ANIMATION_FUNCTIONS = {
+    "prepare_animation", "_composition_member_run_time", "_composition_timings",
 }
 
 
@@ -106,6 +110,25 @@ def make_native():
             raise NotImplementedError(f"{name}: {', '.join(refused)}")
 
     native = types.ModuleType("manimlib")
+    # Fixed boundary responses, not a second implementation of Choreo's
+    # recurrence. Unexpected inputs fail; the native/wheel suites execute
+    # the actual interval builder with independent analytic expectations.
+    interval_cases = {
+        ((1.0, 1.0), 0.0): [(0.0, 1.0), (0.0, 1.0)],
+        ((1.0, 1.0), 0.05): [(0.0, 1.0), (0.05, 1.05)],
+        ((1.0, 1.0), 1.0): [(0.0, 1.0), (1.0, 2.0)],
+        ((5.0, 1.05), 1.0): [(0.0, 5.0), (5.0, 6.05)],
+    }
+    native.interval_calls = []
+
+    def interval_fixture(durations, lag):
+        request = (tuple(durations), lag)
+        native.interval_calls.append(request)
+        if request not in interval_cases:
+            raise AssertionError(f"unregistered interval fixture request: {request}")
+        return list(interval_cases[request])
+
+    native._composition_intervals = interval_fixture
     g = vars(native)
     g.update({
         "_np": np, "_copy": copy, "_math": math,
@@ -118,10 +141,14 @@ def make_native():
     })
     native.straight_path = g["_interpolate"]
     source = ast.parse(BOOTSTRAP.read_text(encoding="utf-8"), filename=str(BOOTSTRAP))
-    selected = [node for node in source.body if isinstance(node, ast.ClassDef) and node.name in ANIMATION_CLASSES]
-    if {node.name for node in selected} != ANIMATION_CLASSES:
-        raise AssertionError("bootstrap animation class inventory changed")
-    exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOOTSTRAP), "exec"), g)
+    selected = [
+        node for node in source.body
+        if (isinstance(node, ast.ClassDef) and node.name in ANIMATION_CLASSES)
+        or (isinstance(node, ast.FunctionDef) and node.name in ANIMATION_FUNCTIONS)
+    ]
+    if {node.name for node in selected} != ANIMATION_CLASSES | ANIMATION_FUNCTIONS:
+        raise AssertionError("bootstrap animation definition inventory changed")
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOOTSTRAP), "exec"), g)  # ubs:ignore — explicit definition inventory from the checked-in bootstrap, not external input.
     spec = importlib.util.spec_from_file_location("fmn_installer_under_test", INSTALLER)
     installer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(installer)
@@ -136,11 +163,17 @@ class NativeCompositionContractTests(unittest.TestCase):
     def test_compositions_preserve_native_timing_and_deferred_root(self):
         n = self.native
         first, second = n.Animation(n.Mobject()), n.Animation(n.Mobject())
-        for cls, lag in ((n.AnimationGroup, 0.0), (n.LaggedStart, 0.05), (n.Succession, 1.0)):
+        for cls, lag, duration in (
+            (n.AnimationGroup, 0.0, 1.0),
+            (n.LaggedStart, 0.05, 1.05),
+            (n.Succession, 1.0, 2.0),
+        ):
             with self.subTest(cls=cls.__name__):
                 group = cls(first, second)
                 self.assertIsNone(group.mobject)
-                self.assertIsNone(group.run_time)
+                self.assertEqual(n.interval_calls[-1], ((1.0, 1.0), lag))
+                self.assertEqual(group.run_time, duration)
+                self.assertEqual(group.max_end_time, duration)
                 self.assertIsNone(group.rate_func)
                 self.assertEqual(group.lag_ratio, lag)
                 self.assertEqual(group.animations, [first, second])
