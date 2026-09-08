@@ -1216,10 +1216,30 @@ fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
 /// subclass constructs a Circle, lifecycle capture crosses the native bridge,
 /// retained Lumen rasterizes it, and Reel publishes an atomic PNG generation.
 fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
-    let root = scenario_dir("python_portal_png")?;
+    python_portal_sequence_run(ctx, false)
+}
+
+fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    python_portal_sequence_run(ctx, true)
+}
+
+fn python_portal_sequence_run(
+    ctx: &mut RunCtx,
+    animation_lifecycle: bool,
+) -> Result<RunOutcome, ScenarioError> {
+    let (directory, scene) = if animation_lifecycle {
+        ("python_animation_lifecycle", "AnimationLifecycleScene")
+    } else {
+        ("python_portal_png", "_GauntletPortalScene")
+    };
+    let root = scenario_dir(directory)?;
     let destination = root.join("frames");
-    let report = manimlib::run_portal_gauntlet_png_sequence(&destination, ctx.seed)
-        .map_err(|error| fail(format!("run Python portal PNG scenario: {error}")))?;
+    let report = if animation_lifecycle {
+        manimlib::run_portal_gauntlet_animation_lifecycle(&destination, ctx.seed)
+    } else {
+        manimlib::run_portal_gauntlet_png_sequence(&destination, ctx.seed)
+    }
+    .map_err(|error| fail(format!("run Python portal PNG scenario: {error}")))?;
     let mut png_paths: Vec<PathBuf> = std::fs::read_dir(&destination)
         .map_err(|error| fail(format!("read {}: {error}", destination.display())))?
         .map(|entry| {
@@ -1270,7 +1290,7 @@ fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
         && engine_journaled;
     ctx.event(
         LogEvent::new("e2e.python.render")
-            .field("scene", "_GauntletPortalScene")
+            .field("scene", scene)
             .field("format", "png_sequence")
             .field("complete", truth(complete))
             .field("png_signature", truth(signature))
@@ -3456,6 +3476,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_animation_semantics.v1",
+        ScenarioClass::Lifecycle,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_animation_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["python_portal_frame.png".to_owned()]),
+            counter_ge("python_render_frames", 3),
+            counter_eq("python_png_signature", 1),
+            counter_eq("python_engine_journaled", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.render",
+            vec![
+                FieldPred::str_eq("scene", "AnimationLifecycleScene"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("dimensions_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_png_still.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -4162,6 +4203,16 @@ fn python_portal_png_scenario_passes() {
 
 /// Focused acceptance for the portal's one-frame final-state route, including
 /// the no-clobber planted negative.
+#[test]
+fn python_animation_lifecycle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_animation_semantics.v1")
+        .expect("Python animation lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 #[test]
 fn python_portal_png_still_scenario_passes() {
     let scenario = catalog()

@@ -144,6 +144,18 @@ cargo test -p fmn-cli --features batch --test cli_smoke
 echo "==> cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets"
 cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets
 
+# Cargo accepts a misspelled filter with zero tests and exit 0. Require both
+# real-extension acceptance suites in the compiled inventory before running.
+echo "==> native Python production acceptance"
+native_acceptance_tests="$(cargo test -p fmn-python --lib -- --list)"
+for suite in production_bridge_acceptance_suite production_animation_semantics_acceptance_suite; do
+    if [[ $'\n'"$native_acceptance_tests"$'\n' != *$'\n'"tests::$suite: test"$'\n'* ]]; then
+        printf 'ERROR: native Python acceptance binary is missing %s\n' "$suite" >&2
+        exit 1
+    fi
+done
+cargo test -p fmn-python --lib production_
+
 # W5 wasm tier 1 (fm-l97, §10.7): the recorded wasm32 gate. The named crates
 # are the render axis the browser build compiles; this must stay green for
 # the fmn-wasm surface to have a foundation. Requires the

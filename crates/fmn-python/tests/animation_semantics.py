@@ -7,12 +7,15 @@ import numpy as np
 from manimlib import (
     Animation,
     AnimationGroup,
+    Circle,
     CyclicReplace,
     LaggedStart,
     LaggedStartMap,
     Mobject,
     ReplacementTransform,
+    Scene,
     ShowCreation,
+    Square,
     Succession,
     Swap,
     Transform,
@@ -192,6 +195,12 @@ arc_source.set_color("#000000")
 arc_target.set_color("#FFFFFF")
 arc_source.set_shading(0.0, 0.0, 0.0)
 arc_target.set_shading(1.0, 0.5, 0.25)
+arc_source.uniforms["clip_planes"] = [[0.0] * 4 for _ in range(4)]
+arc_target.uniforms["clip_planes"] = [[2.0, 4.0, 6.0, 8.0] for _ in range(4)]
+arc_source.uniforms["depth_test"] = True
+arc_target.uniforms["depth_test"] = False
+arc_source.uniforms["joint_type"] = 2.0
+arc_target.uniforms["joint_type"] = 3.0
 arc_transform = Transform(
     arc_source,
     arc_target,
@@ -219,7 +228,12 @@ assert np.allclose(
     [0.5, 0.25, 0.125],
     atol=1e-6,
 )
+assert np.allclose(arc_source.uniforms["clip_planes"], [[1.0, 2.0, 3.0, 4.0]] * 4)
+assert arc_source.uniforms["depth_test"] is True
+assert arc_source.uniforms["joint_type"] == 2.0
 arc_transform.finish()
+assert arc_source.uniforms["depth_test"] is True
+assert arc_source.uniforms["joint_type"] == 2.0
 
 copy_source = Mobject().set_points([[0.0, 0.0, 0.0]])
 copy_target = Mobject().set_points([[1.0, 0.0, 0.0]])
@@ -280,3 +294,47 @@ hook_probe.begin()
 hook_probe.interpolate(0.5)
 assert hook_probe.seen_alphas == [0.0, 0.5]
 hook_probe.finish()
+
+
+def render_animation_lifecycle(destination, seed):
+    """Exercise shared hooks and native composition through real PNG output."""
+    class AnimationLifecycleScene(Scene):
+        random_seed = seed & 0xFFFF_FFFF
+
+        def construct(self):
+            square = Square(side_length=0.5).move_to((1.0, 0.0, 0.0))
+            target = square.copy().move_to((-1.0, 0.0, 0.0))
+            self.add(square)
+            morph = Transform(square, target, path_arc=math.pi, rate_func=linear_rate)
+            morph.begin()
+            morph.interpolate(0.5)
+            midpoint = square.get_center()
+            assert np.allclose(midpoint, [0.0, 1.0, 0.0], atol=1e-5), midpoint
+            self.wait(1.0 / 30.0)
+            morph.finish()
+            assert np.allclose(square.get_center(), [-1.0, 0.0, 0.0], atol=1e-5)
+            assert not square.locked_data_keys
+            self.wait(1.0 / 30.0)
+
+            circle = Circle(radius=0.25).move_to((1.0, 0.0, 0.0))
+            self.play(
+                Succession(
+                    Transform(square, square.copy().shift((0.0, -1.0, 0.0)), run_time=0.1),
+                    ShowCreation(circle, run_time=0.1),
+                    rate_func=linear_rate,
+                ),
+            )
+            assert np.allclose(square.get_center(), [-1.0, -1.0, 0.0], atol=1e-5)
+            assert square in self.mobjects and circle in self.mobjects
+            self.wait(1.0 / 30.0)
+
+    scene = AnimationLifecycleScene()
+    scene._begin_render(destination, 96, 54, 30, 1, seed)
+    try:
+        scene.run()
+        return scene._finish_render(
+            scene.frame._core, scene.camera.light_source.get_center(),
+        )
+    except Exception:
+        scene._abort_render()
+        raise

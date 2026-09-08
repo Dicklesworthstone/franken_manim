@@ -2043,15 +2043,18 @@ remover_scene = Scene()
 remover_circle = manimlib.Circle()
 remover_scene.add(remover_circle)
 remover_anim = manimlib.Animation(remover_circle, run_time=0.25, remover=True)
+remover_scene.begin_animations([remover_anim])
 assert remover_scene.finish_animations([remover_anim]) is None
 assert remover_circle not in remover_scene.mobjects
 skip_progress_scene = Scene(skip_animations=True)
 skip_progress_circle = manimlib.Circle()
 skip_progress_anim = manimlib.Animation(skip_progress_circle, run_time=0.5)
+skip_progress_scene.begin_animations([skip_progress_anim])
 assert skip_progress_scene.progress_through_animations(
     [skip_progress_anim]
 ) is None
 assert np.isclose(skip_progress_scene.get_time(), 0.5)
+skip_progress_scene.finish_animations([skip_progress_anim])
 
 state_scene = Scene()
 state_square = manimlib.Square()
@@ -3030,7 +3033,7 @@ assert interpolating.get_field("point", 0) == [3.0, 0.0, 0.0]
 
 class LifecycleAnimation(Animation):
     def __init__(self):
-        super().__init__()
+        super().__init__(Mobject())
         self.calls = []
 
     def begin(self):

@@ -22,7 +22,7 @@ mod report;
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
-use std::ffi::{CString, c_int, c_void};
+use std::ffi::{CStr, CString, c_int, c_void};
 use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
@@ -9873,7 +9873,28 @@ fn execute_bootstrap(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     let globals = module.dict();
     let result = py.run(source.as_c_str(), Some(&globals), Some(&globals));
     module.delattr("_FMN_MODULE")?;
-    result
+    result?;
+    let semantics = CString::new(include_str!("../python/manimlib/_animation_semantics.py"))
+        .expect("embedded animation semantics contain no NUL");
+    install_animation_semantics(py, module, semantics.as_c_str())
+}
+
+fn install_animation_semantics(
+    py: Python<'_>,
+    module: &Bound<'_, PyModule>,
+    source: &CStr,
+) -> PyResult<()> {
+    // Use a private globals dictionary, so a direct ExtensionFileLoader and
+    // a wheel import execute identical code without importing the surrounding
+    // Python package or publishing another module in sys.modules.
+    let globals = PyDict::new(py);
+    globals.set_item("__name__", "manimlib._animation_semantics")?;
+    py.run(source, Some(&globals), Some(&globals))?;
+    let install = globals.get_item("install")?.ok_or_else(|| {
+        pyo3::exceptions::PyImportError::new_err("missing production animation semantics installer")
+    })?;
+    install.call1((module,))?;
+    Ok(())
 }
 
 fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -10145,6 +10166,41 @@ pub fn run_portal_gauntlet_png_still(
     seed: u64,
 ) -> Result<PortalGauntletReport, String> {
     run_portal_gauntlet_png(destination, seed, true)
+}
+
+/// Exercise the shared Animation/Transform lifecycle through native PNG output.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_animation_lifecycle(
+    destination: &std::path::Path,
+    seed: u64,
+) -> Result<PortalGauntletReport, String> {
+    let destination = destination
+        .to_str()
+        .ok_or_else(|| "animation lifecycle destination is not UTF-8".to_owned())?;
+    with_python_test_module("animation lifecycle", |py, _module, globals| {
+        let source = CString::new(include_str!("../tests/animation_semantics.py"))
+            .expect("animation suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let render = globals
+            .get_item("render_animation_lifecycle")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "animation lifecycle renderer is absent".to_owned())?;
+        let report = render
+            .call1((destination, seed))
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<(String, u64, u64, String, String, usize)>())
+            .map_err(|error| error.to_string())?;
+        Ok(PortalGauntletReport {
+            path: PathBuf::from(report.0),
+            frame_count: report.1,
+            bytes: report.2,
+            digest: report.3,
+            engine: report.4,
+            threads: report.5,
+        })
+    })
 }
 
 #[cfg(feature = "gauntlet")]
@@ -10597,6 +10653,48 @@ except Exception:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_animation_semantics_acceptance_suite() {
+        crate::with_python_test_module("animation acceptance", |py, module, globals| {
+            let begin = module
+                .getattr("Animation")
+                .and_then(|class| class.getattr("begin"))
+                .expect("production Animation.begin");
+            let semantics =
+                CString::new(include_str!("../python/manimlib/_animation_semantics.py"))
+                    .expect("embedded animation semantics contain no NUL");
+            install_animation_semantics(py, module, semantics.as_c_str())
+                .expect("repeated installation is harmless");
+            let installed_begin = module
+                .getattr("Animation")
+                .and_then(|class| class.getattr("begin"))
+                .expect("Animation.begin after repeated installation");
+            assert!(
+                begin.is(&installed_begin),
+                "repeated initialization preserves existing method identities"
+            );
+            let error = install_animation_semantics(py, module, c"pass")
+                .expect_err("an absent installer must fail initialization");
+            assert!(error.is_instance_of::<pyo3::exceptions::PyImportError>(py));
+            assert!(
+                error
+                    .to_string()
+                    .contains("missing production animation semantics installer")
+            );
+            globals
+                .set_item(
+                    "__file__",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/animation_semantics.py"),
+                )
+                .expect("set animation suite source path");
+            let source = CString::new(include_str!("../tests/animation_semantics.py"))
+                .expect("animation suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("native Animation/Transform acceptance suite");
+        });
+    }
 
     #[test]
     fn production_bridge_acceptance_suite() {

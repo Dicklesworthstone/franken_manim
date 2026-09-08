@@ -3,10 +3,11 @@
 
 def install(native):
     g = vars(native)
+    if g.get("_FMN_ANIMATION_SEMANTICS_INSTALLED", False):
+        return
     np = g["_np"]
     interpolate_value = g["_interpolate"]
     copy_module = g["_copy"]
-    root_module = g["_FMN_ROOT"]
     smooth_rate = g["_smooth_rate"]
     refuse_unrouted = g["_refuse_unrouted"]
     Mobject = g["Mobject"]
@@ -28,19 +29,19 @@ def install(native):
                 np.asarray(end, dtype=float),
                 alpha,
             )
-            return tuple(float(component) for component in value)
+            return tuple(value.tolist())
         if isinstance(start, list) or isinstance(end, list):
             value = interpolate_value(
                 np.asarray(start, dtype=float),
                 np.asarray(end, dtype=float),
                 alpha,
             )
-            return [float(component) for component in value]
+            return value.tolist()
         return interpolate_value(start, end, alpha)
 
     def mobject_interpolate(self, mobject1, mobject2, alpha, path_func=None):
         if path_func is None:
-            path_func = getattr(root_module, "straight_path")
+            path_func = g["straight_path"]
         alpha = float(alpha)
         locked_data = getattr(self, "locked_data_keys", ())
         constant_data = getattr(self, "const_data_keys", ())
@@ -68,6 +69,10 @@ def install(native):
         locked_uniforms = getattr(self, "locked_uniform_keys", ())
         for key in tuple(self.uniforms):
             if key in locked_uniforms:
+                continue
+            # Match Choreo's interpolate_fields: typed flags and joint style
+            # stay the live object's own; only numeric uniforms interpolate.
+            if key == "joint_type" or isinstance(self.uniforms[key], (bool, np.bool_)):
                 continue
             if key not in mobject1.uniforms or key not in mobject2.uniforms:
                 continue
@@ -104,7 +109,7 @@ def install(native):
         self.rate_func = (
             rate_func
             if rate_func is not None
-            else getattr(root_module, "smooth", smooth_rate)
+            else g.get("smooth", smooth_rate)
         )
         self.name = name or type(self).__name__ + str(mobject)
         self.remover = bool(remover)
@@ -116,7 +121,7 @@ def install(native):
         if self.run_time is None:
             self.run_time = 1.0
         if self.rate_func is None:
-            self.rate_func = getattr(root_module, "smooth", smooth_rate)
+            self.rate_func = g.get("smooth", smooth_rate)
         if self.lag_ratio is None:
             self.lag_ratio = 0.0
 
@@ -281,9 +286,9 @@ def install(native):
         if getattr(self, "path_func", None) is not None:
             return
         if float(self.path_arc) == 0.0:
-            self.path_func = getattr(root_module, "straight_path")
+            self.path_func = g["straight_path"]
         else:
-            self.path_func = getattr(root_module, "path_along_arc")(
+            self.path_func = g["path_along_arc"](
                 float(self.path_arc),
                 self.path_arc_axis,
             )
@@ -418,3 +423,35 @@ def install(native):
     ReplacementTransform.replace_mobject_with_target_in_scene = True
     TransformFromCopy.replace_mobject_with_target_in_scene = True
     TransformFromCopy.__init__ = transform_from_copy_init
+
+    # Both the embedded extension and installed wheel expose these same class
+    # objects. Give their methods the public identities before either route
+    # applies schema provenance or resolves qualified compatibility imports.
+    semantic_methods = {
+        Mobject: ("__str__", "interpolate"),
+        Animation: (
+            "__init__", "_validate_input_type", "_ensure_runtime_defaults",
+            "__str__", "begin", "finish", "create_starting_mobject",
+            "get_all_mobjects", "get_all_families_zipped",
+            "get_all_mobjects_to_update", "update_mobjects", "copy",
+            "update_rate_info", "interpolate", "update", "time_spanned_alpha",
+            "interpolate_mobject", "interpolate_submobject", "get_sub_alpha",
+            "set_run_time", "get_run_time", "set_rate_func", "get_rate_func",
+            "set_name", "is_remover", "clean_up_from_scene",
+        ),
+        NativeAnimation: ("__init__",),
+        Transform: (
+            "init_path_func", "create_target", "check_target_mobject_validity",
+            "_native_target", "begin", "finish", "clean_up_from_scene",
+            "get_all_mobjects", "get_all_families_zipped",
+            "interpolate_mobject", "interpolate_submobject",
+        ),
+        TransformFromCopy: ("__init__",),
+    }
+    for cls, names in semantic_methods.items():
+        for name in names:
+            function = vars(cls)[name]
+            function.__name__ = name
+            function.__qualname__ = f"{cls.__qualname__}.{name}"
+            function.__module__ = cls.__module__
+    g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
