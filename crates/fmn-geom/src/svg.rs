@@ -2913,29 +2913,11 @@ fn emit_style_attributes(style: &SvgStyle) -> String {
     out
 }
 
-/// Emit one resolved document back to SVG bytes.
-///
-/// The inverse of [`SvgDocument::parse`] for the accepted subset: shapes
-/// serialize as `<path>` elements carrying the full resolved style, so
-/// `parse(emit(document))` recovers the same geometry and style within
-/// 8-bit color rounding (the documented fidelity limit; gradients are
-/// already refused on import, so none can reach the emitter).
-///
-/// The document's `view_box` record is deliberately NOT re-emitted: the
-/// resolved shapes are already in the post-`viewBox`/`preserveAspectRatio`
-/// user space, so a re-emitted `viewBox` would make re-import apply the
-/// mapping a second time. The emitted document's geometry IS the final
-/// user space; re-parsing maps nothing.
-#[must_use]
-pub fn emit_svg_document(document: &SvgDocument) -> String {
-    emit_svg(&document.shapes, document.width, document.height, None)
-}
-
 /// Emit resolved shapes as an SVG document with the given viewport.
 ///
 /// A `view_box` here is a caller decision about the emitted coordinate
-/// system — [`emit_svg_document`] deliberately passes `None`, because its
-/// shapes are already in final user space.
+/// system — [`crate::svg::emit_svg_document`] deliberately passes `None`,
+/// because its shapes are already in final user space.
 #[must_use]
 pub fn emit_svg(
     shapes: &[SvgShape],
