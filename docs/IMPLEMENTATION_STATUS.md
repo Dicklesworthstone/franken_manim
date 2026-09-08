@@ -143,14 +143,20 @@ This checklist implements the user's explicit request for a detailed, persistent
     - [x] Preserve numeric nested uniforms and discrete flags/joint styles during interpolation; actual native acceptance passes.
     - [x] Forward remover flags through the shared constructor and replace the obsolete arc-refusal witness with an analytic midpoint, endpoint and updater-detachment check; the initial installed wheel passes the full bridge script.
     - [x] Reproduce `Scene.play` bypassing a Transform subclass against the native library; route overrides through the existing Choreo callback boundary and observe the regression pass.
-    - [ ] Reverify helper `update_mobjects(dt)`, cleanup and FocusOn/Flash helper initialization after the complete callback lifecycle is enabled. Retain the explicit intermediate-alpha and exact-dt assertions.
+    - [x] Reverify helper `update_mobjects(dt)`, cleanup and FocusOn/Flash helper initialization after the complete callback lifecycle is enabled. Both real native suites passed in `production-composition-timelines.log` (RCH hz3, exit 0, 2 tests); explicit intermediate-alpha and exact-dt assertions remain.
+    - [x] Correct composition wall-clock scaling and just-in-time Python succession begin/finish; observe both complete native suites pass.
+    - [ ] Repair the subsequently reproduced mixed native/Python same-object ordering defect. `mixed-succession-native-before.log` exits 101 with incorrect intermediate geometry despite correct endpoints. Exercise both directions, simultaneous argument order, nested coarse sampling, abort cleanup and real PNG capture before calling this complete.
+      - [x] Drive actual native leaves in the same ordered release window as Python leaves; both production suites pass in `production-native-leaf-drivers.log` (RCH hz3 exit 0).
+      - [ ] Verify the expanded simultaneous-order and exception witnesses, including actual Rust RecordBuffer locks and native suspension. The installed wheel exposed missing Reference lock-set initialization; that state is now initialized on every object construction path and awaits current native/wheel execution.
+      - [ ] Reexecute the PNG scenario with the added mixed same-object succession witness.
+    - [ ] Verify the corpus-discovered `TransformFromCopy` double-copy repair. Its public constructor now lowers its existing copy through native ReplacementTransform. Require exact source/target roots and the unchanged BeamSplitter baseline of 24 roots/194 family members; the failing pre-fix run measured 25/219.
     - [x] Preserve native-created composition roots in Python scene inspection. The real render scenario reproduced an empty `Scene.mobjects` after `Succession`; missing proxies now bind to existing native handles, retaining child identities and synchronizing parent edges. `animation-lifecycle-e2e-6.log` has terminal remote exit 0 and proves later remove/add operations too.
   - [ ] Register a real lifecycle/parity render scenario with deterministic logs and failure artifacts.
     - [x] Add `lifecycle.python_animation_semantics.v1` and its named focused test; correct the initial `ScenarioClass` spelling compile error.
     - [x] Execute the registered scenario, decode its native PNGs and inspect its deterministic log/failure-artifact behavior. One named scenario passes; its earlier assertion failures emitted the expected FMNA bundle and deterministic failure logs.
   - [ ] Build and install the current wheel in supported CPython; execute both acceptance suites and runtime parity audit.
     - [x] Qualify CPython 3.13.15, NumPy 2.5.2 and Maturin 1.14.1; build and install an actual wheel. Its full bridge script passes with the workspace version supplied independently.
-    - [ ] Rebuild the final callback fixes into a fresh wheel/environment and run both real-extension acceptance scripts plus the overlay-bound runtime receipt. The initial wheel predates the subclass repair.
+    - [ ] Rebuild the final callback fixes into a fresh wheel/environment and run both real-extension acceptance scripts plus the overlay-bound runtime receipt. The 04:40 wheel built successfully and passed bridge acceptance; animation acceptance failed on missing lock-set initialization, before reaching the parity audit. It predates the double-copy repair and cannot qualify the current source.
     - [x] Add both acceptance scripts to the permanent installed-wheel check, before its runtime audit.
     - [x] Execute the initial wheel's runtime audit against the exact current overlay/schema: terminal exit 1, 112 contradictions (107 placeholders and 5 missing symbols). Keep these failures visible; the receipt is not a parity pass.
   - [ ] Run required source gates, review the final diff, reverify acceptance with a fresh review pass, commit only owned work, then close only if complete.
@@ -161,14 +167,18 @@ This checklist implements the user's explicit request for a detailed, persistent
     - [ ] Obtain the complete workspace-test receipt before closing.
   - [ ] `fm-5wq.7`: inspect RCH source exclusions and restore the tracked corpus fixture in remote inputs; qualify pinned WASM target and CPython tools without deleting artifacts or disturbing peer jobs.
   - [ ] Obtain terminal full `cargo test`, Clippy, formatting and `scripts/check.sh` receipts; classify source failures separately from worker failures and repair actual roots.
+    - [x] Execute the previous full test gate: 2247 passed, 2 corpus failures, 11 ignored across 115 completed binaries (`full-cargo-test-wasm-audit.log`, RCH exit 101). Qualify the corpus's host-only tqdm dependency without adding it to the product requirements.
+    - [x] Rerun all eight original corpus seeds with tqdm: all import and execute; seven structural baselines match, BeamSplitter exposes the double copy, and the two-pass real-PNG determinism test passes (`corpus-current-tqdm.log`, RCH exit 101 overall).
+    - [ ] Complete current gates after the fixes. Own stale source-gate job 30011725038223381 was cancelled after reproducing the already-fixed missing lock-set error; its partial log is not a gate verdict. Worker vmi1264463's memory-pressure admission refusal is also not a source verdict.
 - [ ] `fm-7wm.6`: rebuild current WASM target/Node/browser packages, verify fresh-consumer serial/threaded output, and only then update the stale lock-bound audit.
   - [x] Re-derive the actual wasm dependency tree: it now includes fnp-random-core and fsci-linalg/fft/runtime, contradicting the old audit's absence claim.
   - [x] Qualify the pinned wasm32 nightly target, wasm-bindgen 0.2.127 and Binaryen 117 with verified archive hashes; install Node 22.22.1, webpack 5.109.2, webpack-cli 7.2.2 and Chrome 152 on the owned worker.
-  - [ ] Run the target build and Node smoke with current locks; retain terminal exits and output hashes.
+  - [x] Run the target build and Node smoke with current locks; retain terminal exits and output hashes.
     - [x] `cargo check --target wasm32-unknown-unknown -p fmn-wasm` passes remotely on hz3 with the current fnp/fsci dependency closure (`wasm-target-hz3-admission.log`, exit 0).
-    - [ ] Execute the actual Node smoke; the target check alone is not runtime evidence.
-  - [ ] Run the existing fresh-consumer browser/package gate, including serial/threaded byte comparison and the COOP/COEP negative case; preserve its actual source-dirty status.
-  - [ ] Update the audit's dependency statements and lock hashes only after those executions pass.
+    - [x] Execute the actual Node smoke: `wasm-node-current-2.log` exits 0 under `--locked`, digest `1f248a71347b82aa`, Node 22.22.1.
+  - [x] Run the existing fresh-consumer browser/package gate, including serial/threaded byte comparison and the COOP/COEP negative case: RCH hz3 exit 0, `wasm-package-current-3.log` and `.rch-results/wasm-package-20260908-0410/receipt.json`. Source commit a40c4a88 has `source_dirty=true`; no publication occurred. Chrome's matching sandbox helper was qualified without disabling the sandbox.
+  - [x] Update the audit's dependency statements and lock hashes only after those executions pass (`822ebee0`).
+  - [ ] Reexecute the governed closure and full source gates against the corrected audit before closure. The full `cargo test` run is in `full-cargo-test-wasm-audit.log`.
 - [ ] `fm-5wq.4.143`: bind authored parity claims to actual native and installed-wheel semantic witnesses, including intermediate state and wrong-behavior negative controls; coordinate existing `.141` helper scope.
   - [ ] `fm-5wq.4.141` is now guarded-claimed by SilentTurtle for verification of the already-landed 16 Reference-named helpers. Confirm constructor and absence contracts in the current native/wheel acceptance and full gates before closure; do not invent snake_case aliases.
 - [ ] `fm-5wq.4.144`: wire Python rendering to the native complete input closure, canonical artifact/provenance publication and replay; test successful certification and actual incomplete-input refusals.
