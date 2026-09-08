@@ -7387,8 +7387,8 @@ impl PyScene {
         Ok(slf.clone())
     }
 
-    fn get_mobjects<'py>(slf: &Bound<'py, Self>) -> Vec<Py<PyAny>> {
-        Self::_engine_roots(slf)
+    fn get_mobjects<'py>(slf: &Bound<'py, Self>) -> PyResult<Vec<Py<PyAny>>> {
+        slf.getattr("mobjects")?.extract()
     }
 
     /// Reassert the exact handle-to-Python identity mapping for an already
@@ -7514,7 +7514,7 @@ impl PyScene {
                         graph.push((
                             mob,
                             entry.buffer.schema().offset("fill_rgba").is_some(),
-                            entry.submobjects.clone(),
+                            entry.submobjects().to_vec(),
                         ));
                     }
                 }
