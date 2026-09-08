@@ -11,6 +11,21 @@ if not path:
 print(f"auditing imported manimlib: {path}")
 PY
 
+for suite in bridge animation_semantics; do
+    python3 - "$suite" <<'PY'
+import pathlib
+import runpy
+import sys
+import tomllib
+
+root = pathlib.Path.cwd()
+version = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+suite = root / "crates" / "fmn-python" / "tests" / (sys.argv[1] + ".py")
+runpy.run_path(str(suite), init_globals={"_expected_package_version": version})
+print(f"installed-wheel acceptance passed: {suite.name}")
+PY
+done
+
 report_file="$(mktemp)"
 trap 'rm -f "$report_file"' EXIT
 set +e

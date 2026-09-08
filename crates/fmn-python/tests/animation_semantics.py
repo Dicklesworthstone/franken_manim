@@ -315,7 +315,9 @@ assert play_hook_probe.seen_alphas, "Scene.play bypassed the Transform subclass 
 assert any(0.0 < alpha < 1.0 for alpha in play_hook_probe.seen_alphas)
 assert play_hook_probe.seen_alphas[0] == 0.0
 assert play_hook_probe.seen_alphas[-1] == 1.0
-assert np.allclose(play_hook_probe.seen_dts, [0.0, 1.0 / 30.0])
+# Plan §9.2: begin interpolates at zero separately; progression samples are
+# k/fps for k=1..N, each with the same rational frame delta.
+assert np.allclose(play_hook_probe.seen_dts, [1.0 / 30.0, 1.0 / 30.0]), play_hook_probe.seen_dts
 assert np.array_equal(play_hook_source.get_points(), [[0.0, 0.0, 0.0]])
 assert not play_hook_source.locked_data_keys
 
