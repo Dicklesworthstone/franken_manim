@@ -1034,9 +1034,9 @@ impl HostHandler {
                 let body = studio_index_response_body(&token)?;
                 write_html_response(stream, body.as_bytes())
             }
-            (Method::Get, "/studio.js") => {
-                let asset = ui::ui_asset("/studio.js").ok_or(HostError::Configuration(
-                    "the embedded studio.js asset is missing from the binary",
+            (Method::Get, "/studio.js" | "/studio.css") => {
+                let asset = ui::ui_asset(&request.path).ok_or(HostError::Configuration(
+                    "the embedded UI asset is missing from the binary",
                 ))?;
                 write_static_response(stream, asset.content_type, asset.bytes)
             }
@@ -1758,7 +1758,7 @@ fn write_html_response(stream: &mut impl Write, body: &[u8]) -> Result<(), HostE
         &[
             (
                 "Content-Security-Policy",
-                "default-src 'none'; img-src 'self'; script-src 'self'; connect-src 'self'",
+                "default-src 'none'; img-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'",
             ),
             ("Referrer-Policy", "no-referrer"),
             (ui::STUDIO_UI_VERSION_HEADER, ui::STUDIO_UI_VERSION),

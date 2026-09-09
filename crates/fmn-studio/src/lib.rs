@@ -26,8 +26,8 @@ pub use host::{
 };
 pub use inspect::{
     DebugOverlaySnapshot, InspectError, InspectorLimits, InspectorNode, InspectorSnapshot,
-    NativeSpanBinding, NodeOverlay, RecordFieldSnapshot, SourceSpanSnapshot, SpanKind,
-    SpanRegistry, TileOverlay, UniformSnapshot, WindingDirection,
+    InspectorView, NativeSpanBinding, NodeOverlay, RecordFieldSnapshot, SourceSpanSnapshot,
+    SpanKind, SpanRegistry, TileOverlay, UniformSnapshot, WindingDirection,
 };
 pub use protocol::{
     CURRENT_VERSION, Checkpoint, CrashReport, DebugLayerSet, FrameEncoding, FramePayload,

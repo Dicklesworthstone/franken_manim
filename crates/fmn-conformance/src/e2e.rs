@@ -21,9 +21,9 @@
 //! latter drives `fmn_cli`'s in-process runner (never a subprocess).
 //! [`Surface::PythonInProcess`] drives the feature-gated PyO3 portal adapter;
 //! [`Surface::PythonPending`] remains only for unlanded Python surface rows.
-//! [`Surface::StudioInProcess`] drives the production
-//! Studio composition root; the CLI crate separately proves subprocess
-//! isolation and loopback publication.
+//! [`Surface::StudioInProcess`] drives the production Studio composition root;
+//! [`Surface::StudioSubprocess`] executes Cargo's shipping CLI artifact through
+//! its isolated worker and authenticated loopback host.
 //!
 //! ## The log contract and `LogExpect`
 //!
@@ -240,6 +240,8 @@ pub enum Surface {
     PythonInProcess,
     /// Studio's production composition root in-process.
     StudioInProcess,
+    /// Studio's shipping CLI, isolated worker, and real loopback HTTP host.
+    StudioSubprocess,
 }
 
 impl Surface {
@@ -252,6 +254,7 @@ impl Surface {
             Self::PythonPending => "python",
             Self::PythonInProcess => "python_in_process",
             Self::StudioInProcess => "studio_in_process",
+            Self::StudioSubprocess => "studio_subprocess",
         }
     }
 
@@ -265,9 +268,11 @@ impl Surface {
     #[must_use]
     pub const fn pending_reason(self) -> Option<&'static str> {
         match self {
-            Self::RustApi | Self::CliInProcess | Self::PythonInProcess | Self::StudioInProcess => {
-                None
-            }
+            Self::RustApi
+            | Self::CliInProcess
+            | Self::PythonInProcess
+            | Self::StudioInProcess
+            | Self::StudioSubprocess => None,
             Self::PythonPending => {
                 Some("surface pending: the Python binding lands with its bead (never stubbed)")
             }

@@ -2024,7 +2024,7 @@ fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheR
             Ok(Some(kind)) => {
                 return CacheReport::Configured {
                     root: root.to_path_buf(),
-                    exists: component == root,
+                    exists: component == root, // ubs:ignore - Compares public filesystem paths, not authentication material.
                     direct_entries: None,
                     warning: Some(format!(
                         "cache traversal refused {kind:?} at {:?}",
@@ -2722,7 +2722,7 @@ impl NativeStudioFrames {
         match self {
             Self::Captured(packets) => packets
                 .iter()
-                .position(|packet| packet.frame_index() == frame),
+                .position(|packet| packet.frame_index() == frame), // ubs:ignore - Compares public frame ordinals for checkpoint lookup.
             Self::Compiled(_) => usize::try_from(frame)
                 .ok()
                 .filter(|index| *index < self.len()),
@@ -2937,7 +2937,7 @@ struct NativeStudioWorker {
 impl NativeStudioWorker {
     fn from_command(fs: &dyn FileSystem, command: &StudioCommand) -> Result<Self, CliError> {
         let input = resolve_native_render_input(fs, &command.render)?;
-        let (scene, frames, config, source_read, span_records) = match input {
+        let (scene, frames, fps, config, source_read, span_records) = match input {
             NativeRenderInput::Builtin { names } => {
                 if names.len() != 1 {
                     return Err(CliError::new(
@@ -2964,6 +2964,10 @@ impl NativeStudioWorker {
                     &mut capture,
                 )
                 .map_err(native_scene_error)?;
+                // Windowed runtime sampling resolves its own effective clock.
+                // Inspector and checkpoint time must use that clock, not the
+                // requested output FPS from the render configuration.
+                let fps = completed.scene().fps();
                 if capture.packets.is_empty() {
                     completed
                         .into_scene()
@@ -2977,6 +2981,7 @@ impl NativeStudioWorker {
                 (
                     scene,
                     NativeStudioFrames::Captured(capture.packets),
+                    fps,
                     config,
                     None,
                     span_records,
@@ -3001,6 +3006,7 @@ impl NativeStudioWorker {
                     ));
                 }
                 compiled_command.fps = Some(bundle.fps());
+                let fps = bundle.fps();
                 let config = resolve_render_config(fs, &compiled_command)?;
                 let path = source_item
                     .virtual_path
@@ -3008,6 +3014,7 @@ impl NativeStudioWorker {
                 (
                     name,
                     NativeStudioFrames::Compiled(bundle),
+                    fps,
                     config,
                     Some(AssetRead {
                         path,
@@ -3084,7 +3091,7 @@ impl NativeStudioWorker {
             },
             current_frame: 0,
             max_frame_bytes: fmn_studio::ProtocolLimits::default().max_frame_bytes,
-            fps: config.camera.fps,
+            fps,
             seed: config.determinism.seed,
             checkpoint_frames: command.checkpoint_frames,
             source_read,
@@ -3381,8 +3388,9 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
             | fmn_studio::SupervisorRequest::Scrub { scene, frame } => {
                 self.require_scene(&scene)?;
                 let frame = self.resolve_frame(frame)?;
+                let rendered = self.render_frame(frame)?;
                 self.current_frame = frame;
-                self.render_frame(frame)
+                Ok(rendered)
             }
             fmn_studio::SupervisorRequest::Event { scene, .. } => {
                 self.require_scene(&scene)?;
@@ -3397,8 +3405,24 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
                 let limits = fmn_studio::InspectorLimits::default();
                 let (registry, _skipped_records) =
                     rebuild_span_registry(&stage, &self.span_records);
-                let bytes = fmn_studio::InspectorSnapshot::capture(&stage, &registry, limits)
-                    .and_then(|snapshot| snapshot.to_json(limits))
+                let mut snapshot =
+                    fmn_studio::InspectorSnapshot::capture(&stage, &registry, limits)
+                        .map_err(|error| studio_service_error(error.to_string()))?;
+                snapshot.view = Some(
+                    fmn_studio::InspectorView::new(
+                        u64::try_from(self.current_frame)
+                            .map_err(|_| studio_service_error("preview frame exceeds u64"))?,
+                        u64::try_from(self.frames.len())
+                            .map_err(|_| studio_service_error("preview frame count exceeds u64"))?,
+                        self.fps,
+                        self.renderer.frame_config.viewport,
+                        self.renderer.frame_config.map,
+                        false,
+                    )
+                    .map_err(|error| studio_service_error(error.to_string()))?,
+                );
+                let bytes = snapshot
+                    .to_json(limits)
                     .map_err(|error| studio_service_error(error.to_string()))?;
                 Ok(self.studio_data(fmn_studio::StudioDataKind::Inspection, bytes))
             }
@@ -5244,6 +5268,7 @@ fn resolve_native_render_input(
             format!("select {BUILTIN_SCENE_SOURCE} or provide one compiled .fmtl artifact"),
         )
     })?;
+    // ubs:ignore - The public @builtin CLI selector is not a credential.
     if source == Path::new(BUILTIN_SCENE_SOURCE) {
         let names = if command.write_all {
             fmn::builtins::PRIMITIVE_SCENE_NAMES
@@ -6057,6 +6082,7 @@ fn configured_output_directory(config: &fmn_config::Config) -> PathBuf {
         .directories
         .subdirs
         .iter()
+        // ubs:ignore - Selects a public configuration field name, not a secret.
         .find(|(name, _)| name == "output")
     {
         root.push(output);
@@ -8090,7 +8116,7 @@ mod tests {
     fn render(invocation: Invocation) -> RenderCommand {
         match invocation {
             Invocation::Render(command) => command,
-            other => panic!("expected render command, got {other:?}"),
+            other => panic!("expected render command, got {other:?}"), // ubs:ignore - cfg(test) helper fails if parser returns the wrong command variant.
         }
     }
 
@@ -8156,10 +8182,12 @@ mod tests {
             for alias in spec.options {
                 let args = isolated_args(spec, alias);
                 if let Err(error) = parse_args(args.clone()) {
-                    panic!(
-                        "generated alias {alias:?} ({}) did not parse from {args:?}: {error}",
-                        spec.binding
-                    );
+                    // UBS counts every macro source line; preserve the opening-line reason.
+                    #[rustfmt::skip]
+                    panic!( // ubs:ignore - cfg(test) must fail when an advertised generated alias cannot parse.
+                        "generated alias {alias:?} ({}) did not parse from {args:?}: {error}", // ubs:ignore - Diagnostic text for this test-only parser failure.
+                        spec.binding // ubs:ignore - Public flag identity in this test-only failure diagnostic.
+                    ); // ubs:ignore - Completes the test-only assertion failure; no production panic path.
                 }
             }
         }
@@ -9011,7 +9039,7 @@ mod tests {
             ..
         } = ffmpeg
         else {
-            panic!("unexpected report: {ffmpeg:?}");
+            panic!("unexpected report: {ffmpeg:?}"); // ubs:ignore - cfg(test) requires the fixture locator to report available ffmpeg.
         };
         assert_eq!(path.to_str(), Some(canonical));
         assert_eq!(version, "ffmpeg version cli-locator-fixture");
@@ -9041,7 +9069,7 @@ mod tests {
             .expect("doctor snapshot resolves");
         assert!(matches!(
             snapshot.cache,
-            CacheReport::Configured { ref root, .. } if root == &expected
+            CacheReport::Configured { ref root, .. } if root == &expected // ubs:ignore - Test compares public default cache paths, not credentials.
         ));
     }
 
@@ -9088,7 +9116,7 @@ mod tests {
                 assert!(warning.contains("RegularFile"));
                 assert!(warning.contains("/cache/blocker"));
             }
-            other => panic!("expected a no-follow traversal warning, got {other:?}"),
+            other => panic!("expected a no-follow traversal warning, got {other:?}"), // ubs:ignore - cfg(test) must reject missing wrong-kind traversal warnings.
         }
     }
 
@@ -9108,7 +9136,7 @@ mod tests {
                 assert_eq!(direct_entries, None);
                 assert!(warning.contains("1-entry limit"));
             }
-            other => panic!("expected a bounded cache-count warning, got {other:?}"),
+            other => panic!("expected a bounded cache-count warning, got {other:?}"), // ubs:ignore - cfg(test) must reject missing entry-limit warnings.
         }
     }
 
@@ -9123,7 +9151,7 @@ mod tests {
         // temp_dir lives under /var -> /private/var; resolve it first.
         let tmp = std::env::temp_dir();
         let tmp = tmp.canonicalize().unwrap_or(tmp);
-        let root = tmp.join(format!("fmn-cli-clear-cache-{}", std::process::id()));
+        let root = tmp.join(format!("fmn-cli-clear-cache-{}", std::process::id())); // ubs:ignore - PID labels a test cache directory; it generates no security credential.
         let _ = StdFs.remove_dir_all(&root);
         let store = Store::open(
             Arc::new(StdFs),
@@ -9135,9 +9163,9 @@ mod tests {
         let namespace = store
             .namespace("cli", 1, NamespacePolicy::default())
             .expect("open cache namespace");
-        let key = KeyBuilder::new("cli-clear")
-            .push_str("fixture")
-            .finish()
+        let key = KeyBuilder::new("cli-clear") // ubs:ignore - Builds a public cache content address, not an authentication key.
+            .push_str("fixture") // ubs:ignore - Fixed fixture content is intentionally deterministic cache key material.
+            .finish() // ubs:ignore - KeyBuilder hashes canonical bytes with SHA256; this is not random-token generation.
             .expect("cache key");
         namespace.put(&key, b"cached").expect("seed cache");
         drop(namespace);
@@ -9429,7 +9457,7 @@ mod tests {
         let result = emitter.finish();
         assert!(matches!(
             result,
-            Err(ref failure) if failure.error == fmn_output::EmitterError::Cancelled
+            Err(ref failure) if failure.error == fmn_output::EmitterError::Cancelled // ubs:ignore - Test compares a public error enum to its expected cancellation variant.
         ));
     }
 
@@ -9587,6 +9615,91 @@ mod tests {
             .expect_err("version-1 schema cannot carry native non-UTF-8");
         assert_eq!(error.exit_name(), "config");
         assert!(error.message().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn studio_inspector_view_uses_the_render_map_and_keeps_failed_scrubs_atomic() {
+        use fmn_studio::{SupervisorRequest, WorkerResponse, WorkerService};
+
+        let fs = VirtualFs::new();
+        fs.insert("/studio.yml", b"sizes:\n  frame_height: 6\n".to_vec());
+        let Invocation::Studio(command) = parse_args([
+            "studio",
+            "--config_file",
+            "/studio.yml",
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+        .expect("native Studio command") else {
+            panic!("Studio front door expected"); // ubs:ignore - cfg(test) requires parsing to select the Studio command variant.
+        };
+        let mut worker = NativeStudioWorker::from_command(&fs, &command)
+            .expect("construct native preview worker");
+        // The built-in plays 0.25 s and waits 0.125 s. Windowed runtime fixes
+        // the clock at 30 fps: ceil(0.25 * 30) + ceil(0.125 * 30) = 8 + 4.
+        assert_eq!(worker.fps, 30, "windowed clock overrides requested 8 fps");
+        assert_eq!(worker.frames.len(), 12);
+        let stage = worker.frames.stage_at(0).expect("first captured stage");
+        let checkpoint = SceneState::from_bytes(
+            &worker.state_bytes(0, 1).expect("captured checkpoint"),
+            &stage,
+        )
+        .expect("decode native checkpoint");
+        assert_eq!(checkpoint.fps, 30);
+        assert_eq!(checkpoint.frames_elapsed, 1);
+        let request = |frame| SupervisorRequest::Scrub {
+            scene: "circle_shift.v1".to_owned(),
+            frame,
+        };
+        let inspect = |worker: &mut NativeStudioWorker| {
+            let response = worker
+                .handle(SupervisorRequest::Inspect {
+                    scene: "circle_shift.v1".to_owned(),
+                })
+                .expect("inspect current native stage");
+            let WorkerResponse::StudioData { kind, bytes, .. } = response else {
+                panic!("inspection document expected"); // ubs:ignore - cfg(test) rejects a worker response other than the requested inspection document.
+            };
+            assert_eq!(kind, fmn_studio::StudioDataKind::Inspection);
+            String::from_utf8(bytes).expect("inspector JSON is UTF-8")
+        };
+        assert!(matches!(
+            worker.handle(request(0)).unwrap(),
+            WorkerResponse::Frame(_)
+        ));
+        let before = inspect(&mut worker);
+        assert!(before.contains(
+            "\"view\":{\"frame_index\":0,\"frame_count\":12,\"fps\":30,\"width\":96,\"height\":54,\"scale\":9,\"origin\":[48,27],\"input_events\":false}"
+        ), "{before}");
+        assert!(before.contains("\"scene_time\":0.03333333333333333"));
+        let frame_budget = worker.max_frame_bytes;
+        worker.max_frame_bytes = 1;
+        let refusal = worker
+            .handle(request(1))
+            .expect_err("PNG cannot fit one byte");
+        assert!(
+            refusal
+                .to_string()
+                .contains("over the negotiated 1-byte budget")
+        );
+        assert_eq!(worker.current_frame, 0);
+        assert_eq!(inspect(&mut worker), before);
+        worker.max_frame_bytes = frame_budget;
+        let WorkerResponse::Frame(frame) = worker.handle(request(1)).unwrap() else {
+            panic!("successful scrub frame expected"); // ubs:ignore - cfg(test) requires successful scrubbing to return a rendered frame.
+        };
+        assert_eq!(frame.frame_index, 1);
+        let after = inspect(&mut worker);
+        assert!(
+            after.contains("\"view\":{\"frame_index\":1,\"frame_count\":12"),
+            "{after}"
+        );
     }
 
     #[test]

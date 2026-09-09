@@ -13,9 +13,10 @@ use fmn_mobject::{Mobject, Stage};
 use fmn_scene::{RenderBackendRecord, RenderBackendRole};
 use fmn_studio::{
     CapabilityToken, DebugLayerSet, DebugOverlaySnapshot, FrameEncoding, FrameHub, FramePayload,
-    FrameStream, InspectError, InspectorLimits, InspectorSnapshot, NativeSpanBinding, NodeOverlay,
-    ProtocolLimits, ScrubMode, SpanKind, SpanRegistry, TerminalPreview, TerminalProtocol,
-    TileOverlay, TuiError, TuiLimits, commit_timeline_frame, preview_timeline_frame,
+    FrameStream, InspectError, InspectorLimits, InspectorSnapshot, InspectorView,
+    NativeSpanBinding, NodeOverlay, ProtocolLimits, ScrubMode, SpanKind, SpanRegistry,
+    TerminalPreview, TerminalProtocol, TileOverlay, TuiError, TuiLimits, commit_timeline_frame,
+    preview_timeline_frame,
 };
 
 struct PayloadWitness<'a> {
@@ -241,6 +242,7 @@ fn studio_json_refuses_before_growing_past_the_first_atom() {
     let inspection = InspectorSnapshot {
         version: 1,
         scene_time: 0.0,
+        view: None,
         nodes: Vec::new(),
         truncated: false,
     };
@@ -274,6 +276,140 @@ fn studio_json_refuses_before_growing_past_the_first_atom() {
         overlays.to_json(limits).unwrap(),
         br#"{"version":1,"layers":0,"truncated":false,"tiles":[],"nodes":[]}"#
     );
+}
+
+#[test]
+fn inspector_view_is_additive_and_obeys_the_exact_json_byte_limit() {
+    let limits = InspectorLimits::default();
+    let mut snapshot =
+        InspectorSnapshot::capture(&Stage::new(), &SpanRegistry::new(), limits).unwrap();
+    assert_eq!(snapshot.view, None);
+    let before = snapshot.to_json(limits).unwrap();
+    snapshot.view = Some(
+        InspectorView::new(
+            2,
+            3,
+            8,
+            fmn_render::Viewport {
+                width: 96,
+                height: 54,
+            },
+            fmn_render::ScreenMap {
+                scale: 6.75,
+                origin: [48.0, 27.0],
+            },
+            false,
+        )
+        .unwrap(),
+    );
+    let json = snapshot.to_json(limits).unwrap();
+    assert_eq!(snapshot.version, 1);
+    assert_eq!(
+        json,
+        br#"{"version":1,"scene_time":0,"truncated":false,"nodes":[],"view":{"frame_index":2,"frame_count":3,"fps":8,"width":96,"height":54,"scale":6.75,"origin":[48,27],"input_events":false}}"#
+    );
+    assert_eq!(
+        snapshot
+            .to_json(InspectorLimits {
+                max_json_bytes: json.len(),
+                ..limits
+            })
+            .unwrap(),
+        json
+    );
+    assert!(matches!(
+        snapshot.to_json(InspectorLimits { max_json_bytes: json.len() - 1, ..limits }),
+        Err(InspectError::JsonLimit { limit, needed }) if limit == json.len() - 1 && needed == json.len()
+    ));
+    snapshot.view = None;
+    assert_eq!(snapshot.to_json(limits).unwrap(), before);
+}
+
+#[test]
+fn inspector_view_refuses_malformed_range_geometry_and_maps() {
+    let viewport = fmn_render::Viewport {
+        width: 96,
+        height: 54,
+    };
+    let map = fmn_render::ScreenMap {
+        scale: 6.75,
+        origin: [48.0, 27.0],
+    };
+    for (index, count, fps) in [(0, 0, 8), (3, 3, 8), (0, u64::MAX, 8), (0, 3, 0)] {
+        assert!(matches!(
+            InspectorView::new(index, count, fps, viewport, map, false),
+            Err(InspectError::InvalidView(_))
+        ));
+    }
+    for viewport in [
+        fmn_render::Viewport {
+            width: 0,
+            height: 54,
+        },
+        fmn_render::Viewport {
+            width: 96,
+            height: 0,
+        },
+        fmn_render::Viewport {
+            width: u32::MAX,
+            height: u32::MAX,
+        },
+    ] {
+        assert!(matches!(
+            InspectorView::new(0, 3, 8, viewport, map, false),
+            Err(InspectError::InvalidView(_))
+        ));
+    }
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            InspectorView::new(
+                0,
+                3,
+                8,
+                viewport,
+                fmn_render::ScreenMap { scale, ..map },
+                false
+            ),
+            Err(InspectError::InvalidView(_))
+        ));
+    }
+    for origin in [
+        [f64::NAN, 0.0],
+        [0.0, f64::INFINITY],
+        [f64::NEG_INFINITY, 0.0],
+    ] {
+        assert!(matches!(
+            InspectorView::new(
+                0,
+                3,
+                8,
+                viewport,
+                fmn_render::ScreenMap { origin, ..map },
+                false
+            ),
+            Err(InspectError::InvalidView(_))
+        ));
+    }
+    let mut snapshot = InspectorSnapshot::capture(
+        &Stage::new(),
+        &SpanRegistry::new(),
+        InspectorLimits::default(),
+    )
+    .unwrap();
+    let mut view = InspectorView::new(0, 3, 8, viewport, map, false).unwrap();
+    view.frame_index = view.frame_count;
+    snapshot.view = Some(view);
+    assert!(matches!(
+        snapshot.to_json(InspectorLimits::default()),
+        Err(InspectError::InvalidView(_))
+    ));
+    view.frame_index = 0;
+    view.scale = f64::NAN;
+    snapshot.view = Some(view);
+    assert!(matches!(
+        snapshot.to_json(InspectorLimits::default()),
+        Err(InspectError::InvalidView(_))
+    ));
 }
 
 #[test]

@@ -54,7 +54,8 @@
 //! CPython adapter. Studio is live through the production CLI composition root;
 //! both have registered frame scenarios, while unsupported Python modes remain
 //! precise capability refusals;
-//! the CLI crate separately proves the subprocess supervisor boundary.
+//! Studio also has a mandatory native subprocess lifecycle row over Cargo's
+//! exact shipping CLI artifact, authenticated loopback HTTP and multipart PNG.
 //! Every seeded class carries one deliberately-injected
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
@@ -113,6 +114,7 @@ use fmn_scene::{
     SceneSink,
 };
 use fmn_tex::{Prim, TexError};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1210,6 +1212,565 @@ fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("studio_preview_frames", 1)
         .with_counter("studio_png_dimensions", 1)
         .with_counter("studio_backend_journaled", 1))
+}
+
+const STUDIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const STUDIO_HEADER_LIMIT: usize = 16 * 1024;
+const STUDIO_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+/// Own the real CLI process from spawn through every failure path. Pipe
+/// readers retain no diagnostics containing the readiness capability.
+struct StudioProcess {
+    child: std::process::Child,
+    stdout_done: std::sync::mpsc::Receiver<Result<usize, std::io::Error>>,
+    stderr_done: std::sync::mpsc::Receiver<Result<usize, std::io::Error>>,
+}
+
+fn studio_io_error(operation: &'static str, error: std::io::Error) -> ScenarioError {
+    fail(format!("Studio {operation}: {:?}", error.kind()))
+}
+
+fn studio_drain(mut reader: impl Read) -> Result<usize, std::io::Error> {
+    let mut count = 0usize;
+    let mut bytes = [0_u8; 4096];
+    loop {
+        let read = reader.read(&mut bytes)?;
+        if read == 0 {
+            return Ok(count);
+        }
+        // Continue draining to prevent pipe backpressure, retaining only a
+        // bounded count. Any output beyond readiness is a test refusal.
+        count = count.saturating_add(read).min(STUDIO_BODY_LIMIT);
+    }
+}
+
+impl StudioProcess {
+    fn launch(directory: &std::path::Path) -> Result<(Self, StudioEndpoint), ScenarioError> {
+        let (ready_send, ready_recv) = std::sync::mpsc::sync_channel(1);
+        let (stdout_send, stdout_done) = std::sync::mpsc::sync_channel(1);
+        let (stderr_send, stderr_done) = std::sync::mpsc::sync_channel(1);
+        let mut command = std::process::Command::new(env!("CARGO_BIN_FILE_FMN_CLI_fmn"));
+        command
+            .args([
+                "studio",
+                "--robot",
+                "--no-browser",
+                "--resolution",
+                "96x54",
+                "--fps",
+                "8",
+                "--threads",
+                "1",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "tex_span.v1",
+            ])
+            .current_dir(directory)
+            .env_clear()
+            .env("PATH", "")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // Native Windows system DLL lookup retains its host-owned directory;
+        // no Python, user configuration, or executable search path is inherited.
+        if cfg!(windows)
+            && let Some(root) = std::env::var_os("SystemRoot")
+        {
+            command.env("SystemRoot", root);
+        }
+        let child = command
+            .spawn()
+            .map_err(|error| studio_io_error("spawn", error))?;
+        let mut process = Self {
+            child,
+            stdout_done,
+            stderr_done,
+        };
+        let stdout = process
+            .child
+            .stdout
+            .take()
+            .ok_or_else(|| fail("Studio stdout is missing"))?;
+        let stderr = process
+            .child
+            .stderr
+            .take()
+            .ok_or_else(|| fail("Studio stderr is missing"))?;
+        std::thread::Builder::new()
+            .name("studio-e2e-stdout".to_owned())
+            .spawn(move || {
+                let mut reader = std::io::BufReader::new(stdout);
+                let mut line = Vec::new();
+                let ready = reader
+                    .by_ref()
+                    .take((STUDIO_HEADER_LIMIT + 1) as u64)
+                    .read_until(b'\n', &mut line)
+                    .map(|_| line);
+                let _ = ready_send.send(ready);
+                let _ = stdout_send.send(studio_drain(reader));
+            })
+            .map_err(|error| studio_io_error("stdout reader", error))?;
+        std::thread::Builder::new()
+            .name("studio-e2e-stderr".to_owned())
+            .spawn(move || {
+                let _ = stderr_send.send(studio_drain(stderr));
+            })
+            .map_err(|error| studio_io_error("stderr reader", error))?;
+        let ready = ready_recv
+            .recv_timeout(STUDIO_IO_TIMEOUT)
+            .map_err(|_| fail("Studio readiness deadline expired"))?
+            .map_err(|error| studio_io_error("readiness", error))?;
+        if ready.len() > STUDIO_HEADER_LIMIT || !ready.ends_with(b"\n") {
+            return Err(fail("Studio readiness exceeded its bounded line contract"));
+        }
+        let endpoint = StudioEndpoint::from_ready(&ready)?;
+        Ok((process, endpoint))
+    }
+
+    fn wait_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<std::process::ExitStatus, ScenarioError> {
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .map_err(|error| studio_io_error("reap", error))?
+            {
+                return Ok(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(fail("Studio shutdown deadline expired"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn finish(&mut self) -> Result<(), ScenarioError> {
+        drop(self.child.stdin.take());
+        let status = self.wait_until(std::time::Instant::now() + STUDIO_IO_TIMEOUT)?;
+        if !status.success() {
+            return Err(fail("Studio did not exit successfully after stdin EOF"));
+        }
+        for receiver in [&self.stdout_done, &self.stderr_done] {
+            let count = receiver
+                .recv_timeout(STUDIO_IO_TIMEOUT)
+                .map_err(|_| fail("Studio pipe reader did not finish after process exit"))?
+                .map_err(|error| studio_io_error("pipe drain", error))?;
+            if count != 0 {
+                return Err(fail(
+                    "Studio emitted unexpected diagnostics after readiness",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StudioProcess {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        if self
+            .wait_until(std::time::Instant::now() + std::time::Duration::from_secs(3))
+            .is_err()
+        {
+            let _ = self.child.kill();
+            let _ = self.wait_until(std::time::Instant::now() + std::time::Duration::from_secs(3));
+        }
+    }
+}
+
+/// The capability never implements Debug, enters an error, or reaches logs.
+struct StudioEndpoint {
+    address: std::net::SocketAddr,
+    capability: String,
+}
+
+impl StudioEndpoint {
+    fn from_ready(bytes: &[u8]) -> Result<Self, ScenarioError> {
+        let ready =
+            std::str::from_utf8(bytes).map_err(|_| fail("Studio readiness is not UTF-8"))?;
+        if !ready.contains("\"kind\":\"studio_ready\"")
+            || !ready.contains("\"scene\":\"tex_span.v1\"")
+            || !ready.contains("\"worker_generation\":1")
+        {
+            return Err(fail("Studio readiness has the wrong production identity"));
+        }
+        let url = ready
+            .split_once("\"url\":\"")
+            .and_then(|(_, rest)| rest.split_once('"').map(|(url, _)| url))
+            .and_then(|url| url.strip_prefix("http://"))
+            .ok_or_else(|| fail("Studio readiness omitted its HTTP capability URL"))?;
+        let (authority, capability) = url
+            .split_once("/?cap=")
+            .ok_or_else(|| fail("Studio readiness URL has an unexpected shape"))?;
+        let address = authority
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| fail("Studio readiness authority is not a socket address"))?;
+        if !address.ip().is_loopback()
+            || address.port() == 0
+            || capability.len() != 64
+            || !capability.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(fail(
+                "Studio readiness did not supply a loopback session capability",
+            ));
+        }
+        Ok(Self {
+            address,
+            capability: capability.to_owned(),
+        })
+    }
+
+    fn connect(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<std::io::BufReader<std::net::TcpStream>, ScenarioError> {
+        let mut stream = std::net::TcpStream::connect_timeout(&self.address, STUDIO_IO_TIMEOUT)
+            .map_err(|error| studio_io_error("connect", error))?;
+        stream
+            .set_write_timeout(Some(STUDIO_IO_TIMEOUT))
+            .map_err(|error| studio_io_error("write timeout", error))?;
+        let header = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nOrigin: http://{}\r\nUser-Agent: OpenAI File Downloader, XaiImageApiFetch/1.0\r\nX-FMN-Capability: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            self.address,
+            self.address,
+            self.capability,
+            body.len(),
+        );
+        stream
+            .write_all(header.as_bytes())
+            .and_then(|()| stream.write_all(body))
+            .map_err(|error| studio_io_error("request write", error))?;
+        Ok(std::io::BufReader::new(stream))
+    }
+
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        status: u16,
+    ) -> Result<Vec<u8>, ScenarioError> {
+        let mut reader = self.connect(method, path, body)?;
+        let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
+        let header = studio_read_header(&mut reader, deadline)?;
+        if !header.starts_with(&format!("HTTP/1.1 {status} ")) {
+            return Err(fail(format!(
+                "Studio {path} returned an unexpected HTTP status"
+            )));
+        }
+        if !studio_header_field(&header, "Content-Type")?.starts_with("application/json") {
+            return Err(fail("Studio API response is not JSON"));
+        }
+        let count = studio_header_number(&header, "Content-Length")?;
+        let bytes = studio_read_body(&mut reader, count, deadline)?;
+        if bytes
+            .windows(self.capability.len())
+            .any(|part| part == self.capability.as_bytes())
+        {
+            return Err(fail(
+                "Studio API unexpectedly disclosed its session capability",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn stream(&self) -> Result<StudioFrameReader, ScenarioError> {
+        let mut reader = self.connect("GET", "/stream", b"")?;
+        let header =
+            studio_read_header(&mut reader, std::time::Instant::now() + STUDIO_IO_TIMEOUT)?;
+        if !header.starts_with("HTTP/1.1 200 ")
+            || studio_header_field(&header, "Content-Type")?
+                != format!(
+                    "multipart/x-mixed-replace; boundary={}",
+                    fmn_studio::MULTIPART_BOUNDARY
+                )
+        {
+            return Err(fail("Studio did not open its real multipart PNG stream"));
+        }
+        Ok(StudioFrameReader { reader })
+    }
+}
+
+fn studio_read_some(
+    reader: &mut std::io::BufReader<std::net::TcpStream>,
+    bytes: &mut [u8],
+    deadline: std::time::Instant,
+) -> Result<usize, ScenarioError> {
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| fail("Studio HTTP response deadline expired"))?;
+    reader
+        .get_mut()
+        .set_read_timeout(Some(remaining))
+        .map_err(|error| studio_io_error("read timeout", error))?;
+    let read = reader
+        .read(bytes)
+        .map_err(|error| studio_io_error("response read", error))?;
+    if read == 0 {
+        return Err(fail("Studio response ended before its declared boundary"));
+    }
+    Ok(read)
+}
+
+fn studio_read_header(
+    reader: &mut std::io::BufReader<std::net::TcpStream>,
+    deadline: std::time::Instant,
+) -> Result<String, ScenarioError> {
+    let mut header = Vec::new();
+    while header.len() < STUDIO_HEADER_LIMIT {
+        let mut byte = [0];
+        studio_read_some(reader, &mut byte, deadline)?;
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            return String::from_utf8(header)
+                .map_err(|_| fail("Studio HTTP headers are not UTF-8"));
+        }
+    }
+    Err(fail("Studio HTTP header exceeded its byte budget"))
+}
+
+fn studio_header_field<'a>(header: &'a str, key: &str) -> Result<&'a str, ScenarioError> {
+    let mut values = header.lines().skip(1).filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(key).then(|| value.trim())
+    });
+    let value = values
+        .next()
+        .ok_or_else(|| fail("Studio response omitted a required header"))?;
+    if values.next().is_some() {
+        return Err(fail("Studio response duplicated a required header"));
+    }
+    Ok(value)
+}
+
+fn studio_header_number(header: &str, key: &str) -> Result<usize, ScenarioError> {
+    studio_header_field(header, key)?
+        .parse()
+        .map_err(|_| fail("Studio response has an invalid numeric header"))
+}
+
+fn studio_read_body(
+    reader: &mut std::io::BufReader<std::net::TcpStream>,
+    count: usize,
+    deadline: std::time::Instant,
+) -> Result<Vec<u8>, ScenarioError> {
+    if count > STUDIO_BODY_LIMIT {
+        return Err(fail("Studio response body exceeded its byte budget"));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(count)
+        .map_err(|_| fail("Studio response body storage refused"))?;
+    bytes.resize(count, 0);
+    let mut offset = 0;
+    while offset < count {
+        offset += studio_read_some(reader, &mut bytes[offset..], deadline)?;
+    }
+    Ok(bytes)
+}
+
+struct StudioFrameReader {
+    reader: std::io::BufReader<std::net::TcpStream>,
+}
+
+impl StudioFrameReader {
+    fn frame(&mut self, frame: usize, publication: usize) -> Result<Vec<u8>, ScenarioError> {
+        let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
+        let header = studio_read_header(&mut self.reader, deadline)?;
+        if !header.starts_with(&format!("--{}\r\n", fmn_studio::MULTIPART_BOUNDARY))
+            || studio_header_field(&header, "Content-Type")? != "image/png"
+            || studio_header_number(&header, "X-FMN-Frame-Index")? != frame
+            || studio_header_number(&header, "X-FMN-Publication-Sequence")? != publication
+        {
+            return Err(fail(
+                "Studio multipart frame or publication identity drifted",
+            ));
+        }
+        let count = studio_header_number(&header, "Content-Length")?;
+        let png = studio_read_body(&mut self.reader, count, deadline)?;
+        if studio_read_body(&mut self.reader, 2, deadline)? != b"\r\n"
+            || sha256(&png).to_string() != studio_header_field(&header, "X-FMN-SHA256")?
+        {
+            return Err(fail("Studio multipart PNG digest or framing drifted"));
+        }
+        let decoded = fmn_codec::decode_png(
+            &png,
+            &fmn_codec::PngLimits {
+                max_pixels: 96 * 54,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| fail("Studio multipart PNG failed native decode"))?;
+        if decoded.width != 96 || decoded.height != 54 {
+            return Err(fail("Studio multipart PNG dimensions drifted"));
+        }
+        let mut pixels = decoded.rgba.chunks_exact(4);
+        let first = pixels
+            .next()
+            .ok_or_else(|| fail("Studio multipart PNG has no pixels"))?;
+        if pixels.all(|pixel| pixel == first) {
+            return Err(fail("Studio multipart PNG is a uniform empty preview"));
+        }
+        Ok(png)
+    }
+}
+
+fn studio_contains(bytes: &[u8], expected: &str) -> Result<(), ScenarioError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| fail("Studio JSON is not UTF-8"))?;
+    if !text.contains(expected) {
+        return Err(fail(format!(
+            "Studio response omitted expected field {expected}"
+        )));
+    }
+    Ok(())
+}
+
+fn studio_view(bytes: &[u8], frame: usize) -> Result<(), ScenarioError> {
+    // tex_span waits 0.25 s at the windowed runtime's effective 30 fps,
+    // yielding eight nominal samples despite the requested CLI output FPS.
+    studio_contains(
+        bytes,
+        &format!(
+            "\"view\":{{\"frame_index\":{frame},\"frame_count\":8,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"input_events\":false}}"
+        ),
+    )
+}
+
+/// The registered native lifecycle crosses the actual shipping executable,
+/// supervisor, disposable worker, authenticated HTTP host, and PNG stream.
+fn studio_subprocess_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((30, 1));
+    ctx.record_asset(
+        "studio/builtin-source.rs",
+        include_bytes!("../../fmn/src/lib.rs"),
+    );
+    let directory = scenario_dir("studio_native_lifecycle")?;
+    let (mut process, endpoint) = StudioProcess::launch(&directory)?;
+    let mut frames = endpoint.stream()?;
+    let initial_png = frames.frame(0, 0)?;
+    let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_view(&initial, 0)?;
+    studio_contains(&initial, "\"scene_time\":0.03333333333333333")?;
+    for span in [
+        "\"source_span\":{\"kind\":\"math_glyph\",\"start\":6,\"end\":7,\"source_bytes\":11,\"excerpt\":\"x\"",
+        "\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":11",
+        "\"source_span\":{\"kind\":\"text_glyph\",\"start\":0,\"end\":1,\"source_bytes\":5,\"excerpt\":\"h\"",
+    ] {
+        studio_contains(&initial, span)?;
+    }
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "initial")
+            .field("frame", 0u64)
+            .field("publication", 0u64),
+    );
+
+    endpoint.request("POST", "/api/scrub", b"frame=0&commit=true", 200)?;
+    if frames.frame(0, 1)? != initial_png {
+        return Err(fail(
+            "Studio checkpoint commit changed the original frame's PNG",
+        ));
+    }
+    studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "checkpoint_committed")
+            .field("frame", 0u64)
+            .field("publication", 1u64),
+    );
+
+    let committed = endpoint.request("POST", "/api/scrub", b"frame=1&commit=true", 200)?;
+    studio_contains(&committed, "\"frame_index\":1")?;
+    let committed_png = frames.frame(1, 2)?;
+    let committed_inspect = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_view(&committed_inspect, 1)?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "committed")
+            .field("frame", 1u64)
+            .field("publication", 2u64),
+    );
+
+    endpoint.request("POST", "/api/scrub", b"frame=0&commit=false", 200)?;
+    let transient_png = frames.frame(0, 3)?;
+    if transient_png != initial_png {
+        return Err(fail(
+            "Studio transient scrub changed the original frame's PNG",
+        ));
+    }
+    studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
+    let refusal = endpoint.request("POST", "/api/scrub", b"frame=8&commit=false", 422)?;
+    studio_contains(&refusal, "outside 0..8")?;
+    studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
+    let event_refusal =
+        endpoint.request("POST", "/api/event", b"type=key_press&key=arrow_left", 422)?;
+    studio_contains(&event_refusal, "no live command/event adapter")?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "transient_and_refusals")
+            .field("frame", 0u64)
+            .field("publication", 3u64),
+    );
+
+    let overlays = endpoint.request("GET", "/api/overlays?layers=31", b"", 200)?;
+    for field in [
+        "\"layers\":31",
+        "\"tiles\":[{",
+        "\"control_points\":[[",
+        "\"bounds\":[[",
+        "\"winding\":\"",
+    ] {
+        studio_contains(&overlays, field)?;
+    }
+    let restart = endpoint.request("POST", "/api/restart", b"", 200)?;
+    for field in [
+        "\"status\":\"restarted\"",
+        "\"worker_generation\":2",
+        "\"reused_entries\":2",
+        "\"replayed_entries\":1",
+        "\"reexecuted_entries\":0",
+        "\"frame_index\":1",
+    ] {
+        studio_contains(&restart, field)?;
+    }
+    let replayed_png = frames.frame(1, 4)?;
+    if replayed_png != committed_png {
+        return Err(fail(
+            "Studio worker restart changed the committed frame's PNG",
+        ));
+    }
+    let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_view(&restored, 1)?;
+    if restored != committed_inspect {
+        return Err(fail(
+            "Studio restart did not reproduce the committed live inspector",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "restarted")
+            .field("frame", 1u64)
+            .field("publication", 4u64)
+            .field("generation", 2u64),
+    );
+    drop(frames);
+    process.finish()?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "clean_eof")
+            .field("exit_code", 0u64),
+    );
+    ctx.counter("studio_native_lifecycle_steps", 6);
+    Ok(RunOutcome::ok()
+        .with_artifact("studio_initial_inspector.json", initial)
+        .with_artifact("studio_restored_inspector.json", restored)
+        .with_artifact("studio_overlays.json", overlays)
+        .with_artifact("studio_replayed_frame.png", replayed_png)
+        .with_counter("studio_native_lifecycle_steps", 6))
 }
 
 /// The PyO3 portal's first production-output Gauntlet row: a real Python
@@ -3520,6 +4081,38 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_native_worker.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_subprocess_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "studio_initial_inspector.json".to_owned(),
+                "studio_restored_inspector.json".to_owned(),
+                "studio_overlays.json".to_owned(),
+                "studio_replayed_frame.png".to_owned(),
+            ]),
+            counter_eq("studio_native_lifecycle_steps", 6),
+        ],
+        [
+            "initial",
+            "checkpoint_committed",
+            "committed",
+            "transient_and_refusals",
+            "restarted",
+            "clean_eof",
+        ]
+        .into_iter()
+        .map(|phase| {
+            LogExpect::span_present(
+                "e2e.studio.lifecycle",
+                vec![FieldPred::str_eq("phase", phase)],
+            )
+        })
+        .collect(),
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_png_sequence.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -4351,6 +4944,17 @@ fn python_portal_png_still_scenario_passes() {
     assert!(report.is_pass(), "{}", report.summary());
 }
 
+/// Focused entry for the same mandatory fast-tier production lifecycle row.
+#[test]
+fn studio_native_worker_lifecycle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_native_worker.v1")
+        .expect("native Studio lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 /// The fast tier: every non-drill `Tier::Fast` scenario runs green
 /// per-commit.
 #[test]
@@ -4567,6 +5171,15 @@ fn catalog_invariants_hold() {
             .iter()
             .any(|scenario| scenario.surface == Surface::StudioInProcess),
         "Studio lost its production composition scenario"
+    );
+    assert!(
+        scenarios.iter().any(
+            |scenario| scenario.name == "lifecycle.studio_native_worker.v1"
+                && scenario.surface == Surface::StudioSubprocess
+                && scenario.tier == Tier::Fast
+                && scenario.regression.is_none()
+        ),
+        "Studio lost its mandatory native subprocess lifecycle scenario"
     );
     assert!(
         scenarios

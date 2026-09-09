@@ -1,8 +1,8 @@
 //! The embedded Studio UI assets (§13.5): compiled into the binary, versioned
 //! with it, never served from the filesystem.
 //!
-//! The Studio's browser UI is exactly what this module compiles in — a static
-//! script and an index-shell template. The HTTP host ([`crate::host`]) serves
+//! The Studio's browser UI is exactly what this module compiles in: a script,
+//! stylesheet, and index-shell template. The HTTP host ([`crate::host`]) serves
 //! these bytes at exact routes and has no mechanism to read UI files at
 //! runtime: there is no path from a request to a filesystem open. An asset
 //! change is a source change, which means it is reviewed, versioned, and
@@ -11,10 +11,7 @@
 //! # Version coupling
 //!
 //! [`STUDIO_UI_VERSION`] is the fmn-studio crate version, baked in at compile
-//! time: the UI asset set is versioned **with the binary** by construction —
-//! a UI change without a crate-version change cannot ship through the release
-//! pipeline, because the served `X-FMN-Studio-Version` header and the
-//! version meta tag would fail the release's own hash checks. The host stamps
+//! time: the UI asset set shares the binary's crate version. The host stamps
 //! every UI response with that header so a connected browser can detect a
 //! stale page against a restarted Studio.
 
@@ -43,51 +40,58 @@ pub struct UiAsset {
 }
 
 /// The Studio browser script, embedded verbatim.
-const STUDIO_JS: &str = r#""use strict";
-const query = new URLSearchParams(window.location.search);
-const capability = query.get("cap");
-if (!capability) throw new Error("missing Studio capability");
-const headers = {"X-FMN-Capability": capability};
-document.getElementById("preview").src =
-  "/stream?cap=" + encodeURIComponent(capability);
-document.getElementById("inspect").addEventListener("click", async () => {
-  const response = await fetch("/api/inspect", {headers});
-  document.getElementById("result").textContent = await response.text();
-});
-document.getElementById("seek").addEventListener("click", async () => {
-  const frame = document.getElementById("frame").value;
-  const response = await fetch("/api/scrub", {
-    method: "POST",
-    headers: {...headers, "Content-Type": "application/x-www-form-urlencoded"},
-    body: "frame=" + encodeURIComponent(frame) + "&commit=true"
-  });
-  document.getElementById("result").textContent = await response.text();
-});
-document.getElementById("restart").addEventListener("click", async () => {
-  const response = await fetch("/api/restart", {method: "POST", headers});
-  document.getElementById("result").textContent = await response.text();
-});
-"#;
+const STUDIO_JS: &str = include_str!("studio.js");
+const STUDIO_CSS: &str = include_str!("studio.css");
 
 /// The static prefix of the index shell. The capability token and suffix are
 /// appended by [`studio_index_html`]; the UI version meta tag is baked in at
 /// compile time via [`STUDIO_UI_VERSION`].
 const STUDIO_INDEX_HTML_PREFIX: &str = concat!(
-    "<!doctype html><meta charset=\"utf-8\">",
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
     "<meta name=\"referrer\" content=\"no-referrer\">",
     "<meta name=\"fmn-studio-ui-version\" content=\"",
     env!("CARGO_PKG_VERSION"),
     "\">",
-    "<title>FrankenManim Studio</title><h1>FrankenManim Studio</h1>",
-    "<img id=\"preview\" alt=\"Live preview\">",
-    "<p><input id=\"frame\" type=\"number\" min=\"0\" value=\"0\">",
-    "<button id=\"seek\">Seek</button><button id=\"restart\">Reload worker</button>",
-    "<button id=\"inspect\">Inspect</button></p>",
-    "<pre id=\"result\"></pre>",
+    "<title>FrankenManim Studio</title></head><body>",
+    r#"<header><div><p class="eyebrow">FRANKENMANIM</p><h1>Studio</h1></div>
+<div class="session"><p id="worker" role="status">Connecting to worker…</p>
+<button id="inspect">Refresh inspector</button><button id="restart">Restart worker</button></div></header>
+<p id="error" role="alert" hidden></p>
+<main><section class="stage" aria-label="Scene preview and timeline">
+<div class="preview-wrap"><canvas id="preview" width="960" height="540" tabindex="0"
+ aria-label="Scene preview. Use the timeline below to navigate."></canvas>
+<canvas id="overlay" width="960" height="540" aria-hidden="true"></canvas></div>
+<p id="display" role="status">Waiting for the first frame…</p>
+<form id="timeline-form"><label for="timeline">Timeline <output id="position">—</output></label>
+<input id="timeline" type="range" min="0" max="0" value="0" disabled>
+<div class="transport"><button type="button" id="first" aria-label="First frame">|←</button>
+<button type="button" id="previous" aria-label="Previous frame">←</button>
+<button type="button" id="play">Play</button>
+<button type="button" id="next" aria-label="Next frame">→</button>
+<button type="button" id="last" aria-label="Last frame">→|</button>
+<label for="frame">Frame</label><input id="frame" type="number" min="0" max="0" value="0" required>
+<button id="seek" type="submit">Go</button></div></form>
+<p id="replay">Release the timeline to commit a replay position.</p>
+<fieldset id="layers"><legend>Debug overlays</legend>
+<label><input type="checkbox" value="1"> Tiles</label>
+<label><input type="checkbox" value="2"> Control points</label>
+<label><input type="checkbox" value="4"> Bounds</label>
+<label><input type="checkbox" value="8"> Winding</label>
+<label><input type="checkbox" value="16"> Depth</label></fieldset>
+<p id="overlay-state">Overlays off.</p>
+<label><input id="input-events" type="checkbox" disabled> Send preview input to the scene</label>
+<p id="input-support">Checking scene input support…</p></section>
+<aside aria-label="Scene inspector"><section><h2>Family tree</h2>
+<p id="tree-state"></p><div id="tree" role="tree" aria-label="Scene family"></div></section>
+<section aria-label="Selected object"><h2 id="selection">Select an object</h2>
+<div id="details"></div></section></aside></main>
+<footer>Arrow keys navigate the family tree. Home / End select its first / last visible item.
+ The timeline supports arrow keys, Home and End.</footer>"#,
     "<script src=\"/studio.js?cap="
 );
 
-const STUDIO_INDEX_HTML_SUFFIX: &str = "\"></script>";
+const STUDIO_INDEX_HTML_SUFFIX: &str = "\"></script></body></html>";
 const STUDIO_INDEX_HTML_STATIC_BYTES: usize =
     STUDIO_INDEX_HTML_PREFIX.len() + STUDIO_INDEX_HTML_SUFFIX.len();
 
@@ -95,11 +99,18 @@ const STUDIO_INDEX_HTML_STATIC_BYTES: usize =
 ///
 /// The index shell is not in this table: it is per-session (it carries the
 /// capability token) and is produced by [`studio_index_html`].
-static UI_ASSETS: &[UiAsset] = &[UiAsset {
-    route: "/studio.js",
-    content_type: "text/javascript; charset=utf-8",
-    bytes: STUDIO_JS.as_bytes(),
-}];
+static UI_ASSETS: &[UiAsset] = &[
+    UiAsset {
+        route: "/studio.css",
+        content_type: "text/css; charset=utf-8",
+        bytes: STUDIO_CSS.as_bytes(),
+    },
+    UiAsset {
+        route: "/studio.js",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: STUDIO_JS.as_bytes(),
+    },
+];
 
 /// The complete embedded UI asset set.
 pub fn ui_assets() -> &'static [UiAsset] {
@@ -160,7 +171,7 @@ mod tests {
         let rendered = studio_index_html("abc123").unwrap();
         assert!(rendered.contains("/studio.js?cap=abc123"));
         assert!(rendered.contains("id=\"restart\""));
-        assert!(STUDIO_JS.contains("fetch(\"/api/restart\""));
+        assert!(STUDIO_JS.contains("api(\"/api/restart\""));
     }
 
     #[test]

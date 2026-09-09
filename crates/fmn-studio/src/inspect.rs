@@ -11,7 +11,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use fmn_render::bin::{CLASS_INTERIOR, CLASS_PARTIAL};
-use fmn_render::{Binning, Viewport};
+use fmn_render::{Binning, ScreenMap, Viewport};
 use fmn_scene::studio_bridge::{Mob, Stage, Uniforms};
 
 use crate::protocol::DebugLayerSet;
@@ -341,6 +341,87 @@ pub struct InspectorNode {
     pub source_span: Option<SourceSpanSnapshot>,
 }
 
+/// Native preview coordinates and frame range for one inspector capture.
+///
+/// Frame indices are preview ordinals, not durable mobject identities or the
+/// scene's potentially discontinuous clock frame. Coordinates use Lumen's
+/// actual screen map: `origin + world.xy * scale`, with no extra Y inversion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InspectorView {
+    /// Current preview frame ordinal.
+    pub frame_index: u64,
+    /// Exclusive upper bound for preview frame ordinals.
+    pub frame_count: u64,
+    /// Native rational-clock frames per second.
+    pub fps: u32,
+    /// Preview width in pixels.
+    pub width: u32,
+    /// Preview height in pixels.
+    pub height: u32,
+    /// Pixels per world unit.
+    pub scale: f64,
+    /// Pixel position of world-space `[0, 0]`.
+    pub origin: [f64; 2],
+    /// Whether the selected worker implements live input events.
+    pub input_events: bool,
+}
+
+impl InspectorView {
+    /// Bind the preview range to the renderer's actual viewport and screen map.
+    ///
+    /// # Errors
+    ///
+    /// Refuses empty or unaddressable ranges, zero FPS, invalid image geometry,
+    /// nonfinite origins, and nonfinite or nonpositive scale. FPS is integral
+    /// by construction.
+    pub fn new(
+        frame_index: u64,
+        frame_count: u64,
+        fps: u32,
+        viewport: Viewport,
+        map: ScreenMap,
+        input_events: bool,
+    ) -> Result<Self, InspectError> {
+        Self {
+            frame_index,
+            frame_count,
+            fps,
+            width: viewport.width,
+            height: viewport.height,
+            scale: map.scale,
+            origin: map.origin,
+            input_events,
+        }
+        .validate()
+    }
+
+    fn validate(self) -> Result<Self, InspectError> {
+        if self.frame_count == 0
+            || self.frame_index >= self.frame_count
+            || self.frame_count > (i64::MAX as u64) + 1
+        {
+            return Err(InspectError::InvalidView("invalid preview frame range"));
+        }
+        if self.fps == 0 {
+            return Err(InspectError::InvalidView("preview FPS must be nonzero"));
+        }
+        let image_bytes = u64::from(self.width)
+            .checked_mul(u64::from(self.height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|bytes| usize::try_from(bytes).ok());
+        if self.width == 0 || self.height == 0 || image_bytes.is_none() {
+            return Err(InspectError::InvalidView("invalid preview image geometry"));
+        }
+        if !self.scale.is_finite()
+            || self.scale <= 0.0
+            || self.origin.iter().any(|value| !value.is_finite())
+        {
+            return Err(InspectError::InvalidView("invalid preview screen map"));
+        }
+        Ok(self)
+    }
+}
+
 /// One bounded family-tree snapshot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InspectorSnapshot {
@@ -348,6 +429,8 @@ pub struct InspectorSnapshot {
     pub version: u16,
     /// Scene time mirror.
     pub scene_time: f64,
+    /// Optional native preview metadata, supplied by the worker owning the view.
+    pub view: Option<InspectorView>,
     /// Captured nodes.
     pub nodes: Vec<InspectorNode>,
     /// Traversal or field data hit a declared ceiling.
@@ -505,6 +588,7 @@ impl InspectorSnapshot {
         Ok(Self {
             version: 1,
             scene_time: stage.time(),
+            view: None,
             nodes,
             truncated,
         })
@@ -513,6 +597,7 @@ impl InspectorSnapshot {
     /// Encode stable line-free JSON under the configured byte ceiling.
     pub fn to_json(&self, limits: InspectorLimits) -> Result<Vec<u8>, InspectError> {
         let limits = limits.validate()?;
+        let view = self.view.map(InspectorView::validate).transpose()?;
         let mut out = JsonBuffer::new(limits.max_json_bytes)?;
         out.push_str("{\"version\":")?;
         push_usize(&mut out, usize::from(self.version))?;
@@ -527,7 +612,27 @@ impl InspectorSnapshot {
             }
             push_inspector_node(&mut out, node)?;
         }
-        out.push_str("]}")?;
+        out.push(']')?;
+        if let Some(view) = view {
+            out.push_str(",\"view\":{\"frame_index\":")?;
+            push_display(&mut out, view.frame_index)?;
+            out.push_str(",\"frame_count\":")?;
+            push_display(&mut out, view.frame_count)?;
+            out.push_str(",\"fps\":")?;
+            push_display(&mut out, view.fps)?;
+            out.push_str(",\"width\":")?;
+            push_display(&mut out, view.width)?;
+            out.push_str(",\"height\":")?;
+            push_display(&mut out, view.height)?;
+            out.push_str(",\"scale\":")?;
+            push_f64(&mut out, view.scale)?;
+            out.push_str(",\"origin\":")?;
+            push_f64_array(&mut out, &view.origin)?;
+            out.push_str(",\"input_events\":")?;
+            push_bool(&mut out, view.input_events)?;
+            out.push('}')?;
+        }
+        out.push('}')?;
         Ok(out.into_bytes())
     }
 }
@@ -1376,6 +1481,8 @@ fn push_json_escaped(out: &mut JsonBuffer, raw: &str) -> Result<(), InspectError
 pub enum InspectError {
     /// At least one ceiling was zero.
     InvalidLimits,
+    /// Native preview metadata could not describe a valid rendered view.
+    InvalidView(&'static str),
     /// Source byte offsets were invalid or split UTF-8.
     InvalidSourceSpan,
     /// A Scribe map did not match the supplied live family.
@@ -1412,6 +1519,7 @@ impl fmt::Display for InspectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidLimits => f.write_str("inspector limits must be nonzero"),
+            Self::InvalidView(message) => write!(f, "invalid inspector view: {message}"),
             Self::InvalidSourceSpan => f.write_str("invalid UTF-8 source span"),
             Self::SpanMapMismatch(message) => write!(f, "source span map mismatch: {message}"),
             Self::InvalidLayers => f.write_str("invalid debug-overlay layer mask"),

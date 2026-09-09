@@ -589,6 +589,15 @@ fn studio_reloads_an_edited_compiled_scene_and_reexecutes_committed_history() {
         "{unchanged}"
     );
     assert!(unchanged.contains("\"frame_index\":2"), "{unchanged}");
+    let unchanged_view = studio_get(authority, &format!("/api/inspect?{query}"));
+    assert!(
+        unchanged_view.starts_with("HTTP/1.1 200 OK"),
+        "{unchanged_view}"
+    );
+    assert!(
+        unchanged_view.contains("\"view\":{\"frame_index\":2,\"frame_count\":4,\"fps\":8"),
+        "{unchanged_view}"
+    );
 
     // The replacement artifact has two additional frames. A successful
     // frame-five scrub after restart therefore proves the new worker read the
@@ -600,6 +609,12 @@ fn studio_reloads_an_edited_compiled_scene_and_reexecutes_committed_history() {
     assert!(restart.contains("\"reused_entries\":0"), "{restart}");
     assert!(restart.contains("\"reexecuted_entries\":2"), "{restart}");
     assert!(restart.contains("\"frame_index\":2"), "{restart}");
+    let edited_view = studio_get(authority, &format!("/api/inspect?{query}"));
+    assert!(edited_view.starts_with("HTTP/1.1 200 OK"), "{edited_view}");
+    assert!(
+        edited_view.contains("\"view\":{\"frame_index\":2,\"frame_count\":6,\"fps\":8"),
+        "{edited_view}"
+    );
 
     let expanded = studio_post(
         authority,
@@ -1901,6 +1916,69 @@ fn studio_inspect_serves_real_tex_span_entries_for_the_tex_span_scene() {
         ),
         "{response}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn studio_inspector_view_tracks_committed_transient_and_restarted_frames() {
+    let (child, stdout, authority, query) = spawn_studio_for("tex_span.v1");
+    // tex_span waits 0.25 s; windowed runtime captures ceil(0.25 * 30) = 8
+    // frames even though the CLI requests 8 fps. Its first sample is 1/30 s.
+    let inspect = || studio_get(&authority, &format!("/api/inspect?{query}"));
+    let assert_view = |response: &str, frame| {
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        let view = format!(
+            "\"view\":{{\"frame_index\":{frame},\"frame_count\":8,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"input_events\":false}}"
+        );
+        assert!(response.contains(&view), "{response}");
+    };
+    let initial = inspect();
+    assert_view(&initial, 0);
+    assert!(initial.contains("\"scene_time\":0.03333333333333333"));
+
+    let committed = studio_post(
+        &authority,
+        &format!("/api/scrub?{query}"),
+        b"frame=1&commit=true",
+    );
+    assert!(committed.starts_with("HTTP/1.1 200 OK"), "{committed}");
+    assert!(committed.contains("\"frame_index\":1"), "{committed}");
+    assert_view(&inspect(), 1);
+
+    let transient = studio_post(
+        &authority,
+        &format!("/api/scrub?{query}"),
+        b"frame=0&commit=false",
+    );
+    assert!(transient.starts_with("HTTP/1.1 200 OK"), "{transient}");
+    assert!(transient.contains("\"frame_index\":0"), "{transient}");
+    assert_view(&inspect(), 0);
+
+    let outside = studio_post(
+        &authority,
+        &format!("/api/scrub?{query}"),
+        b"frame=8&commit=false",
+    );
+    assert!(outside.starts_with("HTTP/1.1 422"), "{outside}");
+    assert!(outside.contains("outside 0..8"), "{outside}");
+    assert_view(&inspect(), 0);
+
+    let event = studio_post(
+        &authority,
+        &format!("/api/event?{query}"),
+        b"type=key_press&key=arrow_left",
+    );
+    assert!(event.starts_with("HTTP/1.1 422"), "{event}");
+    assert!(event.contains("no live command/event adapter"), "{event}");
+    assert_view(&inspect(), 0);
+
+    let restart = studio_post(&authority, &format!("/api/restart?{query}"), b"");
+    assert!(restart.starts_with("HTTP/1.1 200 OK"), "{restart}");
+    assert!(restart.contains("\"worker_generation\":2"), "{restart}");
+    assert!(restart.contains("\"frame_index\":1"), "{restart}");
+    assert_view(&inspect(), 1);
+    drop(stdout);
+    shutdown_studio_cleanly(child);
 }
 
 #[cfg(unix)]

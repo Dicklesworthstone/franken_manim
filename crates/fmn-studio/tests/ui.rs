@@ -15,8 +15,7 @@ use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_studio::{
     BuildError, CapabilityToken, FrameHub, LaunchError, ProtocolLimits, RebuildDriver,
     STUDIO_UI_VERSION, STUDIO_UI_VERSION_HEADER, StudioHost, StudioHostConfig, StudioWorkerSession,
-    Supervisor, SupervisorConfig, WorkerArtifact, WorkerChannel, WorkerLauncher, ui_asset,
-    ui_assets,
+    Supervisor, SupervisorConfig, WorkerArtifact, WorkerChannel, WorkerLauncher, ui_assets,
 };
 
 /// The UI routes never touch the worker; a launcher that refuses by name
@@ -153,36 +152,34 @@ fn ui_version_is_compiled_in_and_stamps_the_asset_table() {
 }
 
 #[test]
-fn embedded_script_serves_at_its_route_with_the_right_content_hash() {
+fn embedded_assets_serve_at_their_routes_with_the_right_content_hash() {
     let test = test_host();
-    let asset = ui_asset("/studio.js").expect("the script is embedded");
-    let response = exchange(
-        &test,
-        &format!(
-            "GET /studio.js?cap={} HTTP/1.1\r\nHost: {}\r\n\r\n",
-            test.capability_hex, test.authority
-        ),
-    );
-    assert_eq!(status(&response), "HTTP/1.1 200 OK");
-    assert_eq!(
-        header(&response, "Content-Type"),
-        Some("text/javascript; charset=utf-8")
-    );
-    assert_eq!(
-        header(&response, STUDIO_UI_VERSION_HEADER),
-        Some(STUDIO_UI_VERSION),
-        "the served asset carries the binary's version"
-    );
-    assert_eq!(
-        body(&response),
-        asset.bytes,
-        "the served bytes are the compiled-in bytes — no filesystem read"
-    );
-    assert_eq!(
-        sha256(body(&response)),
-        sha256(asset.bytes),
-        "content hash of the served route matches the embedded asset"
-    );
+    for asset in ui_assets() {
+        let response = exchange(
+            &test,
+            &format!(
+                "GET {}?cap={} HTTP/1.1\r\nHost: {}\r\n\r\n",
+                asset.route, test.capability_hex, test.authority
+            ),
+        );
+        assert_eq!(status(&response), "HTTP/1.1 200 OK");
+        assert_eq!(header(&response, "Content-Type"), Some(asset.content_type));
+        assert_eq!(
+            header(&response, STUDIO_UI_VERSION_HEADER),
+            Some(STUDIO_UI_VERSION),
+            "the served asset carries the binary's version"
+        );
+        assert_eq!(
+            body(&response),
+            asset.bytes,
+            "the served bytes are the compiled-in bytes — no filesystem read"
+        );
+        assert_eq!(
+            sha256(body(&response)),
+            sha256(asset.bytes),
+            "content hash of the served route matches the embedded asset"
+        );
+    }
 }
 
 #[test]
@@ -201,6 +198,12 @@ fn index_shell_is_per_session_and_version_stamped() {
         Some(STUDIO_UI_VERSION)
     );
     let html = std::str::from_utf8(body(&response)).expect("index is UTF-8");
+    assert_eq!(
+        header(&response, "Content-Security-Policy"),
+        Some(
+            "default-src 'none'; img-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'"
+        )
+    );
     assert!(
         html.contains(&format!(
             "name=\"fmn-studio-ui-version\" content=\"{STUDIO_UI_VERSION}\""
