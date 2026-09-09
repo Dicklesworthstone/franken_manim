@@ -141,6 +141,12 @@ cargo test -p fmn-cli --test cli_smoke
 echo "==> fmn CLI smoke (complete shipping binary)"
 cargo test -p fmn-cli --features batch --test cli_smoke
 
+echo "==> fmn doctor smoke (default-feature report contract)"
+cargo test -p fmn-cli --test doctor_smoke
+
+echo "==> fmn doctor smoke (complete shipping binary)"
+cargo test -p fmn-cli --features batch --test doctor_smoke
+
 echo "==> cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets"
 cargo check -p fmn-output --features ffmpeg-test-fixture --all-targets
 

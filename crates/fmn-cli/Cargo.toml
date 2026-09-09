@@ -22,6 +22,10 @@ name = "cli_smoke"
 path = "tests/cli_smoke.rs"
 
 [[test]]
+name = "doctor_smoke"
+path = "tests/doctor_smoke.rs"
+
+[[test]]
 name = "runtime_boundary"
 path = "tests/runtime_boundary.rs"
 required-features = ["cli", "batch"]

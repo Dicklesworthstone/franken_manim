@@ -1045,6 +1045,102 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("cli_rule_named", 1))
 }
 
+/// Collect real host capabilities through the same in-process CLI dispatch
+/// used by the shipping executable. The optional encoder is deliberately
+/// absent, so this scenario does not depend on an installed ffmpeg or probe
+/// its hardware. Strict field parsing also lives in the doctor_smoke target;
+/// the harness's NdjsonSchema assertion covers its own event log only.
+fn cli_doctor_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_doctor")?;
+    let missing = dir.join("missing-ffmpeg");
+    let cache = dir.join("cache");
+    let missing_text = missing
+        .to_str()
+        .ok_or_else(|| fail("doctor scenario ffmpeg path is not UTF-8"))?;
+    let cache_text = cache
+        .to_str()
+        .ok_or_else(|| fail("doctor scenario cache path is not UTF-8"))?;
+    let base = [
+        "doctor",
+        "--ffmpeg",
+        missing_text,
+        "--cache-dir",
+        cache_text,
+        "--threads",
+        "1",
+    ];
+    let robot = fmn_cli::run(base.into_iter().chain(["--robot"]));
+    let kinds = [
+        "topology",
+        "execution_plan",
+        "ffmpeg",
+        "cache",
+        "fonts",
+        "math_packs",
+        "certification",
+    ];
+    let lines: Vec<_> = robot.stdout.lines().collect();
+    if robot.code != 0
+        || !robot.stderr.is_empty()
+        || !robot.stdout.ends_with('\n')
+        || lines.len() != kinds.len()
+        || !lines.iter().zip(kinds).all(|(line, kind)| {
+            line.starts_with(&format!(
+                "{{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"{kind}\","
+            )) && line.ends_with('}')
+        })
+    {
+        return Err(fail("doctor omitted its ordered version-1 robot records"));
+    }
+    let human = fmn_cli::run(base);
+    if human.code != 0
+        || !human.stderr.is_empty()
+        || !human.stdout.starts_with("FrankenManim doctor\n")
+        || ![
+            "topology:",
+            "cores:",
+            "SIMD:",
+            "plan:",
+            "ffmpeg: unavailable",
+            "alternative:",
+            "cache:",
+            "fonts:",
+            "math packs:",
+            "certification:",
+        ]
+        .iter()
+        .all(|label| human.stdout.lines().any(|line| line.starts_with(label)))
+    {
+        return Err(fail("doctor human report omitted a capability section"));
+    }
+    let required = fmn_cli::run(base.into_iter().chain(["--robot", "--require-ffmpeg"]));
+    let refusal = required.stdout.lines().last().unwrap_or_default();
+    if required.code != 4
+        || !required.stderr.is_empty()
+        || required.stdout.lines().count() != 8
+        || !refusal.contains("\"kind\":\"error\"")
+        || !refusal.contains("\"exit_name\":\"capability\"")
+        || !refusal.contains("native PNG-sequence, GIF, and y4m outputs remain available")
+        || cache.exists()
+        || missing.exists()
+    {
+        return Err(fail(
+            "doctor lost its read-only capability refusal contract",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.cli.doctor")
+            .field("records", 7_u64)
+            .field("human_sections", 10_u64)
+            .field("required_ffmpeg_exit", 4_u64)
+            .field("read_only", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("doctor_records", 7)
+        .with_counter("doctor_human_sections", 10)
+        .with_counter("doctor_required_ffmpeg_exit", 4))
+}
+
 /// The certified contract permanently refuses accelerator work before
 /// output publication, even when the binary was compiled with an annex.
 fn failure_cli_certified_metal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -4025,6 +4121,28 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = Vec::new();
 
+    specs.push(spec(
+        "lifecycle.cli_doctor_capabilities.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::CliInProcess,
+        Invocation::new(cli_doctor_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("doctor_records", 7),
+            counter_eq("doctor_human_sections", 10),
+            counter_eq("doctor_required_ffmpeg_exit", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.doctor",
+            vec![
+                FieldPred::u64_eq("records", 7),
+                FieldPred::u64_eq("human_sections", 10),
+                FieldPred::u64_eq("required_ffmpeg_exit", 4),
+                FieldPred::str_eq("read_only", "true"),
+            ],
+        )],
+    ));
+
     // RENDER-MATRIX: every preset × native sink × engine class.
     for preset in PRESETS {
         for sink_kind in [SinkKind::Y4m, SinkKind::PngSequence] {
@@ -4951,6 +5069,16 @@ fn studio_native_worker_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_native_worker.v1")
         .expect("native Studio lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn cli_doctor_capabilities_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.cli_doctor_capabilities.v1")
+        .expect("doctor capability scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
