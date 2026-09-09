@@ -4271,6 +4271,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         "overridden-light.gif".to_owned(),
         "escaped-markup.png".to_owned(),
         "literal-markup.png".to_owned(),
+        "centered-typesetting.gif".to_owned(),
         "rectangle-flash.gif".to_owned(),
     ];
     if std::env::var("FMN_REQUIRE_FFMPEG").as_deref() == Ok("1") {
