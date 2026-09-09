@@ -255,6 +255,47 @@ fn profile_one_layered_frame() {
     Fixture::new().render(EngineIdentity::certified());
 }
 
+/// Fixed-work paired samples for workers where wall-clock noise swamps libtest's
+/// independently calibrated runs. Alternate order to avoid giving one route
+/// every cold-cache or frequency-ramp position. Run with `--nocapture`.
+#[test]
+fn profile_paired_layered_frames() {
+    const FRAMES: usize = 32;
+    let fixture = Fixture::new();
+    for engine in [EngineKind::CertifiedCpu, EngineKind::FastCpu] {
+        let scalar = EngineIdentity {
+            engine,
+            ..EngineIdentity::certified()
+        };
+        let tier = EngineIdentity {
+            tier: Tier::COMPILED,
+            ..scalar
+        };
+        for _ in 0..3 {
+            fixture.render(scalar);
+            fixture.render(tier);
+        }
+        for sample in 0..10 {
+            let identities = if sample % 2 == 0 {
+                [scalar, tier]
+            } else {
+                [tier, scalar]
+            };
+            for identity in identities {
+                let start = std::time::Instant::now();
+                for _ in 0..FRAMES {
+                    fixture.render(identity);
+                }
+                println!(
+                    "compositor_sample engine={engine:?} tier={} sample={sample} frames={FRAMES} elapsed_ns={}",
+                    identity.tier.name(),
+                    start.elapsed().as_nanos()
+                );
+            }
+        }
+    }
+}
+
 fn benchmark_column_roots(bench: &mut Bencher, width: u32) {
     let mut pieces = Vec::with_capacity(64);
     for index in 0_u32..64 {

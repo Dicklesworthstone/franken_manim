@@ -25,6 +25,7 @@
 //! compositor to real CPU-engine pixels; callers retain the plan, frame arena,
 //! raw frame, and cache across captures.
 #![forbid(unsafe_code)]
+#![feature(portable_simd)]
 
 mod arena;
 pub mod bin;

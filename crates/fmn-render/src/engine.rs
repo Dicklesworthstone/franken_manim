@@ -112,6 +112,7 @@ pub use fmn_core::AaPolicy;
 use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_hash::{Digest, Schema, Writer};
+use std::simd::Simd;
 use std::sync::{Condvar, Mutex, PoisonError};
 
 pub(crate) trait ScopedSpawner {
@@ -2303,6 +2304,14 @@ impl<'a> FrameJob<'a> {
         }
         let w = (x_hi - x_lo) as usize;
 
+        // Binning already proved exact unit coverage for the whole tile. A
+        // flat fill therefore needs neither a coverage buffer nor the pixel
+        // classification loop. Preserve painter order and blend every layer.
+        if interior && let Some(rgba) = rec.flat_fill {
+            K::source_over_full_span(rgba, &mut worker.acc[..w]);
+            return;
+        }
+
         // Exactly one of three sources fills the row, and the order of the tests
         // is the order of §10.4's own argument: a classified interior costs
         // nothing, a hinted kernel costs a closed form, and the general machinery
@@ -2981,6 +2990,15 @@ pub(crate) trait PixelKernel {
             *dst = Self::source_over(rgba, coverage, *dst);
         }
     }
+
+    /// Binning-proven unit coverage; the scalar definition remains ordinary
+    /// source-over with coverage one, including its alpha-only coverage rule.
+    #[inline]
+    fn source_over_full_span(rgba: [f32; 4], dst: &mut [Self::Pixel]) {
+        for dst in dst {
+            *dst = Self::source_over(rgba, 1.0, *dst);
+        }
+    }
 }
 
 /// The certified scalar definition.
@@ -3017,37 +3035,55 @@ impl PixelKernel for CertifiedScalar {
 
 /// Certified build-tier route.
 ///
-/// The measured AoS compositor did not amortize gather/scatter, so it keeps the
-/// faster scalar expression. Other hot kernels in the artifact still use
-/// `std::simd`; build-tier selection must never force a slower implementation.
+/// Each accumulator entry holds one pixel's RGBA lanes. Keeping that layout
+/// through the worker pool avoids gathering channels from different pixels on
+/// every layer. All arithmetic is elementwise, in the scalar definition's
+/// multiply-then-add order; alpha is never a horizontal reduction.
 struct CertifiedBuildTier;
 
 impl PixelKernel for CertifiedBuildTier {
-    type Pixel = PremulRgba;
+    type Pixel = Simd<f64, 4>;
 
     #[inline]
     fn from_premul(pixel: PremulRgba) -> Self::Pixel {
-        pixel
+        Simd::from_array([pixel.r, pixel.g, pixel.b, pixel.a])
     }
 
     #[inline]
     fn to_premul(pixel: Self::Pixel) -> PremulRgba {
-        pixel
+        let [r, g, b, a] = pixel.to_array();
+        PremulRgba { r, g, b, a }
     }
 
     #[inline]
     fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel {
-        source_over(rgba, coverage, dst)
+        let alpha = f64::from(rgba[3]) * coverage;
+        let mut source = Simd::from_array(rgba.map(f64::from)) * Simd::splat(alpha);
+        source[3] = alpha;
+        source + Simd::splat(1.0 - alpha) * dst
     }
 
     #[inline]
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
-        write_row(acc, out);
+        for (&pixel, out) in acc.iter().zip(out.as_chunks_mut::<8>().0) {
+            write_row(&[Self::to_premul(pixel)], out);
+        }
     }
 
     #[inline]
     fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
         &pool.certified_tier
+    }
+
+    #[inline]
+    fn source_over_full_span(rgba: [f32; 4], dst: &mut [Self::Pixel]) {
+        let alpha = f64::from(rgba[3]);
+        let mut source = Simd::from_array(rgba.map(f64::from)) * Simd::splat(alpha);
+        source[3] = alpha;
+        let inverse = Simd::splat(1.0 - alpha);
+        for dst in dst {
+            *dst = source + inverse * *dst;
+        }
     }
 }
 
@@ -3114,31 +3150,51 @@ impl PixelKernel for FastScalar {
 struct FastBuildTier;
 
 impl PixelKernel for FastBuildTier {
-    type Pixel = PremulRgba32;
+    type Pixel = Simd<f32, 4>;
 
     #[inline]
     fn from_premul(pixel: PremulRgba) -> Self::Pixel {
-        FastScalar::from_premul(pixel)
+        let pixel = FastScalar::from_premul(pixel);
+        Simd::from_array([pixel.r, pixel.g, pixel.b, pixel.a])
     }
 
     #[inline]
     fn to_premul(pixel: Self::Pixel) -> PremulRgba {
-        FastScalar::to_premul(pixel)
+        let [r, g, b, a] = pixel.to_array();
+        FastScalar::to_premul(PremulRgba32 { r, g, b, a })
     }
 
     #[inline]
+    #[allow(clippy::cast_possible_truncation)]
     fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel {
-        FastScalar::source_over(rgba, coverage, dst)
+        let alpha = rgba[3] * coverage as f32;
+        let mut source = Simd::from_array(rgba) * Simd::splat(alpha);
+        source[3] = alpha;
+        source + Simd::splat(1.0 - alpha) * dst
     }
 
     #[inline]
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
-        FastScalar::write_row(acc, out);
+        for (&pixel, out) in acc.iter().zip(out.as_chunks_mut::<8>().0) {
+            let [r, g, b, a] = pixel.to_array();
+            write_row_f32(&[PremulRgba32 { r, g, b, a }], out);
+        }
     }
 
     #[inline]
     fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
         &pool.fast_tier
+    }
+
+    #[inline]
+    fn source_over_full_span(rgba: [f32; 4], dst: &mut [Self::Pixel]) {
+        let alpha = rgba[3];
+        let mut source = Simd::from_array(rgba) * Simd::splat(alpha);
+        source[3] = alpha;
+        let inverse = Simd::splat(1.0 - alpha);
+        for dst in dst {
+            *dst = source + inverse * *dst;
+        }
     }
 }
 
@@ -4847,6 +4903,93 @@ mod tests {
         assert_eq!(Tier::ALL[0].name(), "scalar");
         assert_ne!(Tier::COMPILED, Tier::Scalar);
         assert_ne!(Tier::COMPILED.name(), "scalar");
+    }
+
+    #[test]
+    fn compiled_pixel_kernels_preserve_scalar_accumulator_bits() {
+        fn bits(pixel: PremulRgba) -> [u64; 4] {
+            [pixel.r, pixel.g, pixel.b, pixel.a].map(f64::to_bits)
+        }
+
+        fn check<S: PixelKernel, T: PixelKernel>() {
+            let colours = [
+                [0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.25, 0.5, 1.0],
+                [0.25, 0.5, 0.75, 0.123],
+                [-0.25, 2.0, 0.000_000_1, 0.99],
+                [f32::MIN_POSITIVE, f32::from_bits(1), 1.0, f32::MIN_POSITIVE],
+            ];
+            let coverages = [
+                0.0,
+                -0.0,
+                -0.5,
+                1.0 / 3.0,
+                f64::MIN_POSITIVE,
+                f64::from_bits(1),
+                1.0,
+                0.500_000_000_000_000_1,
+            ];
+            let backgrounds = [
+                PremulRgba::TRANSPARENT,
+                PremulRgba {
+                    r: -0.0,
+                    g: 0.0,
+                    b: -0.0,
+                    a: -0.0,
+                },
+                LinearRgba {
+                    r: 0.11,
+                    g: 0.37,
+                    b: 0.93,
+                    a: 0.73,
+                }
+                .premultiply(),
+            ];
+            for background in backgrounds {
+                // Also check the single-pixel entry used by gradients and strokes.
+                for colour in colours {
+                    for coverage in coverages {
+                        let scalar = S::source_over(colour, coverage, S::from_premul(background));
+                        let tier = T::source_over(colour, coverage, T::from_premul(background));
+                        assert_eq!(bits(S::to_premul(scalar)), bits(T::to_premul(tier)));
+                    }
+                }
+                for len in [0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33] {
+                    let mut scalar = vec![S::from_premul(background); len];
+                    let mut tier = vec![T::from_premul(background); len];
+                    for layer in 0..64 {
+                        let coverage: Vec<_> = (0..len)
+                            .map(|index| {
+                                if layer % 2 == 0 {
+                                    1.0
+                                } else {
+                                    coverages[index % coverages.len()]
+                                }
+                            })
+                            .collect();
+                        let colour = colours[layer % colours.len()];
+                        S::source_over_span(colour, &coverage, &mut scalar);
+                        if layer % 2 == 0 {
+                            T::source_over_full_span(colour, &mut tier);
+                        } else {
+                            T::source_over_span(colour, &coverage, &mut tier);
+                        }
+                        for (&scalar, &tier) in scalar.iter().zip(&tier) {
+                            assert_eq!(bits(S::to_premul(scalar)), bits(T::to_premul(tier)));
+                        }
+                        // Incomplete output pixels remain untouched in both routes.
+                        let mut scalar_bytes = vec![0xa5; len * 8 + 7];
+                        let mut tier_bytes = scalar_bytes.clone();
+                        S::write_row(&scalar, &mut scalar_bytes);
+                        T::write_row(&tier, &mut tier_bytes);
+                        assert_eq!(scalar_bytes, tier_bytes);
+                    }
+                }
+            }
+        }
+
+        check::<CertifiedScalar, CertifiedBuildTier>();
+        check::<FastScalar, FastBuildTier>();
     }
 
     #[test]
