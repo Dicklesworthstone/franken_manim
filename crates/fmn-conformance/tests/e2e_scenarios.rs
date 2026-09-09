@@ -1608,7 +1608,7 @@ impl StudioFrameReader {
         if decoded.width != 96 || decoded.height != 54 {
             return Err(fail("Studio multipart PNG dimensions drifted"));
         }
-        let mut pixels = decoded.rgba.chunks_exact(4);
+        let mut pixels = decoded.rgba.as_chunks::<4>().0.iter();
         let first = pixels
             .next()
             .ok_or_else(|| fail("Studio multipart PNG has no pixels"))?;
