@@ -7833,6 +7833,7 @@ class MarkupText(StringMobject):
         **kwargs,
     ):
         self.use_labelled_svg = bool(kwargs.pop("use_labelled_svg", False))
+        should_center = kwargs.pop("should_center", True)
         kwargs.pop("path_string_config", None)
         self.base_color = kwargs.pop("base_color", "#FFFFFF")
         self.protect = kwargs.pop("protect", ())
@@ -7893,6 +7894,10 @@ class MarkupText(StringMobject):
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, kwargs)
         self.set_color_by_text_to_color_map(self.t2c)
+        # Native Scribe bypasses SVGMobject's parser, but still owes its
+        # constructor's placement postpass (including the explicit opt-out).
+        if should_center:
+            self.center()
         if height is not None:
             self.set_height(height)
 
@@ -8013,6 +8018,7 @@ class Tex(StringMobject):
         use_labelled_svg: bool = True,
         **kwargs,
     ):
+        should_center = kwargs.pop("should_center", True)
         self.base_color = kwargs.pop("base_color", "#FFFFFF")
         self.protect = kwargs.pop("protect", ())
         _refuse_unrouted(
@@ -8070,6 +8076,8 @@ class Tex(StringMobject):
         self._validate_isolate_spans()
         _apply_vmobject_style_kwargs(self, kwargs)
         self.set_color_by_tex_to_color_map(color_map)
+        if should_center:
+            self.center()
 
     def _isolate_segments(self, separator):
         """Partition a single-part source at `isolate=` occurrence
