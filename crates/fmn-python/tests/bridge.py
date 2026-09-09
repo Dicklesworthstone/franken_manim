@@ -11770,6 +11770,32 @@ else:
 # Tex and native text share the Reference's StringMobject selector surface.
 # The implementation uses Scribe's retained UTF-8 source spans directly,
 # preserving object identity without the Reference's render-twice SVG labels.
+# Native text bypasses SVG parsing, not the inherited default centering.
+for text_type, text_source in (
+    (manimlib.Text, "café Hello"),
+    (manimlib.MarkupText, "<b>Hello</b> world"),
+    (manimlib.Tex, r"e^{i\pi} + 1 = 0"),
+    (manimlib.TexText, "Hello"),
+):
+    centered = text_type(text_source, color="#00FF00")
+    uncentered = text_type(text_source, should_center=False, color="#00FF00")
+    origin = uncentered.get_center().copy()
+    assert not np.allclose(origin, [0, 0, 0]), (text_type, origin)
+    assert np.allclose(centered.get_center(), [0, 0, 0], atol=1e-7), text_type
+    assert np.allclose(centered.get_all_points(), uncentered.get_all_points() - origin,
+                       atol=1e-6), text_type
+    assert centered.get_color() == uncentered.get_color(), text_type
+    assert centered._string_sub_spans == uncentered._string_sub_spans, text_type
+    assert centered._string_sub_paths == uncentered._string_sub_paths, text_type
+    assert all(centered._string_submobject(i) in centered.get_family()
+               for i in range(len(centered._string_sub_spans)))
+    centered.scale(2)
+    assert np.allclose(centered.get_center(), [0, 0, 0], atol=1e-7), text_type
+for text_type in (manimlib.Text, manimlib.MarkupText):
+    sized_text = text_type("Hello", height=2)
+    assert np.allclose(sized_text.get_center(), [0, 0, 0], atol=1e-7)
+    assert abs(sized_text.get_height() - 2) < 1e-6
+
 string_module = importlib.import_module("manimlib.mobject.svg.string_mobject")
 svg_module = importlib.import_module("manimlib.mobject.svg.svg_mobject")
 text_module = importlib.import_module("manimlib.mobject.svg.text_mobject")

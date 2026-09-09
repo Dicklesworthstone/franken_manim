@@ -1929,6 +1929,7 @@ fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
         "overridden-light.gif",
         "escaped-markup.png",
         "literal-markup.png",
+        "centered-typesetting.gif",
         "rectangle-flash.gif",
     ] {
         let bytes = std::fs::read(root.join(name))

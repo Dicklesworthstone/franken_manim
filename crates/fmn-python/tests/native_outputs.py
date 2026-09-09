@@ -189,6 +189,17 @@ class EscapedMarkup(Scene):
 class LiteralMarkup(Scene):
     def construct(self):
         self.add(Text("a < b & c > d"))
+class CenteredTypesetting(Scene):
+    def construct(self):
+        formula = Tex(r"e^{i\\pi} + 1 = 0").scale(2)
+        label = Text("Hello").scale(2)
+        assert max(abs(value) for value in formula.get_center()) < 1e-7
+        assert max(abs(value) for value in label.get_center()) < 1e-7
+        self.add(formula)
+        self.wait(1 / 30)
+        self.remove(formula)
+        self.add(label)
+        self.wait(1 / 30)
 class RectangleFlash(Scene):
     def construct(self):
         target = Square().set_fill(WHITE, opacity=1).set_stroke(width=0)
@@ -489,6 +500,19 @@ for markup_scene, markup_name in (("EscapedMarkup", "escaped-markup.png"),
     assert any(max(markup_image.point_to_rgb((x, y, 0))) > 0.5
                for y in ys for x in xs), "markup image contains no visible glyphs"
 assert markup_pngs[0] == markup_pngs[1], "escaped markup changed literal text rendering"
+
+centered_destination = output_root / "centered-typesetting.gif"
+code, centered_report = console(str(source), "CenteredTypesetting", "--format", "gif",
+                               "--resolution", "480x270", "--fps", "30", "--threads", "1",
+                               "--video_dir", str(centered_destination))
+assert code == 0 and centered_report["frame_count"] == 2, centered_report
+centered_frames, _ = read_gif(centered_destination)
+assert len(centered_frames) == 2
+for centered_frame in centered_frames:
+    rows, columns = np.nonzero(centered_frame.max(axis=2) > 32)
+    assert len(rows) > 100, "centered typesetting contains no substantial visible glyphs"
+    assert abs((columns.min() + columns.max() + 1) / 2 - 240) <= 2
+    assert abs((rows.min() + rows.max() + 1) / 2 - 135) <= 2
 
 rectangle_destination = output_root / "rectangle-flash.gif"
 code, rectangle_report = console(str(source), "RectangleFlash", "--format", "gif",
