@@ -115,3 +115,20 @@ fn valid_checksum_does_not_authorize_a_different_schema() {
         Err(fmn_hash::SerialError::SchemaMismatch { expected: 2, found: 1 })
     ));
 }
+
+#[test]
+fn byte_fields_preserve_exact_input_identity() {
+    fn encode(bytes: &[u8]) -> Vec<u8> {
+        let mut writer = Writer::new(GOLDEN_SCHEMA);
+        writer.put_bytes(bytes);
+        writer.finish().expect("byte identity encoding")
+    }
+
+    let first = encode(&[0x00, 0xff, 0x00]);
+    let same = encode(&[0x00, 0xff, 0x00]);
+    let changed = encode(&[0x00, 0xff, 0x01]);
+
+    assert_eq!(first, same);
+    assert_ne!(first, changed);
+    assert_ne!(sha256(&first), sha256(&changed));
+}

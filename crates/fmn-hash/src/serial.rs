@@ -249,6 +249,20 @@ pub enum Error {
         /// IEEE-754 bits found in the document.
         bits: u64,
     },
+    /// An `f32` geometry/scalar field required to be finite but was NaN or
+    /// infinite. Use [`Writer::put_f32`] when non-finite values are part of a
+    /// caller's ordinary numeric schema.
+    NonFiniteF32 {
+        /// IEEE-754 bits rejected by the finite-only field contract.
+        bits: u32,
+    },
+    /// An `f64` geometry/scalar field required to be finite but was NaN or
+    /// infinite. Use [`Writer::put_f64`] when non-finite values are part of a
+    /// caller's ordinary numeric schema.
+    NonFiniteF64 {
+        /// IEEE-754 bits rejected by the finite-only field contract.
+        bits: u64,
+    },
     /// A string field was not valid UTF-8.
     InvalidUtf8,
     /// The writer's payload (or the sealed document) could not reserve
@@ -309,6 +323,12 @@ impl fmt::Display for Error {
             }
             Self::NonCanonicalF64 { bits } => {
                 write!(f, "f64 bits 0x{bits:016x} are not canonical")
+            }
+            Self::NonFiniteF32 { bits } => {
+                write!(f, "f32 bits 0x{bits:08x} are not finite")
+            }
+            Self::NonFiniteF64 { bits } => {
+                write!(f, "f64 bits 0x{bits:016x} are not finite")
             }
             Self::InvalidUtf8 => f.write_str("string field is not valid UTF-8"),
             Self::AllocationFailed { needed } => {
@@ -455,6 +475,19 @@ impl Writer {
         self
     }
 
+    /// Append a finite `f32`, canonicalized and stored as little-endian
+    /// IEEE-754 bits.
+    ///
+    /// Unlike [`put_f32`](Self::put_f32), this opt-in field contract rejects
+    /// NaN and infinities and leaves the payload untouched when they occur.
+    pub fn put_finite_f32(&mut self, v: f32) -> &mut Self {
+        if !v.is_finite() {
+            self.set_sticky(Error::NonFiniteF32 { bits: v.to_bits() });
+            return self;
+        }
+        self.put_f32(v)
+    }
+
     /// Append an `f64`, canonicalized and stored as little-endian IEEE-754 bits.
     pub fn put_f64(&mut self, v: f64) -> &mut Self {
         let bits = canonicalize_f64(v).to_bits();
@@ -462,6 +495,19 @@ impl Writer {
             self.payload.extend_from_slice(&bits.to_le_bytes());
         }
         self
+    }
+
+    /// Append a finite `f64`, canonicalized and stored as little-endian
+    /// IEEE-754 bits.
+    ///
+    /// Unlike [`put_f64`](Self::put_f64), this opt-in field contract rejects
+    /// NaN and infinities and leaves the payload untouched when they occur.
+    pub fn put_finite_f64(&mut self, v: f64) -> &mut Self {
+        if !v.is_finite() {
+            self.set_sticky(Error::NonFiniteF64 { bits: v.to_bits() });
+            return self;
+        }
+        self.put_f64(v)
     }
 
     /// Append a length-prefixed byte field (`u64` LE length, then bytes).
@@ -801,6 +847,21 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    /// Read a finite canonical `f32`.
+    ///
+    /// This is the decoding counterpart to [`Writer::put_finite_f32`].
+    /// Ordinary [`get_f32`](Self::get_f32) remains available for schemas that
+    /// intentionally represent infinities or the canonical NaN.
+    pub fn get_finite_f32(&mut self) -> Result<f32, Error> {
+        let value = self.get_f32()?;
+        if !value.is_finite() {
+            return Err(Error::NonFiniteF32 {
+                bits: value.to_bits(),
+            });
+        }
+        Ok(value)
+    }
+
     /// Read an `f64` from its canonical little-endian IEEE-754 bits.
     ///
     /// # Errors
@@ -811,6 +872,21 @@ impl<'a> Reader<'a> {
         let value = f64::from_bits(bits);
         if canonicalize_f64(value).to_bits() != bits {
             return Err(Error::NonCanonicalF64 { bits });
+        }
+        Ok(value)
+    }
+
+    /// Read a finite canonical `f64`.
+    ///
+    /// This is the decoding counterpart to [`Writer::put_finite_f64`].
+    /// Ordinary [`get_f64`](Self::get_f64) remains available for schemas that
+    /// intentionally represent infinities or the canonical NaN.
+    pub fn get_finite_f64(&mut self) -> Result<f64, Error> {
+        let value = self.get_f64()?;
+        if !value.is_finite() {
+            return Err(Error::NonFiniteF64 {
+                bits: value.to_bits(),
+            });
         }
         Ok(value)
     }
@@ -1035,6 +1111,53 @@ mod tests {
         let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
         assert_eq!(r.get_f64().unwrap().to_bits(), f64_value.to_bits());
         r.finish().unwrap();
+    }
+
+    #[test]
+    fn finite_fields_reject_nonfinite_values_without_partial_writes() {
+        let mut f32_writer = Writer::new(TEST);
+        f32_writer.put_u8(0xaa).put_finite_f32(f32::INFINITY);
+        assert_eq!(
+            f32_writer.finish(),
+            Err(Error::NonFiniteF32 {
+                bits: f32::INFINITY.to_bits()
+            })
+        );
+
+        let mut f64_writer = Writer::new(TEST);
+        f64_writer.put_u8(0xbb).put_finite_f64(f64::NAN);
+        assert_eq!(
+            f64_writer.finish(),
+            Err(Error::NonFiniteF64 {
+                bits: f64::NAN.to_bits()
+            })
+        );
+    }
+
+    #[test]
+    fn finite_fields_round_trip_and_canonicalize_signed_zero() {
+        let mut w = Writer::new(TEST);
+        w.put_finite_f32(-0.0).put_finite_f64(-0.0);
+        let doc = w.finish().unwrap();
+        let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+        assert_eq!(r.get_finite_f32().unwrap().to_bits(), 0.0_f32.to_bits());
+        assert_eq!(r.get_finite_f64().unwrap().to_bits(), 0.0_f64.to_bits());
+        r.finish().unwrap();
+    }
+
+    #[test]
+    fn finite_reader_rejects_canonical_nan_and_infinity() {
+        for bits in [f32::NAN.to_bits(), f32::INFINITY.to_bits()] {
+            let doc = raw_payload(&bits.to_le_bytes());
+            let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+            assert_eq!(r.get_finite_f32(), Err(Error::NonFiniteF32 { bits }));
+        }
+
+        for bits in [f64::NAN.to_bits(), f64::INFINITY.to_bits()] {
+            let doc = raw_payload(&bits.to_le_bytes());
+            let mut r = Reader::open(&doc, TEST, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+            assert_eq!(r.get_finite_f64(), Err(Error::NonFiniteF64 { bits }));
+        }
     }
 
     #[test]
