@@ -16,8 +16,8 @@
 //!   semver-style major/minor migration policy) that backs cache keys, arena
 //!   snapshots, `SceneState`, the replay journal's content hashes, and the
 //!   provenance sidecar. Float fields are canonicalized at the boundary
-//!   (`-0.0 → +0.0`, NaN → the one canonical NaN) via `fmn-core`, so equal
-//!   values always hash equally on every platform.
+//!   (`-0.0 → +0.0`, NaN → the one canonical NaN) in this dependency-free
+//!   substrate, so equal values always hash equally on every platform.
 //!
 //! Certified determinism (§16.7) hashes the complete input closure and requires
 //! that equal hashes mean equal meaning; any nondeterminism in serialization —

@@ -6,8 +6,5 @@ license.workspace = true
 repository.workspace = true
 description = "Canonical hashing and versioned serialization for provenance and content addressing (§6.7)."
 
-[dependencies]
-fmn-core.workspace = true
-
 [lints]
 workspace = true

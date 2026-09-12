@@ -15,7 +15,7 @@
 //!   order of the [`Writer`] put-methods, never by map iteration.
 //! - **Primitive canonicalization** at the boundary: booleans have exactly the
 //!   `0`/`1` encodings, while `-0.0 → +0.0` and every NaN collapses to the one
-//!   canonical quiet NaN (via `fmn-core`). Readers reject alternate encodings,
+//!   canonical quiet NaN. Readers reject alternate encodings,
 //!   so bit-for-bit-different-but-equal values cannot acquire distinct hashes.
 //! - **Self-describing header**: a 4-byte magic, a schema id, and a
 //!   `major.minor` version, so a reader validates *what* it is decoding before
@@ -57,7 +57,35 @@
 
 use crate::sha256::{Digest, Sha256};
 use core::fmt;
-use fmn_core::types::{canonicalize_f32, canonicalize_f64};
+
+// These boundary canonicalizers intentionally live beside the wire format.
+// Keeping them here makes fmn-hash a dependency-free substrate: importing the
+// envelope must not pull fmn-core's scientific and RNG closure into consumers
+// that only need deterministic bytes and digests.
+const CANONICAL_NAN_F32_BITS: u32 = 0x7fc0_0000;
+const CANONICAL_NAN_F64_BITS: u64 = 0x7ff8_0000_0000_0000;
+
+#[inline]
+fn canonicalize_f32(value: f32) -> f32 {
+    if value == 0.0 {
+        0.0
+    } else if value.is_nan() {
+        f32::from_bits(CANONICAL_NAN_F32_BITS)
+    } else {
+        value
+    }
+}
+
+#[inline]
+fn canonicalize_f64(value: f64) -> f64 {
+    if value == 0.0 {
+        0.0
+    } else if value.is_nan() {
+        f64::from_bits(CANONICAL_NAN_F64_BITS)
+    } else {
+        value
+    }
+}
 
 /// The fixed on-wire header size in bytes (everything before the payload).
 const HEADER_LEN: usize = 24;

@@ -98,3 +98,20 @@ fn golden_round_trips_field_for_field() {
     assert_eq!(r.get_digest().unwrap(), sha256(b"anchor"));
     r.finish().unwrap();
 }
+
+#[test]
+fn valid_checksum_does_not_authorize_a_different_schema() {
+    // The checksum proves that these bytes were not corrupted; it does not
+    // grant permission to interpret a document under another schema.
+    let doc = golden_doc();
+    let wrong_schema = Schema::new(*b"FMNG", 2, 1, 0);
+    assert!(matches!(
+        Reader::open(
+            &doc,
+            wrong_schema,
+            fmn_hash::Limits::DEFAULT,
+            UnknownPolicy::Strict,
+        ),
+        Err(fmn_hash::SerialError::SchemaMismatch { expected: 2, found: 1 })
+    ));
+}
