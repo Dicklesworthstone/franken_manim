@@ -1096,17 +1096,81 @@ def _install_composition_lifecycle(g):
     animated_mobjects = g["_fmn_animated_mobjects"]
     original_requires = g["_requires_python_animation"]
     original_play = g["Scene"].play
+    original_init = AnimationGroup.__init__
+    original_driver_init = CallbackDriver.__init__
+    original_driver_interpolate = CallbackDriver.interpolate
 
-    def ensure_root(animation):
-        if animation.mobject is None:
-            objects, seen = [], set()
+    # Some shipped group subclasses (notably following Flash) deliberately
+    # implement a leaf-style begin via Animation.begin, not a child driver.
+    # Freeze their previously inherited lifecycle before installing the group
+    # protocol; otherwise that begin would call our driver-only interpolate.
+    legacy_methods = ("_ensure_runtime_defaults", "get_all_mobjects", "begin",
+                      "update_mobjects", "interpolate", "finish", "clean_up_from_scene")
+    legacy_classes = [
+        cls for cls in set(value for value in g.values() if isinstance(value, type))
+        if cls is not AnimationGroup and cls is not g["TransformMatchingParts"]
+        and issubclass(cls, AnimationGroup) and "begin" in vars(cls)
+    ]
+    for cls in legacy_classes:
+        inherited = {name: getattr(cls, name) for name in legacy_methods if name not in vars(cls)}
+        for name, function in inherited.items():
+            setattr(cls, name, function)
+
+    def legacy_abort(self):
+        self.mobject.set_animating_status(False)
+        if self.suspend_mobject_updating and getattr(self, "mobject_was_updating", False):
+            self.mobject.resume_updating()
+
+    for cls in legacy_classes:
+        if not hasattr(cls, "abort"):
+            cls.abort = legacy_abort
+
+    def timing_signature(animation):
+        return tuple((id(member), start, end) for member, start, end in animation.anims_with_timings)
+
+    def group_init(self, *animations, run_time=-1, lag_ratio=None, group=None, group_type=None, **kwargs):
+        if group is not None and not isinstance(group, Mobject):
+            raise TypeError("AnimationGroup group must be a Mobject")
+        if group is None and group_type is not None and not callable(group_type):
+            raise TypeError("AnimationGroup group_type must be callable")
+        original_init(self, *animations, run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+        self._composition_authored_root = group is not None or group_type is not None
+        self._composition_initial_timings = timing_signature(self)
+        if group is not None:
+            self.mobject = self.group = group
+        elif group_type is not None:
+            root = group_type(*member_objects(self))
+            if not isinstance(root, Mobject):
+                raise TypeError("AnimationGroup group_type must return a Mobject")
+            self.mobject = self.group = root
+
+    def member_objects(animation, visiting=None):
+        visiting = set() if visiting is None else visiting
+        if id(animation) in visiting:
+            raise ValueError("Animation composition contains a cycle")
+        visiting.add(id(animation))
+        objects, seen = [], set()
+        try:
             for child in animation.animations:
+                if isinstance(child, AnimationGroup) and child.mobject is None:
+                    ensure_root(child, visiting)
                 for obj in animated_mobjects(child):
                     if id(obj) not in seen:
                         seen.add(id(obj))
                         objects.append(obj)
-            group_type = g["VGroup"] if all(isinstance(obj, g["VMobject"]) for obj in objects) else g["Group"]
-            animation.mobject = group_type(*objects)
+        finally:
+            visiting.remove(id(animation))
+        return objects
+
+    def ensure_root(animation, visiting=None):
+        if animation.mobject is None:
+            existing = getattr(animation, "group", None)
+            if isinstance(existing, Mobject):
+                animation.mobject = existing
+            else:
+                objects = member_objects(animation, visiting)
+                group_type = g["VGroup"] if all(isinstance(obj, g["VMobject"]) for obj in objects) else g["Group"]
+                animation.mobject = group_type(*objects)
         if not isinstance(animation.mobject, Mobject):
             raise TypeError("AnimationGroup must animate a Mobject group")
         animation.group = animation.mobject
@@ -1217,6 +1281,7 @@ def _install_composition_lifecycle(g):
         return ensure_root(self)
 
     methods = {
+        "__init__": group_init,
         "_ensure_runtime_defaults": ensure_runtime_defaults,
         "begin": begin, "update_mobjects": update_mobjects,
         "interpolate": interpolate, "finish": finish,
@@ -1233,15 +1298,78 @@ def _install_composition_lifecycle(g):
     # native specializations must not become callbacks merely for having
     # their own built-in methods. Compare identities, including monkeypatches.
     hooks = ("begin", "finish", "interpolate", "update_mobjects",
-             "clean_up_from_scene", "_ensure_runtime_defaults")
+             "clean_up_from_scene", "_ensure_runtime_defaults",
+             "build_animations_with_timings", "calculate_max_end_time")
     protocols = {
         cls: {name: getattr(cls, name) for name in hooks}
         for cls in tuple(g.values())
         if isinstance(cls, type) and issubclass(cls, AnimationGroup)
     }
 
+    def custom_timings(animation):
+        initial = getattr(animation, "_composition_initial_timings", None)
+        if initial is not None and timing_signature(animation) != initial:
+            return True
+        for cls in type(animation).__mro__:
+            baseline = protocols.get(cls)
+            if baseline is not None:
+                return any(getattr(getattr(animation, name), "__func__", getattr(animation, name)) is not baseline[name]
+                           for name in ("build_animations_with_timings", "calculate_max_end_time"))
+        return False
+
+    def authored_timings(group, children):
+        import math
+        rows = list(group.anims_with_timings)
+        if len(rows) != len(group.animations) or len(children) != len(group.animations):
+            raise ValueError("AnimationGroup timings need one row per animation")
+        available = {}
+        for index, member in enumerate(group.animations):
+            available.setdefault(id(member), []).append(index)
+        timings = []
+        for member, start, end in rows:
+            candidates = available.get(id(member), [])
+            if not candidates:
+                raise ValueError("AnimationGroup timing row contains a foreign or duplicate animation")
+            index = candidates.pop(0)
+            start, end = float(start), float(end)
+            if not math.isfinite(start) or not math.isfinite(end) or end < start:
+                raise ValueError("AnimationGroup timing bounds must be finite and ordered")
+            timings.append((children[index], start, end))
+        max_end = float(group.max_end_time)
+        if not math.isfinite(max_end) or max_end < 0:
+            raise ValueError("AnimationGroup max_end_time must be finite and nonnegative")
+        return timings, max_end
+
+    def driver_init(self, group, children, run_time=None, rate_func=None):
+        original_driver_init(self, group, children, run_time=run_time, rate_func=rate_func)
+        self._authored_timing_rows = custom_timings(group)
+        if self._authored_timing_rows:
+            self.timings, self.max_end = authored_timings(group, children)
+            if self.successive:
+                if any(a[1] > b[1] for a, b in zip(self.timings, self.timings[1:])):
+                    raise ValueError("Succession timing rows must be ordered by start time")
+                self.children = [child for child, _, _ in self.timings]
+
+    def driver_interpolate(self, alpha):
+        if not self._authored_timing_rows or self.successive:
+            return original_driver_interpolate(self, alpha)
+        time = g["_composition_timeline_position"](
+            self.group, float(alpha), self.max_end, self.get_run_time(), self.rate_func,
+        )
+        # Authored row order controls interpolation order; eager begin,
+        # helper updates and finish retain the original argument order.
+        for child, start, end in self.timings:
+            if child is not None:
+                sub = 0.0 if end == start else min(max((time - start) / (end - start), 0.0), 1.0)
+                child.interpolate(sub)
+
+    CallbackDriver.__init__ = driver_init
+    CallbackDriver.interpolate = driver_interpolate
+
     def requires_python_animation(animation):
         if isinstance(animation, AnimationGroup):
+            if getattr(animation, "_composition_authored_root", False) or custom_timings(animation):
+                return True
             for cls in type(animation).__mro__:
                 baseline = protocols.get(cls)
                 if baseline is not None:
@@ -1267,6 +1395,8 @@ def _install_composition_lifecycle(g):
             visiting.remove(id(animation))
             seen.add(id(animation))
             if requires_python_animation(animation):
+                if custom_timings(animation):
+                    authored_timings(animation, animation.animations)
                 ensure_root(animation)
                 groups.append((animation, getattr(animation, "_composition_scene", None)))
                 animation._composition_scene = self
@@ -1281,7 +1411,7 @@ def _install_composition_lifecycle(g):
             # scene updater may fail after these native children have begun.
             for animation, _ in reversed(groups):
                 try:
-                    abort(animation)
+                    animation.abort()
                 except BaseException:
                     pass
             raise
