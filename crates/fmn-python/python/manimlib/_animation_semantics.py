@@ -19,6 +19,55 @@ def install(native):
     DrawBorderThenFill = g["DrawBorderThenFill"]
     FadeTransform = g["FadeTransform"]
     FadeTransformPieces = g["FadeTransformPieces"]
+    original_transform_init = Transform.__init__
+    original_requires_python = g["_requires_python_animation"]
+
+    def uses_python_path(animation):
+        path = getattr(animation, "path_func", None)
+        return path is not None and getattr(path, "_fmn_path_arc", None) is None
+
+    def transform_init(
+        self,
+        mobject,
+        target_mobject=None,
+        path_arc=0.0,
+        path_arc_axis=g["_OUT"],
+        path_func=None,
+        **kwargs,
+    ):
+        if path_func is not None and not callable(path_func):
+            raise TypeError("Transform path_func must be callable")
+        python_path = (
+            path_func is not None
+            and getattr(path_func, "_fmn_path_arc", None) is None
+        )
+        # The callback segment now releases the Stage around every Python
+        # hook. Keep scalar arc factories on Choreo's native path, but do not
+        # reject an authored point-array map that this boundary can execute.
+        # Target-less Swap/CyclicReplace still require their native lowering.
+        if python_path and self._target_attr is None:
+            refuse_unrouted(type(self).__name__ + "()", [("path_func", True)])
+        original_transform_init(
+            self,
+            mobject,
+            target_mobject,
+            path_arc=path_arc,
+            path_arc_axis=path_arc_axis,
+            path_func=None if python_path else path_func,
+            **kwargs,
+        )
+        self.path_func = path_func
+
+    def requires_python_animation(animation):
+        # Consult the live path, not a constructor-time flag: scene authors
+        # may replace it between plays or install it on an animation instance.
+        if (
+            isinstance(animation, Transform)
+            and animation._target_attr is not None
+            and uses_python_path(animation)
+        ):
+            return True
+        return original_requires_python(animation)
 
     def mobject_str(self):
         return type(self).__name__
@@ -324,7 +373,10 @@ def install(native):
             self.target_copy = self.target_mobject.copy()
         self.mobject.align_data_and_family(self.target_copy)
         Animation.begin(self)
-        if not self.mobject.has_updaters():
+        # Equal endpoint records do not imply a constant authored path: a
+        # closed excursion may leave and return to the very same points.
+        # Explicit user locks remain respected by Mobject.interpolate.
+        if not self.mobject.has_updaters() and not uses_python_path(self):
             self.mobject.lock_matching_data(
                 self.starting_mobject,
                 self.target_copy,
@@ -415,6 +467,7 @@ def install(native):
     Animation.is_remover = is_remover
     Animation.clean_up_from_scene = clean_up_from_scene
     NativeAnimation.__init__ = native_animation_init
+    Transform.__init__ = transform_init
     Transform.replace_mobject_with_target_in_scene = False
     Transform.init_path_func = init_path_func
     Transform.create_target = create_target
@@ -473,7 +526,7 @@ def install(native):
         ),
         NativeAnimation: ("__init__",),
         Transform: (
-            "init_path_func", "create_target", "check_target_mobject_validity",
+            "__init__", "init_path_func", "create_target", "check_target_mobject_validity",
             "_native_target", "begin", "finish", "clean_up_from_scene",
             "get_all_mobjects", "get_all_families_zipped",
             "interpolate_mobject", "interpolate_submobject",
@@ -489,4 +542,5 @@ def install(native):
             function.__name__ = name
             function.__qualname__ = f"{cls.__qualname__}.{name}"
             function.__module__ = cls.__module__
+    g["_requires_python_animation"] = requires_python_animation
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
