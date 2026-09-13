@@ -63,4 +63,8 @@ def __getattr__(name):
         from manimlib import __version__
 
         return __version__
+    if name in {"RenderResult", "RenderSession", "render_scene", "render_session"}:
+        from . import rendering
+
+        return getattr(rendering, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
