@@ -24,7 +24,7 @@ def environment():
         def __init__(self, *children, points=None):
             self.submobjects = list(children)
             points = [] if points is None else points
-            self.data = np.zeros(len(points), dtype=[("point", "f8", (3,)), ("rgba", "f8", (4,))])
+            self.data = np.zeros(len(points), dtype=[("point", "f8", (3,)), ("rgba", "f8", (4,)), ("stroke_width", "f8", (1,))])
             self.data["point"] = np.asarray(points).reshape(-1, 3)
             self.data["rgba"][:] = 1
             self.uniforms = {}
@@ -35,6 +35,33 @@ def environment():
             self.calls, self.updaters = [], []
             self.fill_opacity, self.stroke_width, self.stroke_color = .7, 5., "#FFFFFF"
             self.stroke_behind = False
+        @property
+        def fill_opacity(self):
+            return float(self.data["rgba"][0, 3]) if len(self.data) else self._empty_fill
+        @fill_opacity.setter
+        def fill_opacity(self, value):
+            self._empty_fill = value
+            self.data["rgba"][:, 3] = value
+        @property
+        def stroke_width(self):
+            return float(self.data["stroke_width"][0, 0]) if len(self.data) else self._empty_width
+        @stroke_width.setter
+        def stroke_width(self, value):
+            self._empty_width = value
+            self.data["stroke_width"][:] = value
+        def get_uniforms(self):
+            return dict(self.uniforms)
+        def set_uniform(self, **kwargs):
+            self.uniforms.update(kwargs)
+            return self
+        def align_data_and_family(self, other):
+            if len(self.get_family()) != len(other.get_family()):
+                raise ValueError("fixture requires equal family sizes")
+            for left, right in zip(self.get_family(), other.get_family()):
+                count = max(len(left.data), len(right.data))
+                left.data = np.resize(left.data, count)
+                right.data = np.resize(right.data, count)
+            return self
         def get_family(self):
             result = [self]
             for child in self.submobjects:
@@ -192,7 +219,7 @@ def environment():
     g = dict(locals())
     g.update(_abc=abc, _np=np, np=np, _copy=copy, copy_module=copy, _OUT=(0., 0., 1.),
              _linear_rate=linear, _smooth_rate=smooth, smooth_rate=smooth,
-             _interpolate=lambda a,b,t:(1-t)*a+t*b,
+             _interpolate=lambda a,b,t:(1-t)*a+t*b, straight_path=lambda a,b,t:(1-t)*a+t*b,
              interpolate_value=lambda a,b,t:(1-t)*a+t*b,
              _refuse_unrouted=refuse, refuse_unrouted=refuse,
              _RATE_FUNC_NAMES={linear:"linear", smooth:"smooth", double_smooth:"double_smooth"},

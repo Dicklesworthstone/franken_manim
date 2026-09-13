@@ -108,3 +108,78 @@ assert not failure_curve.is_changing()
 failed.abort()
 failure_scene.play(failure_curve.animate.shift((1., 0., 0.)))
 assert np.isfinite(failure_curve.get_points()).all()
+
+# DrawBorderThenFill must execute an authored outline and then fill from it
+# back into the saved initial appearance, using native field interpolation.
+class CustomOutline(m.DrawBorderThenFill):
+    def get_outline(self):
+        self.outline_calls = getattr(self, "outline_calls", 0) + 1
+        return super().get_outline().set_stroke(width=8.)
+
+border_scene = m.Scene()
+border_square = m.Square(fill_opacity=.8, stroke_width=4.)
+border_animation = CustomOutline(border_square, rate_func=m.linear, final_alpha_value=.75)
+border_scene.play(border_animation)
+assert border_animation.outline_calls == 1
+assert np.isclose(border_square.get_fill_opacity(), .4)
+assert np.isclose(border_square.get_stroke_width(), 6.)
+assert not border_square.is_changing()
+
+# Direct lifecycle use supports nonmonotonic interpolation; coming back
+# from the fill phase must not leave fill opacity on the growing outline.
+seek_square = m.Square(fill_opacity=.8, stroke_width=4.)
+seek = m.DrawBorderThenFill(seek_square, rate_func=m.linear)
+seek.begin()
+seek.interpolate(.8)
+assert seek_square.get_fill_opacity() > 0
+seek.interpolate(.2)
+assert seek_square.get_fill_opacity() == 0
+assert np.isclose(seek_square.get_stroke_width(), 2.)
+seek.finish()
+assert np.isclose(seek_square.get_fill_opacity(), .8)
+assert np.isclose(seek_square.get_stroke_width(), 4.)
+
+# Native glyph families exercise point-free group roots and per-glyph lag.
+class AuthoredWrite(m.Write):
+    def get_outline(self):
+        self.outline_calls = getattr(self, "outline_calls", 0) + 1
+        return super().get_outline()
+
+write_scene = m.Scene()
+text = m.Text("Draw", font_size=24)
+glyphs = list(text.family_members_with_points())
+write = AuthoredWrite(text, stroke_width=6.)
+write_scene.play(m.AnimationGroup(write))
+assert write.outline_calls == 1
+assert list(text.family_members_with_points()) == glyphs
+assert all(np.isfinite(glyph.get_points()).all() for glyph in glyphs)
+assert all(glyph.get_fill_opacity() > .9 for glyph in glyphs)
+
+# Outline refinement uses Marionette's real alignment, not truncated zips.
+aligned_scene = m.Scene()
+aligned_curve = m.Line((0., 0., 0.), (4., 0., 0.))
+class RefinedOutline(m.DrawBorderThenFill):
+    def get_outline(self):
+        return super().get_outline().insert_n_curves(3)
+
+aligned = RefinedOutline(aligned_curve, rate_func=m.linear)
+aligned_scene.play(aligned)
+assert np.allclose(aligned_curve.get_start(), [0., 0., 0.])
+assert np.allclose(aligned_curve.get_end(), [4., 0., 0.])
+assert len(aligned_curve.get_points()) == len(aligned.outline.get_points())
+
+class FailingOutline(m.DrawBorderThenFill):
+    def get_outline(self):
+        raise RevealFailure("outline-build-failure")
+
+outline_failure_scene = m.Scene()
+outline_failure_square = m.Square(fill_opacity=.5)
+try:
+    outline_failure_scene.play(FailingOutline(outline_failure_square, suspend_mobject_updating=True))
+except RevealFailure as error:
+    assert str(error) == "outline-build-failure"
+else:
+    raise AssertionError("authored get_outline was bypassed")
+assert not outline_failure_square._is_updating_suspended()
+assert not outline_failure_square.is_changing()
+outline_failure_scene.play(m.Write(outline_failure_square))
