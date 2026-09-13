@@ -19,6 +19,66 @@ def install(native):
     DrawBorderThenFill = g["DrawBorderThenFill"]
     FadeTransform = g["FadeTransform"]
     FadeTransformPieces = g["FadeTransformPieces"]
+    original_transform_init = Transform.__init__
+    original_requires_python = g["_requires_python_animation"]
+
+    def uses_python_path(animation):
+        path = getattr(animation, "path_func", None)
+        return path is not None and getattr(path, "_fmn_path_arc", None) is None
+
+    def transform_init(
+        self,
+        mobject,
+        target_mobject=None,
+        path_arc=0.0,
+        path_arc_axis=g["_OUT"],
+        path_func=None,
+        **kwargs,
+    ):
+        if path_func is not None and not callable(path_func):
+            raise TypeError("Transform path_func must be callable")
+        python_path = (
+            path_func is not None
+            and getattr(path_func, "_fmn_path_arc", None) is None
+        )
+        # The callback segment now releases the Stage around every Python
+        # hook. Keep scalar arc factories on Choreo's native path, but do not
+        # reject an authored point-array map that this boundary can execute.
+        # Target-less Swap/CyclicReplace still require their native lowering.
+        if python_path and self._target_attr is None:
+            refuse_unrouted(type(self).__name__ + "()", [("path_func", True)])
+        original_transform_init(
+            self,
+            mobject,
+            target_mobject,
+            path_arc=path_arc,
+            path_arc_axis=path_arc_axis,
+            path_func=None if python_path else path_func,
+            **kwargs,
+        )
+        self.path_func = path_func
+
+    def requires_python_animation(animation):
+        # Consult the live path, not a constructor-time flag: scene authors
+        # may replace it between plays or install it on an animation instance.
+        if (
+            isinstance(animation, Transform)
+            and animation._target_attr is not None
+        ):
+            if uses_python_path(animation):
+                return True
+            # Compare against the nearest shipped class, not Transform alone:
+            # Grow/Indicate/etc. already have native implementations of their
+            # own hooks. Only authored changes require callback dispatch.
+            for cls in type(animation).__mro__:
+                baseline = transform_protocols.get(cls)
+                if baseline is not None:
+                    for name, expected in baseline.items():
+                        method = getattr(animation, name)
+                        if getattr(method, "__func__", method) is not expected:
+                            return True
+                    break
+        return original_requires_python(animation)
 
     def mobject_str(self):
         return type(self).__name__
@@ -305,6 +365,17 @@ def install(native):
             raise TypeError("Transform target must be a Mobject")
 
     def native_target(self):
+        # Scene.play handles camera transforms before callback dispatch. Do
+        # not silently lower a later-assigned path or authored hook to its
+        # native endpoint-only camera track.
+        if (
+            isinstance(self.mobject, g["CameraFrame"])
+            and requires_python_animation(self)
+        ):
+            raise NotImplementedError(
+                "Python-callback animations of the camera frame await the "
+                "camera track's per-frame callback seam"
+            )
         # CyclicReplace/Swap carry multiple source mobjects rather than a
         # Transform target. Their native constructor owns those destinations.
         if self._target_attr is None:
@@ -324,7 +395,13 @@ def install(native):
             self.target_copy = self.target_mobject.copy()
         self.mobject.align_data_and_family(self.target_copy)
         Animation.begin(self)
-        if not self.mobject.has_updaters():
+        # Equal endpoint records do not imply a constant authored path: a
+        # closed excursion may leave and return to the very same points.
+        # Explicit user locks remain respected by Mobject.interpolate.
+        # Camera pose is not in the RecordBuffer: equal empty endpoint
+        # arrays must not lock the animated center and dimensions.
+        if (not self.mobject.has_updaters() and not uses_python_path(self)
+                and not isinstance(self.mobject, g["CameraFrame"])):
             self.mobject.lock_matching_data(
                 self.starting_mobject,
                 self.target_copy,
@@ -415,6 +492,7 @@ def install(native):
     Animation.is_remover = is_remover
     Animation.clean_up_from_scene = clean_up_from_scene
     NativeAnimation.__init__ = native_animation_init
+    Transform.__init__ = transform_init
     Transform.replace_mobject_with_target_in_scene = False
     Transform.init_path_func = init_path_func
     Transform.create_target = create_target
@@ -473,7 +551,7 @@ def install(native):
         ),
         NativeAnimation: ("__init__",),
         Transform: (
-            "init_path_func", "create_target", "check_target_mobject_validity",
+            "__init__", "init_path_func", "create_target", "check_target_mobject_validity",
             "_native_target", "begin", "finish", "clean_up_from_scene",
             "get_all_mobjects", "get_all_families_zipped",
             "interpolate_mobject", "interpolate_submobject",
@@ -489,4 +567,1247 @@ def install(native):
             function.__name__ = name
             function.__qualname__ = f"{cls.__qualname__}.{name}"
             function.__module__ = cls.__module__
+    # Capture after shared installation so inherited methods and qualified
+    # exports have their final identities. Retain function objects, not just
+    # class names, so later class/instance monkeypatches are visible too.
+    transform_hooks = (
+        "create_target", "create_starting_mobject", "init_path_func",
+        "check_target_mobject_validity", "get_all_mobjects",
+        "get_all_families_zipped", "get_all_mobjects_to_update",
+        "get_sub_alpha", "time_spanned_alpha",
+    )
+    transform_protocols = {
+        cls: {name: getattr(cls, name) for name in transform_hooks}
+        for cls in tuple(g.values())
+        if isinstance(cls, type) and issubclass(cls, Transform)
+        and getattr(cls, "_target_attr", None) is not None
+    }
+    g["_requires_python_animation"] = requires_python_animation
+    _install_matching_parts(g)
+    _install_matching_strings(g)
+    _install_composition_lifecycle(g)
+    _install_camera_pose(g)
+    _install_camera_choreography(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
+
+
+def _install_matching_parts(g):
+    """Plan with public hooks; execute leaves on the existing Choreo boundary."""
+    Parts = g["TransformMatchingParts"]
+    Shapes = g["TransformMatchingShapes"]
+    Animation = g["Animation"]
+    AnimationGroup = g["AnimationGroup"]
+    Mobject = g["Mobject"]
+    Transform = g["Transform"]
+    CallbackDriver = g["_CompositionCallbackDriver"]
+    NativeLeaf = g["_NativeCompositionLeaf"]
+
+    def unique(objects):
+        result, seen = [], set()
+        for obj in objects:
+            if id(obj) not in seen:
+                seen.add(id(obj))
+                result.append(obj)
+        return result
+
+    def animated_mobjects(animation):
+        # CameraFrame is a native pose, never a drawable Stage family member.
+        if isinstance(animation.mobject, g["CameraFrame"]):
+            return []
+        if isinstance(animation.mobject, Mobject):
+            return unique([animation.mobject, *getattr(animation, "_native_extra_mobjects", ())])
+        if isinstance(animation, AnimationGroup):
+            return unique(
+                obj for member in animation.animations
+                for obj in animated_mobjects(member)
+            )
+        raise TypeError("Matching animations must animate Mobjects")
+
+    def matching_init(
+        self, source, target, matched_pairs=(), match_animation=Transform,
+        mismatch_animation=Transform, run_time=2, lag_ratio=0, **kwargs,
+    ):
+        if not isinstance(source, Mobject) or not isinstance(target, Mobject):
+            raise TypeError(type(self).__name__ + " expects two Mobject families")
+        if not callable(match_animation) or not callable(mismatch_animation):
+            raise TypeError("match_animation and mismatch_animation must be callable")
+        pairs = [tuple(pair) for pair in matched_pairs]
+        if not all(len(pair) == 2 and all(isinstance(obj, Mobject) for obj in pair)
+                   for pair in pairs):
+            raise TypeError(type(self).__name__ + " matched_pairs must pair Mobjects")
+        self.source, self.target = source, target
+        self.target_mobject = target
+        self.matched_pairs = pairs
+        self.match_animation, self.mismatch_animation = match_animation, mismatch_animation
+        self.anim_config = dict(kwargs)
+        self.source_pieces = unique(source.family_members_with_points())
+        self.target_pieces = unique(target.family_members_with_points())
+        self.anims = []
+        for pair in pairs:
+            self.add_transform(*pair)
+        # Snapshot the candidates before add_transform consumes their families.
+        for pair in list(self.find_pairs_with_matching_shapes(
+            self.source_pieces, self.target_pieces,
+        )):
+            self.add_transform(*pair)
+        claimed = {
+            id(member) for animation in self.anims
+            for obj in animated_mobjects(animation) for member in obj.get_family()
+        }
+        for piece in self.source_pieces:
+            if id(piece) not in claimed:
+                self.anims.append(g["FadeOutToPoint"](
+                    piece, target.get_center(), **self.anim_config,
+                ))
+        for piece in self.target_pieces:
+            if id(piece) not in claimed:
+                self.anims.append(g["FadeInFromPoint"](
+                    piece, source.get_center(), **self.anim_config,
+                ))
+        AnimationGroup.__init__(self, *self.anims, run_time=run_time, lag_ratio=lag_ratio)
+        # BN-11: members own easing; an omitted group curve is linear, not a
+        # second smooth curve installed by the Python callback normalization.
+        self.rate_func = g["_linear_rate"]
+        objects = unique(obj for anim in self.animations for obj in animated_mobjects(anim))
+        group_type = g["VGroup"] if all(isinstance(obj, g["VMobject"]) for obj in objects) else g["Group"]
+        self.mobject = group_type(*objects)
+        self.remover = True
+        self._matching_driver = None
+        self._matching_scene = None
+
+    def add_transform(self, source, target):
+        if not isinstance(source, Mobject) or not isinstance(target, Mobject):
+            raise TypeError("add_transform expects two Mobjects")
+        source_members = unique(source.family_members_with_points())
+        target_members = unique(target.family_members_with_points())
+        if not source_members or not target_members:
+            return
+        available_source = {id(obj) for obj in self.source_pieces}
+        available_target = {id(obj) for obj in self.target_pieces}
+        if (any(id(obj) not in available_source for obj in source_members)
+                or any(id(obj) not in available_target for obj in target_members)):
+            return
+        factory = self.match_animation if source.has_same_shape_as(target) else self.mismatch_animation
+        animation = factory(source, target, **self.anim_config)
+        if not isinstance(animation, Animation):
+            raise TypeError("A matching animation factory must return an Animation")
+        # A failed factory must not consume either side of the match.
+        self.anims.append(animation)
+        source_ids, target_ids = {id(obj) for obj in source_members}, {id(obj) for obj in target_members}
+        self.source_pieces[:] = [obj for obj in self.source_pieces if id(obj) not in source_ids]
+        self.target_pieces[:] = [obj for obj in self.target_pieces if id(obj) not in target_ids]
+
+    def find_pairs_with_matching_shapes(self, chars1, chars2):
+        return [(source, target) for source in chars1 for target in chars2
+                if source.has_same_shape_as(target)]
+
+    def native_rate(animation):
+        rate = animation.rate_func
+        if rate is None or isinstance(rate, str):
+            return rate
+        name = g["_RATE_FUNC_NAMES"].get(rate)
+        if name is not None:
+            return name
+        if not callable(rate):
+            raise TypeError("rate_func must be a callable or a catalog name")
+        frames = max(2, int(round(g["_composition_member_run_time"](animation) * 30.0)))
+        return [float(rate(index / frames)) for index in range(frames + 1)]
+
+    class PythonLeaf:
+        def __init__(self, animation):
+            self.animation = animation
+            self.begun = False
+            self.finished = False
+
+        def get_run_time(self):
+            return self.animation.get_run_time()
+
+        def begin(self):
+            self.begun = True
+            self.animation.begin()
+
+        def update_mobjects(self, dt):
+            self.animation.update_mobjects(dt)
+
+        def interpolate(self, alpha):
+            self.animation.interpolate(alpha)
+
+        def finish(self):
+            self.animation.finish()
+            self.finished = True
+
+        def clean_up_from_scene(self, scene):
+            self.animation.clean_up_from_scene(scene)
+
+        def abort(self):
+            if not self.begun or self.finished:
+                return
+            animation = self.animation
+            abort_animation = getattr(animation, "abort", None)
+            if callable(abort_animation):
+                abort_animation()
+            else:
+                animation.mobject.set_animating_status(False)
+                if isinstance(animation, Transform):
+                    animation.mobject.unlock_data()
+                if (animation.suspend_mobject_updating
+                        and getattr(animation, "mobject_was_updating", False)):
+                    animation.mobject.resume_updating()
+
+    def make_driver(scene, animation):
+        if isinstance(animation.mobject, g["CameraFrame"]):
+            factory = g.get("_fmn_make_camera_driver")
+            if factory is None:
+                raise NotImplementedError("Matching animations cannot contain camera-frame tracks before camera initialization")
+            return factory(scene, animation)
+        if (g["_requires_python_animation"](animation)
+                or (isinstance(animation, AnimationGroup)
+                    and getattr(scene, "_fmn_camera_play_active", False)
+                    and getattr(animation.begin, "__func__", animation.begin) is AnimationGroup.begin)):
+            animation._ensure_runtime_defaults()
+            if not isinstance(animation.mobject, Mobject):
+                raise TypeError("A Python matching animation must animate a Mobject")
+            if not animation.mobject._is_bound():
+                scene._adopt(animation.mobject)
+            return PythonLeaf(animation)
+        if isinstance(animation, AnimationGroup):
+            return CallbackDriver(animation, [make_driver(scene, member) for member in animation.animations])
+        # This is the same narrow spec consumed by Scene.play. Only lowering
+        # lives here: geometry, record alignment, leaf snapshots and frame
+        # timing remain in the existing native drivers/interval builder.
+        mobject = animation.mobject
+        if isinstance(mobject, g["CameraFrame"]):
+            raise NotImplementedError("Matching animations cannot contain camera-frame tracks")
+        if not mobject._is_bound():
+            scene._adopt(mobject)
+        if animation._native_kind == "restore":
+            saved = getattr(mobject, "saved_state", None)
+            if saved is not None:
+                if not saved._is_bound():
+                    scene._adopt(saved)
+                mobject._link_saved_state(saved)
+        target = animation._native_target()
+        if target is not None and not target._is_bound():
+            scene._adopt(target)
+        for extra in getattr(animation, "_native_extra_mobjects", ()):
+            if not extra._is_bound():
+                scene._adopt(extra)
+        params = dict(animation._native_params())
+        params["suspend_mobject_updating"] = bool(animation.suspend_mobject_updating)
+        if animation.time_span is not None:
+            params["time_span"] = animation.time_span
+        spec = (
+            animation._native_kind, mobject, target, animation.run_time,
+            native_rate(animation), animation.lag_ratio, params,
+        )
+        return NativeLeaf(scene, scene._native_animation_driver(spec))
+
+    # Shared lowering for authored compositions as well as matching plans.
+    g["_fmn_make_animation_driver"] = make_driver
+    g["_fmn_animated_mobjects"] = animated_mobjects
+
+    def abort(self):
+        driver = self._matching_driver
+        if driver is None:
+            return
+        def unwind(child):
+            if isinstance(child, CallbackDriver):
+                errors = []
+                for member in child.children:
+                    try:
+                        unwind(member)
+                    except BaseException as error:
+                        errors.append(error)
+                if errors:
+                    raise errors[0]
+            else:
+                child.abort()
+        try:
+            unwind(driver)
+        finally:
+            self._matching_driver = None
+            self.mobject.set_animating_status(False)
+
+    def drive(self, method, *args):
+        if self._matching_driver is None:
+            raise RuntimeError("Matching animation must begin before " + method)
+        try:
+            return getattr(self._matching_driver, method)(*args)
+        except BaseException:
+            # Abort does not finish an animation or publish the target. Keep
+            # the original callback failure if a secondary cleanup also fails.
+            try:
+                self.abort()
+            except BaseException:
+                pass
+            raise
+
+    def begin(self):
+        if not self.mobject._is_bound():
+            raise RuntimeError("Matching animation begin requires a scene-bound mobject")
+        if self._matching_driver is not None:
+            self.abort()
+        scene = self._matching_scene if self._matching_scene is not None else self.mobject._scene
+        self._matching_driver = CallbackDriver(
+            self, [make_driver(scene, member) for member in self.animations],
+        )
+        self.mobject.set_animating_status(True)
+        drive(self, "begin")
+        self.interpolate(0.0)
+
+    def update_mobjects(self, dt):
+        drive(self, "update_mobjects", dt)
+
+    def interpolate(self, alpha):
+        drive(self, "interpolate", float(alpha))
+
+    def finish(self):
+        drive(self, "finish")
+        self.mobject.set_animating_status(False)
+
+    def clean_up_from_scene(self, scene):
+        drive(self, "clean_up_from_scene", scene)
+        scene.remove(self.mobject, self.source)
+        scene.add(self.target)
+        self._matching_driver = None
+
+    # Retain every already-published class object, including qualified
+    # imports. Both front doors install this after bootstrap construction.
+    Parts.__bases__ = (AnimationGroup,)
+    Parts.__doc__ = "Match through public planning hooks, with native or authored leaves on Choreo's shared timeline."
+    Parts._native_kind = None
+    Shapes._native_kind = None
+    methods = {
+        "__init__": matching_init,
+        "add_transform": add_transform,
+        "find_pairs_with_matching_shapes": find_pairs_with_matching_shapes,
+        "begin": begin, "update_mobjects": update_mobjects,
+        "interpolate": interpolate, "finish": finish,
+        "clean_up_from_scene": clean_up_from_scene, "abort": abort,
+    }
+    for name, function in methods.items():
+        function.__name__ = name
+        function.__qualname__ = f"{Parts.__qualname__}.{name}"
+        function.__module__ = Parts.__module__
+        setattr(Parts, name, function)
+
+    original_play = g["Scene"].play
+
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+        matches, seen = [], set()
+        def visit(animation):
+            if id(animation) in seen:
+                return
+            seen.add(id(animation))
+            if isinstance(animation, Parts):
+                matches.append(animation)
+                animation._matching_scene = self
+            if isinstance(animation, AnimationGroup):
+                for member in animation.animations:
+                    visit(member)
+        for animation in proto_animations:
+            visit(animation)
+        try:
+            return original_play(self, *proto_animations, run_time=run_time,
+                                 rate_func=rate_func, lag_ratio=lag_ratio)
+        except BaseException:
+            # Errors in scene updaters or sibling animations must also unwind
+            # the native leaves owned by a matching callback, even when the
+            # failure did not originate inside that callback.
+            for animation in reversed(matches):
+                try:
+                    animation.abort()
+                except BaseException:
+                    pass
+            raise
+        finally:
+            for animation in matches:
+                animation._matching_scene = None
+
+    scene_play.__name__ = "play"
+    scene_play.__qualname__ = g["Scene"].__qualname__ + ".play"
+    scene_play.__module__ = g["Scene"].__module__
+    g["Scene"].play = scene_play
+
+
+def _install_matching_strings(g):
+    """Dispatch authored block matching over Scribe's native byte-span parts."""
+    Parts = g["TransformMatchingParts"]
+    Strings = g["TransformMatchingStrings"]
+    Tex = g["TransformMatchingTex"]
+    Mobject = g["Mobject"]
+    StringMobject = g["StringMobject"]
+
+    def point_ids(mobject):
+        return {id(part) for part in mobject.family_members_with_points()}
+
+    def claimed_parts(self, source_keys, target_keys):
+        available = [set().union(*(point_ids(part) for part, _ in keys))
+                     for keys in (source_keys, target_keys)]
+        claimed = [set(), set()]
+        for pair in self.matched_pairs:
+            for side, member in enumerate(pair):
+                ids = point_ids(member)
+                if not ids or not ids <= available[side]:
+                    raise ValueError(type(self).__name__ + " matched_pairs member is not a live span-map part of the "
+                                     + ("source" if side == 0 else "target") + " family")
+                if ids & claimed[side]:
+                    raise ValueError(type(self).__name__ + " matched_pairs claims the same part twice")
+                claimed[side].update(ids)
+        return claimed
+
+    def strings_init(
+        self, source, target, matched_keys=(), key_map=None, matched_pairs=(),
+        run_time=2, lag_ratio=0, **kwargs,
+    ):
+        if not isinstance(source, StringMobject) or not isinstance(target, StringMobject):
+            raise TypeError(type(self).__name__ + " expects two StringMobject instances")
+        if not source._string_sub_spans or not target._string_sub_spans:
+            raise g["_TexError"](type(self).__name__ + " requires non-empty native span maps")
+        explicit = [tuple(pair) for pair in matched_pairs]
+        if not all(len(pair) == 2 and all(isinstance(obj, Mobject) for obj in pair) for pair in explicit):
+            raise TypeError(type(self).__name__ + " matched_pairs must pair Mobjects")
+        self.matched_pairs = explicit
+        self.matched_keys, self.key_map = tuple(matched_keys), dict(key_map or {})
+        if not all(isinstance(key, str) for key in (*self.matched_keys, *self.key_map, *self.key_map.values())):
+            raise TypeError("Matching string keys must be strings")
+        # Validate even an authored matcher: no override bypasses the native
+        # UTF-8 provenance or explicit-family ownership checks.
+        claimed_parts(self, self._native_span_keys(source), self._native_span_keys(target))
+        blocks = list(self.matching_blocks(source, target, self.matched_keys, self.key_map))
+        Parts.__init__(self, source, target, matched_pairs=explicit + blocks,
+                       run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+        self.matched_pairs = explicit
+
+    def matching_blocks(self, source, target, matched_keys=(), key_map=None):
+        keys = [self._native_span_keys(source), self._native_span_keys(target)]
+        claimed = claimed_parts(self, *keys)
+        sequences = [[key for _, key in side] for side in keys]
+        masks = [object(), object()]
+        used = [[bool(point_ids(part) & claimed[side]) for part, _ in entries]
+                for side, entries in enumerate(keys)]
+        for side in range(2):
+            for index, taken in enumerate(used[side]):
+                if taken:
+                    sequences[side][index] = masks[side]
+        pairs = []
+
+        def group(side, indices):
+            parts, seen = [], set()
+            for index in indices:
+                part = keys[side][index][0]
+                if id(part) not in seen:
+                    seen.add(id(part))
+                    parts.append(part)
+            if len(parts) == 1:
+                return parts[0]
+            cls = g["VGroup"] if all(isinstance(part, g["VMobject"]) for part in parts) else g["Group"]
+            return cls(*parts)
+
+        def claim(source_indices, target_indices):
+            if any(used[side][index] for side, indices in enumerate((source_indices, target_indices)) for index in indices):
+                return
+            pairs.append((group(0, source_indices), group(1, target_indices)))
+            for side, indices in enumerate((source_indices, target_indices)):
+                consumed = set().union(*(point_ids(keys[side][index][0]) for index in indices))
+                direct = set(indices)
+                for index, (part, _) in enumerate(keys[side]):
+                    if index in direct or point_ids(part) & consumed:
+                        used[side][index] = True
+                        sequences[side][index] = masks[side]
+
+        def occurrences(side, key):
+            if not key:
+                return []
+            mobject = (source, target)[side]
+            encoded, needle = mobject.get_string().encode("utf-8"), key.encode("utf-8")
+            result, position = [], 0
+            while True:
+                start = encoded.find(needle, position)
+                if start < 0:
+                    return result
+                end = start + len(needle)
+                position = end
+                indices = [index for index, (a, b) in enumerate(mobject._string_sub_spans)
+                           if a < end and b > start]
+                if not indices or any(used[side][index] for index in indices):
+                    continue
+                if any(not start <= mobject._string_sub_spans[index][0]
+                           < mobject._string_sub_spans[index][1] <= end for index in indices):
+                    raise g["_TexError"]("Matching key " + repr(key) + " splits a native source-span part")
+                result.append(indices)
+
+        # Explicit pairs were masked above. Authored renames claim next,
+        # followed by pinned keys. Never close gaps by deleting claimed slots:
+        # that would invent adjacency across a moved substring.
+        mapping = dict(key_map or {})
+        for source_key, target_key in mapping.items():
+            for source_indices, target_indices in zip(occurrences(0, source_key), occurrences(1, target_key)):
+                claim(source_indices, target_indices)
+        for key in matched_keys:
+            if key in mapping:
+                continue
+            for source_indices, target_indices in zip(occurrences(0, key), occurrences(1, key)):
+                claim(source_indices, target_indices)
+
+        if not self._match_by_blocks:
+            # D-09: Tex matches semantic native keys, never geometry. Retain
+            # the existing Tex matched_keys admission filter for leftovers.
+            admitted = set(matched_keys)
+            for source_index, (_, source_key) in enumerate(keys[0]):
+                if used[0][source_index] or (admitted and source_key not in admitted):
+                    continue
+                for target_index, (_, target_key) in enumerate(keys[1]):
+                    if not used[1][target_index] and source_key == target_key:
+                        claim([source_index], [target_index])
+                        break
+            return pairs
+
+        # Repeated longest-block matching also handles reordered runs. The
+        # two side-specific non-string sentinels cannot collide with authored
+        # text (including the Reference's literal "Null1"/"Null2" strings).
+        while True:
+            matcher = g["_difflib"].SequenceMatcher(None, *sequences, autojunk=False)
+            block = matcher.find_longest_match()
+            if block.size == 0:
+                break
+            claim(list(range(block.a, block.a + block.size)),
+                  list(range(block.b, block.b + block.size)))
+        return pairs
+
+    def no_shape_fallback(self, sources, targets):
+        # Matching text by outline would discard the native semantic identity
+        # when two unrelated glyphs happen to have the same shape.
+        return []
+
+    def callback_params(self):
+        return {}
+
+    Strings.__bases__ = (Parts,)
+    Strings._native_kind = None
+    Tex._native_kind = None
+    methods = {
+        "__init__": strings_init, "matching_blocks": matching_blocks,
+        "find_pairs_with_matching_shapes": no_shape_fallback,
+        "_native_params": callback_params,
+    }
+    for name, function in methods.items():
+        function.__name__ = name
+        function.__qualname__ = f"{Strings.__qualname__}.{name}"
+        function.__module__ = Strings.__module__
+        setattr(Strings, name, function)
+
+
+def _install_composition_lifecycle(g):
+    """Execute authored group protocols without replacing native leaf kernels."""
+    AnimationGroup = g["AnimationGroup"]
+    Mobject = g["Mobject"]
+    CallbackDriver = g["_CompositionCallbackDriver"]
+    make_driver = g["_fmn_make_animation_driver"]
+    animated_mobjects = g["_fmn_animated_mobjects"]
+    original_requires = g["_requires_python_animation"]
+    original_play = g["Scene"].play
+    original_init = AnimationGroup.__init__
+    original_driver_init = CallbackDriver.__init__
+    original_driver_interpolate = CallbackDriver.interpolate
+
+    # Some shipped group subclasses (notably following Flash) deliberately
+    # implement a leaf-style begin via Animation.begin, not a child driver.
+    # Freeze their previously inherited lifecycle before installing the group
+    # protocol; otherwise that begin would call our driver-only interpolate.
+    legacy_methods = ("_ensure_runtime_defaults", "get_all_mobjects", "begin",
+                      "update_mobjects", "interpolate", "finish", "clean_up_from_scene")
+    legacy_classes = [
+        cls for cls in set(value for value in g.values() if isinstance(value, type))
+        if cls is not AnimationGroup and cls is not g["TransformMatchingParts"]
+        and issubclass(cls, AnimationGroup) and "begin" in vars(cls)
+    ]
+    for cls in legacy_classes:
+        inherited = {name: getattr(cls, name) for name in legacy_methods if name not in vars(cls)}
+        for name, function in inherited.items():
+            setattr(cls, name, function)
+
+    def legacy_abort(self):
+        self.mobject.set_animating_status(False)
+        if self.suspend_mobject_updating and getattr(self, "mobject_was_updating", False):
+            self.mobject.resume_updating()
+
+    for cls in legacy_classes:
+        if not hasattr(cls, "abort"):
+            cls.abort = legacy_abort
+
+    def timing_signature(animation):
+        return tuple((id(member), start, end) for member, start, end in animation.anims_with_timings)
+
+    def group_init(self, *animations, run_time=-1, lag_ratio=None, group=None, group_type=None, **kwargs):
+        if group is not None and not isinstance(group, Mobject):
+            raise TypeError("AnimationGroup group must be a Mobject")
+        if group is None and group_type is not None and not callable(group_type):
+            raise TypeError("AnimationGroup group_type must be callable")
+        original_init(self, *animations, run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+        self._composition_authored_root = group is not None or group_type is not None
+        self._composition_initial_timings = timing_signature(self)
+        if group is not None:
+            self.mobject = self.group = group
+        elif group_type is not None:
+            root = group_type(*member_objects(self))
+            if not isinstance(root, Mobject):
+                raise TypeError("AnimationGroup group_type must return a Mobject")
+            self.mobject = self.group = root
+
+    def member_objects(animation, visiting=None):
+        visiting = set() if visiting is None else visiting
+        if id(animation) in visiting:
+            raise ValueError("Animation composition contains a cycle")
+        visiting.add(id(animation))
+        objects, seen = [], set()
+        try:
+            for child in animation.animations:
+                if isinstance(child, AnimationGroup) and child.mobject is None:
+                    ensure_root(child, visiting)
+                for obj in animated_mobjects(child):
+                    if id(obj) not in seen:
+                        seen.add(id(obj))
+                        objects.append(obj)
+        finally:
+            visiting.remove(id(animation))
+        return objects
+
+    def ensure_root(animation, visiting=None):
+        if animation.mobject is None:
+            existing = getattr(animation, "group", None)
+            if isinstance(existing, Mobject):
+                animation.mobject = existing
+            else:
+                objects = member_objects(animation, visiting)
+                group_type = g["VGroup"] if all(isinstance(obj, g["VMobject"]) for obj in objects) else g["Group"]
+                animation.mobject = group_type(*objects)
+        if not isinstance(animation.mobject, Mobject):
+            raise TypeError("AnimationGroup must animate a Mobject group")
+        animation.group = animation.mobject
+        return animation.mobject
+
+    def ensure_runtime_defaults(self):
+        if self.run_time is None or self.run_time < 0:
+            self.calculate_max_end_time()
+        if self.rate_func is None:
+            self.rate_func = g["_linear_rate"]
+        if self.lag_ratio is None:
+            self.lag_ratio = type(self)._default_lag_ratio
+
+    def abort_children(driver):
+        if isinstance(driver, CallbackDriver):
+            first_error = None
+            for child in driver.children:
+                if child is None:
+                    continue
+                try:
+                    abort_children(child)
+                except BaseException as error:
+                    if first_error is None:
+                        first_error = error
+            if first_error is not None:
+                raise first_error
+        else:
+            driver.abort()
+
+    def release(self):
+        cameras = getattr(self, "_composition_camera_resumes", ())
+        self._composition_camera_resumes = []
+        try:
+            self.mobject.set_animating_status(False)
+            if getattr(self, "_composition_resumes_updating", False):
+                self._composition_resumes_updating = False
+                self.mobject.resume_updating()
+        finally:
+            for camera in cameras:
+                camera.resume_updating()
+
+    def abort(self):
+        driver = getattr(self, "_composition_driver", None)
+        if driver is None:
+            return
+        try:
+            abort_children(driver)
+        finally:
+            self._composition_driver = None
+            release(self)
+
+    def drive(self, method, *args):
+        driver = getattr(self, "_composition_driver", None)
+        if driver is None:
+            raise RuntimeError("AnimationGroup must begin before " + method)
+        try:
+            return getattr(driver, method)(*args)
+        except BaseException:
+            try:
+                abort(self)
+            except BaseException:
+                pass
+            raise
+
+    def begin(self):
+        if getattr(self, "_composition_driver", None) is not None:
+            abort(self)
+        root = ensure_root(self)
+        scene = getattr(self, "_composition_scene", None)
+        if scene is None:
+            scene = next((obj._scene for obj in root.get_family() if obj._is_bound()), None)
+        if scene is None:
+            raise RuntimeError("AnimationGroup.begin requires a scene-bound group or member; use Scene.play(group)")
+        if not root._is_bound():
+            scene._adopt(root)
+        self._ensure_runtime_defaults()
+        # The existing driver owns the interval algebra, eager simultaneous
+        # begin, and just-in-time Succession transitions. No second clock.
+        self._composition_driver = CallbackDriver(
+            self, [make_driver(scene, child) for child in self.animations],
+        )
+        self._composition_resumes_updating = False
+        self._composition_camera_resumes = []
+        try:
+            root.set_animating_status(True)
+            if self.suspend_mobject_updating and not root._is_updating_suspended():
+                self._composition_resumes_updating = True
+                root.suspend_updating()
+            if self.suspend_mobject_updating and "_fmn_group_camera_frames" in g:
+                for camera in g["_fmn_group_camera_frames"](self):
+                    if not camera._is_updating_suspended():
+                        self._composition_camera_resumes.append(camera)
+                        camera.suspend_updating()
+            drive(self, "begin")
+            self.interpolate(0.0)
+        except BaseException:
+            try:
+                abort(self)
+            except BaseException:
+                pass
+            raise
+
+    def update_mobjects(self, dt):
+        drive(self, "update_mobjects", dt)
+
+    def interpolate(self, alpha):
+        drive(self, "interpolate", float(alpha))
+
+    def finish(self):
+        drive(self, "finish")
+        release(self)
+
+    def clean_up_from_scene(self, scene):
+        drive(self, "clean_up_from_scene", scene)
+        if self.remover:
+            scene.remove(self.mobject)
+        self._composition_driver = None
+
+    def get_all_mobjects(self):
+        return ensure_root(self)
+
+    methods = {
+        "__init__": group_init,
+        "_ensure_runtime_defaults": ensure_runtime_defaults,
+        "begin": begin, "update_mobjects": update_mobjects,
+        "interpolate": interpolate, "finish": finish,
+        "clean_up_from_scene": clean_up_from_scene, "abort": abort,
+        "get_all_mobjects": get_all_mobjects,
+    }
+    for name, function in methods.items():
+        function.__name__ = name
+        function.__qualname__ = f"{AnimationGroup.__qualname__}.{name}"
+        function.__module__ = AnimationGroup.__module__
+        setattr(AnimationGroup, name, function)
+
+    # Capture shipped subclasses too: numeric Flash, Broadcast, and other
+    # native specializations must not become callbacks merely for having
+    # their own built-in methods. Compare identities, including monkeypatches.
+    hooks = ("begin", "finish", "interpolate", "update_mobjects",
+             "clean_up_from_scene", "_ensure_runtime_defaults",
+             "build_animations_with_timings", "calculate_max_end_time")
+    protocols = {
+        cls: {name: getattr(cls, name) for name in hooks}
+        for cls in tuple(g.values())
+        if isinstance(cls, type) and issubclass(cls, AnimationGroup)
+    }
+
+    def custom_timings(animation):
+        initial = getattr(animation, "_composition_initial_timings", None)
+        if initial is not None and timing_signature(animation) != initial:
+            return True
+        for cls in type(animation).__mro__:
+            baseline = protocols.get(cls)
+            if baseline is not None:
+                return any(getattr(getattr(animation, name), "__func__", getattr(animation, name)) is not baseline[name]
+                           for name in ("build_animations_with_timings", "calculate_max_end_time"))
+        return False
+
+    def authored_timings(group, children):
+        import math
+        rows = list(group.anims_with_timings)
+        if len(rows) != len(group.animations) or len(children) != len(group.animations):
+            raise ValueError("AnimationGroup timings need one row per animation")
+        available = {}
+        for index, member in enumerate(group.animations):
+            available.setdefault(id(member), []).append(index)
+        timings = []
+        for member, start, end in rows:
+            candidates = available.get(id(member), [])
+            if not candidates:
+                raise ValueError("AnimationGroup timing row contains a foreign or duplicate animation")
+            index = candidates.pop(0)
+            start, end = float(start), float(end)
+            if not math.isfinite(start) or not math.isfinite(end) or end < start:
+                raise ValueError("AnimationGroup timing bounds must be finite and ordered")
+            timings.append((children[index], start, end))
+        max_end = float(group.max_end_time)
+        if not math.isfinite(max_end) or max_end < 0:
+            raise ValueError("AnimationGroup max_end_time must be finite and nonnegative")
+        return timings, max_end
+
+    def driver_init(self, group, children, run_time=None, rate_func=None):
+        original_driver_init(self, group, children, run_time=run_time, rate_func=rate_func)
+        self._authored_timing_rows = custom_timings(group)
+        if self._authored_timing_rows:
+            self.timings, self.max_end = authored_timings(group, children)
+            if self.successive:
+                if any(a[1] > b[1] for a, b in zip(self.timings, self.timings[1:])):
+                    raise ValueError("Succession timing rows must be ordered by start time")
+                self.children = [child for child, _, _ in self.timings]
+
+    def driver_interpolate(self, alpha):
+        if not self._authored_timing_rows or self.successive:
+            return original_driver_interpolate(self, alpha)
+        time = g["_composition_timeline_position"](
+            self.group, float(alpha), self.max_end, self.get_run_time(), self.rate_func,
+        )
+        # Authored row order controls interpolation order; eager begin,
+        # helper updates and finish retain the original argument order.
+        for child, start, end in self.timings:
+            if child is not None:
+                sub = 0.0 if end == start else min(max((time - start) / (end - start), 0.0), 1.0)
+                child.interpolate(sub)
+
+    CallbackDriver.__init__ = driver_init
+    CallbackDriver.interpolate = driver_interpolate
+
+    # Camera-containing plays use these same roots, ownership checks, timing
+    # rows and abort traversal; they do not implement a second composition.
+    g["_fmn_ensure_composition_root"] = ensure_root
+    g["_fmn_validate_composition_timings"] = authored_timings
+    g["_fmn_abort_animation_driver"] = abort_children
+
+    def requires_python_animation(animation):
+        if isinstance(animation, AnimationGroup):
+            if getattr(animation, "_composition_authored_root", False) or custom_timings(animation):
+                return True
+            for cls in type(animation).__mro__:
+                baseline = protocols.get(cls)
+                if baseline is not None:
+                    if any(getattr(getattr(animation, name), "__func__", getattr(animation, name)) is not expected
+                           for name, expected in baseline.items()):
+                        return True
+                    break
+        return original_requires(animation)
+
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+        groups, seen, visiting = [], set(), set()
+
+        def visit(animation):
+            if not isinstance(animation, AnimationGroup):
+                return
+            if id(animation) in visiting:
+                raise ValueError("Animation composition contains a cycle")
+            if id(animation) in seen:
+                return
+            visiting.add(id(animation))
+            for child in animation.animations:
+                visit(child)
+            visiting.remove(id(animation))
+            seen.add(id(animation))
+            if requires_python_animation(animation):
+                if custom_timings(animation):
+                    authored_timings(animation, animation.animations)
+                ensure_root(animation)
+                groups.append((animation, getattr(animation, "_composition_scene", None)))
+                animation._composition_scene = self
+
+        try:
+            for animation in proto_animations:
+                visit(animation)
+            return original_play(self, *proto_animations, run_time=run_time,
+                                 rate_func=rate_func, lag_ratio=lag_ratio)
+        except BaseException:
+            # An authored override may raise outside super(), or a sibling /
+            # scene updater may fail after these native children have begun.
+            for animation, _ in reversed(groups):
+                try:
+                    animation.abort()
+                except BaseException:
+                    pass
+            raise
+        finally:
+            for animation, previous_scene in groups:
+                animation._composition_scene = previous_scene
+
+    scene_play.__name__ = "play"
+    scene_play.__qualname__ = g["Scene"].__qualname__ + ".play"
+    scene_play.__module__ = g["Scene"].__module__
+    g["_requires_python_animation"] = requires_python_animation
+    g["Scene"].play = scene_play
+
+
+def _install_camera_pose(g):
+    """Interpolate CameraFrame's real native pose, not its empty record buffer."""
+    CameraFrame = g["CameraFrame"]
+    np = g["_np"]
+    copy_core = g["_copy"].copy
+    lerp = g["_interpolate"]
+
+    def control_points(frame):
+        center = np.asarray(frame._core.center(), dtype=float)
+        width, height = frame._core.shape()
+        # The pinned CameraFrame uses center, left, right, bottom, top. A
+        # path_func must see that same point array, including during zooms.
+        return center + np.array([
+            [0., 0., 0.], [-width / 2., 0., 0.], [width / 2., 0., 0.],
+            [0., -height / 2., 0.], [0., height / 2., 0.],
+        ])
+
+    def interpolate(self, mobject1, mobject2, alpha, path_func=None):
+        if not isinstance(mobject1, CameraFrame) or not isinstance(mobject2, CameraFrame):
+            raise TypeError("CameraFrame interpolation requires two CameraFrame endpoints")
+        alpha = float(alpha)
+        if not np.isfinite(alpha):
+            raise ValueError("CameraFrame interpolation alpha must be finite")
+        if path_func is None:
+            path_func = g["straight_path"]
+        if not callable(path_func):
+            raise TypeError("CameraFrame path_func must be callable")
+        # Validate on a private native value before changing the live core.
+        # Lumen owns dimension/FOV/quaternion validity and normalization; no
+        # callback failure can leave a half-updated live camera pose.
+        changes = []
+        if "point" not in getattr(self, "locked_data_keys", ()):
+            points = np.asarray(path_func(control_points(mobject1), control_points(mobject2), alpha), dtype=float)
+            if points.shape != (5, 3) or not np.isfinite(points).all():
+                raise ValueError("CameraFrame path_func must return a finite (5, 3) point array")
+            changes.append(("set_center", tuple(points[0])))
+            changes.append(("set_shape", (float(points[2, 0] - points[1, 0]),
+                                          float(points[4, 1] - points[3, 1]))))
+        locked = getattr(self, "locked_uniform_keys", ())
+        if "fovy" not in locked:
+            changes.append(("set_field_of_view", float(lerp(mobject1._core.field_of_view(),
+                                                            mobject2._core.field_of_view(), alpha))))
+        if "orientation" not in locked:
+            # Same componentwise quaternion interpolation as CameraLerp in
+            # the native bridge, normalized by Lumen on write.
+            orientation = lerp(np.asarray(mobject1._core.orientation(), dtype=float),
+                               np.asarray(mobject2._core.orientation(), dtype=float), alpha)
+            changes.append(("set_orientation", tuple(orientation)))
+        candidate = copy_core(self._core)
+        for method, value in changes:
+            getattr(candidate, method)(value)
+        # Preserve the core identity held by the renderer and native tracks.
+        # Publish the raw inputs, not an already-normalized quaternion, so
+        # normalization occurs exactly once on the live value as in Lumen.
+        for method, value in changes:
+            getattr(self._core, method)(value)
+        if changes:
+            self.note_changed_data()
+        return self
+
+    interpolate.__name__ = "interpolate"
+    interpolate.__qualname__ = CameraFrame.__qualname__ + ".interpolate"
+    interpolate.__module__ = CameraFrame.__module__
+    CameraFrame.interpolate = interpolate
+
+
+def _install_camera_choreography(g):
+    """Run camera and drawable animations on the same Choreo release boundary."""
+    import math
+    CameraFrame = g["CameraFrame"]
+    Animation = g["Animation"]
+    AnimationGroup = g["AnimationGroup"]
+    Transform = g["Transform"]
+    Builder = g["_AnimationBuilder"]
+    original_play = g["Scene"].play
+    original_dispatch = CameraFrame._dispatch_updater
+    make_driver = g["_fmn_make_animation_driver"]
+    abort_driver = g["_fmn_abort_animation_driver"]
+
+    def camera_dispatch(self, updater, dt):
+        # The camera is intentionally outside the Stage's suspended-subtree
+        # walk. Its dedicated first-in-scene updater pass needs the same gate.
+        if not self._is_updating_suspended():
+            return original_dispatch(self, updater, dt)
+
+    def validate_camera(scene, animation):
+        if animation.mobject is not scene.frame:
+            raise ValueError("Camera animation must target this Scene.frame")
+        if animation.remover or getattr(animation, "replace_mobject_with_target_in_scene", False):
+            raise NotImplementedError("Camera animation cannot remove or replace the scene's camera identity")
+        if getattr(animation, "_native_kind", None) and not isinstance(animation, Transform):
+            raise NotImplementedError(type(animation).__name__ + " has no camera-pose animation protocol; use Transform or frame.animate")
+        if isinstance(animation, Transform) and animation._target_attr is None:
+            raise NotImplementedError("A camera Transform requires a camera target")
+        target = getattr(animation, "target_mobject", None)
+        if target is not None and not isinstance(target, CameraFrame):
+            raise TypeError("Camera Transform target must be a CameraFrame")
+
+    def normalize_rate(animation):
+        rate = animation.rate_func
+        if isinstance(rate, str):
+            function = next((function for function, name in g["_RATE_FUNC_NAMES"].items() if name == rate), None)
+            if function is None:
+                raise ValueError("unknown rate function: " + rate)
+            animation.rate_func = function
+        elif rate is not None and not callable(rate):
+            raise TypeError("rate_func must be a callable or a catalog name")
+
+    class CameraLeaf:
+        def __init__(self, scene, animation):
+            validate_camera(scene, animation)
+            animation._ensure_runtime_defaults()
+            normalize_rate(animation)
+            self.animation, self.begun, self.finished = animation, False, False
+            self.was_suspended = True
+
+        def get_run_time(self):
+            return self.animation.get_run_time()
+
+        def begin(self):
+            self.begun, self.finished = True, False
+            self.was_suspended = self.animation.mobject._is_updating_suspended()
+            self.animation.begin()
+
+        def update_mobjects(self, dt):
+            self.animation.update_mobjects(dt)
+
+        def interpolate(self, alpha):
+            self.animation.interpolate(alpha)
+
+        def finish(self):
+            if self.begun and not self.finished:
+                self.animation.finish()
+                self.finished = True
+
+        def clean_up_from_scene(self, scene):
+            self.animation.clean_up_from_scene(scene)
+
+        def abort(self):
+            if not self.begun or self.finished:
+                return
+            self.finished = True
+            animation = self.animation
+            custom = getattr(animation, "abort", None)
+            if callable(custom):
+                custom()
+            else:
+                animation.mobject.set_animating_status(False)
+                if isinstance(animation, Transform):
+                    animation.mobject.unlock_data()
+                if (not self.was_suspended and animation.suspend_mobject_updating
+                        and animation.mobject._is_updating_suspended()):
+                    animation.mobject_was_updating = False
+                    animation.mobject.resume_updating()
+
+    g["_fmn_make_camera_driver"] = CameraLeaf
+
+    def group_camera_frames(group):
+        result, seen, frames = [], set(), set()
+        stack = list(group.animations)
+        while stack:
+            animation = stack.pop()
+            if id(animation) in seen:
+                continue
+            seen.add(id(animation))
+            if isinstance(animation.mobject, CameraFrame) and id(animation.mobject) not in frames:
+                frames.add(id(animation.mobject))
+                result.append(animation.mobject)
+            if isinstance(animation, AnimationGroup):
+                stack.extend(animation.animations)
+        return result
+
+    g["_fmn_group_camera_frames"] = group_camera_frames
+
+    def contains_camera(animation, visiting):
+        if id(animation) in visiting:
+            raise ValueError("Animation composition contains a cycle")
+        visiting.add(id(animation))
+        try:
+            if isinstance(getattr(animation, "mobject", None), CameraFrame):
+                return True
+            if any(isinstance(obj, CameraFrame) for obj in getattr(animation, "_native_extra_mobjects", ())):
+                return True
+            if isinstance(animation, Builder):
+                overridden = getattr(animation, "overridden_animation", None)
+                return overridden is not None and contains_camera(overridden, visiting)
+            if isinstance(animation, AnimationGroup):
+                # Do not short-circuit: a later member might contain a cycle.
+                results = [contains_camera(member, visiting) for member in animation.animations]
+                return any(results)
+            return False
+        finally:
+            visiting.remove(id(animation))
+
+    class ClockDriver:
+        """One non-rendering timing slot; no independent sampling or clock."""
+        def __init__(self, scene, slot, children):
+            self.scene, self.slot, self.children = scene, slot, children
+            self.run_times = [float(child.get_run_time()) for child in children]
+            if any(not math.isfinite(value) or value < 0 for value in self.run_times):
+                raise ValueError("Camera play runtimes must be finite and nonnegative")
+            self.run_time = max(self.run_times, default=0.)
+            self.dt = 0.
+            self.completed = 0
+
+        def hide_slot(self):
+            g["_SceneCore"].remove(self.scene, self.slot)
+
+        def begin(self):
+            self.hide_slot()
+            for child in self.children:
+                child.begin()
+
+        def update_mobjects(self, dt):
+            self.hide_slot()
+            self.dt = dt
+
+        def interpolate(self, alpha):
+            time = float(alpha) * self.run_time
+            # Match the engine's per-animation step-1/step-2 ordering, not
+            # all helper updates followed by all interpolations. Later
+            # siblings must observe earlier siblings' current-frame state.
+            for child, duration in zip(self.children, self.run_times):
+                child.update_mobjects(self.dt)
+                child.interpolate(1. if duration == 0 else time / duration)
+
+        def finish(self):
+            self.hide_slot()
+            # Top-level Choreo finish order is finish + cleanup per child.
+            # An enclosing composition still owns its own member protocol.
+            while self.completed < len(self.children):
+                child = self.children[self.completed]
+                child.finish()
+                child.clean_up_from_scene(self.scene)
+                self.completed += 1
+
+        def clean_up_from_scene(self, scene):
+            self.hide_slot()
+
+        def abort(self):
+            first = None
+            for child in self.children:
+                try:
+                    abort_driver(child)
+                except BaseException as error:
+                    if first is None:
+                        first = error
+            if first is not None:
+                raise first
+
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+        if getattr(self, "_fmn_camera_play_active", False):
+            raise RuntimeError("Reentrant Scene.play during camera choreography is not supported")
+        has_camera = [contains_camera(animation, set()) for animation in proto_animations]
+        if not any(has_camera):
+            return original_play(self, *proto_animations, run_time=run_time,
+                                 rate_func=rate_func, lag_ratio=lag_ratio)
+        animations = [g["prepare_animation"](animation) for animation in proto_animations]
+        nodes, seen, visiting = [], set(), set()
+
+        def visit(animation):
+            if not isinstance(animation, Animation):
+                raise TypeError("Camera compositions accept Animation instances")
+            if id(animation) in visiting:
+                raise ValueError("Animation composition contains a cycle")
+            if id(animation) in seen:
+                return
+            visiting.add(id(animation))
+            if isinstance(animation, AnimationGroup):
+                for child in animation.animations:
+                    visit(child)
+                g["_fmn_validate_composition_timings"](animation, animation.animations)
+            elif isinstance(animation.mobject, CameraFrame):
+                validate_camera(self, animation)
+            elif any(isinstance(obj, CameraFrame) for obj in getattr(animation, "_native_extra_mobjects", ())):
+                raise NotImplementedError("A camera animation requires its own Transform; it cannot be an extra drawable mobject")
+            visiting.remove(id(animation))
+            seen.add(id(animation))
+            nodes.append(animation)
+
+        for animation in animations:
+            visit(animation)
+        for animation in animations:
+            if run_time is not None:
+                value = float(run_time)
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError("Camera play run_time must be finite and nonnegative")
+                animation.run_time = value
+            if rate_func is not None:
+                animation.rate_func = rate_func
+            if lag_ratio is not None:
+                value = float(lag_ratio)
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError("Camera play lag_ratio must be finite and nonnegative")
+                animation.lag_ratio = value
+        for animation in nodes:
+            normalize_rate(animation)
+        contexts, children = [], []
+        drawable = {}
+        for animation in nodes:
+            drawable[id(animation)] = (
+                getattr(animation, "_composition_authored_root", False)
+                or any(drawable[id(child)] for child in animation.animations)
+            ) if isinstance(animation, AnimationGroup) else not isinstance(animation.mobject, CameraFrame)
+        slot = g["Mobject"]()
+        failed = False
+        self._fmn_camera_play_active = True
+        try:
+            for animation in nodes:
+                if isinstance(animation, AnimationGroup):
+                    root = g["_fmn_ensure_composition_root"](animation)
+                    if any(isinstance(member, CameraFrame) for member in root.get_family()):
+                        raise ValueError("A composition's drawable group cannot contain CameraFrame")
+                    for name in ("_composition_scene", "_matching_scene"):
+                        contexts.append((animation, name, getattr(animation, name, None)))
+                        setattr(animation, name, self)
+            # Keep the camera itself detached. Adopt ordinary animated roots
+            # through the existing arena path; the private point-free slot
+            # is removed before every user callback/updater and at teardown.
+            for animation in animations:
+                if drawable[id(animation)]:
+                    for root in g["_fmn_animated_mobjects"](animation):
+                        self.add(root)
+                children.append(make_driver(self, animation))
+            self._adopt(slot)
+            clock = ClockDriver(self, slot, children)
+            spec = ("python_callback", slot, None, clock.run_time, None, 0., {"remover": True})
+            return self._play_animations([spec], [clock], None, None, None, None)
+        except BaseException:
+            failed = True
+            for child in children:
+                try:
+                    abort_driver(child)
+                except BaseException:
+                    pass
+            raise
+        finally:
+            try:
+                if slot._is_bound():
+                    g["_SceneCore"].remove(self, slot)
+            except BaseException:
+                if not failed:
+                    raise
+            finally:
+                self._fmn_camera_play_active = False
+                for animation, name, previous in reversed(contexts):
+                    setattr(animation, name, previous)
+
+    camera_dispatch.__name__ = "_dispatch_updater"
+    camera_dispatch.__qualname__ = CameraFrame.__qualname__ + "._dispatch_updater"
+    camera_dispatch.__module__ = CameraFrame.__module__
+    CameraFrame._dispatch_updater = camera_dispatch
+    scene_play.__name__ = "play"
+    scene_play.__qualname__ = g["Scene"].__qualname__ + ".play"
+    scene_play.__module__ = g["Scene"].__module__
+    g["Scene"].play = scene_play

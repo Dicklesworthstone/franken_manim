@@ -269,7 +269,7 @@ arc_target.uniforms["clip_planes"] = [[2.0, 4.0, 6.0, 8.0] for _ in range(4)]
 arc_source.uniforms["depth_test"] = True
 arc_target.uniforms["depth_test"] = False
 arc_source.uniforms["joint_type"] = 2.0
-arc_target.uniforms["joint_type"] = 3.0
+arc_target.uniforms["joint_type"] == 3.0
 arc_transform = Transform(
     arc_source,
     arc_target,
@@ -646,3 +646,155 @@ def render_animation_lifecycle(destination, seed):
     except Exception:
         scene._abort_render()
         raise
+
+
+def _assert_authored_transform_native_paths():
+    """Run against the real extension in the existing production suite."""
+    duration = 2.0 / 30.0
+
+    def excursion(start, end, alpha):
+        return (
+            (1.0 - alpha) * start + alpha * end
+            + np.array([0.0, 12.0 * alpha * (1.0 - alpha), 0.0])
+        )
+
+    def observe(source, animation):
+        samples = []
+        observer = timeline_point()
+        observer.add_updater(
+            lambda mob, dt: samples.append(source.get_points().copy())
+            if dt > 0 else None,
+            call=False,
+        )
+        Scene().add(source, observer).play(animation)
+        observer.clear_updaters()
+        return np.asarray(samples)
+
+    # Midpoint geometry, not just endpoints, proves the authored callable ran
+    # through Scene.play and wrote native RecordBuffer fields before capture.
+    source = timeline_point()
+    target = source.copy().set_x(4.0)
+    samples = observe(source, Transform(
+        source, target, path_func=excursion,
+        run_time=duration, rate_func=linear_rate,
+    ))
+    assert len(samples) >= 2, samples
+    assert np.allclose(samples[:2, 0], [[2, 3, 0], [4, 0, 0]], atol=1e-6), samples
+    assert np.array_equal(target.get_points(), [[4, 0, 0]])
+    assert not source.locked_data_keys
+
+    # Equal endpoint records must not suppress a closed authored excursion.
+    source = timeline_point()
+    closed = Transform(
+        source, source.copy(), path_func=excursion,
+        run_time=duration, rate_func=linear_rate,
+    )
+    closed.begin()
+    closed.interpolate(0.5)
+    assert np.allclose(source.get_points(), [[0, 3, 0]], atol=1e-6)
+    assert "point" not in source.locked_data_keys
+    closed.finish()
+    assert np.allclose(source.get_points(), [[0, 0, 0]], atol=1e-6)
+
+    # Each direction crosses the Python/native boundary on one live source.
+    # A nested group also exercises recursive callback member discovery.
+    for python_first in (True, False):
+        source = timeline_point()
+        members = [
+            Transform(
+                source, source.copy().set_x(destination),
+                path_func=excursion if (index == 0) == python_first else None,
+                run_time=duration, rate_func=linear_rate,
+            )
+            for index, destination in enumerate((2.0, 4.0))
+        ]
+        samples = observe(source, AnimationGroup(Succession(*members)))
+        expected = [[1, 3 if python_first else 0, 0], [2, 0, 0],
+                    [3, 0 if python_first else 3, 0], [4, 0, 0]]
+        assert len(samples) >= 4, samples
+        assert np.allclose(samples[:4, 0], expected, atol=1e-6), (python_first, samples)
+
+    class FromLeft(Transform):
+        def create_starting_mobject(self):
+            return self.mobject.copy().shift((-2.0, 0.0, 0.0))
+
+    source = timeline_point()
+    samples = observe(source, FromLeft(
+        source, source.copy().set_x(4.0),
+        run_time=duration, rate_func=linear_rate,
+    ))
+    assert len(samples) >= 2, samples
+    assert np.allclose(samples[:2, 0], [[1, 0, 0], [4, 0, 0]], atol=1e-6), samples
+
+    class InitializedPath(Transform):
+        def init_path_func(self):
+            self.path_func = excursion
+
+    source = timeline_point()
+    samples = observe(source, InitializedPath(
+        source, source.copy(), run_time=duration, rate_func=linear_rate,
+    ))
+    assert len(samples) >= 2, samples
+    assert np.allclose(samples[:2, 0], [[0, 3, 0], [0, 0, 0]], atol=1e-6), samples
+
+    class QuarterProgress(Transform):
+        def get_sub_alpha(self, alpha, index, num_submobjects):
+            return 0.25
+
+    source = timeline_point()
+    samples = observe(source, QuarterProgress(
+        source, source.copy().set_x(4.0),
+        run_time=duration, rate_func=linear_rate,
+    ))
+    assert len(samples) >= 2, samples
+    assert np.allclose(samples[:, 0], [1, 0, 0], atol=1e-6), samples
+    assert np.allclose(source.get_points(), [[1, 0, 0]], atol=1e-6)
+
+    # A post-construction assignment must not use a stale native-route flag.
+    source = timeline_point()
+    late_path = Transform(source, source.copy().set_x(4.0), run_time=duration)
+    late_path.path_func = excursion
+    late_path.rate_func = linear_rate
+    samples = observe(source, late_path)
+    assert len(samples) >= 2, samples
+    assert np.allclose(samples[:2, 0], [[2, 3, 0], [4, 0, 0]], atol=1e-6), samples
+
+    # Replacement cleanup uses original object identities, with exactly the
+    # constructor-owned source copy and no leaked temporary root.
+    source = timeline_point()
+    target = source.copy().set_x(4.0)
+    copied = TransformFromCopy(
+        source, target, path_func=excursion,
+        run_time=duration, rate_func=linear_rate,
+    )
+    temporary = copied.mobject
+    scene = Scene().add(source)
+    scene.play(copied)
+    assert scene.mobjects == [source, target], scene.mobjects
+    assert temporary not in scene.get_mobject_family_members()
+    assert np.array_equal(source.get_points(), [[0, 0, 0]])
+    assert np.array_equal(target.get_points(), [[4, 0, 0]])
+
+    def broken_path(start, end, alpha):
+        if alpha > 0.0:
+            raise RuntimeError("authored-path failure witness")
+        return start
+
+    source = timeline_point()
+    scene = Scene().add(source)
+    try:
+        scene.play(Transform(
+            source, source.copy().set_x(4.0), path_func=broken_path,
+            run_time=duration, rate_func=linear_rate,
+            suspend_mobject_updating=True,
+        ))
+    except RuntimeError as error:
+        assert str(error) == "authored-path failure witness", error
+    else:
+        raise AssertionError("Scene.play swallowed an authored path exception")
+    assert not source.locked_data_keys
+    assert not source._is_updating_suspended()
+    assert np.array_equal(source.get_points(), [[0, 0, 0]])
+
+
+_assert_authored_transform_native_paths()
