@@ -109,6 +109,7 @@ class RenderSession:
             format = path.suffix.lower().lstrip(".") if path.suffix else "png_sequence"
         if not isinstance(format, str) or format not in _FORMATS:
             raise ValueError("render format must be png, png_sequence, gif, y4m, wav, mp4, or mov")
+        _validate_writer_options(scene, format, native)
         camera = scene.camera
         dimensions = camera.get_pixel_shape() if resolution is None else resolution
         try:
@@ -257,4 +258,98 @@ def render_scene(
             scene.run()
         except native.EndScene:
             pass
+    if session.result is None:
+        raise RuntimeError("scene execution ended without publishing its render generation")
     return session.result
+
+
+def _validate_writer_options(scene: Any, format: str, native: Any) -> None:
+    writer = getattr(scene, "file_writer", None)
+    if writer is None:
+        return
+    unsupported = []
+    for name in ("subdivide_output", "open_file_upon_completion", "show_file_location_upon_completion"):
+        if getattr(writer, name, False):
+            unsupported.append(name)
+    if format != "wav":
+        for name in ("saturation", "gamma"):
+            if getattr(writer, name, 1.0) != 1.0:
+                unsupported.append(name)
+    if format in {"png", "png_sequence"} and getattr(writer, "png_mode", "RGBA") != "RGBA":
+        unsupported.append("png_mode")
+    if format in _VIDEO_FORMATS:
+        for name, default in (("ffmpeg_bin", "ffmpeg"), ("video_codec", "libx264"), ("pixel_format", "yuv420p")):
+            if getattr(writer, name, default) != default:
+                unsupported.append(name)
+    if unsupported:
+        error_type = getattr(native, "_CapabilityError", RuntimeError)
+        raise error_type(
+            "programmatic native output does not yet route these SceneFileWriter options: "
+            + ", ".join(unsupported)
+        )
+
+
+def _configured_destination(scene: Any, destination: Any, format: str | None, native: Any):
+    if destination is not None:
+        # An explicit destination/format selects ONE output, independently of
+        # the writer's movie-versus-still preference. RenderSession owns path
+        # validation and suffix inference.
+        return destination, format
+    writer = getattr(scene, "file_writer", None)
+    if writer is None:
+        raise ValueError("Scene.render requires a destination when no SceneFileWriter is present")
+    if format is None:
+        movie = bool(writer.write_to_movie)
+        still = bool(writer.save_last_frame)
+        if movie and still:
+            error_type = getattr(native, "_CapabilityError", RuntimeError)
+            raise error_type(
+                "Scene.render cannot publish a movie and a last-frame PNG in one generation; "
+                "select one destination or format explicitly"
+            )
+        if movie:
+            return writer.get_movie_file_path(), None
+        format = "png" if still else "png_sequence"
+    if not isinstance(format, str) or format not in _FORMATS:
+        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, mp4, or mov")
+    if format == "png":
+        return writer.get_image_file_path(), format
+    root = writer.get_output_file_rootname()
+    if format == "png_sequence":
+        return Path(root) / "frames", format
+    return str(root) + "." + format, format
+
+
+def install_scene_rendering(native: Any) -> None:
+    """Bind the wheel's explicit output front door without changing Scene.run.
+
+    ``run`` remains the engine lifecycle used by construct-only and externally
+    owned CLI generations. ``render`` owns its generation and delegates to the
+    same run hook. Low-level ExtensionFileLoader consumers can use the public
+    render_scene/render_session functions without the package initializer.
+    """
+    if vars(native).get("_FMN_SCENE_RENDERING_INSTALLED", False):
+        return
+    Scene = native.Scene
+
+    def render(
+        self, destination=None, *, format=None, resolution=None, fps=None, threads=None,
+    ):
+        destination, format = _configured_destination(self, destination, format, native)
+        session = RenderSession(self, destination, format=format, resolution=resolution,
+                                fps=fps, threads=threads, _native=native)
+        with session:
+            try:
+                self.run()
+            except native.EndScene:
+                pass
+        if session.result is None:
+            raise RuntimeError("scene execution ended without publishing its render generation")
+        self.render_result = session.result
+        return session.result
+
+    render.__name__ = "render"
+    render.__qualname__ = Scene.__qualname__ + ".render"
+    render.__module__ = Scene.__module__
+    Scene.render = render
+    native._FMN_SCENE_RENDERING_INSTALLED = True
