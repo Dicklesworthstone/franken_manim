@@ -36,6 +36,7 @@ class SceneRenderOutcome:
     result: RenderResult | None = None
     error_type: str | None = None
     message: str | None = None
+    notes: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -43,7 +44,7 @@ class SceneRenderOutcome:
             "status": self.status,
             "result": None if self.result is None else self.result.as_dict(),
             "error": None if self.error_type is None else {
-                "type": self.error_type, "message": self.message,
+                "type": self.error_type, "message": self.message, "notes": list(self.notes),
             },
         }
 
@@ -159,6 +160,18 @@ def _error_fields(error: BaseException) -> tuple[str, str]:
     return type(error).__name__[:128], message[:4096]
 
 
+def _error_notes(error: BaseException) -> tuple[str, ...]:
+    # RenderSession notes distinguish a failed cancellation from the primary
+    # error, and publication succeeded but provenance retrieval failed.
+    try:
+        notes = vars(error).get("__notes__", ())
+    except BaseException:
+        return ()
+    if not isinstance(notes, (tuple, list)):
+        return ()
+    return tuple(note[:1024] for note in notes[:8] if isinstance(note, str))
+
+
 def _attach_result(error: BaseException, outcomes: list[SceneRenderOutcome]) -> None:
     # Preserve KeyboardInterrupt/SystemExit and authored observer exceptions
     # rather than translating cancellation into an ordinary failed scene.
@@ -216,10 +229,10 @@ def render_scenes(
         except Exception as error:
             failure = error
             kind, message = _error_fields(error)
-            outcomes[index] = SceneRenderOutcome(job.name, path, "failed", error_type=kind, message=message)
+            outcomes[index] = SceneRenderOutcome(job.name, path, "failed", error_type=kind, message=message, notes=_error_notes(error))
         except BaseException as error:
             kind, message = _error_fields(error)
-            outcomes[index] = SceneRenderOutcome(job.name, path, "cancelled", error_type=kind, message=message)
+            outcomes[index] = SceneRenderOutcome(job.name, path, "cancelled", error_type=kind, message=message, notes=_error_notes(error))
             _attach_result(error, outcomes)
             raise
         else:
