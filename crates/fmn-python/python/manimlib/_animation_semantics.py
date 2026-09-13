@@ -403,7 +403,10 @@ def install(native):
         # Equal endpoint records do not imply a constant authored path: a
         # closed excursion may leave and return to the very same points.
         # Explicit user locks remain respected by Mobject.interpolate.
-        if not self.mobject.has_updaters() and not uses_python_path(self):
+        # Camera pose is not in the RecordBuffer: equal empty endpoint
+        # arrays must not lock the animated center and dimensions.
+        if (not self.mobject.has_updaters() and not uses_python_path(self)
+                and not isinstance(self.mobject, g["CameraFrame"])):
             self.mobject.lock_matching_data(
                 self.starting_mobject,
                 self.target_copy,
@@ -588,6 +591,7 @@ def install(native):
     _install_matching_parts(g)
     _install_matching_strings(g)
     _install_composition_lifecycle(g)
+    _install_camera_pose(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
 
 
@@ -1424,3 +1428,69 @@ def _install_composition_lifecycle(g):
     scene_play.__module__ = g["Scene"].__module__
     g["_requires_python_animation"] = requires_python_animation
     g["Scene"].play = scene_play
+
+
+def _install_camera_pose(g):
+    """Interpolate CameraFrame's real native pose, not its empty record buffer."""
+    CameraFrame = g["CameraFrame"]
+    np = g["_np"]
+    copy_core = g["_copy"].copy
+    lerp = g["_interpolate"]
+
+    def control_points(frame):
+        center = np.asarray(frame._core.center(), dtype=float)
+        width, height = frame._core.shape()
+        # The pinned CameraFrame uses center, left, right, bottom, top. A
+        # path_func must see that same point array, including during zooms.
+        return center + np.array([
+            [0., 0., 0.], [-width / 2., 0., 0.], [width / 2., 0., 0.],
+            [0., -height / 2., 0.], [0., height / 2., 0.],
+        ])
+
+    def interpolate(self, mobject1, mobject2, alpha, path_func=None):
+        if not isinstance(mobject1, CameraFrame) or not isinstance(mobject2, CameraFrame):
+            raise TypeError("CameraFrame interpolation requires two CameraFrame endpoints")
+        alpha = float(alpha)
+        if not np.isfinite(alpha):
+            raise ValueError("CameraFrame interpolation alpha must be finite")
+        if path_func is None:
+            path_func = g["straight_path"]
+        if not callable(path_func):
+            raise TypeError("CameraFrame path_func must be callable")
+        # Validate on a private native value before changing the live core.
+        # Lumen owns dimension/FOV/quaternion validity and normalization; no
+        # callback failure can leave a half-updated live camera pose.
+        changes = []
+        if "point" not in getattr(self, "locked_data_keys", ()):
+            points = np.asarray(path_func(control_points(mobject1), control_points(mobject2), alpha), dtype=float)
+            if points.shape != (5, 3) or not np.isfinite(points).all():
+                raise ValueError("CameraFrame path_func must return a finite (5, 3) point array")
+            changes.append(("set_center", tuple(points[0])))
+            changes.append(("set_shape", (float(points[2, 0] - points[1, 0]),
+                                          float(points[4, 1] - points[3, 1]))))
+        locked = getattr(self, "locked_uniform_keys", ())
+        if "fovy" not in locked:
+            changes.append(("set_field_of_view", float(lerp(mobject1._core.field_of_view(),
+                                                            mobject2._core.field_of_view(), alpha))))
+        if "orientation" not in locked:
+            # Same componentwise quaternion interpolation as CameraLerp in
+            # the native bridge, normalized by Lumen on write.
+            orientation = lerp(np.asarray(mobject1._core.orientation(), dtype=float),
+                               np.asarray(mobject2._core.orientation(), dtype=float), alpha)
+            changes.append(("set_orientation", tuple(orientation)))
+        candidate = copy_core(self._core)
+        for method, value in changes:
+            getattr(candidate, method)(value)
+        # Preserve the core identity held by the renderer and native tracks.
+        # Publish the raw inputs, not an already-normalized quaternion, so
+        # normalization occurs exactly once on the live value as in Lumen.
+        for method, value in changes:
+            getattr(self._core, method)(value)
+        if changes:
+            self.note_changed_data()
+        return self
+
+    interpolate.__name__ = "interpolate"
+    interpolate.__qualname__ = CameraFrame.__qualname__ + ".interpolate"
+    interpolate.__module__ = CameraFrame.__module__
+    CameraFrame.interpolate = interpolate
