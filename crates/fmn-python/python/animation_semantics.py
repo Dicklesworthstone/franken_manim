@@ -11,6 +11,15 @@ def _fmn_mobject_str(self):
     return type(self).__name__
 
 
+def _fmn_uniform_tuple(value):
+    return tuple(
+        _fmn_uniform_tuple(component)
+        if isinstance(component, _np.ndarray)
+        else float(component)
+        for component in value
+    )
+
+
 def _fmn_interpolate_uniform(start, end, alpha):
     if isinstance(start, _np.ndarray) or isinstance(end, _np.ndarray):
         return _interpolate(_np.asarray(start), _np.asarray(end), alpha)
@@ -20,14 +29,14 @@ def _fmn_interpolate_uniform(start, end, alpha):
             _np.asarray(end, dtype=float),
             alpha,
         )
-        return tuple(float(component) for component in value)
+        return _fmn_uniform_tuple(value)
     if isinstance(start, list) or isinstance(end, list):
         value = _interpolate(
             _np.asarray(start, dtype=float),
             _np.asarray(end, dtype=float),
             alpha,
         )
-        return [float(component) for component in value]
+        return value.tolist()
     return _interpolate(start, end, alpha)
 
 
