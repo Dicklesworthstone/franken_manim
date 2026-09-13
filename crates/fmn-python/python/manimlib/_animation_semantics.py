@@ -47,11 +47,6 @@ def install(native):
         # Target-less Swap/CyclicReplace still require their native lowering.
         if python_path and self._target_attr is None:
             refuse_unrouted(type(self).__name__ + "()", [("path_func", True)])
-        if python_path and isinstance(mobject, g["CameraFrame"]):
-            raise NotImplementedError(
-                "Python path_func animations of the camera frame await the "
-                "camera track's per-frame callback seam"
-            )
         original_transform_init(
             self,
             mobject,
@@ -592,6 +587,7 @@ def install(native):
     _install_matching_strings(g)
     _install_composition_lifecycle(g)
     _install_camera_pose(g)
+    _install_camera_choreography(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
 
 
@@ -615,6 +611,9 @@ def _install_matching_parts(g):
         return result
 
     def animated_mobjects(animation):
+        # CameraFrame is a native pose, never a drawable Stage family member.
+        if isinstance(animation.mobject, g["CameraFrame"]):
+            return []
         if isinstance(animation.mobject, Mobject):
             return unique([animation.mobject, *getattr(animation, "_native_extra_mobjects", ())])
         if isinstance(animation, AnimationGroup):
@@ -756,7 +755,15 @@ def _install_matching_parts(g):
                     animation.mobject.resume_updating()
 
     def make_driver(scene, animation):
-        if g["_requires_python_animation"](animation):
+        if isinstance(animation.mobject, g["CameraFrame"]):
+            factory = g.get("_fmn_make_camera_driver")
+            if factory is None:
+                raise NotImplementedError("Matching animations cannot contain camera-frame tracks before camera initialization")
+            return factory(scene, animation)
+        if (g["_requires_python_animation"](animation)
+                or (isinstance(animation, AnimationGroup)
+                    and getattr(scene, "_fmn_camera_play_active", False)
+                    and getattr(animation.begin, "__func__", animation.begin) is AnimationGroup.begin)):
             animation._ensure_runtime_defaults()
             if not isinstance(animation.mobject, Mobject):
                 raise TypeError("A Python matching animation must animate a Mobject")
@@ -1205,10 +1212,16 @@ def _install_composition_lifecycle(g):
             driver.abort()
 
     def release(self):
-        self.mobject.set_animating_status(False)
-        if getattr(self, "_composition_resumes_updating", False):
-            self._composition_resumes_updating = False
-            self.mobject.resume_updating()
+        cameras = getattr(self, "_composition_camera_resumes", ())
+        self._composition_camera_resumes = []
+        try:
+            self.mobject.set_animating_status(False)
+            if getattr(self, "_composition_resumes_updating", False):
+                self._composition_resumes_updating = False
+                self.mobject.resume_updating()
+        finally:
+            for camera in cameras:
+                camera.resume_updating()
 
     def abort(self):
         driver = getattr(self, "_composition_driver", None)
@@ -1251,11 +1264,17 @@ def _install_composition_lifecycle(g):
             self, [make_driver(scene, child) for child in self.animations],
         )
         self._composition_resumes_updating = False
+        self._composition_camera_resumes = []
         try:
             root.set_animating_status(True)
             if self.suspend_mobject_updating and not root._is_updating_suspended():
                 self._composition_resumes_updating = True
                 root.suspend_updating()
+            if self.suspend_mobject_updating and "_fmn_group_camera_frames" in g:
+                for camera in g["_fmn_group_camera_frames"](self):
+                    if not camera._is_updating_suspended():
+                        self._composition_camera_resumes.append(camera)
+                        camera.suspend_updating()
             drive(self, "begin")
             self.interpolate(0.0)
         except BaseException:
@@ -1369,6 +1388,12 @@ def _install_composition_lifecycle(g):
 
     CallbackDriver.__init__ = driver_init
     CallbackDriver.interpolate = driver_interpolate
+
+    # Camera-containing plays use these same roots, ownership checks, timing
+    # rows and abort traversal; they do not implement a second composition.
+    g["_fmn_ensure_composition_root"] = ensure_root
+    g["_fmn_validate_composition_timings"] = authored_timings
+    g["_fmn_abort_animation_driver"] = abort_children
 
     def requires_python_animation(animation):
         if isinstance(animation, AnimationGroup):
@@ -1494,3 +1519,295 @@ def _install_camera_pose(g):
     interpolate.__qualname__ = CameraFrame.__qualname__ + ".interpolate"
     interpolate.__module__ = CameraFrame.__module__
     CameraFrame.interpolate = interpolate
+
+
+def _install_camera_choreography(g):
+    """Run camera and drawable animations on the same Choreo release boundary."""
+    import math
+    CameraFrame = g["CameraFrame"]
+    Animation = g["Animation"]
+    AnimationGroup = g["AnimationGroup"]
+    Transform = g["Transform"]
+    Builder = g["_AnimationBuilder"]
+    original_play = g["Scene"].play
+    original_dispatch = CameraFrame._dispatch_updater
+    make_driver = g["_fmn_make_animation_driver"]
+    abort_driver = g["_fmn_abort_animation_driver"]
+
+    def camera_dispatch(self, updater, dt):
+        # The camera is intentionally outside the Stage's suspended-subtree
+        # walk. Its dedicated first-in-scene updater pass needs the same gate.
+        if not self._is_updating_suspended():
+            return original_dispatch(self, updater, dt)
+
+    def validate_camera(scene, animation):
+        if animation.mobject is not scene.frame:
+            raise ValueError("Camera animation must target this Scene.frame")
+        if animation.remover or getattr(animation, "replace_mobject_with_target_in_scene", False):
+            raise NotImplementedError("Camera animation cannot remove or replace the scene's camera identity")
+        if getattr(animation, "_native_kind", None) and not isinstance(animation, Transform):
+            raise NotImplementedError(type(animation).__name__ + " has no camera-pose animation protocol; use Transform or frame.animate")
+        if isinstance(animation, Transform) and animation._target_attr is None:
+            raise NotImplementedError("A camera Transform requires a camera target")
+        target = getattr(animation, "target_mobject", None)
+        if target is not None and not isinstance(target, CameraFrame):
+            raise TypeError("Camera Transform target must be a CameraFrame")
+
+    def normalize_rate(animation):
+        rate = animation.rate_func
+        if isinstance(rate, str):
+            function = next((function for function, name in g["_RATE_FUNC_NAMES"].items() if name == rate), None)
+            if function is None:
+                raise ValueError("unknown rate function: " + rate)
+            animation.rate_func = function
+        elif rate is not None and not callable(rate):
+            raise TypeError("rate_func must be a callable or a catalog name")
+
+    class CameraLeaf:
+        def __init__(self, scene, animation):
+            validate_camera(scene, animation)
+            animation._ensure_runtime_defaults()
+            normalize_rate(animation)
+            self.animation, self.begun, self.finished = animation, False, False
+            self.was_suspended = True
+
+        def get_run_time(self):
+            return self.animation.get_run_time()
+
+        def begin(self):
+            self.begun, self.finished = True, False
+            self.was_suspended = self.animation.mobject._is_updating_suspended()
+            self.animation.begin()
+
+        def update_mobjects(self, dt):
+            self.animation.update_mobjects(dt)
+
+        def interpolate(self, alpha):
+            self.animation.interpolate(alpha)
+
+        def finish(self):
+            if self.begun and not self.finished:
+                self.animation.finish()
+                self.finished = True
+
+        def clean_up_from_scene(self, scene):
+            self.animation.clean_up_from_scene(scene)
+
+        def abort(self):
+            if not self.begun or self.finished:
+                return
+            self.finished = True
+            animation = self.animation
+            custom = getattr(animation, "abort", None)
+            if callable(custom):
+                custom()
+            else:
+                animation.mobject.set_animating_status(False)
+                if isinstance(animation, Transform):
+                    animation.mobject.unlock_data()
+                if (not self.was_suspended and animation.suspend_mobject_updating
+                        and animation.mobject._is_updating_suspended()):
+                    animation.mobject_was_updating = False
+                    animation.mobject.resume_updating()
+
+    g["_fmn_make_camera_driver"] = CameraLeaf
+
+    def group_camera_frames(group):
+        result, seen, frames = [], set(), set()
+        stack = list(group.animations)
+        while stack:
+            animation = stack.pop()
+            if id(animation) in seen:
+                continue
+            seen.add(id(animation))
+            if isinstance(animation.mobject, CameraFrame) and id(animation.mobject) not in frames:
+                frames.add(id(animation.mobject))
+                result.append(animation.mobject)
+            if isinstance(animation, AnimationGroup):
+                stack.extend(animation.animations)
+        return result
+
+    g["_fmn_group_camera_frames"] = group_camera_frames
+
+    def contains_camera(animation, visiting):
+        if id(animation) in visiting:
+            raise ValueError("Animation composition contains a cycle")
+        visiting.add(id(animation))
+        try:
+            if isinstance(getattr(animation, "mobject", None), CameraFrame):
+                return True
+            if any(isinstance(obj, CameraFrame) for obj in getattr(animation, "_native_extra_mobjects", ())):
+                return True
+            if isinstance(animation, Builder):
+                overridden = getattr(animation, "overridden_animation", None)
+                return overridden is not None and contains_camera(overridden, visiting)
+            if isinstance(animation, AnimationGroup):
+                # Do not short-circuit: a later member might contain a cycle.
+                results = [contains_camera(member, visiting) for member in animation.animations]
+                return any(results)
+            return False
+        finally:
+            visiting.remove(id(animation))
+
+    class ClockDriver:
+        """One non-rendering timing slot; no independent sampling or clock."""
+        def __init__(self, scene, slot, children):
+            self.scene, self.slot, self.children = scene, slot, children
+            self.run_times = [float(child.get_run_time()) for child in children]
+            if any(not math.isfinite(value) or value < 0 for value in self.run_times):
+                raise ValueError("Camera play runtimes must be finite and nonnegative")
+            self.run_time = max(self.run_times, default=0.)
+            self.dt = 0.
+            self.completed = 0
+
+        def hide_slot(self):
+            g["_SceneCore"].remove(self.scene, self.slot)
+
+        def begin(self):
+            self.hide_slot()
+            for child in self.children:
+                child.begin()
+
+        def update_mobjects(self, dt):
+            self.hide_slot()
+            self.dt = dt
+
+        def interpolate(self, alpha):
+            time = float(alpha) * self.run_time
+            # Match the engine's per-animation step-1/step-2 ordering, not
+            # all helper updates followed by all interpolations. Later
+            # siblings must observe earlier siblings' current-frame state.
+            for child, duration in zip(self.children, self.run_times):
+                child.update_mobjects(self.dt)
+                child.interpolate(1. if duration == 0 else time / duration)
+
+        def finish(self):
+            self.hide_slot()
+            # Top-level Choreo finish order is finish + cleanup per child.
+            # An enclosing composition still owns its own member protocol.
+            while self.completed < len(self.children):
+                child = self.children[self.completed]
+                child.finish()
+                child.clean_up_from_scene(self.scene)
+                self.completed += 1
+
+        def clean_up_from_scene(self, scene):
+            self.hide_slot()
+
+        def abort(self):
+            first = None
+            for child in self.children:
+                try:
+                    abort_driver(child)
+                except BaseException as error:
+                    if first is None:
+                        first = error
+            if first is not None:
+                raise first
+
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+        if getattr(self, "_fmn_camera_play_active", False):
+            raise RuntimeError("Reentrant Scene.play during camera choreography is not supported")
+        has_camera = [contains_camera(animation, set()) for animation in proto_animations]
+        if not any(has_camera):
+            return original_play(self, *proto_animations, run_time=run_time,
+                                 rate_func=rate_func, lag_ratio=lag_ratio)
+        animations = [g["prepare_animation"](animation) for animation in proto_animations]
+        nodes, seen, visiting = [], set(), set()
+
+        def visit(animation):
+            if not isinstance(animation, Animation):
+                raise TypeError("Camera compositions accept Animation instances")
+            if id(animation) in visiting:
+                raise ValueError("Animation composition contains a cycle")
+            if id(animation) in seen:
+                return
+            visiting.add(id(animation))
+            if isinstance(animation, AnimationGroup):
+                for child in animation.animations:
+                    visit(child)
+                g["_fmn_validate_composition_timings"](animation, animation.animations)
+            elif isinstance(animation.mobject, CameraFrame):
+                validate_camera(self, animation)
+            elif any(isinstance(obj, CameraFrame) for obj in getattr(animation, "_native_extra_mobjects", ())):
+                raise NotImplementedError("A camera animation requires its own Transform; it cannot be an extra drawable mobject")
+            visiting.remove(id(animation))
+            seen.add(id(animation))
+            nodes.append(animation)
+
+        for animation in animations:
+            visit(animation)
+        for animation in animations:
+            if run_time is not None:
+                value = float(run_time)
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError("Camera play run_time must be finite and nonnegative")
+                animation.run_time = value
+            if rate_func is not None:
+                animation.rate_func = rate_func
+            if lag_ratio is not None:
+                value = float(lag_ratio)
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError("Camera play lag_ratio must be finite and nonnegative")
+                animation.lag_ratio = value
+        for animation in nodes:
+            normalize_rate(animation)
+        contexts, children = [], []
+        drawable = {}
+        for animation in nodes:
+            drawable[id(animation)] = (
+                getattr(animation, "_composition_authored_root", False)
+                or any(drawable[id(child)] for child in animation.animations)
+            ) if isinstance(animation, AnimationGroup) else not isinstance(animation.mobject, CameraFrame)
+        slot = g["Mobject"]()
+        failed = False
+        self._fmn_camera_play_active = True
+        try:
+            for animation in nodes:
+                if isinstance(animation, AnimationGroup):
+                    root = g["_fmn_ensure_composition_root"](animation)
+                    if any(isinstance(member, CameraFrame) for member in root.get_family()):
+                        raise ValueError("A composition's drawable group cannot contain CameraFrame")
+                    for name in ("_composition_scene", "_matching_scene"):
+                        contexts.append((animation, name, getattr(animation, name, None)))
+                        setattr(animation, name, self)
+            # Keep the camera itself detached. Adopt ordinary animated roots
+            # through the existing arena path; the private point-free slot
+            # is removed before every user callback/updater and at teardown.
+            for animation in animations:
+                if drawable[id(animation)]:
+                    for root in g["_fmn_animated_mobjects"](animation):
+                        self.add(root)
+                children.append(make_driver(self, animation))
+            self._adopt(slot)
+            clock = ClockDriver(self, slot, children)
+            spec = ("python_callback", slot, None, clock.run_time, None, 0., {"remover": True})
+            return self._play_animations([spec], [clock], None, None, None, None)
+        except BaseException:
+            failed = True
+            for child in children:
+                try:
+                    abort_driver(child)
+                except BaseException:
+                    pass
+            raise
+        finally:
+            try:
+                if slot._is_bound():
+                    g["_SceneCore"].remove(self, slot)
+            except BaseException:
+                if not failed:
+                    raise
+            finally:
+                self._fmn_camera_play_active = False
+                for animation, name, previous in reversed(contexts):
+                    setattr(animation, name, previous)
+
+    camera_dispatch.__name__ = "_dispatch_updater"
+    camera_dispatch.__qualname__ = CameraFrame.__qualname__ + "._dispatch_updater"
+    camera_dispatch.__module__ = CameraFrame.__module__
+    CameraFrame._dispatch_updater = camera_dispatch
+    scene_play.__name__ = "play"
+    scene_play.__qualname__ = g["Scene"].__qualname__ + ".play"
+    scene_play.__module__ = g["Scene"].__module__
+    g["Scene"].play = scene_play
