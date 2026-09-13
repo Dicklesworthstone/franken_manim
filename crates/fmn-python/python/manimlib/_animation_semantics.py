@@ -588,6 +588,7 @@ def install(native):
     _install_composition_lifecycle(g)
     _install_camera_pose(g)
     _install_camera_choreography(g)
+    _install_partial_reveals(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
 
 
@@ -1313,7 +1314,7 @@ def _install_composition_lifecycle(g):
     }
     for name, function in methods.items():
         function.__name__ = name
-        function.__qualname__ = f"{AnimationGroup.__qualname__}.{name}"
+        function.__qualname__ = AnimationGroup.__qualname__ + "." + name
         function.__module__ = AnimationGroup.__module__
         setattr(AnimationGroup, name, function)
 
@@ -1811,3 +1812,233 @@ def _install_camera_choreography(g):
     scene_play.__qualname__ = g["Scene"].__qualname__ + ".play"
     scene_play.__module__ = g["Scene"].__module__
     g["Scene"].play = scene_play
+
+
+def _install_partial_reveals(g):
+    """Dispatch authored reveal windows to the existing native partial kernels."""
+    import math
+    Animation = g["Animation"]
+    Partial = g["ShowPartial"]
+    Creation = g["ShowCreation"]
+    Uncreate = g["Uncreate"]
+    Passing = g["ShowPassingFlash"]
+    Scene = g["Scene"]
+    original_requires = g["_requires_python_animation"]
+    original_play = Scene.play
+    creation_params = Creation._native_params
+    uncreate_params = Uncreate._native_params
+
+    def implementation(method):
+        return getattr(method, "__func__", method)
+
+    def normalize_rate(self):
+        if isinstance(self.rate_func, str):
+            name = self.rate_func
+            function = next((fn for fn, label in g["_RATE_FUNC_NAMES"].items()
+                             if label == name), None)
+            if function is None:
+                raise ValueError("unknown rate function: " + name)
+            self.rate_func = function
+
+    def reverse_smooth(alpha):
+        return g.get("smooth", g["_smooth_rate"])(1.0 - alpha)
+
+    def ensure_defaults(self):
+        if self.rate_func is None and isinstance(self, Uncreate):
+            self.rate_func = reverse_smooth
+        Animation._ensure_runtime_defaults(self)
+        normalize_rate(self)
+
+    def abort(self):
+        if not getattr(self, "_partial_active", False):
+            return
+        self._partial_active = False
+        try:
+            self.mobject.set_animating_status(False)
+        finally:
+            if (self.suspend_mobject_updating
+                    and not self._partial_was_suspended
+                    and self.mobject._is_updating_suspended()):
+                self.mobject_was_updating = False
+                self.mobject.resume_updating()
+
+    def abort_preserving_error(self):
+        try:
+            abort(self)
+        except BaseException:
+            pass
+
+    def begin(self):
+        abort(self)
+        self._partial_was_suspended = self.mobject._is_updating_suspended()
+        self._partial_active = True
+        try:
+            Animation.begin(self)
+        except BaseException:
+            abort_preserving_error(self)
+            raise
+
+    def interpolate(self, alpha):
+        try:
+            alpha = float(alpha)
+            if not math.isfinite(alpha):
+                raise ValueError("Partial reveal alpha must be finite")
+            # Scene.play may install its rate override after normalization.
+            normalize_rate(self)
+            Animation.interpolate(self, alpha)
+        except BaseException:
+            abort_preserving_error(self)
+            raise
+
+    def update_mobjects(self, dt):
+        try:
+            Animation.update_mobjects(self, dt)
+        except BaseException:
+            abort_preserving_error(self)
+            raise
+
+    def interpolate_submobject(self, submob, start_submob, alpha):
+        # Do not probe or approximate an authored function. A rule which
+        # agrees with a stock rule at four samples need not agree elsewhere,
+        # and closures may legitimately depend on live scene state.
+        lower, upper = self.get_bounds(alpha)
+        lower, upper = float(lower), float(upper)
+        if not math.isfinite(lower) or not math.isfinite(upper):
+            raise ValueError(type(self).__name__ + ".get_bounds must return two finite bounds")
+        # VMobject and Surface own clipping/alignment in their native kernels.
+        # In particular, never flatten a Surface into a VMobject record schema.
+        submob.pointwise_become_partial(start_submob, lower, upper)
+
+    def finish(self):
+        try:
+            Animation.finish(self)
+            self._partial_active = False
+        except BaseException:
+            abort_preserving_error(self)
+            raise
+
+    def passing_finish(self):
+        finish(self)
+        for submob, start in self.get_all_families_zipped():
+            submob.pointwise_become_partial(start, 0.0, 1.0)
+
+    def uncreate_init(self, mobject, rate_func=None, remover=True,
+                      should_match_start=True, **kwargs):
+        Creation.__init__(self, mobject, rate_func=rate_func, remover=remover,
+                          should_match_start=should_match_start, **kwargs)
+        self._native_kind = ("uncreate_surface" if isinstance(mobject, g["Surface"])
+                             and hasattr(mobject, "resolution") else "uncreate")
+
+    def passing_init(self, mobject, time_width=0.1, remover=True, **kwargs):
+        self.time_width = float(time_width)
+        if not math.isfinite(self.time_width) or self.time_width < 0:
+            raise ValueError("ShowPassingFlash time_width must be finite and nonnegative")
+        Partial.__init__(self, mobject, remover=remover, **kwargs)
+
+    def partial_params(self):
+        return {"remover": self.remover, "final_alpha_value": self.final_alpha_value}
+
+    def show_params(self):
+        return {**creation_params(self), **partial_params(self)}
+
+    def uncreate_native_params(self):
+        return {**uncreate_params(self), **partial_params(self)}
+
+    def passing_params(self):
+        return {"time_width": self.time_width, **partial_params(self)}
+
+    # Fix the hierarchy in place, preserving all previously published names.
+    Passing.__bases__ = (Partial,)
+    Partial._native_kind = None
+    Partial.__doc__ = "Reveal native curves or surfaces through a live, overridable get_bounds rule."
+    methods = {
+        Partial: {"begin": begin, "finish": finish, "interpolate": interpolate,
+                  "update_mobjects": update_mobjects, "abort": abort,
+                  "interpolate_submobject": interpolate_submobject,
+                  "_ensure_runtime_defaults": ensure_defaults, "_native_params": partial_params},
+        Creation: {"_native_params": show_params},
+        Uncreate: {"__init__": uncreate_init, "_native_params": uncreate_native_params},
+        Passing: {"__init__": passing_init, "finish": passing_finish, "_native_params": passing_params},
+    }
+    for cls, entries in methods.items():
+        for name, function in entries.items():
+            function.__name__ = name
+            function.__qualname__ = cls.__qualname__ + "." + name
+            function.__module__ = cls.__module__
+            setattr(cls, name, function)
+
+    hooks = ("get_bounds", "begin", "finish", "interpolate", "interpolate_mobject",
+             "interpolate_submobject", "update_mobjects", "clean_up_from_scene",
+             "create_starting_mobject", "get_all_mobjects", "get_all_families_zipped",
+             "get_all_mobjects_to_update", "get_sub_alpha", "time_spanned_alpha",
+             "_ensure_runtime_defaults")
+    protocols = {
+        cls: {name: implementation(getattr(cls, name)) for name in hooks}
+        for cls in tuple(g.values()) if isinstance(cls, type) and issubclass(cls, Partial)
+    }
+    object_protocols = {
+        cls: implementation(getattr(cls, "pointwise_become_partial"))
+        for cls in tuple(g.values()) if isinstance(cls, type)
+        and issubclass(cls, g["Mobject"]) and hasattr(cls, "pointwise_become_partial")
+    }
+
+    def requires_python(animation):
+        if not isinstance(animation, Partial):
+            return original_requires(animation)
+        if not getattr(animation, "_native_kind", None):
+            return True
+        if isinstance(animation, (Uncreate, Passing)) and not animation.remover:
+            return True
+        if isinstance(animation, Passing) and isinstance(animation.mobject, g["Surface"]):
+            return True
+        if animation.final_alpha_value != 1.0:
+            return True
+        for cls in type(animation).__mro__:
+            baseline = protocols.get(cls)
+            if baseline is not None:
+                if any(implementation(getattr(animation, name)) is not expected
+                       for name, expected in baseline.items()):
+                    return True
+                break
+        for member in animation.mobject.get_family():
+            for cls in type(member).__mro__:
+                expected = object_protocols.get(cls)
+                if expected is not None:
+                    if implementation(member.pointwise_become_partial) is not expected:
+                        return True
+                    break
+        return False
+
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+        # An override_animate builder already owns its resulting animation.
+        # Resolve just that case once, leaving ordinary builder lowering alone.
+        animations = tuple(g["prepare_animation"](anim)
+                           if isinstance(anim, g["_AnimationBuilder"])
+                           and getattr(anim, "overridden_animation", None) is not None
+                           else anim for anim in proto_animations)
+        reveals, seen = [], set()
+        stack = list(animations)
+        while stack:
+            animation = stack.pop()
+            if id(animation) in seen:
+                continue
+            seen.add(id(animation))
+            if isinstance(animation, Partial):
+                reveals.append(animation)
+            if isinstance(animation, g["AnimationGroup"]):
+                stack.extend(animation.animations)
+        try:
+            return original_play(self, *animations, run_time=run_time,
+                                 rate_func=rate_func, lag_ratio=lag_ratio)
+        except BaseException:
+            # Includes failures outside an overridden super() call, in a
+            # sibling, or in a scene updater. Never finish/publish on failure.
+            for animation in reveals:
+                abort_preserving_error(animation)
+            raise
+
+    scene_play.__name__ = "play"
+    scene_play.__qualname__ = Scene.__qualname__ + ".play"
+    scene_play.__module__ = Scene.__module__
+    g["_requires_python_animation"] = requires_python
+    Scene.play = scene_play
