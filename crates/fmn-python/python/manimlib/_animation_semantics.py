@@ -47,6 +47,11 @@ def install(native):
         # Target-less Swap/CyclicReplace still require their native lowering.
         if python_path and self._target_attr is None:
             refuse_unrouted(type(self).__name__ + "()", [("path_func", True)])
+        if python_path and isinstance(mobject, g["CameraFrame"]):
+            raise NotImplementedError(
+                "Python path_func animations of the camera frame await the "
+                "camera track's per-frame callback seam"
+            )
         original_transform_init(
             self,
             mobject,
@@ -64,9 +69,20 @@ def install(native):
         if (
             isinstance(animation, Transform)
             and animation._target_attr is not None
-            and uses_python_path(animation)
         ):
-            return True
+            if uses_python_path(animation):
+                return True
+            # Compare against the nearest shipped class, not Transform alone:
+            # Grow/Indicate/etc. already have native implementations of their
+            # own hooks. Only authored changes require callback dispatch.
+            for cls in type(animation).__mro__:
+                baseline = transform_protocols.get(cls)
+                if baseline is not None:
+                    for name, expected in baseline.items():
+                        method = getattr(animation, name)
+                        if getattr(method, "__func__", method) is not expected:
+                            return True
+                    break
         return original_requires_python(animation)
 
     def mobject_str(self):
@@ -354,6 +370,17 @@ def install(native):
             raise TypeError("Transform target must be a Mobject")
 
     def native_target(self):
+        # Scene.play handles camera transforms before callback dispatch. Do
+        # not silently lower a later-assigned path or authored hook to its
+        # native endpoint-only camera track.
+        if (
+            isinstance(self.mobject, g["CameraFrame"])
+            and requires_python_animation(self)
+        ):
+            raise NotImplementedError(
+                "Python-callback animations of the camera frame await the "
+                "camera track's per-frame callback seam"
+            )
         # CyclicReplace/Swap carry multiple source mobjects rather than a
         # Transform target. Their native constructor owns those destinations.
         if self._target_attr is None:
@@ -542,5 +569,20 @@ def install(native):
             function.__name__ = name
             function.__qualname__ = f"{cls.__qualname__}.{name}"
             function.__module__ = cls.__module__
+    # Capture after shared installation so inherited methods and qualified
+    # exports have their final identities. Retain function objects, not just
+    # class names, so later class/instance monkeypatches are visible too.
+    transform_hooks = (
+        "create_target", "create_starting_mobject", "init_path_func",
+        "check_target_mobject_validity", "get_all_mobjects",
+        "get_all_families_zipped", "get_all_mobjects_to_update",
+        "get_sub_alpha", "time_spanned_alpha",
+    )
+    transform_protocols = {
+        cls: {name: getattr(cls, name) for name in transform_hooks}
+        for cls in tuple(g.values())
+        if isinstance(cls, type) and issubclass(cls, Transform)
+        and getattr(cls, "_target_attr", None) is not None
+    }
     g["_requires_python_animation"] = requires_python_animation
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
