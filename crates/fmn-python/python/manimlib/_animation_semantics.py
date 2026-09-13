@@ -587,6 +587,7 @@ def install(native):
     g["_requires_python_animation"] = requires_python_animation
     _install_matching_parts(g)
     _install_matching_strings(g)
+    _install_composition_lifecycle(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
 
 
@@ -789,6 +790,10 @@ def _install_matching_parts(g):
             native_rate(animation), animation.lag_ratio, params,
         )
         return NativeLeaf(scene, scene._native_animation_driver(spec))
+
+    # Shared lowering for authored compositions as well as matching plans.
+    g["_fmn_make_animation_driver"] = make_driver
+    g["_fmn_animated_mobjects"] = animated_mobjects
 
     def abort(self):
         driver = self._matching_driver
@@ -1080,3 +1085,212 @@ def _install_matching_strings(g):
         function.__qualname__ = f"{Strings.__qualname__}.{name}"
         function.__module__ = Strings.__module__
         setattr(Strings, name, function)
+
+
+def _install_composition_lifecycle(g):
+    """Execute authored group protocols without replacing native leaf kernels."""
+    AnimationGroup = g["AnimationGroup"]
+    Mobject = g["Mobject"]
+    CallbackDriver = g["_CompositionCallbackDriver"]
+    make_driver = g["_fmn_make_animation_driver"]
+    animated_mobjects = g["_fmn_animated_mobjects"]
+    original_requires = g["_requires_python_animation"]
+    original_play = g["Scene"].play
+
+    def ensure_root(animation):
+        if animation.mobject is None:
+            objects, seen = [], set()
+            for child in animation.animations:
+                for obj in animated_mobjects(child):
+                    if id(obj) not in seen:
+                        seen.add(id(obj))
+                        objects.append(obj)
+            group_type = g["VGroup"] if all(isinstance(obj, g["VMobject"]) for obj in objects) else g["Group"]
+            animation.mobject = group_type(*objects)
+        if not isinstance(animation.mobject, Mobject):
+            raise TypeError("AnimationGroup must animate a Mobject group")
+        animation.group = animation.mobject
+        return animation.mobject
+
+    def ensure_runtime_defaults(self):
+        if self.run_time is None or self.run_time < 0:
+            self.calculate_max_end_time()
+        if self.rate_func is None:
+            self.rate_func = g["_linear_rate"]
+        if self.lag_ratio is None:
+            self.lag_ratio = type(self)._default_lag_ratio
+
+    def abort_children(driver):
+        if isinstance(driver, CallbackDriver):
+            first_error = None
+            for child in driver.children:
+                if child is None:
+                    continue
+                try:
+                    abort_children(child)
+                except BaseException as error:
+                    if first_error is None:
+                        first_error = error
+            if first_error is not None:
+                raise first_error
+        else:
+            driver.abort()
+
+    def release(self):
+        self.mobject.set_animating_status(False)
+        if getattr(self, "_composition_resumes_updating", False):
+            self._composition_resumes_updating = False
+            self.mobject.resume_updating()
+
+    def abort(self):
+        driver = getattr(self, "_composition_driver", None)
+        if driver is None:
+            return
+        try:
+            abort_children(driver)
+        finally:
+            self._composition_driver = None
+            release(self)
+
+    def drive(self, method, *args):
+        driver = getattr(self, "_composition_driver", None)
+        if driver is None:
+            raise RuntimeError("AnimationGroup must begin before " + method)
+        try:
+            return getattr(driver, method)(*args)
+        except BaseException:
+            try:
+                abort(self)
+            except BaseException:
+                pass
+            raise
+
+    def begin(self):
+        if getattr(self, "_composition_driver", None) is not None:
+            abort(self)
+        root = ensure_root(self)
+        scene = getattr(self, "_composition_scene", None)
+        if scene is None:
+            scene = next((obj._scene for obj in root.get_family() if obj._is_bound()), None)
+        if scene is None:
+            raise RuntimeError("AnimationGroup.begin requires a scene-bound group or member; use Scene.play(group)")
+        if not root._is_bound():
+            scene._adopt(root)
+        self._ensure_runtime_defaults()
+        # The existing driver owns the interval algebra, eager simultaneous
+        # begin, and just-in-time Succession transitions. No second clock.
+        self._composition_driver = CallbackDriver(
+            self, [make_driver(scene, child) for child in self.animations],
+        )
+        self._composition_resumes_updating = False
+        try:
+            root.set_animating_status(True)
+            if self.suspend_mobject_updating and not root._is_updating_suspended():
+                self._composition_resumes_updating = True
+                root.suspend_updating()
+            drive(self, "begin")
+            self.interpolate(0.0)
+        except BaseException:
+            try:
+                abort(self)
+            except BaseException:
+                pass
+            raise
+
+    def update_mobjects(self, dt):
+        drive(self, "update_mobjects", dt)
+
+    def interpolate(self, alpha):
+        drive(self, "interpolate", float(alpha))
+
+    def finish(self):
+        drive(self, "finish")
+        release(self)
+
+    def clean_up_from_scene(self, scene):
+        drive(self, "clean_up_from_scene", scene)
+        if self.remover:
+            scene.remove(self.mobject)
+        self._composition_driver = None
+
+    def get_all_mobjects(self):
+        return ensure_root(self)
+
+    methods = {
+        "_ensure_runtime_defaults": ensure_runtime_defaults,
+        "begin": begin, "update_mobjects": update_mobjects,
+        "interpolate": interpolate, "finish": finish,
+        "clean_up_from_scene": clean_up_from_scene, "abort": abort,
+        "get_all_mobjects": get_all_mobjects,
+    }
+    for name, function in methods.items():
+        function.__name__ = name
+        function.__qualname__ = f"{AnimationGroup.__qualname__}.{name}"
+        function.__module__ = AnimationGroup.__module__
+        setattr(AnimationGroup, name, function)
+
+    # Capture shipped subclasses too: numeric Flash, Broadcast, and other
+    # native specializations must not become callbacks merely for having
+    # their own built-in methods. Compare identities, including monkeypatches.
+    hooks = ("begin", "finish", "interpolate", "update_mobjects",
+             "clean_up_from_scene", "_ensure_runtime_defaults")
+    protocols = {
+        cls: {name: getattr(cls, name) for name in hooks}
+        for cls in tuple(g.values())
+        if isinstance(cls, type) and issubclass(cls, AnimationGroup)
+    }
+
+    def requires_python_animation(animation):
+        if isinstance(animation, AnimationGroup):
+            for cls in type(animation).__mro__:
+                baseline = protocols.get(cls)
+                if baseline is not None:
+                    if any(getattr(getattr(animation, name), "__func__", getattr(animation, name)) is not expected
+                           for name, expected in baseline.items()):
+                        return True
+                    break
+        return original_requires(animation)
+
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+        groups, seen, visiting = [], set(), set()
+
+        def visit(animation):
+            if not isinstance(animation, AnimationGroup):
+                return
+            if id(animation) in visiting:
+                raise ValueError("Animation composition contains a cycle")
+            if id(animation) in seen:
+                return
+            visiting.add(id(animation))
+            for child in animation.animations:
+                visit(child)
+            visiting.remove(id(animation))
+            seen.add(id(animation))
+            if requires_python_animation(animation):
+                ensure_root(animation)
+                groups.append((animation, getattr(animation, "_composition_scene", None)))
+                animation._composition_scene = self
+
+        try:
+            for animation in proto_animations:
+                visit(animation)
+            return original_play(self, *proto_animations, run_time=run_time,
+                                 rate_func=rate_func, lag_ratio=lag_ratio)
+        except BaseException:
+            # An authored override may raise outside super(), or a sibling /
+            # scene updater may fail after these native children have begun.
+            for animation, _ in reversed(groups):
+                try:
+                    abort(animation)
+                except BaseException:
+                    pass
+            raise
+        finally:
+            for animation, previous_scene in groups:
+                animation._composition_scene = previous_scene
+
+    scene_play.__name__ = "play"
+    scene_play.__qualname__ = g["Scene"].__qualname__ + ".play"
+    scene_play.__module__ = g["Scene"].__module__
+    g["_requires_python_animation"] = requires_python_animation
+    g["Scene"].play = scene_play
