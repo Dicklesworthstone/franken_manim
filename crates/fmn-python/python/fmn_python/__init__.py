@@ -67,4 +67,8 @@ def __getattr__(name):
         from . import rendering
 
         return getattr(rendering, name)
+    if name in {"RenderJob", "SceneRenderOutcome", "BatchRenderResult", "BatchRenderError", "render_scenes"}:
+        from . import batch_rendering
+
+        return getattr(batch_rendering, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
