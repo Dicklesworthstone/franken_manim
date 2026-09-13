@@ -112,6 +112,48 @@ def test_matching_exception_does_not_publish_target():
     scene.play(ml.Transform(source, source.copy().shift(ml.UP), run_time=2 / 30))
 
 
+def test_string_matching_override_reaches_scene_play():
+    calls = []
+    class AuthoredStrings(ml.TransformMatchingStrings):
+        def matching_blocks(self, source, target, matched_keys, key_map):
+            calls.append((source, target))
+            return [(source._string_submobject(0), target._string_submobject(0))]
+    source, target = ml.Text("ab"), ml.Text("ba").shift(2 * ml.RIGHT)
+    animation = AuthoredStrings(source, target, run_time=3 / 30)
+    assert calls == [(source, target)]
+    assert isinstance(animation, ml.TransformMatchingParts)
+    assert animation.animations[0].mobject is source._string_submobject(0)
+    assert animation.animations[0].target_mobject is target._string_submobject(0)
+    scene = ml.Scene()
+    scene.add(source)
+    scene.play(animation)
+    assert source not in scene.mobjects and target in scene.mobjects
+
+
+def test_multi_glyph_rename_uses_native_spans():
+    source, target = ml.Text("foo+foo"), ml.Text("bar+bar").shift(ml.UP)
+    animation = ml.TransformMatchingStrings(source, target, key_map={"foo": "bar"}, run_time=3 / 30)
+    matches = [child for child in animation.animations if child._native_kind == "transform"]
+    assert len(matches) == 3
+    assert len(matches[0].mobject.family_members_with_points()) == 3
+    scene = ml.Scene()
+    scene.add(source)
+    scene.play(animation)
+    assert target in scene.mobjects and source not in scene.mobjects
+
+
+def test_reordered_tex_retains_native_semantic_keys():
+    source = ml.Tex("x+y", isolate=["x", "y"])
+    target = ml.Tex("y+x", isolate=["x", "y"]).shift(ml.UP)
+    animation = ml.TransformMatchingTex(source, target, run_time=3 / 30)
+    assert isinstance(animation, ml.TransformMatchingParts)
+    assert any(child._native_kind == "transform" for child in animation.animations)
+    scene = ml.Scene()
+    scene.add(source)
+    scene.play(animation)
+    assert target in scene.mobjects and source not in scene.mobjects
+
+
 def run_matching_acceptance():
     assert getattr(ml, "__franken_manim__", False), "requires the real FrankenManim extension"
     cases = sorted((name, value) for name, value in globals().items()

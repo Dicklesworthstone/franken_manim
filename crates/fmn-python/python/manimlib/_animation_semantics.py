@@ -586,6 +586,7 @@ def install(native):
     }
     g["_requires_python_animation"] = requires_python_animation
     _install_matching_parts(g)
+    _install_matching_strings(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
 
 
@@ -808,6 +809,7 @@ def _install_matching_parts(g):
         try:
             unwind(driver)
         finally:
+            self._matching_driver = None
             self.mobject.set_animating_status(False)
 
     def drive(self, method, *args):
@@ -827,6 +829,8 @@ def _install_matching_parts(g):
     def begin(self):
         if not self.mobject._is_bound():
             raise RuntimeError("Matching animation begin requires a scene-bound mobject")
+        if self._matching_driver is not None:
+            self.abort()
         scene = self._matching_scene if self._matching_scene is not None else self.mobject._scene
         self._matching_driver = CallbackDriver(
             self, [make_driver(scene, member) for member in self.animations],
@@ -854,6 +858,7 @@ def _install_matching_parts(g):
     # Retain every already-published class object, including qualified
     # imports. Both front doors install this after bootstrap construction.
     Parts.__bases__ = (AnimationGroup,)
+    Parts.__doc__ = "Match through public planning hooks, with native or authored leaves on Choreo's shared timeline."
     Parts._native_kind = None
     Shapes._native_kind = None
     methods = {
@@ -907,3 +912,171 @@ def _install_matching_parts(g):
     scene_play.__qualname__ = g["Scene"].__qualname__ + ".play"
     scene_play.__module__ = g["Scene"].__module__
     g["Scene"].play = scene_play
+
+
+def _install_matching_strings(g):
+    """Dispatch authored block matching over Scribe's native byte-span parts."""
+    Parts = g["TransformMatchingParts"]
+    Strings = g["TransformMatchingStrings"]
+    Tex = g["TransformMatchingTex"]
+    Mobject = g["Mobject"]
+    StringMobject = g["StringMobject"]
+
+    def point_ids(mobject):
+        return {id(part) for part in mobject.family_members_with_points()}
+
+    def claimed_parts(self, source_keys, target_keys):
+        available = [set().union(*(point_ids(part) for part, _ in keys))
+                     for keys in (source_keys, target_keys)]
+        claimed = [set(), set()]
+        for pair in self.matched_pairs:
+            for side, member in enumerate(pair):
+                ids = point_ids(member)
+                if not ids or not ids <= available[side]:
+                    raise ValueError(type(self).__name__ + " matched_pairs member is not a live span-map part of the "
+                                     + ("source" if side == 0 else "target") + " family")
+                if ids & claimed[side]:
+                    raise ValueError(type(self).__name__ + " matched_pairs claims the same part twice")
+                claimed[side].update(ids)
+        return claimed
+
+    def strings_init(
+        self, source, target, matched_keys=(), key_map=None, matched_pairs=(),
+        run_time=2, lag_ratio=0, **kwargs,
+    ):
+        if not isinstance(source, StringMobject) or not isinstance(target, StringMobject):
+            raise TypeError(type(self).__name__ + " expects two StringMobject instances")
+        if not source._string_sub_spans or not target._string_sub_spans:
+            raise g["_TexError"](type(self).__name__ + " requires non-empty native span maps")
+        explicit = [tuple(pair) for pair in matched_pairs]
+        if not all(len(pair) == 2 and all(isinstance(obj, Mobject) for obj in pair) for pair in explicit):
+            raise TypeError(type(self).__name__ + " matched_pairs must pair Mobjects")
+        self.matched_pairs = explicit
+        self.matched_keys, self.key_map = tuple(matched_keys), dict(key_map or {})
+        if not all(isinstance(key, str) for key in (*self.matched_keys, *self.key_map, *self.key_map.values())):
+            raise TypeError("Matching string keys must be strings")
+        # Validate even an authored matcher: no override bypasses the native
+        # UTF-8 provenance or explicit-family ownership checks.
+        claimed_parts(self, self._native_span_keys(source), self._native_span_keys(target))
+        blocks = list(self.matching_blocks(source, target, self.matched_keys, self.key_map))
+        Parts.__init__(self, source, target, matched_pairs=explicit + blocks,
+                       run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+        self.matched_pairs = explicit
+
+    def matching_blocks(self, source, target, matched_keys=(), key_map=None):
+        keys = [self._native_span_keys(source), self._native_span_keys(target)]
+        claimed = claimed_parts(self, *keys)
+        sequences = [[key for _, key in side] for side in keys]
+        masks = [object(), object()]
+        used = [[bool(point_ids(part) & claimed[side]) for part, _ in entries]
+                for side, entries in enumerate(keys)]
+        for side in range(2):
+            for index, taken in enumerate(used[side]):
+                if taken:
+                    sequences[side][index] = masks[side]
+        pairs = []
+
+        def group(side, indices):
+            parts, seen = [], set()
+            for index in indices:
+                part = keys[side][index][0]
+                if id(part) not in seen:
+                    seen.add(id(part))
+                    parts.append(part)
+            if len(parts) == 1:
+                return parts[0]
+            cls = g["VGroup"] if all(isinstance(part, g["VMobject"]) for part in parts) else g["Group"]
+            return cls(*parts)
+
+        def claim(source_indices, target_indices):
+            if any(used[side][index] for side, indices in enumerate((source_indices, target_indices)) for index in indices):
+                return
+            pairs.append((group(0, source_indices), group(1, target_indices)))
+            for side, indices in enumerate((source_indices, target_indices)):
+                consumed = set().union(*(point_ids(keys[side][index][0]) for index in indices))
+                direct = set(indices)
+                for index, (part, _) in enumerate(keys[side]):
+                    if index in direct or point_ids(part) & consumed:
+                        used[side][index] = True
+                        sequences[side][index] = masks[side]
+
+        def occurrences(side, key):
+            if not key:
+                return []
+            mobject = (source, target)[side]
+            encoded, needle = mobject.get_string().encode("utf-8"), key.encode("utf-8")
+            result, position = [], 0
+            while True:
+                start = encoded.find(needle, position)
+                if start < 0:
+                    return result
+                end = start + len(needle)
+                position = end
+                indices = [index for index, (a, b) in enumerate(mobject._string_sub_spans)
+                           if a < end and b > start]
+                if not indices or any(used[side][index] for index in indices):
+                    continue
+                if any(not start <= mobject._string_sub_spans[index][0]
+                           < mobject._string_sub_spans[index][1] <= end for index in indices):
+                    raise g["_TexError"]("Matching key " + repr(key) + " splits a native source-span part")
+                result.append(indices)
+
+        # Explicit pairs were masked above. Authored renames claim next,
+        # followed by pinned keys. Never close gaps by deleting claimed slots:
+        # that would invent adjacency across a moved substring.
+        mapping = dict(key_map or {})
+        for source_key, target_key in mapping.items():
+            for source_indices, target_indices in zip(occurrences(0, source_key), occurrences(1, target_key)):
+                claim(source_indices, target_indices)
+        for key in matched_keys:
+            if key in mapping:
+                continue
+            for source_indices, target_indices in zip(occurrences(0, key), occurrences(1, key)):
+                claim(source_indices, target_indices)
+
+        if not self._match_by_blocks:
+            # D-09: Tex matches semantic native keys, never geometry. Retain
+            # the existing Tex matched_keys admission filter for leftovers.
+            admitted = set(matched_keys)
+            for source_index, (_, source_key) in enumerate(keys[0]):
+                if used[0][source_index] or (admitted and source_key not in admitted):
+                    continue
+                for target_index, (_, target_key) in enumerate(keys[1]):
+                    if not used[1][target_index] and source_key == target_key:
+                        claim([source_index], [target_index])
+                        break
+            return pairs
+
+        # Repeated longest-block matching also handles reordered runs. The
+        # two side-specific non-string sentinels cannot collide with authored
+        # text (including the Reference's literal "Null1"/"Null2" strings).
+        while True:
+            matcher = g["_difflib"].SequenceMatcher(None, *sequences, autojunk=False)
+            block = matcher.find_longest_match()
+            if block.size == 0:
+                break
+            claim(list(range(block.a, block.a + block.size)),
+                  list(range(block.b, block.b + block.size)))
+        return pairs
+
+    def no_shape_fallback(self, sources, targets):
+        # Matching text by outline would discard the native semantic identity
+        # when two unrelated glyphs happen to have the same shape.
+        return []
+
+    def callback_params(self):
+        return {}
+
+    Strings.__bases__ = (Parts,)
+    Strings._native_kind = None
+    Tex._native_kind = None
+    methods = {
+        "__init__": strings_init, "matching_blocks": matching_blocks,
+        "find_pairs_with_matching_shapes": no_shape_fallback,
+        "_native_params": callback_params,
+    }
+    for name, function in methods.items():
+        function.__name__ = name
+        function.__qualname__ = f"{Strings.__qualname__}.{name}"
+        function.__module__ = Strings.__module__
+        setattr(Strings, name, function)
