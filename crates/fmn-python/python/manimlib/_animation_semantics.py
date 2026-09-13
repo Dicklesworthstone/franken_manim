@@ -585,4 +585,325 @@ def install(native):
         and getattr(cls, "_target_attr", None) is not None
     }
     g["_requires_python_animation"] = requires_python_animation
+    _install_matching_parts(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
+
+
+def _install_matching_parts(g):
+    """Plan with public hooks; execute leaves on the existing Choreo boundary."""
+    Parts = g["TransformMatchingParts"]
+    Shapes = g["TransformMatchingShapes"]
+    Animation = g["Animation"]
+    AnimationGroup = g["AnimationGroup"]
+    Mobject = g["Mobject"]
+    Transform = g["Transform"]
+    CallbackDriver = g["_CompositionCallbackDriver"]
+    NativeLeaf = g["_NativeCompositionLeaf"]
+
+    def unique(objects):
+        result, seen = [], set()
+        for obj in objects:
+            if id(obj) not in seen:
+                seen.add(id(obj))
+                result.append(obj)
+        return result
+
+    def animated_mobjects(animation):
+        if isinstance(animation.mobject, Mobject):
+            return unique([animation.mobject, *getattr(animation, "_native_extra_mobjects", ())])
+        if isinstance(animation, AnimationGroup):
+            return unique(
+                obj for member in animation.animations
+                for obj in animated_mobjects(member)
+            )
+        raise TypeError("Matching animations must animate Mobjects")
+
+    def matching_init(
+        self, source, target, matched_pairs=(), match_animation=Transform,
+        mismatch_animation=Transform, run_time=2, lag_ratio=0, **kwargs,
+    ):
+        if not isinstance(source, Mobject) or not isinstance(target, Mobject):
+            raise TypeError(type(self).__name__ + " expects two Mobject families")
+        if not callable(match_animation) or not callable(mismatch_animation):
+            raise TypeError("match_animation and mismatch_animation must be callable")
+        pairs = [tuple(pair) for pair in matched_pairs]
+        if not all(len(pair) == 2 and all(isinstance(obj, Mobject) for obj in pair)
+                   for pair in pairs):
+            raise TypeError(type(self).__name__ + " matched_pairs must pair Mobjects")
+        self.source, self.target = source, target
+        self.target_mobject = target
+        self.matched_pairs = pairs
+        self.match_animation, self.mismatch_animation = match_animation, mismatch_animation
+        self.anim_config = dict(kwargs)
+        self.source_pieces = unique(source.family_members_with_points())
+        self.target_pieces = unique(target.family_members_with_points())
+        self.anims = []
+        for pair in pairs:
+            self.add_transform(*pair)
+        # Snapshot the candidates before add_transform consumes their families.
+        for pair in list(self.find_pairs_with_matching_shapes(
+            self.source_pieces, self.target_pieces,
+        )):
+            self.add_transform(*pair)
+        claimed = {
+            id(member) for animation in self.anims
+            for obj in animated_mobjects(animation) for member in obj.get_family()
+        }
+        for piece in self.source_pieces:
+            if id(piece) not in claimed:
+                self.anims.append(g["FadeOutToPoint"](
+                    piece, target.get_center(), **self.anim_config,
+                ))
+        for piece in self.target_pieces:
+            if id(piece) not in claimed:
+                self.anims.append(g["FadeInFromPoint"](
+                    piece, source.get_center(), **self.anim_config,
+                ))
+        AnimationGroup.__init__(self, *self.anims, run_time=run_time, lag_ratio=lag_ratio)
+        # BN-11: members own easing; an omitted group curve is linear, not a
+        # second smooth curve installed by the Python callback normalization.
+        self.rate_func = g["_linear_rate"]
+        objects = unique(obj for anim in self.animations for obj in animated_mobjects(anim))
+        group_type = g["VGroup"] if all(isinstance(obj, g["VMobject"]) for obj in objects) else g["Group"]
+        self.mobject = group_type(*objects)
+        self.remover = True
+        self._matching_driver = None
+        self._matching_scene = None
+
+    def add_transform(self, source, target):
+        if not isinstance(source, Mobject) or not isinstance(target, Mobject):
+            raise TypeError("add_transform expects two Mobjects")
+        source_members = unique(source.family_members_with_points())
+        target_members = unique(target.family_members_with_points())
+        if not source_members or not target_members:
+            return
+        available_source = {id(obj) for obj in self.source_pieces}
+        available_target = {id(obj) for obj in self.target_pieces}
+        if (any(id(obj) not in available_source for obj in source_members)
+                or any(id(obj) not in available_target for obj in target_members)):
+            return
+        factory = self.match_animation if source.has_same_shape_as(target) else self.mismatch_animation
+        animation = factory(source, target, **self.anim_config)
+        if not isinstance(animation, Animation):
+            raise TypeError("A matching animation factory must return an Animation")
+        # A failed factory must not consume either side of the match.
+        self.anims.append(animation)
+        source_ids, target_ids = {id(obj) for obj in source_members}, {id(obj) for obj in target_members}
+        self.source_pieces[:] = [obj for obj in self.source_pieces if id(obj) not in source_ids]
+        self.target_pieces[:] = [obj for obj in self.target_pieces if id(obj) not in target_ids]
+
+    def find_pairs_with_matching_shapes(self, chars1, chars2):
+        return [(source, target) for source in chars1 for target in chars2
+                if source.has_same_shape_as(target)]
+
+    def native_rate(animation):
+        rate = animation.rate_func
+        if rate is None or isinstance(rate, str):
+            return rate
+        name = g["_RATE_FUNC_NAMES"].get(rate)
+        if name is not None:
+            return name
+        if not callable(rate):
+            raise TypeError("rate_func must be a callable or a catalog name")
+        frames = max(2, int(round(g["_composition_member_run_time"](animation) * 30.0)))
+        return [float(rate(index / frames)) for index in range(frames + 1)]
+
+    class PythonLeaf:
+        def __init__(self, animation):
+            self.animation = animation
+            self.begun = False
+            self.finished = False
+
+        def get_run_time(self):
+            return self.animation.get_run_time()
+
+        def begin(self):
+            self.begun = True
+            self.animation.begin()
+
+        def update_mobjects(self, dt):
+            self.animation.update_mobjects(dt)
+
+        def interpolate(self, alpha):
+            self.animation.interpolate(alpha)
+
+        def finish(self):
+            self.animation.finish()
+            self.finished = True
+
+        def clean_up_from_scene(self, scene):
+            self.animation.clean_up_from_scene(scene)
+
+        def abort(self):
+            if not self.begun or self.finished:
+                return
+            animation = self.animation
+            abort_animation = getattr(animation, "abort", None)
+            if callable(abort_animation):
+                abort_animation()
+            else:
+                animation.mobject.set_animating_status(False)
+                if isinstance(animation, Transform):
+                    animation.mobject.unlock_data()
+                if (animation.suspend_mobject_updating
+                        and getattr(animation, "mobject_was_updating", False)):
+                    animation.mobject.resume_updating()
+
+    def make_driver(scene, animation):
+        if g["_requires_python_animation"](animation):
+            animation._ensure_runtime_defaults()
+            if not isinstance(animation.mobject, Mobject):
+                raise TypeError("A Python matching animation must animate a Mobject")
+            if not animation.mobject._is_bound():
+                scene._adopt(animation.mobject)
+            return PythonLeaf(animation)
+        if isinstance(animation, AnimationGroup):
+            return CallbackDriver(animation, [make_driver(scene, member) for member in animation.animations])
+        # This is the same narrow spec consumed by Scene.play. Only lowering
+        # lives here: geometry, record alignment, leaf snapshots and frame
+        # timing remain in the existing native drivers/interval builder.
+        mobject = animation.mobject
+        if isinstance(mobject, g["CameraFrame"]):
+            raise NotImplementedError("Matching animations cannot contain camera-frame tracks")
+        if not mobject._is_bound():
+            scene._adopt(mobject)
+        if animation._native_kind == "restore":
+            saved = getattr(mobject, "saved_state", None)
+            if saved is not None:
+                if not saved._is_bound():
+                    scene._adopt(saved)
+                mobject._link_saved_state(saved)
+        target = animation._native_target()
+        if target is not None and not target._is_bound():
+            scene._adopt(target)
+        for extra in getattr(animation, "_native_extra_mobjects", ()):
+            if not extra._is_bound():
+                scene._adopt(extra)
+        params = dict(animation._native_params())
+        params["suspend_mobject_updating"] = bool(animation.suspend_mobject_updating)
+        if animation.time_span is not None:
+            params["time_span"] = animation.time_span
+        spec = (
+            animation._native_kind, mobject, target, animation.run_time,
+            native_rate(animation), animation.lag_ratio, params,
+        )
+        return NativeLeaf(scene, scene._native_animation_driver(spec))
+
+    def abort(self):
+        driver = self._matching_driver
+        if driver is None:
+            return
+        def unwind(child):
+            if isinstance(child, CallbackDriver):
+                errors = []
+                for member in child.children:
+                    try:
+                        unwind(member)
+                    except BaseException as error:
+                        errors.append(error)
+                if errors:
+                    raise errors[0]
+            else:
+                child.abort()
+        try:
+            unwind(driver)
+        finally:
+            self.mobject.set_animating_status(False)
+
+    def drive(self, method, *args):
+        if self._matching_driver is None:
+            raise RuntimeError("Matching animation must begin before " + method)
+        try:
+            return getattr(self._matching_driver, method)(*args)
+        except BaseException:
+            # Abort does not finish an animation or publish the target. Keep
+            # the original callback failure if a secondary cleanup also fails.
+            try:
+                self.abort()
+            except BaseException:
+                pass
+            raise
+
+    def begin(self):
+        if not self.mobject._is_bound():
+            raise RuntimeError("Matching animation begin requires a scene-bound mobject")
+        scene = self._matching_scene if self._matching_scene is not None else self.mobject._scene
+        self._matching_driver = CallbackDriver(
+            self, [make_driver(scene, member) for member in self.animations],
+        )
+        self.mobject.set_animating_status(True)
+        drive(self, "begin")
+        self.interpolate(0.0)
+
+    def update_mobjects(self, dt):
+        drive(self, "update_mobjects", dt)
+
+    def interpolate(self, alpha):
+        drive(self, "interpolate", float(alpha))
+
+    def finish(self):
+        drive(self, "finish")
+        self.mobject.set_animating_status(False)
+
+    def clean_up_from_scene(self, scene):
+        drive(self, "clean_up_from_scene", scene)
+        scene.remove(self.mobject, self.source)
+        scene.add(self.target)
+        self._matching_driver = None
+
+    # Retain every already-published class object, including qualified
+    # imports. Both front doors install this after bootstrap construction.
+    Parts.__bases__ = (AnimationGroup,)
+    Parts._native_kind = None
+    Shapes._native_kind = None
+    methods = {
+        "__init__": matching_init,
+        "add_transform": add_transform,
+        "find_pairs_with_matching_shapes": find_pairs_with_matching_shapes,
+        "begin": begin, "update_mobjects": update_mobjects,
+        "interpolate": interpolate, "finish": finish,
+        "clean_up_from_scene": clean_up_from_scene, "abort": abort,
+    }
+    for name, function in methods.items():
+        function.__name__ = name
+        function.__qualname__ = f"{Parts.__qualname__}.{name}"
+        function.__module__ = Parts.__module__
+        setattr(Parts, name, function)
+
+    original_play = g["Scene"].play
+
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+        matches, seen = [], set()
+        def visit(animation):
+            if id(animation) in seen:
+                return
+            seen.add(id(animation))
+            if isinstance(animation, Parts):
+                matches.append(animation)
+                animation._matching_scene = self
+            if isinstance(animation, AnimationGroup):
+                for member in animation.animations:
+                    visit(member)
+        for animation in proto_animations:
+            visit(animation)
+        try:
+            return original_play(self, *proto_animations, run_time=run_time,
+                                 rate_func=rate_func, lag_ratio=lag_ratio)
+        except BaseException:
+            # Errors in scene updaters or sibling animations must also unwind
+            # the native leaves owned by a matching callback, even when the
+            # failure did not originate inside that callback.
+            for animation in reversed(matches):
+                try:
+                    animation.abort()
+                except BaseException:
+                    pass
+            raise
+        finally:
+            for animation in matches:
+                animation._matching_scene = None
+
+    scene_play.__name__ = "play"
+    scene_play.__qualname__ = g["Scene"].__qualname__ + ".play"
+    scene_play.__module__ = g["Scene"].__module__
+    g["Scene"].play = scene_play
