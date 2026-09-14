@@ -247,6 +247,15 @@ class TrackerInterpolationTests(unittest.TestCase):
         self.assertIs(raised.exception, error)
         self.assertEqual(current.get_value(), 2)
 
+    def test_exponential_nonrepresentable_extrapolation_refuses_before_write(self):
+        current = self.n.ExponentialValueTracker(2)
+        for start, end in ((1., 1e250), (1., 1e-250)):
+            with self.assertRaisesRegex(ValueError, "nonrepresentable decoded value"):
+                current.interpolate(self.n.ExponentialValueTracker(start),
+                                    self.n.ExponentialValueTracker(end), 2.)
+            self.assertEqual(current.get_value(), 2)
+            self.assertEqual(current.setter_calls, [])
+
     def test_subclass_identity_and_reinstallation_are_preserved(self):
         cls, function = self.n.ValueTracker, self.n.Mobject.interpolate
         replacement = lambda *args: None
@@ -264,6 +273,15 @@ class TrackerInterpolationTests(unittest.TestCase):
         self.assertEqual(current.get_value(), 2)
         current.interpolate(start, end, 1)
         self.assertTrue(math.isinf(current.get_value()))
+
+    def test_exponential_unrepresentable_decoding_refuses_before_write(self):
+        current, start, end = (self.n.ExponentialValueTracker(1) for _ in range(3))
+        start.lanes[0] = -1000.
+        for alpha in (0., .5, 1.):
+            with self.assertRaisesRegex(ValueError, "positive finite decoded endpoints"):
+                current.interpolate(start, end, alpha)
+            self.assertEqual(current.get_value(), 1)
+            self.assertEqual(current.setter_calls, [])
 
 
 if __name__ == "__main__":

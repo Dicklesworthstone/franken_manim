@@ -27,6 +27,11 @@ def install_tracker_interpolation(native: Any) -> None:
         return tracker._tracker_value()
 
     def interpolate_value(start, end, alpha, kind):
+        if kind == 1 and not (np.isfinite(start) and np.isfinite(end) and start > 0 and end > 0):
+            raise ValueError(
+                "Exponential callback interpolation requires positive finite decoded endpoints; "
+                "use native Transform for nonrepresentable encoded tracker states"
+            )
         # Endpoint selection avoids 0 * infinity and preserves scalar/complex
         # values without passing them through NumPy's float32 record plane.
         if alpha == 0.0:
@@ -43,7 +48,13 @@ def install_tracker_interpolation(native: Any) -> None:
         if start == end:
             return start
         with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
-            return float(np.exp((1.0 - alpha) * np.log(start) + alpha * np.log(end)))
+            value = float(np.exp((1.0 - alpha) * np.log(start) + alpha * np.log(end)))
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(
+                "Exponential callback interpolation produced a nonrepresentable decoded value; "
+                "use native Transform for nonrepresentable encoded tracker states"
+            )
+        return value
 
     @wraps(original)
     def interpolate(self, mobject1, mobject2, alpha, path_func=None):

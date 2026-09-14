@@ -70,6 +70,10 @@ def install_scene_playback(native: Any) -> None:
         from fmn_python.trackers import install_tracker_interpolation
 
         install_tracker_interpolation(native)
+    if "_RATE_FUNC_NAMES" in g and "AnimationGroup" in g:
+        from fmn_python.live_rates import install_live_rates
+
+        install_live_rates(native)
     g["_FMN_SCENE_PLAYBACK_INSTALLED"] = True
 
 
