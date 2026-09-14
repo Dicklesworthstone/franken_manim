@@ -59,6 +59,13 @@ def install_scene_playback(native: Any) -> None:
 
     g["_requires_python_animation"] = requires_python_animation
     Scene.play = play
+    # The wheel exports the complete table; smaller embedding tables may
+    # install only their available playback families. Missing exports remain
+    # missing and are still the independent parity auditor's responsibility.
+    if "Homotopy" in g:
+        from fmn_python.movement import install_movement
+
+        install_movement(native)
     g["_FMN_SCENE_PLAYBACK_INSTALLED"] = True
 
 
