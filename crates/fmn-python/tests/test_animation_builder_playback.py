@@ -44,8 +44,11 @@ def environment():
             self.name = kwargs.pop("name", "")
             if kwargs:
                 raise TypeError("unknown animation options: " + ", ".join(kwargs))
-    class Transform(Animation):
+    class NativeAnimation(Animation):
+        _target_attr = None
+    class Transform(NativeAnimation):
         _native_kind = "transform"
+        _target_attr = "target_mobject"
         def __init__(self, mobject, target_mobject=None, path_func=None, path_arc=0., path_arc_axis=None, **kwargs):
             super().__init__(mobject, **kwargs)
             self.target_mobject, self.path_func = target_mobject, path_func
@@ -59,9 +62,13 @@ def environment():
             return self.calls[-1]
     def requires(animation):
         return not getattr(animation, "_native_kind", None) or bool(getattr(animation, "path_func", None))
-    g.update(Mobject=Mobject, Animation=Animation, Transform=Transform, Scene=Scene,
+    def refuse(where, values):
+        if any(active for _, active in values):
+            raise NotImplementedError(where + " unsupported path_func")
+    g.update(_NativeAnimation=NativeAnimation, _OUT=(0., 0., 1.), _vec3=tuple,
+             _refuse_unrouted=refuse, Mobject=Mobject, Animation=Animation, Transform=Transform, Scene=Scene,
              _requires_python_animation=requires)
-    names = {"_AnimationBuilder", "MoveToTarget", "_MethodAnimation", "prepare_animation", "override_animate"}
+    names = {"_AnimationBuilder", "MoveToTarget", "_MethodAnimation", "prepare_animation", "override_animate", "Restore"}
     path = ROOT / "python/manimlib_bootstrap.py"
     tree = ast.parse(path.read_text())
     nodes = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]

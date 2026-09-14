@@ -20,6 +20,7 @@ def install_scene_playback(native: Any) -> None:
     g = vars(native)
     if g.get("_FMN_SCENE_PLAYBACK_INSTALLED", False):
         return
+    _install_restore_playback(g)
     Scene, Animation = g["Scene"], g["Animation"]
     Builder, Transform = g["_AnimationBuilder"], g["Transform"]
     original_play = Scene.play
@@ -59,3 +60,34 @@ def install_scene_playback(native: Any) -> None:
     g["_requires_python_animation"] = requires_python_animation
     Scene.play = play
     g["_FMN_SCENE_PLAYBACK_INSTALLED"] = True
+
+
+def _install_restore_playback(g: dict[str, Any]) -> None:
+    """Restore the public Transform lineage and constructor-selected target."""
+    Restore, Transform, Mobject = g["Restore"], g["Transform"], g["Mobject"]
+
+    def restore_init(self, mobject, path_arc=0.0, path_arc_axis=g["_OUT"],
+                     path_func=None, **kwargs):
+        saved = getattr(mobject, "saved_state", None)
+        if saved is None:
+            raise Exception("Trying to restore without having saved")
+        if not isinstance(saved, Mobject):
+            raise TypeError("Restore saved_state must be a Mobject")
+        # Capture the saved object by reference at construction, as the
+        # Reference does. Rebinding mobject.saved_state later must not change
+        # this animation's destination; edits to the saved object remain live.
+        super(Restore, self).__init__(
+            mobject, saved, path_arc=path_arc, path_arc_axis=path_arc_axis,
+            path_func=path_func, **kwargs,
+        )
+
+    # Keep every qualified import and existing subclass attached to the same
+    # public class object. Native Transform owns ordinary restoration; the
+    # shared Transform protocol owns authored paths, hooks and camera poses.
+    # Neither route performs the legacy play-time saved_state relinking.
+    Restore.__bases__ = (Transform,)
+    Restore._native_kind = "transform"
+    restore_init.__name__ = "__init__"
+    restore_init.__qualname__ = Restore.__qualname__ + ".__init__"
+    restore_init.__module__ = Restore.__module__
+    Restore.__init__ = restore_init
