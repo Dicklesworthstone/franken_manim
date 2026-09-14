@@ -66,6 +66,10 @@ def install_scene_playback(native: Any) -> None:
         from fmn_python.movement import install_movement
 
         install_movement(native)
+    if "ValueTracker" in g:
+        from fmn_python.trackers import install_tracker_interpolation
+
+        install_tracker_interpolation(native)
     g["_FMN_SCENE_PLAYBACK_INSTALLED"] = True
 
 
