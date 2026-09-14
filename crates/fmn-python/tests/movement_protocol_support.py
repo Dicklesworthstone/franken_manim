@@ -158,6 +158,11 @@ def environment(install=True):
                     animation.clean_up_from_scene(self)
             return "played"
 
+    def refuse_unrouted(where, settings):
+        unsupported = [key for key, active in settings if active]
+        if unsupported:
+            raise NotImplementedError(where + ": " + ", ".join(unsupported))
+
     def linear(t):
         return t
     def smooth(t):
@@ -166,6 +171,7 @@ def environment(install=True):
              _NativeAnimation=_NativeAnimation, AnimationGroup=AnimationGroup,
              _AnimationBuilder=_AnimationBuilder, Scene=Scene, np=np, _np=np,
              _linear_rate=linear, smooth_rate=smooth, smooth=smooth,
+             refuse_unrouted=refuse_unrouted,
              _RATE_FUNC_NAMES={linear:"linear", smooth:"smooth"},
              _requires_python_animation=lambda a:not bool(getattr(a, "_native_kind", None)),
              prepare_animation=lambda a:a.build() if isinstance(a, _AnimationBuilder) else a)
@@ -188,6 +194,8 @@ def environment(install=True):
     for name, definition in methods.items():
         exec(compile(ast.Module([definitions[definition]], []), str(path), "exec"), g)
         setattr(Animation, name, g[definition])
+    exec(compile(ast.Module([definitions["native_animation_init"]], []), str(path), "exec"), g)
+    _NativeAnimation.__init__ = g["native_animation_init"]
     path = ROOT / "python/manimlib_bootstrap.py"
     names = {"Homotopy", "SmoothedVectorizedHomotopy", "ComplexHomotopy", "PhaseFlow", "MoveAlongPath"}
     nodes = [node for node in ast.parse(path.read_text()).body if isinstance(node, ast.ClassDef) and node.name in names]

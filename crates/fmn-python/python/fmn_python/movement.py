@@ -7,6 +7,9 @@ integrator, frame loop, renderer, or dependency is introduced here.
 from __future__ import annotations
 
 from functools import wraps
+import inspect
+import math
+import types
 from typing import Any
 
 
@@ -79,6 +82,7 @@ def _install_lifecycle(g, cls, prepare):
     def begin(self):
         if getattr(self, "_movement_active", False):
             self.abort()
+        self._movement_finished = self._movement_cleaned = False
         self._ensure_runtime_defaults()
         prepare(self)
         prior, seen = [], set()
@@ -168,6 +172,16 @@ def install_movement(native: Any) -> None:
 
     _install_lifecycle(g, Homotopy, prepare_homotopy)
     _method(Homotopy, "interpolate_mobject", interpolate_family)
+    movement_types = [Homotopy]
+    PhaseFlow = g.get("PhaseFlow")
+    if PhaseFlow is not None:
+        _install_phase_flow(g, PhaseFlow)
+        movement_types.append(PhaseFlow)
+    PathMotion = g.get("MoveAlongPath")
+    if PathMotion is not None:
+        _install_path_motion(g, PathMotion)
+        movement_types.append(PathMotion)
+    movement_types = tuple(movement_types)
     previous_play = Scene.play
 
     @wraps(previous_play)
@@ -195,11 +209,29 @@ def install_movement(native: Any) -> None:
             seen.add(marker)
             visiting.add(marker)
             stack.append((animation, True))
-            if isinstance(animation, Homotopy):
+            if isinstance(animation, movement_types):
                 movements.append(animation)
             if isinstance(animation, g["AnimationGroup"]):
                 stack.extend((child, False) for child in reversed(animation.animations))
+        absent = object()
+        forced = []
         try:
+            if (PathMotion is not None and _custom_rate(g, kwargs.get("rate_func"))
+                    and any(isinstance(animation, PathMotion) for animation in animations)):
+                for animation in animations:
+                    if isinstance(animation, PathMotion):
+                        forced.append((animation, animation.__dict__.get("_movement_force_callback", absent)))
+                        animation.__dict__["_movement_force_callback"] = True
+                if all(isinstance(animation, Animation) and g["_requires_python_animation"](animation)
+                       for animation in animations):
+                    # The frontend pre-samples its global rate even for an
+                    # entirely callback-driven play. Assign the same override
+                    # before lowering and omit that redundant payload. Mixed
+                    # native plays retain the original global lowering and
+                    # sampling density, including native sibling overrides.
+                    for animation in animations:
+                        animation.rate_func = kwargs["rate_func"]
+                    kwargs = dict(kwargs, rate_func=None)
             return previous_play(self, *animations, **kwargs)
         except BaseException as error:
             # Authored overrides can fail outside super(), or a sibling/scene
@@ -207,6 +239,127 @@ def install_movement(native: Any) -> None:
             for animation in reversed(movements):
                 _cancel_preserving(animation, error)
             raise
+        finally:
+            for animation, previous in reversed(forced):
+                if previous is absent:
+                    animation.__dict__.pop("_movement_force_callback", None)
+                else:
+                    animation.__dict__["_movement_force_callback"] = previous
 
     Scene.play = play
     g["_FMN_MOVEMENT_INSTALLED"] = True
+
+
+def _install_phase_flow(g, Flow):
+    def flow_init(self, function, mobject, virtual_time=None,
+                  suspend_mobject_updating=False, rate_func=g["_linear_rate"],
+                  run_time=3.0, **kwargs):
+        if not callable(function):
+            raise TypeError("PhaseFlow requires a callable vector field")
+        duration = float(run_time if virtual_time is None else virtual_time)
+        if not math.isfinite(duration):
+            raise ValueError("PhaseFlow virtual_time must be finite")
+        self.function, self.virtual_time = function, duration
+        super(Flow, self).__init__(
+            mobject, run_time=run_time, rate_func=rate_func,
+            suspend_mobject_updating=suspend_mobject_updating, **kwargs,
+        )
+
+    def prepare(self):
+        if not callable(self.function):
+            raise TypeError("PhaseFlow requires a callable vector field")
+        if not math.isfinite(float(self.virtual_time)):
+            raise ValueError("PhaseFlow virtual_time must be finite")
+        # Match native PhaseFlow::setup. A reused animation must not perform
+        # an accidental backwards Euler step from its last run's final alpha
+        # to begin(0). The current live geometry is the next run's initial state.
+        self.__dict__.pop("last_alpha", None)
+
+    _method(Flow, "__init__", flow_init)
+    _install_lifecycle(g, Flow, prepare)
+    # Keep the existing stateful Euler map, raw-alpha convention and native
+    # point writes. In particular, do not reinterpret it as an RK integrator
+    # or apply rate/lag/time_span a second time.
+
+
+def _implementation(obj, name):
+    value = inspect.getattr_static(obj, name, None)
+    if isinstance(value, (staticmethod, classmethod, types.MethodType)):
+        return value.__func__
+    return value
+
+
+def _protocols(g, root, names):
+    classes = {base for cls in tuple(g.values())
+               if isinstance(cls, type) and issubclass(cls, root)
+               for base in cls.__mro__ if issubclass(base, root)}
+    return {cls:{name:_implementation(cls, name) for name in names} for cls in classes}
+
+
+def _changed(obj, protocols):
+    found = False
+    for cls in type(obj).__mro__:
+        baseline = protocols.get(cls)
+        if baseline is None:
+            continue
+        if not found:
+            found = True
+            if any(_implementation(obj, name) is not expected for name, expected in baseline.items()):
+                return True
+        # A shipped override may still call a changed base through super().
+        if any(_implementation(cls, name) is not expected for name, expected in baseline.items()):
+            return True
+    return not found
+
+
+def _custom_rate(g, rate):
+    return rate is not None and not isinstance(rate, str) and all(
+        rate is not known for known in g["_RATE_FUNC_NAMES"]
+    )
+
+
+def _install_path_motion(g, PathMotion):
+    def prepare(self):
+        if not isinstance(self.path, g["VMobject"]) or not self.path.has_points():
+            raise ValueError("MoveAlongPath requires a nonempty VMobject path")
+        owner = getattr(self.mobject, "_scene", None)
+        path_owner = getattr(self.path, "_scene", None)
+        if owner is not None and path_owner is not None and owner is not path_owner:
+            error = g.get("_ForeignStageError", ValueError)
+            raise error("MoveAlongPath cannot reference a path from another Scene; copy it")
+
+    _install_lifecycle(g, PathMotion, prepare)
+    hooks = ("begin", "finish", "interpolate", "interpolate_mobject", "interpolate_submobject",
+             "create_starting_mobject", "get_all_mobjects", "get_all_families_zipped",
+             "get_all_mobjects_to_update", "update_mobjects", "clean_up_from_scene",
+             "_ensure_runtime_defaults", "__getattribute__", "__getattr__")
+    protocols = _protocols(g, PathMotion, hooks)
+    # Include the shared bases: a later Animation.begin replacement is an
+    # authored hook even when PathMotion's installed wrapper has not changed.
+    protocols.update({base:{name:_implementation(base, name) for name in hooks}
+                      for base in PathMotion.__mro__[1:] if issubclass(base, g["Animation"])})
+    path_protocols = _protocols(g, g["VMobject"],
+                                ("point_from_proportion", "_point_from_proportion",
+                                 "__getattribute__", "__getattr__"))
+    object_protocols = _protocols(g, g["Mobject"],
+                                  ("move_to", "shift", "get_center", "get_bounding_box_point",
+                                   "__getattribute__", "__getattr__"))
+    previous_requires = g["_requires_python_animation"]
+
+    def requires(animation):
+        if isinstance(animation, PathMotion):
+            if (getattr(animation, "_movement_force_callback", False)
+                    or getattr(animation, "_movement_active", False)
+                    or animation.final_alpha_value != 1.0 or animation.remover
+                    or _custom_rate(g, animation.rate_func)
+                    or _changed(animation, protocols)
+                    or _changed(animation.path, path_protocols)
+                    or _changed(animation.mobject, object_protocols)):
+                return True
+        return previous_requires(animation)
+
+    # The existing interpolation calls path.point_from_proportion at the real
+    # current alpha. The default implementation is Chisel's true-arclength
+    # sampler; custom path/move_to methods are invoked, never probe-classified.
+    # Unchanged stock animations still use Choreo's native MoveAlongPath.
+    g["_requires_python_animation"] = requires

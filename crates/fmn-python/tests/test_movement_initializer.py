@@ -64,6 +64,18 @@ class MovementInitializerTests(unittest.TestCase):
             self.assertTrue(mob.suspended)
             animation.finish()
             self.assertFalse(mob.suspended)
+            self.assertTrue(native._FMN_MOVEMENT_INSTALLED)
+            flow=package.PhaseFlow(lambda p:native.np.array([1.,0.,0.]),mob,virtual_time=0.)
+            flow.begin()
+            before=mob.points.copy()
+            flow.finish()
+            native.np.testing.assert_array_equal(mob.points,before)
+            path=native.VMobject(points=[(0.,0.,0.),(2.,0.,0.)])
+            motion=package.MoveAlongPath(mob,path,rate_func=native._linear_rate,final_alpha_value=.5)
+            self.assertTrue(native._requires_python_animation(motion))
+            motion.begin()
+            motion.finish()
+            self.assertEqual(mob.get_center()[0],1.)
             self.assertEqual({key for key in vars(package) if not key.startswith("_")},
                              {key for key in vars(native) if not key.startswith("_")})
 
