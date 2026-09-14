@@ -19,6 +19,9 @@ from fmn_python.schema_provenance import (
     SchemaProvenanceError as _SchemaProvenanceError,
     apply_schema_placeholder_provenance as _apply_schema_placeholder_provenance,
 )
+from fmn_python.rendering import install_scene_rendering as _install_scene_rendering
+from fmn_python.fading import install_fading as _install_fading
+from fmn_python.playback import install_scene_playback as _install_scene_playback
 
 _ensure_exclusive_manimlib_namespace()
 
@@ -29,6 +32,11 @@ try:
 except _SchemaProvenanceError as error:
     raise ImportError(f"invalid manimlib schema provenance: {error}") from error
 del _SchemaProvenanceError, _apply_schema_placeholder_provenance
+
+_install_scene_rendering(_native)
+_install_fading(_native)
+_install_scene_playback(_native)
+del _install_scene_rendering, _install_fading, _install_scene_playback
 
 
 # The Rust API deliberately exposes ergonomic snake_case constructors, while

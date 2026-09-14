@@ -80,7 +80,10 @@ def main():
 
     if "--audit-parity" in sys.argv[1:]:
         return _emit_parity_audit(_native)
-    return _native._console_main()
+    from .batch_cli import try_batch_cli
+
+    result = try_batch_cli(_native, list(sys.argv[1:]))
+    return _native._console_main() if result is None else result
 
 
 if __name__ == "__main__":
