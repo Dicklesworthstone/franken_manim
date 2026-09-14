@@ -221,7 +221,8 @@ class SceneRenderTests(unittest.TestCase):
         modules = {module.__name__: module for module in (package, extension, shapes, authority, provenance)}
         # Playback has its own complete native-table fixture in test_animation_builder_playback.
         with patch.dict(sys.modules, modules), patch("fmn_python._ensure_exclusive_manimlib_namespace"), \
-                patch("fmn_python.playback.install_scene_playback"):
+                patch("fmn_python.playback.install_scene_playback"), \
+                patch("fmn_python.fading.install_fading"):
             exec(compile(source, str(path), "exec"), vars(package))
             self.assertIs(package.Scene, extension.Scene)
             self.assertIs(extension.Scene.run, self.old_run)

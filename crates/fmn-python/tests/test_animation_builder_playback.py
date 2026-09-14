@@ -292,6 +292,9 @@ class BuilderPlaybackTests(unittest.TestCase):
         rendering.install_scene_rendering = lambda module: None
         modules = {module.__name__: module for module in
                    (native, package, distribution, shapes, authority, provenance, rendering)}
+        fading = types.ModuleType("fmn_python.fading")
+        fading.install_fading = lambda module: None
+        modules["fmn_python.fading"] = fading
         modules["fmn_python.playback"] = playback
         with patch.dict(sys.modules, modules):
             exec(compile(source, "manimlib/__init__.py", "exec"), vars(package))

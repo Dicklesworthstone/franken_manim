@@ -11,7 +11,7 @@ if not path:
 print(f"auditing imported manimlib: {path}")
 PY
 
-for suite in bridge animation_semantics matching_transform_semantics composition_lifecycle camera_animation_semantics creation_semantics native_outputs programmatic_rendering batch_rendering builder_playback restore_playback; do
+for suite in bridge animation_semantics matching_transform_semantics composition_lifecycle camera_animation_semantics creation_semantics native_outputs programmatic_rendering batch_rendering builder_playback restore_playback fading_semantics; do
     python3 - "$suite" <<'PY'
 import pathlib
 import runpy
