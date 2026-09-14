@@ -219,7 +219,9 @@ class SceneRenderTests(unittest.TestCase):
         provenance.SchemaProvenanceError = ValueError
         provenance.apply_schema_placeholder_provenance = lambda module: None
         modules = {module.__name__: module for module in (package, extension, shapes, authority, provenance)}
-        with patch.dict(sys.modules, modules), patch("fmn_python._ensure_exclusive_manimlib_namespace"):
+        # Playback has its own complete native-table fixture in test_animation_builder_playback.
+        with patch.dict(sys.modules, modules), patch("fmn_python._ensure_exclusive_manimlib_namespace"), \
+                patch("fmn_python.playback.install_scene_playback"):
             exec(compile(source, str(path), "exec"), vars(package))
             self.assertIs(package.Scene, extension.Scene)
             self.assertIs(extension.Scene.run, self.old_run)
