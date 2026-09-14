@@ -216,4 +216,200 @@ def install_fading(native: Any) -> None:
             raise
 
     g["Scene"].play = play
+    _install_fade_effects(g)
     g["_FMN_FADING_INSTALLED"] = True
+
+
+def _install_fade_effects(g):
+    """Honor authored vector fades and geometric fade endpoint options."""
+    Animation, Transform = g["Animation"], g["Transform"]
+    VFadeIn, VFadeOut = g["VFadeIn"], g["VFadeOut"]
+    FadeIn, FadeOut = g["FadeIn"], g["FadeOut"]
+    VMobject = g["VMobject"]
+    previous_requires, previous_play = g["_requires_python_animation"], g["Scene"].play
+
+    def states(mobject):
+        result, seen = [], set()
+        for member in mobject.get_family():
+            if id(member) not in seen:
+                seen.add(id(member))
+                result.append((member, member._is_updating_suspended()))
+        return result
+
+    def release(animation, prior):
+        first = None
+        try:
+            animation.mobject.set_animating_status(False)
+            if isinstance(animation, Transform):
+                animation.mobject.unlock_data()
+        except BaseException as error:
+            first = error
+        if animation.suspend_mobject_updating:
+            for member, was_suspended in prior:
+                try:
+                    if not was_suspended and member._is_updating_suspended():
+                        member.resume_updating(recurse=False, call_updater=False)
+                except BaseException as error:
+                    if first is None:
+                        first = error
+        animation.mobject_was_updating = False
+        if first is not None:
+            raise first
+
+    def callback_rate(rate):
+        if isinstance(rate, str):
+            name = rate
+            rate = next((function for function, label in g["_RATE_FUNC_NAMES"].items()
+                         if label == name), None)
+            if rate is None:
+                raise ValueError("unknown rate function: " + name)
+        if rate is not None and not callable(rate):
+            raise TypeError("rate_func must be a callable or a catalog name")
+        return rate
+
+    def vector_defaults(self):
+        Animation._ensure_runtime_defaults(self)
+        self.rate_func = callback_rate(self.rate_func)
+
+    def vector_abort(self):
+        if not getattr(self, "_vector_fade_active", False):
+            return
+        self._vector_fade_active = False
+        prior, self._vector_fade_prior = self._vector_fade_prior, []
+        release(self, prior)
+
+    def vector_begin(self):
+        vector_abort(self)
+        self._vector_fade_prior = states(self.mobject)
+        self._vector_fade_active, self._vector_fade_finished = True, False
+        try:
+            Animation.begin(self)
+        except BaseException:
+            try:
+                vector_abort(self)
+            except BaseException:
+                pass
+            raise
+
+    def vector_finish(self):
+        if not getattr(self, "_vector_fade_active", False):
+            if getattr(self, "_vector_fade_finished", False):
+                return
+            raise RuntimeError("Vector fade must begin before finish")
+        # The shared finish owns final-alpha interpolation. Resume per member
+        # below rather than reviving descendants suspended before this fade.
+        self.mobject_was_updating = False
+        try:
+            Animation.finish(self)
+            vector_abort(self)
+        except BaseException:
+            try:
+                vector_abort(self)
+            except BaseException:
+                pass
+            raise
+        self._vector_fade_finished = True
+
+    def vector_in(self, submob, start, alpha):
+        # Match the native VFade kernel: the Reference getters read the first
+        # opacity lane and setters broadcast it. Do not restore point/color/
+        # width data, so concurrent geometry updaters remain live. Family lag
+        # is per member, not a recursive opacity write from its parent.
+        submob.set_stroke(opacity=float(alpha) * start.get_stroke_opacity(), recurse=False)
+        submob.set_fill(opacity=float(alpha) * start.get_fill_opacity(), recurse=False)
+
+    def vector_out(self, submob, start, alpha):
+        super(VFadeOut, self).interpolate_submobject(submob, start, 1.0 - float(alpha))
+
+    VFadeOut.__bases__ = (VFadeIn,)
+    for name, function in {"begin": vector_begin, "finish": vector_finish,
+                           "abort": vector_abort, "interpolate_submobject": vector_in,
+                           "_ensure_runtime_defaults": vector_defaults}.items():
+        _method(VFadeIn, name, function)
+    _method(VFadeOut, "interpolate_submobject", vector_out)
+
+    def fade_out_init(self, mobject, shift=g["_ORIGIN"], remover=True,
+                      final_alpha_value=0.0, **kwargs):
+        super(FadeOut, self).__init__(mobject, shift=shift, remover=remover,
+                                     final_alpha_value=final_alpha_value, **kwargs)
+
+    _method(FadeOut, "__init__", fade_out_init)
+    hooks = ("begin", "finish", "interpolate", "interpolate_mobject", "interpolate_submobject",
+             "create_starting_mobject", "get_all_mobjects", "get_all_families_zipped",
+             "get_all_mobjects_to_update", "get_sub_alpha", "time_spanned_alpha",
+             "update_mobjects", "clean_up_from_scene", "_ensure_runtime_defaults")
+    object_hooks = ("set_stroke", "set_fill", "get_stroke_opacity", "get_fill_opacity")
+    protocol_classes = {base for cls in tuple(g.values())
+                        if isinstance(cls, type) and issubclass(cls, VFadeIn)
+                        for base in cls.__mro__ if issubclass(base, Animation)}
+    protocols = {cls: {name: getattr(cls, name) for name in hooks} for cls in protocol_classes}
+    object_protocols = {cls: {name: getattr(cls, name) for name in object_hooks}
+                        for cls in tuple(g.values()) if isinstance(cls, type) and issubclass(cls, VMobject)}
+
+    def changed(obj, baselines):
+        found = False
+        for cls in type(obj).__mro__:
+            baseline = baselines.get(cls)
+            if baseline is None:
+                continue
+            if not found:
+                found = True
+                if any(getattr(getattr(obj, name), "__func__", getattr(obj, name)) is not method
+                       for name, method in baseline.items()):
+                    return True
+            # A shipped override may delegate through super(): changing
+            # VFadeIn must remain observable even on an unchanged VFadeOut.
+            if any(getattr(cls, name) is not method for name, method in baseline.items()):
+                return True
+        return not found
+
+    def requires(animation):
+        kind = getattr(animation, "_native_kind", None)
+        if isinstance(animation, VFadeIn):
+            if kind == "v_fade_in" and animation.remover:
+                return True
+            if changed(animation, protocols) or any(
+                changed(member, object_protocols) for member in animation.mobject.get_family()
+            ):
+                return True
+        if isinstance(animation, FadeOut) and kind == "fade_out":
+            if not animation.remover or animation.final_alpha_value != 0.0:
+                return True
+        elif isinstance(animation, FadeIn) and kind == "fade_in":
+            if animation.remover or animation.final_alpha_value != 1.0:
+                return True
+        return previous_requires(animation)
+
+    @wraps(previous_play)
+    def play(self, *animations, **kwargs):
+        selected, seen = [], set()
+        def visit(animation):
+            if id(animation) in seen:
+                return
+            seen.add(id(animation))
+            if isinstance(animation, (VFadeIn, FadeIn, FadeOut)) and requires(animation):
+                selected.append((animation, states(animation.mobject)))
+            if isinstance(animation, g["AnimationGroup"]):
+                for child in animation.animations:
+                    visit(child)
+        for animation in animations:
+            visit(animation)
+        for animation, _ in selected:
+            animation.rate_func = callback_rate(animation.rate_func)
+        if selected and "rate_func" in kwargs:
+            kwargs["rate_func"] = callback_rate(kwargs["rate_func"])
+        try:
+            return previous_play(self, *animations, **kwargs)
+        except BaseException:
+            for animation, prior in reversed(selected):
+                try:
+                    if isinstance(animation, VFadeIn):
+                        vector_abort(animation)
+                    # Also cover an authored begin that fails outside super.
+                    release(animation, prior)
+                except BaseException:
+                    pass
+            raise
+
+    g["_requires_python_animation"] = requires
+    g["Scene"].play = play

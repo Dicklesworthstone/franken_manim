@@ -125,3 +125,112 @@ for case in (grouped_midpoint, native_play_cleanup, ghost_hook_and_nested_timing
              authored_path_and_zero_rate, unequal_piece_families, text_crossfade,
              failure_releases_suspension, remover_and_saved_identity):
     case()
+
+
+from manimlib import VFadeIn, VFadeOut, VFadeInThenOut, FadeIn, FadeOut
+
+
+def vector_only_changes_opacity():
+    source = Square(fill_opacity=.8, stroke_opacity=.6)
+    animation = VFadeIn(source, rate_func=linear)
+    animation.begin()
+    source.shift(2*RIGHT).set_stroke(width=7)
+    points = source.get_points().copy()
+    animation.interpolate(.25)
+    near(source.get_points(), points)
+    near(source.get_fill_opacity(), .2)
+    near(source.get_stroke_opacity(), .15)
+    near(source.get_stroke_width(), 7)
+    animation.abort()
+
+
+def authored_vector_lag_hook_runs():
+    calls = []
+    class Custom(VFadeIn):
+        def get_sub_alpha(self, alpha, index, count):
+            calls.append((alpha,index,count))
+            return .25
+    scene = Scene()
+    source = Square(fill_opacity=.8)
+    scene.add(source)
+    scene.play(Custom(source), run_time=.125)
+    assert calls
+    near(source.get_fill_opacity(), .2)
+
+
+def nested_vector_out_restores_configured_endpoint():
+    class Custom(VFadeOut):
+        def interpolate_submobject(self, current, start, alpha):
+            super().interpolate_submobject(current, start, alpha)
+    assert issubclass(VFadeOut,VFadeIn)
+    source = Square(fill_opacity=.8)
+    scene = Scene(); scene.add(source)
+    before = source.get_points().copy()
+    scene.play(AnimationGroup(Custom(source,remover=False,final_alpha_value=.5,rate_func=linear)),run_time=.125)
+    near(source.get_fill_opacity(), .4)
+    near(source.get_points(), before)
+
+
+def geometric_fadeout_retains_partial_endpoint():
+    source = Square(fill_opacity=.8)
+    scene = Scene(); scene.add(source)
+    scene.play(FadeOut(source,shift=2*RIGHT,remover=False,final_alpha_value=.5,rate_func=linear),run_time=.125)
+    assert source in scene.mobjects
+    near(source.get_center(), RIGHT)
+    near(source.get_fill_opacity(), .4)
+
+
+def geometric_fadein_remover_uses_shared_cleanup():
+    source = Square(fill_opacity=.8)
+    scene = Scene()
+    scene.play(FadeIn(source,remover=True,final_alpha_value=.5,rate_func=linear),run_time=.125)
+    assert source not in scene.mobjects
+    near(source.get_fill_opacity(), .4)
+
+
+def vector_mobject_getter_is_not_bypassed():
+    class CustomSquare(Square):
+        def get_fill_opacity(self):
+            return .4
+    source = CustomSquare(fill_opacity=1)
+    scene = Scene(); scene.add(source)
+    scene.play(VFadeIn(source,final_alpha_value=.5,rate_func=linear),run_time=.125)
+    near(source.data["fill_rgba"][:,3], .2)
+
+
+def vector_callback_failure_unwinds():
+    failure = RuntimeError("vector callback failure")
+    class Broken(VFadeIn):
+        def interpolate(self, alpha):
+            if alpha > 0:
+                raise failure
+            super().interpolate(alpha)
+    source = Square()
+    scene = Scene(); scene.add(source)
+    animation = Broken(source,suspend_mobject_updating=True)
+    try:
+        scene.play(AnimationGroup(animation),run_time=.125)
+    except RuntimeError as error:
+        assert error is failure
+    else:
+        raise AssertionError("vector callback was bypassed")
+    assert not source._is_updating_suspended()
+    animation.abort()
+
+
+def presuspended_vector_child_is_not_resumed():
+    child = Square()
+    child.suspend_updating()
+    group = VGroup(child, Circle())
+    animation = VFadeIn(group,suspend_mobject_updating=True)
+    animation.begin(); animation.finish()
+    assert child._is_updating_suspended()
+    assert not group._is_updating_suspended()
+    assert not group[1]._is_updating_suspended()
+
+
+for case in (vector_only_changes_opacity, authored_vector_lag_hook_runs,
+             nested_vector_out_restores_configured_endpoint, geometric_fadeout_retains_partial_endpoint,
+             geometric_fadein_remover_uses_shared_cleanup, vector_mobject_getter_is_not_bypassed,
+             vector_callback_failure_unwinds, presuspended_vector_child_is_not_resumed):
+    case()

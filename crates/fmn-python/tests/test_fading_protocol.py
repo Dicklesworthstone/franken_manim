@@ -27,6 +27,7 @@ def environment():
             self.updaters = []
             self.scene = None
             self.events = []
+            self.stroke_opacity = float(opacity)
         def __getitem__(self, index):
             return self.submobjects[index]
         def get_family(self):
@@ -65,6 +66,28 @@ def environment():
             for child in self.submobjects:
                 child.replace(target, stretch=stretch, dim_to_match=dim_to_match)
             self.events.append(("replace", stretch, dim_to_match))
+            return self
+        def get_stroke_opacity(self):
+            return self.stroke_opacity
+        def get_fill_opacity(self):
+            return self.opacity
+        def set_stroke(self, opacity=None, recurse=True):
+            for obj in self.get_family() if recurse else [self]:
+                if opacity is not None:
+                    obj.stroke_opacity = float(opacity)
+            return self
+        def set_fill(self, opacity=None, recurse=True):
+            for obj in self.get_family() if recurse else [self]:
+                if opacity is not None:
+                    obj.opacity = float(opacity)
+            return self
+        def unlock_data(self):
+            self.events.append(("unlock",))
+        def shift(self, vector):
+            self.x += float(np.asarray(vector)[0])
+            return self
+        def scale(self, factor):
+            self.width *= factor
             return self
         def get_uniforms(self):
             return dict(self.uniforms)
@@ -116,6 +139,37 @@ def environment():
             self.final_alpha_value, self.suspend_mobject_updating = final_alpha_value, suspend_mobject_updating
             self.remover = remover
             self.__dict__.update(kwargs)
+        def begin(self):
+            self._ensure_runtime_defaults()
+            if self.time_span is not None:
+                self.run_time = max(self.run_time, self.time_span[1])
+            self.mobject.set_animating_status(True)
+            self.starting_mobject = self.create_starting_mobject()
+            self.mobject_was_updating = False
+            if self.suspend_mobject_updating:
+                self.mobject_was_updating = not self.mobject._is_updating_suspended()
+                self.mobject.suspend_updating()
+            self.families = list(self.get_all_families_zipped())
+            self.interpolate(0.)
+        def finish(self):
+            self.interpolate(self.final_alpha_value)
+            self.mobject.set_animating_status(False)
+            if self.suspend_mobject_updating and self.mobject_was_updating:
+                self.mobject.resume_updating()
+        def get_all_mobjects(self):
+            return self.mobject, self.starting_mobject
+        def clean_up_from_scene(self, scene):
+            if self.remover:
+                scene.remove(self.mobject)
+        def interpolate_submobject(self, current, start, alpha):
+            pass
+        def time_spanned_alpha(self, alpha):
+            if self.time_span is None:
+                return alpha
+            a, b = self.time_span
+            return min(max(alpha*self.run_time-a, 0), b-a)/(b-a)
+        def get_sub_alpha(self, alpha, index, count):
+            return self.rate_func(min(max(alpha*((count-1)*self.lag_ratio+1)-index*self.lag_ratio, 0), 1))
         def _ensure_runtime_defaults(self):
             if self.run_time is None:
                 self.run_time = 1.
@@ -133,12 +187,9 @@ def environment():
         def interpolate(self, alpha):
             self.interpolate_mobject(alpha)
         def interpolate_mobject(self, alpha):
-            if self.time_span is not None:
-                a, b = self.time_span
-                alpha = min(max(alpha*self.run_time-a, 0), b-a)/(b-a)
+            alpha = self.time_spanned_alpha(alpha)
             for i, family in enumerate(self.families):
-                sub = min(max(alpha*((len(self.families)-1)*self.lag_ratio+1)-i*self.lag_ratio, 0), 1)
-                self.interpolate_submobject(*family, self.rate_func(sub))
+                self.interpolate_submobject(*family, self.get_sub_alpha(alpha, i, len(self.families)))
         def is_remover(self):
             return self.remover
     class Transform(Animation):
@@ -149,8 +200,54 @@ def environment():
         def init_path_func(self):
             if self.path_func is None:
                 self.path_func = lambda a,b,t:(1-t)*a+t*b
+        def create_target(self):
+            return self.target_mobject if self.target_mobject is not None else self.mobject.copy()
+        def begin(self):
+            self.init_path_func()
+            self.target_mobject = self.create_target()
+            self.target_copy = self.target_mobject.copy()
+            Animation.begin(self)
+        def get_all_mobjects(self):
+            return self.mobject, self.starting_mobject, self.target_copy
+        def interpolate_submobject(self, current, start, end, alpha):
+            current.interpolate(start, end, alpha, self.path_func)
     class NativeAnimation(Animation):
         pass
+    class VFadeIn(NativeAnimation):
+        _native_kind = "v_fade_in"
+        def __init__(self, mobject, suspend_mobject_updating=False, **kwargs):
+            if not isinstance(mobject, VMobject):
+                raise TypeError("requires VMobject")
+            super().__init__(mobject, suspend_mobject_updating=suspend_mobject_updating, **kwargs)
+    class VFadeOut(NativeAnimation):
+        _native_kind = "v_fade_out"
+        def __init__(self, mobject, remover=True, final_alpha_value=0., **kwargs):
+            super().__init__(mobject, remover=remover, final_alpha_value=final_alpha_value, **kwargs)
+    class VFadeInThenOut(VFadeIn):
+        _native_kind = "v_fade_in_then_out"
+        def __init__(self, mobject, rate_func=lambda t:2*t if t < .5 else 2*(1-t),
+                     remover=True, final_alpha_value=.5, **kwargs):
+            super().__init__(mobject, rate_func=rate_func, remover=remover,
+                             final_alpha_value=final_alpha_value, **kwargs)
+    class Fade(Transform):
+        def __init__(self, mobject, shift=(0.,0.,0.), scale=1., **kwargs):
+            super().__init__(mobject, **kwargs)
+            self.shift_vect, self.scale_factor = np.array(shift), scale
+    class FadeIn(Fade):
+        _native_kind = "fade_in"
+        def create_target(self):
+            return self.mobject.copy()
+        def create_starting_mobject(self):
+            return self.mobject.copy().set_opacity(0).scale(1/self.scale_factor).shift(-self.shift_vect)
+    class FadeOut(Fade):
+        _native_kind = "fade_out"
+        def __init__(self, mobject, shift=(0.,0.,0.), remover=True, final_alpha_value=0., **kwargs):
+            if not remover or final_alpha_value != 0:
+                raise NotImplementedError("unrouted fade options")
+            super().__init__(mobject, shift=shift, **kwargs)
+            self.final_alpha_value = 0.
+        def create_target(self):
+            return self.mobject.copy().set_opacity(0).shift(self.shift_vect).scale(self.scale_factor)
     class FadeTransform(NativeAnimation):
         _native_kind = "fade_transform"
         def ghost_to(self, source, target):
@@ -198,7 +295,11 @@ def environment():
             for anim in leaves:
                 anim.finish()
                 anim.clean_up_from_scene(self)
-    return types.SimpleNamespace(**locals())
+    result = types.SimpleNamespace(**locals())
+    result._ORIGIN = (0., 0., 0.)
+    result._RATE_FUNC_NAMES = {}
+    result._requires_python_animation = lambda animation: not getattr(animation, "_native_kind", None) or bool(getattr(animation, "path_func", None))
+    return result
 
 
 class FadeTransformTests(unittest.TestCase):
