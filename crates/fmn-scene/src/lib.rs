@@ -28,7 +28,7 @@ pub mod timeline_bundle;
 /// edges to Marionette, Choreo, or Lumen.
 pub mod studio_bridge {
     pub use fmn_anim::{AnimError, FramePacket, Timeline};
-    pub use fmn_mobject::{Mob, SceneState, Stage, Uniforms};
+    pub use fmn_mobject::{Mob, SceneState, Snapshot, Stage, Uniforms};
     pub use fmn_render::{CameraError, CameraFrame};
 }
 
