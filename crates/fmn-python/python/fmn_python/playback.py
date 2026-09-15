@@ -70,6 +70,10 @@ def install_scene_playback(native: Any) -> None:
         from fmn_python.rotation import install_rotation
 
         install_rotation(native)
+    if "MaintainPositionRelativeTo" in g:
+        from fmn_python.update_animations import install_update_animations
+
+        install_update_animations(native)
     if "ValueTracker" in g:
         from fmn_python.trackers import install_tracker_interpolation
 
