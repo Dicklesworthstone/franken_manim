@@ -66,6 +66,10 @@ def install_scene_playback(native: Any) -> None:
         from fmn_python.movement import install_movement
 
         install_movement(native)
+    if "Rotating" in g:
+        from fmn_python.rotation import install_rotation
+
+        install_rotation(native)
     if "ValueTracker" in g:
         from fmn_python.trackers import install_tracker_interpolation
 
