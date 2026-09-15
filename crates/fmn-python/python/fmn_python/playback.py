@@ -74,6 +74,10 @@ def install_scene_playback(native: Any) -> None:
         from fmn_python.live_rates import install_live_rates
 
         install_live_rates(native)
+    if "turn_animation_into_updater" in g and "cycle_animation" in g:
+        from fmn_python.animation_updaters import install_animation_updaters
+
+        install_animation_updaters(native)
     g["_FMN_SCENE_PLAYBACK_INSTALLED"] = True
 
 
