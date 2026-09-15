@@ -11,6 +11,7 @@
 
 pub mod host;
 pub mod inspect;
+pub mod interaction;
 #[cfg(feature = "metal")]
 pub mod preview;
 pub mod protocol;
@@ -29,6 +30,7 @@ pub use inspect::{
     InspectorView, NativeSpanBinding, NodeOverlay, RecordFieldSnapshot, SourceSpanSnapshot,
     SpanKind, SpanRegistry, TileOverlay, UniformSnapshot, WindingDirection,
 };
+pub use interaction::{InteractiveDispatch, InteractivePreview, InteractivePreviewError};
 pub use protocol::{
     CURRENT_VERSION, Checkpoint, CrashReport, DebugLayerSet, FrameEncoding, FramePayload,
     FrameStream, FramingError, JournalReplay, MAX_FRAME_RENDER_BACKENDS, ProtocolError,
