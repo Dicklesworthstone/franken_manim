@@ -44,6 +44,9 @@ def install_live_rates(native: Any) -> None:
             "animation_group", "lagged_start", "succession",
         }:
             return True
+        rotating = g.get("Rotating")
+        if rotating is not None and isinstance(animation, rotating):
+            return True
         path_motion = g.get("MoveAlongPath")
         return path_motion is not None and isinstance(animation, path_motion)
 
