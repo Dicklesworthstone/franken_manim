@@ -6,6 +6,7 @@ or clock. Persistent effects never perform scene-removal/publication cleanup.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from functools import wraps
 import inspect
 import math
@@ -40,16 +41,46 @@ def _has_python_interpolation(g, animation):
     return not getattr(animation, "_native_kind", None)
 
 
+def _animation_tree(g, animation):
+    """Walk shared compositions once and reject cycles, including explicit roots."""
+    seen, visiting = set(), set()
+    stack = [(animation, False)]
+    while stack:
+        node, exiting = stack.pop()
+        marker = id(node)
+        if exiting:
+            visiting.remove(marker)
+            continue
+        if marker in visiting:
+            raise ValueError("Animation composition contains a cycle")
+        if marker in seen:
+            continue
+        seen.add(marker)
+        visiting.add(marker)
+        yield node
+        stack.append((node, True))
+        if isinstance(node, g["AnimationGroup"]):
+            stack.extend((child, False) for child in reversed(node.animations))
+
+
 def _scene_for(g, animation, anchor):
     """Resolve ownership without invoking create_target or changing draw roots."""
-    objects = [anchor, *getattr(animation, "_native_extra_mobjects", ())]
-    target_name = getattr(animation, "_target_attr", None)
-    target = getattr(animation, target_name, None) if target_name else None
-    if isinstance(target, g["Mobject"]):
-        objects.append(target)
-    scene = None
+    objects = [anchor]
+    for node in _animation_tree(g, animation):
+        obj = getattr(node, "mobject", None)
+        if isinstance(obj, g["Mobject"]):
+            objects.append(obj)
+        objects.extend(getattr(node, "_native_extra_mobjects", ()))
+        target_name = getattr(node, "_target_attr", None)
+        target = getattr(node, target_name, None) if target_name else None
+        if isinstance(target, g["Mobject"]):
+            objects.append(target)
+    scene, seen = None, set()
     for obj in objects:
         for member in obj.get_family():
+            if id(member) in seen:
+                continue
+            seen.add(id(member))
             owner = getattr(member, "_scene", None)
             if owner is not None:
                 if scene is not None and owner is not scene:
@@ -57,6 +88,26 @@ def _scene_for(g, animation, anchor):
                     raise error("persistent animation cannot reference multiple Scenes; copy its mobjects")
                 scene = owner
     return scene
+
+
+@contextmanager
+def _composition_context(g, animation, scene, groups=None):
+    """Keep nested authored begin hooks on the resolved Scene, without leaking it."""
+    missing, restored = object(), []
+    try:
+        nodes = _animation_tree(g, animation) if groups is None else groups
+        for node in nodes:
+            if isinstance(node, g["AnimationGroup"]):
+                previous = node.__dict__.get("_composition_scene", missing)
+                restored.append((node, previous))
+                node._composition_scene = scene
+        yield
+    finally:
+        for node, previous in reversed(restored):
+            if previous is missing:
+                node.__dict__.pop("_composition_scene", None)
+            else:
+                node._composition_scene = previous
 
 
 def _implementation(obj, name):
@@ -92,7 +143,11 @@ class _PersistentAnimation:
         self.cycle = bool(cycle)
         self.driver = animation
         self.driver_factory = driver_factory
+        self.needs_scene = driver_factory is not None or isinstance(animation, g["AnimationGroup"])
+        self.scene = None
+        self.groups = ()
         self.closed = self.busy = self.begun = False
+        self.cleanup_pending = False
         self.prior_suspension = []
 
         def update(current, dt):
@@ -104,15 +159,32 @@ class _PersistentAnimation:
     def detach(self):
         self.anchor.remove_updater(self.update)
 
+    def call(self, method, *args):
+        if not self.needs_scene:
+            return getattr(self.driver, method)(*args)
+        with _composition_context(self.g, self.animation, self.scene, self.groups):
+            return getattr(self.driver, method)(*args)
+
     def cancel(self, original=None):
         if self.closed:
+            if self.cleanup_pending and original is not None:
+                self._unwind(original)
             return
         self.closed = True
+        if self.busy and original is None:
+            # A callback may remove its own updater. Finish this invocation
+            # before unwinding a group driver that is still on the stack.
+            self.cleanup_pending = True
+            self.detach()
+            return
+        self._unwind(original)
+
+    def _unwind(self, original=None):
+        self.cleanup_pending = False
         actions = []
         if self.begun:
-            abort = getattr(self.driver, "abort", None)
-            if callable(abort):
-                actions.append(abort)
+            if callable(getattr(self.driver, "abort", None)):
+                actions.append(lambda: self.call("abort"))
             actions.append(lambda: self.anchor.set_animating_status(False))
             if isinstance(self.animation, self.g["Transform"]):
                 actions.append(self.anchor.unlock_data)
@@ -135,25 +207,48 @@ class _PersistentAnimation:
         if first is not None and original is None:
             raise first
 
+    def activate(self):
+        if self.needs_scene:
+            self.scene = _scene_for(self.g, self.animation, self.anchor)
+            if self.scene is None:
+                return False
+            # Drivers freeze their child timeline at begin. Cache that same
+            # group set for context/abort, even if authored code later edits
+            # the animation list; do not rewalk a mutable graph every tick.
+            self.groups = tuple(node for node in _animation_tree(self.g, self.animation)
+                                if isinstance(node, self.g["AnimationGroup"]))
+            if not self.anchor._is_bound():
+                self.scene._adopt(self.anchor)
+        self.animation._ensure_runtime_defaults()
+        if self.driver_factory is not None:
+            self.driver = self.driver_factory(self.scene)
+        if self.closed:
+            self.driver = None
+            return False
+        duration = _duration(self.driver)
+        if self.cycle and duration == 0:
+            raise ValueError("a cycling animation updater requires positive run_time")
+        self.prior_suspension = [
+            (member, member._is_updating_suspended())
+            for member in self.anchor.get_family()
+        ]
+        self.begun = True
+        self.call("begin")
+        return not self.closed
+
     def start(self):
         duration = _duration(self.animation)
         if self.cycle and duration == 0:
             raise ValueError("a cycling animation updater requires positive run_time")
         self.animation.suspend_mobject_updating = False
         self.animation.total_time = 0.0
-        self.prior_suspension = [
-            (member, member._is_updating_suspended())
-            for member in self.anchor.get_family()
-        ]
         try:
-            if self.driver_factory is not None:
-                self.driver = self.driver_factory()
-            duration = _duration(self.driver)
-            if self.cycle and duration == 0:
-                raise ValueError("a cycling animation updater requires positive run_time")
-            self.begun = True
-            self.driver.begin()
-            self.anchor.add_updater(self.update)
+            self.activate()
+            if not self.closed:
+                # Detached native/group animations register a pending updater.
+                # Zero-dt registration cannot allocate an unrelated Scene or
+                # advance their clock before the owner has adopted the anchor.
+                self.anchor.add_updater(self.update)
         except BaseException as error:
             self.cancel(error)
             raise
@@ -164,36 +259,63 @@ class _PersistentAnimation:
         if self.closed or self.busy or current is not self.anchor:
             return
         self.busy = True
+        awaiting_adoption = False
         try:
             delta = float(dt)
+            if not math.isfinite(delta):
+                raise ValueError("animation updater dt and total_time must be finite")
+            if not self.begun and self.needs_scene:
+                if _scene_for(self.g, self.animation, self.anchor) is None:
+                    if delta != 0:
+                        awaiting_adoption = True
+                        raise RuntimeError("native animation updater requires Scene adoption before advancing")
+                    return
+            if not self.begun and not self.activate():
+                return
             elapsed = float(self.animation.total_time)
-            if not math.isfinite(delta) or not math.isfinite(elapsed):
+            if not math.isfinite(elapsed):
                 raise ValueError("animation updater dt and total_time must be finite")
             duration = _duration(self.driver)
             if self.cycle and duration == 0:
                 raise ValueError("a cycling animation updater requires positive run_time")
             if not self.cycle and (duration == 0 or elapsed >= duration):
-                self.driver.finish()
-                self.closed = True
-                self.detach()
-                self.driver = None
+                self.call("finish")
+                if not self.closed:
+                    self.closed = True
+                    self.detach()
+                    # Ordinary Scene.play keeps these until scene cleanup.
+                    # Persistent helpers must not remove/publish scene objects,
+                    # but a completed group must not retain native children.
+                    group_driver = self.g.get("_CompositionCallbackDriver")
+                    if group_driver is not None:
+                        for group in self.groups:
+                            retained = group.__dict__.get("_composition_driver")
+                            if isinstance(retained, group_driver) and retained.group is group:
+                                group._composition_driver = None
+                    self.driver = None
                 return
             following = elapsed + delta
             if not math.isfinite(following):
                 raise ValueError("animation updater accumulated time is not finite")
             alpha = (elapsed / duration) % 1.0 if self.cycle else max(0.0, elapsed / duration)
             # The helper's pinned contract is interpolate THEN helper update.
-            self.driver.interpolate(alpha)
+            self.call("interpolate", alpha)
             if self.closed:
                 return
-            self.driver.update_mobjects(delta)
+            self.call("update_mobjects", delta)
             if not self.closed:
                 self.animation.total_time = following
         except BaseException as error:
-            self.cancel(error)
+            if not awaiting_adoption:
+                if self.closed and self.driver is not None:
+                    self._unwind(error)
+                else:
+                    self.cancel(error)
             raise
         finally:
             self.busy = False
+            if self.cleanup_pending:
+                self._unwind()
 
 
 def _install_removal(g):
@@ -268,14 +390,19 @@ def install_animation_updaters(native: Any) -> None:
         factory = None
         if not _has_python_interpolation(g, animation):
             make_driver = g.get("_fmn_make_animation_driver")
-            scene = _scene_for(g, animation, anchor)
-            if make_driver is None or scene is None:
+            if make_driver is None:
                 raise NotImplementedError(type(animation).__name__ + " requires a scene-bound native animation driver")
-            if not _native_hooks_unchanged(animation, protocols):
-                raise NotImplementedError("native-only persistent animation has authored lifecycle hooks without a Python interpolator")
-            if float(animation.final_alpha_value) != 1.0:
-                raise NotImplementedError("native-only persistent animation requires its default final_alpha_value=1")
-            factory = lambda: make_driver(scene, animation)
+            def validate_native():
+                if not _native_hooks_unchanged(animation, protocols):
+                    raise NotImplementedError("native-only persistent animation has authored lifecycle hooks without a Python interpolator")
+                if float(animation.final_alpha_value) != 1.0:
+                    raise NotImplementedError("native-only persistent animation requires its default final_alpha_value=1")
+            validate_native()
+            def factory(scene):
+                # A pending animation can be edited before adoption. Recheck
+                # hooks/endpoints before freezing the native specification.
+                validate_native()
+                return make_driver(scene, animation)
         return _PersistentAnimation(g, animation, anchor, cycle, factory).start()
 
     def cycle_animation(animation, **kwargs):

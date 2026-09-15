@@ -46,6 +46,7 @@ def native_environment():
         def get_run_time(self):
             return self.duration
         def begin(self):
+            self.initial = self.anchor.value
             self.anchor.animating = True
             self.event("begin")
             self.interpolate(0.)
