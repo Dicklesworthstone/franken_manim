@@ -253,7 +253,7 @@ mod tests {
         preview
             .dispatch(EventPayload::KeyPress {
                 key: Key::ArrowRight,
-                modifiers: Modifiers::empty(),
+                modifiers: Modifiers::NONE,
             })
             .expect("nudge");
         let root = preview.stage().roots()[0];
@@ -272,7 +272,7 @@ mod tests {
         preview
             .dispatch(EventPayload::KeyPress {
                 key: Key::ArrowUp,
-                modifiers: Modifiers::empty(),
+                modifiers: Modifiers::NONE,
             })
             .expect("nudge");
         assert_eq!(preview.selection().len(), 1);
@@ -280,7 +280,7 @@ mod tests {
         assert!(preview.selection().is_empty());
         assert_eq!(preview.frame_index(), 4);
         let bounds = preview.stage().get_bounding_box(preview.stage().roots()[0]);
-        assert!((bounds.mid[1]).abs() < 1.0e-9);
+        assert!(bounds.mid[1].abs() < 1.0e-9);
     }
 
     #[test]
