@@ -73,6 +73,10 @@ def install_scene_playback(native: Any) -> None:
         from fmn_python.rotation import install_rotation
 
         install_rotation(native)
+    if "WiggleOutThenIn" in g or "VShowPassingFlash" in g:
+        from fmn_python.indication import install_indication
+
+        install_indication(native)
     if "MaintainPositionRelativeTo" in g:
         from fmn_python.update_animations import install_update_animations
 
