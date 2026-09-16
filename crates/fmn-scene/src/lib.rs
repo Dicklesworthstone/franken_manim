@@ -12,11 +12,14 @@
 //! classifier's journaled evidence, and the pipeline's barrier vocabulary.
 #![forbid(unsafe_code)]
 
+pub mod camera_rig;
 pub mod events;
 pub mod interactive;
 pub mod journal;
 pub mod runtime;
 pub mod timeline_bundle;
+
+pub use camera_rig::CameraRig;
 
 /// Lower-layer scene types exposed through Proscenium for Studio and
 /// portal adapters.
@@ -50,8 +53,8 @@ pub use journal::{
 pub use runtime::{
     BlankScene, CameraOrientation, CaptureReason, CompletionRequest, EndScene, HoldController,
     HoldDecision, HoldKind, IntegrationError, LifecycleEvent, LifecyclePhase, NullSceneSink,
-    OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram, SceneRegistration,
-    SceneRegistry, SceneRunReport, SceneSelection, SceneSelectionError, SceneSink,
+    OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneSink, SceneProgram,
+    SceneRegistration, SceneRegistry, SceneRunReport, SceneSelection, SceneSelectionError,
     SceneStateRestore, SoundRequest, SteppedPlay, SteppedWait, ThreeDAddOptions, ThreeDScene,
 };
 pub use timeline_bundle::{
