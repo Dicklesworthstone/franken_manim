@@ -1,10 +1,10 @@
 //! Native Studio interaction over Proscenium's one event/editing implementation.
 //!
-//! A preview frame is copied into an independent Scene through Marionette's
-//! durable snapshot bridge, then wrapped by [`fmn_scene::InteractiveScene`].
-//! Browser/TUI events therefore execute the same selection, grab, resize,
-//! grouping, clipboard, color-pick, undo, and nudge semantics as the engine.
-//! This module owns no duplicate editing rules and advances no frame clock.
+//! Captured previews rebind a durable snapshot into an independent Scene.
+//! Live previews instead move the actual Scene, retaining its arena, event
+//! inbox, native updaters and runtime clock. Both use the same
+//! [`fmn_scene::InteractiveScene`] selection/editing engine. This module owns
+//! no duplicate editing rules and advances no frame clock.
 
 use fmn_scene::studio_bridge::{Snapshot, Stage};
 use fmn_scene::{
@@ -41,7 +41,7 @@ impl std::fmt::Display for InteractivePreviewError {
             }
             Self::UpdatersRequireLiveScene { count } => write!(
                 f,
-                "interactive preview carries {count} updater identities; a live-scene adapter is required"
+                "interactive preview carries {count} updater identities; use InteractivePreview::from_scene with the live Scene"
             ),
         }
     }
@@ -80,13 +80,13 @@ pub struct InteractiveDispatch {
     pub dispatched: usize,
 }
 
-/// Mutable, transient editor state for one captured preview frame.
+/// Interactive editor over either a captured frame or an owned live Scene.
 ///
-/// Constructing this value does not mutate `source`, advance its clock, or run
-/// its updaters. The copied Scene receives only events explicitly dispatched
-/// here. A Studio scrub can discard this value and reconstruct from the
-/// canonical captured frame, which gives transient editing precise reset
-/// semantics without contaminating the replay journal.
+/// [`Self::from_stage`] copies a callable-free captured frame. Its edits do
+/// not change that source. [`Self::from_scene`] moves a live runtime without
+/// copying or serializing executable state. Hosts can keep driving that same
+/// runtime through [`Self::scene_mut`] and its ordinary play/wait/sink APIs.
+/// Neither constructor advances time or runs an updater.
 pub struct InteractivePreview {
     frame_index: u64,
     scene: InteractiveScene,
@@ -102,6 +102,53 @@ impl std::fmt::Debug for InteractivePreview {
 }
 
 impl InteractivePreview {
+    /// Take ownership of a native Scene without a snapshot round trip.
+    ///
+    /// Existing handles, updater callables, event listeners, inbox senders,
+    /// clock, RNG and runtime configuration remain owned by the same Scene.
+    /// Use this path for updater-bearing scenes: durable snapshots cannot
+    /// recreate their executable callbacks. A decoded Scene with unresolved
+    /// updater identities still refuses through Scene's existing readiness
+    /// check; this constructor is not a way around that replay barrier.
+    pub fn from_scene(scene: Scene) -> Result<Self, InteractivePreviewError> {
+        Self::from_interactive(InteractiveScene::new(scene)?)
+    }
+
+    /// Keep an existing interactive runtime, including its selection and
+    /// history, without registering a second set of editing listeners.
+    pub fn from_interactive(mut scene: InteractiveScene) -> Result<Self, InteractivePreviewError> {
+        // Scene::state checks readiness and synchronizes its Stage timestamp.
+        // This in-memory snapshot is immediately dropped, never serialized.
+        // Capturing it neither executes nor replaces the native callbacks.
+        let _ = scene.scene_mut().state()?;
+        let frame_index = u64::try_from(scene.scene().time().frames()).map_err(|_| {
+            SceneError::InvalidState("interactive frame must be non-negative")
+        })?;
+        Ok(Self { frame_index, scene })
+    }
+
+    /// The retained native runtime. This is the original Scene for the live
+    /// ownership path, not a materialized copy of its visible records.
+    #[must_use]
+    pub fn scene(&self) -> &Scene {
+        self.scene.scene()
+    }
+
+    /// Drive the same native play/wait/frame pipeline or register more native
+    /// callbacks. No parallel scheduler or Python process is introduced.
+    ///
+    /// `frame_index` identifies the adopted/source preview frame; subsequent
+    /// runtime advancement is read from `scene().time()`, not that anchor.
+    pub fn scene_mut(&mut self) -> &mut Scene {
+        self.scene.scene_mut()
+    }
+
+    /// Return the interactive owner with all live behavior intact.
+    #[must_use]
+    pub fn into_interactive(self) -> InteractiveScene {
+        self.scene
+    }
+
     /// Copy one captured Stage into an independent interactive Scene.
     ///
     /// The durable encode/decode path intentionally rebinds every handle to
