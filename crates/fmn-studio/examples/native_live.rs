@@ -18,7 +18,7 @@ use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_render::{EngineIdentity, FrameConfig, RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport};
 use fmn_scene::{
     AssetRead, EventListener, EventPayload, EventPropagation, EventTarget, EventType, Journal,
-    Key, Modifiers, PlayOverrides, RuntimeConfig, Scene,
+    Key, Modifiers, PlayOverrides, RuntimeConfig, Scene, SceneError,
 };
 use fmn_studio::native::{NativeReplayPolicy, NativeSceneProgram, NativeSceneWorker, NativeSegment, NativeWorkerConfig};
 use fmn_studio::protocol::studio_seek_command;
@@ -71,7 +71,39 @@ fn program() -> std::result::Result<NativeSceneProgram, ServiceError> {
     )).map_err(execution_error)?;
     NativeSceneProgram::new(scene, vec![
         NativeSegment::Play { animations: vec![Box::new(rotate(root, PI))], overrides: PlayOverrides::default() },
-        NativeSegment::Wait { duration: Some(29.0) },
+        // This object must not exist at frame zero. Its location comes from
+        // the first animation's completed state, not a planning-time copy.
+        NativeSegment::defer(move |context| {
+            let stage = context.stage_mut();
+            let center = stage.get_center(root);
+            let mut buffer = stage.get(root)
+                .ok_or(SceneError::InvalidState("the opening object is missing"))?
+                .buffer.deep_clone();
+            let count = buffer.len();
+            buffer.write_range("fill_rgba", 0, &[1.0, 0.35, 0.08, 1.0].repeat(count));
+            let late = stage.add(Mobject::from_buffer(buffer));
+            stage.shift_many(&[late], center);
+            stage.remove_from_scene(root);
+            stage.add_to_scene(late)?;
+            Ok(vec![
+                NativeSegment::Play {
+                    animations: vec![Box::new(rotate(late, PI / 2.0))],
+                    overrides: PlayOverrides::default(),
+                },
+                // Native callback state is created only once this new
+                // object's own animation finishes, and rebuilt on recovery.
+                NativeSegment::edit(move |context| {
+                    let mut tick = 0_u32;
+                    context.stage_mut().add_updater(late, move |stage, target| {
+                        tick += 1;
+                        let delta = if tick % 120 < 60 { 0.02 } else { -0.02 };
+                        stage.shift_many(&[target], [delta, 0.0, 0.0]);
+                    }, false)?;
+                    Ok(())
+                }),
+                NativeSegment::Wait { duration: Some(28.0) },
+            ])
+        }),
     ], 900)
 }
 
@@ -116,10 +148,12 @@ fn preview(supervisor: &mut Supervisor, frame: i64, asset_ok: &dyn Fn(&AssetRead
 }
 
 fn process_smoke(supervisor: &mut Supervisor, asset_ok: &dyn Fn(&AssetRead) -> bool) -> Result<()> {
+    // Past both late construction and updater registration: the replacement
+    // must rebuild the *new* callback state, not only the opening object.
     worker_response(supervisor.request(SupervisorRequest::Play {
-        scene: NAME.into(), command: studio_seek_command(NAME, 37)?,
+        scene: NAME.into(), command: studio_seek_command(NAME, 77)?,
     }, asset_ok)?)?;
-    let before = preview(supervisor, 40, asset_ok)?;
+    let before = preview(supervisor, 80, asset_ok)?;
     let generation = supervisor.generation();
     let recovered = supervisor.request(SupervisorRequest::Event {
         scene: NAME.into(), event: EventPayload::KeyPress { key: CRASH_KEY, modifiers: Modifiers::NONE },
@@ -127,8 +161,8 @@ fn process_smoke(supervisor: &mut Supervisor, asset_ok: &dyn Fn(&AssetRead) -> b
     assert!(matches!(recovered, SupervisorReply::Recovered { .. }));
     assert_eq!(supervisor.generation(), generation + 1);
     assert_eq!(supervisor.crashes().len(), 1);
-    let after = preview(supervisor, 40, asset_ok)?;
-    assert_eq!(before, after, "replacement must reconstruct mutable callback state and real pixels");
+    let after = preview(supervisor, 80, asset_ok)?;
+    assert_eq!(before, after, "replacement must reconstruct deferred objects, callbacks and pixels");
     Ok(())
 }
 
@@ -154,9 +188,12 @@ fn http(host: &StudioHost, cap: &str, method: &str, route: &str, body: &str) -> 
 
 fn http_smoke(host: &StudioHost, frames: &FrameHub, cap: &str) -> Result<()> {
     http(host, cap, "GET", "/", "")?;
+    http(host, cap, "POST", "/api/scrub", "frame=29&commit=false")?;
+    let opening = frames.latest().ok_or("missing opening native frame")?;
     http(host, cap, "POST", "/api/scrub", "frame=37&commit=true")?;
-    let before = frames.latest().ok_or("missing initial native frame")?;
+    let before = frames.latest().ok_or("missing constructed native frame")?;
     assert_eq!(before.frame_index, 37);
+    assert_ne!(opening.png, before.png, "later construction must be visible through HTTP");
     http(host, cap, "POST", "/api/event", "type=key_press&key=a&modifiers=2")?;
     http(host, cap, "POST", "/api/event", "type=key_press&key=arrow_up&modifiers=1")?;
     let edited = frames.latest().ok_or("missing edited native frame")?;
@@ -224,7 +261,7 @@ fn run() -> Result<()> {
     let host = StudioHost::bind(Arc::clone(&session), frames.clone(), token, clock, host_config)?;
     let result = if self_test {
         let result = http_smoke(&host, &frames, &cap);
-        if result.is_ok() { println!("OK: native child crash/recovery, HTTP editing/undo/inspection/overlays/restart and PNG identity"); }
+        if result.is_ok() { println!("OK: deferred native construction, late callback crash/recovery, HTTP editing/undo/inspection/overlays/restart and PNG identity"); }
         result
     } else {
         println!("{}", host.launch_url()?);

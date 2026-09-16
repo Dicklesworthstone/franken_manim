@@ -1,12 +1,13 @@
 //! Deferred authoring at a completed native segment boundary.
 //!
-//! The context deliberately exposes scene data but not mutable Scene playback:
-//! authored construction can add/remove/style objects and build animations,
-//! but cannot consume unreported play/wait frames through this API.
+//! The context exposes scene data, its one RNG and listener registration, but
+//! not mutable Scene playback. Construction cannot consume unreported play/wait
+//! frames through this API.
 
+use fmn_core::rng::Pcg64Dxsm;
 use fmn_render::CameraConfig;
 use fmn_scene::studio_bridge::{Animation, Stage};
-use fmn_scene::{CameraRig, PlayOverrides, Scene, SceneError};
+use fmn_scene::{CameraRig, EventDispatcher, PlayOverrides, Scene, SceneError};
 
 use crate::SpanRegistry;
 
@@ -48,6 +49,20 @@ impl NativeBuildContext<'_> {
     /// animation targets in the original arena. No runtime clock is advanced.
     pub fn stage_mut(&mut self) -> &mut Stage {
         self.scene.stage_mut()
+    }
+
+    /// The existing scene-serial PCG64DXSM substream. Deferred random choices
+    /// consume the same snapshotted RNG as ordinary Scene construction; no
+    /// ambient entropy, independent seed or renderer-thread stream is introduced.
+    pub fn rng_mut(&mut self) -> &mut Pcg64Dxsm {
+        self.scene.rng_mut()
+    }
+
+    /// Register/remove native listeners for content constructed at this point.
+    /// Input still runs through the Scene's single dispatcher and capture seam;
+    /// obtaining this handle neither queues nor dispatches an event.
+    pub fn event_dispatcher_mut(&mut self) -> &mut EventDispatcher {
+        self.scene.event_dispatcher_mut()
     }
 
     /// Attach native source/type-setting spans to newly constructed handles.
