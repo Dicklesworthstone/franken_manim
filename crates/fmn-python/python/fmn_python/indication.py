@@ -160,6 +160,8 @@ def install_indication(native: Any) -> None:
     g = vars(native)
     if g.get("_FMN_INDICATION_INSTALLED", False):
         return
+    deferred = _install_transform_indications(g)
+    wave_installed = _install_wave(g)
     families, validators, default_removers = [], {}, {}
     for name, installer, remover in (
         ("WiggleOutThenIn", _install_wiggle, False),
@@ -171,6 +173,8 @@ def install_indication(native: Any) -> None:
             families.append(cls)
             default_removers[cls] = remover
     if not families:
+        if deferred or wave_installed:
+            g["_FMN_INDICATION_INSTALLED"] = True
         return
     families = tuple(families)
     Animation, Scene, Mobject = g["Animation"], g["Scene"], g["Mobject"]
@@ -201,6 +205,13 @@ def install_indication(native: Any) -> None:
                     or bool(animation.remover) != default
                     or _custom_rate(g, animation.rate_func)
                     or _changed(animation, protocols)):
+                return True
+            Wiggle = g.get("WiggleOutThenIn")
+            if (Wiggle is not None and isinstance(animation, Wiggle)
+                    and (animation.scale_about_point is not None
+                         or animation.rotate_about_point is not None)):
+                # Public pivot getters observe the scale-then-rotate order.
+                # The native stock kernel snapshots both pivots beforehand.
                 return True
             stack, seen = [animation.mobject], set()
             while stack:
@@ -255,6 +266,14 @@ def install_indication(native: Any) -> None:
                     if isinstance(animation, families):
                         forced.append((animation, animation.__dict__.get("_indication_force_callback", absent)))
                         animation.__dict__["_indication_force_callback"] = True
+                if animations and all(g["_requires_python_animation"](animation)
+                                      for animation in animations):
+                    # An entirely callback-driven play has no consumer for
+                    # the bootstrap's sampled global rate table. Keep the
+                    # original callable live, without speculative probes.
+                    for animation in animations:
+                        animation.rate_func = kwargs["rate_func"]
+                    kwargs = dict(kwargs, rate_func=None)
             return previous_play(self, *animations, **kwargs)
         except BaseException as error:
             for animation in reversed(targets):
@@ -269,3 +288,93 @@ def install_indication(native: Any) -> None:
 
     Scene.play = play
     g["_FMN_INDICATION_INSTALLED"] = True
+
+
+def _install_transform_indications(g):
+    """Use existing Transform target/start hooks for the indication shelf."""
+    names = (
+        "GrowFromPoint", "GrowFromCenter", "GrowFromEdge", "GrowArrow",
+        "SpinInFromNothing", "Indicate", "TurnInsideOut",
+    )
+    classes = tuple(g[name] for name in names if name in g)
+    if not classes:
+        return ()
+    Transform = g["Transform"]
+    Grow = g.get("GrowFromPoint")
+    if Grow is not None:
+        def starting_mobject(self):
+            start = super(Grow, self).create_starting_mobject()
+            start.scale(0)
+            start.move_to(self.point)
+            if self.point_color is not None:
+                start.set_color(self.point_color)
+            return start
+
+        _method(Grow, "create_starting_mobject", starting_mobject)
+    for cls in classes:
+        cls._native_kind = "transform"
+        cls._target_attr = "target_mobject"
+        cls._native_target = Transform._native_target
+        cls._native_params = Transform._native_params
+    previous_requires = g["_requires_python_animation"]
+
+    def requires(animation):
+        # The native factories eagerly copy their targets while planning the
+        # whole play. These create_target/create_starting_mobject protocols
+        # instead observe the preceding Succession member's completed state.
+        # Public hooks already implement collapse, recoloring and reversal;
+        # reuse them, including authored paths, endpoints and remover flags.
+        return isinstance(animation, classes) or previous_requires(animation)
+
+    g["_requires_python_animation"] = requires
+    return classes
+
+
+def _install_wave(g):
+    """Restore ApplyWave's Homotopy lineage and construction-time wave map."""
+    Wave = g.get("ApplyWave")
+    if Wave is None:
+        return False
+    Homotopy, Mobject, np = g["Homotopy"], g["Mobject"], g["_np"]
+
+    def wave_init(self, mobject, direction=g["_UP"], amplitude=0.2,
+                  run_time=1.0, **kwargs):
+        if not isinstance(mobject, Mobject):
+            raise TypeError("ApplyWave requires a Mobject")
+        left = _finite(mobject.get_left()[0], "ApplyWave left extent")
+        right = _finite(mobject.get_right()[0], "ApplyWave right extent")
+        extent = right - left
+        if not math.isfinite(extent) or extent <= 0:
+            raise ValueError("ApplyWave requires a finite nonzero horizontal extent")
+        direction = np.asarray(direction, dtype=float)
+        if direction.shape != (3,) or not np.isfinite(direction).all():
+            raise ValueError("ApplyWave.direction must be a finite 3D vector")
+        amplitude = _finite(amplitude, "ApplyWave.amplitude")
+        vector = amplitude * direction
+        if not np.isfinite(vector).all():
+            raise ValueError("ApplyWave displacement must be finite")
+
+        def homotopy(x, y, z, t):
+            point = np.array([x, y, z], dtype=float)
+            # The endpoints are identity maps, including after a large live
+            # translation beyond the original construction-time envelope.
+            if t == 0.0 or t == 1.0:
+                return point
+            with np.errstate(over="raise", invalid="raise", divide="raise"):
+                try:
+                    power = np.exp(2.0 * ((x - left) / extent - 0.5))
+                    phase = np.power(t, power)
+                except FloatingPointError as error:
+                    raise ValueError("ApplyWave phase is outside the finite real domain") from error
+            return point + g["there_and_back"](float(phase)) * vector
+
+        self.direction, self.amplitude = tuple(direction), amplitude
+        super(Wave, self).__init__(homotopy, mobject, run_time=run_time, **kwargs)
+
+    # Keep every qualified alias and already-existing subclass attached to
+    # the original class object. Homotopy delegates all geometry writes to
+    # Mobject.apply_function and runs on the shared frame/family lifecycle.
+    Wave.__bases__ = (Homotopy,)
+    Wave._native_kind = None
+    _method(Wave, "__init__", wave_init)
+    return True
