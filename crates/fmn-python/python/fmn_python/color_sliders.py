@@ -165,4 +165,73 @@ def install_color_sliders(native: Any) -> None:
         "set_value": set_value, "get_background": get_background,
     }.items():
         _method(Bank, name, function)
+    _install_panel_content(g)
     g["_FMN_COLOR_SLIDERS_INSTALLED"] = True
+
+
+def _install_panel_content(g):
+    """Allow composite controls on the existing native panel layout path."""
+    import inspect
+
+    Panel = g.get("ControlPanel")
+    if Panel is None:
+        return
+    original = Panel.__init__
+    signature = inspect.signature(original)
+    Mobject, ScalarControl = g["Mobject"], g["ControlMobject"]
+    rectangle_keys = {"width", "height", "color", "fill_color", "fill_opacity",
+                      "stroke_color", "stroke_width", "stroke_opacity"}
+
+    def config(value, name, allowed):
+        result = dict(value)
+        unknown = sorted(set(result) - allowed)
+        if unknown:
+            raise TypeError("unexpected keyword arguments: " + ", ".join(name + "." + key for key in unknown))
+        return result
+
+    def validate(controls):
+        if not all(isinstance(control, Mobject) for control in controls):
+            raise TypeError("ControlPanel controls must be Mobject instances")
+
+    @wraps(original)
+    def initialize(self, *controls, **kwargs):
+        # Preserve the established scalar-only path and its authored hooks.
+        if all(isinstance(control, ScalarControl) for control in controls):
+            return original(self, *controls, **kwargs)
+        validate(controls)
+        bound = signature.bind(self, *controls, **kwargs)
+        bound.apply_defaults()
+        args = bound.arguments
+        extra = args.get("kwargs", {})
+        if extra:
+            raise TypeError("unexpected keyword arguments: " + ", ".join(sorted(extra)))
+        self.panel_kwargs = config(args["panel_kwargs"], "panel_kwargs", rectangle_keys)
+        self.opener_kwargs = config(args["opener_kwargs"], "opener_kwargs", rectangle_keys)
+        self.opener_text_kwargs = config(args["opener_text_kwargs"], "opener_text_kwargs",
+                                         {"text", "font_size", "color", "fill_color"})
+        self._control_panel_open = False
+        text = self.opener_text_kwargs
+        panel, opener, content = self._native_control_panel_parts(
+            str(text.get("text", "Control Panel")), float(text.get("font_size", 20)),
+            controls, open=False,
+        )
+        # This helper computes native extents/layout and grafts the original
+        # controls; no scalar proxy/wrapper or replacement layout is needed.
+        super(Panel, self).__init__(panel, opener, content)
+        self.panel, self.panel_opener, self.controls = panel, opener, content
+        self.panel_opener_rect, self.panel_info_text = opener.submobjects
+        self.fix_in_frame()
+        from .control_events import _connect
+
+        _connect(g, self, (
+            ("panel", "MouseScrollEvent", "add_mouse_scroll_listner", "panel_on_mouse_scroll"),
+            ("panel_opener", "MouseDragEvent", "add_mouse_drag_listner", "panel_opener_on_mouse_drag"),
+        ))
+
+    def add_controls(self, *new_controls):
+        validate(new_controls)
+        self.controls.add(*new_controls)
+        self.move_panel_and_controls_to_panel_opener()
+
+    _method(Panel, "__init__", initialize)
+    _method(Panel, "add_controls", add_controls)
