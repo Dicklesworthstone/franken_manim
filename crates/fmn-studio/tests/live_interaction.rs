@@ -197,3 +197,29 @@ fn native_history_and_updaters_remain_usable_after_preview_ownership_round_trip(
         .expect("native callback execution continues");
     assert!(calls.get() > 0);
 }
+
+#[test]
+fn a_live_seek_refuses_before_relabeling_time_or_state() {
+    let (scene, root) = scene_with_point();
+    let mut live = InteractivePreview::from_scene(scene).expect("live");
+    assert!(live.is_live());
+    let time = live.scene().time();
+    let bounds = live.stage().get_bounding_box(root);
+    let result = live.seek_frame(99, 99);
+    assert!(matches!(result, Err(InteractivePreviewError::LiveSeekRequiresReplay)));
+    assert_eq!(live.frame_index(), 0);
+    assert_eq!(live.scene().time(), time);
+    assert_eq!(live.stage().get_bounding_box(root), bounds);
+}
+
+#[test]
+fn captured_seek_and_explicit_reset_remain_separate_from_live_advancement() {
+    let (scene, _) = scene_with_point();
+    let source = scene.stage().snapshot().materialize();
+    let mut preview = InteractivePreview::from_scene(scene).expect("live");
+    preview.reset(&source, 30, 17, 4).expect("explicit captured reset");
+    assert!(!preview.is_live());
+    preview.seek_frame(5, 5).expect("captured relabel");
+    assert_eq!(preview.frame_index(), 5);
+    assert_eq!(preview.scene().time().frames(), 5);
+}

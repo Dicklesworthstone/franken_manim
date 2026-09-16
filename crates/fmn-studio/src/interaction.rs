@@ -26,6 +26,9 @@ pub enum InteractivePreviewError {
     /// Durable snapshots intentionally contain updater identities, not callables.
     /// A paused Studio edit must not silently discard executable scene behavior.
     UpdatersRequireLiveScene { count: usize },
+    /// A live runtime cannot jump its clock without executing/replaying the
+    /// intervening updater and event history.
+    LiveSeekRequiresReplay,
 }
 
 impl std::fmt::Display for InteractivePreviewError {
@@ -43,6 +46,9 @@ impl std::fmt::Display for InteractivePreviewError {
                 f,
                 "interactive preview carries {count} updater identities; use InteractivePreview::from_scene with the live Scene"
             ),
+            Self::LiveSeekRequiresReplay => f.write_str(
+                "live preview seeking requires replay; advance its Scene with play/wait instead of changing only the clock",
+            ),
         }
     }
 }
@@ -54,7 +60,8 @@ impl std::error::Error for InteractivePreviewError {
             Self::Event(error) => Some(error),
             Self::SnapshotEncode(_)
             | Self::SnapshotDecode(_)
-            | Self::UpdatersRequireLiveScene { .. } => None,
+            | Self::UpdatersRequireLiveScene { .. }
+            | Self::LiveSeekRequiresReplay => None,
         }
     }
 }
@@ -90,12 +97,14 @@ pub struct InteractiveDispatch {
 pub struct InteractivePreview {
     frame_index: u64,
     scene: InteractiveScene,
+    live_owner: bool,
 }
 
 impl std::fmt::Debug for InteractivePreview {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InteractivePreview")
             .field("frame_index", &self.frame_index)
+            .field("live_owner", &self.live_owner)
             .field("selection", &self.scene.selection())
             .finish_non_exhaustive()
     }
@@ -124,7 +133,18 @@ impl InteractivePreview {
         let frame_index = u64::try_from(scene.scene().time().frames()).map_err(|_| {
             SceneError::InvalidState("interactive frame must be non-negative")
         })?;
-        Ok(Self { frame_index, scene })
+        Ok(Self {
+            frame_index,
+            scene,
+            live_owner: true,
+        })
+    }
+
+    /// Whether this owner was created from a live Scene rather than a
+    /// captured Stage. A successful snapshot reset switches to captured mode.
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        self.live_owner
     }
 
     /// The retained native runtime. This is the original Scene for the live
@@ -189,7 +209,11 @@ impl InteractivePreview {
                 SceneError::InvalidState("interactive frame exceeds i64")
             })?,
         )?;
-        Ok(Self { frame_index, scene })
+        Ok(Self {
+            frame_index,
+            scene,
+            live_owner: false,
+        })
     }
 
     /// Reset all transient edits from a canonical captured Stage.
@@ -217,11 +241,17 @@ impl InteractivePreview {
         })
     }
 
+    /// Re-label a captured-frame preview at a supplied clock instant.
+    /// Live ownership refuses this operation: changing the clock alone must
+    /// never pretend to have executed the intervening callbacks or inputs.
     pub fn seek_frame(
         &mut self,
         frame_index: u64,
         clock_frame: i64,
     ) -> Result<(), InteractivePreviewError> {
+        if self.live_owner {
+            return Err(InteractivePreviewError::LiveSeekRequiresReplay);
+        }
         self.scene.scene_mut().seek_interactive_frame(clock_frame)?;
         self.frame_index = frame_index;
         Ok(())
