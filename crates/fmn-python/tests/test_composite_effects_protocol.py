@@ -295,6 +295,18 @@ class CompositeEffectsProtocol(unittest.TestCase):
         self.assertEqual(calls, ["factory", "begin"])
         self.assertEqual(flash.animations[0].events, ["begin"])
 
+    def test_later_group_base_override_remains_live_for_flash(self):
+        native, calls = self.native, []
+        original = native.AnimationGroup.begin
+        def changed(group):
+            calls.append(group)
+            original(group)
+        native.AnimationGroup.begin = changed
+        flash = native.Flash([0, 0, 0], num_lines=2)
+        flash.begin()
+        self.assertEqual(calls, [flash])
+        self.assertTrue(all(child.events == ["begin"] for child in flash.animations))
+
     def test_child_failure_is_not_swallowed_by_synthetic_reveal(self):
         native = self.native
         error = RuntimeError("authored child interpolation failed")
@@ -366,7 +378,7 @@ class CompositeEffectsProtocol(unittest.TestCase):
         self.assertEqual(len(root.updaters), 1)
         self.assertEqual(animation.kwargs, {})
 
-    def test_map_factory_membership_mutations_do_not_skip_original_children(self):
+    def test_map_factory_membership_mutations_follow_the_group_iterator(self):
         native, visited = self.native, []
         children = [native.Mobject([[i, 0, 0]]) for i in range(3)]
         root = native.VGroup(*children)
@@ -375,8 +387,8 @@ class CompositeEffectsProtocol(unittest.TestCase):
             root.submobjects.clear()
             return native.Animation(child)
         animation = native.LaggedStartMap(factory, root)
-        self.assertEqual(visited, children)
-        self.assertEqual(len(animation.animations), 3)
+        self.assertEqual(visited, children[:1])
+        self.assertEqual(len(animation.animations), 1)
         self.assertIs(animation.group, root)
 
     def test_map_rejects_invalid_factory_or_root_without_calls(self):

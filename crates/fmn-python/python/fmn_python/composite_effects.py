@@ -57,7 +57,7 @@ def _bind_root(animation, root):
 
 
 def _install_flash(g):
-    Flash, Group = g["Flash"], g["AnimationGroup"]
+    Flash = g["Flash"]
 
     def flash_init(self, point, color=g["_YELLOW"], line_length=0.2,
                    num_lines=12, flash_radius=0.3, line_stroke_width=3.0,
@@ -102,13 +102,15 @@ def _install_flash(g):
     }.items():
         _method(Flash, name, function)
     # The shared initializer froze a legacy leaf-style Flash lifecycle on
-    # this class before installing AnimationGroup. Replace that entire
-    # frozen protocol, not just begin: each stage must drive the children.
+    # this class before installing AnimationGroup. Remove the entire frozen
+    # protocol so normal MRO lookup reaches the group at every stage, including
+    # later authored changes to AnimationGroup itself. Do not freeze aliases.
     for name in (
         "_ensure_runtime_defaults", "get_all_mobjects", "begin",
         "update_mobjects", "interpolate", "finish", "clean_up_from_scene", "abort",
     ):
-        setattr(Flash, name, getattr(Group, name))
+        if name in vars(Flash):
+            delattr(Flash, name)
     if "interpolate_mobject" in vars(Flash):
         delattr(Flash, "interpolate_mobject")
 
@@ -121,11 +123,10 @@ def _install_lagged_map(g):
             raise TypeError("LaggedStartMap requires an animation constructor")
         if not isinstance(group, g["Mobject"]):
             raise TypeError("LaggedStartMap requires a Mobject group")
-        # Snapshot membership, not geometry: an authored factory can edit
-        # the live group. Evaluate each original child once in argument order.
-        # kwargs belong to each child; run_time/lag_ratio belong to the group.
-        children = tuple(group)
-        animations = [anim_func(child, **kwargs) for child in children]
+        # Let the group's own iterator control membership, as in the pinned
+        # Reference: a factory may intentionally mutate the group. kwargs
+        # belong to each child; run_time/lag_ratio belong to the group.
+        animations = [anim_func(child, **kwargs) for child in group]
         super(Map, self).__init__(
             *animations, run_time=run_time, lag_ratio=lag_ratio, group=group,
         )
