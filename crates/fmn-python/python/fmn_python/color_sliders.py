@@ -178,7 +178,7 @@ def _install_panel_content(g):
         return
     original = Panel.__init__
     signature = inspect.signature(original)
-    Mobject, ScalarControl = g["Mobject"], g["ControlMobject"]
+    Group, ScalarControl, Bank = g["Group"], g["ControlMobject"], g["ColorSliders"]
     rectangle_keys = {"width", "height", "color", "fill_color", "fill_opacity",
                       "stroke_color", "stroke_width", "stroke_opacity"}
 
@@ -189,9 +189,20 @@ def _install_panel_content(g):
             raise TypeError("unexpected keyword arguments: " + ", ".join(name + "." + key for key in unknown))
         return result
 
+    def is_control(control):
+        if isinstance(control, (ScalarControl, Bank)):
+            return True
+        # A composite can include labels/decorations alongside its controls.
+        # A bare shape or an empty/decorative group is still not a control;
+        # keep the pre-existing refusal and its public diagnostic intact.
+        return isinstance(control, Group) and any(
+            isinstance(member, (ScalarControl, Bank))
+            for member in control.get_family()[1:]
+        )
+
     def validate(controls):
-        if not all(isinstance(control, Mobject) for control in controls):
-            raise TypeError("ControlPanel controls must be Mobject instances")
+        if not all(is_control(control) for control in controls):
+            raise TypeError("ControlPanel controls must be ControlMobject instances")
 
     @wraps(original)
     def initialize(self, *controls, **kwargs):

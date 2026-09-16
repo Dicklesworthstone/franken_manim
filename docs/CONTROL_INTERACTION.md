@@ -58,11 +58,12 @@ alphanumeric/space/tab/backspace key surface; navigation and modifier keysyms
 are not inserted as Unicode letters, and unsupported shortcuts do not execute
 scene actions. This is not clipboard, text-selection or IME support.
 
-This adapter does not convert ColorSliders' generic native child descriptions
-into independently interactive LinearNumberSlider instances. It also does not
-change the existing copying/closure semantics, make every camera or control
-mutation transactional, or complete the Python/native Studio worker gateway.
-The existing Studio capability refusals remain in place.
+The subsequently installed color-bank adapter supplies independently
+interactive ColorSliders channels and grouped panel controls; see
+[Live color controls and composite panels](COLOR_CONTROL_PANELS.md).
+These adapters do not change the existing copying/closure semantics, make
+every camera or control mutation transactional, or complete the Python/native
+Studio worker gateway. The existing Studio capability refusals remain in place.
 
 `test_interaction_protocol.py` and `test_control_events_protocol.py` test
 adapter logic against explicit storage fixtures. The installed-wheel gate

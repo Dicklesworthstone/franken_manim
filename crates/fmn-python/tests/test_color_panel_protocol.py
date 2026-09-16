@@ -64,13 +64,25 @@ class ColorPanelTests(unittest.TestCase):
         context.start()
         self.addCleanup(context.stop)
         module._install_panel_content(vars(self.n))
+    def test_bare_shapes_and_noncontrol_groups_keep_existing_refusal(self):
+        panel = self.n.ControlPanel(self.n.ControlMobject())
+        prior = list(panel.controls.submobjects)
+        for shape in (self.n.Mobject(), self.n.Group(), self.n.Group(self.n.Mobject())):
+            with self.subTest(shape=type(shape).__name__):
+                with self.assertRaisesRegex(TypeError, "^ControlPanel controls must be ControlMobject instances$"):
+                    self.n.ControlPanel(shape)
+                with self.assertRaisesRegex(TypeError, "^ControlPanel controls must be ControlMobject instances$"):
+                    panel.add_controls(shape)
+        self.assertEqual(panel.controls.submobjects, prior)
+        self.assertFalse(hasattr(panel, "relayouts"))
+
     def test_previous_constructor_rejects_color_bank(self):
         bank = self.n.ColorSliders()
         instance = self.n.ControlPanel.__new__(self.n.ControlPanel)
         with self.assertRaisesRegex(TypeError, "scalar-only"):
             self.original(instance, bank)
-    def test_color_bank_and_arbitrary_group_use_native_extent_path(self):
-        bank, caption = self.n.ColorSliders(), self.n.Group(self.n.Mobject())
+    def test_color_bank_and_grouped_controls_use_native_extent_path(self):
+        bank, caption = self.n.ColorSliders(), self.n.Group(self.n.ControlMobject(), self.n.Mobject())
         panel = self.n.ControlPanel(bank, caption)
         self.assertEqual(self.calls[-1], ("Control Panel", 20., (bank, caption), False))
         self.assertEqual(panel.controls.submobjects, [bank, caption])
@@ -109,7 +121,7 @@ class ColorPanelTests(unittest.TestCase):
         panel = self.n.ControlPanel(scalar)
         root = panel.controls
         bank = self.n.ColorSliders()
-        caption = self.n.Group(self.n.Mobject())
+        caption = self.n.Group(self.n.ControlMobject(), self.n.Mobject())
         self.assertIsNone(panel.add_controls(bank, caption))
         self.assertIs(panel.controls, root)
         self.assertEqual(root.submobjects, [scalar, bank, caption])
@@ -134,7 +146,7 @@ class ColorPanelTests(unittest.TestCase):
                 return super().move_panel_and_controls_to_panel_opener()
         bank = self.n.ColorSliders()
         panel = Authored(bank)
-        panel.add_controls(self.n.Group())
+        panel.add_controls(self.n.Group(self.n.ControlMobject()))
         self.assertTrue(panel.saw_layout and panel.saw_relayout)
 
 
