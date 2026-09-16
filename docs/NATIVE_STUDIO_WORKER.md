@@ -77,20 +77,77 @@ factory and execute to the requested capture. The implementation retains at
 most the current capture packet during stepping; the native Scene and its
 animation/editor snapshots still have their ordinary memory costs.
 
+## Camera scenes: surfaces, images and dot clouds
+
+The default `camera: None` retains the affine vector renderer. Select a fixed
+camera explicitly to render a mixed native scene through Lumen's existing
+`RetainedFrameRenderer::render_with_camera`:
+
+```rust
+worker_config.renderer.engine = fmn_render::EngineIdentity::certified();
+let viewport = worker_config.renderer.frame.viewport;
+worker_config.camera = Some(fmn_render::CameraConfig {
+    resolution: (viewport.width, viewport.height),
+    fps: worker_config.fps,
+    background: worker_config.renderer.frame.background,
+    ..fmn_render::CameraConfig::default()
+});
+```
+
+The camera route accepts vectors, UV-grid surfaces, triangle meshes, image
+quads and dot clouds in their shared painter sequence. Projection, clipping,
+depth testing, lighting, texture sampling, fixed-in-frame content and glow all
+remain Lumen responsibilities. Scene animations and updaters run normally;
+the camera configuration itself is fixed for the worker session.
+
+The viewport, background and FPS must agree with the worker configuration.
+Fast-CPU and annex identities are refused because the selected mixed camera
+rasterizer is the certified CPU implementation. This identifies the executed
+engine; it does not claim that this worker has passed a cross-platform release
+certification matrix.
+
+Camera frame provenance records the normalized projection, light, sample
+ceiling, background, output geometry, tile policy and renderer version. The
+same digest is carried as the `native/camera-capture-policy` journal read.
+A changed camera or light therefore invalidates journal replay even when
+geometry and source identity are unchanged. Scheduler thread counts are not
+semantic identity. Use the supervisor's normal read-validation path when
+restoring checkpoints: static camera policy is journal metadata, not a mutable
+SceneState field.
+
+Camera inspection includes the timeline and native object records, but reports
+`input_events: false`. Perspective input projection and projected debug
+overlays are not yet implemented; their requests refuse before mutating the
+live owner instead of applying the affine editor to perspective pixels.
+
+Run the complete camera browser host, showing a rotating lit surface, a
+fixed-frame raster image and a glow dot:
+
+```sh
+cargo run --locked -p fmn-studio --example native_camera
+cargo run --locked -p fmn-studio --example native_camera -- --self-test
+```
+
+The self-test uses the actual child executable and authenticated HTTP server.
+It checks animated PNG differences, inspection capabilities and bit-identical
+camera frames after supervisor restart. Neither native example needs CPython,
+system fonts or ffmpeg.
+
 ## Input, journals and recovery
 
-`Event` dispatches through the existing native editor/application listeners at
-the paused frame, then renders a fresh PNG. Inspection and overlays read that
-same mutated arena. Events do not advance the clock or run scene updaters.
-These edits are transient: the next seek discards them by reconstructing from
-source. They are not falsely reported as durable replay-journal edits.
+On the affine route, `Event` dispatches through the existing native
+editor/application listeners at the paused frame, then renders a fresh PNG.
+Inspection and overlays read that same mutated arena. Events do not advance
+the clock or run scene updaters. These edits are transient: the next seek
+discards them by reconstructing from source. They are not falsely reported as
+durable replay-journal edits.
 
 `Play` accepts the canonical `studio_seek_command` identity. It executes from
 a fresh factory and records actual `Scene::state_bytes()`, including the real
-clock, RNG and play count. The entry carries three read identities: the
-source/input closure, worker build and capture contract. Checkpoints are
-attached on the configured frame-distance cadence. No made-up RNG fork or
-journal-position-as-play-count is substituted for runtime state.
+clock, RNG and play count. The entry carries the source/input closure, worker
+build and capture contract, plus the camera policy when selected. Checkpoints
+are attached on the configured frame-distance cadence. No made-up RNG fork
+or journal-position-as-play-count is substituted for runtime state.
 
 Replay is disabled by default. Unclassified factory commands are opaque
 barriers, and restore/replay requests refuse. Selecting
@@ -125,12 +182,13 @@ native code.
 ## Scope
 
 This is an explicit native factory front door; the default `fmn-cli` captured-
-artifact worker is unchanged. The runnable example is not a claim that the
+artifact worker is unchanged. The runnable examples are not a claim that the
 CLI can compile and discover arbitrary Rust source files. Native programs use
 an owned declarative segment schedule, not a suspended arbitrary Rust stack.
-The renderer currently uses the retained affine CPU vector path. It does not
-add the default CLI's camera-aware mixed image/surface/dot dispatch, Metal
-presentation, Python callback ownership or audio export to this worker.
+The renderer supports affine CPU vectors and explicitly selected fixed-camera
+mixed CPU captures. It does not add animated cameras, camera-space editing,
+projected overlays, Metal presentation, Python callback ownership or audio
+export to this worker.
 
 Recovery is cold execution, not constant-time checkpoint restoration. It has
 not been benchmarked against the Studio latency budget. Source-hash checking
@@ -142,15 +200,14 @@ editing history does not rewind mutable closure captures or external effects.
 
 At implementation checkpoint `04990eb`, the focused GitHub Actions lane
 compiled and passed all 159 `fmn-studio` tests plus all 16 native history tests,
-and the real-process/HTTP host acceptance completed successfully. The 159
-include nine live-owner tests, six native program tests and ten concrete worker
-tests with real PNGs and mutable callback recovery. These results belong to
-that exact checkpoint; later animation-specific tests require their own run.
+and the real-process/HTTP host acceptance completed successfully. These results
+belong to that exact checkpoint, not to later camera additions.
 
-The workflow also runs the real-process/HTTP `native_live --self-test`.
-Additional `native_animation` tests compare every serialized capture from a
-rotation-plus-wait program with ordinary Scene playback at two frame rates,
-including native follower callbacks, final state and pause/finalization order.
+The workflow runs both real-process/HTTP example self-tests. Native animation
+tests compare serialized captures with ordinary Scene playback. The
+`native_camera` integration suite compares all five primitive kinds and mixed
+scenes with direct Lumen output; tests motion/rewind/recovery, 1/4/16-thread
+frame identity, changed camera-policy replay refusals and capability reporting.
 
 The focused lane supplements, and does not replace or relax, the repository's
 mandatory workspace governance, formatting, lint and certification gates.

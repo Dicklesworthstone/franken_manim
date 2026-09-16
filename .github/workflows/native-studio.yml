@@ -48,3 +48,6 @@ jobs:
       - name: Run real native child and HTTP host acceptance
         if: ${{ !cancelled() }}
         run: cargo run --locked -p fmn-studio --example native_live -- --self-test
+      - name: Run real camera child and HTTP host acceptance
+        if: ${{ !cancelled() }}
+        run: cargo run --locked -p fmn-studio --example native_camera -- --self-test
