@@ -142,6 +142,20 @@ The quaternion target is chosen in the source hemisphere, avoiding the zero
 midpoint between equivalent q and -q orientations. Interpolation is normalized
 linear interpolation, not spherical interpolation or constant angular speed.
 
+The existing native Transform default keeps source updaters active. Thus a
+source updater can still change the visible pose after interpolation, while
+the detached target stays fixed. To pause source camera updaters during the
+transition, explicitly set the returned animation's configuration before play:
+
+```rust
+use fmn_anim::Animation;
+let mut movement = rig.animate_to(&mut scene, &destination)?;
+movement.state_mut().config.suspend_mobject_updating = true;
+```
+
+The runnable camera example uses this explicit mode. Normal animation finish
+resumes the source updaters; starting-copy updater behavior is unchanged.
+
 For independent channels, `center()`, `width()`, `orientation()`,
 `field_of_view()` and `light()` return the original tracker handles. Attach
 ordinary native dt-updaters or use them as native Transform targets. Raw
@@ -223,6 +237,7 @@ editing history, and both real-child/HTTP self-tests. Camera-motion tests compar
 every PNG against ordinary Scene playback at 8 and 30 fps, check fixed-frame
 invariance and 1/4/16-thread equality, repeated reads, invalid input, binding
 changes and camera-callback recovery. Transition tests cover opposite-quaternion
-signs, updater-free targets and pre-allocation refusal. These tests supplement,
-not replace, mandatory workspace governance, formatting, lint and certification.
-A focused execution pass is not a full-workspace gate pass.
+signs, updater-free targets under both suspension modes, and pre-allocation
+refusal. These tests supplement, not replace, mandatory workspace governance,
+formatting, lint and certification. A focused execution pass is not a
+full-workspace gate pass.

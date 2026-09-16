@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use fmn_anim::rotate;
+use fmn_anim::{Animation, rotate};
 use fmn_cache::{NamespacePolicy, Store, StoreConfig};
 use fmn_core::color::LinearRgba;
 use fmn_core::constants::PI;
@@ -125,7 +125,11 @@ fn program() -> std::result::Result<NativeSceneProgram, ServiceError> {
     destination.frame.set_euler_angles(Some(0.25), Some(1.1), Some(0.0)).map_err(error)?;
     destination.light_source_position = [4.0, 6.0, 10.0];
     // The camera and surface share one Play and one ordinary native clock.
-    let movement = rig.animate_to(&mut scene, &destination).map_err(error)?;
+    let mut movement = rig.animate_to(&mut scene, &destination).map_err(error)?;
+    // Transform leaves source updaters active by default. This authored
+    // transition deliberately pauses them, then lets the normal finish resume
+    // the camera drift during the following wait.
+    movement.state_mut().config.suspend_mobject_updating = true;
     let mut ticks = 0_u32;
     scene.stage_mut().add_dt_updater(rig.center()[0], move |stage, x, dt| {
         ticks += 1;

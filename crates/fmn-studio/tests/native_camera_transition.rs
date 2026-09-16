@@ -3,6 +3,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use fmn_anim::Animation;
 use fmn_render::CameraConfig;
 use fmn_scene::studio_bridge::FramePacket;
 use fmn_scene::{CameraRig, CaptureReason, IntegrationError, PlayOverrides, RuntimeConfig, Scene, SceneSink};
@@ -43,22 +44,42 @@ fn equivalent_opposite_quaternions_do_not_interpolate_through_a_zero_orientation
 
 #[test]
 fn target_pose_does_not_inherit_source_updaters() {
-    let base = CameraConfig::default();
-    let mut scene = Scene::new(RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 23).unwrap();
-    let rig = CameraRig::new(&mut scene, &base).unwrap();
-    let calls = Rc::new(Cell::new(0));
-    let seen = Rc::clone(&calls);
-    scene.stage_mut().add_updater(rig.width(), move |stage, width| {
-        seen.set(seen.get() + 1);
-        stage.set_tracker_value(width, stage.tracker_value(width).unwrap() + 0.1).unwrap();
-    }, false).unwrap();
-    let mut target = base.clone(); target.frame.set_width(2.0).unwrap();
-    let animation = rig.animate_to(&mut scene, &target).unwrap();
-    let mut captures = Captures::default();
-    scene.play(vec![Box::new(animation)], PlayOverrides { run_time: Some(0.5), ..PlayOverrides::default() }, &mut captures).unwrap();
-    let last = rig.sample(&captures.0.last().unwrap().materialize_stage(), &base).unwrap();
-    assert_eq!(last.frame.width(), 2.0, "callbacks must not move the destination");
-    assert!(calls.get() > 0, "source updater resumes through the ordinary lifecycle");
+    for suspend in [false, true] {
+        let base = CameraConfig::default();
+        let mut scene = Scene::new(RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 23).unwrap();
+        let rig = CameraRig::new(&mut scene, &base).unwrap();
+        let source_width = rig.width();
+        let source_calls = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&source_calls);
+        scene.stage_mut().add_updater(source_width, move |stage, width| {
+            // Starting-copy callbacks retain their ordinary native semantics;
+            // count the live source separately from those animation helpers.
+            if width == source_width { seen.set(seen.get() + 1); }
+            stage.set_tracker_value(width, stage.tracker_value(width).unwrap() + 0.1).unwrap();
+        }, false).unwrap();
+        let mut target = base.clone(); target.frame.set_width(2.0).unwrap();
+        let mut animation = rig.animate_to(&mut scene, &target).unwrap();
+        assert!(!animation.state().config.suspend_mobject_updating,
+            "the helper must preserve the existing Transform default");
+        animation.state_mut().config.suspend_mobject_updating = suspend;
+        let target_root = animation.preflight_mobjects()[1];
+        let target_width = scene.stage().get(target_root).unwrap().submobjects()[3];
+        let mut captures = Captures::default();
+        scene.play(vec![Box::new(animation)], PlayOverrides { run_time: Some(0.5), ..PlayOverrides::default() }, &mut captures).unwrap();
+        // Inspect the destination itself, not the live source after its scene
+        // updater phase. Only the latter is supposed to drift when unsuspended.
+        for packet in &captures.0 {
+            let stage = packet.materialize_stage();
+            assert_eq!(stage.tracker_value(target_width), Some(2.0),
+                "callbacks must never move the detached destination");
+        }
+        assert_eq!(scene.stage().tracker_value(target_width), Some(2.0));
+        let last = rig.sample(&captures.0.last().unwrap().materialize_stage(), &base).unwrap();
+        assert_eq!(last.frame.width(), if suspend { 2.0 } else { 2.1 },
+            "source updater execution follows the explicit suspension setting");
+        assert!(!scene.stage().is_updating_suspended(rig.root()));
+        assert!(source_calls.get() > 0, "source callbacks remain usable after completion");
+    }
 }
 
 #[test]
