@@ -11,12 +11,15 @@ use fmn_scene::{
 
 use crate::{InteractiveDispatch, InteractivePreview, ServiceError, SpanRegistry, WorkerErrorCode};
 
-/// Maximum number of declarative segments admitted by one native program.
+use super::{NativeBuild, NativeBuildContext};
+
+/// Maximum cumulative segments admitted by one native program, including
+/// deferred construction and every segment it generates, not just queue length.
 pub const MAX_NATIVE_SEGMENTS: usize = 65_536;
 
-/// A native animation or wait, executed by the ordinary Scene frame machinery.
+/// A native animation, wait, or deferred authoring step.
 ///
-/// Animation values and updater closures belong to one program instance. A
+/// Animation values and callback closures belong to one program instance. A
 /// replay factory must construct fresh values, not clone their mutable captures.
 pub enum NativeSegment {
     /// Play the supplied animations together with the ordinary timing overrides.
@@ -30,6 +33,12 @@ pub enum NativeSegment {
     Wait {
         /// Duration in seconds; sampling stays on the Scene's rational grid.
         duration: Option<f64>,
+    },
+    /// Run one-shot native construction after preceding segment epilogues.
+    /// Prefer `defer`, `edit`, or `play_with` for ergonomic construction.
+    Build {
+        /// Owned callback; returned segments run before the queued continuation.
+        build: NativeBuild,
     },
 }
 
@@ -96,11 +105,10 @@ impl SceneSink for CaptureOne {
 
 /// A live, pausable native scene with its animations, callbacks and input owner.
 ///
-/// Frame zero is the constructed state before playback. Subsequent indices are
-/// the actual rational clock indices of Scene captures, not clock relabels.
-/// Only one capture is retained per step; an entire movie is never buffered.
-/// Empty/zero-duration segments complete through the engine between captures.
-/// Pausing at a capture does not prematurely run segment-finalization callbacks.
+/// Frame zero is the factory's constructed state; leading deferred steps run
+/// only when advancing toward the first capture. Subsequent indices are actual
+/// rational clock indices, not clock relabels. At most one capture is retained
+/// per step. Pausing never runs later construction or a segment epilogue early.
 /// An optional CameraRig lives in the same snapshotted Stage as the geometry.
 pub struct NativeSceneProgram {
     preview: InteractivePreview,
@@ -111,10 +119,13 @@ pub struct NativeSceneProgram {
     failed: bool,
     spans: SpanRegistry,
     camera_rig: Option<CameraRig>,
+    admitted_segments: usize,
+    started_segments: usize,
+    segment_limit: usize,
 }
 
 impl NativeSceneProgram {
-    /// Adopt an initial native Scene and a bounded declarative schedule.
+    /// Adopt an initial native Scene and a bounded schedule.
     ///
     /// Skip/range/presenter modes are refused: they do not have the one-capture
     /// per rational-clock-step contract required by interactive seeking.
@@ -150,6 +161,7 @@ impl NativeSceneProgram {
             return Err(invalid("native program exceeds its segment or clock limit"));
         }
         let preview = InteractivePreview::from_interactive(scene).map_err(execution_error)?;
+        let admitted_segments = segments.len();
         Ok(Self {
             preview,
             segments: segments.into(),
@@ -159,7 +171,23 @@ impl NativeSceneProgram {
             failed: false,
             spans: SpanRegistry::new(),
             camera_rig: None,
+            admitted_segments,
+            started_segments: 0,
+            segment_limit: MAX_NATIVE_SEGMENTS,
         })
+    }
+
+    /// Tighten cumulative schedule admission before execution. Every deferred
+    /// step and every returned segment spends one slot for the program's entire
+    /// lifetime. Recursive expansion cannot evade the limit by keeping a short
+    /// pending queue. Zero permits only an initially empty schedule.
+    pub fn with_segment_limit(mut self, limit: usize) -> Result<Self, ServiceError> {
+        self.require_healthy()?;
+        if self.started_segments != 0 || limit > MAX_NATIVE_SEGMENTS || limit < self.admitted_segments {
+            return Err(invalid("native segment limit must cover the initial schedule and be set before execution"));
+        }
+        self.segment_limit = limit;
+        Ok(self)
     }
 
     /// Bind one native camera family before the first segment starts. The rig
@@ -168,7 +196,7 @@ impl NativeSceneProgram {
     /// as well; its resolution, aspect and capture policy remain authoritative.
     pub fn with_camera_rig(mut self, rig: CameraRig) -> Result<Self, ServiceError> {
         self.require_healthy()?;
-        if self.frame != 0 || self.active.is_some() || self.camera_rig.is_some()
+        if self.frame != 0 || self.started_segments != 0 || self.active.is_some() || self.camera_rig.is_some()
             || self.preview.scene().play_count() != 0
         {
             return Err(invalid("bind a camera rig once, before native playback"));
@@ -207,21 +235,23 @@ impl NativeSceneProgram {
     #[must_use]
     pub fn preview(&self) -> &InteractivePreview { &self.preview }
 
-    /// Source spans bound by the factory to this instance's original handles.
+    /// Source spans bound to this instance's original handles.
     #[must_use]
     pub fn spans(&self) -> &SpanRegistry { &self.spans }
 
-    /// Bind source spans while constructing the program.
+    /// Bind source spans while constructing the program. Deferred constructors
+    /// can register their spans through NativeBuildContext as well.
     pub fn spans_mut(&mut self) -> &mut SpanRegistry { &mut self.spans }
 
     /// Dispatch native editing or application input at the paused boundary.
-    /// A failed callback boundary poisons the program until its owner rebuilds.
+    /// Failure or unwinding poisons the program until its owner rebuilds it.
     pub fn dispatch(&mut self, event: EventPayload) -> Result<InteractiveDispatch, ServiceError> {
         self.require_healthy()?;
         event.validate().map_err(|error| invalid(error.to_string()))?;
+        self.failed = true;
         let result = self.preview.dispatch(event).map_err(execution_error)
             .and_then(|receipt| { self.validate_camera()?; Ok(receipt) });
-        self.failed |= result.is_err();
+        self.failed = result.is_err();
         result
     }
 
@@ -234,19 +264,20 @@ impl NativeSceneProgram {
     }
 
     /// Execute the next ordinary native capture, retaining executable state for
-    /// the next call. Execution errors poison the cursor instead of reusing partial
-    /// work. At the frame limit, admission fails before any finalization or new
-    /// segment prologue runs; the last captured state remains available.
+    /// the next call. At the frame limit, refusal happens before any epilogue or
+    /// deferred callback. Errors and panics poison the cursor: a caller catching
+    /// an unwind cannot accidentally reuse partially consumed authoring work.
     pub fn next_frame(&mut self) -> Result<Option<FramePacket>, ServiceError> {
         self.require_healthy()?;
         if self.frame >= self.frame_limit {
             return Err(invalid("native execution reached its frame budget"));
         }
+        self.failed = true;
         let result = self.next_frame_inner().and_then(|packet| {
             self.validate_camera()?;
             Ok(packet)
         });
-        self.failed |= result.is_err();
+        self.failed = result.is_err();
         result
     }
 
@@ -273,10 +304,23 @@ impl NativeSceneProgram {
         }
     }
 
+    fn prepend(&mut self, segments: Vec<NativeSegment>) -> Result<(), ServiceError> {
+        let admitted = self.admitted_segments.checked_add(segments.len())
+            .filter(|count| *count <= self.segment_limit)
+            .ok_or_else(|| invalid("deferred native construction exceeded its cumulative segment budget"))?;
+        self.segments.try_reserve(segments.len()).map_err(execution_error)?;
+        for segment in segments.into_iter().rev() {
+            self.segments.push_front(segment);
+        }
+        self.admitted_segments = admitted;
+        Ok(())
+    }
+
     fn next_frame_inner(&mut self) -> Result<Option<FramePacket>, ServiceError> {
         loop {
             if self.active.is_none() {
                 let Some(segment) = self.segments.pop_front() else { return Ok(None); };
+                self.started_segments += 1;
                 self.active = match segment {
                     NativeSegment::Play { animations, overrides } => self.preview.scene_mut()
                         .begin_stepped_play(animations, overrides, &mut NullSceneSink)
@@ -285,6 +329,15 @@ impl NativeSceneProgram {
                         self.preview.scene_mut().begin_stepped_wait(duration, &mut NullSceneSink)
                             .map_err(execution_error)?,
                     )),
+                    NativeSegment::Build { build } => {
+                        let generated = build(&mut NativeBuildContext {
+                            scene: self.preview.scene_mut(),
+                            spans: &mut self.spans,
+                        }).map_err(execution_error)?;
+                        self.validate_camera()?;
+                        self.prepend(generated)?;
+                        None
+                    }
                 };
                 continue;
             }
