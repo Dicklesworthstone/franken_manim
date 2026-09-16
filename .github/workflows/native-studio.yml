@@ -6,6 +6,7 @@ on:
     paths:
       - 'crates/fmn-studio/**'
       - 'crates/fmn-scene/**'
+      - 'scripts/check_native_project_host.py'
       - '.github/workflows/native-studio.yml'
   workflow_dispatch:
 
@@ -56,3 +57,8 @@ jobs:
         run: |
           cargo test --locked -p fmn-studio --features native-build --test project_cargo --test project_cargo_config -- --nocapture
           cargo build --locked -p fmn-studio --features native-build --example native_project
+      - name: Exercise automatic source watching in the actual project host
+        run: |
+          python3 scripts/check_native_project_host.py \
+            --host target/pg5/debug/examples/native_project \
+            --cargo "$(rustup which cargo)"

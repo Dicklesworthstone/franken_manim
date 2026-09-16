@@ -133,8 +133,13 @@ fn run() -> Result<()> {
     eprintln!("Watching declared source paths. Browser Restart also rebuilds. Press Enter here to stop.");
     let stop = Arc::new(AtomicBool::new(false));
     let input_stop = Arc::clone(&stop);
+    let input_frames = frames.clone();
     std::thread::Builder::new().name("project-studio-stop".into()).spawn(move || {
-        let _ = std::io::stdin().read_line(&mut String::new()); input_stop.store(true, Ordering::Release);
+        let _ = std::io::stdin().read_line(&mut String::new());
+        // Wake idle multipart readers before serve_until joins their threads.
+        // Closing only after serve_until returns would wait out every idle timeout.
+        input_frames.close();
+        input_stop.store(true, Ordering::Release);
     })?;
     let watch_stop = Arc::clone(&stop);
     let thread = std::thread::Builder::new().name("project-studio-source-watch".into()).spawn(move || {
@@ -160,8 +165,9 @@ fn run() -> Result<()> {
     })?;
     let result = host.serve_until(&stop);
     stop.store(true, Ordering::Release);
+    frames.close();
     let _ = thread.join();
-    frames.close(); session.shutdown_worker();
+    session.shutdown_worker();
     // No image is removed while a supervisor may still restart it.
     drop(host); drop(session);
     if let Some(directory) = published_directory { std::fs::remove_dir_all(directory)?; }

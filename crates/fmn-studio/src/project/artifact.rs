@@ -45,7 +45,7 @@ impl ArtifactStore {
             // follow an attacker-created candidate symlink. This is not a
             // sandbox against a hostile owner of the supplied parent directory.
             for _ in 0..128 {
-                let id = NEXT_DIRECTORY.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                let id = NEXT_DIRECTORY.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                     .map_err(|_| fail("worker-image namespace exhausted"))?;
                 let directory = self.parent.join(format!("fmn-worker-{}-{id}", std::process::id()));
                 let mut builder = fs::DirBuilder::new();
