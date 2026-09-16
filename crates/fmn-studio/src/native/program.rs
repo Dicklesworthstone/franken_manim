@@ -2,10 +2,11 @@
 
 use std::collections::VecDeque;
 
+use fmn_render::CameraConfig;
 use fmn_scene::studio_bridge::{Animation, FramePacket};
 use fmn_scene::{
-    CaptureReason, EventPayload, IntegrationError, InteractiveScene, NullSceneSink, PlayOverrides,
-    Scene, SceneError, SceneSink, SteppedPlay, SteppedWait,
+    CameraRig, CaptureReason, EventPayload, IntegrationError, InteractiveScene, NullSceneSink,
+    PlayOverrides, Scene, SceneError, SceneSink, SteppedPlay, SteppedWait,
 };
 
 use crate::{InteractiveDispatch, InteractivePreview, ServiceError, SpanRegistry, WorkerErrorCode};
@@ -96,10 +97,11 @@ impl SceneSink for CaptureOne {
 /// A live, pausable native scene with its animations, callbacks and input owner.
 ///
 /// Frame zero is the constructed state before playback. Subsequent indices are
-/// the *actual rational clock indices* of Scene captures, not clock relabels.
+/// the actual rational clock indices of Scene captures, not clock relabels.
 /// Only one capture is retained per step; an entire movie is never buffered.
 /// Empty/zero-duration segments complete through the engine between captures.
 /// Pausing at a capture does not prematurely run segment-finalization callbacks.
+/// An optional CameraRig lives in the same snapshotted Stage as the geometry.
 pub struct NativeSceneProgram {
     preview: InteractivePreview,
     segments: VecDeque<NativeSegment>,
@@ -108,6 +110,7 @@ pub struct NativeSceneProgram {
     frame_limit: u64,
     failed: bool,
     spans: SpanRegistry,
+    camera_rig: Option<CameraRig>,
 }
 
 impl NativeSceneProgram {
@@ -155,53 +158,78 @@ impl NativeSceneProgram {
             frame_limit,
             failed: false,
             spans: SpanRegistry::new(),
+            camera_rig: None,
         })
+    }
+
+    /// Bind one native camera family before the first segment starts. The rig
+    /// must belong to this Scene. Binding never executes an updater, and cannot
+    /// be replaced partway through a program. Select CameraConfig on the worker
+    /// as well; its resolution, aspect and capture policy remain authoritative.
+    pub fn with_camera_rig(mut self, rig: CameraRig) -> Result<Self, ServiceError> {
+        self.require_healthy()?;
+        if self.frame != 0 || self.active.is_some() || self.camera_rig.is_some()
+            || self.preview.scene().play_count() != 0
+        {
+            return Err(invalid("bind a camera rig once, before native playback"));
+        }
+        rig.sample(self.preview.stage(), &CameraConfig::default()).map_err(execution_error)?;
+        self.camera_rig = Some(rig);
+        Ok(self)
+    }
+
+    /// Original tracker handles for the optional camera. Values are sampled
+    /// from captured native state, never from a renderer-side timing callback.
+    #[must_use]
+    pub const fn camera_rig(&self) -> Option<CameraRig> { self.camera_rig }
+
+    pub(super) fn camera_binding_index(&self) -> Result<Option<u64>, ServiceError> {
+        self.camera_rig.map(|rig| rig.binding_index(self.preview.stage()).map_err(execution_error)).transpose()
+    }
+
+    fn validate_camera(&self) -> Result<(), ServiceError> {
+        if let Some(rig) = self.camera_rig {
+            rig.sample(self.preview.stage(), &CameraConfig::default()).map_err(execution_error)?;
+        }
+        Ok(())
     }
 
     /// Latest completed capture, or zero for the initial constructed state.
     #[must_use]
-    pub const fn frame_index(&self) -> u64 {
-        self.frame
-    }
+    pub const fn frame_index(&self) -> u64 { self.frame }
 
     /// Highest admitted capture index (zero is always available initially).
     #[must_use]
-    pub const fn frame_limit(&self) -> u64 {
-        self.frame_limit
-    }
+    pub const fn frame_limit(&self) -> u64 { self.frame_limit }
 
     /// The actual Scene/editor owner; its clock and callbacks are never rebuilt
     /// from a callable-free durable snapshot.
     #[must_use]
-    pub fn preview(&self) -> &InteractivePreview {
-        &self.preview
-    }
+    pub fn preview(&self) -> &InteractivePreview { &self.preview }
 
     /// Source spans bound by the factory to this instance's original handles.
     #[must_use]
-    pub fn spans(&self) -> &SpanRegistry {
-        &self.spans
-    }
+    pub fn spans(&self) -> &SpanRegistry { &self.spans }
 
     /// Bind source spans while constructing the program.
-    pub fn spans_mut(&mut self) -> &mut SpanRegistry {
-        &mut self.spans
-    }
+    pub fn spans_mut(&mut self) -> &mut SpanRegistry { &mut self.spans }
 
     /// Dispatch native editing or application input at the paused boundary.
     /// A failed callback boundary poisons the program until its owner rebuilds.
     pub fn dispatch(&mut self, event: EventPayload) -> Result<InteractiveDispatch, ServiceError> {
         self.require_healthy()?;
         event.validate().map_err(|error| invalid(error.to_string()))?;
-        let result = self.preview.dispatch(event).map_err(execution_error);
+        let result = self.preview.dispatch(event).map_err(execution_error)
+            .and_then(|receipt| { self.validate_camera()?; Ok(receipt) });
         self.failed |= result.is_err();
         result
     }
 
-    /// Capture the actual Scene clock, RNG and Stage; no synthetic RNG fork or
-    /// journal-position-as-play-count is substituted for runtime state.
+    /// Capture the actual Scene clock, RNG and Stage, including rig channels.
+    /// Invalid camera values cannot become successful checkpoint receipts.
     pub fn state_bytes(&mut self) -> Result<Vec<u8>, ServiceError> {
         self.require_healthy()?;
+        self.validate_camera()?;
         self.preview.scene_mut().state_bytes().map_err(execution_error)
     }
 
@@ -214,7 +242,10 @@ impl NativeSceneProgram {
         if self.frame >= self.frame_limit {
             return Err(invalid("native execution reached its frame budget"));
         }
-        let result = self.next_frame_inner();
+        let result = self.next_frame_inner().and_then(|packet| {
+            self.validate_camera()?;
+            Ok(packet)
+        });
         self.failed |= result.is_err();
         result
     }
@@ -245,9 +276,7 @@ impl NativeSceneProgram {
     fn next_frame_inner(&mut self) -> Result<Option<FramePacket>, ServiceError> {
         loop {
             if self.active.is_none() {
-                let Some(segment) = self.segments.pop_front() else {
-                    return Ok(None);
-                };
+                let Some(segment) = self.segments.pop_front() else { return Ok(None); };
                 self.active = match segment {
                     NativeSegment::Play { animations, overrides } => self.preview.scene_mut()
                         .begin_stepped_play(animations, overrides, &mut NullSceneSink)

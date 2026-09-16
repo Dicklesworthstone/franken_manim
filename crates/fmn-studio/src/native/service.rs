@@ -45,11 +45,12 @@ pub struct NativeWorkerConfig {
     pub fps: u32,
     /// The existing retained CPU renderer's complete policy.
     pub renderer: RetainedFrameRendererConfig,
-    /// Optional fixed camera for mixed vectors, surfaces, images and dot clouds.
+    /// Optional base camera for mixed vectors, surfaces, images and dot clouds.
+    /// A program CameraRig overrides pose, zoom, FOV and light at each capture.
     /// Resolution, background and FPS must agree with the worker policy. This
     /// uses Lumen's certified camera CPU route, not an affine or annex engine.
-    /// Camera parameters are bound into journal reads and frame provenance.
-    /// Browser editing and affine overlays remain disabled on this route until
+    /// Base parameters and the rig binding are journaled; animated values live
+    /// in SceneState. Browser editing and affine overlays remain disabled until
     /// they have a camera-aware coordinate mapping.
     pub camera: Option<CameraConfig>,
     /// Canonical IPC and document limits; the handshake can only reduce them.
@@ -78,17 +79,9 @@ impl NativeWorkerConfig {
         renderer: RetainedFrameRendererConfig,
     ) -> Self {
         Self {
-            scene: scene.into(),
-            build_id,
-            source_digest,
-            frame_count,
-            fps,
-            renderer,
-            camera: None,
-            limits: ProtocolLimits::default(),
-            checkpoint_frames: 30,
-            replay: NativeReplayPolicy::Disabled,
-            max_replay_frames: 1_000_000,
+            scene: scene.into(), build_id, source_digest, frame_count, fps, renderer,
+            camera: None, limits: ProtocolLimits::default(), checkpoint_frames: 30,
+            replay: NativeReplayPolicy::Disabled, max_replay_frames: 1_000_000,
             max_pixels: 16_777_216,
         }
     }
@@ -105,7 +98,7 @@ impl NativeWorkerConfig {
 /// the same live arena on either route; affine overlays and editing refuse for
 /// camera captures rather than misinterpreting perspective pixels as world XY.
 ///
-/// The factory must create independent callback state on *every* invocation.
+/// The factory must create independent callback state on every invocation.
 /// It is invoked inside the disposable worker, not inside the UI supervisor.
 /// Native callbacks may panic; `serve_worker` supplies the crash boundary.
 /// This implementation does not claim constant-time or warm callback recovery.
@@ -115,6 +108,7 @@ pub struct NativeSceneWorker {
     program: Option<NativeSceneProgram>,
     preview_clean: bool,
     raster: NativeRaster,
+    camera_binding: Option<u64>,
     reads: Vec<AssetRead>,
     position: u64,
     last_hash: Option<ProtocolDigest>,
@@ -131,12 +125,8 @@ impl NativeSceneWorker {
         crate::protocol::studio_seek_command(&config.scene, 0).map_err(execution_error)?;
         let viewport = config.renderer.frame.viewport;
         let pixels = u64::from(viewport.width) * u64::from(viewport.height);
-        if config.frame_count == 0
-            || config.frame_count > i64::MAX.cast_unsigned()
-            || config.fps == 0
-            || config.checkpoint_frames == 0
-            || pixels == 0
-            || pixels > config.max_pixels
+        if config.frame_count == 0 || config.frame_count > i64::MAX.cast_unsigned()
+            || config.fps == 0 || config.checkpoint_frames == 0 || pixels == 0 || pixels > config.max_pixels
         {
             return Err(invalid("invalid native worker frame, clock, checkpoint or pixel budget"));
         }
@@ -154,40 +144,47 @@ impl NativeSceneWorker {
         ];
         crate::InspectorView::new(0, config.frame_count, config.fps,
             viewport, config.renderer.frame.map, config.camera.is_none()).map_err(execution_error)?;
-        let raster = NativeRaster::new(config.renderer, config.camera.clone())?;
+        let mut raster = NativeRaster::new(config.renderer, config.camera.clone())?;
         if config.camera.is_some() {
-            // Configuration-only camera/light changes must invalidate replay
-            // even when source code and serialized geometry are unchanged.
             reads.push(AssetRead {
-                path: "native/camera-capture-policy".into(),
-                digest: raster.backend()?.digest(),
+                path: "native/camera-capture-policy".into(), digest: raster.backend()?.digest(),
             });
         }
         let program = factory()?;
         Self::validate_program(&config, &program)?;
+        let camera_binding = program.camera_binding_index()?;
+        raster.bind_camera(camera_binding)?;
+        if camera_binding.is_some() {
+            reads.push(AssetRead {
+                path: "native/camera-rig-binding".into(), digest: raster.backend()?.digest(),
+            });
+        }
         Ok(Self {
-            config, factory: Box::new(factory), program: Some(program), preview_clean: true, raster, reads,
-            position: 0, last_hash: None, last_checkpoint: None, tail: Vec::new(),
+            config, factory: Box::new(factory), program: Some(program), preview_clean: true,
+            raster, camera_binding, reads, position: 0, last_hash: None,
+            last_checkpoint: None, tail: Vec::new(),
         })
     }
 
     /// The current paused owner, when a failed input/render has not invalidated
     /// it. A successful seek reconstructs it without changing the replay journal.
     #[must_use]
-    pub fn program(&self) -> Option<&NativeSceneProgram> {
-        self.program.as_ref()
-    }
+    pub fn program(&self) -> Option<&NativeSceneProgram> { self.program.as_ref() }
 
     fn new_raster(&self) -> Result<NativeRaster, ServiceError> {
-        NativeRaster::new(self.config.renderer, self.config.camera.clone())
+        let mut raster = NativeRaster::new(self.config.renderer, self.config.camera.clone())?;
+        raster.bind_camera(self.camera_binding)?;
+        Ok(raster)
     }
 
     fn validate_program(config: &NativeWorkerConfig, program: &NativeSceneProgram) -> Result<(), ServiceError> {
-        if program.frame_index() != 0
-            || program.frame_limit() != config.frame_count - 1
+        if program.frame_index() != 0 || program.frame_limit() != config.frame_count - 1
             || program.preview().scene().fps() != config.fps
         {
             return Err(invalid("native factory disagrees with its initial-frame, length or fps contract"));
+        }
+        if program.camera_rig().is_some() && config.camera.is_none() {
+            return Err(invalid("camera rig requires an explicit worker CameraConfig"));
         }
         Ok(())
     }
@@ -203,13 +200,16 @@ impl NativeSceneWorker {
     fn fresh_at(&self, frame: u64) -> Result<NativeSceneProgram, ServiceError> {
         let mut program = (self.factory)()?;
         Self::validate_program(&self.config, &program)?;
+        // CameraRig role binding is part of the executable factory contract,
+        // not inferable from geometry equality or callback-free state bytes.
+        if program.camera_binding_index()? != self.camera_binding {
+            return Err(invalid("native factory changed its camera rig binding"));
+        }
         program.advance_to(frame)?;
         Ok(program)
     }
 
     fn checked(&self, response: WorkerResponse) -> Result<WorkerResponse, ServiceError> {
-        // Validate the *entire encoded envelope*, not just inner payload lengths,
-        // before making a state transition observable to the supervisor.
         let envelope = ResponseEnvelope { request_id: 1, response };
         let _ = envelope.to_bytes(self.config.limits).map_err(execution_error)?;
         Ok(envelope.response)
@@ -225,8 +225,6 @@ impl NativeSceneWorker {
     fn effect(&self) -> EffectClass {
         match self.config.replay {
             NativeReplayPolicy::Disabled => EffectClass::Opaque,
-            // Even an attested factory is never advertised as frame-parallel
-            // pure. Its native callback/animation front end remains serial.
             NativeReplayPolicy::ColdVerified => EffectClass::Stateful(vec![ImpureEffectTag::UnclassifiedAnimation]),
         }
     }
@@ -240,9 +238,7 @@ impl NativeSceneWorker {
 
     fn seek(&mut self, frame: i64) -> Result<WorkerResponse, ServiceError> {
         let frame = self.target(frame)?;
-        if self.preview_clean
-            && self.program.as_ref().is_some_and(|program| program.frame_index() <= frame)
-        {
+        if self.preview_clean && self.program.as_ref().is_some_and(|program| program.frame_index() <= frame) {
             let mut program = self.program.take().ok_or_else(|| invalid("native cursor disappeared"))?;
             program.advance_to(frame)?;
             let response = self.raster.frame(&self.config.scene, &program)?;
@@ -266,8 +262,7 @@ impl NativeSceneWorker {
             return Err(invalid("native camera editing requires camera-aware input projection"));
         }
         let mut program = self.program.take().ok_or_else(|| invalid("seek before sending input to a failed native preview"))?;
-        // Callback captures cannot be rolled back by restoring record bytes.
-        // A failed dispatch/render therefore leaves no reusable preview owner.
+        // Restoring records cannot roll back externally mutable callback state.
         self.preview_clean = false;
         program.dispatch(event)?;
         let response = self.raster.frame(&self.config.scene, &program)?;
@@ -312,8 +307,7 @@ impl NativeSceneWorker {
         self.require_scene(&replay.scene)?;
         self.require_replay(WorkerErrorCode::ReplayFailed)?;
         let refuse = |message| ServiceError::new(WorkerErrorCode::ReplayFailed, message);
-        if replay.from_entry != self.position
-            || replay.from_entry > replay.through_entry
+        if replay.from_entry != self.position || replay.from_entry > replay.through_entry
             || replay.journal.len() > self.config.limits.max_journal_bytes
         {
             return Err(refuse("native replay range or byte budget is invalid"));
@@ -368,8 +362,6 @@ impl NativeSceneWorker {
             if entry.checkpoint.is_some() { last_checkpoint = Some(frame); }
             candidate = Some(program);
         }
-        // Keep only an actually executed tail, never the unexecuted suffix
-        // supplied by the caller. Empty replay preserves the existing tail.
         let mut tail = None;
         if let Some(entry) = entries.last() {
             let mut segment = Journal::new();
@@ -407,8 +399,7 @@ impl NativeSceneWorker {
         if decoded.fps != self.config.fps {
             return Err(refuse("native checkpoint uses a different frame clock"));
         }
-        // The decoded snapshot and updater manifest are NEVER installed.
-        // Real execution reconstructs both the visible state and closure state.
+        // Metadata only: recreate native callbacks by executing the factory.
         drop(decoded);
         let mut program = self.fresh_at(frame)?;
         let state = program.state_bytes()?;
