@@ -15,6 +15,8 @@ pub mod interaction;
 pub mod native;
 #[cfg(feature = "metal")]
 pub mod preview;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod project;
 pub mod protocol;
 pub mod scrub;
 pub mod supervisor;

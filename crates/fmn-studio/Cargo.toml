@@ -9,6 +9,8 @@ description = "The Studio"
 [features]
 default = []
 metal = ["fmn-render/metal"]
+# Development-host Cargo rebuilds only, never a scene-visible tool escape.
+native-build = ["fmn-platform/exact-process"]
 
 [dependencies]
 fmn-core.workspace = true
