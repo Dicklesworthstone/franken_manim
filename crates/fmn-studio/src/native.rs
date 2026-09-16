@@ -4,6 +4,7 @@
 //! executable callbacks while paused rather than pretending a durable snapshot
 //! can recreate them.
 
+mod camera;
 mod program;
 mod raster;
 mod service;

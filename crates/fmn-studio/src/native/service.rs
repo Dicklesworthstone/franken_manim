@@ -1,6 +1,6 @@
 //! Concrete native WorkerService, with cold, hash-verified recovery.
 
-use fmn_render::RetainedFrameRendererConfig;
+use fmn_render::{CameraConfig, RetainedFrameRendererConfig};
 use fmn_scene::studio_bridge::{SceneState, Stage};
 use fmn_scene::{AssetRead, CommandRecord, EffectClass, Entry, EventPayload, ImpureEffectTag, Journal};
 
@@ -45,6 +45,13 @@ pub struct NativeWorkerConfig {
     pub fps: u32,
     /// The existing retained CPU renderer's complete policy.
     pub renderer: RetainedFrameRendererConfig,
+    /// Optional fixed camera for mixed vectors, surfaces, images and dot clouds.
+    /// Resolution, background and FPS must agree with the worker policy. This
+    /// uses Lumen's certified camera CPU route, not an affine or annex engine.
+    /// Camera parameters are bound into journal reads and frame provenance.
+    /// Browser editing and affine overlays remain disabled on this route until
+    /// they have a camera-aware coordinate mapping.
+    pub camera: Option<CameraConfig>,
     /// Canonical IPC and document limits; the handshake can only reduce them.
     pub limits: ProtocolLimits,
     /// Frame-distance cadence for checkpoint attachment to committed seeks.
@@ -77,6 +84,7 @@ impl NativeWorkerConfig {
             frame_count,
             fps,
             renderer,
+            camera: None,
             limits: ProtocolLimits::default(),
             checkpoint_frames: 30,
             replay: NativeReplayPolicy::Disabled,
@@ -91,10 +99,11 @@ impl NativeWorkerConfig {
 /// Feed this value to [`crate::serve_worker`]. Play records canonical committed
 /// seeks. Clean forward previews resume the retained native program; backward
 /// seeks and seeks after edits reconstruct from a fresh factory. No clock jumps
-/// substitute for execution. At a capture,
-/// Event edits the current paused owner and returns newly rendered PNG pixels.
-/// Edits are deliberately transient: the next seek/recovery reconstructs from
-/// source. Inspection and overlays read that same live arena, including edits.
+/// substitute for execution. At an affine capture, Event edits the current
+/// paused owner and returns newly rendered PNG pixels. Edits are deliberately
+/// transient: the next seek/recovery reconstructs from source. Inspection reads
+/// the same live arena on either route; affine overlays and editing refuse for
+/// camera captures rather than misinterpreting perspective pixels as world XY.
 ///
 /// The factory must create independent callback state on *every* invocation.
 /// It is invoked inside the disposable worker, not inside the UI supervisor.
@@ -131,18 +140,29 @@ impl NativeSceneWorker {
         {
             return Err(invalid("invalid native worker frame, clock, checkpoint or pixel budget"));
         }
+        if config.camera.as_ref().is_some_and(|camera| camera.fps != config.fps) {
+            return Err(invalid("native camera FPS must match the scene clock"));
+        }
         let mut contract = b"fmn-native-studio-v1\0".to_vec();
         contract.extend_from_slice(&config.fps.to_le_bytes());
         contract.extend_from_slice(&config.frame_count.to_le_bytes());
         contract.extend_from_slice(config.scene.as_bytes());
-        let reads = vec![
+        let mut reads = vec![
             AssetRead { path: "native/source-closure".into(), digest: config.source_digest },
             AssetRead { path: "native/worker-build".into(), digest: config.build_id },
             AssetRead { path: "native/capture-contract".into(), digest: protocol_digest(&contract) },
         ];
         crate::InspectorView::new(0, config.frame_count, config.fps,
-            viewport, config.renderer.frame.map, true).map_err(execution_error)?;
-        let raster = NativeRaster::new(config.renderer)?;
+            viewport, config.renderer.frame.map, config.camera.is_none()).map_err(execution_error)?;
+        let raster = NativeRaster::new(config.renderer, config.camera.clone())?;
+        if config.camera.is_some() {
+            // Configuration-only camera/light changes must invalidate replay
+            // even when source code and serialized geometry are unchanged.
+            reads.push(AssetRead {
+                path: "native/camera-capture-policy".into(),
+                digest: raster.backend()?.digest(),
+            });
+        }
         let program = factory()?;
         Self::validate_program(&config, &program)?;
         Ok(Self {
@@ -156,6 +176,10 @@ impl NativeSceneWorker {
     #[must_use]
     pub fn program(&self) -> Option<&NativeSceneProgram> {
         self.program.as_ref()
+    }
+
+    fn new_raster(&self) -> Result<NativeRaster, ServiceError> {
+        NativeRaster::new(self.config.renderer, self.config.camera.clone())
     }
 
     fn validate_program(config: &NativeWorkerConfig, program: &NativeSceneProgram) -> Result<(), ServiceError> {
@@ -227,7 +251,7 @@ impl NativeSceneWorker {
             return Ok(response);
         }
         let program = self.fresh_at(frame)?;
-        let mut raster = NativeRaster::new(self.config.renderer)?;
+        let mut raster = self.new_raster()?;
         let response = raster.frame(&self.config.scene, &program)?;
         let response = self.checked(response)?;
         self.program = Some(program);
@@ -238,6 +262,9 @@ impl NativeSceneWorker {
 
     fn event(&mut self, event: EventPayload) -> Result<WorkerResponse, ServiceError> {
         event.validate().map_err(|error| invalid(error.to_string()))?;
+        if self.config.camera.is_some() {
+            return Err(invalid("native camera editing requires camera-aware input projection"));
+        }
         let mut program = self.program.take().ok_or_else(|| invalid("seek before sending input to a failed native preview"))?;
         // Callback captures cannot be rolled back by restoring record bytes.
         // A failed dispatch/render therefore leaves no reusable preview owner.
@@ -270,7 +297,7 @@ impl NativeSceneWorker {
         let response = self.checked(WorkerResponse::JournalSegment {
             scene: self.config.scene.clone(), start_entry: self.position, journal: journal.clone(),
         })?;
-        let raster = NativeRaster::new(self.config.renderer)?;
+        let raster = self.new_raster()?;
         self.program = Some(program);
         self.preview_clean = true;
         self.raster = raster;
@@ -352,7 +379,7 @@ impl NativeSceneWorker {
         let last_hash = hashes.last().copied().or(self.last_hash);
         let response = self.checked(WorkerResponse::ReplayComplete { from_entry: replay.from_entry, state_hashes: hashes })?;
         if let Some(program) = candidate {
-            let raster = NativeRaster::new(self.config.renderer)?;
+            let raster = self.new_raster()?;
             self.program = Some(program);
             self.preview_clean = true;
             self.raster = raster;
@@ -389,7 +416,7 @@ impl NativeSceneWorker {
             return Err(refuse("native checkpoint does not match fresh callback execution"));
         }
         let response = self.checked(WorkerResponse::Ack { state_hash: Some(checkpoint.state_hash), journal_len: next })?;
-        let raster = NativeRaster::new(self.config.renderer)?;
+        let raster = self.new_raster()?;
         self.program = Some(program);
         self.preview_clean = true;
         self.raster = raster;
