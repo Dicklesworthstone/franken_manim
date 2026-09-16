@@ -364,6 +364,7 @@ pub struct InspectorView {
     pub origin: [f64; 2],
     /// Whether the selected worker implements live input events.
     pub input_events: bool,
+    pub input_revision: Option<u64>,
 }
 
 impl InspectorView {
@@ -391,6 +392,7 @@ impl InspectorView {
             scale: map.scale,
             origin: map.origin,
             input_events,
+            input_revision: None,
         }
         .validate()
     }
@@ -630,6 +632,10 @@ impl InspectorSnapshot {
             push_f64_array(&mut out, &view.origin)?;
             out.push_str(",\"input_events\":")?;
             push_bool(&mut out, view.input_events)?;
+            if let Some(input_revision) = view.input_revision {
+                out.push_str(",\"input_revision\":")?;
+                push_display(&mut out, input_revision)?;
+            }
             out.push('}')?;
         }
         out.push('}')?;

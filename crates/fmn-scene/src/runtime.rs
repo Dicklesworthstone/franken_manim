@@ -849,6 +849,20 @@ impl Scene {
         }
     }
 
+    pub fn seek_interactive_frame(&mut self, frame: i64) -> Result<(), SceneError> {
+        self.ensure_ready()?;
+        if frame < 0 {
+            return Err(SceneError::InvalidState(
+                "interactive frame must be non-negative",
+            ));
+        }
+        let mut clock = RationalFrameClock::new(self.fps()).map_err(AnimError::Clock)?;
+        clock.advance_frames(frame).map_err(AnimError::Clock)?;
+        self.clock = clock;
+        self.sync_stage_time();
+        Ok(())
+    }
+
     /// Events in the exact order and at the exact times they were dispatched.
     #[must_use]
     pub fn recorded_events(&self) -> &[InputEvent] {

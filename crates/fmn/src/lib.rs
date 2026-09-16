@@ -304,6 +304,41 @@ pub mod builtins {
         })
     }
 
+    pub const INTERACTIVE_SCENE_NAME: &str = "interactive.v1";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct InteractiveCanvas;
+
+    impl SceneConstruct for InteractiveCanvas {
+        fn name(&self) -> &str {
+            INTERACTIVE_SCENE_NAME
+        }
+
+        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+            let child = stage.arena_mut().add(
+                Circle::new()
+                    .radius(0.6)
+                    .arc_center([-1.5, 0.0, 0.0])
+                    .color(BLUE),
+            );
+            let group = stage.add(Mobject::new())?;
+            stage.arena_mut().attach(group, child)?;
+            stage.set_fill(child, Some(BLUE), Some(1.0), Some(0.0), true);
+            stage.set_stroke(child, None, Some(0.0), Some(0.0), None, true);
+            let swatch = stage.add(Square::new().side_length(1.0).color(RED))?;
+            stage.shift(swatch, [1.5, 0.0, 0.0]);
+            stage.set_fill(swatch, Some(RED), Some(1.0), Some(0.0), true);
+            stage.set_stroke(swatch, None, Some(0.0), Some(0.0), None, true);
+            stage.wait(2.0)?;
+            Ok(())
+        }
+    }
+
+    #[must_use]
+    pub fn interactive_scene(name: &str) -> Option<InteractiveCanvas> {
+        (name == INTERACTIVE_SCENE_NAME).then_some(InteractiveCanvas)
+    }
+
     fn primitive(index: usize, color: Srgb) -> crate::Result<Mobject> {
         Ok(match index {
             0 | 11 => Circle::new()

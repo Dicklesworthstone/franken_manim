@@ -1342,6 +1342,13 @@ fn studio_drain(mut reader: impl Read) -> Result<usize, std::io::Error> {
 
 impl StudioProcess {
     fn launch(directory: &std::path::Path) -> Result<(Self, StudioEndpoint), ScenarioError> {
+        Self::launch_named(directory, "tex_span.v1")
+    }
+
+    fn launch_named(
+        directory: &std::path::Path,
+        scene: &str,
+    ) -> Result<(Self, StudioEndpoint), ScenarioError> {
         let (ready_send, ready_recv) = std::sync::mpsc::sync_channel(1);
         let (stdout_send, stdout_done) = std::sync::mpsc::sync_channel(1);
         let (stderr_send, stderr_done) = std::sync::mpsc::sync_channel(1);
@@ -1358,7 +1365,7 @@ impl StudioProcess {
                 "--threads",
                 "1",
                 fmn_cli::BUILTIN_SCENE_SOURCE,
-                "tex_span.v1",
+                scene,
             ])
             .current_dir(directory)
             .env_clear()
@@ -1418,7 +1425,7 @@ impl StudioProcess {
         if ready.len() > STUDIO_HEADER_LIMIT || !ready.ends_with(b"\n") {
             return Err(fail("Studio readiness exceeded its bounded line contract"));
         }
-        let endpoint = StudioEndpoint::from_ready(&ready)?;
+        let endpoint = StudioEndpoint::from_ready(&ready, scene)?;
         Ok((process, endpoint))
     }
 
@@ -1482,11 +1489,11 @@ struct StudioEndpoint {
 }
 
 impl StudioEndpoint {
-    fn from_ready(bytes: &[u8]) -> Result<Self, ScenarioError> {
+    fn from_ready(bytes: &[u8], scene: &str) -> Result<Self, ScenarioError> {
         let ready =
             std::str::from_utf8(bytes).map_err(|_| fail("Studio readiness is not UTF-8"))?;
         if !ready.contains("\"kind\":\"studio_ready\"")
-            || !ready.contains("\"scene\":\"tex_span.v1\"")
+            || !ready.contains(&format!("\"scene\":\"{scene}\""))
             || !ready.contains("\"worker_generation\":1")
         {
             return Err(fail("Studio readiness has the wrong production identity"));
@@ -1734,6 +1741,112 @@ fn studio_view(bytes: &[u8], frame: usize) -> Result<(), ScenarioError> {
             "\"view\":{{\"frame_index\":{frame},\"frame_count\":8,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"input_events\":false}}"
         ),
     )
+}
+
+fn studio_interactive_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((30, 1));
+    ctx.record_asset("studio/builtin-source.rs", include_bytes!("../../fmn/src/lib.rs"));
+    let directory = scenario_dir("studio_interactive_lifecycle")?;
+    let (mut process, endpoint) = StudioProcess::launch_named(&directory, "interactive.v1")?;
+    let mut frames = endpoint.stream()?;
+    let initial_png = frames.frame(0, 0)?;
+    let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_contains(&initial, "\"input_events\":true,\"input_revision\":0")?;
+    studio_contains(&initial, "\"parents\":[0]")?;
+    endpoint.request("POST", "/api/scrub", b"frame=0&commit=true", 200)?;
+    if frames.frame(0, 1)? != initial_png {
+        return Err(fail("Native input checkpoint changed the initial image"));
+    }
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "checkpoint"));
+
+    let inputs = [
+        "type=key_press&key=t&modifiers=2",
+        "type=key_release&key=t&modifiers=2",
+        "type=mouse_press&x=-1.5&y=0&button=left&modifiers=2",
+        "type=mouse_release&x=-1.5&y=0&button=left&modifiers=2",
+        "type=key_press&key=arrow_right",
+        "type=key_release&key=arrow_right",
+    ];
+    let mut moved_png = Vec::new();
+    for (index, input) in inputs.iter().enumerate() {
+        let revision = index + 1;
+        let body = format!("{input}&worker_generation=1&frame=0&revision={revision}");
+        endpoint.request("POST", "/api/event", body.as_bytes(), 200)?;
+        moved_png = frames.frame(0, index + 2)?;
+    }
+    let decode = |png: &[u8]| {
+        fmn_codec::decode_png(png, &fmn_codec::PngLimits {
+            max_pixels: 96 * 54,
+            ..Default::default()
+        }).map_err(|_| fail("Native interactive PNG could not be decoded"))
+    };
+    if decode(&initial_png)?.rgba == decode(&moved_png)?.rgba {
+        return Err(fail("Native keyboard movement did not change decoded pixels"));
+    }
+    let moved = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_contains(&moved, "\"input_revision\":7")?;
+    if moved == initial {
+        return Err(fail("Native keyboard movement did not change inspected state"));
+    }
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "edited"));
+
+    for (body, diagnostic) in [
+        ("type=key_press&key=arrow_right&worker_generation=1&frame=0&revision=0", "stale native input revision"),
+        ("type=key_press&key=arrow_right&worker_generation=1&frame=0&revision=7&target=99999", "stale native input object"),
+        ("type=mouse_motion&x=10000000&y=0&dx=0&dy=0&worker_generation=1&frame=0&revision=7", "budget"),
+    ] {
+        let refusal = endpoint.request("POST", "/api/event", body.as_bytes(), 422)?;
+        studio_contains(&refusal, diagnostic)?;
+        if endpoint.request("GET", "/api/inspect", b"", 200)? != moved {
+            return Err(fail("Refused native input mutated inspected state"));
+        }
+    }
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "refused_atomically"));
+
+    endpoint.request("POST", "/api/scrub", b"frame=2&commit=true", 200)?;
+    let committed_png = frames.frame(2, 8)?;
+    if decode(&committed_png)?.rgba != decode(&moved_png)?.rgba {
+        return Err(fail("Scrubbing discarded the native canvas edit"));
+    }
+    let committed = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_contains(&committed, "\"input_revision\":8")?;
+    let restart = endpoint.request("POST", "/api/restart", b"", 200)?;
+    for field in [
+        "\"worker_generation\":2", "\"reused_entries\":1",
+        "\"reexecuted_entries\":7", "\"frame_index\":2",
+    ] {
+        studio_contains(&restart, field)?;
+    }
+    let restored_png = frames.frame(2, 9)?;
+    if decode(&restored_png)?.rgba != decode(&committed_png)?.rgba {
+        return Err(fail("Native input replay changed decoded pixels"));
+    }
+    let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    if restored != committed {
+        return Err(fail("Native input replay changed inspected state"));
+    }
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "restarted"));
+
+    endpoint.request("POST", "/api/event", b"type=key_press&key=arrow_right&worker_generation=2&frame=2&revision=8", 200)?;
+    let continued_png = frames.frame(2, 10)?;
+    if decode(&continued_png)?.rgba == decode(&restored_png)?.rgba {
+        return Err(fail("Native replay lost the interactive selection"));
+    }
+    endpoint.request("POST", "/api/event", b"type=key_press&key=z&modifiers=2&worker_generation=2&frame=2&revision=9", 200)?;
+    let undone_png = frames.frame(2, 11)?;
+    if decode(&undone_png)?.rgba != decode(&restored_png)?.rgba {
+        return Err(fail("Native undo did not restore the replayed image"));
+    }
+    drop(frames);
+    process.finish()?;
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "continued_and_undone"));
+    ctx.counter("studio_interactive_inputs", 8);
+    Ok(RunOutcome::ok()
+        .with_artifact("interactive_initial.png", initial_png)
+        .with_artifact("interactive_replayed.png", restored_png)
+        .with_artifact("interactive_initial_inspector.json", initial)
+        .with_artifact("interactive_replayed_inspector.json", restored)
+        .with_counter("studio_interactive_inputs", 8))
 }
 
 /// The registered native lifecycle crosses the actual shipping executable,
@@ -4232,6 +4345,29 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .collect(),
     ));
     specs.push(spec(
+        "lifecycle.studio_native_interactive.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_interactive_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "interactive_initial.png".to_owned(),
+                "interactive_replayed.png".to_owned(),
+                "interactive_initial_inspector.json".to_owned(),
+                "interactive_replayed_inspector.json".to_owned(),
+            ]),
+            counter_eq("studio_interactive_inputs", 8),
+        ],
+        ["checkpoint", "edited", "refused_atomically", "restarted", "continued_and_undone"]
+            .into_iter()
+            .map(|phase| LogExpect::span_present(
+                "e2e.studio.interactive",
+                vec![FieldPred::str_eq("phase", phase)],
+            ))
+            .collect(),
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_png_sequence.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -5071,6 +5207,16 @@ fn studio_native_worker_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_native_worker.v1")
         .expect("native Studio lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_native_interactive_lifecycle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_native_interactive.v1")
+        .expect("native Studio interactive lifecycle scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

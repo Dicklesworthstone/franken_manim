@@ -137,6 +137,11 @@ impl InteractivePreview {
             });
         }
         scene.scene_mut().stage_mut().restore(&decoded.snapshot);
+        scene.scene_mut().seek_interactive_frame(
+            i64::try_from(frame_index).map_err(|_| {
+                SceneError::InvalidState("interactive frame exceeds i64")
+            })?,
+        )?;
         Ok(Self { frame_index, scene })
     }
 
@@ -163,6 +168,16 @@ impl InteractivePreview {
             sequence,
             dispatched,
         })
+    }
+
+    pub fn seek_frame(
+        &mut self,
+        frame_index: u64,
+        clock_frame: i64,
+    ) -> Result<(), InteractivePreviewError> {
+        self.scene.scene_mut().seek_interactive_frame(clock_frame)?;
+        self.frame_index = frame_index;
+        Ok(())
     }
 
     /// Canonical timeline frame this transient editor was materialized from.

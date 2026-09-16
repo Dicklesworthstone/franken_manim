@@ -74,6 +74,141 @@ pub fn studio_seek_frame(scene: &str, command: &CommandRecord) -> Result<i64, Pr
     Ok(frame)
 }
 
+const STUDIO_INPUT_COMMAND_SCHEMA: Schema = Schema::new(*b"FMNI", 4, 1, 0);
+const STUDIO_INPUT_LABEL_PREFIX: &str = "studio input ";
+const STUDIO_INPUT_DOCUMENT_LIMIT: usize = 1024;
+pub const MAX_STUDIO_INPUT_LABEL_BYTES: usize = 2048;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StudioInput {
+    pub frame: i64,
+    pub revision: u64,
+    pub target: Option<u64>,
+    pub event: EventPayload,
+}
+
+pub fn studio_input_command(
+    scene: &str,
+    input: &StudioInput,
+) -> Result<CommandRecord, ProtocolError> {
+    require_scene(scene)?;
+    if input.frame < 0 {
+        return Err(ProtocolError::Malformed("negative Studio input frame"));
+    }
+    input
+        .event
+        .validate()
+        .map_err(|_| ProtocolError::Malformed("invalid Studio input event"))?;
+    let mut document = Writer::new(STUDIO_INPUT_COMMAND_SCHEMA);
+    document
+        .put_str(scene)
+        .put_i64(input.frame)
+        .put_u64(input.revision);
+    match input.target {
+        None => {
+            document.put_u8(0);
+        }
+        Some(target) => {
+            document.put_u8(1);
+            document.put_u64(target);
+        }
+    }
+    put_event(&mut document, &input.event);
+    let document = document.finish()?;
+    limit_payload(
+        "Studio input command document",
+        document.len(),
+        STUDIO_INPUT_DOCUMENT_LIMIT,
+    )?;
+    let identity = sha256(&document);
+    let mut label = string_with_capacity(256, "Studio input command label")?;
+    label.push_str(STUDIO_INPUT_LABEL_PREFIX);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in document {
+        label.push(char::from(HEX[usize::from(byte >> 4)]));
+        label.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    limit_payload(
+        "Studio input command label",
+        label.len(),
+        MAX_STUDIO_INPUT_LABEL_BYTES,
+    )?;
+    Ok(CommandRecord {
+        kind: CommandKind::Custom,
+        identity,
+        label,
+    })
+}
+
+pub fn studio_input_payload(
+    scene: &str,
+    command: &CommandRecord,
+) -> Result<StudioInput, ProtocolError> {
+    if command.kind != CommandKind::Custom {
+        return Err(ProtocolError::Malformed("Studio input command kind"));
+    }
+    let hex = command
+        .label
+        .strip_prefix(STUDIO_INPUT_LABEL_PREFIX)
+        .ok_or(ProtocolError::Malformed("Studio input command label"))?;
+    limit_payload(
+        "Studio input command label",
+        command.label.len(),
+        MAX_STUDIO_INPUT_LABEL_BYTES,
+    )?;
+    if hex.len() % 2 != 0
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ProtocolError::Malformed("Studio input command label"));
+    }
+    let mut document = vec_with_capacity(hex.len() / 2, "Studio input command document")?;
+    let bytes = hex.as_bytes();
+    for pair in bytes.chunks_exact(2) {
+        document.push(hex_digit(pair[0])? << 4 | hex_digit(pair[1])?);
+    }
+    let limits = Limits {
+        max_total: STUDIO_INPUT_DOCUMENT_LIMIT,
+        max_field: STUDIO_INPUT_DOCUMENT_LIMIT,
+    };
+    let mut reader = Reader::open(
+        &document,
+        STUDIO_INPUT_COMMAND_SCHEMA,
+        limits,
+        UnknownPolicy::Strict,
+    )?;
+    let decoded_scene = reader.get_str()?;
+    let frame = reader.get_i64()?;
+    let revision = reader.get_u64()?;
+    let target = match reader.get_u8()? {
+        0 => None,
+        1 => Some(reader.get_u64()?),
+        _ => return Err(ProtocolError::Malformed("Studio input target tag")),
+    };
+    let event = get_event(&mut reader)?;
+    reader.finish()?;
+    let decoded = StudioInput {
+        frame,
+        revision,
+        target,
+        event,
+    };
+    let expected = studio_input_command(decoded_scene, &decoded)?;
+    if &expected != command || decoded_scene != scene {
+        return Err(ProtocolError::Malformed("Studio input command identity"));
+    }
+    Ok(decoded)
+}
+
+fn hex_digit(byte: u8) -> Result<u8, ProtocolError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(ProtocolError::Malformed("Studio input command label")),
+    }
+}
+
 /// A live-protocol version.
 ///
 /// fmn-hash already rejects incompatible document schemas.  The explicit
@@ -2157,6 +2292,114 @@ mod studio_command_tests {
         assert!(studio_seek_frame("Demo", &wrong_label).is_err());
         assert!(studio_seek_frame("Other", &command).is_err());
         assert!(studio_seek_command("Demo", -1).is_err());
+    }
+
+    #[test]
+    fn studio_input_command_round_trips_and_binds_all_fields() {
+        let input = StudioInput {
+            frame: 2,
+            revision: 7,
+            target: Some(3),
+            event: EventPayload::MousePress {
+                point: [-1.5, 0.0, 0.0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::PRIMARY,
+            },
+        };
+        let command = studio_input_command("interactive.v1", &input).expect("valid input");
+        assert_eq!(command.kind, CommandKind::Custom);
+        assert!(command.label.starts_with("studio input "));
+        assert!(command.label.len() <= MAX_STUDIO_INPUT_LABEL_BYTES);
+        assert_eq!(
+            studio_input_payload("interactive.v1", &command).expect("decode"),
+            input
+        );
+
+        let keyed = StudioInput {
+            frame: 0,
+            revision: 0,
+            target: None,
+            event: EventPayload::KeyRelease {
+                key: Key::ArrowRight,
+                modifiers: Modifiers::NONE,
+            },
+        };
+        let command = studio_input_command("interactive.v1", &keyed).expect("valid input");
+        assert_eq!(
+            studio_input_payload("interactive.v1", &command).expect("decode"),
+            keyed
+        );
+    }
+
+    #[test]
+    fn studio_input_command_rejects_tampering_and_malformed_labels() {
+        let input = StudioInput {
+            frame: 1,
+            revision: 0,
+            target: None,
+            event: EventPayload::MouseMotion {
+                point: [0.0, 0.0, 0.0],
+                delta: [0.0, 0.0, 0.0],
+                modifiers: Modifiers::NONE,
+            },
+        };
+        let command = studio_input_command("interactive.v1", &input).expect("valid input");
+
+        assert!(studio_input_payload("other.v1", &command).is_err());
+
+        let mut wrong_kind = command.clone();
+        wrong_kind.kind = CommandKind::Wait;
+        assert!(studio_input_payload("interactive.v1", &wrong_kind).is_err());
+
+        let mut wrong_identity = command.clone();
+        wrong_identity.identity = sha256(b"tampered");
+        assert!(studio_input_payload("interactive.v1", &wrong_identity).is_err());
+
+        let mut wrong_label = command.clone();
+        wrong_label.label = "studio input 00".to_owned();
+        assert!(studio_input_payload("interactive.v1", &wrong_label).is_err());
+
+        let mut odd_hex = command.clone();
+        odd_hex.label.push('0');
+        assert!(studio_input_payload("interactive.v1", &odd_hex).is_err());
+
+        let mut upper_hex = command.clone();
+        upper_hex.label = upper_hex.label.to_ascii_uppercase();
+        assert!(studio_input_payload("interactive.v1", &upper_hex).is_err());
+
+        let mut over_budget = command.clone();
+        over_budget.label = format!("studio input {}", "00".repeat(1025));
+        assert!(studio_input_payload("interactive.v1", &over_budget).is_err());
+
+        let mut truncated = command.clone();
+        truncated.label.truncate(truncated.label.len() - 2);
+        assert!(studio_input_payload("interactive.v1", &truncated).is_err());
+
+        assert!(
+            studio_input_command(
+                "interactive.v1",
+                &StudioInput {
+                    frame: -1,
+                    ..input.clone()
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            studio_input_command(
+                "interactive.v1",
+                &StudioInput {
+                    event: EventPayload::MouseMotion {
+                        point: [f64::NAN, 0.0, 0.0],
+                        delta: [0.0, 0.0, 0.0],
+                        modifiers: Modifiers::NONE,
+                    },
+                    ..input
+                },
+            )
+            .is_err()
+        );
+        assert!(studio_input_command("", &input).is_err());
     }
 }
 

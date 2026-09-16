@@ -184,6 +184,136 @@ try {
     assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
     await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
   }
+  studio = await startStudio("interactive.v1");
+  await command("Page.navigate", {url:studio.url.href});
+  await synchronized(0);
+  const interactiveInitial = await inspect();
+  assert.equal(interactiveInitial.view.input_events, true);
+  assert.equal(interactiveInitial.view.input_revision, 0);
+  const nested = interactiveInitial.nodes.find(node => node.parents.length && node.records.count);
+  const swatch = interactiveInitial.nodes.find(node => node.root && node.records.count);
+  assert.ok(nested && swatch, "interactive canvas has a nested object and a color source");
+  await click("#first"); await synchronized(0);
+  await until(async () => (await inspect()).view.input_revision === 1, "initial input checkpoint");
+  await click("#input-events");
+  assert.equal(await evaluate("document.getElementById('input-events').checked"), true);
+  await evaluate("document.getElementById('preview').focus()");
+  async function inputReady(revision) {
+    await until(async () => {
+      if (!await evaluate("!document.getElementById('inspect').disabled && document.getElementById('display').dataset.synchronized === 'true'")) return false;
+      return (await inspect()).view.input_revision >= revision;
+    }, `native input revision ${revision}`);
+    assert.equal(await evaluate("document.getElementById('error').hidden"), true);
+  }
+  async function nativeKey(value, modifiers = 0, types = ["keyDown", "keyUp"]) {
+    const revision = (await inspect()).view.input_revision;
+    const code = value === "ArrowRight" ? "ArrowRight" : "Key" + value.toUpperCase();
+    const windowsVirtualKeyCode = value === "ArrowRight" ? 39 : value.toUpperCase().charCodeAt(0);
+    for (const type of types) await command("Input.dispatchKeyEvent", {type,key:value,code,windowsVirtualKeyCode,modifiers});
+    await inputReady(revision + types.length);
+  }
+  async function nativePointer(point, type = "mouseMoved", modifiers = 0, buttons = 0) {
+    const revision = (await inspect()).view.input_revision;
+    const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[0]}) * r.width / ${interactiveInitial.view.width}, y:r.y + (${point[1]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[1]}) * r.height / ${interactiveInitial.view.height}}; })()`);
+    await command("Input.dispatchMouseEvent", {type,...position,modifiers,buttons,
+      ...(type === "mouseMoved" ? {} : {button:"left",clickCount:1})});
+    await inputReady(revision + 1);
+  }
+  async function pixelHash() {
+    return evaluate("(async () => { const c=document.getElementById('preview'); const bytes=c.getContext('2d').getImageData(0,0,c.width,c.height).data; return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join(''); })()");
+  }
+  const initialPixels = await pixelHash();
+  await nativeKey("t", 2);
+  await nativePointer([-1.5,0]);
+  await nativePointer([-1.5,0], "mousePressed", 2, 1);
+  await nativePointer([-1.5,0], "mouseReleased", 2);
+  let edited = await inspect();
+  assert.equal(edited.nodes.find(node => node.id === nested.id).animating, true, "nested selection reaches native state");
+  await nativeKey("g", 0, ["keyDown"]);
+  await nativePointer([-1.5,0], "mousePressed", 0, 1);
+  await nativePointer([-0.75,0.25], "mouseMoved", 0, 1);
+  await nativePointer([-0.75,0.25], "mouseReleased");
+  await nativeKey("g", 0, ["keyUp"]);
+  edited = await inspect();
+  let child = edited.nodes.find(node => node.id === nested.id);
+  assert.ok(Math.abs(child.bounds[1][0] + 0.75) < 1e-5 && Math.abs(child.bounds[1][1] - 0.25) < 1e-5, "grab moves the nested object to the requested coordinates");
+  assert.deepEqual(edited.nodes.find(node => node.id === swatch.id).bounds, swatch.bounds, "editing one child preserves its sibling");
+  assert.notEqual(await pixelHash(), initialPixels, "native drag changes decoded rendered pixels");
+  const width = child.bounds[2][0] - child.bounds[0][0];
+  await nativePointer([-0.15,0.25]);
+  await nativeKey("t", 0, ["keyDown"]);
+  await nativePointer([0.15,0.25]);
+  await nativeKey("t", 0, ["keyUp"]);
+  child = (await inspect()).nodes.find(node => node.id === nested.id);
+  assert.ok(Math.abs((child.bounds[2][0] - child.bounds[0][0]) / width - 1.5) < 1e-4, "native resize follows the pointer ratio");
+  const resizedPixels = await pixelHash();
+  await nativeKey("c");
+  await nativePointer([1.5,0], "mousePressed", 0, 1);
+  await nativePointer([1.5,0], "mouseReleased");
+  edited = await inspect();
+  child = edited.nodes.find(node => node.id === nested.id);
+  const fill = node => node.records.fields.find(field => field.name === "fill_rgba").values.slice(0,4);
+  assert.deepEqual(fill(child), fill(edited.nodes.find(node => node.id === swatch.id)), "native color picker uses the swatch color");
+  assert.notEqual(await pixelHash(), resizedPixels, "native recoloring changes decoded pixels");
+  const coloredPixels = await pixelHash(), beforePaste = edited.nodes.length;
+  await nativeKey("c", 2);
+  await nativeKey("v", 2);
+  const pasted = await inspect();
+  assert.equal(pasted.nodes.length, beforePaste + 1, "native clipboard creates one detached child copy");
+  const pastedId = pasted.nodes.find(node => !edited.nodes.some(old => old.id === node.id)).id;
+  await nativeKey("z", 2);
+  assert.equal((await inspect()).nodes.length, beforePaste, "native undo reverses paste");
+  assert.equal(await pixelHash(), coloredPixels, "native undo restores decoded pixels");
+  await nativeKey("ArrowRight");
+  const finalPixels = await pixelHash();
+  assert.notEqual(finalPixels, coloredPixels, "selection survives clipboard undo");
+  const beforePlayback = Number(await evaluate("document.getElementById('display').dataset.frame"));
+  await click("#play");
+  await until(() => evaluate(`Number(document.getElementById('display').dataset.frame) > ${beforePlayback}`), "native preview resumes");
+  await click("#play");
+  assert.equal(await evaluate("document.getElementById('play').textContent"), "Play", "native preview pauses");
+  await click("#last"); await synchronized(interactiveInitial.view.frame_count - 1);
+  const finalState = await inspect();
+  assert.equal(await pixelHash(), finalPixels, "static native canvas edits survive timeline scrubbing");
+  await screenshot("interactive.v1.edited.desktop.png");
+  await click("#restart"); await synchronized(interactiveInitial.view.frame_count - 1);
+  await until(() => evaluate("/Restart restored/.test(document.getElementById('replay').textContent)"), "native edit replay completes");
+  assert.match(await evaluate("document.getElementById('replay').textContent"), /1 reused/);
+  const restoredState = await inspect();
+  assert.deepEqual(restoredState.nodes, finalState.nodes, "checkpoint plus input reexecution restores native scene state");
+  assert.equal(await pixelHash(), finalPixels, "checkpoint plus input reexecution restores decoded pixels");
+  const generation = Number((await evaluate("document.getElementById('worker').textContent")).match(/generation (\d+)/)[1]);
+  assert.equal(generation, 2);
+  const revision = restoredState.view.input_revision, frame = restoredState.view.frame_index;
+  const guarded = {worker_generation:String(generation),frame:String(frame),revision:String(revision),type:"key_press",key:"arrow_right"};
+  const refusalCases = [
+    [{...guarded,worker_generation:"1"},400,/stale.*generation/],
+    [{...guarded,revision:"0"},422,/stale native input revision/],
+    [{...guarded,target:String(pastedId)},422,/stale native input object/],
+    [{...guarded,type:"mouse_motion",x:"NaN",y:"0",dx:"0",dy:"0"},400,/invalid event coordinates/],
+    [{...guarded,type:"mouse_motion",x:"10000000",y:"0",dx:"0",dy:"0"},422,/budget/],
+  ];
+  for (const [fields,status,diagnostic] of refusalCases) {
+    const response = await fetch(new URL("/api/event",studio.url), {method:"POST",headers:{"User-Agent":userAgent,"X-FMN-Capability":studio.cap,"Origin":studio.url.origin,"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(fields),signal:AbortSignal.timeout(10000)});
+    const text = await response.text(); assert.equal(response.status,status); assert.match(text,diagnostic);
+    assert.ok(text.length < 8192 && !text.includes(studio.cap));
+    assert.deepEqual((await inspect()).nodes, restoredState.nodes, "rejected input preserves native state");
+    assert.equal((await inspect()).view.input_revision, revision);
+  }
+  const deniedInput = await fetch(new URL("/api/event",studio.url), {method:"POST",headers:{"User-Agent":userAgent,"X-FMN-Capability":"0".repeat(64),"Origin":studio.url.origin,"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(guarded),signal:AbortSignal.timeout(10000)});
+  assert.equal(deniedInput.status,403); assert.ok(!(await deniedInput.text()).includes(studio.cap));
+  assert.deepEqual((await inspect()).nodes, restoredState.nodes);
+  assert.equal(await pixelHash(), finalPixels);
+  await command("Emulation.setDeviceMetricsOverride",{width:390,height:844,deviceScaleFactor:1,mobile:false});
+  assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true);
+  await screenshot("interactive.v1.edited.compact.png");
+  await writeFile(join(output,"interactive.v1.initial.json"),JSON.stringify(interactiveInitial,null,2)+"\n");
+  await writeFile(join(output,"interactive.v1.restored.json"),JSON.stringify(restoredState,null,2)+"\n");
+  receipt.scenarios.push({scene:"interactive.v1",nested_selection:true,drag:true,resize:true,recolor:true,clipboard:true,undo:true,
+    pause_resume:true,restart_same_pixels:true,restart_same_state:true,initial_pixels:initialPixels,final_pixels:finalPixels,
+    refusals:refusalCases.map(([,status])=>status),unauthorized:deniedInput.status});
+  await command("Page.navigate",{url:"about:blank"}); await stop(studio.child);
+  assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
   assert.deepEqual(receipt.browser_errors,[]);
   receipt.passed = true;
 } catch (error) {
