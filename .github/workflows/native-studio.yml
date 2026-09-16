@@ -54,5 +54,5 @@ jobs:
       - name: Execute real Cargo project rebuild and HTTP acceptance
         if: ${{ !cancelled() }}
         run: |
-          cargo test --locked -p fmn-studio --features native-build --test project_cargo -- --nocapture
+          cargo test --locked -p fmn-studio --features native-build --test project_cargo --test project_cargo_config -- --nocapture
           cargo build --locked -p fmn-studio --features native-build --example native_project

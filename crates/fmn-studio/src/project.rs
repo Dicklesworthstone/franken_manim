@@ -39,7 +39,9 @@ impl CargoTarget {
 /// Explicit compiler, project, output and process authority for one session.
 #[derive(Clone, Debug)]
 pub struct CargoBuildConfig {
-    /// Absolute Cargo executable (prefer `rustup which cargo`). No PATH lookup.
+    /// Absolute nightly Cargo executable (prefer `rustup which cargo`).
+    /// Nightly -C selects the project's configuration without changing the
+    /// supervisor's process cwd or weakening exact-image process authority.
     pub cargo: PathBuf,
     /// Absolute Cargo.toml. Cargo.lock must already be current (`--locked`).
     pub manifest: PathBuf,
@@ -81,6 +83,7 @@ pub struct CargoBuildConfig {
 impl CargoBuildConfig {
     /// Configure one native target. Paths and environment are checked before
     /// the compiler runs; no ambient tool discovery or arbitrary extra argv.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cargo: PathBuf,
         manifest: PathBuf,
@@ -130,7 +133,9 @@ impl CargoBuildConfig {
 
     fn process(&self) -> Result<ProcessSpec, BuildError> {
         let (flag, target) = self.target.selection();
+        let project = self.manifest.parent().ok_or_else(|| fail("manifest has no project directory"))?;
         let mut argv = vec![
+            "-Z".into(), "unstable-options".into(), "-C".into(), text(project)?.into(),
             "build".into(), "--locked".into(), "--color".into(), "never".into(),
             "--message-format".into(), "short".into(),
             "--manifest-path".into(), text(&self.manifest)?.into(),
@@ -169,8 +174,8 @@ impl CargoBuildConfig {
 ///
 /// Published paths can outlive this driver through WorkerArtifact clones.
 /// Consequently Drop does NOT delete them. Call `cleanup` only after all worker
-/// generations and their supervisors are stopped. The bounded incremental
-/// target directory is caller-managed and never removed by this type.
+/// generations and their supervisors are stopped. The incremental target
+/// directory is caller-managed and never removed by this type.
 pub struct CargoRebuildDriver {
     config: CargoBuildConfig,
     runner: Arc<dyn ProcessRunner>,
@@ -208,7 +213,9 @@ impl CargoRebuildDriver {
             env: env.to_vec(), cwd: None, stdin: None,
             timeout: Duration::from_secs(15), max_output_bytes: 64 * 1024,
         }).map_err(fail)?;
-        if !outcome.success() { return Err(fail("selected Cargo could not report its host triple")); }
+        if !outcome.success() || outcome.stdout.len() > 64 * 1024 || outcome.stderr.len() > 64 * 1024 {
+            return Err(fail("selected Cargo could not report a bounded host triple"));
+        }
         let output = std::str::from_utf8(&outcome.stdout).map_err(fail)?;
         let mut hosts = output.lines().filter_map(|line| line.strip_prefix("host: "));
         let host = hosts.next().ok_or_else(|| fail("Cargo omitted its host triple"))?;
@@ -235,10 +242,11 @@ impl RebuildDriver for CargoRebuildDriver {
         if !success {
             let outcome = self.last_outcome.as_ref().ok_or_else(|| fail("missing build result"))?;
             let tail = &outcome.stderr[outcome.stderr.len().saturating_sub(16 * 1024)..];
-            let diagnostic: String = String::from_utf8_lossy(tail).chars().flat_map(|c| {
-                if c == '\n' || c == '\t' || !c.is_control() { vec![c] }
-                else { c.escape_default().collect() }
-            }).collect();
+            let mut diagnostic = String::new();
+            for c in String::from_utf8_lossy(tail).chars() {
+                if c == '\n' || c == '\t' || !c.is_control() { diagnostic.push(c); }
+                else { diagnostic.extend(c.escape_default()); }
+            }
             return Err(fail(format!("Cargo {:?}\n{diagnostic}", outcome.termination)));
         }
         let (executable, build_id) = self.artifacts.publish(
