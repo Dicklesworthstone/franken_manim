@@ -29,5 +29,9 @@ fmn-mobject.workspace = true
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "=1.1.4", features = ["pty"] }
 
+[[example]]
+name = "native_project"
+required-features = ["native-build"]
+
 [lints]
 workspace = true

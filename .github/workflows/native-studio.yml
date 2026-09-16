@@ -51,3 +51,8 @@ jobs:
       - name: Run real camera child and HTTP host acceptance
         if: ${{ !cancelled() }}
         run: cargo run --locked -p fmn-studio --example native_camera -- --self-test
+      - name: Execute real Cargo project rebuild and HTTP acceptance
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p fmn-studio --features native-build --test project_cargo -- --nocapture
+          cargo build --locked -p fmn-studio --features native-build --example native_project
