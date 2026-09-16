@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 from functools import wraps
+import operator
 from typing import Any
 
 
@@ -240,7 +241,9 @@ def install_scene_state(native: Any) -> None:
             raise TypeError("n_changes expects a SceneState")
         other = state.mobjects_to_copies
         # Compare two captured states, not a source object edited afterward.
-        count = sum(mob not in other or not _same_mobject(np, saved, other[mob])
+        count = sum(mob not in other
+                    or self._root_topologies[id(mob)] != state._root_topologies.get(id(mob))
+                    or not _same_mobject(np, saved, other[mob])
                     for mob, saved in self.mobjects_to_copies.items())
         return count + int(not camera_matches(self, state))
 
@@ -280,4 +283,66 @@ def install_scene_state(native: Any) -> None:
     # Defining equality on the existing class must also disable its inherited
     # identity hash, exactly as a normal Python class definition would.
     State.__hash__ = None
+    _install_history(Scene)
     g["_FMN_SCENE_STATE_INSTALLED"] = True
+
+
+def _install_history(Scene):
+    """Commit history transitions only after the existing restore hook returns."""
+    def limit(self):
+        value = self.max_num_saved_states
+        if isinstance(value, bool):
+            raise TypeError("max_num_saved_states must be a nonnegative integer")
+        try:
+            value = operator.index(value)
+        except TypeError:
+            raise TypeError("max_num_saved_states must be a nonnegative integer") from None
+        if value < 0:
+            raise ValueError("max_num_saved_states must be nonnegative")
+        return value
+
+    def trim(stack, maximum):
+        if len(stack) > maximum:
+            del stack[:len(stack) - maximum]
+
+    def save_state(self):
+        maximum = limit(self)
+        if maximum == 0:
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+            return self
+        state = self.get_state()
+        if self.undo_stack and state.mobjects_match(self.undo_stack[-1]):
+            trim(self.undo_stack, maximum)
+            return self
+        # A new edit branches from the current state; old redo entries no
+        # longer describe its future. Keep externally retained list aliases.
+        self.redo_stack.clear()
+        self.undo_stack.append(state)
+        trim(self.undo_stack, maximum)
+        return self
+
+    def undo(self):
+        if not self.undo_stack:
+            return
+        maximum = limit(self)
+        target = self.undo_stack[-1]
+        current = self.get_state()
+        self.restore_state(target)
+        self.undo_stack.pop()
+        self.redo_stack.append(current)
+        trim(self.redo_stack, maximum)
+
+    def redo(self):
+        if not self.redo_stack:
+            return
+        maximum = limit(self)
+        target = self.redo_stack[-1]
+        current = self.get_state()
+        self.restore_state(target)
+        self.redo_stack.pop()
+        self.undo_stack.append(current)
+        trim(self.undo_stack, maximum)
+
+    for name, function in {"save_state": save_state, "undo": undo, "redo": redo}.items():
+        _method(Scene, name, function)
