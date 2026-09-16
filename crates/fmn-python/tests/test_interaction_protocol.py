@@ -72,12 +72,27 @@ def environment(install=True):
             bucket = self.event_listners[listener.event_type]
             bucket[:] = [item for item in bucket if item is not listener]
         def dispatch(self, kind, **data):
-            # Old dispatch's stale-hover hit test is the negative control.
-            result = None
+            # Pinned standalone dispatch semantics, over doubled hit testing.
             if kind == EventType.MouseMotionEvent:
                 self.mouse_point = data["point"]
-            for listener in self.event_listners[kind]:
-                if kind.value.startswith("mouse") and not listener.mobject.is_point_touching(self.mouse_point):
+            elif kind == EventType.MouseDragEvent:
+                self.mouse_drag_point = data["point"]
+            elif kind == EventType.KeyPressEvent:
+                self.pressed_keys.add(data["symbol"])
+            elif kind == EventType.KeyReleaseEvent:
+                self.pressed_keys.discard(data["symbol"])
+            elif kind == EventType.MousePressEvent:
+                self.draggable_object_listners = [
+                    listener for listener in self.event_listners[EventType.MouseDragEvent]
+                    if listener.mobject.is_point_touching(self.mouse_point)
+                ]
+            elif kind == EventType.MouseReleaseEvent:
+                self.draggable_object_listners = []
+            captured = kind == EventType.MouseDragEvent
+            listeners = self.draggable_object_listners if captured else self.event_listners[kind]
+            result = None
+            for listener in listeners:
+                if not captured and kind.value.startswith("mouse") and not listener.mobject.is_point_touching(self.mouse_point):
                     continue
                 result = listener.callback(listener.mobject, data)
                 if result is False:
@@ -168,12 +183,31 @@ class InputTests(unittest.TestCase):
         obj.add_event_listner(kind, callback)
         return obj.event_listners[-1]
 
-    def test_standalone_press_uses_its_own_point_and_call_alias(self):
+    def test_scene_press_uses_its_own_point(self):
         obj, seen = self.Mob().move_to([4, 0, 0]), []
         self.listen(obj, self.Event.MousePressEvent, lambda m, e: seen.append(e["point"]))
-        self.dispatcher(self.Event.MousePressEvent, point=[4, 0, 0])
+        self.Scene().add(obj).on_mouse_press([4, 0, 0], 1, 0)
         self.assertEqual(len(seen), 1)
-        np.testing.assert_equal(self.dispatcher.get_mouse_point(), [4, 0, 0])
+        np.testing.assert_equal(seen[0], [4, 0, 0])
+
+    def test_standalone_hover_capture_and_pointer_identity_are_preserved(self):
+        obj, seen = self.Mob(), []
+        self.listen(obj, self.Event.MouseDragEvent, lambda m, e: seen.append(m))
+        hover, point = np.zeros(3), np.array([4., 0, 0])
+        self.dispatcher(self.Event.MouseMotionEvent, point=hover)
+        self.dispatcher(self.Event.MousePressEvent, point=point)
+        self.dispatcher(self.Event.MouseDragEvent, point=point)
+        self.assertEqual(seen, [obj])
+        self.assertIs(self.dispatcher.get_mouse_point(), hover)
+        self.assertIs(self.dispatcher.get_mouse_drag_point(), point)
+
+    def test_explicit_detached_global_interceptor_remains_supported(self):
+        obj = self.Mob()
+        listener = self.g["EventListener"](obj, self.Event.MouseScrollEvent, lambda m, e: False)
+        self.dispatcher.add_listner(listener)
+        scene = self.Scene()
+        self.assertIs(scene.on_mouse_scroll([0, 0, 0], [0, 1], 0, 1), False)
+        self.assertEqual(scene.events, [])
 
     def test_old_stale_hover_control_reproduces_missing_click(self):
         g, dispatcher = environment(False)

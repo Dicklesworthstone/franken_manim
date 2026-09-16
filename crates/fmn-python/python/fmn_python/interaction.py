@@ -46,6 +46,13 @@ def _in_scene(listener):
     if context is None:
         return True
     target = listener.mobject
+    # A detached listener explicitly added to the global dispatcher (rather
+    # than through Mobject's local registration API) is a compatibility-level
+    # global interceptor. Bound objects and locally registered controls are
+    # always subject to current scene membership.
+    if (getattr(target, "_scene", None) is None
+            and not any(listener is item for item in target.event_listners)):
+        return True
     # Use current drawable membership, not the persistent arena-owner field:
     # removing a control from a scene does not unbind its native allocation.
     return any(target is member for root in context.scene.mobjects
@@ -59,8 +66,14 @@ def _registered(dispatcher, listener, event_type):
 def _install_dispatcher(g):
     Dispatcher, Event = g["EventDispatcher"], g["EventType"]
     np = g["_np"]
+    standalone_dispatch = Dispatcher.dispatch
 
     def dispatch(self, event_type, **event_data):
+        if _INPUT.get() is None:
+            # Direct dispatcher calls preserve the pinned hover/capture and
+            # pointer-identity contract. Only a Scene gateway selects the new
+            # current-event coordinates and scene membership policy.
+            return standalone_dispatch(self, event_type, **event_data)
         if not isinstance(event_type, Event):
             raise TypeError("dispatch requires an EventType")
         state = _state(self)
