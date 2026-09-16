@@ -11,14 +11,28 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from .batch_cli import _VALUE_FLAGS, _source_import_path, try_batch_cli
-from .batch_rendering import _error_fields, _error_notes
+from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result, _source_import_path
+from .batch_rendering import (
+    BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
+    _name_key, render_scenes,
+)
 from .rendering import RenderSession, _positive_integer
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
+_SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
+_MAX_SELECTED_SCENES = 1024
+_SELECTION_HELP = """Named scene selection:
+  fmn-python [--robot] SOURCE.py SCENE [SCENE ...] [--keep-going]
+
+Named scenes render in command-line order; -a is an alias for --write_all.
+All selected names and destinations are checked before any scene is constructed.
+With multiple names, --video_dir is a batch root containing per-scene outputs.
+With one scene, --video_dir retains its existing single-output destination meaning.
+--keep-going requires multiple names or --write_all. It never ignores Ctrl-C.
+"""
 
 
-def _tokens(arguments):
+def _tokens(arguments, omit=()):
     """Separate positional selectors without interpreting native option values."""
     options, positionals, switches = [], [], []
     index = 0
@@ -29,7 +43,8 @@ def _tokens(arguments):
             index += 2
             continue
         if value.startswith("-"):
-            options.append(value)
+            if value not in omit:
+                options.append(value)
             switches.append(value)
         else:
             positionals.append(value)
@@ -58,35 +73,48 @@ def _single_result(native, result, robot, source, selected):
 
 def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     """Own ordinary renders; leave non-render commands on their native route."""
-    _, raw_positionals, switches = _tokens(arguments)
+    native_options, raw_positionals, switches = _tokens(arguments, _SELECTION_FLAGS)
     if (_CONTROL_FLAGS.intersection(switches)
             or (raw_positionals and raw_positionals[0] == "studio")):
         return None
-    batch = try_batch_cli(native, arguments)
-    if batch is not None:
-        return batch
     if not arguments or arguments == ["--robot"]:
         return None
     robot = switches.count("--robot") != 0
-    if switches.count("--robot") > 1:
-        return native._portal_cli_emit(2, "usage", "usage-error", "--robot must not be repeated", robot)
-    # Only strip a real switch: an option value spelled --robot is data.
-    remaining, index = [], 0
-    while index < len(arguments):
-        value = arguments[index]
-        if value in _VALUE_FLAGS:
-            remaining.extend(arguments[index:index + 2])
-            index += 2
-            continue
-        if value != "--robot":
-            remaining.append(value)
-        index += 1
+    write_all = switches.count("--write_all") + switches.count("-a")
+    keep_going = switches.count("--keep-going")
+    if max(switches.count("--robot"), write_all, keep_going) > 1:
+        return native._portal_cli_emit(2, "usage", "usage-error", "render switches must not be repeated", robot)
+    if not raw_positionals and native_options in (["--help"], ["-h"]):
+        text = native._portal_cli_help().replace(
+            "Certified output, opener flags, write-all, and Studio",
+            "Certified output, opener flags, and Studio",
+        ) + "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP
+        if robot:
+            return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
+        print(text)
+        return 0
+    batch = bool(write_all or len(raw_positionals) > 2)
     try:
-        positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(remaining)
+        # Selection is the only new CLI syntax. Delegate every option and its
+        # value to the existing native parser, with exactly one source. Put
+        # that source first so a missing trailing option value stays missing.
+        parser_args = raw_positionals[:1] + native_options
+        positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(parser_args)
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
             _positive_integer(value, name)
         source = positionals[0]
-        selected = positionals[1] if len(positionals) == 2 else None
+        requested = raw_positionals[1:]
+        if write_all and requested:
+            raise ValueError("--write_all/-a cannot be combined with explicit scene names")
+        if keep_going and not batch:
+            raise ValueError("--keep-going requires multiple scene names or --write_all")
+        if len(requested) > _MAX_SELECTED_SCENES:
+            raise ValueError(f"scene selection exceeds {_MAX_SELECTED_SCENES} names")
+        if batch:
+            keys = [_name_key(name) for name in requested]
+            if len(set(keys)) != len(keys):
+                raise ValueError("selected scene names collide; each output must be unique")
+        selected = requested[0] if len(requested) == 1 else None
         source_path = Path(source).resolve()
         supplied = options["video_dir"]
         if supplied is not None and (not str(supplied) or "\0" in str(supplied)):
@@ -103,44 +131,73 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     except (TypeError, ValueError, OSError) as error:
         return native._portal_cli_emit(2, "usage", "usage-error", _message(error), robot)
 
-    phase, session = "load", None
+    phase, session, report = "load", None, None
     redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
     try:
         with redirect, _source_import_path(source_path):
             scenes = native._portal_cli_scene_types(str(source_path))
             names = sorted(scenes)
-            if selected is None:
-                if len(names) != 1:
-                    raise ValueError("select one scene explicitly; discovered: " + (", ".join(names) or "none"))
-                selected = names[0]
-            if selected not in scenes:
-                raise ValueError(f"scene {selected!r} was not declared by {source}; discovered: "
-                                 + (", ".join(names) or "none"))
-            if destination is None:
-                destination = (default_root / selected / "frames" if options["format"] == "png_sequence"
-                               else default_root / (selected + "." + options["format"]))
-            phase = "construct"
-            scene = scenes[selected]()
-            phase = "start"
-            session = RenderSession(scene, destination, format=options["format"],
-                                    resolution=(width, height), fps=fps, threads=threads, _native=native)
-            with session:
-                phase = "execute"
-                try:
-                    scene.run()
-                except native.EndScene:
-                    pass
-                phase = "finish"
-            if session.result is None:
-                raise RuntimeError("scene execution ended without publishing its render generation")
+            if batch:
+                requested = names if write_all else requested
+                if not requested:
+                    raise ValueError(f"no locally declared Scene classes found in {source}")
+                missing = [name for name in requested if name not in scenes]
+                if missing:
+                    raise ValueError("selected scenes were not declared by " + source + ": " + ", ".join(missing))
+                destination = default_root if destination is None else destination
+                phase = "batch"
+                report = render_scenes(
+                    {name: scenes[name] for name in requested}, destination,
+                    format=options["format"], resolution=(width, height), fps=fps, threads=threads,
+                    continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
+                    on_result=lambda outcome: print(
+                        f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
+                        file=sys.stderr,
+                    ),
+                )
+            else:
+                if selected is None:
+                    if len(names) != 1:
+                        raise ValueError("select one scene explicitly; discovered: " + (", ".join(names) or "none"))
+                    selected = names[0]
+                if selected not in scenes:
+                    raise ValueError(f"scene {selected!r} was not declared by {source}; discovered: "
+                                     + (", ".join(names) or "none"))
+                if destination is None:
+                    destination = (default_root / selected / "frames" if options["format"] == "png_sequence"
+                                   else default_root / (selected + "." + options["format"]))
+                phase = "construct"
+                scene = scenes[selected]()
+                phase = "start"
+                session = RenderSession(scene, destination, format=options["format"],
+                                        resolution=(width, height), fps=fps, threads=threads, _native=native)
+                with session:
+                    phase = "execute"
+                    try:
+                        scene.run()
+                    except native.EndScene:
+                        pass
+                    phase = "finish"
+                if session.result is None:
+                    raise RuntimeError("scene execution ended without publishing its render generation")
+    except BatchRenderError as error:
+        return _emit_result(native, error.result, robot, source, destination)
     except (KeyboardInterrupt, SystemExit) as error:
         code = 130 if isinstance(error, KeyboardInterrupt) else 5
+        partial = getattr(error, "render_batch_result", None)
+        if phase == "batch" and isinstance(partial, BatchRenderResult):
+            return _emit_result(native, partial, robot, source, destination,
+                                interrupted=True, interrupt_code=code)
         return native._portal_cli_emit(code, "interrupted", "render-interrupted", _message(error), robot,
                                        source=source, scene=selected, phase=phase,
                                        destination=None if destination is None else str(destination),
                                        notes=list(_error_notes(error)),
                                        artifact_published=session is not None and session.result is not None)
     except Exception as error:
+        partial = getattr(error, "render_batch_result", None)
+        if phase == "batch" and isinstance(partial, BatchRenderResult):
+            return native._portal_cli_emit(6, "render", "render-batch-reporting-failed", _message(error), robot,
+                                           source=source, destination=str(destination), batch=partial.as_dict())
         capability = getattr(native, "_CapabilityError", ())
         if phase == "start" and isinstance(error, capability):
             code, identity, kind = 4, "capability", "render-capability-unavailable"
@@ -148,6 +205,11 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             code, identity, kind = 5, "scene", "scene-load-failed"
         elif phase in {"start", "finish"}:
             code, identity, kind = 6, "render", "render-" + phase + "-failed"
+        elif phase == "batch":
+            if isinstance(error, OSError):
+                code, identity, kind = 6, "render", "render-start-failed"
+            else:
+                code, identity, kind = 2, "usage", "usage-error"
         elif any(marker in _error_fields(error)[1] for marker in ("lumen:", "reel:", "portal-render:")):
             code, identity, kind = 6, "render", "render-failed"
         else:
@@ -157,4 +219,6 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        destination=None if destination is None else str(destination),
                                        notes=list(_error_notes(error)),
                                        artifact_published=session is not None and session.result is not None)
+    if batch:
+        return _emit_result(native, report, robot, source, destination)
     return _single_result(native, session.result, robot, source, selected)
