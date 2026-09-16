@@ -169,10 +169,11 @@ class CyclicReplaceProtocol(unittest.TestCase):
         self.assertTrue(animation.suspend_mobject_updating)
         self.assertTrue(self.native._requires_python_animation(animation))
 
-    def test_stock_cycles_keep_native_lowering(self):
+    def test_stock_cycles_defer_to_the_ordered_callback_driver(self):
         for cls in (self.native.CyclicReplace, self.native.Swap):
             animation = cls(*self.operands(), rate_func=self.native.linear)
-            self.assertFalse(self.native._requires_python_animation(animation))
+            self.assertTrue(self.native._requires_python_animation(animation))
+            self.assertIsNone(animation.target_mobject)
         self.assertEqual(self.native.previous_calls, [])
 
     def test_unrelated_dispatch_is_preserved(self):
@@ -215,12 +216,13 @@ class CyclicReplaceProtocol(unittest.TestCase):
         animation = self.native.Swap(*self.operands(), rate_func=Rate())
         self.assertTrue(self.native._requires_python_animation(animation))
 
-    def test_tagged_arc_paths_stay_native(self):
+    def test_tagged_arc_paths_still_defer_target_planning(self):
         def arc(start, end, alpha):
             return start
         arc._fmn_path_arc = .5
         animation = self.native.Swap(*self.operands(), path_func=arc)
-        self.assertFalse(self.native._requires_python_animation(animation))
+        self.assertTrue(self.native._requires_python_animation(animation))
+        self.assertIsNone(animation.target_mobject)
 
     def test_invalid_operands_do_not_create_partial_group(self):
         before = self.native.Group.constructions

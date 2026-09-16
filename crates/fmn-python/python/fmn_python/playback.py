@@ -170,49 +170,15 @@ def _install_cyclic_replace(g: dict[str, Any]) -> None:
         function.__qualname__ = Cyclic.__qualname__ + "." + name
         function.__module__ = Cyclic.__module__
 
-    # The shared installer captured its Transform hook baselines before
-    # this targetless class acquired a real create_target. Capture the new
-    # shipped protocol here, rather than misclassifying that implementation
-    # itself as an authored hook on every ordinary Swap.
-    hooks = (
-        "begin", "finish", "interpolate", "interpolate_mobject",
-        "interpolate_submobject", "create_target", "create_starting_mobject",
-        "init_path_func", "check_target_mobject_validity", "get_all_mobjects",
-        "get_all_families_zipped", "get_all_mobjects_to_update", "update_mobjects",
-        "get_sub_alpha", "time_spanned_alpha", "clean_up_from_scene",
-        "_ensure_runtime_defaults", "_native_target", "_native_params",
-    )
-    protocols = {
-        cls: {name: getattr(cls, name, None) for name in hooks}
-        for cls in (Cyclic, Swap) if cls is not None
-    }
+    # A normal native Transform spec resolves _native_target while the whole
+    # composition is being planned, before a preceding Succession member has
+    # finished. Cycles instead sample the live group in Transform.begin. Use
+    # the existing ordered Python-leaf driver for this deferred protocol,
+    # including stock cycles; native record storage and Choreo's clock remain
+    # authoritative. This also preserves Mobject.interpolate overrides.
     previous_requires = g["_requires_python_animation"]
 
     def requires(animation):
-        if not isinstance(animation, Cyclic):
-            return previous_requires(animation)
-        # Authored subclasses take the shared callback route, conservatively.
-        # It calls their live hooks and handles nesting/updater conversion.
-        baseline = protocols.get(type(animation))
-        if baseline is None:
-            return True
-        for name, expected in baseline.items():
-            method = getattr(animation, name, None)
-            if getattr(method, "__func__", method) is not expected:
-                return True
-        path = getattr(animation, "path_func", None)
-        rate = getattr(animation, "rate_func", None)
-        catalog = g.get("_RATE_FUNC_NAMES", {})
-        known_rate = rate is None or isinstance(rate, str) or any(
-            rate is function for function in catalog
-        )
-        return (
-            getattr(animation, "_native_kind", None) != "transform"
-            or getattr(animation, "final_alpha_value", 1.0) != 1.0
-            or bool(getattr(animation, "remover", False))
-            or bool(getattr(animation, "replace_mobject_with_target_in_scene", False))
-            or (path is not None and getattr(path, "_fmn_path_arc", None) is None)
-            or not known_rate
-        )
+        return isinstance(animation, Cyclic) or previous_requires(animation)
 
     g["_requires_python_animation"] = requires
