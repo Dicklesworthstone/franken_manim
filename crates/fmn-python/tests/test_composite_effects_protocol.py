@@ -164,10 +164,44 @@ def table():
     class ShowCreationThenDestruction(Animation):
         pass
 
+    class Broadcast(LaggedStart):
+        _native_kind = "broadcast"
+
+        def __init__(self, point, *, run_time=3, lag_ratio=.2, **kwargs):
+            self.point = point
+            self.circles = VGroup(Mobject([[1, 0, 0]]), Mobject([[2, 0, 0]]))
+            self.circles.marker = "original rings"
+            super().__init__(*(Animation(ring) for ring in self.circles),
+                             run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+
+    class ClockPassesTime(AnimationGroup):
+        def __init__(self, clock, run_time=5, **kwargs):
+            super().__init__(Animation(clock.hour), Animation(clock.minute),
+                             run_time=run_time, **kwargs)
+            # This is the old split identity: native specs use mobject while
+            # only the legacy Python group attribute remembers the clock.
+            self.group = self.clock = clock
+
+    class FlashyFadeIn(AnimationGroup):
+        _native_kind = "flashy_fade_in"
+
+        def __init__(self, vmobject, *, fade_lag=0, **kwargs):
+            self.outline = vmobject.copy()
+            self.fade_lag = fade_lag
+            super().__init__(Animation(vmobject), Animation(self.outline), **kwargs)
+
+    def ensure_root(animation):
+        if animation.mobject is None:
+            animation.mobject = VGroup(*(child.mobject for child in animation.animations))
+        animation.group = animation.mobject
+        return animation.mobject
+
     return SimpleNamespace(
         Mobject=Mobject, VGroup=VGroup, Line=Line, Animation=Animation,
         AnimationGroup=AnimationGroup, LaggedStart=LaggedStart,
         Flash=Flash, LaggedStartMap=LaggedStartMap,
+        Broadcast=Broadcast, ClockPassesTime=ClockPassesTime, FlashyFadeIn=FlashyFadeIn,
+        _fmn_ensure_composition_root=ensure_root,
         ShowCreationThenDestruction=ShowCreationThenDestruction,
         _np=np, _YELLOW="#FFFF00", _ORIGIN=np.zeros(3), _RIGHT=np.array([1., 0., 0.]),
     )
@@ -238,6 +272,14 @@ class CompositeEffectsProtocol(unittest.TestCase):
         flash.lines.update()
         np.testing.assert_allclose(flash.lines.get_center(), flash.point)
         self.assertEqual(len(flash.lines.updaters), 1)
+
+    def test_caller_owned_point_array_and_list_remain_live(self):
+        for point in (np.array([1., 2., 0.]), [1., 2., 0.]):
+            flash = self.native.Flash(point, num_lines=4)
+            self.assertIs(flash.point, point)
+            point[0] = 9.
+            flash.lines.update()
+            np.testing.assert_allclose(flash.lines.get_center(), [9., 2., 0.])
 
     def test_authored_line_factory_and_super_dispatch(self):
         native, calls = self.native, []
@@ -321,8 +363,8 @@ class CompositeEffectsProtocol(unittest.TestCase):
         self.assertEqual(animation.animations, created)
         self.assertTrue(all(a.mobject is b for a, b in zip(created, children)))
         self.assertTrue(all(child.kwargs == {"marker": "leaf"} for child in created))
-        self.assertEqual(animation.kwargs, {})
         self.assertEqual(len(root.updaters), 1)
+        self.assertEqual(animation.kwargs, {})
 
     def test_map_factory_membership_mutations_do_not_skip_original_children(self):
         native, visited = self.native, []
@@ -359,6 +401,86 @@ class CompositeEffectsProtocol(unittest.TestCase):
         animation = native.LaggedStartMap(lambda child: self.fail("called"), root)
         self.assertIs(animation.mobject, root)
         self.assertEqual(animation.animations, [])
+
+    def test_broadcast_preserves_original_rings_and_member_factories(self):
+        effect = self.native.Broadcast([1, 0, 0], run_time=4, lag_ratio=.3)
+        self.assertIs(effect.mobject, effect.circles)
+        self.assertIs(effect.group, effect.circles)
+        self.assertEqual(effect.group.marker, "original rings")
+        self.assertTrue(effect._composition_authored_root)
+        self.assertEqual(effect._native_kind, "lagged_start")
+        self.assertEqual((effect.run_time, effect.lag_ratio), (4, .3))
+        self.assertTrue(all(child.mobject is ring for child, ring in zip(effect.animations, effect.circles)))
+
+    def test_clock_group_includes_face_not_just_animated_hands(self):
+        native = self.native
+        face = native.Mobject([[0, 0, 0]])
+        hour, minute = native.Mobject([[1, 0, 0]]), native.Mobject([[2, 0, 0]])
+        clock = native.VGroup(face, hour, minute)
+        clock.hour, clock.minute = hour, minute
+        effect = native.ClockPassesTime(clock, run_time=2)
+        self.assertIs(effect.mobject, clock)
+        self.assertIs(effect.group, clock)
+        self.assertIn(face, effect.mobject.get_family())
+        self.assertEqual([child.mobject for child in effect.animations], [hour, minute])
+        self.assertTrue(effect._composition_authored_root)
+
+    def test_flashy_fade_root_contains_live_subject_and_original_outline(self):
+        native = self.native
+        subject = native.Mobject([[3, 4, 0]])
+        effect = native.FlashyFadeIn(subject, fade_lag=.25, run_time=3)
+        self.assertEqual(list(effect.group), [subject, effect.outline])
+        self.assertIs(effect.animations[0].mobject, subject)
+        self.assertIs(effect.animations[1].mobject, effect.outline)
+        self.assertEqual((effect.run_time, effect.fade_lag), (3, .25))
+        self.assertEqual(effect._native_kind, "animation_group")
+        self.assertTrue(effect._composition_authored_root)
+
+    def test_explicit_effect_group_is_never_overwritten(self):
+        native = self.native
+        custom = native.VGroup()
+        subject = native.Mobject([[0, 0, 0]])
+        clock = native.VGroup(subject)
+        clock.hour = clock.minute = subject
+        effects = [native.Broadcast([0, 0, 0], group=custom),
+                   native.FlashyFadeIn(subject, group=custom),
+                   native.ClockPassesTime(clock, group=custom)]
+        for effect in effects:
+            self.assertIs(effect.group, custom)
+            self.assertIs(effect.mobject, custom)
+
+    def test_effects_delegate_nested_child_phases(self):
+        native = self.native
+        broadcast = native.Broadcast([0, 0, 0])
+        fade = native.FlashyFadeIn(native.Mobject([[0, 0, 0]]))
+        outer = native.AnimationGroup(broadcast, fade)
+        outer.begin()
+        outer.update_mobjects(.125)
+        outer.interpolate(.75)
+        outer.finish()
+        for effect in (broadcast, fade):
+            for child in effect.animations:
+                self.assertEqual(child.events, ["begin", ("helpers", .125), ("alpha", .75), "finish"])
+
+    def test_wrapped_constructor_signature_and_subclass_calls_are_kept(self):
+        import inspect
+        native, calls = self.native, []
+        self.assertIn("fade_lag", inspect.signature(native.FlashyFadeIn).parameters)
+        class Authored(native.Broadcast):
+            def __init__(self, *args, **kwargs):
+                calls.append("before")
+                super().__init__(*args, **kwargs)
+                calls.append(self.group)
+        effect = Authored([0, 0, 0])
+        self.assertEqual(calls, ["before", effect.circles])
+
+    def test_installer_does_not_duplicate_effect_roots(self):
+        native = self.native
+        effect = native.Broadcast([0, 0, 0])
+        root, constructor = effect.group, native.Broadcast.__init__
+        module.install_composite_effects(native)
+        self.assertIs(native.Broadcast.__init__, constructor)
+        self.assertIs(effect.group, root)
 
     def test_installer_is_idempotent_and_keeps_public_classes(self):
         method = self.native.Flash.__init__

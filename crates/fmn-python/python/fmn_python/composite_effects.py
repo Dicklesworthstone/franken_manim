@@ -6,6 +6,7 @@ and leaf implementations, including the borrow-free native driver.
 """
 from __future__ import annotations
 
+from functools import wraps
 import math
 import operator
 from typing import Any
@@ -39,10 +40,12 @@ def _point(g, point, name):
     if isinstance(point, g["Mobject"]):
         return point
     np = g["_np"]
-    point = np.asarray(point, dtype=float)
-    if point.shape != (3,) or not np.isfinite(point).all():
+    coordinates = np.asarray(point, dtype=float)
+    if coordinates.shape != (3,) or not np.isfinite(coordinates).all():
         raise ValueError(name + " must be a Mobject or a finite 3D point")
-    return point.copy()
+    # A caller may mutate the supplied array/list while the effect runs.
+    # Validate its coordinates without replacing that live input identity.
+    return point
 
 
 def _bind_root(animation, root):
@@ -130,6 +133,34 @@ def _install_lagged_map(g):
     _method(Map, "__init__", map_init)
 
 
+def _install_rooted_effect(g, name, root_attribute, kind):
+    """Keep the existing constructor/leaf factories; retain their real group."""
+    cls = g.get(name)
+    if cls is None:
+        return
+    original_init = cls.__init__
+
+    @wraps(original_init)
+    def initialize(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if self.mobject is None and root_attribute is not None:
+            root = getattr(self, root_attribute)
+        else:
+            # This also preserves explicit group/group_type arguments. For
+            # FlashyFadeIn the root contains both the live object and outline;
+            # the shared helper determines group type and de-duplicates them.
+            root = g["_fmn_ensure_composition_root"](self)
+        if not isinstance(root, g["Mobject"]):
+            raise TypeError(name + " must retain a Mobject composition root")
+        _bind_root(self, root)
+
+    # With an explicit root the shared composition driver executes the exact
+    # authored children. Normal group kinds also make play-level easing use
+    # the live-rate protocol, not the obsolete special-case sampled lowering.
+    cls._native_kind = kind
+    _method(cls, "__init__", initialize)
+
+
 def install_composite_effects(native: Any) -> None:
     """Install real composite protocols without replacing public class objects."""
     g = vars(native)
@@ -139,4 +170,7 @@ def install_composite_effects(native: Any) -> None:
         _install_flash(g)
     if "LaggedStartMap" in g:
         _install_lagged_map(g)
+    _install_rooted_effect(g, "Broadcast", "circles", "lagged_start")
+    _install_rooted_effect(g, "ClockPassesTime", "clock", "animation_group")
+    _install_rooted_effect(g, "FlashyFadeIn", None, "animation_group")
     g["_FMN_COMPOSITE_EFFECTS_INSTALLED"] = True
