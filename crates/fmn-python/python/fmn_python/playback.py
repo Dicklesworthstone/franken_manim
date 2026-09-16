@@ -61,6 +61,7 @@ def install_scene_playback(native: Any) -> None:
     Scene.play = play
     if "CyclicReplace" in g:
         _install_cyclic_replace(g)
+    _install_deferred_transforms(g)
     # The wheel exports the complete table; smaller embedding tables may
     # install only their available playback families. Missing exports remain
     # missing and are still the independent parity auditor's responsibility.
@@ -180,5 +181,42 @@ def _install_cyclic_replace(g: dict[str, Any]) -> None:
 
     def requires(animation):
         return isinstance(animation, Cyclic) or previous_requires(animation)
+
+    g["_requires_python_animation"] = requires
+
+
+def _install_deferred_transforms(g: dict[str, Any]) -> None:
+    """Evaluate authored target functions at begin, not during spec planning."""
+    Complex = g.get("ApplyComplexFunction")
+    if Complex is not None:
+        np = g["_np"]
+
+        def init_path_func(self):
+            self.path_arc = float(np.log(complex(self.function(complex(1)))).imag)
+            # Computing the angle alone leaves path_func=None, silently
+            # turning a rotation into a straight interpolation. The shared
+            # Transform path factory owns arc construction and respects an
+            # already supplied path; retain cooperative subclass dispatch.
+            super(Complex, self).init_path_func()
+
+        init_path_func.__name__ = "init_path_func"
+        init_path_func.__qualname__ = Complex.__qualname__ + ".init_path_func"
+        init_path_func.__module__ = Complex.__module__
+        Complex.init_path_func = init_path_func
+
+    families = tuple(g[name] for name in (
+        "ApplyMethod", "ApplyFunction", "ApplyPointwiseFunctionToCenter",
+        "ApplyComplexFunction",
+    ) if name in g)
+    if not families:
+        return
+    previous_requires = g["_requires_python_animation"]
+
+    def requires(animation):
+        # ApplyMethod also covers ApplyMatrix, pointwise functions, color and
+        # scale transforms. Their targets must see the predecessor's final
+        # state, even when several leaves share a single source. In contrast,
+        # MoveToTarget/_MethodAnimation deliberately retain authored targets.
+        return isinstance(animation, families) or previous_requires(animation)
 
     g["_requires_python_animation"] = requires
