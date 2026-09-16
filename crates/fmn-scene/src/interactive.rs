@@ -6,6 +6,10 @@
 //! descriptions for Studio/Lumen overlays, so helper rectangles never pollute
 //! the user's Stage or replay state.
 
+mod history;
+
+pub use history::DEFAULT_HISTORY_LIMIT;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -170,6 +174,7 @@ enum GrabAxis {
 struct GrabGesture {
     axis: GrabAxis,
     mouse_to_center: Vec3,
+    recorded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +182,7 @@ struct ResizeGesture {
     pivot: Vec3,
     reference: Vec3,
     last_scale: [f64; 3],
+    recorded: bool,
 }
 
 struct UndoState {
@@ -198,7 +204,7 @@ struct InteractionState {
     information_visible: bool,
     cursor_visible: bool,
     clipboard: InteractiveClipboard,
-    undo: Option<UndoState>,
+    history: history::EditHistory,
 }
 
 impl Default for InteractionState {
@@ -216,7 +222,7 @@ impl Default for InteractionState {
             information_visible: false,
             cursor_visible: false,
             clipboard: InteractiveClipboard::Empty,
-            undo: None,
+            history: history::EditHistory::default(),
         }
     }
 }
@@ -296,7 +302,12 @@ impl InteractionState {
                     self.select_top_level = !self.select_top_level;
                     self.refresh_selection_scope(stage);
                 }
-                (Key::Character('z'), _) => self.restore_undo(stage),
+                (Key::Character('z'), true) => {
+                    self.restore_redo(stage);
+                }
+                (Key::Character('z'), false) => {
+                    self.restore_undo(stage);
+                }
                 _ => {}
             }
             return;
@@ -327,9 +338,6 @@ impl InteractionState {
             }
             Key::Character('c') if modifiers.is_empty() => {
                 if !self.selection.is_empty() {
-                    if !self.color_picking {
-                        self.save_undo(stage);
-                    }
                     self.color_picking = !self.color_picking;
                 }
             }
@@ -387,39 +395,20 @@ impl InteractionState {
         }
     }
 
-    fn save_undo(&mut self, stage: &Stage) {
-        self.undo = Some(UndoState {
-            stage: Rc::new(stage.snapshot()),
-            selection: self.selection.clone(),
-            clipboard: self.clipboard.clone(),
-        });
-    }
-
-    fn restore_undo(&mut self, stage: &mut Stage) {
-        let Some(undo) = &self.undo else {
-            return;
-        };
-        let snapshot = Rc::clone(&undo.stage);
-        let selection = undo.selection.clone();
-        let clipboard = undo.clipboard.clone();
-        stage.restore(&snapshot);
-        self.selection = selection;
-        self.clipboard = clipboard;
-        self.prune(stage);
-    }
-
     fn prepare_grab(&mut self, stage: &Stage, mouse: Vec3, axis: GrabAxis) {
         let Some(bounds) = selection_bounds(stage, &self.selection) else {
             return;
         };
-        self.save_undo(stage);
+        // Record at the first actual movement, not a cancelled key press.
+        let recorded = self.grab.is_some_and(|gesture| gesture.recorded);
         self.grab = Some(GrabGesture {
             axis,
             mouse_to_center: sub(mouse, bounds.mid),
+            recorded,
         });
     }
 
-    fn handle_grab(&self, stage: &mut Stage, mouse: Vec3, grab: GrabGesture) {
+    fn handle_grab(&mut self, stage: &mut Stage, mouse: Vec3, grab: GrabGesture) {
         let Some(bounds) = selection_bounds(stage, &self.selection) else {
             return;
         };
@@ -440,14 +429,22 @@ impl InteractionState {
                 delta[1] = 0.0;
             }
         }
-        stage.shift_many(&self.selection, delta);
+        if delta.iter().any(|component| *component != 0.0) {
+            if !grab.recorded {
+                self.save_undo(stage);
+                if let Some(gesture) = self.grab.as_mut() {
+                    gesture.recorded = true;
+                }
+            }
+            stage.shift_many(&self.selection, delta);
+        }
     }
 
     fn prepare_resize(&mut self, stage: &Stage, mouse: Vec3, about_corner: bool) {
         let Some(bounds) = selection_bounds(stage, &self.selection) else {
             return;
         };
-        self.save_undo(stage);
+        let recorded = self.resize.as_ref().is_some_and(|gesture| gesture.recorded);
         let pivot = if about_corner {
             bounds.point([
                 sign(bounds.mid[0] - mouse[0]),
@@ -461,11 +458,12 @@ impl InteractionState {
             pivot,
             reference: sub(mouse, pivot),
             last_scale: [1.0; 3],
+            recorded,
         });
     }
 
     fn handle_resize(&mut self, stage: &mut Stage, point: Vec3, modifiers: Modifiers) {
-        let Some(gesture) = self.resize.as_mut() else {
+        let Some(mut gesture) = self.resize.clone() else {
             return;
         };
         let vector = sub(point, gesture.pivot);
@@ -482,8 +480,14 @@ impl InteractionState {
                     ratio
                 };
                 let incremental = cumulative / gesture.last_scale[axis];
-                stage.stretch_many_about_point(&self.selection, incremental, axis, gesture.pivot);
-                gesture.last_scale[axis] = cumulative;
+                if incremental != 1.0 {
+                    if !gesture.recorded {
+                        self.save_undo(stage);
+                        gesture.recorded = true;
+                    }
+                    stage.stretch_many_about_point(&self.selection, incremental, axis, gesture.pivot);
+                    gesture.last_scale[axis] = cumulative;
+                }
             }
         } else {
             let reference_norm = norm(gesture.reference);
@@ -492,9 +496,16 @@ impl InteractionState {
             }
             let absolute = (norm(vector) / reference_norm).max(1.0e-6);
             let incremental = absolute / gesture.last_scale[0];
-            stage.scale_many_about_point(&self.selection, incremental, gesture.pivot);
-            gesture.last_scale = [absolute; 3];
+            if incremental != 1.0 {
+                if !gesture.recorded {
+                    self.save_undo(stage);
+                    gesture.recorded = true;
+                }
+                stage.scale_many_about_point(&self.selection, incremental, gesture.pivot);
+                gesture.last_scale = [absolute; 3];
+            }
         }
+        self.resize = Some(gesture);
     }
 
     fn nudge(&mut self, stage: &mut Stage, direction: Vec3, large: bool) {
@@ -739,13 +750,14 @@ impl InteractionState {
         self.add_to_selection(stage, &pieces);
     }
 
-    fn choose_color(&self, stage: &mut Stage, point: Vec3) {
+    fn choose_color(&mut self, stage: &mut Stage, point: Vec3) {
         let Some(source) = self.topmost_color_source(stage, point) else {
             return;
         };
         let Some(color) = read_color(stage, source) else {
             return;
         };
+        self.save_undo(stage);
         write_color(stage, &self.selection, color);
     }
 
