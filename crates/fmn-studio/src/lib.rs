@@ -12,6 +12,7 @@
 pub mod host;
 pub mod inspect;
 pub mod interaction;
+pub mod native;
 #[cfg(feature = "metal")]
 pub mod preview;
 pub mod protocol;
