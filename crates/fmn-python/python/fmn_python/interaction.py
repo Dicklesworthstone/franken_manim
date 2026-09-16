@@ -82,14 +82,27 @@ def _install_dispatcher(g):
         def active(listener, kind):
             return _registered(self, listener, kind) and _in_scene(listener)
 
-        def hit(listener):
-            return listener.mobject.is_point_touching(state.mouse_point)
+        def payload(listener):
+            context = _INPUT.get()
+            if mouse and context is not None and listener.mobject.is_fixed_in_frame():
+                # World input is projected by the existing native CameraFrame
+                # API for fixed-frame controls. No second coordinate model.
+                data = dict(event_data)
+                frame = context.scene.frame
+                data["point"] = frame.to_fixed_frame_point(event_data["point"])
+                if "d_point" in data:
+                    data["d_point"] = frame.to_fixed_frame_point(data["d_point"], relative=True)
+                return data
+            return event_data
+
+        def hit(listener, data):
+            return listener.mobject.is_point_touching(data["point"])
 
         if event_type == Event.MousePressEvent:
             state.draggable_object_listners = []
             state.draggable_object_listners = [
                 listener for listener in tuple(self.event_listners[Event.MouseDragEvent])
-                if active(listener, Event.MouseDragEvent) and hit(listener)
+                if active(listener, Event.MouseDragEvent) and hit(listener, payload(listener))
             ]
         elif event_type == Event.MouseReleaseEvent:
             state.draggable_object_listners = []
@@ -103,9 +116,10 @@ def _install_dispatcher(g):
                 # membership at each turn. Added listeners wait for next input.
                 if not active(listener, event_type):
                     continue
-                if mouse and not captured and not hit(listener):
+                data = payload(listener)
+                if mouse and not captured and not hit(listener, data):
                     continue
-                result = listener.callback(listener.mobject, event_data)
+                result = listener.callback(listener.mobject, data)
                 if result is False:
                     return False
             return result
