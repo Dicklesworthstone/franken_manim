@@ -45,3 +45,6 @@ jobs:
       - name: Execute native editing history tests
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-scene --test interactive_history
+      - name: Run real native child and HTTP host acceptance
+        if: ${{ !cancelled() }}
+        run: cargo run --locked -p fmn-studio --example native_live -- --self-test
