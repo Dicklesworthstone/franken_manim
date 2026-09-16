@@ -23,6 +23,7 @@ from fmn_python.rendering import install_scene_rendering as _install_scene_rende
 from fmn_python.fading import install_fading as _install_fading
 from fmn_python.playback import install_scene_playback as _install_scene_playback
 from fmn_python.scene_state import install_scene_state as _install_scene_state
+from fmn_python.streamline_animation import install_streamline_animation as _install_streamline_animation
 
 _ensure_exclusive_manimlib_namespace()
 
@@ -38,7 +39,9 @@ _install_scene_rendering(_native)
 _install_fading(_native)
 _install_scene_playback(_native)
 _install_scene_state(_native)
+_install_streamline_animation(_native)
 del _install_scene_rendering, _install_fading, _install_scene_playback, _install_scene_state
+del _install_streamline_animation
 
 
 # The Rust API deliberately exposes ergonomic snake_case constructors, while
