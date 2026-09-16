@@ -62,6 +62,8 @@ def environment(install=True):
             self.error = error if error is not None else LookupError("primary")
             self.events = []
             self.on_interpolate = None
+        def update_rate_info(self, **kwargs):
+            self.__dict__.update(kwargs)
         def event(self, name):
             self.events.append(name)
             if name == self.fail:
@@ -89,6 +91,11 @@ def environment(install=True):
             super().__init__(Mob(*(anim.mobject for anim in animations)))
             self.animations = animations
     class Scene:
+        default_wait_time = 1.0
+        def pre_play(self):
+            pass
+        def post_play(self):
+            self.num_plays += 1
         def __init__(self):
             self.native_failure = None
             self.outer_failure = None
@@ -129,7 +136,12 @@ def environment(install=True):
                 stop_condition()
             if self.native_failure:
                 raise self.native_failure
-    g = types.SimpleNamespace(Scene=Scene, Mobject=Mob, Animation=Animation, AnimationGroup=AnimationGroup)
+    def prepare_animation(item):
+        if not isinstance(item, Animation):
+            raise TypeError("expected Animation")
+        return item
+    g = types.SimpleNamespace(Scene=Scene, Mobject=Mob, Animation=Animation,
+                              AnimationGroup=AnimationGroup, prepare_animation=prepare_animation)
     if install:
         execution.install_scene_execution(g)
     return g

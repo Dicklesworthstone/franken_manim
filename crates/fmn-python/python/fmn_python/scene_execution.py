@@ -7,6 +7,7 @@ it neither rewinds geometry/clock/output nor implements another frame loop.
 from __future__ import annotations
 
 from functools import wraps
+import math
 from typing import Any
 
 
@@ -143,6 +144,7 @@ class _Execution:
         # pass on an unrelated thread (native proxies are unsendable).
         self.begun.clear()
         self.snapshots.clear()
+        self.primary = None
 
     def fail(self, error):
         if self.primary is None:
@@ -214,10 +216,16 @@ def install_scene_execution(native: Any) -> None:
             if independent:
                 leave(self, owner)
 
-    def execute(scene, operation, *args, **kwargs):
+    def execute(scene, operation, args, kwargs, prepare):
         owner = enter(scene)
         try:
-            return operation(scene, *args, **kwargs)
+            args, kwargs, hooks = prepare(scene, args, kwargs)
+            if hooks:
+                scene.pre_play()
+            result = operation(scene, *args, **kwargs)
+            if hooks:
+                scene.post_play()
+            return result
         except BaseException as error:
             # An older animation-specific wrapper may throw while unwinding.
             # Keep the execution failure, not that secondary cleanup failure.
@@ -231,13 +239,52 @@ def install_scene_execution(native: Any) -> None:
         finally:
             leave(scene, owner)
 
+    def prepare_play(scene, animations, kwargs):
+        unknown = set(kwargs) - {"run_time", "rate_func", "lag_ratio"}
+        if unknown:
+            raise TypeError("Scene.play unexpected keyword(s): " + ", ".join(sorted(unknown)))
+        if not animations:
+            return animations, kwargs, False
+        # This is the Reference's prepare -> update_rate_info -> pre_play
+        # order. Build each authored builder once, before a hook can inspect
+        # or edit the completed animation objects. No geometry is adopted here.
+        prepared = tuple(g["prepare_animation"](item) for item in animations)
+        if not all(isinstance(item, g["Animation"]) for item in prepared):
+            raise TypeError("prepare_animation must return an Animation")
+        for key in ("run_time", "lag_ratio"):
+            value = kwargs.get(key)
+            if value is not None:
+                value = float(value)
+                if not math.isfinite(value) or (key == "run_time" and value < 0):
+                    raise ValueError("Scene.play " + key + " must be finite"
+                                     + (" and non-negative" if key == "run_time" else ""))
+                kwargs[key] = value
+        rate = kwargs.get("rate_func")
+        if rate is not None and not isinstance(rate, str) and not callable(rate):
+            raise TypeError("rate_func must be a callable or a catalog name")
+        for animation in prepared:
+            animation.update_rate_info(**kwargs)
+        return prepared, kwargs, True
+
     @wraps(original_play)
     def play(self, *animations, **kwargs):
-        return execute(self, original_play, *animations, **kwargs)
+        return execute(self, original_play, animations, kwargs, prepare_play)
 
     @wraps(original_wait)
-    def wait(self, *args, **kwargs):
-        return execute(self, original_wait, *args, **kwargs)
+    def wait(self, duration=None, stop_condition=None, note=None,
+             ignore_presenter_mode=False, **kwargs):
+        def prepare_wait(scene, args, options):
+            if options:
+                raise NotImplementedError("Scene.wait unsupported keyword(s): " + ", ".join(sorted(options)))
+            if stop_condition is not None and not callable(stop_condition):
+                raise TypeError("Scene.wait stop_condition must be callable or None")
+            value = float(scene.default_wait_time if duration is None else duration)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("Scene.wait duration must be finite and non-negative")
+            return (value, stop_condition), {
+                "note": note, "ignore_presenter_mode": ignore_presenter_mode,
+            }, True
+        return execute(self, original_wait, (), kwargs, prepare_wait)
 
     Scene._play_animations = core
     Scene.play, Scene.wait = play, wait
