@@ -77,6 +77,10 @@ def install_scene_playback(native: Any) -> None:
         from fmn_python.indication import install_indication
 
         install_indication(native)
+    if "AnimationGroup" in g:
+        from fmn_python.composite_effects import install_composite_effects
+
+        install_composite_effects(native)
     if "MaintainPositionRelativeTo" in g:
         from fmn_python.update_animations import install_update_animations
 
