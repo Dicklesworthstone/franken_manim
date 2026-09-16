@@ -4,6 +4,7 @@
 //! Scene animations/updaters on its trackers, and a renderer samples those
 //! values only after the ordinary capture boundary.
 
+use fmn_anim::Transform;
 use fmn_mobject::{Mob, Mobject, Stage};
 use fmn_render::{Camera, CameraConfig};
 
@@ -13,14 +14,31 @@ use crate::{Scene, SceneError};
 ///
 /// Center (xyz), width, orientation (xyzw), vertical field of view, and light
 /// position (xyz) are ordinary native state. Quaternion channels retain exact
-/// authored orientation without Euler extraction/pole rounding; interpolation
-/// of these scalar channels is normalized linear interpolation, NOT spherical
-/// interpolation or a constant-angular-speed promise. Keep quaternion target
-/// signs consistent to avoid interpolating through the zero quaternion.
+/// authored orientation without Euler extraction/pole rounding. Scalar-channel
+/// interpolation is normalized linear interpolation, NOT spherical interpolation
+/// or a constant-angular-speed promise. `animate_to` chooses compatible target
+/// signs; callers editing raw quaternion trackers must do so themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CameraRig {
     root: Mob,
     channels: [Mob; 12],
+}
+
+fn values(camera: &Camera) -> [f64; 12] {
+    let frame = camera.frame();
+    let center = frame.center();
+    let orientation = frame.orientation();
+    let light = camera.light_source_position();
+    [center[0], center[1], center[2], frame.width(),
+        orientation[0], orientation[1], orientation[2], orientation[3],
+        frame.field_of_view(), light[0], light[1], light[2]]
+}
+
+fn allocate(stage: &mut Stage, values: [f64; 12]) -> Result<CameraRig, SceneError> {
+    let root = stage.add(Mobject::new());
+    let channels = values.map(|value| stage.add_value_tracker(value));
+    for channel in channels { stage.attach(root, channel)?; }
+    Ok(CameraRig { root, channels })
 }
 
 impl CameraRig {
@@ -29,23 +47,33 @@ impl CameraRig {
     /// background, samples and other capture policy stay outside the rig.
     pub fn new(scene: &mut Scene, config: &CameraConfig) -> Result<Self, SceneError> {
         let camera = Camera::new(config.clone())?;
-        let frame = camera.frame();
-        let center = frame.center();
-        let orientation = frame.orientation();
-        let light = camera.light_source_position();
-        let values = [
-            center[0], center[1], center[2], frame.width(),
-            orientation[0], orientation[1], orientation[2], orientation[3],
-            frame.field_of_view(), light[0], light[1], light[2],
-        ];
-        let stage = scene.stage_mut();
-        let root = stage.add(Mobject::new());
-        let channels = values.map(|value| stage.add_value_tracker(value));
-        for channel in channels {
-            stage.attach(root, channel)?;
+        let rig = allocate(scene.stage_mut(), values(&camera))?;
+        scene.add(&[rig.root])?;
+        Ok(rig)
+    }
+
+    /// Animate the rig to the target's center, width, quaternion, FOV and light.
+    /// Returns the existing Choreo Transform, so timing, rate functions and
+    /// composition remain the normal native animation API. No new interpolator
+    /// or clock is introduced. Resolution, background, samples and other output
+    /// policy are NOT animated by this operation.
+    ///
+    /// Both endpoints are validated before allocating the detached target. The
+    /// target is a fresh, updater-free family, not a copy that could keep moving
+    /// under the source's callbacks. Quaternion target signs are chosen in the
+    /// current orientation's hemisphere to avoid the q-to-minus-q zero midpoint.
+    pub fn animate_to(self, scene: &mut Scene, target: &CameraConfig) -> Result<Transform, SceneError> {
+        let target_camera = Camera::new(target.clone())?;
+        let current = self.sample(scene.stage(), target)?;
+        let from = current.frame.orientation();
+        let to = target_camera.frame().orientation();
+        let mut target_values = values(&target_camera);
+        let dot = from[0] * to[0] + from[1] * to[1] + from[2] * to[2] + from[3] * to[3];
+        if dot < 0.0 {
+            for value in &mut target_values[4..8] { *value = -*value; }
         }
-        scene.add(&[root])?;
-        Ok(Self { root, channels })
+        let target = allocate(scene.stage_mut(), target_values)?;
+        Ok(Transform::new(self.root, target.root))
     }
 
     /// Point-free family root; suitable for a native updater or suspension.
@@ -110,10 +138,7 @@ impl CameraRig {
         config.frame.set_center([values[0], values[1], values[2]])?;
         config.frame.set_width(values[3])?;
         let orientation = [values[4], values[5], values[6], values[7]];
-        // Preserve the exact normalized initial orientation when unchanged.
-        if orientation != config.frame.orientation() {
-            config.frame.set_orientation(orientation)?;
-        }
+        if orientation != config.frame.orientation() { config.frame.set_orientation(orientation)?; }
         config.frame.set_field_of_view(values[8])?;
         config.light_source_position = [values[9], values[10], values[11]];
         let camera = Camera::new(config.clone())?;
