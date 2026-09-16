@@ -167,7 +167,7 @@ fn recursive_expansion_spends_a_lifetime_budget_not_just_queue_slots() {
     let calls = Rc::new(Cell::new(0));
     let mut program = NativeSceneProgram::new(source().0,
         vec![recursive_build(Rc::clone(&calls))], 1).unwrap().with_segment_limit(5).unwrap();
-    let error = program.next_frame().unwrap_err();
+    let error = program.next_frame().err().expect("recursive expansion must refuse");
     assert_eq!(error.code, WorkerErrorCode::InvalidRequest);
     assert!(error.message.contains("cumulative segment budget"));
     assert_eq!(calls.get(), 5);
@@ -209,7 +209,8 @@ fn failed_edit_preserves_failure_without_claiming_mutation_rollback() {
         context.stage_mut().shift_many(&[root], [5.0, 0.0, 0.0]);
         Err(SceneError::InvalidState("authored construction failed"))
     })], 1).unwrap();
-    assert!(program.next_frame().unwrap_err().message.contains("authored construction failed"));
+    let error = program.next_frame().err().expect("authored failure must propagate");
+    assert!(error.message.contains("authored construction failed"));
     assert!(program.preview().stage().get_bounding_box(root).mid[0] > 4.0);
     assert!(program.state_bytes().is_err());
     assert!(program.next_frame().is_err());
