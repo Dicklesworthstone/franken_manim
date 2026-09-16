@@ -77,12 +77,12 @@ def main():
         return _emit_namespace_collision(error)
 
     from manimlib import _native
+    from .console_rendering import _tokens, try_render_cli
 
-    if "--audit-parity" in sys.argv[1:]:
+    arguments = list(sys.argv[1:])
+    if "--audit-parity" in _tokens(arguments)[2]:
         return _emit_parity_audit(_native)
-    from .batch_cli import try_batch_cli
-
-    result = try_batch_cli(_native, list(sys.argv[1:]))
+    result = try_render_cli(_native, arguments)
     return _native._console_main() if result is None else result
 
 
