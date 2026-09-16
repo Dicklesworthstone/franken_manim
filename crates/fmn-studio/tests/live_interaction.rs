@@ -63,14 +63,15 @@ fn live_adoption_keeps_the_original_arena_and_updater_callable() {
     assert_eq!(live.stage().roots(), &[root]);
     let before = live.scene().time();
     let mut captures = Captures::default();
+    // Binary-exact duration: unlike 0.1, 0.5 has no upward rounding at 30 fps.
     live.scene_mut()
-        .wait(Some(0.1), &mut captures)
+        .wait(Some(0.5), &mut captures)
         .expect("same native runtime advances");
     assert!(calls.get() > 0);
     assert!(live.scene().time().frames() > before.frames());
-    assert_eq!(captures.0.len(), 3);
+    assert_eq!(captures.0.len(), 15);
     let first = captures.0[0].materialize_stage().get_bounding_box(root);
-    let last = captures.0[2].materialize_stage().get_bounding_box(root);
+    let last = captures.0[14].materialize_stage().get_bounding_box(root);
     assert!(last.mid[0] > first.mid[0]);
     assert!(live.stage().contains(root));
 }
@@ -110,15 +111,15 @@ fn pending_native_events_survive_ownership_transfer() {
 #[test]
 fn the_runtime_clock_and_capture_anchor_have_distinct_meanings() {
     let (mut scene, _) = scene_with_point();
-    scene.wait(Some(0.1), &mut NullSceneSink).expect("advance");
+    scene.wait(Some(0.5), &mut NullSceneSink).expect("advance");
     let initial = scene.time();
     let mut live = InteractivePreview::from_scene(scene).expect("live");
     assert_eq!(live.frame_index(), u64::try_from(initial.frames()).unwrap());
     assert_eq!(live.scene().time(), initial);
     live.scene_mut()
-        .wait(Some(0.1), &mut NullSceneSink)
+        .wait(Some(0.5), &mut NullSceneSink)
         .expect("continue");
-    assert_eq!(live.scene().time().frames(), initial.frames() + 3);
+    assert_eq!(live.scene().time().frames(), initial.frames() + 15);
     assert_eq!(live.frame_index(), u64::try_from(initial.frames()).unwrap());
 }
 

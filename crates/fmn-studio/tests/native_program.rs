@@ -112,9 +112,9 @@ fn empty_and_zero_duration_segments_use_the_engine_lifecycle() {
     let mut program = NativeSceneProgram::new(scene, vec![
         NativeSegment::Play { animations: Vec::new(), overrides: PlayOverrides::default() },
         NativeSegment::Wait { duration: Some(0.0) },
-        NativeSegment::Wait { duration: Some(0.1) },
-    ], 10).expect("program");
-    program.advance_to(3).expect("skip empty intervals");
+        NativeSegment::Wait { duration: Some(0.5) },
+    ], 20).expect("program");
+    program.advance_to(15).expect("skip empty intervals");
     assert!(program.next_frame().expect("end").is_none());
     assert_eq!(program.preview().scene().play_count(), 2);
 }

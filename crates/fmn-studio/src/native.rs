@@ -5,5 +5,9 @@
 //! can recreate them.
 
 mod program;
+mod raster;
+mod service;
 
 pub use program::{MAX_NATIVE_SEGMENTS, NativeSceneProgram, NativeSegment};
+
+pub use service::{NativeReplayPolicy, NativeSceneWorker, NativeWorkerConfig};
