@@ -34,7 +34,9 @@ impl EditHistory {
         // Keep the nearest undo/redo transitions. Past front is the oldest
         // undo state; future front is the most distant redo state.
         while self.past.len().saturating_add(self.future.len()) > self.limit {
-            if self.past.pop_front().is_none() {
+            if self.past.len() >= self.future.len() {
+                self.past.pop_front();
+            } else {
                 self.future.pop_front();
             }
         }
