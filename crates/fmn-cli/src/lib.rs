@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod generated;
+mod studio_live;
 
 pub use generated::{
     CommandScope, EXIT_CODE_SPECS, ExitCodeSpec, FLAG_SPECS, FlagAction, FlagArity, FlagSource,
@@ -3343,12 +3344,10 @@ pub fn compose_studio_preview_frame(
     command: &StudioCommand,
     frame: i64,
 ) -> Result<fmn_studio::FrameStream, CliError> {
-    let mut worker = NativeStudioWorker::from_command(fs, command)?;
-    let frame = worker
-        .resolve_frame(frame)
-        .map_err(|error| CliError::new("scene", error.to_string()))?;
+    let scene = studio_scene_name(fs, &command.render)?;
+    let mut worker = studio_live::worker(fs, command)?;
     match worker
-        .render_frame(frame)
+        .handle(fmn_studio::SupervisorRequest::Scrub { scene, frame })
         .map_err(|error| CliError::new("render", error.to_string()))?
     {
         fmn_studio::WorkerResponse::Frame(stream) => Ok(stream),
@@ -7159,14 +7158,14 @@ pub fn run_internal_studio_worker_os(args: &[OsString]) -> RunOutput {
     if command.render.scene_source_kind() == Some(SceneSourceKind::Python) {
         return internal_worker_failure(PYTHON_SOURCE_PORTAL_MESSAGE);
     }
-    let mut service = match NativeStudioWorker::from_command(&fmn_platform::fs::StdFs, &command) {
+    let mut service = match studio_live::worker(&fmn_platform::fs::StdFs, &command) {
         Ok(service) => service,
         Err(error) => return internal_worker_failure(error),
     };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let outcome = fmn_studio::serve_worker(
-        &mut service,
+        service.as_mut(),
         &mut stdin.lock(),
         &mut stdout.lock(),
         fmn_studio::ProtocolLimits::default(),
@@ -7185,6 +7184,10 @@ pub fn run_internal_studio_worker_os(args: &[OsString]) -> RunOutput {
 }
 
 fn studio_scene_name(fs: &dyn FileSystem, command: &RenderCommand) -> Result<String, CliError> {
+    if studio_live::selected(command) {
+        studio_live::validate_selection(command)?;
+        return Ok(fmn::builtins::INTERACTIVE_SCENE_NAME.to_owned());
+    }
     match resolve_native_render_input(fs, command)? {
         NativeRenderInput::Builtin { mut names } => {
             if names.len() != 1 {
@@ -7446,14 +7449,19 @@ fn execute_studio(
         .publish(&initial, protocol_limits)
         .map_err(|error| CliError::new("render", format!("Studio first frame: {error}")))?;
     let tui_frames = command.tui.then(|| frames.clone());
+    let live_reads = studio_live::source_reads(&*fs, &command)?;
     let asset_fs = Arc::clone(&fs);
     let asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync> = Arc::new(move |read| {
+        if read.path.starts_with("native/") {
+            return live_reads.iter().any(|expected| expected == read);
+        }
         asset_fs
             .read_bounded(Path::new(&read.path), DEFAULT_MAX_BUNDLE_BYTES)
             .is_ok_and(|bytes| fmn_studio::protocol_digest(&bytes) == read.digest)
     });
     let session = Arc::new(
         fmn_studio::StudioWorkerSession::new(&scene, supervisor, Box::new(builder), asset_ok)
+            .map(fmn_studio::StudioWorkerSession::require_guarded_input)
             .map_err(|error| internal(format!("Studio session: {error}")))?,
     );
     let host = match fmn_studio::StudioHost::bind(

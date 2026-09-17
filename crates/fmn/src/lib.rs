@@ -315,23 +315,32 @@ pub mod builtins {
         }
 
         fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
-            let child = stage.arena_mut().add(
-                Circle::new()
-                    .radius(0.6)
-                    .arc_center([-1.5, 0.0, 0.0])
-                    .color(BLUE),
-            );
-            let group = stage.add(Mobject::new())?;
-            stage.arena_mut().attach(group, child)?;
-            stage.set_fill(child, Some(BLUE), Some(1.0), Some(0.0), true);
-            stage.set_stroke(child, None, Some(0.0), Some(0.0), None, true);
-            let swatch = stage.add(Square::new().side_length(1.0).color(RED))?;
-            stage.shift(swatch, [1.5, 0.0, 0.0]);
-            stage.set_fill(swatch, Some(RED), Some(1.0), Some(0.0), true);
-            stage.set_stroke(swatch, None, Some(0.0), Some(0.0), None, true);
+            populate_interactive_canvas(stage.arena_mut())?;
             stage.wait(2.0)?;
             Ok(())
         }
+    }
+
+    /// Populate the live canvas without advancing its native scene clock.
+    /// Both the eager SceneConstruct and Studio's stepped program use this owner.
+    pub fn populate_interactive_canvas(stage: &mut crate::mobject::Stage) -> crate::Result<()> {
+        let child = stage.add(
+            Circle::new()
+                .radius(0.6)
+                .arc_center([-1.5, 0.0, 0.0])
+                .color(BLUE),
+        );
+        let group = stage.add(Mobject::new());
+        stage.add_to_scene(group)?;
+        stage.attach(group, child)?;
+        stage.set_fill(child, Some(BLUE), Some(1.0), Some(0.0), true);
+        stage.set_stroke(child, None, Some(0.0), Some(0.0), None, true);
+        let swatch = stage.add(Square::new().side_length(1.0).color(RED));
+        stage.add_to_scene(swatch)?;
+        stage.shift(swatch, [1.5, 0.0, 0.0]);
+        stage.set_fill(swatch, Some(RED), Some(1.0), Some(0.0), true);
+        stage.set_stroke(swatch, None, Some(0.0), Some(0.0), None, true);
+        Ok(())
     }
 
     #[must_use]
