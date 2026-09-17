@@ -69,6 +69,7 @@ class Preview:
         self.base = f"{url.scheme}://{url.netloc}"
         self.cap = urllib.parse.parse_qs(url.query)["cap"][0]
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.expected_digest = None
 
     def request(self, path, fields=None, *, cap=True, origin=None):
         url = self.base + path + ("?cap=" + self.cap if cap else "")
@@ -82,21 +83,39 @@ class Preview:
 
     def json(self, path, fields=None):
         with self.request(path, fields) as response:
-            return json.load(response)
+            result = json.load(response)
+        if path in {"/api/scrub", "/api/restart"}:
+            self.expected_digest = result["sha256"]
+        return result
 
     def frame(self):
         with self.request("/stream") as response:
             assert response.headers["Content-Type"].startswith("multipart/x-mixed-replace")
-            assert response.readline().strip() == b"--fmn-frame"
-            headers = {}
-            while (line := response.readline().strip()):
-                name, value = line.decode().split(":", 1)
-                headers[name.lower()] = value.strip()
-            size = int(headers["content-length"])
-            assert 0 < size < 1024 * 1024
-            data = response.read(size)
-            assert len(data) == size
-            return data
+            # A new client receives retained history, oldest first. Drain it
+            # just as the persistent browser stream does, selecting by the
+            # operation's content identity, NOT a reused frame-zero index.
+            for _ in range(8):
+                boundary = response.readline(1024).strip()
+                if not boundary:
+                    boundary = response.readline(1024).strip()
+                assert boundary == b"--fmn-frame", boundary
+                headers = {}
+                for _ in range(16):
+                    line = response.readline(4096).strip()
+                    if not line:
+                        break
+                    name, value = line.decode().split(":", 1)
+                    headers[name.lower()] = value.strip()
+                else:
+                    raise AssertionError("multipart header budget exceeded")
+                size = int(headers["content-length"])
+                assert 0 < size < 1024 * 1024
+                data = response.read(size)
+                assert len(data) == size
+                digest = hashlib.sha256(data).hexdigest()
+                if self.expected_digest is None or digest == self.expected_digest:
+                    return data
+            raise AssertionError("operation's PNG was absent from retained stream history")
 
 
 class StudioWheelTests(unittest.TestCase):
