@@ -18,6 +18,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  integration-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Archive exact tracked integration sources
+        run: git archive --format=tar.gz --output=native-studio-source.tar.gz HEAD crates/fmn-studio
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-studio-source-${{ github.sha }}
+          path: native-studio-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
   native-studio:
     runs-on: ubuntu-latest
     timeout-minutes: 30
