@@ -212,7 +212,7 @@ s.wait(0.25)
                 event: EventPayload::KeyPress { key: Key::Character(k), modifiers: Modifiers::NONE },
             }).unwrap();
             worker.handle(SupervisorRequest::Play { scene: "Live".into(), command: command(0, 'i') }).unwrap();
-            py.run(std::ffi::c_str!("import numpy as np; assert np.allclose(s.follower.get_center(), s.box.get_center() + m.UP)"), Some(globals), Some(globals)).unwrap();
+            py.run(c"import numpy as np; assert np.allclose(s.follower.get_center(), s.box.get_center() + m.UP)", Some(globals), Some(globals)).unwrap();
             let state = worker.last_state_hash();
             assert!(worker.handle(SupervisorRequest::Play { scene: "Live".into(), command: command(0, 'a') }).is_err());
             assert!(worker.handle(SupervisorRequest::Play { scene: "Live".into(), command: command(1, 'e') }).is_err());
