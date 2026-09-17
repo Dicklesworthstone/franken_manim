@@ -1,0 +1,108 @@
+name: Python Studio preview
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/portal-studio-preview.yml'
+      - 'crates/fmn-studio/src/recorded.rs'
+      - 'crates/fmn-python/src/portal_studio.rs'
+      - 'crates/fmn-python/python/fmn_python/studio.py'
+      - 'crates/fmn-python/tests/studio_preview.py'
+      - 'scripts/patches/portal-studio-preview.patch'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: portal-studio-preview
+  cancel-in-progress: false
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TARGET_DIR: target/portable
+      CARGO_TERM_COLOR: never
+      PYO3_PYTHON: python
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - name: Connect reviewed portal integration when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f scripts/patches/portal-studio-preview.patch && ! grep -qx 'mod portal_studio;' crates/fmn-python/src/lib.rs; then
+            git apply --check scripts/patches/portal-studio-preview.patch
+            git apply scripts/patches/portal-studio-preview.patch
+          fi
+      - name: Install pinned compiler and Python build tools
+        run: |
+          rustup show active-toolchain
+          python -m pip install numpy 'maturin>=1.9,<2'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-portal-studio-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - name: Verify native captured timeline and preview boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-studio/src/recorded.rs
+          cargo test --locked -p fmn-studio recorded::tests:: -- --nocapture 2>&1 | tee /tmp/studio-native.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-native.log
+          cargo clippy --locked -p fmn-studio --lib -- -D warnings
+      - name: Verify portal and clean installed wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -qx 'mod portal_studio;' crates/fmn-python/src/lib.rs; then
+            rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/lib.rs
+            cargo test --locked -p fmn-python portal_studio -- --nocapture 2>&1 | tee /tmp/studio-portal.log
+            grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-portal.log
+            cargo clippy --locked -p fmn-python --lib -- -D warnings
+            python -m maturin build --locked --interpreter python --profile dev --out target/studio-wheel
+            python -m venv target/studio-venv
+            target/studio-venv/bin/python -m pip install numpy target/studio-wheel/*.whl
+            target/studio-venv/bin/python -I crates/fmn-python/tests/studio_preview.py 2>&1 | tee /tmp/studio-wheel.log
+          fi
+          git diff --check
+      - name: Commit verified integration and formatting directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add crates/fmn-studio/src/recorded.rs
+          if test -f scripts/patches/portal-studio-preview.patch; then
+            git add Cargo.lock crates/fmn-python/Cargo.toml crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_studio.rs scripts/check_crate_dag.py
+          fi
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(studio): activate verified Python capture, isolated preview and reload'
+            git push origin HEAD:main
+          fi
+      - name: Preserve source and verification evidence
+        if: always()
+        run: |
+          git archive --format=tar.gz HEAD > /tmp/studio-source.tar.gz
+          git rev-parse HEAD > /tmp/studio-source-sha.txt
+          git diff > /tmp/studio-working.patch
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: studio-preview-${{ github.sha }}
+          path: |
+            /tmp/studio-*.log
+            /tmp/studio-source.tar.gz
+            /tmp/studio-source-sha.txt
+            /tmp/studio-working.patch
+          retention-days: 1
