@@ -197,6 +197,8 @@ pub struct AudioDecoder {
     limits: AudioDecodeLimits,
     ffmpeg_bin: Option<PathBuf>,
     boundary: Option<Boundary>,
+    locator: StdFfmpegLocator,
+    workdir_root: Option<PathBuf>,
 }
 
 impl AudioDecoder {
@@ -205,13 +207,25 @@ impl AudioDecoder {
         if ffmpeg_bin.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
             return Err(AudioDecodeError::Capability("empty ffmpeg path".into()));
         }
-        Ok(Self { limits, ffmpeg_bin, boundary: None })
+        if cfg!(target_arch = "wasm32") && ffmpeg_bin.is_some() {
+            return Err(AudioDecodeError::Capability("host audio transcoding is unavailable on wasm32".into()));
+        }
+        let ffmpeg_bin = ffmpeg_bin.map(|path| {
+            if path.is_relative() && path.components().count() > 1 {
+                std::env::current_dir().map(|cwd| cwd.join(path))
+                    .map_err(|e| AudioDecodeError::Capability(e.to_string()))
+            } else { Ok(path) }
+        }).transpose()?;
+        let (locator, workdir_root) = if ffmpeg_bin.is_some() {
+            (StdFfmpegLocator::from_host_path(), Some(std::env::temp_dir()))
+        } else { (StdFfmpegLocator::default(), None) };
+        Ok(Self { limits, ffmpeg_bin, boundary: None, locator, workdir_root })
     }
 
     /// Inject an already-governed boundary (e.g. a host's capability runner).
     pub fn with_boundary(limits: AudioDecodeLimits, boundary: Boundary) -> Result<Self, AudioDecodeError> {
         limits.decoded_byte_limit()?;
-        Ok(Self { limits, ffmpeg_bin: None, boundary: Some(boundary) })
+        Ok(Self { limits, ffmpeg_bin: None, boundary: Some(boundary), locator: StdFfmpegLocator::default(), workdir_root: None })
     }
 
     pub fn decode(&mut self, bytes: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
@@ -229,9 +243,9 @@ impl AudioDecoder {
         if self.boundary.is_none() {
             let path = self.ffmpeg_bin.as_ref().ok_or(AudioDecodeError::TranscoderRequired { format })?;
             let runner = Arc::new(StdProcessRunner);
-            let executable = StdFfmpegLocator::default().locate_ffmpeg(path)
+            let executable = self.locator.locate_ffmpeg(path)
                 .map_err(|e| AudioDecodeError::Capability(e.to_string()))?;
-            let root = std::env::temp_dir();
+            let root = self.workdir_root.clone().ok_or(AudioDecodeError::TranscoderRequired { format })?;
             let tool = FfmpegTool::resolve(executable, runner.as_ref(), &root)?;
             let limits = JobLimits { max_artifact_bytes: self.limits.decoded_byte_limit()?, ..JobLimits::default() };
             self.boundary = Some(Boundary::new(tool, runner, limits, root)?);

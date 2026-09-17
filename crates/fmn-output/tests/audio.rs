@@ -101,3 +101,29 @@ fn audio_real_compressed_decode_keeps_pcm_and_records_exact_source() {
     let reference = fmn_codec::decode_wav(&std::fs::read(root.join("source.wav")).unwrap(), &WavLimits::default()).unwrap();
     assert_eq!(flac.audio.samples, reference.samples);
 }
+
+#[test]
+fn audio_missing_decoder_does_not_disable_native_wav() {
+    let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), Some("/missing/ffmpeg".into())).unwrap();
+    assert!(matches!(decoder.decode(b"fLaC12345678"), Err(AudioDecodeError::Capability(_))));
+    let result = decoder.decode(&encode_wav(1, 48000, SampleFormat::F32, &[0.25])).unwrap();
+    assert!(result.report.invocation.is_none());
+}
+
+#[test]
+fn audio_real_file_cap_is_not_a_successfully_truncated_soundtrack() {
+    let Some(root) = std::env::var_os("FMN_AUDIO_FIXTURE_DIR") else {
+        assert!(std::env::var_os("FMN_REQUIRE_FFMPEG").is_none(), "required real audio fixtures are missing");
+        return;
+    };
+    use fmn_platform::process::{FfmpegLocator, StdFfmpegLocator, StdProcessRunner};
+    use fmn_output::{Boundary, BoundaryError, FfmpegTool, JobLimits};
+    let runner = std::sync::Arc::new(StdProcessRunner);
+    let executable = StdFfmpegLocator::from_host_path().locate_ffmpeg(std::path::Path::new("ffmpeg")).unwrap();
+    let workdir = std::env::temp_dir();
+    let tool = FfmpegTool::resolve(executable, runner.as_ref(), &workdir).unwrap();
+    let boundary = Boundary::new(tool, runner, JobLimits { max_artifact_bytes: 1024, ..JobLimits::default() }, workdir).unwrap();
+    let mut decoder = AudioDecoder::with_boundary(AudioDecodeLimits::default(), boundary).unwrap();
+    let input = std::fs::read(std::path::PathBuf::from(root).join("flac.asset")).unwrap();
+    assert!(matches!(decoder.decode(&input), Err(AudioDecodeError::Boundary(BoundaryError::ArtifactOversized { .. }))));
+}
