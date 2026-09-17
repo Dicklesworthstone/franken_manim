@@ -12,7 +12,8 @@
   history.replaceState(null, "", "/");
   const MAX_JSON = 8 * 1024 * 1024, MAX_PNG = 64 * 1024 * 1024;
   const state = {snapshot: null, overlay: null, selected: null, collapsed: new Set(),
-    shown: null, expected: null, busy: false, pending: null, refreshNeeded: false, playing: false, connected: false};
+    shown: null, expected: null, busy: false, busyKind: null, pending: null, refreshNeeded: false, playing: false, connected: false,
+    generation: null, inputs: [], restartPending: false};
   const safeText = value => String(value).split(capability).join("[session]").slice(0, 600);
   function report(error) {
     $("error").textContent = safeText(error.message || error);
@@ -45,6 +46,17 @@
     let data;
     try { data = JSON.parse(text); } catch { if (response.ok) throw new Error("Invalid Studio JSON response."); }
     if (!response.ok) throw new Error(`Studio ${response.status}: ${safeText(data?.message || text)}`);
+    if (path === "/api/inspect") {
+      const raw = response.headers.get("X-FMN-Worker-Generation");
+      const generation = raw !== null && /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+      if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Missing or invalid worker generation.");
+      const replaced = state.generation !== null && state.generation !== generation;
+      state.generation = generation;
+      if (replaced && (state.inputs.length || heldKeys.size || heldPointer)) {
+        discardInputs();
+        throw new Error("The worker was replaced. Pending input was not sent to the new generation; refresh before editing again.");
+      }
+    }
     return data;
   }
   function viewOf(snapshot) {
@@ -96,9 +108,9 @@
     }
     $("timeline").disabled = false;
     $("position").textContent = `${v.frame_index} / ${v.frame_count - 1} · ${snapshot.scene_time.toFixed(3)} s · ${v.fps} fps`;
-    $("input-events").disabled = !v.input_events;
-    if (!v.input_events) $("input-events").checked = false;
-    $("input-support").textContent = v.input_events ? "Enable to route pointer and keyboard events from the focused preview." : "This native preview has no live scene input adapter. Timeline and inspector controls remain available.";
+    $("input-events").disabled = !supportsInput(v);
+    if (!supportsInput(v)) $("input-events").checked = false;
+    $("input-support").textContent = supportsInput(v) ? "Edits are committed for replay. Ctrl/Command+T selects nested objects; Ctrl/Command+click selects. Hold G to drag, T to resize; C picks a color. Ctrl/Command+C/V copies/pastes; Ctrl/Command+Z undoes." : "This native preview has no live scene input adapter. Timeline and inspector controls remain available.";
     if (!snapshot.nodes.some(node => node.id === state.selected)) state.selected = null;
     renderTree(); renderDetails(); displayState();
   }
@@ -226,32 +238,36 @@
     $("overlay-state").textContent = `${primitives} overlay marks · frame ${v.frame_index}${readout}${data.truncated || primitives >= 20000 || data.tiles.length > 10000 || data.nodes.length > 1000 ? " · bounded display truncated" : ""}`;
     $("overlay-state").dataset.marks = String(primitives);
   }
-  async function run(operation) {
+  async function run(operation, kind = "read") {
     if (state.busy) return;
-    state.busy = true; $("restart").disabled = true; $("inspect").disabled = true;
+    state.busy = true; state.busyKind = kind; $("restart").disabled = kind === "restart"; $("inspect").disabled = true;
     try { clearError(); await operation(); }
     catch (error) { state.playing = false; report(error); }
     finally {
-      state.busy = false; $("restart").disabled = false; $("inspect").disabled = false; $("play").textContent = state.playing ? "Pause" : "Play";
-      if (state.pending) void drain();
+      state.busy = false; state.busyKind = null; $("restart").disabled = false; $("inspect").disabled = false; $("play").textContent = state.playing ? "Pause" : "Play";
+      if (state.inputs.length) void drainInputs();
+      else if (state.restartPending) void restartWorker();
+      else if (state.pending) void drain();
       else if (state.refreshNeeded) { state.refreshNeeded = false; void run(refresh); }
     }
   }
   async function drain() {
     await run(async () => {
-      while (state.pending) {
+      while (state.pending && !state.inputs.length && !state.restartPending) {
         const {frame, commit} = state.pending; state.pending = null;
         state.overlay = null; displayState();
         state.expected = await api("/api/scrub", {frame: String(frame), commit: String(commit)});
         await refresh();
         $("replay").textContent = commit ? `Committed frame ${frame} for worker replay.` : `Previewing frame ${frame}. Release the timeline to commit.`;
       }
-    });
+    }, "seek");
   }
   function seek(frame, commit = true) {
     const v = state.snapshot?.view;
     if (!v || !Number.isSafeInteger(frame) || frame < 0 || frame >= v.frame_count) { report(new Error(`Choose an integer frame from 0 to ${v ? v.frame_count - 1 : "the available range"}.`)); return; }
-    state.pending = {frame, commit}; void drain();
+    releaseInputs();
+    state.pending = {frame, commit};
+    if (state.inputs.length) void drainInputs(); else void drain();
   }
   $("timeline").addEventListener("input", () => { state.playing = false; seek(Number($("timeline").value), false); });
   $("timeline").addEventListener("change", () => seek(Number($("timeline").value), true));
@@ -260,13 +276,13 @@
     ["previous", () => Math.max(0, state.snapshot.view.frame_index - 1)], ["next", () => Math.min(state.snapshot.view.frame_count - 1, state.snapshot.view.frame_index + 1)]]) {
     $(id).addEventListener("click", () => { state.playing = false; if (state.snapshot) seek(next()); });
   }
-  $("play").addEventListener("click", () => { state.playing = !state.playing; $("play").textContent = state.playing ? "Pause" : "Play"; });
+  $("play").addEventListener("click", () => { const playing = !state.playing; releaseInputs(); state.playing = playing; $("play").textContent = state.playing ? "Pause" : "Play"; });
   // Preview playback advances nominal frames; it never invents variable sampling
   // or claims real-time rendering when the worker takes longer than a frame.
   let lastTick = 0;
   function tick(now) {
     const v = state.snapshot?.view;
-    if (state.playing && v && !state.busy && now - lastTick >= 1000 / v.fps) {
+    if (state.playing && v && !state.busy && !state.inputs.length && !state.restartPending && now - lastTick >= 1000 / v.fps) {
       lastTick = now;
       if (v.frame_index + 1 < v.frame_count) seek(v.frame_index + 1, false);
       else { state.playing = false; $("play").textContent = "Play"; seek(v.frame_index, true); }
@@ -276,7 +292,9 @@
   requestAnimationFrame(tick);
   $("inspect").addEventListener("click", () => void run(refresh));
   $("layers").addEventListener("change", () => { if (!state.busy) void run(refresh); else state.refreshNeeded = true; });
-  $("restart").addEventListener("click", () => void run(async () => {
+  async function restartWorker() {
+    await run(async () => {
+    state.restartPending = false;
     state.playing = false; state.pending = null; state.overlay = null; state.snapshot = null; displayState();
     $("worker").textContent = "Restarting worker and replaying committed state…";
     const result = await api("/api/restart", {});
@@ -284,28 +302,145 @@
     await refresh();
     $("worker").textContent = `Worker generation ${result.worker_generation} ready`;
     $("replay").textContent = `Restart restored frame ${result.frame_index} · ${result.reused_entries} reused, ${result.replayed_entries} replayed, ${result.reexecuted_entries} re-executed entries${result.cold_fallback ? " · cold fallback" : ""}.`;
-  }));
-  const keyNames = {ArrowLeft:"arrow_left", ArrowRight:"arrow_right", ArrowUp:"arrow_up", ArrowDown:"arrow_down", Escape:"escape", Enter:"enter", Tab:"tab", Backspace:"backspace"};
-  function routeInput(event, fields) {
-    if (!$("input-events").checked || !state.snapshot?.view.input_events) return;
-    event.preventDefault();
-    if (state.busy) { report(new Error("Scene input is busy; retry after the current request completes.")); return; }
-    const modifiers = String(Number(event.shiftKey) | Number(event.ctrlKey) << 1 | Number(event.metaKey) << 2 | Number(event.altKey) << 3);
-    void run(async () => { await api("/api/event", {...fields, modifiers}); await refresh(); });
+    }, "restart");
   }
-  for (const type of ["keydown", "keyup"]) $("preview").addEventListener(type, event => {
-    const key = keyNames[event.key] || ([...event.key].length === 1 ? event.key : null);
-    if (key) routeInput(event, {type: type === "keydown" ? "key_press" : "key_release", key});
+  $("restart").addEventListener("click", () => {
+    releaseInputs(); state.playing = false; state.pending = null; state.restartPending = true;
+    if (state.inputs.length) void drainInputs(); else void restartWorker();
   });
-  for (const type of ["pointerdown", "pointerup", "wheel"]) $("preview").addEventListener(type, event => {
-    const v = state.snapshot?.view; if (!v) return;
-    const rect = $("preview").getBoundingClientRect();
-    const x = ((event.clientX - rect.left) * v.width / rect.width - v.origin[0]) / v.scale;
-    const y = ((event.clientY - rect.top) * v.height / rect.height - v.origin[1]) / v.scale;
-    if (type === "pointerdown") $("preview").focus();
-    routeInput(event, type === "wheel" ? {type:"mouse_scroll", x, y, offset_x:event.deltaX, offset_y:event.deltaY} :
-      {type: type === "pointerdown" ? "mouse_press" : "mouse_release", x, y, button: ["left","middle","right"][event.button] || `other:${event.button}`});
-  }, {passive: false});
+  const keyNames = {ArrowLeft:"arrow_left", ArrowRight:"arrow_right", ArrowUp:"arrow_up", ArrowDown:"arrow_down", Escape:"escape", Enter:"enter", Tab:"tab", Backspace:"backspace"};
+  const heldKeys = new Map();
+  let heldPointer = null, lastPointer = null;
+  const MAX_PENDING_INPUTS = 256, MAX_HELD_KEYS = 16;
+  function supportsInput(v = state.snapshot?.view) {
+    return Boolean(v?.input_events && Number.isSafeInteger(v.input_revision) && v.input_revision >= 0 &&
+      Number.isSafeInteger(state.generation) && state.generation > 0);
+  }
+  const modifierBits = event => String(Number(event.shiftKey) | Number(event.ctrlKey) << 1 | Number(event.metaKey) << 2 | Number(event.altKey) << 3);
+  function discardInputs() {
+    state.inputs.length = 0; heldKeys.clear();
+    const pointer = heldPointer; heldPointer = null; lastPointer = null;
+    if (pointer && $("preview").hasPointerCapture(pointer.id)) $("preview").releasePointerCapture(pointer.id);
+    $("input-events").checked = false; state.pending = null;
+  }
+  // Every admitted event keeps its order, including rapid key-up and pointer-up
+  // transitions while a render is in flight. Do not coalesce nonlinear drags.
+  function enqueueInput(fields, owner = null, release = false) {
+    if (!supportsInput() || (!$("input-events").checked && !release)) return false;
+    if (!owner && (state.restartPending || state.busyKind === "seek" || state.busyKind === "restart" ||
+        (!state.busy && !matchesFrame()))) {
+      report(new Error("Scene input requires a synchronized, paused preview.")); return false;
+    }
+    if (state.inputs.length >= MAX_PENDING_INPUTS && !release) {
+      report(new Error("Scene input queue is full. Let the pending actions finish; releases remain available.")); return false;
+    }
+    const anchor = owner || {generation: state.generation, frame: state.snapshot.view.frame_index};
+    state.inputs.push({fields, generation: anchor.generation, frame: anchor.frame});
+    state.playing = false; $("play").textContent = "Play";
+    void drainInputs();
+    return true;
+  }
+  async function drainInputs() {
+    await run(async () => {
+      try {
+        while (state.inputs.length) {
+          const input = state.inputs.shift(), revision = state.snapshot.view.input_revision;
+          if (!supportsInput() || input.generation !== state.generation) throw new Error("Stale worker generation; queued input was not replayed.");
+          state.expected = await api("/api/event", {...input.fields, worker_generation: String(input.generation),
+            frame: String(input.frame), revision: String(revision)});
+          await refresh();
+          if (state.generation !== input.generation || state.snapshot.view.input_revision !== revision + 1) {
+            throw new Error("The scene changed during input. Remaining actions were not retried against a different revision.");
+          }
+          $("replay").textContent = `Committed input at frame ${input.frame} · revision ${revision + 1}.`;
+        }
+      } catch (error) { discardInputs(); throw error; }
+    }, "input");
+  }
+  function releasePointer() {
+    const pointer = heldPointer;
+    if (!pointer) return;
+    heldPointer = null;
+    enqueueInput({type:"mouse_release", x:pointer.x, y:pointer.y, button:pointer.button, modifiers:pointer.modifiers}, pointer, true);
+    if ($("preview").hasPointerCapture(pointer.id)) $("preview").releasePointerCapture(pointer.id);
+  }
+  function releaseInputs() {
+    releasePointer();
+    for (const [key, owner] of heldKeys) {
+      enqueueInput({type:"key_release", key, modifiers:owner.modifiers}, owner, true);
+    }
+    heldKeys.clear();
+  }
+  $("preview").addEventListener("keydown", event => {
+    if (!$("input-events").checked || !supportsInput()) return;
+    const key = keyNames[event.key] || ([...event.key].length === 1 ? event.key : null);
+    if (!key) return;
+    event.preventDefault();
+    const prior = heldKeys.get(key);
+    if (!prior && heldKeys.size >= MAX_HELD_KEYS) { report(new Error("Too many held scene keys.")); return; }
+    const modifiers = modifierBits(event);
+    const owner = prior || {generation:state.generation, frame:state.snapshot.view.frame_index, modifiers};
+    if (enqueueInput({type:"key_press", key, modifiers}, prior)) heldKeys.set(key, owner);
+  });
+  // Listen outside the canvas too: moving focus must not strand a held native key.
+  window.addEventListener("keyup", event => {
+    const key = keyNames[event.key] || ([...event.key].length === 1 ? event.key : null);
+    const owner = heldKeys.get(key);
+    if (!owner) return;
+    event.preventDefault(); heldKeys.delete(key);
+    enqueueInput({type:"key_release", key, modifiers:modifierBits(event)}, owner, true);
+  });
+  function pointerPoint(event) {
+    const v = state.snapshot?.view, rect = $("preview").getBoundingClientRect();
+    if (!v || !rect.width || !rect.height) return null;
+    return {x:((event.clientX - rect.left) * v.width / rect.width - v.origin[0]) / v.scale,
+      y:((event.clientY - rect.top) * v.height / rect.height - v.origin[1]) / v.scale};
+  }
+  const pointerButton = event => ["left","middle","right"][event.button] || `other:${event.button}`;
+  $("preview").addEventListener("pointerdown", event => {
+    if (!$("input-events").checked || !supportsInput() || heldPointer) return;
+    const point = pointerPoint(event); if (!point) return;
+    event.preventDefault(); $("preview").focus();
+    const modifiers = modifierBits(event), button = pointerButton(event);
+    const owner = {...point, id:event.pointerId, button, modifiers, generation:state.generation, frame:state.snapshot.view.frame_index};
+    if (enqueueInput({type:"mouse_press", ...point, button, modifiers})) {
+      heldPointer = owner; lastPointer = point; $("preview").setPointerCapture(event.pointerId);
+    }
+  });
+  $("preview").addEventListener("pointermove", event => {
+    if (!$("input-events").checked || !supportsInput()) return;
+    if (heldPointer && heldPointer.id !== event.pointerId) return;
+    const point = pointerPoint(event); if (!point) return;
+    event.preventDefault();
+    if (heldPointer && event.buttons === 0) releasePointer();
+    const previous = lastPointer || point, modifiers = modifierBits(event);
+    const fields = {type:heldPointer ? "mouse_drag" : "mouse_motion", ...point,
+      dx:point.x - previous.x, dy:point.y - previous.y, modifiers};
+    if (heldPointer) fields.button = heldPointer.button;
+    if (enqueueInput(fields, heldPointer)) {
+      lastPointer = point;
+      if (heldPointer) Object.assign(heldPointer, point, {modifiers});
+    }
+  });
+  $("preview").addEventListener("pointerup", event => {
+    if (!heldPointer || heldPointer.id !== event.pointerId) return;
+    event.preventDefault();
+    const point = pointerPoint(event); if (point) Object.assign(heldPointer, point);
+    heldPointer.modifiers = modifierBits(event); releasePointer();
+  });
+  for (const type of ["pointercancel", "lostpointercapture"]) $("preview").addEventListener(type, releasePointer);
+  $("preview").addEventListener("wheel", event => {
+    if (!$("input-events").checked || !supportsInput()) return;
+    const point = pointerPoint(event); if (!point) return;
+    event.preventDefault();
+    enqueueInput({type:"mouse_scroll", ...point, offset_x:event.deltaX, offset_y:event.deltaY, modifiers:modifierBits(event)});
+  }, {passive:false});
+  $("preview").addEventListener("contextmenu", event => { if ($("input-events").checked) event.preventDefault(); });
+  $("preview").style.touchAction = "none";
+  $("preview").addEventListener("blur", releaseInputs);
+  window.addEventListener("blur", releaseInputs);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) releaseInputs(); });
+  $("input-events").addEventListener("change", () => { if (!$("input-events").checked) releaseInputs(); });
   // FrameHub parts carry a length, frame index and digest. Decode only a bounded
   // complete part; image arrival is independent from the inspector HTTP request.
   async function streamOnce() {
