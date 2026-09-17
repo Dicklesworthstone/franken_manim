@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/codex-source-snapshot.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
