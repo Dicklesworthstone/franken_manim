@@ -17,6 +17,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from .render_selection import animation_range as _animation_range, apply_animation_range
+
 _FORMATS = frozenset({"png", "png_sequence", "gif", "y4m", "wav", "mp4", "mov"})
 _VIDEO_FORMATS = frozenset({"mp4", "mov"})
 
@@ -66,6 +68,7 @@ class RenderResult:
     seed: int
     ffmpeg_invocations: tuple[dict[str, Any], ...] = ()
     certified: bool = False
+    animation_range: tuple[int, int | None] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -77,6 +80,8 @@ class RenderResult:
             "certified": self.certified,
             "ffmpeg_invocations": copy.deepcopy(list(self.ffmpeg_invocations)),
         }
+        if self.animation_range is not None:
+            result["animation_range"] = list(self.animation_range)
         if self.format == "wav":
             result.update(sample_rate=48000, channels=2)
         return result
@@ -94,6 +99,7 @@ class RenderSession:
         self, scene: Any, destination: os.PathLike[str] | str, *,
         format: str | None = None, resolution: tuple[int, int] | None = None,
         fps: int | None = None, threads: int | None = None,
+        animation_range: tuple[int, int | None] | None = None,
         _native: Any = None,
     ) -> None:
         native = importlib.import_module("manimlib") if _native is None else _native
@@ -123,6 +129,7 @@ class RenderSession:
             "threads",
         )
         self.seed = _seed(scene.random_seed)
+        self.animation_range = _animation_range(animation_range)
         self.scene = scene
         self.destination = path
         self.format = format
@@ -152,6 +159,8 @@ class RenderSession:
         self._state = "active"
         try:
             scene.__dict__["_fmn_owned_render_session"] = self
+            if self.animation_range is not None:
+                apply_animation_range(scene, self.animation_range)
             camera = scene.camera
             # Resolution is output configuration, not a camera-pose edit.
             # Keep the exact scene frame identity and authored view/zoom.
@@ -203,7 +212,7 @@ class RenderSession:
             fps=self.fps, threads=int(threads), engine=engine, bytes=int(size),
             digest=digest, frame_count=None if self.format == "wav" else int(count),
             sample_frames=int(count) if self.format == "wav" else None,
-            seed=self.seed,
+            seed=self.seed, animation_range=self.animation_range,
         )
         if self.format in _VIDEO_FORMATS:
             try:
@@ -227,16 +236,18 @@ def render_session(
     scene: Any, destination: os.PathLike[str] | str, *, format: str | None = None,
     resolution: tuple[int, int] | None = None, fps: int | None = None,
     threads: int | None = None,
+    animation_range: tuple[int, int | None] | None = None,
 ) -> RenderSession:
     """Record imperative scene operations without a CLI or temporary script."""
     return RenderSession(scene, destination, format=format, resolution=resolution,
-                         fps=fps, threads=threads)
+                         fps=fps, threads=threads, animation_range=animation_range)
 
 
 def render_scene(
     scene: Any, destination: os.PathLike[str] | str, *, format: str | None = None,
     resolution: tuple[int, int] | None = None, fps: int | None = None,
     threads: int | None = None, scene_kwargs: dict[str, Any] | None = None,
+    animation_range: tuple[int, int | None] | None = None,
 ) -> RenderResult:
     """Render a Scene instance or class and return its native artifact receipt.
 
@@ -246,13 +257,14 @@ def render_scene(
     artifact. The host interpreter executes source directly, never a child
     Python process or a subprocess wrapper around the command-line program.
     """
+    animation_range = _animation_range(animation_range)
     native = importlib.import_module("manimlib")
     if isinstance(scene, type) and issubclass(scene, native.Scene):
         scene = scene(**({} if scene_kwargs is None else dict(scene_kwargs)))
     elif scene_kwargs is not None:
         raise TypeError("scene_kwargs is valid only when rendering a Scene class")
     session = RenderSession(scene, destination, format=format, resolution=resolution,
-                            fps=fps, threads=threads, _native=native)
+                            fps=fps, threads=threads, animation_range=animation_range, _native=native)
     with session:
         try:
             scene.run()
@@ -334,10 +346,11 @@ def install_scene_rendering(native: Any) -> None:
 
     def render(
         self, destination=None, *, format=None, resolution=None, fps=None, threads=None,
+        animation_range=None,
     ):
         destination, format = _configured_destination(self, destination, format, native)
         session = RenderSession(self, destination, format=format, resolution=resolution,
-                                fps=fps, threads=threads, _native=native)
+                                fps=fps, threads=threads, animation_range=animation_range, _native=native)
         with session:
             try:
                 self.run()

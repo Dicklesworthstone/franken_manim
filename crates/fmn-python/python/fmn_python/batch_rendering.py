@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .render_selection import animation_range as _animation_range
 from .rendering import RenderResult, _FORMATS, _positive_integer, render_scene
 
 
@@ -188,6 +189,7 @@ def render_scenes(
     continue_on_error: bool = False,
     on_result: Callable[[SceneRenderOutcome], Any] | None = None,
     max_jobs: int = 1024,
+    animation_range: tuple[int, int | None] | None = None,
 ) -> BatchRenderResult:
     """Render named scenes in input order using independent native sessions.
 
@@ -210,6 +212,7 @@ def render_scenes(
     if on_result is not None and not callable(on_result):
         raise TypeError("on_result must be callable or None")
     maximum = _positive_integer(max_jobs, "max_jobs", 65536)
+    selection = _animation_range(animation_range)
     if resolution is not None:
         try:
             width, height = resolution
@@ -225,7 +228,8 @@ def render_scenes(
         failure = None
         try:
             receipt = render_scene(job.scene, path, format=format, resolution=resolution,
-                                   fps=fps, threads=threads, scene_kwargs=job.scene_kwargs)
+                                   fps=fps, threads=threads, scene_kwargs=job.scene_kwargs,
+                                   **({} if selection is None else {"animation_range": selection}))
         except Exception as error:
             failure = error
             kind, message = _error_fields(error)
