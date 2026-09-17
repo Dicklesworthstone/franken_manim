@@ -11,12 +11,14 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result, _source_import_path
+from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
     _name_key, render_scenes,
 )
 from .rendering import RenderSession, _positive_integer
+from .scene_loading import SceneSource
+from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
 _SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
@@ -88,18 +90,20 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         text = native._portal_cli_help().replace(
             "Certified output, opener flags, write-all, and Studio",
             "Certified output, opener flags, and Studio",
-        ) + "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP
+        ) + "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
     batch = bool(write_all or len(raw_positionals) > 2)
     try:
-        # Selection is the only new CLI syntax. Delegate every option and its
-        # value to the existing native parser, with exactly one source. Put
+        # Strip playback selection only. Delegate output options and their
+        # values to the existing native parser, with exactly one source. Put
         # that source first so a missing trailing option value stays missing.
+        native_options, selection, still = take_playback_options(native_options)
         parser_args = raw_positionals[:1] + native_options
         positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(parser_args)
+        options = select_still_format(options, native_options, still)
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
             _positive_integer(value, name)
         source = positionals[0]
@@ -134,8 +138,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     phase, session, report = "load", None, None
     redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
     try:
-        with redirect, _source_import_path(source_path):
-            scenes = native._portal_cli_scene_types(str(source_path))
+        with redirect, SceneSource(source_path, native.Scene) as loaded:
+            scenes = loaded.scenes
             names = sorted(scenes)
             if batch:
                 requested = names if write_all else requested
@@ -150,6 +154,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     {name: scenes[name] for name in requested}, destination,
                     format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
+                    **({} if selection is None else {"animation_range": selection}),
                     on_result=lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
                         file=sys.stderr,
@@ -170,7 +175,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 scene = scenes[selected]()
                 phase = "start"
                 session = RenderSession(scene, destination, format=options["format"],
-                                        resolution=(width, height), fps=fps, threads=threads, _native=native)
+                                        resolution=(width, height), fps=fps, threads=threads,
+                                        animation_range=selection, _native=native)
                 with session:
                     phase = "execute"
                     try:
