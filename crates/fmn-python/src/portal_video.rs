@@ -241,7 +241,8 @@ mod tests {
     #[test]
     fn portal_video_callback_ownership_is_fail_closed() {
         crate::with_python_test_module("portal video ownership", |py, _module, globals| {
-            let source = std::ffi::CString::new(include_str!("../tests/video_ownership.py")).unwrap();
+            let source =
+                std::ffi::CString::new(include_str!("../tests/video_ownership.py")).unwrap();
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("writer callbacks cannot invalidate generation ownership");
