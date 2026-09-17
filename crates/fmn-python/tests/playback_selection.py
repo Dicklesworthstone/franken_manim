@@ -31,7 +31,10 @@ def render(scene, name, format="y4m", threads=1):
     scene.camera.fps = 8
     scene._begin_native_output(str(destination), format, 96, 54, 8, threads, 0)
     try:
-        scene.run()
+        try:
+            scene.run()
+        except m.EndScene:
+            pass  # Selected-range termination is normal completion.
         report = scene._finish_render()
     except BaseException:
         scene._abort_render()
