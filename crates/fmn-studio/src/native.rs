@@ -7,6 +7,7 @@
 
 mod build;
 mod camera;
+mod edits;
 mod program;
 mod raster;
 mod service;
