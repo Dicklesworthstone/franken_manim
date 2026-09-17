@@ -249,7 +249,7 @@ index ea85fb1..9f7f255 100644
 +        }
          let engine = Rc::clone(&slf.borrow().engine);
 diff --git a/crates/fmn-python/src/portal_video.rs b/crates/fmn-python/src/portal_video.rs
-index fabd486..a5faad8 100644
+index fabd486..64d0657 100644
 --- a/crates/fmn-python/src/portal_video.rs
 +++ b/crates/fmn-python/src/portal_video.rs
 @@ -72,3 +72,3 @@ impl PortalVideoConfig {
@@ -261,6 +261,11 @@ index fabd486..a5faad8 100644
          || scene.engine.borrow().stage().time() != 0.0
 +        || !scene.engine.borrow().sound_requests().is_empty()
      {
+@@ -158,3 +159,3 @@ fn video_job(
+     // Both ordinary container paths encode 4:2:0, even for an RGBA input wire.
+-    if !transparent && (width % 2 != 0 || height % 2 != 0) {
++    if !transparent && (!width.is_multiple_of(2) || !height.is_multiple_of(2)) {
+         return Err("ordinary video requires even width and height for 4:2:0 output".into());
 diff --git a/crates/fmn-python/tests/native_outputs.py b/crates/fmn-python/tests/native_outputs.py
 index ee1f1e0..2260c4a 100644
 --- a/crates/fmn-python/tests/native_outputs.py
