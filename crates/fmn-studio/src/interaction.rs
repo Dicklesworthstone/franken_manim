@@ -185,8 +185,10 @@ impl InteractivePreview {
             .snapshot()
             .to_bytes()
             .map_err(|error| InteractivePreviewError::SnapshotEncode(error.to_string()))?;
-        let mut config = RuntimeConfig::default();
-        config.fps = fps;
+        let config = RuntimeConfig {
+            fps,
+            ..RuntimeConfig::default()
+        };
         let scene = Scene::new(config, seed)?;
         let mut scene = InteractiveScene::new(scene)?;
         let decoded = Snapshot::from_bytes(&bytes, scene.scene().stage())

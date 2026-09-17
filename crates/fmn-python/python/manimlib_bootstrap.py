@@ -22751,11 +22751,23 @@ def _portal_cli_render_arguments(arguments):
         "fps": "60",
         "threads": str(max(1, min(_os.cpu_count() or 1, 96))),
         "video_dir": None,
+        "vcodec": None,
+        "pix_fmt": None,
+        "ffmpeg_bin": None,
+        "transparent": False,
     }
     positionals = []
+    value_flags = ("--format", "--resolution", "--fps", "--threads", "--video_dir",
+                   "--vcodec", "--pix_fmt", "--ffmpeg_bin")
     index = 0
     while index < len(arguments):
         argument = arguments[index]
+        if argument in ("--transparent", "-t"):
+            if values["transparent"]:
+                raise ValueError("--transparent/-t must not be repeated")
+            values["transparent"] = True
+            index += 1
+            continue
         if argument == "--reproducible":
             raise RuntimeError(
                 "CAPABILITY: certified portal rendering awaits the complete "
@@ -22765,7 +22777,7 @@ def _portal_cli_render_arguments(arguments):
             raise RuntimeError(
                 f"CAPABILITY: {argument} is not connected in the Python portal"
             )
-        if argument in ("--format", "--resolution", "--fps", "--threads", "--video_dir"):
+        if argument in value_flags:
             if index + 1 >= len(arguments):
                 raise ValueError(f"{argument} requires a value")
             values[argument[2:]] = arguments[index + 1]
@@ -22773,7 +22785,7 @@ def _portal_cli_render_arguments(arguments):
             continue
         if argument.startswith("--") and "=" in argument:
             name, value = argument.split("=", 1)
-            if name in ("--format", "--resolution", "--fps", "--threads", "--video_dir"):
+            if name in value_flags:
                 if not value:
                     raise ValueError(f"{name} requires a value")
                 values[name[2:]] = value
@@ -22803,6 +22815,12 @@ def _portal_cli_render_arguments(arguments):
         ) from error
     if width <= 0 or height <= 0 or fps <= 0 or threads <= 0:
         raise ValueError("resolution, fps, and threads must all be positive")
+    # Final format checks follow -s/--skip_animations selection in the console
+    # owner. Do not validate against the pre-selection default here.
+    for name in ("vcodec", "pix_fmt", "ffmpeg_bin"):
+        value = values[name]
+        if value is not None and (not value or "\0" in value):
+            raise ValueError(f"--{name} requires a nonempty value without NUL")
     return positionals, values, width, height, fps, threads
 
 

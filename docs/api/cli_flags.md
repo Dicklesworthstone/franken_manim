@@ -76,6 +76,7 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--tui` | studio | `tui` | improved | BN-15 | store_true | False | Attach the kitty or sixel terminal client |
 | `--checkpoint-frames` | studio | `checkpoint_frames` | improved | BN-15 | store | 120 | Maximum frames between replay checkpoints |
 | `--preview-codec` | studio | `preview_codec` | improved | BN-15 | store | png | Select permanent multipart PNG or optional MJPEG preview |
+| `--restore-session` | studio | `restore_session` | improved | BN-15 | store | — | Restore a saved native Studio session with matching scene and render settings |
 
 ## Commands
 

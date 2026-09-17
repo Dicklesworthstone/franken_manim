@@ -8,6 +8,7 @@
 
 mod generated;
 mod studio_live;
+mod studio_session;
 
 pub use generated::{
     CommandScope, EXIT_CODE_SPECS, ExitCodeSpec, FLAG_SPECS, FlagAction, FlagArity, FlagSource,
@@ -399,6 +400,8 @@ pub struct StudioCommand {
     pub checkpoint_frames: u64,
     /// Preview transport.
     pub preview_codec: PreviewCodec,
+    /// Restore committed native editing data from a saved Studio session.
+    pub restore_session: Option<PathBuf>,
 }
 
 /// Provenance of the topology used for `fmn doctor`.
@@ -689,9 +692,8 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "math_pack" => CommandScope::Render,
         "require_ffmpeg" => CommandScope::Doctor,
         "budget_ms" | "max_scenes" | "fail_fast" | "manifest_dir" => CommandScope::Batch,
-        "bind" | "port" | "no_browser" | "tui" | "checkpoint_frames" | "preview_codec" => {
-            CommandScope::Studio
-        }
+        "bind" | "port" | "no_browser" | "tui" | "checkpoint_frames" | "preview_codec"
+        | "restore_session" => CommandScope::Studio,
         _ => return None,
     })
 }
@@ -1108,6 +1110,7 @@ fn build_invocation(
                 tui: values.bool("tui"),
                 checkpoint_frames,
                 preview_codec,
+                restore_session: values.value("restore_session").map(PathBuf::from),
             }))
         }
         CommandScope::Global => Err(internal("global scope cannot be dispatched")),
@@ -7366,6 +7369,23 @@ fn execute_studio(
     // derives the same plan again before constructing its renderer.
     let _ =
         derive_studio_execution_plan(fs.as_ref(), &config, fmn_runtime::OutputPixelFormat::Rgba8)?;
+    let protocol_limits = fmn_studio::ProtocolLimits::default();
+    let (session_context, saved) =
+        studio_session::prepare(&*fs, &command, &scene, &config, protocol_limits)?;
+    let restored_frame = saved.as_ref().map_or(0, |saved| saved.committed_frame());
+    let live_reads = studio_live::source_reads(&*fs, &command)?;
+    let live_scene = studio_live::selected(&command.render);
+    let asset_fs = Arc::clone(&fs);
+    let asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync> = Arc::new(move |read| {
+        // A saved native journal cannot nominate arbitrary host files to read.
+        // Its input closure was independently resolved by this host.
+        if live_scene || read.path.starts_with("native/") {
+            return live_reads.iter().any(|expected| expected == read);
+        }
+        asset_fs
+            .read_bounded(Path::new(&read.path), DEFAULT_MAX_BUNDLE_BYTES)
+            .is_ok_and(|bytes| fmn_studio::protocol_digest(&bytes) == read.digest)
+    });
     let mut token_bytes = [0_u8; 32];
     fmn_platform::entropy::HostEntropy::fill(
         &fmn_platform::entropy::StdHostEntropy,
@@ -7403,7 +7423,6 @@ fn execute_studio(
         build_id,
     };
     let clock: Arc<dyn fmn_platform::clock::Clock> = Arc::new(fmn_platform::clock::StdClock::new());
-    let protocol_limits = fmn_studio::ProtocolLimits::default();
     let mut supervisor = fmn_studio::Supervisor::new(
         Box::new(fmn_studio::StdWorkerLauncher::default()),
         Arc::clone(&clock),
@@ -7414,18 +7433,25 @@ fn execute_studio(
             ..fmn_studio::SupervisorConfig::default()
         },
     );
-    supervisor
-        .install_session(scene.clone(), fmn_scene::Journal::new())
-        .and_then(|()| supervisor.build_and_start(&mut builder))
-        .map_err(|error| CliError::new("scene", format!("Studio worker startup: {error}")))?;
+    if let Some(saved) = saved {
+        let context = session_context.ok_or_else(|| internal("missing saved-session context"))?;
+        supervisor
+            .resume_saved_session(&mut builder, saved, &scene, context, &*asset_ok)
+            .map_err(|error| CliError::new("scene", format!("Studio session restore: {error}")))?;
+    } else {
+        supervisor
+            .install_session(scene.clone(), fmn_scene::Journal::new())
+            .and_then(|()| supervisor.build_and_start(&mut builder))
+            .map_err(|error| CliError::new("scene", format!("Studio worker startup: {error}")))?;
+    }
     let generation = supervisor.generation();
     let initial = supervisor
         .request(
             fmn_studio::SupervisorRequest::Scrub {
                 scene: scene.clone(),
-                frame: 0,
+                frame: restored_frame,
             },
-            &|_| false,
+            &*asset_ok,
         )
         .map_err(|error| CliError::new("render", format!("Studio first frame: {error}")))?;
     let initial = match initial {
@@ -7449,19 +7475,13 @@ fn execute_studio(
         .publish(&initial, protocol_limits)
         .map_err(|error| CliError::new("render", format!("Studio first frame: {error}")))?;
     let tui_frames = command.tui.then(|| frames.clone());
-    let live_reads = studio_live::source_reads(&*fs, &command)?;
-    let asset_fs = Arc::clone(&fs);
-    let asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync> = Arc::new(move |read| {
-        if read.path.starts_with("native/") {
-            return live_reads.iter().any(|expected| expected == read);
-        }
-        asset_fs
-            .read_bounded(Path::new(&read.path), DEFAULT_MAX_BUNDLE_BYTES)
-            .is_ok_and(|bytes| fmn_studio::protocol_digest(&bytes) == read.digest)
-    });
     let session = Arc::new(
         fmn_studio::StudioWorkerSession::new(&scene, supervisor, Box::new(builder), asset_ok)
             .map(fmn_studio::StudioWorkerSession::require_guarded_input)
+            .and_then(|session| match session_context {
+                Some(context) => session.with_saved_session_context(context, restored_frame),
+                None => Ok(session),
+            })
             .map_err(|error| internal(format!("Studio session: {error}")))?,
     );
     let host = match fmn_studio::StudioHost::bind(

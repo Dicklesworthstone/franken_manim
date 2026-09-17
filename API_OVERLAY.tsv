@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	c44adfd61e5e19d75baf965576b862f31292bcce7e48310c513bbf2052ed340e
+ledger_reviewed_digest	44ce27d59d4ecb55dcf0ee26aa566e5678ec4dbbe46179a385e2d470a01280d8
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -2739,6 +2739,7 @@ scene_names	same	-	render	scene_names	crates/fmn-cli/src/lib.rs#tests	explicit s
 --tui	store_true	-	False	-	studio	tui	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Attach the kitty or sixel terminal client
 --checkpoint-frames	store	-	120	u64	studio	checkpoint_frames	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Maximum frames between replay checkpoints
 --preview-codec	store	-	png	preview_codec	studio	preview_codec	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select permanent multipart PNG or optional MJPEG preview
+--restore-session	store	-	-	path	studio	restore_session	improved	BN-15	crates/fmn-cli/src/studio_session.rs#tests	Restore a saved native Studio session with matching scene and render settings
 
 # ---------------------------------------------------------------------------
 # [subcommands] — the native command tree. `render` is also the default when

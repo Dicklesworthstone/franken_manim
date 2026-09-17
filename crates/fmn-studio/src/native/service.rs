@@ -127,7 +127,7 @@ impl NativeWorkerConfig {
             },
             AssetRead {
                 path: "native/input-track-semantics".into(),
-                digest: protocol_digest(b"frame-stamped-native-input-track-v1"),
+                digest: protocol_digest(b"frame-stamped-native-input-track-v2"),
             },
         ]
     }
@@ -393,7 +393,7 @@ impl NativeSceneWorker {
         position: u64,
         edits: &mut EditTrack,
     ) -> Result<u64, ServiceError> {
-        let frame = if command.kind == CommandKind::Custom {
+        let frame = if command.kind == CommandKind::Input {
             if !self.input_enabled() {
                 return Err(invalid(
                     "native committed input is not enabled for this worker",
@@ -498,13 +498,13 @@ impl NativeSceneWorker {
         let mut program = self.fresh_at(frame, &edits)?;
         let state = self.state_bytes(&mut program, &edits, next)?;
         let mut raster = self.new_raster()?;
-        if command.kind == CommandKind::Custom {
+        if command.kind == CommandKind::Input {
             // Do not record an input which cannot produce a valid native frame.
             let frame_response = raster.frame(&self.config.scene, &program)?;
             self.checked(frame_response)?;
         }
         let state_hash = protocol_digest(&state);
-        let checkpoint = command.kind == CommandKind::Custom
+        let checkpoint = command.kind == CommandKind::Input
             || self
                 .last_checkpoint
                 .is_none_or(|last| last.abs_diff(frame) >= self.config.checkpoint_frames);

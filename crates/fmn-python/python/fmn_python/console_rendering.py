@@ -16,7 +16,7 @@ from .batch_rendering import (
     BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
     _name_key, render_scenes,
 )
-from .rendering import RenderSession, _positive_integer
+from .rendering import RenderSession, _positive_integer, _apply_output_options
 from .scene_loading import SceneSource
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
@@ -32,6 +32,41 @@ With multiple names, --video_dir is a batch root containing per-scene outputs.
 With one scene, --video_dir retains its existing single-output destination meaning.
 --keep-going requires multiple names or --write_all. It never ignores Ctrl-C.
 """
+
+_OUTPUT_HELP = """Native output profiles:
+  --transparent, -t       Preserve alpha in PNG/PNG sequences or qtrle MOV.
+  --vcodec ENCODER        Installed ffmpeg encoder name, or auto (video only).
+  --pix_fmt FORMAT        Native wire: rgba, bgra, nv12/yuv420p, p010le.
+  --ffmpeg_bin PATH       Explicit ffmpeg executable; paths with spaces work.
+
+Transparent MOV defaults to RGBA/qtrle. Explicit transparent video profiles
+require rgba/bgra and qtrle/auto. MP4, GIF, y4m and WAV do not accept -t.
+Output options apply to every selected scene without constructor changes.
+Video remains uncertified. P010 is a 10-bit transport, not an HDR claim.
+"""
+
+
+def _output_overrides(options):
+    """Validate output combinations after the existing parser/still selector."""
+    result = {name: options[name] for name in ("vcodec", "pix_fmt", "ffmpeg_bin", "transparent")
+              if options.get(name) is not None and options.get(name) is not False}
+    format = options["format"]
+    if any(name in result for name in ("vcodec", "pix_fmt", "ffmpeg_bin")) and format not in {"mp4", "mov"}:
+        raise ValueError("--vcodec/--pix_fmt/--ffmpeg_bin require mp4 or mov output")
+    if result.get("transparent"):
+        if format not in {"png", "png_sequence", "mov"}:
+            raise ValueError("--transparent requires png, png_sequence, or mov output")
+        if format == "mov":
+            if result.get("pix_fmt", "rgba").lower() not in {"rgba", "rgba8", "bgra", "bgra8"}:
+                raise ValueError("transparent video requires an rgba or bgra wire pixel format")
+            if result.get("vcodec", "auto").lower() not in {"auto", "qtrle"}:
+                raise ValueError("transparent video requires --vcodec qtrle or auto")
+    executable = result.get("ffmpeg_bin")
+    if executable is not None and Path(executable).name != executable:
+        # Freeze explicit paths before authored imports/constructors can chdir.
+        # Bare executable names remain the native governed locator's job.
+        result["ffmpeg_bin"] = str(Path(executable).resolve())
+    return result
 
 
 def _tokens(arguments, omit=()):
@@ -90,7 +125,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         text = native._portal_cli_help().replace(
             "Certified output, opener flags, write-all, and Studio",
             "Certified output, opener flags, and Studio",
-        ) + "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP
+        ) + "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
@@ -104,6 +139,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         parser_args = raw_positionals[:1] + native_options
         positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(parser_args)
         options = select_still_format(options, native_options, still)
+        output_options = _output_overrides(options)
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
             _positive_integer(value, name)
         source = positionals[0]
@@ -155,6 +191,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
                     **({} if selection is None else {"animation_range": selection}),
+                    **({} if not output_options else {"_output_options": output_options}),
                     on_result=lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
                         file=sys.stderr,
@@ -174,6 +211,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 phase = "construct"
                 scene = scenes[selected]()
                 phase = "start"
+                _apply_output_options(scene, output_options)
                 session = RenderSession(scene, destination, format=options["format"],
                                         resolution=(width, height), fps=fps, threads=threads,
                                         animation_range=selection, _native=native)

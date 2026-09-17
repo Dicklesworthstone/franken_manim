@@ -190,6 +190,7 @@ def render_scenes(
     on_result: Callable[[SceneRenderOutcome], Any] | None = None,
     max_jobs: int = 1024,
     animation_range: tuple[int, int | None] | None = None,
+    _output_options: dict[str, Any] | None = None,
 ) -> BatchRenderResult:
     """Render named scenes in input order using independent native sessions.
 
@@ -229,6 +230,7 @@ def render_scenes(
         try:
             receipt = render_scene(job.scene, path, format=format, resolution=resolution,
                                    fps=fps, threads=threads, scene_kwargs=job.scene_kwargs,
+                                   **({} if not _output_options else {"_output_options": _output_options}),
                                    **({} if selection is None else {"animation_range": selection}))
         except Exception as error:
             failure = error

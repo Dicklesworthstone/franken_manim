@@ -51,7 +51,7 @@ impl NativeSceneWorker {
     }
 
     pub(super) fn saves_pending(&self, command: &CommandRecord) -> Result<bool, ServiceError> {
-        if self.pending_inputs.is_empty() || command.kind == CommandKind::Custom {
+        if self.pending_inputs.is_empty() || command.kind == CommandKind::Input {
             return Ok(false);
         }
         let frame = self.target(

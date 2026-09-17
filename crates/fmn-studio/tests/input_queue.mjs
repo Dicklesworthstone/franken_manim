@@ -40,7 +40,7 @@ function fixture() {
   const calls = [], errors = [], control = {fail:false, conflict:false};
   const state = {snapshot:null, shown:null, expected:null, connected:true, generation,
     inputs:[], restartPending:false, busy:false, pending:null, playing:false,
-    collapsed:new Set(), refreshNeeded:false};
+    collapsed:new Set(), refreshNeeded:false, canSave:true, savePending:false};
   const refresh = async () => {
     state.generation = generation;
     state.snapshot = {view:{frame_index:frame, frame_count:61, width:96, height:54,
@@ -61,19 +61,47 @@ function fixture() {
       reused_entries:revision, replayed_entries:0, reexecuted_entries:0};
   };
   const context = vm.createContext({$,window,document,state,api,refresh,
+    async downloadSession() { calls.push({path:'/api/session'}); if (control.failDownload) throw new Error('download refused'); },
     clearError() {}, report(error) { errors.push(error.message); }, displayState() {},
     matchesFrame() { return true; }, requestAnimationFrame() {}});
   vm.runInContext(controller + '\n globalThis.queue = {enqueueInput,seek,heldKeys};', context);
   return {$,window,document,state,calls,errors,control,release,queue:context.queue,
     async settled() {
       release();
-      for (let i=0; i<1000 && (state.busy || state.inputs.length || state.restartPending || state.pending); i++) {
+      for (let i=0; i<1000 && (state.busy || state.inputs.length || state.restartPending || state.pending || state.savePending); i++) {
         await new Promise(resolve => setImmediate(resolve));
       }
       assert.equal(state.busy, false, 'controller must settle');
     }};
 }
 const eventCalls = f => f.calls.filter(call => call.path === '/api/event');
+test('saving drains accepted gestures and releases before exactly one export', async () => {
+  const f = fixture(), preview = f.$('preview');
+  preview.emit('keydown', {key:'g'}); preview.emit('pointerdown', {buttons:1});
+  preview.emit('pointermove', {buttons:1, clientX:60});
+  f.$('save-session').emit('click'); f.$('save-session').emit('click');
+  preview.emit('keydown', {key:'x'}); f.queue.seek(15); f.$('restart').emit('click');
+  await f.settled();
+  assert.deepEqual(f.calls.map(x => x.type || x.path), ['key_press','mouse_press','mouse_drag','mouse_release','key_release','/api/session']);
+  assert.match(f.$('session-save').textContent, /download started/);
+  assert.equal(f.state.playing, false);
+});
+test('saving waits for an admitted seek without promoting a preview to a commit', async () => {
+  const f = fixture(); f.queue.seek(12, false); f.$('save-session').emit('click');
+  await f.settled();
+  assert.deepEqual(f.calls.map(x=>x.path), ['/api/scrub','/api/session']);
+  assert.equal(f.calls[0].commit, 'false');
+});
+test('failed edits cancel queued save and failed downloads never report success', async () => {
+  const f = fixture(); f.control.fail = true;
+  f.$('preview').emit('keydown', {key:'g'}); f.$('save-session').emit('click');
+  await f.settled();
+  assert.ok(!f.calls.some(x=>x.path === '/api/session'));
+  const download = fixture(); download.control.failDownload = true;
+  download.$('save-session').emit('click'); await download.settled();
+  assert.equal(download.$('session-save').textContent, 'Session was not downloaded.');
+  assert.deepEqual(download.errors, ['download refused']);
+});
 function gesture(f) {
   const preview = f.$('preview');
   preview.emit('keydown', {key:'g'});

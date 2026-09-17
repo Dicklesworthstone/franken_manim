@@ -103,6 +103,67 @@ fn config() -> NativeWorkerConfig {
 fn worker() -> NativeSceneWorker {
     NativeSceneWorker::new(config(), program).unwrap()
 }
+
+#[test]
+fn actual_editor_journal_reuses_typed_input_without_bypassing_effect_or_asset_checks() {
+    let mut worker = worker();
+    let mut journal = Journal::new();
+    journal.record(commit_seek(&mut worker, 0)).unwrap();
+    journal.record(select(&mut worker)).unwrap();
+    journal.record(input(&mut worker, nudge())).unwrap();
+    journal.record(commit_seek(&mut worker, 3)).unwrap();
+    let journal = Journal::from_bytes(&journal.to_bytes().unwrap()).unwrap();
+    let commands = journal
+        .entries()
+        .iter()
+        .map(|entry| entry.command.clone())
+        .collect::<Vec<_>>();
+    let plan = fmn_scene::plan_replay(&journal, &commands, &|_| true);
+    assert_eq!(plan.reuse, 4);
+    assert!(plan.reason.is_none());
+    assert!(
+        journal
+            .entries()
+            .iter()
+            .all(|entry| matches!(entry.effect, fmn_scene::EffectClass::Stateful(_)))
+    );
+    assert_eq!(
+        journal.entries()[1].command.kind,
+        fmn_scene::CommandKind::Input
+    );
+    assert_eq!(
+        fmn_scene::plan_replay(&journal, &commands, &|_| false).reuse,
+        0
+    );
+}
+
+#[test]
+fn custom_command_with_a_valid_input_label_cannot_execute_or_be_promoted() {
+    let mut worker = worker();
+    let before = seek(&mut worker, 0);
+    let mut command = studio_input_command(
+        NAME,
+        &StudioInput {
+            frame: 0,
+            revision: 0,
+            target: None,
+            event: nudge(),
+        },
+    )
+    .unwrap();
+    command.kind = fmn_scene::CommandKind::Custom;
+    assert!(
+        worker
+            .handle(SupervisorRequest::Play {
+                scene: NAME.into(),
+                command
+            })
+            .is_err()
+    );
+    assert_eq!(worker.journal_position(), 0);
+    assert_eq!(worker.committed_input_count(), 0);
+    assert_eq!(seek(&mut worker, 0), before);
+}
 fn seek(worker: &mut NativeSceneWorker, frame: i64) -> FrameStream {
     let WorkerResponse::Frame(frame) = worker
         .handle(SupervisorRequest::Scrub {
@@ -618,7 +679,9 @@ fn preview_save_publishes_one_complete_batch_and_only_its_final_checkpoint() {
     assert!(
         entries[..2]
             .iter()
-            .all(|entry| entry.effect == fmn_scene::EffectClass::Opaque)
+            .all(|entry| entry.command.kind == fmn_scene::CommandKind::Input
+                && matches!(entry.effect, fmn_scene::EffectClass::Stateful(_))
+                && !entry.is_replay_barrier())
     );
     assert!(entries[2].checkpoint.is_some());
     assert_eq!(worker.journal_position(), 3);

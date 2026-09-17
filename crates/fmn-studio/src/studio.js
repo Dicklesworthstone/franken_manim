@@ -13,14 +13,14 @@
   const MAX_JSON = 8 * 1024 * 1024, MAX_PNG = 64 * 1024 * 1024;
   const state = {snapshot: null, overlay: null, selected: null, collapsed: new Set(),
     shown: null, expected: null, busy: false, busyKind: null, pending: null, refreshNeeded: false, playing: false, connected: false,
-    generation: null, inputs: [], restartPending: false};
+    generation: null, inputs: [], restartPending: false, savePending: false, canSave: false};
   const safeText = value => String(value).split(capability).join("[session]").slice(0, 600);
   function report(error) {
     $("error").textContent = safeText(error.message || error);
     $("error").hidden = false;
   }
   function clearError() { $("error").hidden = true; $("error").textContent = ""; }
-  async function boundedBody(response, limit) {
+  async function boundedBytes(response, limit) {
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
     try {
@@ -34,8 +34,24 @@
       const bytes = new Uint8Array(length);
       let at = 0;
       for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.length; }
-      return new TextDecoder("utf-8", {fatal: true}).decode(bytes);
+      return bytes;
     } finally { await reader.cancel().catch(() => {}); }
+  }
+  async function boundedBody(response, limit) {
+    return new TextDecoder("utf-8", {fatal: true}).decode(await boundedBytes(response, limit));
+  }
+  async function downloadSession() {
+    const response = await fetch("/api/session", {headers, signal: AbortSignal.timeout(30000)});
+    if (!response.ok) throw new Error(`Studio ${response.status}: ${safeText(await boundedBody(response, 8192))}`);
+    if (response.headers.get("Content-Type") !== "application/vnd.frankenmanim.studio-session") throw new Error("Unexpected saved-session content type.");
+    const bytes = await boundedBytes(response, 64 * 1024 * 1024);
+    if (bytes.length < 4 || new TextDecoder().decode(bytes.slice(0,4)) !== "FMNS") throw new Error("Invalid saved-session envelope.");
+    const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(n => n.toString(16).padStart(2,"0")).join("");
+    if (hash !== response.headers.get("X-FMN-SHA256")) throw new Error("Saved-session checksum mismatch.");
+    const url = URL.createObjectURL(new Blob([bytes], {type:"application/vnd.frankenmanim.studio-session"}));
+    const link = document.createElement("a"); link.href = url; link.download = "studio-session.fmns";
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   async function api(path, fields) {
     const response = await fetch(path, {headers: fields ? {...headers,
@@ -47,6 +63,7 @@
     try { data = JSON.parse(text); } catch { if (response.ok) throw new Error("Invalid Studio JSON response."); }
     if (!response.ok) throw new Error(`Studio ${response.status}: ${safeText(data?.message || text)}`);
     if (path === "/api/inspect") {
+      state.canSave = response.headers.get("X-FMN-Session-Export") === "true";
       const raw = response.headers.get("X-FMN-Worker-Generation");
       const generation = raw !== null && /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
       if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Missing or invalid worker generation.");
@@ -79,6 +96,7 @@
       (!state.expected || (state.expected.frame_index === state.shown.index && state.expected.sha256 === state.shown.hash));
   }
   function displayState() {
+    $("save-session").disabled = !state.canSave || state.savePending || state.busyKind === "save";
     const matched = matchesFrame(), shown = state.shown;
     $("display").textContent = shown ? `Displayed frame ${shown.index}${matched ? " · inspector synchronized" : " · waiting for synchronized inspector / stream"}` : "Waiting for the first frame…";
     $("display").dataset.frame = shown ? String(shown.index) : "";
@@ -242,12 +260,13 @@
     if (state.busy) return;
     state.busy = true; state.busyKind = kind; $("restart").disabled = kind === "restart"; $("inspect").disabled = true;
     try { clearError(); await operation(); }
-    catch (error) { state.playing = false; report(error); }
+    catch (error) { state.playing = false; state.savePending = false; report(error); }
     finally {
       state.busy = false; state.busyKind = null; $("restart").disabled = false; $("inspect").disabled = false; $("play").textContent = state.playing ? "Pause" : "Play";
       if (state.inputs.length) void drainInputs();
       else if (state.restartPending) void restartWorker();
       else if (state.pending) void drain();
+      else if (state.savePending) void saveSession();
       else if (state.refreshNeeded) { state.refreshNeeded = false; void run(refresh); }
     }
   }
@@ -263,6 +282,7 @@
     }, "seek");
   }
   function seek(frame, commit = true) {
+    if (state.savePending || state.busyKind === "save") return;
     const v = state.snapshot?.view;
     if (!v || !Number.isSafeInteger(frame) || frame < 0 || frame >= v.frame_count) { report(new Error(`Choose an integer frame from 0 to ${v ? v.frame_count - 1 : "the available range"}.`)); return; }
     releaseInputs();
@@ -276,7 +296,7 @@
     ["previous", () => Math.max(0, state.snapshot.view.frame_index - 1)], ["next", () => Math.min(state.snapshot.view.frame_count - 1, state.snapshot.view.frame_index + 1)]]) {
     $(id).addEventListener("click", () => { state.playing = false; if (state.snapshot) seek(next()); });
   }
-  $("play").addEventListener("click", () => { const playing = !state.playing; releaseInputs(); state.playing = playing; $("play").textContent = state.playing ? "Pause" : "Play"; });
+  $("play").addEventListener("click", () => { if (state.savePending || state.busyKind === "save") return; const playing = !state.playing; releaseInputs(); state.playing = playing; $("play").textContent = state.playing ? "Pause" : "Play"; });
   // Preview playback advances nominal frames; it never invents variable sampling
   // or claims real-time rendering when the worker takes longer than a frame.
   let lastTick = 0;
@@ -305,8 +325,33 @@
     }, "restart");
   }
   $("restart").addEventListener("click", () => {
+    if (state.savePending || state.busyKind === "save") return;
     releaseInputs(); state.playing = false; state.pending = null; state.restartPending = true;
     if (state.inputs.length) void drainInputs(); else void restartWorker();
+  });
+  async function saveSession() {
+    await run(async () => {
+      state.savePending = false;
+      $("save-session").disabled = true;
+      $("session-save").textContent = "Preparing committed session…";
+      try {
+        await downloadSession();
+        $("session-save").textContent = "Session download started. Reopen with --restore-session and the same scene/settings. Preview-only positions are not saved.";
+      } catch (error) { $("session-save").textContent = "Session was not downloaded."; throw error; }
+      finally { $("save-session").disabled = !state.canSave; }
+    }, "save");
+  }
+  $("save-session").addEventListener("click", () => {
+    if (!state.canSave || state.savePending || state.busyKind === "save") return;
+    // Release held modes with their original frame owner, then drain admitted
+    // input and an earlier seek. Never silently commit preview-only playback.
+    releaseInputs(); state.playing = false; state.savePending = true;
+    $("session-save").textContent = "Waiting for accepted edits…";
+    if (state.busy) return;
+    if (state.inputs.length) void drainInputs();
+    else if (state.restartPending) void restartWorker();
+    else if (state.pending) void drain();
+    else void saveSession();
   });
   const keyNames = {ArrowLeft:"arrow_left", ArrowRight:"arrow_right", ArrowUp:"arrow_up", ArrowDown:"arrow_down", Escape:"escape", Enter:"enter", Tab:"tab", Backspace:"backspace"};
   // Physical ownership survives modifier/layout changes between down and up.
@@ -330,6 +375,7 @@
   // transitions while a render is in flight. Do not coalesce nonlinear drags.
   function enqueueInput(fields, owner = null, release = false) {
     if (!supportsInput() || (!$("input-events").checked && !release)) return false;
+    if (!release && (state.savePending || state.busyKind === "save")) return false;
     if (!owner && (state.restartPending || state.busyKind === "seek" || state.busyKind === "restart" ||
         (!state.busy && !matchesFrame()))) {
       report(new Error("Scene input requires a synchronized, paused preview.")); return false;

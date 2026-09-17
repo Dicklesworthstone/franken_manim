@@ -248,6 +248,7 @@ def render_scene(
     resolution: tuple[int, int] | None = None, fps: int | None = None,
     threads: int | None = None, scene_kwargs: dict[str, Any] | None = None,
     animation_range: tuple[int, int | None] | None = None,
+    _output_options: dict[str, Any] | None = None,
 ) -> RenderResult:
     """Render a Scene instance or class and return its native artifact receipt.
 
@@ -263,6 +264,8 @@ def render_scene(
         scene = scene(**({} if scene_kwargs is None else dict(scene_kwargs)))
     elif scene_kwargs is not None:
         raise TypeError("scene_kwargs is valid only when rendering a Scene class")
+    if _output_options:
+        _apply_output_options(scene, _output_options)
     session = RenderSession(scene, destination, format=format, resolution=resolution,
                             fps=fps, threads=threads, animation_range=animation_range, _native=native)
     with session:
@@ -273,6 +276,19 @@ def render_scene(
     if session.result is None:
         raise RuntimeError("scene execution ended without publishing its render generation")
     return session.result
+
+
+def _apply_output_options(scene: Any, options: dict[str, Any]) -> None:
+    """Apply parsed console overrides after construction, without replacing
+    the scene's camera, pose, RGB background, or unrelated writer settings.
+    """
+    for option, attribute in (("vcodec", "video_codec"), ("pix_fmt", "pixel_format"),
+                              ("ffmpeg_bin", "ffmpeg_bin")):
+        value = options.get(option)
+        if value is not None:
+            setattr(scene.file_writer, attribute, value)
+    if options.get("transparent", False):
+        scene.camera.background_rgba[3] = 0.0
 
 
 def _validate_writer_options(scene: Any, format: str, native: Any) -> None:
@@ -289,10 +305,8 @@ def _validate_writer_options(scene: Any, format: str, native: Any) -> None:
                 unsupported.append(name)
     if format in {"png", "png_sequence"} and getattr(writer, "png_mode", "RGBA") != "RGBA":
         unsupported.append("png_mode")
-    if format in _VIDEO_FORMATS:
-        for name, default in (("ffmpeg_bin", "ffmpeg"), ("video_codec", "libx264"), ("pixel_format", "yuv420p")):
-            if getattr(writer, name, default) != default:
-                unsupported.append(name)
+    # Video codec, wire format and executable are validated and negotiated by
+    # the native generation before it acquires a process/output reservation.
     if unsupported:
         error_type = getattr(native, "_CapabilityError", RuntimeError)
         raise error_type(

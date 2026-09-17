@@ -65,6 +65,7 @@ fmn.cli.studio	--checkpoint-frames	checkpoint_frames	cli_flag	0	action=store;nar
 fmn.cli.studio	--no-browser	no_browser	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Do not launch the host browser
 fmn.cli.studio	--port	port	cli_flag	0	action=store;nargs=-;type=u16;default=0	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Studio TCP port, with zero selecting an ephemeral port
 fmn.cli.studio	--preview-codec	preview_codec	cli_flag	0	action=store;nargs=-;type=preview_codec;default=png	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select permanent multipart PNG or optional MJPEG preview
+fmn.cli.studio	--restore-session	restore_session	cli_flag	0	action=store;nargs=-;type=path;default=-	improved	BN-15	crates/fmn-cli/src/studio_session.rs#tests	Restore a saved native Studio session with matching scene and render settings
 fmn.cli.studio	--tui	tui	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Attach the kitty or sixel terminal client
 fmn.config	camera	camera	config_key	0	kind=map;default=-	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the camera configuration namespace mapping resolution, fps, and background properties
 fmn.config	camera.background_color	camera.background_color	config_key	0	kind=string;default="	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the camera background color string hex representation

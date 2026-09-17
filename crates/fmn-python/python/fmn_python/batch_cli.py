@@ -12,6 +12,7 @@ from .scene_loading import SceneSource
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
 _VALUE_FLAGS = frozenset({"--format", "--resolution", "--fps", "--threads", "--video_dir",
+                          "--vcodec", "--pix_fmt", "--ffmpeg_bin",
                           "-n", "--start_at_animation_number"})
 _BATCH_HELP = """Multi-scene output:
   fmn-python [--robot] SOURCE.py --write_all [--keep-going]

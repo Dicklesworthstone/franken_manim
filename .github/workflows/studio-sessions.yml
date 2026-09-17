@@ -4,16 +4,18 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/studio-sessions.yml'
-      - 'scripts/patches/studio-session-*.patch'
-      - 'crates/fmn-studio/src/supervisor/session.rs'
-      - 'crates/fmn-studio/src/host/session.rs'
-      - 'crates/fmn-cli/src/studio_session.rs'
+      - 'crates/fmn-studio/src/**'
+      - 'crates/fmn-studio/tests/**'
+      - 'crates/fmn-cli/src/**'
+      - 'crates/fmn-scene/src/journal.rs'
+      - 'crates/fmn-scene/tests/journal.rs'
+      - 'API_OVERLAY.tsv'
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: studio-sessions
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   CARGO_TARGET_DIR: target/portable
@@ -26,7 +28,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.13'
@@ -40,43 +42,28 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Integrate reviewed session entry points
+      - name: Verify versioned archives, native editing and recovery
         run: |
-          if ! grep -q '^pub mod session;' crates/fmn-studio/src/supervisor.rs; then
-            git apply --check scripts/patches/studio-session-core.patch
-            git apply scripts/patches/studio-session-core.patch
-          fi
-          if ! grep -q '^mod studio_session;' crates/fmn-cli/src/lib.rs; then
-            git apply --check scripts/patches/studio-session-host.patch
-            git apply scripts/patches/studio-session-host.patch
-          fi
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs
-          git diff --check
-      - name: Generate the CLI contract from its single schema
-        run: UPDATE_API_ARTIFACTS=1 cargo test --locked -p fmn-conformance --test api_schema
-      - name: Verify saved sessions and existing native recovery
-        run: |
-          cargo test --locked -p fmn-studio --lib
-          cargo test --locked -p fmn-studio --test supervisor --test native_committed_input --test native_worker
-          cargo test --locked -p fmn-cli --features cli,batch --lib studio_
+          cargo test --locked -p fmn-conformance --test api_schema
+          cargo test --locked -p fmn-studio
+          cargo test --locked -p fmn-cli --features cli,batch --lib
+          cargo test --locked -p fmn-scene
           cargo clippy --locked -p fmn-studio --lib -- -D warnings
-      - name: Commit validated integration to main
+          node --test crates/fmn-studio/tests/input_queue.mjs
+      - name: Verify authenticated HTTP and worker lifecycle
+        run: cargo test --locked -p fmn-conformance --test e2e_scenarios studio_native_ -- --nocapture
+      - name: Verify real browser downloads and editable sessions across whole-host restarts
         run: |
-          git add API_OVERLAY.tsv crates/fmn-cli/src/lib.rs crates/fmn-cli/src/generated.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-config/src/generated.rs docs/api/cli_flags.md docs/api/schema.md docs/api/ledger.tsv docs/api/out_of_tier.tsv docs/api/parity_coverage.svg crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(studio): enable saved session downloads and strict CLI resume'
-            git fetch origin main
-            git merge --no-edit origin/main
-            git push origin HEAD:main
-          fi
-          git rev-parse HEAD > /tmp/session-source-sha.txt
-          git archive --format=tar.gz HEAD > /tmp/session-source.tar.gz
+          cargo build --locked -p fmn-cli --features cli,batch --bin fmn
+          node crates/fmn-studio/tests/browser.mjs "$PWD/target/portable/debug/fmn" "$RUNNER_TEMP/saved-session-browser"
+          git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: studio-session-source-${{ github.sha }}
+          name: studio-session-browser-${{ github.sha }}
           path: |
-            /tmp/session-source-sha.txt
-            /tmp/session-source.tar.gz
-          retention-days: 1
+            ${{ runner.temp }}/saved-session-browser/*.json
+            ${{ runner.temp }}/saved-session-browser/*.png
+            ${{ runner.temp }}/saved-session-browser/saved-*/studio-session.fmns
+          retention-days: 3
+          if-no-files-found: warn

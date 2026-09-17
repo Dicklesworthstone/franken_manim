@@ -1,7 +1,7 @@
 //! Transactional native command replay and cold checkpoint reconstruction.
 
+use fmn_scene::Journal;
 use fmn_scene::studio_bridge::{SceneState, Stage};
-use fmn_scene::{CommandKind, EffectClass, Journal};
 
 use super::super::edits::decode_state;
 use super::{NativeSceneWorker, execution_error, refuse_owned};
@@ -52,12 +52,9 @@ impl NativeSceneWorker {
         let mut total_frames = 0_u64;
         let mut total_inputs = 0_u64;
         for (offset, entry) in entries.iter().enumerate() {
-            let effect = if entry.command.kind == CommandKind::Custom {
-                EffectClass::Opaque
-            } else {
-                self.effect()
-            };
-            if entry.reads != self.reads || entry.effect != effect || !entry.subprocesses.is_empty()
+            if entry.reads != self.reads
+                || entry.effect != self.effect()
+                || !entry.subprocesses.is_empty()
             {
                 return Err(refuse(
                     "native replay closure or effect differs from this factory",
@@ -80,14 +77,13 @@ impl NativeSceneWorker {
                     "native replay exceeds its total frame or input work budget",
                 ));
             }
-            if let Some(state) = &entry.checkpoint {
-                if state.len() > self.config.limits.max_checkpoint_bytes
-                    || protocol_digest(state) != entry.state_hash
-                {
-                    return Err(refuse(
-                        "native replay checkpoint digest or budget is invalid",
-                    ));
-                }
+            if let Some(state) = &entry.checkpoint
+                && (state.len() > self.config.limits.max_checkpoint_bytes
+                    || protocol_digest(state) != entry.state_hash)
+            {
+                return Err(refuse(
+                    "native replay checkpoint digest or budget is invalid",
+                ));
             }
         }
         let mut edits = self.edits.try_clone()?;
