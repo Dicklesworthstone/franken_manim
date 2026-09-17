@@ -9,8 +9,10 @@ from typing import Any
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_fields, render_scenes
 from .rendering import _positive_integer
 from .scene_loading import SceneSource
+from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
-_VALUE_FLAGS = frozenset({"--format", "--resolution", "--fps", "--threads", "--video_dir"})
+_VALUE_FLAGS = frozenset({"--format", "--resolution", "--fps", "--threads", "--video_dir",
+                          "-n", "--start_at_animation_number"})
 _BATCH_HELP = """Multi-scene output:
   fmn-python [--robot] SOURCE.py --write_all [--keep-going]
              [--format png|png_sequence|gif|y4m|wav|mp4|mov]
@@ -87,7 +89,7 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
         text = native._portal_cli_help().replace(
             "Certified output, opener flags, write-all, and Studio",
             "Certified output, opener flags, and Studio",
-        ) + "\n\n" + _BATCH_HELP
+        ) + "\n\n" + _BATCH_HELP + "\n" + PLAYBACK_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
@@ -95,7 +97,9 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
     if not flags["--write_all"]:
         return native._portal_cli_emit(2, "usage", "usage-error", "--keep-going requires --write_all", robot)
     try:
+        remaining, selection, still = take_playback_options(remaining)
         positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(remaining)
+        options = select_still_format(options, remaining, still)
         if len(positionals) != 1:
             raise ValueError("--write_all accepts SOURCE.py without an individual scene name")
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
@@ -135,6 +139,7 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
                 {name: discovered[name] for name in sorted(discovered)}, directory,
                 format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                 continue_on_error=bool(flags["--keep-going"]), on_result=progress,
+                **({} if selection is None else {"animation_range": selection}),
             )
     except BatchRenderError as error:
         return _emit_result(native, error.result, robot, source, directory)
