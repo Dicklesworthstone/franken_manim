@@ -9,7 +9,7 @@ use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat};
 use pyo3::prelude::*;
 
-use crate::{CapabilityError, PortalFrameFormat, PyScene, PyValueError};
+use crate::{CapabilityError, PortalFrameFormat, PyRuntimeError, PyScene, PyValueError};
 
 pub(crate) struct PortalVideoConfig {
     pub(crate) ffmpeg_bin: String,
@@ -24,6 +24,7 @@ impl PortalVideoConfig {
         height: u32,
         fps: u32,
     ) -> PyResult<Self> {
+        check_scene_ownership(scene)?;
         // No engine borrow may cross a Python descriptor/callback.
         let writer = scene.getattr("file_writer")?;
         let ffmpeg_bin: String = writer.getattr("ffmpeg_bin")?.extract()?;
@@ -61,8 +62,35 @@ impl PortalVideoConfig {
             rgba[3] < 1.0,
         )
         .map_err(PyValueError::new_err)?;
+        // Python getters may adopt mobjects, advance time, or recursively
+        // acquire a generation. Never replace that state or probe an encoder
+        // against the now-stale preflight in begin_portal_render.
+        check_scene_ownership(scene)?;
         Ok(Self { ffmpeg_bin, job })
     }
+}
+
+fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+    let scene = scene.try_borrow()?;
+    if scene
+        .render
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+        .is_some()
+    {
+        return Err(PyRuntimeError::new_err(
+            "a portal render generation is already active",
+        ));
+    }
+    if !scene.proxies.borrow().is_empty()
+        || !scene.engine.borrow().stage().roots().is_empty()
+        || scene.engine.borrow().stage().time() != 0.0
+    {
+        return Err(PyRuntimeError::new_err(
+            "render configuration must be installed before Scene construction mutates engine state",
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -208,6 +236,16 @@ mod tests {
             assert!(video_job(format, 96, 54, 8, codec, wire, transparent).is_err());
         }
         assert!(video_job(PortalFrameFormat::Mp4, 95, 54, 8, "auto", "rgba", false).is_err());
+    }
+
+    #[test]
+    fn portal_video_callback_ownership_is_fail_closed() {
+        crate::with_python_test_module("portal video ownership", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/video_ownership.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("writer callbacks cannot invalidate generation ownership");
+        });
     }
 
     #[test]
