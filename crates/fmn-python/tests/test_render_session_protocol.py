@@ -43,6 +43,7 @@ class Scene:
         self.active = False
         self.start_error = self.run_error = self.finish_error = self.abort_error = None
         self._render_invocations = [{"argv": ["ffmpeg", "-i", "pipe:0"]}]
+        self._render_audio_inputs = []
 
     def _begin_native_output(self, *args):
         self.events.append(("begin", args))
@@ -85,6 +86,17 @@ class RenderSessionTests(unittest.TestCase):
 
     def session(self, path="movie.y4m", **kwargs):
         return render_session(self.scene, path, **kwargs)
+
+    def test_audio_decode_receipt_is_available_for_wav_and_detached_from_native(self):
+        self.scene._render_audio_inputs = [{"source_sha256": "a" * 64, "decoder": "ffmpeg"}]
+        result = render_scene(self.scene, "soundtrack.wav", threads=1)
+        self.assertEqual(result.sample_frames, 4800)
+        self.assertEqual(result.ffmpeg_invocations[0]["argv"], ["ffmpeg", "-i", "pipe:0"])
+        self.scene._render_audio_inputs[0]["source_sha256"] = "changed"
+        self.assertEqual(result.audio_inputs[0]["source_sha256"], "a" * 64)
+        report = result.as_dict()
+        report["audio_inputs"][0]["source_sha256"] = "changed again"
+        self.assertEqual(result.audio_inputs[0]["source_sha256"], "a" * 64)
 
     def test_imperative_context_publishes_one_native_receipt(self):
         session = self.session()

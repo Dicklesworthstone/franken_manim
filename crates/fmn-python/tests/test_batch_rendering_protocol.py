@@ -41,6 +41,7 @@ class Scene:
         self.run_error = self.start_error = self.finish_error = self.abort_error = None
         self.events = []
         self._render_invocations = [{"argv": ["ffmpeg", "input"]}]
+        self._render_audio_inputs = []
         self.kwargs = kwargs
         Scene.instances.append(self)
         Scene.trace.append(("construct", type(self).__name__, threading.get_ident()))

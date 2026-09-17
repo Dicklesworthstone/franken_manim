@@ -22,62 +22,106 @@ pub(crate) struct PortalAudio {
 
 impl PortalAudio {
     pub(crate) fn from_scene(
-        scene: &Bound<'_, PyScene>, format: &PortalOutputFormat,
+        scene: &Bound<'_, PyScene>,
+        format: &PortalOutputFormat,
         video: Option<&portal_video::PortalVideoConfig>,
     ) -> PyResult<Box<Self>> {
         let executable = if let Some(video) = video {
             Some(video.ffmpeg_bin.clone())
         } else if matches!(format, PortalOutputFormat::Wav) {
-            Some(scene.getattr("file_writer")?.getattr("ffmpeg_bin")?.extract::<String>()?)
-        } else { None };
-        if executable.as_ref().is_some_and(|value| value.is_empty() || value.contains('\0')) {
-            return Err(PyValueError::new_err("file_writer.ffmpeg_bin must be nonempty and contain no NUL"));
+            Some(
+                scene
+                    .getattr("file_writer")?
+                    .getattr("ffmpeg_bin")?
+                    .extract::<String>()?,
+            )
+        } else {
+            None
+        };
+        if executable
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.contains('\0'))
+        {
+            return Err(PyValueError::new_err(
+                "file_writer.ffmpeg_bin must be nonempty and contain no NUL",
+            ));
         }
-        let decoder = AudioDecoder::new(AudioDecodeLimits::default(), executable.map(PathBuf::from))
-            .map_err(decode_error)?;
-        Ok(Box::new(Self { decoder, inputs: Vec::new() }))
+        let decoder =
+            AudioDecoder::new(AudioDecodeLimits::default(), executable.map(PathBuf::from))
+                .map_err(decode_error)?;
+        Ok(Box::new(Self {
+            decoder,
+            inputs: Vec::new(),
+        }))
     }
 
     pub(crate) fn mix(
-        &mut self, scene: &Scene, threads: usize, timeline: &OutputTimeline,
+        &mut self,
+        scene: &Scene,
+        threads: usize,
+        timeline: &OutputTimeline,
     ) -> PyResult<Option<fmn_output::MixReport>> {
         let requests = scene.sound_requests();
-        if requests.is_empty() { return Ok(None); }
+        if requests.is_empty() {
+            return Ok(None);
+        }
         let config = fmn_output::MixerConfig::default();
         let time = scene.time();
         let timeline_frames = fmn_output::frames_to_samples(
-            timeline.output_frame(time.frames())?, time.fps(), config.sample_rate,
-        ).map_err(native_error)?;
-        let mut mixer = fmn_output::SoundMixer::new(config).map_err(native_error)?
+            timeline.output_frame(time.frames())?,
+            time.fps(),
+            config.sample_rate,
+        )
+        .map_err(native_error)?;
+        let mut mixer = fmn_output::SoundMixer::new(config)
+            .map_err(native_error)?
             .with_timeline_frames(u64::try_from(timeline_frames).map_err(native_error)?);
         self.inputs.clear();
         let fs = fmn_platform::fs::StdFs;
         for request in requests {
-            let bytes = fmn_platform::fs::FileSystem::read_bounded(&fs, &request.sound_file, 64 * 1024 * 1024)
-                .map_err(|error| PyOSError::new_err(format!("sound cue {}: {error}", request.sound_file.display())))?;
+            let bytes = fmn_platform::fs::FileSystem::read_bounded(
+                &fs,
+                &request.sound_file,
+                64 * 1024 * 1024,
+            )
+            .map_err(|error| {
+                PyOSError::new_err(format!(
+                    "sound cue {}: {error}",
+                    request.sound_file.display()
+                ))
+            })?;
             let decoded = self.decoder.decode(&bytes).map_err(|error| {
                 let message = format!("sound cue {}: {error}", request.sound_file.display());
                 decode_message(&error, message)
             })?;
             let input = PortalAudioInput {
-                path: request.sound_file.clone(), channels: decoded.audio.channels,
+                path: request.sound_file.clone(),
+                channels: decoded.audio.channels,
                 sample_rate: decoded.audio.sample_rate,
-                sample_frames: (decoded.audio.samples.len() / usize::from(decoded.audio.channels)) as u64,
+                sample_frames: (decoded.audio.samples.len() / usize::from(decoded.audio.channels))
+                    as u64,
                 report: decoded.report,
             };
-            mixer.add(fmn_output::SoundCue {
-                audio: decoded.audio,
-                frame: timeline.output_frame(request.time.frames())?, fps: request.time.fps(),
-                time_offset: request.time_offset, gain: request.gain,
-                gain_to_background: request.gain_to_background,
-            }).map_err(native_error)?;
+            mixer
+                .add(fmn_output::SoundCue {
+                    audio: decoded.audio,
+                    frame: timeline.output_frame(request.time.frames())?,
+                    fps: request.time.fps(),
+                    time_offset: request.time_offset,
+                    gain: request.gain,
+                    gain_to_background: request.gain_to_background,
+                })
+                .map_err(native_error)?;
             self.inputs.push(input);
         }
         mixer.mix(threads).map(Some).map_err(native_error)
     }
 
     pub(crate) fn invocations(&self) -> Vec<fmn_output::InvocationReport> {
-        self.inputs.iter().filter_map(|input| input.report.invocation.clone()).collect()
+        self.inputs
+            .iter()
+            .filter_map(|input| input.report.invocation.clone())
+            .collect()
     }
 }
 
@@ -87,8 +131,9 @@ fn decode_error(error: AudioDecodeError) -> PyErr {
 
 fn decode_message(error: &AudioDecodeError, message: String) -> PyErr {
     match error {
-        AudioDecodeError::Capability(_) | AudioDecodeError::TranscoderRequired { .. } =>
-            CapabilityError::new_err(message),
+        AudioDecodeError::Capability(_) | AudioDecodeError::TranscoderRequired { .. } => {
+            CapabilityError::new_err(message)
+        }
         AudioDecodeError::Boundary(_) => PyRuntimeError::new_err(message),
         _ => PyValueError::new_err(message),
     }
@@ -105,8 +150,22 @@ pub(crate) fn input_facts(scene: &Bound<'_, PyScene>) -> PyResult<Py<PyList>> {
         fact.set_item("sample_rate", input.sample_rate)?;
         fact.set_item("channels", input.channels)?;
         fact.set_item("sample_frames", input.sample_frames)?;
-        fact.set_item("decoder", if input.report.invocation.is_some() { "ffmpeg" } else { "native-wav" })?;
-        fact.set_item("decoder_sha256", input.report.invocation.as_ref().map(|invocation| &invocation.provenance.tool_sha256_hex))?;
+        fact.set_item(
+            "decoder",
+            if input.report.invocation.is_some() {
+                "ffmpeg"
+            } else {
+                "native-wav"
+            },
+        )?;
+        fact.set_item(
+            "decoder_sha256",
+            input
+                .report
+                .invocation
+                .as_ref()
+                .map(|invocation| &invocation.provenance.tool_sha256_hex),
+        )?;
         facts.append(fact)?;
     }
     Ok(facts.unbind())
@@ -118,10 +177,19 @@ mod tests {
     #[test]
     fn portal_compressed_audio_acceptance() {
         crate::with_python_test_module("compressed audio", |py, _module, globals| {
-            globals.set_item("_audio_fixture_generator", concat!(env!("CARGO_MANIFEST_DIR"), "/../fmn-output/tests/make_audio_fixtures.py")).unwrap();
+            globals
+                .set_item(
+                    "_audio_fixture_generator",
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../fmn-output/tests/make_audio_fixtures.py"
+                    ),
+                )
+                .unwrap();
             let source = std::ffi::CString::new(include_str!("../tests/audio_inputs.py")).unwrap();
             py.run(source.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py)).expect("real compressed sound and output receipts");
+                .inspect_err(|error| error.print(py))
+                .expect("real compressed sound and output receipts");
         });
     }
 }
