@@ -20,6 +20,7 @@ pub mod project;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project_watch;
 pub mod protocol;
+pub mod recorded;
 pub mod scrub;
 pub mod supervisor;
 pub mod tui;
