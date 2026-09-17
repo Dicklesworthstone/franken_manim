@@ -38,9 +38,10 @@ jobs:
         run: |
           set -euo pipefail
           if test -f scripts/patches/portal-studio-preview.patch && ! grep -qx 'mod portal_studio;' crates/fmn-python/src/lib.rs; then
-            git apply --check scripts/patches/portal-studio-preview.patch
-            git apply scripts/patches/portal-studio-preview.patch
+            git apply --recount --check scripts/patches/portal-studio-preview.patch
+            git apply --recount scripts/patches/portal-studio-preview.patch
           fi
+          grep -qx 'mod portal_studio;' crates/fmn-python/src/lib.rs
       - name: Install pinned compiler and Python build tools
         run: |
           rustup show active-toolchain
@@ -75,20 +76,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -qx 'mod portal_studio;' crates/fmn-python/src/lib.rs; then
-            rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/lib.rs
-            cargo test --locked -p fmn-python portal_studio -- --nocapture 2>&1 | tee /tmp/studio-portal.log
-            grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-portal.log
-            cargo clippy --locked -p fmn-python --lib -- -D warnings
-            python scripts/check_crate_dag.py
-            rustfmt --edition 2024 --config skip_children=true crates/fmn-conformance/tests/e2e_scenarios.rs
-            cargo test --locked -p fmn-conformance --test e2e_scenarios python_studio_capture_scenario_passes -- --nocapture 2>&1 | tee /tmp/studio-e2e.log
-            grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-e2e.log
-            python -m maturin build --locked --interpreter python --profile dev --out target/studio-wheel
-            python -m venv target/studio-venv
-            target/studio-venv/bin/python -m pip install numpy target/studio-wheel/*.whl
-            target/studio-venv/bin/python -I crates/fmn-python/tests/studio_preview.py 2>&1 | tee /tmp/studio-wheel.log
-          fi
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/lib.rs
+          cargo test --locked -p fmn-python portal_studio -- --nocapture 2>&1 | tee /tmp/studio-portal.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-portal.log
+          cargo clippy --locked -p fmn-python --lib -- -D warnings
+          python scripts/check_crate_dag.py
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-conformance/tests/e2e_scenarios.rs
+          cargo test --locked -p fmn-conformance --test e2e_scenarios python_studio_capture_scenario_passes -- --nocapture 2>&1 | tee /tmp/studio-e2e.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-e2e.log
+          python -m maturin build --locked --interpreter python --profile dev --out target/studio-wheel
+          python -m venv target/studio-venv
+          target/studio-venv/bin/python -m pip install 'numpy==2.5.2' target/studio-wheel/*.whl
+          target/studio-venv/bin/python -I crates/fmn-python/tests/studio_preview.py 2>&1 | tee /tmp/studio-wheel.log
           git diff --check
       - name: Commit verified integration and formatting directly to main
         shell: bash
