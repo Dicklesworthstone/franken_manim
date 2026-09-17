@@ -236,6 +236,60 @@ class Other(Clip):
         assert frames(Path(item["destination"])) == frames(ROOT / "full.y4m")[4:8]
 
 
+def range_termination_never_masks_teardown_failure():
+    from fmn_python.rendering import render_scene
+    class TeardownFailure(Motion):
+        def tear_down(self):
+            self.torn_down = True
+            raise ValueError("teardown failed after selected output")
+    for name, scene in (("teardown-selected", TeardownFailure()),
+                        ("teardown-full", TeardownFailure())):
+        destination = ROOT / (name + ".y4m")
+        options = {"animation_range": (1, 2)} if name.endswith("selected") else {}
+        try:
+            render_scene(scene, destination, format="y4m", resolution=(96, 54),
+                         fps=8, threads=1, **options)
+        except ValueError as error:
+            assert str(error) == "teardown failed after selected output"
+        else:
+            raise AssertionError("teardown failure was swallowed by normal EndScene")
+        assert scene.torn_down and not destination.exists()
+    class BothFail(TeardownFailure):
+        def construct(self):
+            raise KeyError("primary construct failure")
+    try:
+        render_scene(BothFail(), ROOT / "two-failures.y4m", resolution=(96, 54), fps=8, threads=1)
+    except KeyError as error:
+        assert error.args == ("primary construct failure",)
+    else:
+        raise AssertionError("teardown replaced an actual construct failure")
+    assert not (ROOT / "two-failures.y4m").exists()
+
+
+def skipped_preroll_keeps_live_python_updaters_and_camera_samples():
+    class Updated(m.Scene):
+        def construct(self):
+            self.square = m.Square(side_length=1, fill_opacity=1, stroke_width=0)
+            self.add(self.square)
+            self.ticks = []
+            def move(mob, dt):
+                self.ticks.append(dt)
+                mob.shift(dt * m.RIGHT)
+            self.square.add_updater(move)
+            self.frame.add_updater(lambda frame, dt: frame.shift(-dt * m.RIGHT), call=False)
+            self.wait(.5)
+            self.wait(.5)
+            self.wait(.25)
+    full, selected = Updated(), Updated(start_at_animation_number=1, end_at_animation_number=2)
+    full_path, _ = render(full, "updated-full")
+    selected_path, report = render(selected, "updated-range")
+    assert report[1] == 4
+    assert frames(selected_path) == frames(full_path)[4:8]
+    assert [tick for tick in selected.ticks if tick] == [.125] * 8
+    np.testing.assert_allclose(selected.square.get_center(), m.RIGHT, atol=1e-6)
+    np.testing.assert_allclose(selected.frame.get_center(), -m.RIGHT, atol=1e-6)
+
+
 CASES = (
     range_is_the_same_frames_after_real_preroll,
     temporary_skip_keeps_endpoints_and_omits_frames,
@@ -245,8 +299,10 @@ CASES = (
     exception_after_selected_capture_does_not_publish,
     public_render_session_uses_the_same_native_range,
     shipped_console_renders_selected_project_frames_and_named_batches,
+    range_termination_never_masks_teardown_failure,
+    skipped_preroll_keeps_live_python_updaters_and_camera_samples,
 )
-assert len(CASES) == 8
+assert len(CASES) == 10
 for case in CASES:
     case()
     print("native playback selection:", case.__name__)

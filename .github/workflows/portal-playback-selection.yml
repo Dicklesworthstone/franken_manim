@@ -18,11 +18,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: portal-playback-selection
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -37,8 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
+          ref: main
+          fetch-depth: 0
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: "3.13"
@@ -46,6 +46,24 @@ jobs:
         run: |
           rustup show active-toolchain
           python -m pip install numpy
+      - name: Integrate native teardown error precedence
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -Fq '(Err(error), Err(teardown)) if error.is_instance_of::<EndScene>(slf.py())' crates/fmn-python/src/lib.rs; then
+            git apply --check scripts/patches/portal-range-teardown.patch
+            git apply scripts/patches/portal-range-teardown.patch
+            rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/lib.rs
+            git diff --check
+            git add crates/fmn-python/src/lib.rs
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(python): do not hide teardown failure behind normal range termination'
+            git fetch origin main
+            git merge --no-edit origin/main
+            git push origin HEAD:main
+          fi
+          echo "Validated source: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
