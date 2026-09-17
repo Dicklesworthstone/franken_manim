@@ -1,13 +1,24 @@
-name: Portal playback selection integration
+name: Portal playback selection
 
 on:
   push:
     branches: [main]
-    paths: [".github/workflows/portal-playback-selection.yml"]
+    paths:
+      - ".github/workflows/portal-playback-selection.yml"
+      - "crates/fmn-python/src/portal_playback.rs"
+      - "crates/fmn-python/src/lib.rs"
+      - "crates/fmn-python/tests/playback_selection.py"
+      - "crates/fmn-python/tests/test_render_selection_protocol.py"
+      - "crates/fmn-python/python/fmn_python/render_selection.py"
+      - "crates/fmn-python/python/fmn_python/rendering.py"
+      - "crates/fmn-python/python/fmn_python/console_rendering.py"
+      - "crates/fmn-python/python/fmn_python/batch_rendering.py"
+      - "crates/fmn-python/python/fmn_python/batch_cli.py"
+      - "crates/fmn-scene/src/runtime.rs"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: portal-playback-selection
@@ -17,40 +28,24 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TARGET_DIR: target/portable
   CARGO_TERM_COLOR: always
+  PYO3_PYTHON: python
 
 jobs:
-  integrate:
+  native:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: main
-          fetch-depth: 0
-      - name: Install the governed toolchain
-        run: rustup show active-toolchain
-      - name: Apply the reviewed native bridge patch
-        shell: bash
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.13"
+      - name: Install the governed toolchain and host NumPy
         run: |
-          set -euo pipefail
-          if ! grep -q '^mod portal_playback;' crates/fmn-python/src/lib.rs; then
-            git apply --check scripts/patches/portal-playback-selection.patch
-            git apply scripts/patches/portal-playback-selection.patch
-          fi
-          rustfmt --edition 2024 --config skip_children=true \
-            crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_playback.rs \
-            crates/fmn-scene/src/runtime.rs
-          git diff --check
-          git add crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_playback.rs crates/fmn-scene/src/runtime.rs
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(python): honor native skip/range playback and rebase selected soundtracks (fm-5wq.4.145)'
-            git fetch origin main
-            git merge --no-edit origin/main
-            git push origin HEAD:main
-          fi
-          echo "Validated source: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          rustup show active-toolchain
+          python -m pip install numpy
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -58,8 +53,11 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Install host NumPy
-        run: python3 -m pip install --user --break-system-packages numpy
+      - name: Exercise selection and native generation ownership
+        env:
+          PYTHONPATH: crates/fmn-python/tests
+        run: |
+          python -m unittest test_console_rendering_protocol test_render_session_protocol test_batch_rendering_protocol test_batch_failure_notes_protocol test_render_selection_protocol
       - name: Exercise actual native playback and decoded outputs
         shell: bash
         run: |

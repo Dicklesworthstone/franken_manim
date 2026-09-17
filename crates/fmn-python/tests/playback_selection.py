@@ -178,6 +178,61 @@ def exception_after_selected_capture_does_not_publish():
     assert not (ROOT / "failed.y4m").exists()
 
 
+def public_render_session_uses_the_same_native_range():
+    from fmn_python.rendering import render_scene
+    scene = Motion()
+    report = render_scene(scene, ROOT / "public.y4m", format="y4m", resolution=(96, 54),
+                          fps=8, threads=2, animation_range=(1, 2))
+    assert report.frame_count == 4 and report.animation_range == (1, 2)
+    assert frames(report.destination) == frames(ROOT / "full.y4m")[4:8]
+    assert scene.torn_down and not hasattr(scene, "reached_tail")
+
+
+def shipped_console_renders_selected_project_frames_and_named_batches():
+    import contextlib
+    import io
+    import json
+    from fmn_python.console_rendering import try_render_cli
+    project = ROOT / "project"
+    project.mkdir()
+    source = project / "selected_scene.py"
+    source.write_text("""from manimlib import Scene, Square, Transform, RIGHT, linear
+class Clip(Scene):
+    def __init__(self):
+        super().__init__()
+    def construct(self):
+        square = Square(side_length=1, fill_opacity=1, stroke_width=0)
+        square.shift(-2 * RIGHT)
+        self.add(square)
+        self.play(Transform(square, square.copy().shift(RIGHT)), run_time=.5, rate_func=linear)
+        self.play(Transform(square, square.copy().shift(RIGHT)), run_time=.5, rate_func=linear)
+        self.wait(.25)
+class Other(Clip):
+    pass
+""")
+    def invoke(*options):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = try_render_cli(m, ["--robot", str(source), "--resolution", "96x54",
+                                     "--fps", "8", "--threads", "2", *options])
+        assert code == 0, (stdout.getvalue(), stderr.getvalue())
+        assert len(stdout.getvalue().splitlines()) == 1
+        return json.loads(stdout.getvalue())
+    clip = invoke("Clip", "-n", "1,2", "--format", "y4m", "--video_dir", str(ROOT / "cli.y4m"))
+    assert clip["frame_count"] == 4 and clip["animation_range"] == [1, 2]
+    assert frames(Path(clip["destination"])) == frames(ROOT / "full.y4m")[4:8]
+    still = invoke("Clip", "-n1,2", "-s", "--video_dir", str(ROOT / "cli.png"))
+    assert still["frame_count"] == 1 and still["format"] == "png"
+    assert Path(still["destination"]).read_bytes() == (ROOT / "still.png").read_bytes()
+    result = invoke("Other", "Clip", "--start_at_animation_number=1,2", "--format=y4m",
+                    "--video_dir", str(ROOT / "cli-batch"))
+    outcomes = result["batch"]["outcomes"]
+    assert [item["name"] for item in outcomes] == ["Other", "Clip"]
+    for item in outcomes:
+        assert item["result"]["frame_count"] == 4
+        assert frames(Path(item["destination"])) == frames(ROOT / "full.y4m")[4:8]
+
+
 CASES = (
     range_is_the_same_frames_after_real_preroll,
     temporary_skip_keeps_endpoints_and_omits_frames,
@@ -185,8 +240,10 @@ CASES = (
     final_png_remains_one_frame_when_python_stops_skipping,
     soundtrack_uses_output_time_without_losing_original_cue_time,
     exception_after_selected_capture_does_not_publish,
+    public_render_session_uses_the_same_native_range,
+    shipped_console_renders_selected_project_frames_and_named_batches,
 )
-assert len(CASES) == 6
+assert len(CASES) == 8
 for case in CASES:
     case()
     print("native playback selection:", case.__name__)
