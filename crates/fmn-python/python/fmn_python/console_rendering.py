@@ -127,7 +127,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         text = native._portal_cli_help().replace(
             "Certified output, opener flags, write-all, and Studio",
             "Certified output, opener flags, and Studio",
-        ) + "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP
+        ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
+        from .studio import _HELP as _STUDIO_HELP
+        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + _STUDIO_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)

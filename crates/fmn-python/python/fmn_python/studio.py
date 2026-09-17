@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
 import sys
+import threading
 import time
 from typing import Any
+import weakref
 
 from . import _ensure_exclusive_manimlib_namespace
 
@@ -25,6 +28,7 @@ _SCHEMA = "fmn-python.studio-worker"
 _MAX_SOURCE_BYTES = 16 * 1024 * 1024
 _DEFAULT_FRAMES = 7200
 _DEFAULT_BYTES = 256 * 1024 * 1024
+_MAX_RELOAD_RESPONSE = 65536
 
 
 class _Parser(argparse.ArgumentParser):
@@ -83,20 +87,35 @@ class Studio:
     Construction executes the selected scene once in a disposable worker.
     ``url`` contains a bearer capability: do not share it with untrusted users.
     Preview is silent/read-only; ordinary offline rendering remains separate.
+    ``autoreload=True`` explicitly authorizes rerunning source on stabilized
+    edits. It watches local Python sources and any additional ``watch_paths``;
+    files named explicitly may be non-Python assets. Worker failures leave the
+    previous healthy capture available and are exposed through ``reload_status``.
     """
     def __init__(
         self, source: os.PathLike[str] | str, scene: str, *,
         resolution: tuple[int, int] = (640, 360), fps: int = 30, threads: int = 1,
         max_frames: int = _DEFAULT_FRAMES, max_bytes: int = _DEFAULT_BYTES,
         timeout: int = 120, port: int = 0,
+        autoreload: bool = False, watch_paths: tuple[os.PathLike[str] | str, ...] | list = (),
+        debounce_ms: int = 200,
     ) -> None:
         _ensure_exclusive_manimlib_namespace()
         from manimlib import _native
 
         if not isinstance(scene, str) or not scene.isidentifier() or len(scene) > 512:
             raise ValueError("Studio requires one explicit Scene class name")
+        if not isinstance(autoreload, bool):
+            raise ValueError("autoreload must be a bool")
+        if not isinstance(watch_paths, (tuple, list)) or len(watch_paths) > 62:
+            raise ValueError("watch_paths must be a list or tuple of at most 62 paths")
+        if watch_paths and not autoreload:
+            raise ValueError("watch_paths requires autoreload=True")
+        debounce_ms = _integer(debounce_ms, "debounce_ms", 0, 10000)
         path = Path(source).resolve()
         _source(path)
+        roots = list(dict.fromkeys([str(path), str(path.parent),
+                                   *(str(Path(value).resolve()) for value in watch_paths)]))
         try:
             width, height = resolution
         except (TypeError, ValueError):
@@ -133,18 +152,84 @@ class Studio:
             return (str(executable), ["-I", "-m", "fmn_python.studio", "--worker", _canonical(request)],
                     environment, str(path.parent), request["build_id"])
 
+        self._operation = threading.RLock()
+        self._status_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._watch_thread = None
+        # Snapshot before executing the initial generation. An edit made while
+        # that worker is rendering must be noticed on the first later poll.
+        self._watch = _native._StudioHost.watch_sources(roots, debounce_ms) if autoreload else None
+        self._timeout = timeout + 5
+        self._autoreload = autoreload
+        self._reload_status = {"revision": 0, "completed": 0, "error": None, "result": None}
         self._host = _native._StudioHost(rebuild, scene, secrets.token_hex(32), port, timeout)
+        try:
+            if autoreload:
+                self._watch_thread = threading.Thread(
+                    target=_watch_loop, args=(weakref.ref(self), self._stop, self._watch),
+                    name="fmn-python-source-watch", daemon=True,
+                )
+                self._watch_thread.start()
+        except BaseException:
+            self._stop.set()
+            self._host.close()
+            raise
 
     @property
     def url(self) -> str:
-        return self._host.url
+        with self._operation:
+            return self._host.url
 
     @property
     def alive(self) -> bool:
-        return self._host.alive
+        with self._operation:
+            return self._host.alive
+
+    @property
+    def autoreload(self) -> bool:
+        return self._autoreload
+
+    @property
+    def reload_status(self) -> dict[str, Any]:
+        """Detached status; a failed edit is not a terminal host failure."""
+        with self._status_lock:
+            return copy.deepcopy(self._reload_status)
+
+    def _record_reload(self, result=None, error=None) -> None:
+        with self._status_lock:
+            if error is not None and error == self._reload_status["error"]:
+                return  # A refused scan must not flood robot output every poll.
+            self._reload_status = {
+                "revision": self._reload_status["revision"] + 1,
+                "completed": self._reload_status["completed"] + int(error is None),
+                "error": error, "result": result,
+            }
+
+    def reload(self) -> dict[str, Any]:
+        """Reexecute in a fresh worker through the same authenticated native
+        route as the browser's Reload button, including its operation lock,
+        rate limits, opaque-effect handling and frame publication.
+        """
+        with self._operation:
+            if self._stop.is_set() or not self._host.alive:
+                raise RuntimeError("Studio is closed")
+            try:
+                result = _reload_request(self._host.url, self._timeout)
+            except Exception as error:
+                self._record_reload(error=str(error)[:4096])
+                raise
+            self._record_reload(result=result)
+            return copy.deepcopy(result)
 
     def close(self) -> None:
-        self._host.close()
+        self._stop.set()
+        thread = self._watch_thread
+        # Never hold the operation lock while joining a thread which may need
+        # it to finish. Native worker requests retain their configured deadline.
+        if thread is not None and thread is not threading.current_thread() and thread.ident is not None:
+            thread.join()
+        with self._operation:
+            self._host.close()
 
     def __enter__(self) -> Studio:
         if not self.alive:
@@ -153,6 +238,59 @@ class Studio:
 
     def __exit__(self, *_exc) -> None:
         self.close()
+
+
+def _reload_request(url: str, timeout: int) -> dict[str, Any]:
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password:
+        raise RuntimeError("Studio reload requires its native loopback host")
+    authority = "http://" + parsed.netloc
+    request = urllib.request.Request(authority + "/api/restart?" + parsed.query, data=b"",
+        headers={"Origin": authority, "Content-Type": "application/x-www-form-urlencoded"})
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None  # Never forward the bearer capability to another host.
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            data = response.read(_MAX_RELOAD_RESPONSE + 1)
+        if len(data) > _MAX_RELOAD_RESPONSE:
+            raise RuntimeError("Studio reload response exceeds its 64 KiB budget")
+        result = json.loads(data)
+        if not isinstance(result, dict) or not isinstance(result.get("sha256"), str):
+            raise RuntimeError("Studio reload returned no native frame receipt")
+        return result
+    except urllib.error.HTTPError as error:
+        with error:
+            detail = error.read(4096).decode("utf-8", "replace")
+        raise RuntimeError(f"Studio reload refused ({error.code}): {detail}") from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+        raise RuntimeError(f"Studio reload failed: {error}") from error
+
+
+def _watch_loop(owner_ref, stop, watch) -> None:
+    # A weak owner lets a forgotten Python Studio object release its native
+    # host/worker rather than being kept alive forever by its polling thread.
+    while not stop.wait(0.1):
+        owner = owner_ref()
+        if owner is None:
+            return
+        try:
+            if not owner.alive:
+                return
+            if watch.poll() and not stop.is_set():
+                owner.reload()
+        except Exception as error:
+            if not stop.is_set():
+                owner._record_reload(error=str(error)[:4096])
+        finally:
+            del owner
 
 
 def _capture(request: dict[str, Any], native: Any):
@@ -214,10 +352,15 @@ def _worker(encoded: str) -> int:
 _HELP = """Read-only native Studio for Python scenes:
   fmn-python studio SOURCE.py SCENE [--resolution WxH] [--fps N] [--threads N]
                     [--max_frames N] [--max_bytes N] [--timeout SECONDS] [--port N]
+                    [--autoreload] [--watch PATH ...] [--debounce_ms N]
 
 Executes once in a disposable host-CPython worker; scrub and inspect the captured
 frames in the authenticated native Studio UI. Reload explicitly executes fresh
 source and imports. Ctrl-C closes the host and worker. This is not a sandbox.
+--autoreload explicitly reruns source on content changes to local .py/.pyw
+files; --watch adds directories or explicit asset files. Native bounded scans
+ignore caches/virtualenvs and debounce edits. A failed edit retains the healthy
+preview and is retried only after another edit, not in an execution loop.
 No live Python event editing, sound playback, callback checkpoints, or certified
 render claim. Default: 640x360, 30 FPS, 7200 frames, 256 MiB encoded capture budget.
 """
@@ -240,6 +383,9 @@ def try_studio_cli(native: Any, arguments: list[str]) -> int | None:
     parser.add_argument("source")
     parser.add_argument("scene")
     parser.add_argument("--resolution", default="640x360")
+    parser.add_argument("--autoreload", action="store_true")
+    parser.add_argument("--watch", dest="watch_paths", action="append", default=[])
+    parser.add_argument("--debounce_ms", type=int, default=200)
     for flag, default in (("fps", 30), ("threads", 1), ("max_frames", _DEFAULT_FRAMES),
                           ("max_bytes", _DEFAULT_BYTES), ("timeout", 120), ("port", 0)):
         parser.add_argument("--" + flag, type=int, default=default)
@@ -256,13 +402,22 @@ def try_studio_cli(native: Any, arguments: list[str]) -> int | None:
             if robot:
                 native._portal_cli_emit(0, "success", "studio", "Python Studio is ready", True,
                                        url=host.url, scene=options.scene, preview_mode="captured-read-only",
-                                       certified=False)
+                                       certified=False, autoreload=host.autoreload)
             else:
                 print("Python Studio (read-only): " + host.url)
                 print("Reload runs fresh source. Ctrl-C closes Studio.", file=sys.stderr)
             sys.stdout.flush()
             phase = "serve"
+            revision = 0
             while host.alive:
+                status = host.reload_status
+                if status["revision"] != revision:
+                    revision = status["revision"]
+                    failed = status["error"] is not None
+                    native._portal_cli_emit(6 if failed else 0, "execution" if failed else "success",
+                        "studio-reload", status["error"] or "Python Studio reloaded", robot,
+                        reload_status=status, terminal=False)
+                    sys.stdout.flush()
                 time.sleep(0.05)
         return 0
     except KeyboardInterrupt:

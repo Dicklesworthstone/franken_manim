@@ -27,6 +27,8 @@ fmn-library.workspace = true
 fmn-scene.workspace = true
 fmn-output = { workspace = true, features = ["exact-process"] }
 fmn-runtime.workspace = true
+# Host-CPython preview composition only; the standalone CLI has no Python edge.
+fmn-studio.workspace = true
 pyo3.workspace = true
 
 [lints]

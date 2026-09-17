@@ -24,6 +24,10 @@ class NativeHost:
     def close(self):
         self.alive = False
 
+    @staticmethod
+    def watch_sources(roots, debounce_ms):
+        return SimpleNamespace(poll=lambda: False, watched=(roots, debounce_ms))
+
 
 class StudioPolicyTests(unittest.TestCase):
     def setUp(self):
@@ -84,6 +88,76 @@ class StudioPolicyTests(unittest.TestCase):
         self.source.write_text("broken(\n")
         with self.assertRaises(SyntaxError):
             _source(self.source)
+
+    def test_programmatic_reload_receipt_and_failure_status_are_detached(self):
+        with Studio(self.source, "Lesson") as host:
+            with patch("fmn_python.studio._reload_request", return_value={"sha256": "a" * 64, "frame_index": 0}) as reload:
+                receipt = host.reload()
+                reload.assert_called_once_with(host.url, 125)
+                receipt["sha256"] = "mutated"
+                status = host.reload_status
+                self.assertEqual(status["completed"], 1)
+                self.assertEqual(status["result"]["sha256"], "a" * 64)
+                status["result"]["sha256"] = "mutated again"
+                self.assertEqual(host.reload_status["result"]["sha256"], "a" * 64)
+            with patch("fmn_python.studio._reload_request", side_effect=RuntimeError("broken edit")):
+                with self.assertRaisesRegex(RuntimeError, "broken edit"):
+                    host.reload()
+            self.assertEqual(host.reload_status["completed"], 1)
+            self.assertEqual(host.reload_status["error"], "broken edit")
+            self.assertTrue(host.alive)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            host.reload()
+
+    def test_autoreload_owns_one_native_watcher_and_joins_on_close(self):
+        asset = self.root / "values.csv"
+        with Studio(self.source, "Lesson", autoreload=True, watch_paths=[asset], debounce_ms=50) as host:
+            self.assertTrue(host.autoreload)
+            self.assertEqual(host._watch.watched, ([str(self.source), str(self.root), str(asset)], 50))
+            thread = host._watch_thread
+            self.assertTrue(thread.is_alive())
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(host.alive)
+        host.close()
+
+    def test_autoreload_retries_changed_inputs_not_the_same_failed_edit(self):
+        from fmn_python.studio import _watch_loop
+        import weakref
+        with Studio(self.source, "Lesson") as host:
+            # Native SourceWatch owns stabilization/one-shot behavior. Verify
+            # this caller records a failed attempt without manufacturing retries.
+            polls = iter([True, False])
+            def poll():
+                result = next(polls)
+                if not result:
+                    host._stop.set()
+                return result
+            with patch("fmn_python.studio._reload_request", side_effect=RuntimeError("failed")) as reload:
+                _watch_loop(weakref.ref(host), host._stop, SimpleNamespace(poll=poll))
+                self.assertEqual(reload.call_count, 1)
+            self.assertEqual(host.reload_status["revision"], 1)
+            self.assertEqual(host.reload_status["error"], "failed")
+
+    def test_invalid_watch_options_fail_before_launch(self):
+        for options in ({"autoreload": 1}, {"watch_paths": [self.source]},
+                        {"autoreload": True, "watch_paths": str(self.source)},
+                        {"debounce_ms": -1}, {"debounce_ms": True}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                Studio(self.source, "Lesson", **options)
+
+    def test_watch_snapshot_precedes_initial_worker_execution(self):
+        events = []
+        class OrderedHost(NativeHost):
+            @staticmethod
+            def watch_sources(roots, debounce_ms):
+                events.append("snapshot")
+                return NativeHost.watch_sources(roots, debounce_ms)
+            def __init__(self, *args):
+                events.append("worker")
+                super().__init__(*args)
+        self.native._StudioHost = OrderedHost
+        with Studio(self.source, "Lesson", autoreload=True):
+            self.assertEqual(events, ["snapshot", "worker"])
 
     def test_cli_studio_usage_refuses_extra_or_missing_options(self):
         receipts = []

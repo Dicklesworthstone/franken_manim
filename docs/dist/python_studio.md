@@ -6,6 +6,7 @@ frames in the same authenticated Studio UI used by native scene workers:
 ```bash
 fmn-python studio lesson.py Example
 fmn-python --robot studio lesson.py Example --resolution 960x540 --fps 24
+fmn-python studio lesson.py Example --autoreload --watch assets/values.csv
 ```
 
 Or keep the preview alongside other Python work:
@@ -48,6 +49,49 @@ in the disposable worker; the last displayed PNG and stable host remain, and
 fixing the source permits another explicit Reload. A failed capture is not
 published as a successful truncated timeline, even if scene code catches its
 exception. Automatic crash re-execution is disabled.
+
+### Automatic source reload
+
+`--autoreload` explicitly authorizes re-executing authored source after stable
+edits. It uses Studio's native content-based watcher, not modification times:
+the entry file and local `.py`/`.pyw` helpers are watched by default, including
+new and deleted modules. Repeated `--watch PATH` arguments add source directories
+or explicit files of any type, such as CSV inputs or image assets. Directory
+scans ignore non-Python output files, `__pycache__`, virtual environments, Git
+metadata and Cargo's `target`. This avoids reload loops caused by generated
+PNGs, bytecode, or logs. Explicit asset files remain watched regardless of
+their extension. The snapshot is taken before the initial worker executes, so
+an edit made during a slow initial capture is not missed.
+
+Changes are debounced (`--debounce_ms`, default 200). A failed edit produces one
+failure status and leaves the old worker/preview usable. That same unchanged
+source is not continually retried; fixing it schedules a fresh attempt.
+Scanning itself is bounded to 4,096 entries, 64 MiB of selected file bytes and
+64 directory levels. Symlinks/non-regular watched inputs and exceeded budgets
+are reported rather than silently watching an incomplete project. Additional
+dependencies outside the local directory must be declared with `--watch`.
+
+The programmatic interface exposes the same functionality:
+
+```python
+with Studio("lesson.py", "Example", autoreload=True,
+            watch_paths=["assets/values.csv"]) as preview:
+    print(preview.url)
+    # Explicit reload is also available, even when autoreload is disabled.
+    receipt = preview.reload()
+    print(receipt["frame_index"], receipt["sha256"])
+    print(preview.reload_status)
+    input("Press Enter to close Studio")
+```
+
+`reload_status` is a detached dictionary containing a monotonically increasing
+revision, completed-reload count, last error, and last native frame receipt.
+Robot mode emits separate, nonterminal `studio-reload` success/failure events.
+Manual and automatic reloads use the same authenticated native HTTP route as
+the browser, including its operation serialization and rate limits. No proxy
+or redirect receives the capability URL. Closing Studio stops and joins the
+watcher before releasing the host; an in-flight worker operation remains bounded
+by the configured request timeout.
 
 Committed preview positions are explicitly opaque journal barriers, not a
 serialization of arbitrary Python callbacks. This implementation does not

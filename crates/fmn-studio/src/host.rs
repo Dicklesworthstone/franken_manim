@@ -507,6 +507,7 @@ pub struct StudioWorkerSession {
     operations: Mutex<()>,
     guarded_input: bool,
     session_context: Option<Digest>,
+    fresh_capture_reload: bool,
 }
 
 impl fmt::Debug for StudioWorkerSession {
@@ -551,7 +552,17 @@ impl StudioWorkerSession {
             operations: Mutex::new(()),
             guarded_input: false,
             session_context: None,
+            fresh_capture_reload: false,
         })
+    }
+
+    /// Reload an imperative, read-only capture from frame zero. A new source
+    /// may have a shorter timeline; old preview positions are not authored
+    /// commands and must not be replayed against the new Python execution.
+    #[must_use]
+    pub fn with_fresh_capture_reload(mut self) -> Self {
+        self.fresh_capture_reload = true;
+        self
     }
 
     /// Active scene identity.
@@ -601,9 +612,18 @@ impl StudioWorkerSession {
     fn restart(&self) -> Result<StudioRestart, HostError> {
         let mut builder = lock(&self.builder);
         let mut supervisor = lock(&self.supervisor);
-        let incoming = supervisor.current_commands()?;
+        let incoming = if self.fresh_capture_reload {
+            Vec::new()
+        } else {
+            supervisor.current_commands()?
+        };
         let recovery =
             supervisor.rebuild_and_restart(&mut **builder, &incoming, &*self.asset_ok)?;
+        if self.fresh_capture_reload {
+            // The replacement captured a new opaque execution. Do not carry
+            // old preview commands or renderer observations into its journal.
+            supervisor.install_session(self.try_owned_scene()?, fmn_scene::Journal::new())?;
+        }
         let invalidated_at = recovery.plan.reuse;
         let mut reexecuted_entries = 0usize;
         for command in incoming.into_iter().skip(invalidated_at) {
@@ -627,13 +647,20 @@ impl StudioWorkerSession {
         let frame = worker_response(supervisor.request(
             SupervisorRequest::Scrub {
                 scene: self.try_owned_scene()?,
-                frame: self.committed_frame.load(Ordering::Acquire),
+                frame: if self.fresh_capture_reload {
+                    0
+                } else {
+                    self.committed_frame.load(Ordering::Acquire)
+                },
             },
             &*self.asset_ok,
         )?)?;
         let WorkerResponse::Frame(frame) = frame else {
             return Err(HostError::UnexpectedWorkerResponse);
         };
+        if self.fresh_capture_reload {
+            self.committed_frame.store(0, Ordering::Release);
+        }
         Ok(StudioRestart {
             recovery,
             reexecuted_entries,

@@ -929,6 +929,7 @@ dependencies = [
  "fmn-render",
  "fmn-runtime",
  "fmn-scene",
+ "fmn-studio",
  "pyo3",
 ]
 

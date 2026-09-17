@@ -247,6 +247,73 @@ class StudioWheelTests(unittest.TestCase):
             self.host(timeout=1)
         self.assertLess(time.monotonic() - started, 12)
 
+    def test_autoreload_uses_native_content_watch_and_recovers_failed_edits(self):
+        asset = self.root / "values.csv"
+        asset.write_text("1")
+        self.source.write_text(self.original.replace("helper.OFFSET * RIGHT",
+            f"helper.OFFSET * float(Path({str(asset)!r}).read_text()) * RIGHT"))
+
+        def wait_for(host, predicate):
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                status = host.reload_status
+                if predicate(status):
+                    return status
+                self.assertTrue(host.alive, status)
+                time.sleep(0.1)
+            self.fail("autoreload did not settle: " + repr(host.reload_status))
+
+        with self.host(autoreload=True, watch_paths=[asset], debounce_ms=50) as host:
+            api = Preview(host)
+            api.json("/api/scrub", {"frame": 5})
+            initial = api.frame()
+            # A same-size edit with unchanged mtime must still restart.
+            stamp = self.helper.stat()
+            self.helper.write_text("OFFSET = 3\n")
+            os.utime(self.helper, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            first = wait_for(host, lambda status: status["completed"] == 1)
+            self.assertIsNone(first["error"])
+            self.assertEqual(first["result"]["frame_index"], 0)
+            api.json("/api/scrub", {"frame": 5})
+            changed = api.frame()
+            self.assertNotEqual(initial, changed)
+            # Generated files, empty output directories and identical saves
+            # cannot continually re-execute the scene's authored side effects.
+            (self.root / "media").mkdir()
+            (self.root / "media/preview.png").write_bytes(changed)
+            self.helper.write_text("OFFSET = 3\n")
+            time.sleep(0.7)
+            self.assertEqual(host.reload_status["completed"], 1)
+            self.assertEqual(len(self.marker.read_text().splitlines()), 2)
+
+            asset.write_text("2")
+            wait_for(host, lambda status: status["completed"] == 2)
+            api.json("/api/scrub", {"frame": 5})
+            asset_changed = api.frame()
+            self.assertNotEqual(changed, asset_changed)
+
+            # A bad helper is discovered inside the candidate worker, not by
+            # executing Python in the stable host. The old worker stays usable.
+            self.helper.write_text("OFFSET = (\n")
+            failed = wait_for(host, lambda status: status["error"] is not None)
+            self.assertEqual(failed["completed"], 2)
+            self.assertEqual(api.json("/api/inspect")["view"]["frame_index"], 5)
+            self.assertEqual(api.frame(), asset_changed)
+            time.sleep(0.5)
+            self.assertEqual(host.reload_status, failed, "failed source must not execute on every poll")
+            self.assertEqual(len(self.marker.read_text().splitlines()), 3)
+
+            self.helper.write_text("OFFSET = 1\n")
+            self.source.write_text("from manimlib import *\nclass Moving(Scene):\n    def construct(self):\n        self.add(Circle())\n")
+            recovered = wait_for(host, lambda status: status["completed"] == 3)
+            self.assertIsNone(recovered["error"])
+            self.assertEqual(api.json("/api/inspect")["view"]["frame_count"], 1)
+            self.assertEqual(recovered["result"]["replayed_entries"], 0)
+            watch_thread = host._watch_thread
+        self.assertFalse(watch_thread.is_alive())
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            host.reload()
+
     def test_cli_selects_native_studio_and_stops_on_interrupt(self):
         command = [sys.executable, "-I", "-m", "fmn_python", "--robot", "studio", str(self.source), "Moving",
                    "--resolution", "96x54", "--fps", "8", "--timeout", "15"]
@@ -277,7 +344,7 @@ class StudioWheelTests(unittest.TestCase):
                 process.stdout.close()
         help = subprocess.run([sys.executable, "-I", "-m", "fmn_python", "--robot", "studio", "--help"],
                               capture_output=True, text=True, timeout=15, check=True)
-        self.assertIn("read-only", json.loads(help.stdout)["help"])
+        self.assertIn("read-only", json.loads(help.stdout)["help"].lower())
 
 
 if __name__ == "__main__":

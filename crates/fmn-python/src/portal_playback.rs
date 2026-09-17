@@ -66,6 +66,7 @@ impl PortalRenderSession {
     fn output_timeline(&self) -> &OutputTimeline {
         match self {
             Self::Frames(session) => &session.timeline,
+            Self::Preview(session) => &session.timeline,
             Self::Soundtrack { timeline, .. } => timeline,
         }
     }
@@ -73,6 +74,7 @@ impl PortalRenderSession {
     fn output_timeline_mut(&mut self) -> &mut OutputTimeline {
         match self {
             Self::Frames(session) => &mut session.timeline,
+            Self::Preview(session) => &mut session.timeline,
             Self::Soundtrack { timeline, .. } => timeline,
         }
     }
