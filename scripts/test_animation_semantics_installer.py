@@ -7,6 +7,7 @@ tests, not evidence of Rust timing, native rendering or installed-wheel behavior
 """
 from __future__ import annotations
 
+import abc
 import ast
 import collections.abc
 import copy
@@ -27,9 +28,17 @@ ANIMATION_CLASSES = {
     "TransformFromCopy", "CyclicReplace", "Swap", "AnimationGroup",
     "LaggedStart", "Succession", "LaggedStartMap",
     "DrawBorderThenFill", "FadeTransform", "FadeTransformPieces",
+    "TransformMatchingParts", "TransformMatchingShapes",
+    "TransformMatchingStrings", "TransformMatchingTex",
+    "ShowPartial", "ShowCreation", "Uncreate", "ShowPassingFlash", "Write",
+    "_AnimationBuilder", "_NativeCompositionLeaf", "_CompositionCallbackDriver",
+    "Group", "VGroup",
 }
 ANIMATION_FUNCTIONS = {
     "prepare_animation", "_composition_member_run_time", "_composition_timings",
+    "_requires_python_animation", "_linear_rate", "_composition_timeline_position",
+    "_vec3", "_refuse_unrouted", "_interpolate", "_smooth_rate",
+    "_there_and_back_rate", "_install_rate_functions", "_install_path_functions",
 }
 
 
@@ -105,10 +114,38 @@ def make_native():
                 for updater in self.updaters:
                     updater(self, dt)
 
-    def refuse(name, parameters):
-        refused = [key for key, active in parameters if active]
-        if refused:
-            raise NotImplementedError(f"{name}: {', '.join(refused)}")
+    def unsupported_native(*args, **kwargs):
+        raise AssertionError("fixture does not implement native scene, camera, or geometry storage")
+
+    # These Rust-backed surfaces are needed for installation/type checks,
+    # not exercised by this record-interpolation fixture. Never pretend to
+    # construct native state or successfully execute a scene/updater.
+    class VMobject(Mobject):
+        __init__ = unsupported_native
+        pointwise_become_partial = unsupported_native
+
+    class Surface(Mobject):
+        __init__ = unsupported_native
+
+    class StringMobject(VMobject):
+        __init__ = unsupported_native
+
+    class CameraFrame(Mobject):
+        __init__ = unsupported_native
+        _dispatch_updater = unsupported_native
+
+    class Scene:
+        __init__ = unsupported_native
+        play = unsupported_native
+
+    modules = {}
+
+    def ensure_module(name):
+        # Real utility installers publish into isolated modules rather than
+        # polluting sys.modules or a separately installed manimlib package.
+        if name not in modules:
+            modules[name] = types.ModuleType(name)
+        return modules[name]
 
     native = types.ModuleType("manimlib")
     # Fixed boundary responses, not a second implementation of Choreo's
@@ -133,14 +170,13 @@ def make_native():
     g = vars(native)
     g.update({
         "_np": np, "_copy": copy, "_math": math,
-        "_collections_abc": collections.abc, "_OUT": (0.0, 0.0, 1.0),
-        "_vec3": lambda value: tuple(value), "_refuse_unrouted": refuse,
-        "_interpolate": lambda left, right, alpha: (1.0 - alpha) * left + alpha * right,
-        "_smooth_rate": lambda value: value * value * (3.0 - 2.0 * value),
-        "Mobject": Mobject, "_AnimationBuilder": type("_AnimationBuilder", (), {}),
-        "_FMN_ROOT": native,
+        "_abc": abc, "_collections_abc": collections.abc,
+        "_OUT": np.array([0.0, 0.0, 1.0]), "_RATE_FUNC_NAMES": {},
+        "Mobject": Mobject, "VMobject": VMobject, "Surface": Surface,
+        "StringMobject": StringMobject, "CameraFrame": CameraFrame,
+        "Scene": Scene, "_FMN_ROOT": native, "_FMN_MODULE": native,
+        "_ensure_module": ensure_module,
     })
-    native.straight_path = g["_interpolate"]
     source = ast.parse(BOOTSTRAP.read_text(encoding="utf-8"), filename=str(BOOTSTRAP))
     selected = [
         node for node in source.body
@@ -150,6 +186,8 @@ def make_native():
     if {node.name for node in selected} != ANIMATION_CLASSES | ANIMATION_FUNCTIONS:
         raise AssertionError("bootstrap animation definition inventory changed")
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOOTSTRAP), "exec"), g)  # ubs:ignore — explicit definition inventory from the checked-in bootstrap, not external input.
+    native._install_rate_functions()
+    native._install_path_functions()
     spec = importlib.util.spec_from_file_location("fmn_installer_under_test", INSTALLER)
     installer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(installer)
