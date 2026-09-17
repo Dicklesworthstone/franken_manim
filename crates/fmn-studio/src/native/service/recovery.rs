@@ -1,7 +1,7 @@
 //! Transactional native command replay and cold checkpoint reconstruction.
 
 use fmn_scene::studio_bridge::{SceneState, Stage};
-use fmn_scene::Journal;
+use fmn_scene::{CommandKind, EffectClass, Journal};
 
 use crate::{Checkpoint, JournalReplay, ServiceError, WorkerErrorCode, WorkerResponse, protocol_digest};
 use super::{NativeSceneWorker, execution_error, refuse_owned};
@@ -33,7 +33,8 @@ impl NativeSceneWorker {
         let mut total_frames = 0_u64;
         let mut total_inputs = 0_u64;
         for (offset, entry) in entries.iter().enumerate() {
-            if entry.reads != self.reads || entry.effect != self.effect() || !entry.subprocesses.is_empty() {
+            let effect = if entry.command.kind == CommandKind::Custom { EffectClass::Opaque } else { self.effect() };
+            if entry.reads != self.reads || entry.effect != effect || !entry.subprocesses.is_empty() {
                 return Err(refuse("native replay closure or effect differs from this factory"));
             }
             let position = replay.from_entry + offset as u64;
@@ -80,6 +81,7 @@ impl NativeSceneWorker {
             let raster = self.new_raster()?;
             self.program = Some(program);
             self.edits = edits;
+            self.pending_inputs.clear();
             self.preview_clean = true;
             self.raster = raster;
         }
@@ -120,6 +122,7 @@ impl NativeSceneWorker {
         let raster = self.new_raster()?;
         self.program = Some(program);
         self.edits = restored.edits;
+        self.pending_inputs.clear();
         self.preview_clean = true;
         self.raster = raster;
         self.position = next;

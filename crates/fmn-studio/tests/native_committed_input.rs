@@ -302,7 +302,7 @@ fn inspector_exposes_the_revision_and_input_capability_with_a_bounded_additive_f
     let WorkerResponse::StudioData { bytes, .. } = worker.handle(SupervisorRequest::Inspect { scene: NAME.into() }).unwrap()
         else { panic!("inspection") };
     let text = String::from_utf8(bytes).unwrap();
-    assert!(text.ends_with("\"native_edit\":{\"revision\":1,\"committed_inputs\":1,\"enabled\":true}}"));
+    assert!(text.contains("\"native_edit\":{\"revision\":1,\"committed_inputs\":1,\"enabled\":true"));
 }
 
 #[test]
@@ -313,4 +313,158 @@ fn committed_input_command_tampering_does_not_advance_the_journal() {
     assert!(worker.handle(SupervisorRequest::Play { scene: NAME.into(), command }).is_err());
     assert_eq!(worker.journal_position(), 0);
     assert_eq!(worker.committed_input_count(), 0);
+}
+
+fn staged_worker() -> NativeSceneWorker {
+    let mut policy = config();
+    policy.stage_input_events = true;
+    NativeSceneWorker::new(policy, program).unwrap()
+}
+fn stage_event(worker: &mut NativeSceneWorker, event: EventPayload) -> FrameStream {
+    let WorkerResponse::Frame(frame) = worker.handle(SupervisorRequest::Event { scene: NAME.into(), event }).unwrap()
+        else { panic!("staged input frame") };
+    frame
+}
+fn stage_select(worker: &mut NativeSceneWorker) {
+    let stage = worker.program().unwrap().preview().stage();
+    let point = stage.get_bounding_box(stage.roots()[0]).mid;
+    stage_event(worker, EventPayload::MousePress { point, button: MouseButton::Left, modifiers: Modifiers::PRIMARY });
+}
+fn save(worker: &mut NativeSceneWorker) -> Vec<Entry> {
+    let frame = worker.program().unwrap().frame_index() as i64;
+    let WorkerResponse::JournalSegment { journal, .. } = worker.handle(SupervisorRequest::Play {
+        scene: NAME.into(), command: studio_seek_command(NAME, frame).unwrap(),
+    }).unwrap() else { panic!("saved batch") };
+    Journal::from_bytes(&journal).unwrap().entries().to_vec()
+}
+
+#[test]
+fn preview_save_publishes_one_complete_batch_and_only_its_final_checkpoint() {
+    let mut worker = staged_worker();
+    seek(&mut worker, 3); stage_select(&mut worker);
+    let edited = stage_event(&mut worker, nudge());
+    assert_eq!(worker.journal_position(), 0);
+    assert_eq!(worker.pending_input_count(), 2);
+    assert_eq!(worker.committed_input_count(), 0);
+    assert!(worker.journal_tail().is_empty());
+    let entries = save(&mut worker);
+    assert_eq!(entries.len(), 3);
+    assert!(entries[..2].iter().all(|entry| entry.checkpoint.is_none()));
+    assert!(entries[..2].iter().all(|entry| entry.effect == fmn_scene::EffectClass::Opaque));
+    assert!(entries[2].checkpoint.is_some());
+    assert_eq!(worker.journal_position(), 3);
+    assert_eq!(worker.pending_input_count(), 0);
+    assert_eq!(worker.committed_input_count(), 2);
+    assert_eq!(seek(&mut worker, 3), edited);
+    assert_eq!(worker.last_state_hash(), Some(entries[2].state_hash));
+}
+
+#[test]
+fn saved_batch_replays_each_intermediate_hash_and_restores_native_history() {
+    let mut original = staged_worker();
+    seek(&mut original, 3); stage_select(&mut original); stage_event(&mut original, nudge());
+    let entries = save(&mut original);
+    let expected = seek(&mut original, 6);
+    let mut replayed = staged_worker();
+    let response = replayed.handle(SupervisorRequest::ReplayJournal(JournalReplay {
+        scene: NAME.into(), from_entry: 0, through_entry: 3, journal: journal(&entries),
+    })).unwrap();
+    assert_eq!(response, WorkerResponse::ReplayComplete {
+        from_entry: 0, state_hashes: entries.iter().map(|entry| entry.state_hash).collect(),
+    });
+    assert_eq!(seek(&mut replayed, 6), expected);
+    let mut restored = staged_worker(); restore(&mut restored, &entries[2], 2);
+    assert_eq!(seek(&mut restored, 6), expected);
+    seek(&mut restored, 3);
+    stage_event(&mut restored, key(Key::Character('z'), Modifiers::PRIMARY));
+    save(&mut restored);
+    assert!(y(&restored).abs() < 1.0e-6);
+    seek(&mut restored, 7);
+    assert!(y(&restored).abs() < 1.0e-6);
+}
+
+#[test]
+fn noncommitting_scrub_discards_preview_input_without_erasing_saved_input() {
+    let mut worker = staged_worker(); stage_select(&mut worker); stage_event(&mut worker, nudge());
+    save(&mut worker);
+    let canonical = seek(&mut worker, 0);
+    stage_event(&mut worker, nudge());
+    assert_eq!(worker.pending_input_count(), 1);
+    assert_eq!(seek(&mut worker, 0), canonical);
+    assert_eq!(worker.pending_input_count(), 0);
+    assert_eq!(worker.committed_input_count(), 2);
+    assert_eq!(worker.journal_position(), 3);
+}
+
+#[test]
+fn navigating_to_a_different_committed_frame_does_not_silently_save_the_preview() {
+    let mut worker = staged_worker(); stage_select(&mut worker); stage_event(&mut worker, nudge());
+    commit_seek(&mut worker, 4);
+    assert_eq!(worker.pending_input_count(), 0);
+    assert_eq!(worker.committed_input_count(), 0);
+    assert_eq!(worker.journal_position(), 1);
+    assert!(y(&worker).abs() < 1.0e-6);
+}
+
+#[test]
+fn failed_save_keeps_pending_edits_and_committed_recovery_authority() {
+    let mut policy = config(); policy.stage_input_events = true;
+    policy.limits.max_checkpoint_bytes = 8;
+    let mut worker = NativeSceneWorker::new(policy, program).unwrap();
+    stage_select(&mut worker); stage_event(&mut worker, nudge());
+    let root_count = worker.program().unwrap().preview().stage().roots().len();
+    let result = worker.handle(SupervisorRequest::Play { scene: NAME.into(), command: studio_seek_command(NAME, 0).unwrap() });
+    assert!(result.is_err());
+    assert_eq!(worker.pending_input_count(), 2);
+    assert_eq!(worker.committed_input_count(), 0);
+    assert_eq!(worker.journal_position(), 0);
+    assert_eq!(worker.last_state_hash(), None);
+    assert_eq!(worker.program().unwrap().preview().stage().roots().len(), root_count);
+    assert!((y(&worker) - 0.5).abs() < 1.0e-6);
+    seek(&mut worker, 0);
+    assert_eq!(worker.pending_input_count(), 0);
+}
+
+#[test]
+fn preview_staging_is_explicit_and_unknown_callbacks_are_never_promoted_to_durable() {
+    for replay in [NativeReplayPolicy::Disabled, NativeReplayPolicy::ColdVerified] {
+        let mut policy = config(); policy.replay = replay;
+        policy.stage_input_events = replay == NativeReplayPolicy::Disabled;
+        let mut worker = NativeSceneWorker::new(policy, program).unwrap();
+        stage_select(&mut worker); stage_event(&mut worker, nudge());
+        assert_eq!(worker.pending_input_count(), 0);
+        assert_eq!(save(&mut worker).len(), 1);
+        assert!(y(&worker).abs() < 1.0e-6);
+        assert_eq!(worker.committed_input_count(), 0);
+    }
+}
+
+#[test]
+fn a_full_pending_queue_refuses_before_dispatch_and_can_be_discarded() {
+    let mut policy = config(); policy.stage_input_events = true; policy.max_recorded_inputs = 1;
+    let mut worker = NativeSceneWorker::new(policy, program).unwrap();
+    stage_select(&mut worker);
+    let before = y(&worker);
+    assert!(worker.handle(SupervisorRequest::Event { scene: NAME.into(), event: nudge() }).is_err());
+    assert_eq!(worker.pending_input_count(), 1);
+    assert_eq!(y(&worker), before);
+    assert!(worker.program().is_some());
+    seek(&mut worker, 0);
+    assert_eq!(worker.pending_input_count(), 0);
+}
+
+#[test]
+fn saving_a_grab_keeps_one_native_undo_transition_across_restart() {
+    let mut worker = staged_worker(); stage_select(&mut worker);
+    stage_event(&mut worker, key(Key::Character('g'), Modifiers::NONE));
+    for x in [0.5, 1.0, 1.5] {
+        stage_event(&mut worker, EventPayload::MouseMotion { point: [x, 0.0, 0.0], delta: [0.5, 0.0, 0.0], modifiers: Modifiers::NONE });
+    }
+    stage_event(&mut worker, EventPayload::KeyRelease { key: Key::Character('g'), modifiers: Modifiers::NONE });
+    let entries = save(&mut worker);
+    let mut recovered = staged_worker(); restore(&mut recovered, entries.last().unwrap(), entries.len() as u64 - 1);
+    stage_event(&mut recovered, key(Key::Character('z'), Modifiers::PRIMARY));
+    save(&mut recovered);
+    let stage = recovered.program().unwrap().preview().stage();
+    assert!(stage.get_bounding_box(stage.roots()[0]).mid[0].abs() < 1.0e-6);
 }

@@ -1,5 +1,6 @@
 //! Concrete native WorkerService, with cold, hash-verified recovery.
 
+mod pending;
 mod recovery;
 
 use fmn_render::{CameraConfig, RetainedFrameRendererConfig};
@@ -62,6 +63,11 @@ pub struct NativeWorkerConfig {
     /// Maximum aggregate input dispatches in one replay/seek/commit request.
     /// This separately bounds zero-frame callbacks that a frame limit cannot.
     pub max_replay_inputs: u64,
+    /// Stage successful preview Event requests for explicit Save. A committed
+    /// seek to that same frame publishes the pending inputs as one journal
+    /// batch. A noncommitting scrub discards them. Disabled by default; requires
+    /// ColdVerified and affine input support. No new protocol variant is used.
+    pub stage_input_events: bool,
 }
 
 impl NativeWorkerConfig {
@@ -75,7 +81,7 @@ impl NativeWorkerConfig {
             scene: scene.into(), build_id, source_digest, frame_count, fps, renderer,
             camera: None, limits: ProtocolLimits::default(), checkpoint_frames: 30,
             replay: NativeReplayPolicy::Disabled, max_replay_frames: 1_000_000,
-            max_pixels: 16_777_216, max_recorded_inputs: 4096, max_replay_inputs: 65_536,
+            max_pixels: 16_777_216, max_recorded_inputs: 4096, max_replay_inputs: 65_536, stage_input_events: false,
         }
     }
 }
@@ -106,6 +112,7 @@ pub struct NativeSceneWorker {
     last_checkpoint: Option<u64>,
     tail: Vec<u8>,
     edits: EditTrack,
+    pending_inputs: Vec<CommandRecord>,
 }
 
 impl NativeSceneWorker {
@@ -150,7 +157,7 @@ impl NativeSceneWorker {
         Ok(Self {
             config, factory: Box::new(factory), program: Some(program), preview_clean: true,
             raster, camera_binding, reads, position: 0, last_hash: None,
-            last_checkpoint: None, tail: Vec::new(), edits: EditTrack::default(),
+            last_checkpoint: None, tail: Vec::new(), edits: EditTrack::default(), pending_inputs: Vec::new(),
         })
     }
 
@@ -173,6 +180,10 @@ impl NativeSceneWorker {
         let command = studio_input_command(&self.config.scene, &input).map_err(|error| invalid(error.to_string()))?;
         self.record_command(command)
     }
+
+    /// Successful preview inputs awaiting a same-frame committed seek (Save).
+    #[must_use]
+    pub fn pending_input_count(&self) -> usize { self.pending_inputs.len() }
 
     fn new_raster(&self) -> Result<NativeRaster, ServiceError> {
         let mut raster = NativeRaster::new(self.config.renderer, self.config.camera.clone())?;
@@ -278,6 +289,7 @@ impl NativeSceneWorker {
             let response = self.raster.frame(&self.config.scene, &program)?;
             let response = self.checked(response)?;
             self.program = Some(program);
+            self.pending_inputs.clear();
             return Ok(response);
         }
         let program = self.fresh_at(frame, &self.edits)?;
@@ -285,6 +297,7 @@ impl NativeSceneWorker {
         let response = raster.frame(&self.config.scene, &program)?;
         let response = self.checked(response)?;
         self.program = Some(program);
+        self.pending_inputs.clear();
         self.preview_clean = true;
         self.raster = raster;
         Ok(response)
@@ -293,27 +306,37 @@ impl NativeSceneWorker {
     fn event(&mut self, event: EventPayload) -> Result<WorkerResponse, ServiceError> {
         event.validate().map_err(|error| invalid(error.to_string()))?;
         if self.config.camera.is_some() { return Err(invalid("native camera editing requires camera-aware input projection")); }
+        let command = self.staged_command(&event)?;
         let mut program = self.program.take().ok_or_else(|| invalid("seek before sending input to a failed native preview"))?;
         self.preview_clean = false;
-        program.dispatch(event)?;
-        let response = self.raster.frame(&self.config.scene, &program)?;
-        let response = self.checked(response)?;
-        self.program = Some(program);
-        Ok(response)
+        let result = (|| {
+            program.dispatch(event)?;
+            let response = self.raster.frame(&self.config.scene, &program)?;
+            self.checked(response)
+        })();
+        match result {
+            Ok(response) => {
+                self.program = Some(program);
+                if let Some(command) = command { self.pending_inputs.push(command); }
+                Ok(response)
+            }
+            Err(error) => { self.pending_inputs.clear(); Err(error) }
+        }
     }
 
     fn record_command(&mut self, command: CommandRecord) -> Result<WorkerResponse, ServiceError> {
+        if self.saves_pending(&command)? { return self.save_pending(command); }
         let next = self.position.checked_add(1).ok_or_else(|| invalid("native journal position exhausted"))?;
         let mut edits = self.edits.try_clone()?;
         let frame = self.prepare_command(&command, self.position, &mut edits)?;
         let mut program = self.fresh_at(frame, &edits)?;
+        let state = self.state_bytes(&mut program, &edits, next)?;
         let mut raster = self.new_raster()?;
         if command.kind == CommandKind::Custom {
             // Do not record an input which cannot produce a valid native frame.
             let frame_response = raster.frame(&self.config.scene, &program)?;
             self.checked(frame_response)?;
         }
-        let state = self.state_bytes(&mut program, &edits, next)?;
         let state_hash = protocol_digest(&state);
         let checkpoint = command.kind == CommandKind::Custom
             || self.last_checkpoint.is_none_or(|last| last.abs_diff(frame) >= self.config.checkpoint_frames);
@@ -330,6 +353,7 @@ impl NativeSceneWorker {
         self.program = Some(program);
         self.edits = edits;
         self.preview_clean = true;
+        self.pending_inputs.clear();
         self.raster = raster;
         self.position = next;
         self.last_hash = Some(state_hash);
@@ -341,8 +365,9 @@ impl NativeSceneWorker {
     fn inspection(&self) -> Result<Vec<u8>, ServiceError> {
         let program = self.program.as_ref().ok_or_else(|| invalid("native preview requires a successful seek"))?;
         let max = self.config.limits.max_studio_data_bytes;
-        let suffix = format!(",\"native_edit\":{{\"revision\":{},\"committed_inputs\":{},\"enabled\":{}}}}}",
-            self.position, self.edits.len(), self.input_enabled());
+        let suffix = format!(",\"native_edit\":{{\"revision\":{},\"committed_inputs\":{},\"enabled\":{},\"preview_commit\":{},\"pending_inputs\":{}}}}}",
+            self.position, self.edits.len(), self.input_enabled(),
+            self.input_enabled() && self.config.stage_input_events, self.pending_inputs.len());
         // The existing inspector remains the authority for the whole object tree.
         // Only additive, bounded native command metadata is appended here.
         let mut bytes = self.raster.inspect(program, self.config.frame_count, max)?;
