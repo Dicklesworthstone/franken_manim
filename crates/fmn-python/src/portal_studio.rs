@@ -12,6 +12,8 @@ use fmn_studio::{
 };
 use std::time::Duration;
 
+pub(super) mod live;
+
 pub(super) struct Capture {
     renderer: RetainedFrameRenderer,
     camera: Camera,
@@ -20,6 +22,8 @@ pub(super) struct Capture {
     scene: String,
     recorded: fmn_studio::recorded::RecordedTimeline,
     failure: Option<String>,
+    live: bool,
+    live_refresh: bool,
     pub(super) timeline: OutputTimeline,
 }
 
@@ -124,6 +128,8 @@ impl Capture {
                 scene,
                 recorded,
                 failure: None,
+                live: false,
+                live_refresh: false,
                 timeline: OutputTimeline::default(),
             },
             RuntimeConfig::from_config(&config),
@@ -158,6 +164,13 @@ impl Capture {
         &mut self,
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
+        // Live input is a paused edit boundary. play/wait still execute their
+        // ordinary samples and updaters, but only the completed callback's
+        // final state replaces the live view. Intermediate/failed callback
+        // captures cannot publish a partial edit or grow recorded history.
+        if self.live && !self.live_refresh {
+            return Ok(());
+        }
         if let Some(error) = &self.failure {
             return Err(fmn_scene::IntegrationError::new(
                 "python-studio",
@@ -222,14 +235,24 @@ impl Capture {
                 self.camera.fps(),
                 Viewport { width, height },
                 ScreenMap {
-                    scale: 1.0 / self.camera.pixel_size(),
+                    scale: if self.live {
+                        f64::from(height) / fmn_core::constants::FRAME_HEIGHT
+                    } else {
+                        1.0 / self.camera.pixel_size()
+                    },
                     origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
                 },
                 false,
             )
             .map_err(native_error)?,
         );
-        self.recorded.push(stream, snapshot).map_err(native_error)
+        if self.live {
+            self.recorded
+                .replace_live_frame(stream, snapshot)
+                .map_err(native_error)
+        } else {
+            self.recorded.push(stream, snapshot).map_err(native_error)
+        }
     }
 }
 

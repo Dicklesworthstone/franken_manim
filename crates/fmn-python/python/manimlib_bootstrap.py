@@ -15027,9 +15027,8 @@ class Scene(_SceneCore):
         return getattr(self, "window", None)
 
     def on_mouse_motion(self, point, d_point):
-        # Host-free hover: the live Point moves even without a pyglet window.
-        # pan_3d / pan need a host key-state adapter and are skipped until
-        # Studio binds one (the Reference asserts window is not None).
+        # Studio reuses the scene-scoped native dispatcher for held keys;
+        # offline hover still needs no window and changes no camera pose.
         self.mouse_point.move_to(point)
         if _scene_event_stopped(
             EventType.MouseMotionEvent, point=point, d_point=d_point
@@ -15037,7 +15036,11 @@ class Scene(_SceneCore):
             return
         window = self.get_window()
         if window is None:
-            return
+            if not self.__dict__.get("_fmn_studio_live_input", False):
+                return
+            # This method runs inside the owning Scene input gateway, so
+            # dispatcher key state is scoped to this scene, not process-global.
+            window = _event_dispatcher()
         keys = _pinned_manim_config().key_bindings
         frame = self.frame
         if window.is_key_pressed(ord(keys.pan_3d)):
