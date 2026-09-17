@@ -25,12 +25,12 @@ EXPECTED: dict[str, set[str]] = {
     # fmn-core, so the edge it used to declare was vestigial.
     "fmn-dmath": set(),
     "fmn-core": {"fmn-dmath"},  # dmath: color transfer + rate functions (ADR-0014)
-    "fmn-hash": {"fmn-core"},
+    "fmn-hash": set(),  # Canonical bytes/digests are independent of scene math.
     "fmn-config": {"fmn-core", "fmn-hash"},
     "fmn-platform": {"fmn-core"},
     "fmn-frame": {"fmn-core", "fmn-dmath"},  # dmath: deterministic transfer functions (D-17, fm-a25)
     "fmn-codec": {"fmn-core", "fmn-frame", "fmn-hash"},
-    "fmn-cache": {"fmn-core", "fmn-hash", "fmn-platform"},
+    "fmn-cache": {"fmn-hash", "fmn-platform"},
     "fmn-geom": {"fmn-core", "fmn-dmath"},
     "fmn-mobject": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-hash"},  # dmath: tracker exp/ln (ADR-0014)
     # hash: canonical Timeline serialization — the Studio-scrubbing and
@@ -147,6 +147,8 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-scene",
         "fmn-output",
         "fmn-runtime",
+        # Host-CPython Studio front door; no Python enters the native CLI.
+        "fmn-studio",
     },
     # W5 tier-1 wasm surface (fm-l97, §10.7): the browser leaf. dmath is a
     # direct dependency because scene construction evaluates parametric

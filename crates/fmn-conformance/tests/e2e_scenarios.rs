@@ -2021,6 +2021,35 @@ fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     python_portal_sequence_run(ctx, false)
 }
 
+fn python_studio_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_studio_capture()
+        .map_err(|error| fail(format!("Python Studio capture: {error}")))?;
+    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode first Studio frame: {error}")))?;
+    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode last Studio frame: {error}")))?;
+    if report.frames != 6
+        || (first.width, first.height) != (96, 54)
+        || (last.width, last.height) != (96, 54)
+        || first.rgba == last.rgba
+    {
+        return Err(fail(
+            "Studio capture did not render six moving native frames",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.studio_capture")
+            .field("frames", report.frames)
+            .field("read_only", true)
+            .field("native_inspector", true),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_studio_frames", report.frames)
+        .with_artifact("studio_first.png", report.first_png)
+        .with_artifact("studio_last.png", report.last_png)
+        .with_artifact("studio_inspector.json", report.last_inspector))
+}
+
 fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     python_portal_sequence_run(ctx, true)
 }
@@ -4434,6 +4463,29 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(spec(
+        "lifecycle.python_studio_capture.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_studio_capture_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "studio_first.png".to_owned(),
+                "studio_last.png".to_owned(),
+                "studio_inspector.json".to_owned(),
+            ]),
+            counter_eq("python_studio_frames", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.studio_capture",
+            vec![
+                FieldPred::u64_eq("frames", 6),
+                FieldPred::bool_eq("read_only", true),
+                FieldPred::bool_eq("native_inspector", true),
+            ],
+        )],
+    ));
     let mut portal_output_inventory = vec![
         "native_scene.py".to_owned(),
         "motion.gif".to_owned(),
@@ -5206,6 +5258,17 @@ fn python_portal_png_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_png_sequence.v1")
         .expect("Python portal scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// The production Python capture and native read-only worker in the fast tier.
+#[test]
+fn python_studio_capture_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_studio_capture.v1")
+        .expect("Python Studio capture is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
