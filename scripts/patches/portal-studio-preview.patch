@@ -58,8 +58,8 @@ index 8a956e6..39825cd 100644
 +        ],
 +        vec![LogExpect::span_present("e2e.python.studio_capture", vec![
 +            FieldPred::u64_eq("frames", 6),
-+            FieldPred::str_eq("read_only", "true"),
-+            FieldPred::str_eq("native_inspector", "true"),
++            FieldPred::bool_eq("read_only", true),
++            FieldPred::bool_eq("native_inspector", true),
 +        ])],
 +    ));
      let mut portal_output_inventory = vec![
@@ -148,7 +148,6 @@ index 7e76f05..f919a31 100644
 +    Preview(Box<portal_studio::Capture>),
      Frames(Box<PortalFrameSession>),
      Soundtrack {
-         destination: PathBuf,
 @@ -217,6 +219,7 @@ impl PortalRenderSession {
      ) -> Result<(), fmn_scene::IntegrationError> {
          match self {
@@ -230,7 +229,7 @@ index 7e76f05..f919a31 100644
      module.add_class::<PyRecordView>()?;
      module.add_class::<PyGilProbe>()?;
      module.add_class::<PyCameraFrameCore>()?;
-@@ -10963,6 +10988,10 @@ fn with_python_test_module<R>(
+@@ -10962,6 +10987,10 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
      })
  }
  
@@ -293,7 +292,7 @@ index d1a1357..b63d340 100644
      /// Active scene identity.
      #[must_use]
      pub fn scene(&self) -> &str {
-@@ -601,7 +612,7 @@ impl StudioWorkerSession {
+@@ -601,7 +612,12 @@ impl StudioWorkerSession {
      fn restart(&self) -> Result<StudioRestart, HostError> {
          let mut builder = lock(&self.builder);
          let mut supervisor = lock(&self.supervisor);
@@ -301,6 +300,11 @@ index d1a1357..b63d340 100644
 +        let incoming = if self.fresh_capture_reload { Vec::new() } else { supervisor.current_commands()? };
          let recovery =
              supervisor.rebuild_and_restart(&mut **builder, &incoming, &*self.asset_ok)?;
++        if self.fresh_capture_reload {
++            // The replacement captured a new opaque execution. Do not carry
++            // old preview commands or renderer observations into its journal.
++            supervisor.install_session(self.try_owned_scene()?, Journal::new())?;
++        }
          let invalidated_at = recovery.plan.reuse;
 @@ -627,13 +638,14 @@ impl StudioWorkerSession {
          let frame = worker_response(supervisor.request(
@@ -413,6 +417,21 @@ diff --git a/scripts/check_crate_dag.py b/scripts/check_crate_dag.py
 index 2a21066..1dc78cd 100755
 --- a/scripts/check_crate_dag.py
 +++ b/scripts/check_crate_dag.py
+@@ -25,12 +25,12 @@ EXPECTED: dict[str, set[str]] = {
+     # layering puts it above the funnel. fmn-dmath consumes nothing from
+     # fmn-core, so the edge it used to declare was vestigial.
+     "fmn-dmath": set(),
+     "fmn-core": {"fmn-dmath"},  # dmath: color transfer + rate functions (ADR-0014)
+-    "fmn-hash": {"fmn-core"},
++    "fmn-hash": set(),  # Canonical bytes/digests are independent of scene math.
+     "fmn-config": {"fmn-core", "fmn-hash"},
+     "fmn-platform": {"fmn-core"},
+     "fmn-frame": {"fmn-core", "fmn-dmath"},  # dmath: deterministic transfer functions (D-17, fm-a25)
+     "fmn-codec": {"fmn-core", "fmn-frame", "fmn-hash"},
+-    "fmn-cache": {"fmn-core", "fmn-hash", "fmn-platform"},
++    "fmn-cache": {"fmn-hash", "fmn-platform"},
+     "fmn-geom": {"fmn-core", "fmn-dmath"},
+     "fmn-mobject": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-hash"},  # dmath: tracker exp/ln (ADR-0014)
 @@ -147,6 +147,8 @@ EXPECTED: dict[str, set[str]] = {
          "fmn-scene",
          "fmn-output",
