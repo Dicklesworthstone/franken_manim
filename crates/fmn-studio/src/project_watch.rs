@@ -12,6 +12,49 @@ use std::time::Duration;
 
 use crate::{BuildError, ProtocolDigest, protocol_digest};
 
+/// Optional filtering for directory roots. Explicitly named input files are
+/// always watched, including assets with a different extension. Filtering does
+/// not relax traversal/read budgets or the refusal of followed symlinks.
+#[derive(Clone, Debug, Default)]
+pub struct WatchFilter {
+    /// Empty means all files; otherwise these are extension names without dots.
+    pub extensions: Vec<String>,
+    /// Directory entry names to omit at every depth, in addition to .git/target.
+    pub ignored_directories: Vec<String>,
+}
+
+impl WatchFilter {
+    fn validate(&self) -> Result<(), BuildError> {
+        if self.extensions.len() > 32
+            || self.ignored_directories.len() > 32
+            || self.extensions.iter().any(|ext| {
+                ext.is_empty() || ext.len() > 32 || !ext.bytes().all(|b| b.is_ascii_alphanumeric())
+            })
+            || self.ignored_directories.iter().any(|name| {
+                name.is_empty()
+                    || name.len() > 128
+                    || matches!(name.as_str(), "." | "..")
+                    || name.contains(['/', '\\', '\0'])
+            })
+        {
+            return Err(error("invalid source-watch filter"));
+        }
+        Ok(())
+    }
+
+    fn includes(&self, path: &std::path::Path) -> bool {
+        self.extensions.is_empty()
+            || path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    self.extensions
+                        .iter()
+                        .any(|wanted| ext.eq_ignore_ascii_case(wanted))
+                })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Input {
     Missing,
@@ -52,6 +95,7 @@ pub struct SourceWatch {
     inputs: Vec<PathBuf>,
     excludes: Vec<PathBuf>,
     limits: WatchLimits,
+    filter: WatchFilter,
     debounce: Duration,
     observed: Snapshot,
     attempted: Snapshot,
@@ -69,6 +113,21 @@ impl SourceWatch {
         debounce: Duration,
         limits: WatchLimits,
     ) -> Result<Self, BuildError> {
+        Self::new_filtered(inputs, excludes, debounce, limits, WatchFilter::default())
+    }
+
+    /// Watch selected directory contents without treating unrelated generated
+    /// outputs or cache directories as source edits. A file passed explicitly
+    /// bypasses the extension filter. Changes in empty filtered directories do
+    /// not trigger reloads, but adding/deleting an included file does.
+    pub fn new_filtered(
+        inputs: Vec<PathBuf>,
+        excludes: Vec<PathBuf>,
+        debounce: Duration,
+        limits: WatchLimits,
+        filter: WatchFilter,
+    ) -> Result<Self, BuildError> {
+        filter.validate()?;
         if inputs.is_empty()
             || inputs.len() > limits.max_entries
             || excludes.len() > limits.max_entries
@@ -85,11 +144,12 @@ impl SourceWatch {
         {
             return Err(error("invalid source-watch paths or work limits"));
         }
-        let observed = scan(&inputs, &excludes, limits)?;
+        let observed = scan(&inputs, &excludes, limits, &filter)?;
         Ok(Self {
             inputs,
             excludes,
             limits,
+            filter,
             debounce,
             attempted: observed.clone(),
             observed,
@@ -104,7 +164,7 @@ impl SourceWatch {
         if self.last_poll.is_some_and(|last| now < last) {
             return Err(error("source-watch clock moved backwards"));
         }
-        let current = scan(&self.inputs, &self.excludes, self.limits)?;
+        let current = scan(&self.inputs, &self.excludes, self.limits, &self.filter)?;
         self.last_poll = Some(now);
         if current != self.observed {
             self.observed = current;
@@ -130,6 +190,7 @@ fn scan(
     inputs: &[PathBuf],
     excludes: &[PathBuf],
     limits: WatchLimits,
+    filter: &WatchFilter,
 ) -> Result<Snapshot, BuildError> {
     let mut work: Vec<_> = inputs.iter().cloned().map(|path| (path, 0)).collect();
     let mut seen = BTreeSet::new();
@@ -143,21 +204,30 @@ fn scan(
             return Err(error("source-watch entry/depth budget exceeded"));
         }
         seen.insert(path.clone());
+        let explicit = depth == 0 || inputs.contains(&path);
         snapshot.try_reserve(1).map_err(error)?;
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                snapshot.push((path, Input::Missing));
+                if explicit || filter.includes(&path) {
+                    snapshot.push((path, Input::Missing));
+                }
                 continue;
             }
             Err(err) => return Err(error(err)),
         };
         if metadata.is_dir() {
-            snapshot.push((path.clone(), Input::Directory));
+            if explicit || filter.extensions.is_empty() {
+                snapshot.push((path.clone(), Input::Directory));
+            }
             for child in fs::read_dir(&path).map_err(error)? {
                 let child = child.map_err(error)?;
                 let child_path = child.path();
-                if matches!(child.file_name().to_str(), Some("target" | ".git"))
+                if (matches!(child.file_name().to_str(), Some("target" | ".git"))
+                    || filter
+                        .ignored_directories
+                        .iter()
+                        .any(|name| child.file_name() == name.as_str()))
                     && child.file_type().map_err(error)?.is_dir()
                 {
                     continue;
@@ -169,6 +239,9 @@ fn scan(
                 work.push((child_path, depth + 1));
             }
         } else if metadata.is_file() {
+            if !explicit && !filter.includes(&path) {
+                continue;
+            }
             if metadata.len() > remaining {
                 return Err(error("source-watch byte budget exceeded"));
             }
@@ -348,6 +421,96 @@ mod tests {
                 WatchLimits {
                     max_entries: 2,
                     ..WatchLimits::default()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn filtered_sources_ignore_generated_outputs_but_observe_helpers_and_explicit_assets() {
+        let temp = Temp::new();
+        fs::write(temp.0.join("scene.py"), "one").unwrap();
+        let asset = temp.0.join("data.csv");
+        fs::write(&asset, "one").unwrap();
+        // The explicit asset comes first and is therefore traversed last: the
+        // directory walk must not hide it behind an already-seen filtered path.
+        let mut watch = SourceWatch::new_filtered(
+            vec![asset.clone(), temp.0.clone()],
+            Vec::new(),
+            ms(100),
+            WatchLimits::default(),
+            WatchFilter {
+                extensions: vec!["py".into(), "pyw".into()],
+                ignored_directories: vec!["__pycache__".into(), ".venv".into()],
+            },
+        )
+        .unwrap();
+        fs::create_dir(temp.0.join("__pycache__")).unwrap();
+        fs::create_dir(temp.0.join("media")).unwrap();
+        fs::create_dir(temp.0.join(".venv")).unwrap();
+        fs::write(temp.0.join("__pycache__/source.pyc"), "cache").unwrap();
+        fs::write(temp.0.join(".venv/irrelevant.py"), "venv").unwrap();
+        fs::write(temp.0.join("media/preview.png"), "render").unwrap();
+        assert!(!watch.poll(ms(0)).unwrap());
+        assert!(!watch.poll(ms(1000)).unwrap());
+        fs::write(temp.0.join("helper.PY"), "new").unwrap();
+        assert!(!watch.poll(ms(1100)).unwrap());
+        assert!(watch.poll(ms(1200)).unwrap());
+        fs::write(&asset, "two").unwrap();
+        assert!(!watch.poll(ms(1300)).unwrap());
+        assert!(watch.poll(ms(1400)).unwrap());
+        fs::remove_file(temp.0.join("helper.PY")).unwrap();
+        assert!(!watch.poll(ms(1500)).unwrap());
+        assert!(watch.poll(ms(1600)).unwrap());
+        assert!(!watch.poll(ms(1700)).unwrap());
+    }
+
+    #[test]
+    fn filtered_watch_still_bounds_directory_work_and_selected_source_bytes() {
+        let temp = Temp::new();
+        let filter = WatchFilter {
+            extensions: vec!["py".into()],
+            ..WatchFilter::default()
+        };
+        fs::write(temp.0.join("large.png"), [0; 100]).unwrap();
+        let mut watch = SourceWatch::new_filtered(
+            vec![temp.0.clone()],
+            Vec::new(),
+            Duration::ZERO,
+            WatchLimits {
+                max_bytes: 4,
+                ..WatchLimits::default()
+            },
+            filter.clone(),
+        )
+        .unwrap();
+        fs::write(temp.0.join("large.py"), "over budget").unwrap();
+        assert!(watch.poll(ms(0)).is_err());
+        fs::write(temp.0.join("large.py"), "okay").unwrap();
+        assert!(watch.poll(ms(1)).unwrap());
+        assert!(
+            SourceWatch::new_filtered(
+                vec![temp.0.clone()],
+                Vec::new(),
+                Duration::ZERO,
+                WatchLimits {
+                    max_entries: 1,
+                    ..WatchLimits::default()
+                },
+                filter
+            )
+            .is_err()
+        );
+        assert!(
+            SourceWatch::new_filtered(
+                vec![temp.0.clone()],
+                Vec::new(),
+                Duration::ZERO,
+                WatchLimits::default(),
+                WatchFilter {
+                    extensions: vec!["../py".into()],
+                    ..WatchFilter::default()
                 }
             )
             .is_err()

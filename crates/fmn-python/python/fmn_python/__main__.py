@@ -79,10 +79,14 @@ def main():
     from manimlib import _native
     from .console_rendering import _tokens, try_render_cli
     from .scene_controls import try_scene_cli
+    from .studio import try_studio_cli
 
     arguments = list(sys.argv[1:])
     if "--audit-parity" in _tokens(arguments)[2]:
         return _emit_parity_audit(_native)
+    result = try_studio_cli(_native, arguments)
+    if result is not None:
+        return result
     result = try_render_cli(_native, arguments)
     if result is None:
         result = try_scene_cli(_native, arguments)

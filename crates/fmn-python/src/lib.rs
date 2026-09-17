@@ -20,6 +20,7 @@ mod method_cache;
 pub mod perf_harness;
 mod portal_audio;
 mod portal_playback;
+mod portal_studio;
 mod portal_video;
 mod report;
 
@@ -150,6 +151,7 @@ enum PortalOutputFormat {
 }
 
 enum PortalRenderSession {
+    Preview(Box<portal_studio::Capture>),
     Frames(Box<PortalFrameSession>),
     Soundtrack {
         destination: PathBuf,
@@ -217,6 +219,7 @@ impl PortalRenderSession {
     ) -> Result<(), fmn_scene::IntegrationError> {
         match self {
             Self::Frames(session) => session.capture(packet),
+            Self::Preview(session) => session.capture(packet),
             Self::Soundtrack { .. } => Ok(()),
         }
     }
@@ -229,6 +232,9 @@ impl PortalRenderSession {
         light_mob: Option<Mob>,
     ) -> PyResult<()> {
         match self {
+            Self::Preview(session) => {
+                session.bind_camera(frame, light_position, background, light_mob)
+            }
             Self::Frames(session) => {
                 session.bind_camera(frame, light_position, background, light_mob)
             }
@@ -238,6 +244,7 @@ impl PortalRenderSession {
 
     fn needs_final_capture(&self) -> bool {
         matches!(self, Self::Frames(session) if session.frame_count() == 0)
+            || matches!(self, Self::Preview(session) if session.is_empty())
     }
 
     fn abort(self) {
@@ -248,6 +255,9 @@ impl PortalRenderSession {
 
     fn finish(self, scene: &Scene) -> PyResult<(PortalArtifactReport, String, usize)> {
         match self {
+            Self::Preview(_) => Err(PyRuntimeError::new_err(
+                "Studio capture must finish through _finish_studio_capture, not file publication",
+            )),
             // ubs:ignore — finalizes frame publication; no security token or randomness is generated.
             Self::Frames(session) => session.finish(scene),
             Self::Soundtrack {
@@ -7524,7 +7534,7 @@ fn portal_has_frame_render(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
         .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?;
     Ok(matches!(
         render.as_ref(),
-        Some(PortalRenderSession::Frames(_))
+        Some(PortalRenderSession::Frames(_) | PortalRenderSession::Preview(_))
     ))
 }
 
@@ -7777,6 +7787,29 @@ impl PyScene {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn _begin_studio_capture(
+        slf: &Bound<'_, Self>,
+        name: String,
+        build: &str,
+        source: &str,
+        width: u32,
+        height: u32,
+        fps: u32,
+        threads: usize,
+        seed: u64,
+        max_frames: usize,
+        max_bytes: usize,
+    ) -> PyResult<()> {
+        portal_studio::begin(
+            slf, name, build, source, width, height, fps, threads, seed, max_frames, max_bytes,
+        )
+    }
+
+    fn _finish_studio_capture(slf: &Bound<'_, Self>) -> PyResult<portal_studio::Recording> {
+        portal_studio::finish(slf)
+    }
+
     /// Cancel an active generation and join its ordered output worker.
     fn _abort_render(slf: &Bound<'_, Self>) -> PyResult<()> {
         let render = Arc::clone(&slf.borrow().render);
@@ -7798,6 +7831,18 @@ impl PyScene {
         camera: Option<PyRef<'_, PyCameraFrameCore>>,
         light_position: Option<[f64; 3]>,
     ) -> PyResult<(String, u64, u64, String, String, usize)> {
+        if matches!(
+            slf.borrow()
+                .render
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("render generation lock poisoned"))?
+                .as_ref(),
+            Some(PortalRenderSession::Preview(_))
+        ) {
+            return Err(PyRuntimeError::new_err(
+                "Studio capture is not a file render; use _finish_studio_capture",
+            ));
+        }
         portal_playback::synchronize(slf)?;
         synchronize_portal_camera(slf)?;
         let engine = Rc::clone(&slf.borrow().engine);
@@ -10687,6 +10732,8 @@ fn _composition_intervals(run_times: Vec<f64>, lag_ratio: f64) -> Vec<(f64, f64)
 fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BridgeMobject>()?;
     module.add_class::<PyScene>()?;
+    module.add_class::<portal_studio::Recording>()?;
+    module.add_class::<portal_studio::Host>()?;
     module.add_class::<PyRecordView>()?;
     module.add_class::<PyGilProbe>()?;
     module.add_class::<PyCameraFrameCore>()?;
@@ -10961,6 +11008,10 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         }
     })
 }
+
+/// Production captured-preview seam, available only to the Gauntlet.
+#[cfg(feature = "gauntlet")]
+pub use portal_studio::{PortalStudioGauntletReport, run_portal_gauntlet_studio_capture};
 
 /// Structured result from the feature-gated in-process Gauntlet portal row.
 #[cfg(feature = "gauntlet")]

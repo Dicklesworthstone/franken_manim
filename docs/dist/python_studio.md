@@ -1,0 +1,125 @@
+# Python Studio preview
+
+Run an existing Python Scene in a disposable process and inspect its native
+frames in the same authenticated Studio UI used by native scene workers:
+
+```bash
+fmn-python studio lesson.py Example
+fmn-python --robot studio lesson.py Example --resolution 960x540 --fps 24
+fmn-python studio lesson.py Example --autoreload --watch assets/values.csv
+```
+
+Or keep the preview alongside other Python work:
+
+```python
+from fmn_python.studio import Studio
+
+with Studio("lesson.py", "Example", resolution=(640, 360), fps=30) as preview:
+    print(preview.url)
+    input("Press Enter to close Studio")
+```
+
+The optional installed Python wheel owns the interpreter. The standalone `fmn`
+executable has not acquired a CPython dependency, locator, or Python launcher.
+The worker uses the exact host interpreter/virtual environment and installed
+engine, not a `python` found later on PATH. Install the wheel before launching;
+source-tree `PYTHONPATH` overlays are deliberately not propagated to a worker.
+
+## Capture, playback and reload
+
+The worker loads the selected source, constructs the requested class normally,
+and runs its ordinary lifecycle once. `play`, `wait`, native/Python updaters,
+and camera synchronization use the existing scene scheduler. Lumen's retained
+camera renderer supplies the actual PNGs. Matching native inspector snapshots
+are captured at those same frame boundaries. Static scenes receive one final
+capture, rather than a blank or lifecycle-only “preview.”
+
+The UI becomes available after this initial capture. Its playback and scrub
+controls read the captured timeline, including reverse scrubbing, without
+executing the source or its side effects again. The inspector's mobject records
+and hierarchy follow the displayed frame. The viewport is read-only; no live
+Python input-event editing or projected-camera picking is advertised.
+
+**Reload executes source again**, in a new worker with fresh helper imports,
+and starts the new timeline at frame zero. Equal-size, same-timestamp source
+edits do not reuse old Python bytecode. Starting at zero also permits a shorter
+edited scene to replace a longer one. A syntax error in the entry source is
+reported before replacing the current worker. A runtime failure is contained
+in the disposable worker; the last displayed PNG and stable host remain, and
+fixing the source permits another explicit Reload. A failed capture is not
+published as a successful truncated timeline, even if scene code catches its
+exception. Automatic crash re-execution is disabled.
+
+### Automatic source reload
+
+`--autoreload` explicitly authorizes re-executing authored source after stable
+edits. It uses Studio's native content-based watcher, not modification times:
+the entry file and local `.py`/`.pyw` helpers are watched by default, including
+new and deleted modules. Repeated `--watch PATH` arguments add source directories
+or explicit files of any type, such as CSV inputs or image assets. Directory
+scans ignore non-Python output files, `__pycache__`, virtual environments, Git
+metadata and Cargo's `target`. This avoids reload loops caused by generated
+PNGs, bytecode, or logs. Explicit asset files remain watched regardless of
+their extension. The snapshot is taken before the initial worker executes, so
+an edit made during a slow initial capture is not missed.
+
+Changes are debounced (`--debounce_ms`, default 200). A failed edit produces one
+failure status and leaves the old worker/preview usable. That same unchanged
+source is not continually retried; fixing it schedules a fresh attempt.
+Scanning itself is bounded to 4,096 entries, 64 MiB of selected file bytes and
+64 directory levels. Symlinks/non-regular watched inputs and exceeded budgets
+are reported rather than silently watching an incomplete project. Additional
+dependencies outside the local directory must be declared with `--watch`.
+
+The programmatic interface exposes the same functionality:
+
+```python
+with Studio("lesson.py", "Example", autoreload=True,
+            watch_paths=["assets/values.csv"]) as preview:
+    print(preview.url)
+    # Explicit reload is also available, even when autoreload is disabled.
+    receipt = preview.reload()
+    print(receipt["frame_index"], receipt["sha256"])
+    print(preview.reload_status)
+    input("Press Enter to close Studio")
+```
+
+`reload_status` is a detached dictionary containing a monotonically increasing
+revision, completed-reload count, last error, and last native frame receipt.
+Robot mode emits separate, nonterminal `studio-reload` success/failure events.
+Manual and automatic reloads use the same authenticated native HTTP route as
+the browser, including its operation serialization and rate limits. No proxy
+or redirect receives the capability URL. Closing Studio stops and joins the
+watcher before releasing the host; an in-flight worker operation remains bounded
+by the configured request timeout.
+
+Committed preview positions are explicitly opaque journal barriers, not a
+serialization of arbitrary Python callbacks. This implementation does not
+restore callback checkpoints, replay arbitrary Python effects, or export a
+durable certified Python session. It also does not provide IPython `embed`,
+audio playback, or the full live `InteractiveScene` editing lifecycle.
+
+## Budgets and host access
+
+The defaults are 640×360, 30 FPS, 7,200 captured frames, a 256 MiB encoded capture
+budget, and a 120-second worker-request timeout. Set `--max_frames`,
+`--max_bytes`, or `--timeout` explicitly for longer scenes. The encoded budget
+accounts for PNGs, inspector documents and per-frame metadata; native inspector
+traversal/field limits and a 16M-pixel frame ceiling apply independently. It is
+not an operating-system memory quota on arbitrary authored Python. The maximum
+accepted controls are 100,000 frames, 1 GiB encoded captures, and 900 seconds.
+
+The native HTTP host binds only loopback and requires its random bearer
+capability for the UI, frames, inspector and mutation routes. Its existing
+origin, request-size, concurrency, and rate limits remain in force. The URL is
+a capability: do not share it with untrusted users. There is no automatic
+browser opening or public-network bind. Ctrl-C or `Studio.close()` stops the
+host and reaps its disposable worker; context-manager use is recommended.
+
+Preview is silent and needs no ffmpeg. Use `render_scene` / ordinary
+`fmn-python lesson.py Example` for soundtrack or movie export.
+
+**Process isolation is not a sandbox.** Scene code has the host user's file and
+process permissions. Source/runtime digests bind this preview generation; they
+do not constitute the complete C1–C10 certified Python input closure. Python
+Studio does not make a certified-render claim.

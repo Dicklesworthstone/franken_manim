@@ -98,8 +98,9 @@ width. `--video_dir` names the output directory for a PNG sequence and the
 destination file for the other formats.
 
 WAV output runs the sampled scene lifecycle without rasterization and mixes
-`Scene.add_sound` cues through Reel. Cue inputs currently must be PCM WAV;
-missing, malformed or over-budget audio fails before atomic publication. At
+`Scene.add_sound` cues through Reel. PCM/float WAV inputs remain native-only;
+compressed audio uses the optional governed decoder described in
+[Python audio](python_audio.md). Missing, malformed or over-budget audio fails before atomic publication. At
 least one cue is required. Output is 48 kHz, stereo, signed 16-bit PCM, with
 frame-clock cue placement, `time_offset`, `gain`, and `gain_to_background`.
 Robot output identifies `native-sound-mixer` and reports `sample_frames`,
@@ -141,8 +142,20 @@ the corresponding `file_writer_config` on a Scene, then call
 contain spaces and is resolved without shell tokenization. Invalid profiles,
 missing encoders and failed frames do not replace existing destinations.
 
-Certified output (`--reproducible`), opener flags, and Python `studio`
-remain fail-closed capability errors. In particular, the portal
+Python `studio` now captures existing scenes in disposable host-CPython workers:
+
+```bash
+fmn-python studio scene.py Example --resolution 640x360 --fps 30
+```
+
+The authenticated native browser UI supports playback, reverse scrubbing,
+per-frame native inspection and explicit source reload. Preview is bounded,
+silent and read-only; it does not expose arbitrary callback checkpoints or
+live `InteractiveScene` editing. See [Python Studio](python_studio.md) for the
+programmatic context manager, resource controls and worker-failure semantics.
+
+Certified output (`--reproducible`) and opener flags remain fail-closed
+capability errors. In particular, the portal
 does not expose a partial certified path before the Python input closure and
 provenance sidecar are complete, and it does not label lifecycle-only work as
 a render. Python scenes execute with the host interpreter's full user
