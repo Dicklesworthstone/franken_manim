@@ -7,6 +7,7 @@ frames in the same authenticated Studio UI used by native scene workers:
 fmn-python studio lesson.py Example
 fmn-python --robot studio lesson.py Example --resolution 960x540 --fps 24
 fmn-python studio lesson.py Example --autoreload --watch assets/values.csv
+fmn-python studio lesson.py Example --interactive --autoreload
 ```
 
 Or keep the preview alongside other Python work:
@@ -37,8 +38,9 @@ capture, rather than a blank or lifecycle-only “preview.”
 The UI becomes available after this initial capture. Its playback and scrub
 controls read the captured timeline, including reverse scrubbing, without
 executing the source or its side effects again. The inspector's mobject records
-and hierarchy follow the displayed frame. The viewport is read-only; no live
-Python input-event editing or projected-camera picking is advertised.
+and hierarchy follow the displayed frame. The viewport is read-only by default.
+`--interactive` additionally retains the actual scene and its local import
+context in the worker, allowing input at its final frame as described below.
 
 **Reload executes source again**, in a new worker with fresh helper imports,
 and starts the new timeline at frame zero. Equal-size, same-timestamp source
@@ -98,6 +100,68 @@ serialization of arbitrary Python callbacks. This implementation does not
 restore callback checkpoints, replay arbitrary Python effects, or export a
 durable certified Python session. It also does not provide IPython `embed`,
 audio playback, or the full live `InteractiveScene` editing lifecycle.
+
+## Live input at the final frame
+
+Pass `--interactive`, or `Studio(..., interactive=True)`, to enable live Python
+callbacks. In the Studio UI, select the last timeline frame and enable **Scene
+input**. Keyboard press/release, pointer motion, press/release, drag and wheel
+events then reach the existing `Scene.on_*` methods and event dispatcher. A
+plain `Scene` with mobject listeners works without a window toolkit:
+
+```python
+from manimlib import Scene, Square, BLUE, RED, RIGHT
+
+class Clickable(Scene):
+    def construct(self):
+        self.box = Square(fill_color=BLUE, fill_opacity=1)
+        self.box.add_mouse_press_listner(
+            lambda box, event: box.set_color(RED)
+        )
+        self.box.add_mouse_drag_listner(self.drag_box)
+        self.add(self.box)
+        self.wait(0.5)
+
+    def drag_box(self, box, event):
+        box.shift(event["d_point"])
+        return False  # Consume the drag; do not also pan the camera.
+
+    def on_key_press(self, symbol, modifiers):
+        super().on_key_press(symbol, modifiers)
+        if symbol == ord("k"):
+            self.play(self.box.animate.shift(RIGHT), run_time=0.25)
+```
+
+This is paused, final-frame editing, not a second animation loop. The complete
+callback runs on the original worker/interpreter thread. Ordinary `play` and
+`wait` still advance the same scene clock, execute updaters and synchronize
+geometry; only their final state is rendered into the live view after successful
+callback completion. Repeated input replaces that one frame rather than adding
+unbounded history. Earlier captured frames remain immutable and read-only;
+scrubbing back to them does not undo or reexecute the live scene. Return to the
+last frame to resume input.
+
+The native camera maps the browser's coordinates into the live world frame,
+including translation, scale and rotation. The existing dispatcher handles
+fixed-frame controls, hit tests, drag capture and listener order. Events carry
+the selected frame, an increasing input revision and the worker generation.
+Stale events, foreign scenes and edits against historical frames are rejected
+before any Python callback runs. Reload starts a fresh input revision and a new
+worker generation, so queued input cannot mutate the replacement scene.
+
+**A callback exception freezes further input until reload.** The last good PNG
+and matching inspector snapshot remain available; intermediate `play`/`wait`
+captures are not published. This is not rollback of arbitrary Python side
+effects. A hung callback is bounded by the worker request timeout and terminates
+that worker, without automatically executing the source again. The stable host
+retains its displayed frame and accepts an explicit reload. Live commands are
+opaque journal barriers, never serialized callback replay or certified state.
+
+This mode does not yet provide continuous idle updater ticks, animated playback
+of the frames inside an input callback, a native-window key-state adapter,
+IPython `embed`, audio playback, or the complete `InteractiveScene` windowed
+resize/sweep lifecycle. Read-only captured Studio and offline output remain
+separate modes with their existing behavior.
 
 ## Budgets and host access
 

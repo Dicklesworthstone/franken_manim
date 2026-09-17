@@ -24,6 +24,11 @@ fn with_capture<T>(scene: &Bound<'_, PyScene>, f: impl FnOnce(&mut Capture) -> R
 fn refresh(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     let engine = Rc::clone(&scene.try_borrow()?.engine);
     portal_playback::synchronize(scene)?;
+    // Match Scene.update_mobjects at the ordinary release boundary. Native
+    // show() supplies the native zero-dt pass, not host-language updaters.
+    // Run the Python half while unborrowed so followers, controls and camera
+    // updaters reflect an input edit even when its callback did not play/wait.
+    run_python_updaters(scene, 0.0)?;
     synchronize_portal_camera(scene)?;
     if !Rc::ptr_eq(&engine, &scene.try_borrow()?.engine) {
         return Err(PyRuntimeError::new_err("live Studio engine changed during synchronization"));
@@ -186,13 +191,16 @@ class Live(m.Scene):
             self.box.shift(m.RIGHT)
             raise ValueError('callback exploded')
         self.box.shift(m.RIGHT)
-        self.wait(0.125)
+        if symbol != ord('i'):
+            self.wait(0.125)
 s = Live()
 s._begin_studio_capture('Live', '11'*32, '22'*32, 96, 54, 8, 1, 0, 8, 1024*1024)
 s.camera._core.set_pixel_shape(96, 54)
 s.camera.fps = 8
 s.box = m.Square(fill_opacity=1)
-s.add(s.box)
+s.follower = m.Square(side_length=0.25, fill_opacity=1)
+s.follower.add_updater(lambda mob: mob.move_to(s.box.get_center() + m.UP))
+s.add(s.box, s.follower)
 s.wait(0.25)
 "#).unwrap();
             py.run(source.as_c_str(), Some(globals), Some(globals)).unwrap();
@@ -203,7 +211,8 @@ s.wait(0.25)
                 frame: 1, revision, target: None,
                 event: EventPayload::KeyPress { key: Key::Character(k), modifiers: Modifiers::NONE },
             }).unwrap();
-            worker.handle(SupervisorRequest::Play { scene: "Live".into(), command: command(0, 'a') }).unwrap();
+            worker.handle(SupervisorRequest::Play { scene: "Live".into(), command: command(0, 'i') }).unwrap();
+            py.run(std::ffi::c_str!("import numpy as np; assert np.allclose(s.follower.get_center(), s.box.get_center() + m.UP)"), Some(globals), Some(globals)).unwrap();
             let state = worker.last_state_hash();
             assert!(worker.handle(SupervisorRequest::Play { scene: "Live".into(), command: command(0, 'a') }).is_err());
             assert!(worker.handle(SupervisorRequest::Play { scene: "Live".into(), command: command(1, 'e') }).is_err());

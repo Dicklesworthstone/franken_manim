@@ -39,14 +39,21 @@ class Live(Scene):
         self.box = Square(fill_opacity=1, fill_color=BLUE, stroke_width=0)
         self.box.add_mouse_press_listner(self.press)
         self.box.add_mouse_drag_listner(self.drag)
-        self.add(self.box)
+        self.fixed = Square(side_length=0.5, fill_opacity=1).shift(3 * LEFT + UP).fix_in_frame()
+        self.fixed.add_mouse_press_listner(self.fixed_press)
+        self.add(self.box, self.fixed)
         self.wait(0.25)
+    def fixed_press(self, mob, event):
+        self.log('fixed', point=event['point'].tolist())
+        mob.set_color(GREEN)
+        return False
     def press(self, mob, event):
         self.log('press', point=event['point'].tolist())
         mob.set_color(RED)
     def drag(self, mob, event):
         self.log('drag', delta=event['d_point'].tolist())
         mob.shift(event['d_point'])
+        return False  # Consume the drag instead of also panning the camera.
     def on_key_press(self, symbol, modifiers):
         self.log('key', symbol=symbol, modifiers=modifiers)
         super().on_key_press(symbol, modifiers)
@@ -145,6 +152,12 @@ class Live(Scene):
             press = [f for f in self.facts() if f["kind"] == "press"][-1]
             self.assertEqual(press["point"], [4.0, 1.0, 0.0])
             self.event(api, "mouse_release", x=1.5, y=0, button="left")
+            # A fixed-frame control receives its original fixed coordinates,
+            # not the camera-transformed world point used for ordinary objects.
+            self.event(api, "mouse_press", x=-3, y=-1, button="left")
+            fixed = [f for f in self.facts() if f["kind"] == "fixed"][-1]
+            self.assertEqual(fixed["point"], [-3.0, 1.0, 0.0])
+            self.event(api, "mouse_release", x=-3, y=-1, button="left")
             self.event(api, "mouse_scroll", x=1.5, y=0, offset_x=0, offset_y=1)
             api.json("/api/scrub", {"frame": 0})
             self.assertEqual(api.frame(), history)
@@ -183,6 +196,52 @@ class Live(Scene):
             self.assertEqual(len(pids), 2)
             self.assertNotEqual(pids[0], pids[1])
             self.assertNotIn(str(os.getpid()), pids)
+
+    def test_live_edit_runs_python_followers_without_advancing_the_clock(self):
+        self.source.write_text('''from manimlib import *
+class Live(Scene):
+    def construct(self):
+        self.box = Square(fill_color=BLUE, fill_opacity=1, stroke_width=0)
+        self.follower = Square(side_length=0.5, fill_color=RED, fill_opacity=1, stroke_width=0)
+        self.follower.add_updater(lambda mob: mob.move_to(self.box.get_center() + 2 * UP))
+        self.add(self.box, self.follower)
+        self.wait(0.25)
+    def on_key_press(self, symbol, modifiers):
+        self.box.shift(RIGHT)
+''')
+        def red_center(data):
+            width, _, rgba = rgba_png(data)
+            xs = [p % width for p in range(len(rgba) // 4)
+                  if rgba[p * 4] > 150 and rgba[p * 4] > 2 * rgba[p * 4 + 2]]
+            self.assertGreater(len(xs), 3)
+            return sum(xs) / len(xs)
+
+        with self.host() as host:
+            api = Preview(host)
+            api.json("/api/scrub", {"frame": 1})
+            original_time = self.inspect(api)[0]["scene_time"]
+            before = red_center(api.frame())
+            self.event(api, "key_press", key="j")
+            self.assertGreater(red_center(api.frame()), before + 4)
+            self.assertEqual(self.inspect(api)[0]["scene_time"], original_time)
+
+    def test_interactive_scene_selection_and_nudge_use_existing_native_objects(self):
+        self.source.write_text('''from manimlib import *
+class Live(InteractiveScene):
+    def construct(self):
+        self.box = Square(fill_color=BLUE, fill_opacity=1, stroke_width=0)
+        self.add(self.box)
+        self.wait(0.25)
+''')
+        with self.host() as host:
+            api = Preview(host)
+            api.json("/api/scrub", {"frame": 1})
+            self.event(api, "key_press", key="a", modifiers=2)
+            selected = api.frame()
+            self.event(api, "key_press", key="arrow_right", modifiers=1)
+            nudged = api.frame()
+            self.assertNotEqual(rgba_png(selected)[2], rgba_png(nudged)[2])
+            self.assertTrue(self.inspect(api)[0]["view"]["input_events"])
 
     def test_hung_callback_is_killed_without_reexecution_and_host_can_reload(self):
         with self.host(timeout=3) as host:
