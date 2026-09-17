@@ -5,15 +5,16 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/native-studio-live.yml'
-      - 'scripts/patches/native-studio-live.patch'
-      - 'crates/fmn-cli/src/studio_live.rs'
-      - 'crates/fmn-studio/src/host/input.rs'
-      - 'crates/fmn-studio/src/studio.js'
-      - 'crates/fmn-studio/tests/browser.mjs'
+      - 'crates/fmn-cli/src/**'
+      - 'crates/fmn-studio/src/**'
+      - 'crates/fmn-studio/tests/**'
+      - 'crates/fmn-conformance/tests/e2e_scenarios.rs'
+      - 'crates/fmn-scene/src/**'
+      - 'crates/fmn/src/lib.rs'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: native-studio-live
@@ -33,7 +34,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.13'
@@ -48,35 +49,29 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Apply reviewed native wiring
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! grep -q '^mod studio_live;' crates/fmn-cli/src/lib.rs; then
-            git apply --check scripts/patches/native-studio-live.patch
-            git apply scripts/patches/native-studio-live.patch
-          fi
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/studio_live.rs crates/fmn-scene/src/runtime.rs crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/input.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/raster.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/protocol.rs crates/fmn/src/lib.rs
-          git diff --check
-      - name: Test the real scene editor, protocol, host and CLI registration
+      - name: Test the native editor, protocol, host and CLI registration
         run: |
           cargo test --locked -p fmn-studio --lib
           cargo test --locked -p fmn-studio --test native_committed_input --test native_worker --test native_deferred_worker --test studio
           cargo test --locked -p fmn-cli --features cli,batch --lib studio_live
           cargo test --locked -p fmn-scene --test runtime
-      - name: Commit validated wiring directly to main
+      - name: Exercise authenticated HTTP and worker restart through the shipping executable
+        run: cargo test --locked -p fmn-conformance --test e2e_scenarios studio_native_ -- --nocapture
+      - name: Exercise real Chrome editing and exact streamed pixels
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/fmn-cli/src/lib.rs crates/fmn-cli/src/studio_live.rs crates/fmn-scene/src/runtime.rs crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/input.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/raster.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/protocol.rs crates/fmn/src/lib.rs
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(studio): connect shipped live canvas to guarded input and verified replay (fm-ffj.72)'
-            git fetch origin main
-            git merge --no-edit origin/main
-            git push origin HEAD:main
-          fi
-          echo "Native source: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-      - name: Exercise the actual shipped subprocess and authenticated HTTP lifecycle
-        run: cargo test --locked -p fmn-conformance --test e2e_scenarios studio_native_interactive_lifecycle_scenario_passes -- --nocapture
+          node --version
+          google-chrome --version
+          node --test crates/fmn-studio/tests/input_queue.mjs
+          cargo build --locked -p fmn-cli --features cli,batch --bin fmn
+          node crates/fmn-studio/tests/browser.mjs "$PWD/target/portable/debug/fmn" "$RUNNER_TEMP/native-studio-browser"
+      - name: Retain native browser receipts and rendered evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-studio-browser-${{ github.sha }}
+          path: ${{ runner.temp }}/native-studio-browser
+          if-no-files-found: warn
+          retention-days: 3
