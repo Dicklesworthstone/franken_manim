@@ -250,8 +250,11 @@ try {
   async function nativePointer(point, type = "mouseMoved", modifiers = 0, buttons = 0) {
     const revision = (await inspect()).view.input_revision;
     const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[0]}) * r.width / ${interactiveInitial.view.width}, y:r.y + (${point[1]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[1]}) * r.height / ${interactiveInitial.view.height}}; })()`);
+    // CDP requires the held button on mouseMoved too. Omitting it can drop
+    // pointer capture even when the buttons bitmask still says left is down.
     await command("Input.dispatchMouseEvent", {type,...position,modifiers,buttons,
-      ...(type === "mouseMoved" ? {} : {button:"left",clickCount:1})});
+      button: type === "mouseMoved" ? (buttons & 1 ? "left" : "none") : "left",
+      ...(type === "mouseMoved" ? {} : {clickCount:1})});
     await inputReady(revision + 1);
   }
   async function pixelHash() {
