@@ -23,7 +23,7 @@ fn configuration(fs: &dyn FileSystem, command: &StudioCommand) -> Result<(Native
     let config = resolve_render_config(fs, &command.render)?;
     let mut runtime = command.render.runtime_config(&config);
     runtime.windowed = true;
-    // Use Prosceniumium's effective windowed FPS rather than a second clock policy.
+    // Use Proscenium's effective windowed FPS rather than a second clock policy.
     let fps = runtime.effective_fps();
     let frame_count = 2 * u64::from(fps) + 1;
     let (plan, _, _) = derive_studio_execution_plan(fs, &config, fmn_runtime::OutputPixelFormat::Rgba8)?;
@@ -43,7 +43,7 @@ fn configuration(fs: &dyn FileSystem, command: &StudioCommand) -> Result<(Native
     let mut closure = include_bytes!("studio_live.rs").to_vec();
     closure.extend_from_slice(include_bytes!("../../fmn/src/lib.rs"));
     closure.extend_from_slice(SUITE_LOCK_BYTES);
-    closure.extend_from_slice(&build);
+    closure.extend_from_slice(build.as_bytes());
     closure.extend_from_slice(format!("{config:?}").as_bytes());
     let mut native = NativeWorkerConfig::new(fmn::builtins::INTERACTIVE_SCENE_NAME,
         build, fmn_studio::protocol_digest(&closure), frame_count, fps, renderer);
