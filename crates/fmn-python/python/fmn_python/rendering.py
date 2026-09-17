@@ -69,6 +69,7 @@ class RenderResult:
     ffmpeg_invocations: tuple[dict[str, Any], ...] = ()
     certified: bool = False
     animation_range: tuple[int, int | None] | None = None
+    audio_inputs: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -79,6 +80,7 @@ class RenderResult:
             "sample_frames": self.sample_frames, "seed": self.seed,
             "certified": self.certified,
             "ffmpeg_invocations": copy.deepcopy(list(self.ffmpeg_invocations)),
+            "audio_inputs": copy.deepcopy(list(self.audio_inputs)),
         }
         if self.animation_range is not None:
             result["animation_range"] = list(self.animation_range)
@@ -214,13 +216,15 @@ class RenderSession:
             sample_frames=int(count) if self.format == "wav" else None,
             seed=self.seed, animation_range=self.animation_range,
         )
-        if self.format in _VIDEO_FORMATS:
+        if self.format in _VIDEO_FORMATS or self.format == "wav":
             try:
-                self.result = replace(self.result, ffmpeg_invocations=tuple(
-                    copy.deepcopy(self.scene._render_invocations),
-                ))
+                self.result = replace(
+                    self.result,
+                    ffmpeg_invocations=tuple(copy.deepcopy(self.scene._render_invocations)),
+                    audio_inputs=tuple(copy.deepcopy(self.scene._render_audio_inputs)),
+                )
             except BaseException as error:
-                error.add_note(f"native artifact is already published at {path}; ffmpeg provenance could not be read")
+                error.add_note(f"native artifact is already published at {path}; media provenance could not be read")
                 raise
         return self.result
 

@@ -45,6 +45,8 @@
 //! between the final check and the OS operation. That stronger threat requires
 //! a future host capability rather than an unsafe platform carve-out.
 
+mod audio;
+
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};

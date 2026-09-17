@@ -16,6 +16,27 @@ concurrency:
   group: native-audio-ingestion
   cancel-in-progress: false
 jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Capture exact source for portal integration
+        run: |
+          git archive --format=tar.gz HEAD > /tmp/audio-source.tar.gz
+          git rev-parse HEAD > /tmp/audio-source-sha.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: audio-source-${{ github.sha }}
+          path: |
+            /tmp/audio-source.tar.gz
+            /tmp/audio-source-sha.txt
+          retention-days: 1
   audio:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -50,6 +71,8 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
       - name: Test real compressed inputs and native PCM contracts
         shell: bash
         run: |

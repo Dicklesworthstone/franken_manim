@@ -18,6 +18,7 @@ mod crossing;
 mod ladder;
 mod method_cache;
 pub mod perf_harness;
+mod portal_audio;
 mod portal_playback;
 mod portal_video;
 mod report;
@@ -122,6 +123,7 @@ struct PortalArtifactReport {
     bytes: u64,
     digest: fmn_output::ArtifactDigest,
     invocations: Vec<fmn_output::InvocationReport>,
+    audio_inputs: Vec<portal_audio::PortalAudioInput>,
 }
 
 impl From<NativeArtifactReport> for PortalArtifactReport {
@@ -132,6 +134,7 @@ impl From<NativeArtifactReport> for PortalArtifactReport {
             bytes: report.bytes,
             digest: report.digest,
             invocations: Vec::new(),
+            audio_inputs: Vec::new(),
         }
     }
 }
@@ -152,10 +155,12 @@ enum PortalRenderSession {
         destination: PathBuf,
         threads: usize,
         timeline: OutputTimeline,
+        audio: Box<portal_audio::PortalAudio>,
     },
 }
 
 impl PortalRenderSession {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         destination: PathBuf,
         width: u32,
@@ -164,6 +169,7 @@ impl PortalRenderSession {
         threads: usize,
         format: PortalOutputFormat,
         video: Option<portal_video::PortalVideoConfig>,
+        audio: Box<portal_audio::PortalAudio>,
     ) -> PyResult<(Self, RuntimeConfig)> {
         match format {
             PortalOutputFormat::Frames(format) => {
@@ -175,6 +181,7 @@ impl PortalRenderSession {
                     threads,
                     format,
                     video,
+                    audio,
                 )?;
                 Ok((Self::Frames(Box::new(session)), config))
             }
@@ -196,6 +203,7 @@ impl PortalRenderSession {
                         destination,
                         threads,
                         timeline: OutputTimeline::default(),
+                        audio,
                     },
                     RuntimeConfig::from_config(&config),
                 ))
@@ -246,8 +254,9 @@ impl PortalRenderSession {
                 destination,
                 threads,
                 timeline,
+                mut audio,
             } => {
-                let mix = mix_portal_soundtrack(scene, threads, &timeline)?.ok_or_else(|| {
+                let mix = audio.mix(scene, threads, &timeline)?.ok_or_else(|| {
                     PyRuntimeError::new_err("WAV output requires at least one Scene.add_sound cue")
                 })?;
                 let config = fmn_output::MixerConfig::default();
@@ -277,7 +286,8 @@ impl PortalRenderSession {
                         frame_count: report.sample_frames,
                         bytes: report.bytes,
                         digest: report.digest,
-                        invocations: Vec::new(),
+                        invocations: audio.invocations(),
+                        audio_inputs: std::mem::take(&mut audio.inputs),
                     },
                     "native-sound-mixer".to_owned(),
                     threads,
@@ -285,57 +295,6 @@ impl PortalRenderSession {
             }
         }
     }
-}
-
-fn mix_portal_soundtrack(
-    scene: &Scene,
-    threads: usize,
-    timeline: &OutputTimeline,
-) -> PyResult<Option<fmn_output::MixReport>> {
-    let requests = scene.sound_requests();
-    if requests.is_empty() {
-        return Ok(None);
-    }
-    let config = fmn_output::MixerConfig::default();
-    let time = scene.time();
-    let timeline_frames = fmn_output::frames_to_samples(
-        timeline.output_frame(time.frames())?,
-        time.fps(),
-        config.sample_rate,
-    )
-    .map_err(native_error)?;
-    let mut mixer = fmn_output::SoundMixer::new(config)
-        .map_err(native_error)?
-        .with_timeline_frames(u64::try_from(timeline_frames).map_err(native_error)?);
-    let fs = fmn_platform::fs::StdFs;
-    for request in requests {
-        let bytes =
-            fmn_platform::fs::FileSystem::read_bounded(&fs, &request.sound_file, 64 * 1024 * 1024)
-                .map_err(|error| {
-                    PyOSError::new_err(format!(
-                        "sound cue {}: {error}",
-                        request.sound_file.display(),
-                    ))
-                })?;
-        let audio =
-            fmn_codec::decode_wav(&bytes, &fmn_codec::WavLimits::default()).map_err(|error| {
-                PyValueError::new_err(format!(
-                    "sound cue {} is not decodable PCM WAV: {error}",
-                    request.sound_file.display(),
-                ))
-            })?;
-        mixer
-            .add(fmn_output::SoundCue {
-                audio,
-                frame: timeline.output_frame(request.time.frames())?,
-                fps: request.time.fps(),
-                time_offset: request.time_offset,
-                gain: request.gain,
-                gain_to_background: request.gain_to_background,
-            })
-            .map_err(native_error)?;
-    }
-    mixer.mix(threads).map(Some).map_err(native_error)
 }
 
 /// One fmn-python render generation, retained across every `play` and `wait`.
@@ -348,6 +307,7 @@ struct PortalFrameSession {
     emitter: Option<OrderedEmitter>,
     receipt: PortalReceipt,
     soundtrack: Option<fmn_output::FfmpegSoundtrack>,
+    audio: Box<portal_audio::PortalAudio>,
     light_mob: Option<Mob>,
     rgba8_scratch: Option<FrameBuffer>,
     opaque_video: bool,
@@ -365,6 +325,7 @@ impl PortalFrameSession {
         max_threads: usize,
         format: PortalFrameFormat,
         video: Option<portal_video::PortalVideoConfig>,
+        audio: Box<portal_audio::PortalAudio>,
     ) -> PyResult<(Self, RuntimeConfig)> {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err(
@@ -646,6 +607,7 @@ impl PortalFrameSession {
                 emitter: Some(emitter),
                 receipt,
                 soundtrack,
+                audio,
                 light_mob: None,
                 rgba8_scratch,
                 opaque_video,
@@ -744,11 +706,7 @@ impl PortalFrameSession {
         let renderer = self.renderer.config();
         if let Some(soundtrack) = self.soundtrack.take() {
             soundtrack
-                .finish(mix_portal_soundtrack(
-                    scene,
-                    renderer.threads,
-                    &self.timeline,
-                )?)
+                .finish(self.audio.mix(scene, renderer.threads, &self.timeline)?)
                 .map_err(native_error)?;
         }
         self.emitter
@@ -756,7 +714,7 @@ impl PortalFrameSession {
             .ok_or_else(|| PyRuntimeError::new_err("portal render generation is already closed"))?
             .finish()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        let report = match &self.receipt {
+        let mut report: PortalArtifactReport = match &self.receipt {
             PortalReceipt::Native(receipt) => receipt.take().map_err(native_error)?.into(),
             PortalReceipt::Video(receipt) => {
                 let report = receipt.take().map_err(native_error)?;
@@ -766,9 +724,17 @@ impl PortalFrameSession {
                     bytes: report.boundary.artifact_bytes,
                     digest: report.boundary.artifact_digest,
                     invocations: report.boundary.invocations,
+                    audio_inputs: Vec::new(),
                 }
             }
         };
+        // The video encoder starts first; cue decodes finish before the final
+        // mux. Preserve that ordering and do not conceal external audio work.
+        let index = usize::from(!report.invocations.is_empty());
+        report
+            .invocations
+            .splice(index..index, self.audio.invocations());
+        report.audio_inputs = std::mem::take(&mut self.audio.inputs);
         Ok((report, renderer.engine.closure_string(), renderer.threads))
     }
 
@@ -893,6 +859,7 @@ struct PyScene {
     /// Optional production output session shared by every play/wait sink.
     render: Arc<Mutex<Option<PortalRenderSession>>>,
     render_invocations: Vec<fmn_output::InvocationReport>,
+    render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
 }
 
 /// Owns one pinned RecordBuffer generation while a NumPy array exports it.
@@ -7634,18 +7601,8 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
             "render destination must not be empty",
         ));
     }
-    let render_slot = {
-        let scene = slf.borrow();
-        if !scene.proxies.borrow().is_empty()
-            || !scene.engine.borrow().stage().roots().is_empty()
-            || scene.engine.borrow().stage().time() != 0.0
-        {
-            return Err(PyRuntimeError::new_err(
-                "render configuration must be installed before Scene construction mutates engine state",
-            ));
-        }
-        Arc::clone(&scene.render)
-    };
+    portal_video::check_scene_ownership(slf)?;
+    let render_slot = Arc::clone(&slf.borrow().render);
     let video = match &format {
         PortalOutputFormat::Frames(
             frame_format @ (PortalFrameFormat::Mp4 | PortalFrameFormat::Mov),
@@ -7658,6 +7615,8 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         )?),
         _ => None,
     };
+    let audio = portal_audio::PortalAudio::from_scene(slf, &format, video.as_ref())?;
+    portal_video::check_scene_ownership(slf)?;
     let (session, runtime_config) = PortalRenderSession::new(
         PathBuf::from(destination),
         width,
@@ -7666,6 +7625,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         threads,
         format,
         video,
+        audio,
     )?;
     let replacement = match Scene::new(runtime_config, seed) {
         Ok(scene) => Rc::new(EngineState::new(scene)),
@@ -7693,6 +7653,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         let mut scene = slf.borrow_mut();
         scene.engine = replacement;
         scene.render_invocations.clear();
+        scene.render_audio_inputs.clear();
     }
     *render = Some(session);
     Ok(())
@@ -7710,6 +7671,7 @@ impl PyScene {
             proxies: RefCell::new(HashMap::new()),
             render: Arc::new(Mutex::new(None)),
             render_invocations: Vec::new(),
+            render_audio_inputs: Vec::new(),
         })
     }
 
@@ -7876,7 +7838,11 @@ impl PyScene {
             .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?;
         // ubs:ignore — finalizes a frame-render session; no token, secret, or randomness exists.
         let (report, engine, threads) = session.finish(&engine.borrow())?;
-        slf.borrow_mut().render_invocations = report.invocations;
+        {
+            let mut scene = slf.borrow_mut();
+            scene.render_invocations = report.invocations;
+            scene.render_audio_inputs = report.audio_inputs;
+        }
         Ok((
             report.path.to_string_lossy().into_owned(),
             report.frame_count,
@@ -7885,6 +7851,11 @@ impl PyScene {
             engine,
             threads,
         ))
+    }
+
+    #[getter]
+    fn _render_audio_inputs(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
+        portal_audio::input_facts(slf)
     }
 
     #[getter]
@@ -8068,6 +8039,18 @@ impl PyScene {
         crossing::record(CrossingClass::Other);
         if portal_playback::requested_skip(slf)? {
             return Ok(());
+        }
+        let mut sound_file = PathBuf::from(sound_file);
+        let active = slf
+            .borrow()
+            .render
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+            .is_some();
+        if active && sound_file.is_relative() {
+            sound_file = std::env::current_dir()
+                .map_err(|error| PyOSError::new_err(error.to_string()))?
+                .join(sound_file);
         }
         let engine = Rc::clone(&slf.borrow().engine);
         let mut scene = engine.borrow_mut();

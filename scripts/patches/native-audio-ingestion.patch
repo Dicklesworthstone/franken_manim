@@ -32,3 +32,13 @@ index a289c70..558c218 100644
  pub use emitter::{
      CancelOutcome, EmitterConfig, EmitterError, EmitterFailure, EmitterHandle, EmitterReport,
      EmitterStats, FrameReservation, FrameSink, OrderedEmitter, SinkBinding, SinkFailure, SinkMode,
+diff --git a/crates/fmn-output/src/audio.rs b/crates/fmn-output/src/audio.rs
+--- a/crates/fmn-output/src/audio.rs
++++ b/crates/fmn-output/src/audio.rs
+@@ -167,5 +167,5 @@
+         return Err(AudioDecodeError::InvalidPcm("only mono and stereo layouts are supported; implicit downmix is forbidden"));
+     }
+-    if audio.sample_rate == 0 || audio.samples.len() % usize::from(audio.channels) != 0 {
++    if audio.sample_rate == 0 || !audio.samples.len().is_multiple_of(usize::from(audio.channels)) {
+         return Err(AudioDecodeError::InvalidPcm("sample rate must be nonzero and samples must contain complete channel frames"));
+     }

@@ -407,7 +407,7 @@ thread_replays += 1
 
 for scene_name, failure_code, message in (
     ("MissingSound", 6, "missing.wav"),
-    ("MalformedSound", 6, "not decodable PCM WAV"),
+    ("MalformedSound", 6, "unrecognized audio container"),
     ("OversizedSound", 6, "budget"),
     ("MovingWhiteSquare", 6, "at least one Scene.add_sound"),
     ("FailingSound", 5, "soundtrack-after-composition"),
