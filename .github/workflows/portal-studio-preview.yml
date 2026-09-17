@@ -8,6 +8,8 @@ on:
       - 'crates/fmn-studio/src/project_watch.rs'
       - 'crates/fmn-python/src/portal_studio.rs'
       - 'crates/fmn-python/python/fmn_python/studio.py'
+      - 'crates/fmn-python/python/fmn_python/interaction.py'
+      - 'crates/fmn-python/tests/test_dispatcher_binding_protocol.py'
       - 'crates/fmn-python/tests/studio_preview.py'
       - 'crates/fmn-python/tests/test_studio_protocol.py'
       - 'scripts/patches/portal-studio-preview.patch'
@@ -68,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           export PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests
-          python -m unittest test_render_session_protocol test_console_rendering_protocol test_batch_rendering_protocol test_render_selection_protocol test_video_console_protocol test_studio_protocol 2>&1 | tee /tmp/studio-protocol.log
+          python -m unittest test_render_session_protocol test_console_rendering_protocol test_batch_rendering_protocol test_render_selection_protocol test_video_console_protocol test_studio_protocol test_interaction_protocol test_dispatcher_binding_protocol test_control_events_protocol test_color_sliders_protocol 2>&1 | tee /tmp/studio-protocol.log
       - name: Verify native captured timeline and preview boundaries
         shell: bash
         run: |

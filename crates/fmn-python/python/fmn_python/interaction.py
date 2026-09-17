@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from functools import wraps
 import inspect
+import sys
 from types import SimpleNamespace
 from typing import Any
 import weakref
@@ -64,7 +65,17 @@ def _registered(dispatcher, listener, event_type):
 
 
 def _install_dispatcher(g):
-    Dispatcher, Event = g["EventDispatcher"], g["EventType"]
+    # The pinned schema exposes EventDispatcher in its owning module, not at
+    # the manimlib root. Patch that exact class (also used by EVENT_DISPATCHER)
+    # without broadening the root's public exports. Storage doubles may supply
+    # the class directly in their isolated namespace.
+    Dispatcher = g.get("EventDispatcher")
+    if Dispatcher is None:
+        module = sys.modules.get("manimlib.event_handler.event_dispatcher")
+        Dispatcher = getattr(module, "EventDispatcher", None)
+    if not isinstance(Dispatcher, type):
+        raise ImportError("native EventDispatcher is missing from its canonical module")
+    Event = g["EventType"]
     np = g["_np"]
     standalone_dispatch = Dispatcher.dispatch
 
