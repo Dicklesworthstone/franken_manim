@@ -37,7 +37,7 @@ _OUTPUT_HELP = """Native output profiles:
   --transparent, -t       Preserve alpha in PNG/PNG sequences or qtrle MOV.
   --vcodec ENCODER        Installed ffmpeg encoder name, or auto (video only).
   --pix_fmt FORMAT        Native wire: rgba, bgra, nv12/yuv420p, p010le.
-  --ffmpeg_bin PATH       Explicit ffmpeg executable; paths with spaces work.
+  --ffmpeg_bin PATH       Video encoder or WAV input decoder; paths with spaces work.
 
 Transparent MOV defaults to RGBA/qtrle. Explicit transparent video profiles
 require rgba/bgra and qtrle/auto. MP4, GIF, y4m and WAV do not accept -t.
@@ -51,8 +51,10 @@ def _output_overrides(options):
     result = {name: options[name] for name in ("vcodec", "pix_fmt", "ffmpeg_bin", "transparent")
               if options.get(name) is not None and options.get(name) is not False}
     format = options["format"]
-    if any(name in result for name in ("vcodec", "pix_fmt", "ffmpeg_bin")) and format not in {"mp4", "mov"}:
-        raise ValueError("--vcodec/--pix_fmt/--ffmpeg_bin require mp4 or mov output")
+    if any(name in result for name in ("vcodec", "pix_fmt")) and format not in {"mp4", "mov"}:
+        raise ValueError("--vcodec/--pix_fmt require mp4 or mov output")
+    if "ffmpeg_bin" in result and format not in {"mp4", "mov", "wav"}:
+        raise ValueError("--ffmpeg_bin requires mp4, mov, or wav output")
     if result.get("transparent"):
         if format not in {"png", "png_sequence", "mov"}:
             raise ValueError("--transparent requires png, png_sequence, or mov output")

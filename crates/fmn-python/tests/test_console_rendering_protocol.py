@@ -56,6 +56,7 @@ def native_fixture():
             )
             self.file_writer = SimpleNamespace(**self.writer_options)
             self.active = self.published = False
+            self._render_audio_inputs = []
 
         def set_pixel_shape(self, width, height):
             self.dimensions = width, height
@@ -154,6 +155,22 @@ class ConsoleRenderingProtocol(unittest.TestCase):
 
     def render(self, *extra):
         return self.invoke("--robot", str(self.source), "--resolution", "96x54", "--fps", "8", "--threads", "4", *extra)
+
+    def test_audio_decoder_path_reaches_wav_writer(self):
+        code, report, _, _ = self.render("--format", "wav", "--ffmpeg_bin", "tools/decoder with spaces")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.native.instances[0].file_writer.ffmpeg_bin,
+                         str(self.root / "tools/decoder with spaces"))
+        self.assertEqual(report["audio_inputs"], [])
+        self.assertEqual(report["ffmpeg_invocations"], [{"fixture": True}])
+
+    def test_video_codec_and_pixel_format_are_not_audio_decode_options(self):
+        for option, value in (("--vcodec", "aac"), ("--pix_fmt", "rgba")):
+            with self.subTest(option=option):
+                code, report, _, _ = self.render("--format", "wav", option, value)
+                self.assertEqual(code, 2)
+                self.assertIn("require mp4 or mov", report["message"])
+        self.assertEqual(self.native.instances, [])
 
     def test_single_uses_actual_session_and_native_finish_signature(self):
         code, report, _, _ = self.render()

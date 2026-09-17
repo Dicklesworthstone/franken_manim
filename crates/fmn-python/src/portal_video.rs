@@ -70,7 +70,7 @@ impl PortalVideoConfig {
     }
 }
 
-fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+pub(crate) fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     let scene = scene.try_borrow()?;
     if scene
         .render
@@ -85,6 +85,7 @@ fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     if !scene.proxies.borrow().is_empty()
         || !scene.engine.borrow().stage().roots().is_empty()
         || scene.engine.borrow().stage().time() != 0.0
+        || !scene.engine.borrow().sound_requests().is_empty()
     {
         return Err(PyRuntimeError::new_err(
             "render configuration must be installed before Scene construction mutates engine state",
@@ -156,7 +157,7 @@ fn video_job(
         return Err("transparent video currently requires the qtrle encoder".into());
     }
     // Both ordinary container paths encode 4:2:0, even for an RGBA input wire.
-    if !transparent && (width % 2 != 0 || height % 2 != 0) {
+    if !transparent && (!width.is_multiple_of(2) || !height.is_multiple_of(2)) {
         return Err("ordinary video requires even width and height for 4:2:0 output".into());
     }
     Ok(job)
