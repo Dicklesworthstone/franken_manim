@@ -1656,6 +1656,14 @@ impl Scene {
         Ok(())
     }
 
+    /// Set effective playback skipping without changing the saved revert state.
+    /// Host-language front doors call this only between segments, after their
+    /// range/skip hooks and before Choreo opens the next sampled segment.
+    pub fn set_skipping(&mut self, skipping: bool) -> &mut Self {
+        self.skipping = skipping;
+        self
+    }
+
     /// Force skip mode while remembering the status to which revert returns.
     pub fn force_skipping(&mut self) -> &mut Self {
         self.original_skipping = self.skipping;

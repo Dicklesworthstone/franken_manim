@@ -16,7 +16,10 @@ pub(super) struct OutputTimeline {
 
 impl OutputTimeline {
     pub(super) fn new(final_state_only: bool) -> Self {
-        Self { final_state_only, ..Self::default() }
+        Self {
+            final_state_only,
+            ..Self::default()
+        }
     }
 
     pub(super) fn observe(&mut self, frame: i64, skipping: bool) -> PyResult<()> {
@@ -78,7 +81,9 @@ impl PortalRenderSession {
 pub(super) fn requested_skip(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
     let requested = match scene.getattr("skip_animations") {
         Ok(value) => value.is_truthy()?,
-        Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(scene.py()) => false,
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(scene.py()) => {
+            false
+        }
         Err(error) => return Err(error),
     };
     let slot = Arc::clone(&scene.borrow().render);
@@ -123,7 +128,15 @@ mod tests {
         timeline.observe(30, false).unwrap();
         timeline.observe(36, false).unwrap();
         assert_eq!(timeline.omitted, [(0, 12), (20, 30)]);
-        for (scene, output) in [(0, 0), (12, 0), (13, 1), (20, 8), (25, 8), (30, 8), (36, 14)] {
+        for (scene, output) in [
+            (0, 0),
+            (12, 0),
+            (13, 1),
+            (20, 8),
+            (25, 8),
+            (30, 8),
+            (36, 14),
+        ] {
             assert_eq!(timeline.output_frame(scene).unwrap(), output);
         }
     }
@@ -154,7 +167,10 @@ mod tests {
     fn production_portal_playback_selection_acceptance() {
         crate::with_python_test_module("playback selection acceptance", |py, _module, globals| {
             globals
-                .set_item("__file__", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/playback_selection.py"))
+                .set_item(
+                    "__file__",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/playback_selection.py"),
+                )
                 .expect("set playback source path");
             let source = CString::new(include_str!("../tests/playback_selection.py"))
                 .expect("playback selection source contains no NUL");
