@@ -106,7 +106,9 @@ impl RuntimeConfig {
         }
     }
 
-    fn effective_fps(&self) -> u32 {
+    /// Frame rate selected by the native runtime, including the windowed override.
+    #[must_use]
+    pub fn effective_fps(&self) -> u32 {
         if self.windowed { 30 } else { self.fps }
     }
 
