@@ -11,12 +11,13 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result, _source_import_path
+from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
     _name_key, render_scenes,
 )
 from .rendering import RenderSession, _positive_integer
+from .scene_loading import SceneSource
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
 _SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
@@ -134,8 +135,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     phase, session, report = "load", None, None
     redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
     try:
-        with redirect, _source_import_path(source_path):
-            scenes = native._portal_cli_scene_types(str(source_path))
+        with redirect, SceneSource(source_path, native.Scene) as loaded:
+            scenes = loaded.scenes
             names = sorted(scenes)
             if batch:
                 requested = names if write_all else requested

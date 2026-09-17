@@ -8,6 +8,7 @@ from typing import Any
 
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_fields, render_scenes
 from .rendering import _positive_integer
+from .scene_loading import SceneSource
 
 _VALUE_FLAGS = frozenset({"--format", "--resolution", "--fps", "--threads", "--video_dir"})
 _BATCH_HELP = """Multi-scene output:
@@ -125,8 +126,8 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
     redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
     phase = "load"
     try:
-        with redirect, _source_import_path(source_path):
-            discovered = native._portal_cli_scene_types(str(source_path))
+        with redirect, SceneSource(source_path, native.Scene) as loaded:
+            discovered = loaded.scenes
             if not discovered:
                 raise ValueError(f"no locally declared Scene classes found in {source}")
             phase = "render"
