@@ -18,9 +18,8 @@ use super::NativeSegment;
 /// Invocations belong to the disposable native worker. A replay factory must
 /// create a fresh closure and fresh mutable captures on each reconstruction.
 /// The callback itself is not serialized, cloned, or claimed pure.
-pub type NativeBuild = Box<
-    dyn FnOnce(&mut NativeBuildContext<'_>) -> Result<Vec<NativeSegment>, SceneError>,
->;
+pub type NativeBuild =
+    Box<dyn FnOnce(&mut NativeBuildContext<'_>) -> Result<Vec<NativeSegment>, SceneError>>;
 
 /// Native construction access at an ordered boundary between segments.
 ///
@@ -92,7 +91,9 @@ impl NativeSegment {
     pub fn defer(
         build: impl FnOnce(&mut NativeBuildContext<'_>) -> Result<Vec<Self>, SceneError> + 'static,
     ) -> Self {
-        Self::Build { build: Box::new(build) }
+        Self::Build {
+            build: Box::new(build),
+        }
     }
 
     /// Apply a scene-data edit between segments without emitting an extra frame
@@ -115,7 +116,10 @@ impl NativeSegment {
         + 'static,
     ) -> Self {
         Self::defer(move |context| {
-            Ok(vec![Self::Play { animations: build(context)?, overrides }])
+            Ok(vec![Self::Play {
+                animations: build(context)?,
+                overrides,
+            }])
         })
     }
 }

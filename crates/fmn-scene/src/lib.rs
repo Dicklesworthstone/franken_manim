@@ -53,8 +53,8 @@ pub use journal::{
 pub use runtime::{
     BlankScene, CameraOrientation, CaptureReason, CompletionRequest, EndScene, HoldController,
     HoldDecision, HoldKind, IntegrationError, LifecycleEvent, LifecyclePhase, NullSceneSink,
-    OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneSink, SceneProgram,
-    SceneRegistration, SceneRegistry, SceneRunReport, SceneSelection, SceneSelectionError,
+    OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram, SceneRegistration,
+    SceneRegistry, SceneRunReport, SceneSelection, SceneSelectionError, SceneSink,
     SceneStateRestore, SoundRequest, SteppedPlay, SteppedWait, ThreeDAddOptions, ThreeDScene,
 };
 pub use timeline_bundle::{

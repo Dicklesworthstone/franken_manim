@@ -9,7 +9,9 @@ use fmn_scene::{CameraRig, NullSceneSink, Scene};
 #[test]
 fn initial_camera_and_all_live_channels_are_sampled_without_mutation() {
     let mut base = CameraConfig::default();
-    base.frame.set_euler_angles(Some(0.7), Some(0.004), Some(-0.3)).unwrap();
+    base.frame
+        .set_euler_angles(Some(0.7), Some(0.004), Some(-0.3))
+        .unwrap();
     let mut scene = Scene::default();
     let rig = CameraRig::new(&mut scene, &base).unwrap();
     let original = Camera::new(base.clone()).unwrap();
@@ -21,8 +23,14 @@ fn initial_camera_and_all_live_channels_are_sampled_without_mutation() {
     for (handle, value) in rig.center().into_iter().zip([1.0, 2.0, 3.0]) {
         scene.stage_mut().set_tracker_value(handle, value).unwrap();
     }
-    scene.stage_mut().set_tracker_value(rig.width(), 8.0).unwrap();
-    scene.stage_mut().set_tracker_value(rig.field_of_view(), 0.9).unwrap();
+    scene
+        .stage_mut()
+        .set_tracker_value(rig.width(), 8.0)
+        .unwrap();
+    scene
+        .stage_mut()
+        .set_tracker_value(rig.field_of_view(), 0.9)
+        .unwrap();
     for (handle, value) in rig.light().into_iter().zip([3.0, 4.0, 5.0]) {
         scene.stage_mut().set_tracker_value(handle, value).unwrap();
     }
@@ -39,11 +47,26 @@ fn in_memory_snapshots_freeze_camera_values_but_retain_original_handles() {
     let mut scene = Scene::default();
     let rig = CameraRig::new(&mut scene, &base).unwrap();
     let snapshot = scene.stage().snapshot();
-    scene.stage_mut().set_tracker_value(rig.center()[0], 7.0).unwrap();
-    assert_eq!(rig.sample(scene.stage(), &base).unwrap().frame.center()[0], 7.0);
-    assert_eq!(rig.sample(&snapshot.materialize(), &base).unwrap().frame.center()[0], 0.0);
+    scene
+        .stage_mut()
+        .set_tracker_value(rig.center()[0], 7.0)
+        .unwrap();
+    assert_eq!(
+        rig.sample(scene.stage(), &base).unwrap().frame.center()[0],
+        7.0
+    );
+    assert_eq!(
+        rig.sample(&snapshot.materialize(), &base)
+            .unwrap()
+            .frame
+            .center()[0],
+        0.0
+    );
     scene.stage_mut().restore(&snapshot);
-    assert_eq!(rig.sample(scene.stage(), &base).unwrap().frame.center()[0], 0.0);
+    assert_eq!(
+        rig.sample(scene.stage(), &base).unwrap().frame.center()[0],
+        0.0
+    );
 }
 
 #[test]
@@ -53,11 +76,18 @@ fn native_updaters_advance_the_camera_on_scene_time_and_sampling_never_ticks_the
     let rig = CameraRig::new(&mut scene, &base).unwrap();
     let calls = Rc::new(Cell::new(0));
     let seen = Rc::clone(&calls);
-    scene.stage_mut().add_dt_updater(rig.center()[0], move |stage, target, dt| {
-        seen.set(seen.get() + 1);
-        let current = stage.tracker_value(target).unwrap();
-        stage.set_tracker_value(target, current + dt).unwrap();
-    }, false).unwrap();
+    scene
+        .stage_mut()
+        .add_dt_updater(
+            rig.center()[0],
+            move |stage, target, dt| {
+                seen.set(seen.get() + 1);
+                let current = stage.tracker_value(target).unwrap();
+                stage.set_tracker_value(target, current + dt).unwrap();
+            },
+            false,
+        )
+        .unwrap();
     scene.wait(Some(0.5), &mut NullSceneSink).unwrap();
     let camera = rig.sample(scene.stage(), &base).unwrap();
     assert!((camera.frame.center()[0] - 0.5).abs() < 1e-6);

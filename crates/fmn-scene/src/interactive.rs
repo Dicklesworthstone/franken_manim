@@ -485,7 +485,12 @@ impl InteractionState {
                         self.save_undo(stage);
                         gesture.recorded = true;
                     }
-                    stage.stretch_many_about_point(&self.selection, incremental, axis, gesture.pivot);
+                    stage.stretch_many_about_point(
+                        &self.selection,
+                        incremental,
+                        axis,
+                        gesture.pivot,
+                    );
                     gesture.last_scale[axis] = cumulative;
                 }
             }

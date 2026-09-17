@@ -93,10 +93,17 @@ struct CaptureOne {
 }
 
 impl SceneSink for CaptureOne {
-    fn capture(&mut self, reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         if reason != CaptureReason::Segment || self.packet.is_some() {
             self.invalid = true;
-            return Err(IntegrationError::new("studio", "expected one native segment capture"));
+            return Err(IntegrationError::new(
+                "studio",
+                "expected one native segment capture",
+            ));
         }
         self.packet = Some(packet);
         Ok(())
@@ -155,7 +162,9 @@ impl NativeSceneProgram {
             || config.end_at_play.is_some()
             || config.presenter_mode
         {
-            return Err(invalid("native program requires a fresh non-skipping, non-presenter Scene"));
+            return Err(invalid(
+                "native program requires a fresh non-skipping, non-presenter Scene",
+            ));
         }
         if segments.len() > MAX_NATIVE_SEGMENTS || frame_limit > i64::MAX.cast_unsigned() {
             return Err(invalid("native program exceeds its segment or clock limit"));
@@ -183,8 +192,13 @@ impl NativeSceneProgram {
     /// pending queue. Zero permits only an initially empty schedule.
     pub fn with_segment_limit(mut self, limit: usize) -> Result<Self, ServiceError> {
         self.require_healthy()?;
-        if self.started_segments != 0 || limit > MAX_NATIVE_SEGMENTS || limit < self.admitted_segments {
-            return Err(invalid("native segment limit must cover the initial schedule and be set before execution"));
+        if self.started_segments != 0
+            || limit > MAX_NATIVE_SEGMENTS
+            || limit < self.admitted_segments
+        {
+            return Err(invalid(
+                "native segment limit must cover the initial schedule and be set before execution",
+            ));
         }
         self.segment_limit = limit;
         Ok(self)
@@ -196,12 +210,16 @@ impl NativeSceneProgram {
     /// as well; its resolution, aspect and capture policy remain authoritative.
     pub fn with_camera_rig(mut self, rig: CameraRig) -> Result<Self, ServiceError> {
         self.require_healthy()?;
-        if self.frame != 0 || self.started_segments != 0 || self.active.is_some() || self.camera_rig.is_some()
+        if self.frame != 0
+            || self.started_segments != 0
+            || self.active.is_some()
+            || self.camera_rig.is_some()
             || self.preview.scene().play_count() != 0
         {
             return Err(invalid("bind a camera rig once, before native playback"));
         }
-        rig.sample(self.preview.stage(), &CameraConfig::default()).map_err(execution_error)?;
+        rig.sample(self.preview.stage(), &CameraConfig::default())
+            .map_err(execution_error)?;
         self.camera_rig = Some(rig);
         Ok(self)
     }
@@ -209,48 +227,74 @@ impl NativeSceneProgram {
     /// Original tracker handles for the optional camera. Values are sampled
     /// from captured native state, never from a renderer-side timing callback.
     #[must_use]
-    pub const fn camera_rig(&self) -> Option<CameraRig> { self.camera_rig }
+    pub const fn camera_rig(&self) -> Option<CameraRig> {
+        self.camera_rig
+    }
 
     pub(super) fn camera_binding_index(&self) -> Result<Option<u64>, ServiceError> {
-        self.camera_rig.map(|rig| rig.binding_index(self.preview.stage()).map_err(execution_error)).transpose()
+        self.camera_rig
+            .map(|rig| {
+                rig.binding_index(self.preview.stage())
+                    .map_err(execution_error)
+            })
+            .transpose()
     }
 
     fn validate_camera(&self) -> Result<(), ServiceError> {
         if let Some(rig) = self.camera_rig {
-            rig.sample(self.preview.stage(), &CameraConfig::default()).map_err(execution_error)?;
+            rig.sample(self.preview.stage(), &CameraConfig::default())
+                .map_err(execution_error)?;
         }
         Ok(())
     }
 
     /// Latest completed capture, or zero for the initial constructed state.
     #[must_use]
-    pub const fn frame_index(&self) -> u64 { self.frame }
+    pub const fn frame_index(&self) -> u64 {
+        self.frame
+    }
 
     /// Highest admitted capture index (zero is always available initially).
     #[must_use]
-    pub const fn frame_limit(&self) -> u64 { self.frame_limit }
+    pub const fn frame_limit(&self) -> u64 {
+        self.frame_limit
+    }
 
     /// The actual Scene/editor owner; its clock and callbacks are never rebuilt
     /// from a callable-free durable snapshot.
     #[must_use]
-    pub fn preview(&self) -> &InteractivePreview { &self.preview }
+    pub fn preview(&self) -> &InteractivePreview {
+        &self.preview
+    }
 
     /// Source spans bound to this instance's original handles.
     #[must_use]
-    pub fn spans(&self) -> &SpanRegistry { &self.spans }
+    pub fn spans(&self) -> &SpanRegistry {
+        &self.spans
+    }
 
     /// Bind source spans while constructing the program. Deferred constructors
     /// can register their spans through NativeBuildContext as well.
-    pub fn spans_mut(&mut self) -> &mut SpanRegistry { &mut self.spans }
+    pub fn spans_mut(&mut self) -> &mut SpanRegistry {
+        &mut self.spans
+    }
 
     /// Dispatch native editing or application input at the paused boundary.
     /// Failure or unwinding poisons the program until its owner rebuilds it.
     pub fn dispatch(&mut self, event: EventPayload) -> Result<InteractiveDispatch, ServiceError> {
         self.require_healthy()?;
-        event.validate().map_err(|error| invalid(error.to_string()))?;
+        event
+            .validate()
+            .map_err(|error| invalid(error.to_string()))?;
         self.failed = true;
-        let result = self.preview.dispatch(event).map_err(execution_error)
-            .and_then(|receipt| { self.validate_camera()?; Ok(receipt) });
+        let result = self
+            .preview
+            .dispatch(event)
+            .map_err(execution_error)
+            .and_then(|receipt| {
+                self.validate_camera()?;
+                Ok(receipt)
+            });
         self.failed = result.is_err();
         result
     }
@@ -260,7 +304,10 @@ impl NativeSceneProgram {
     pub fn state_bytes(&mut self) -> Result<Vec<u8>, ServiceError> {
         self.require_healthy()?;
         self.validate_camera()?;
-        self.preview.scene_mut().state_bytes().map_err(execution_error)
+        self.preview
+            .scene_mut()
+            .state_bytes()
+            .map_err(execution_error)
     }
 
     /// Execute the next ordinary native capture, retaining executable state for
@@ -286,7 +333,9 @@ impl NativeSceneProgram {
     pub fn advance_to(&mut self, target: u64) -> Result<(), ServiceError> {
         self.require_healthy()?;
         if target < self.frame || target > self.frame_limit {
-            return Err(invalid("native seek requires a forward target within the frame limit"));
+            return Err(invalid(
+                "native seek requires a forward target within the frame limit",
+            ));
         }
         while self.frame < target {
             if self.next_frame()?.is_none() {
@@ -298,17 +347,25 @@ impl NativeSceneProgram {
 
     fn require_healthy(&self) -> Result<(), ServiceError> {
         if self.failed {
-            Err(execution_error("native program failed; reconstruct it from its factory"))
+            Err(execution_error(
+                "native program failed; reconstruct it from its factory",
+            ))
         } else {
             Ok(())
         }
     }
 
     fn prepend(&mut self, segments: Vec<NativeSegment>) -> Result<(), ServiceError> {
-        let admitted = self.admitted_segments.checked_add(segments.len())
+        let admitted = self
+            .admitted_segments
+            .checked_add(segments.len())
             .filter(|count| *count <= self.segment_limit)
-            .ok_or_else(|| invalid("deferred native construction exceeded its cumulative segment budget"))?;
-        self.segments.try_reserve(segments.len()).map_err(execution_error)?;
+            .ok_or_else(|| {
+                invalid("deferred native construction exceeded its cumulative segment budget")
+            })?;
+        self.segments
+            .try_reserve(segments.len())
+            .map_err(execution_error)?;
         for segment in segments.into_iter().rev() {
             self.segments.push_front(segment);
         }
@@ -319,21 +376,32 @@ impl NativeSceneProgram {
     fn next_frame_inner(&mut self) -> Result<Option<FramePacket>, ServiceError> {
         loop {
             if self.active.is_none() {
-                let Some(segment) = self.segments.pop_front() else { return Ok(None); };
+                let Some(segment) = self.segments.pop_front() else {
+                    return Ok(None);
+                };
                 self.started_segments += 1;
                 self.active = match segment {
-                    NativeSegment::Play { animations, overrides } => self.preview.scene_mut()
+                    NativeSegment::Play {
+                        animations,
+                        overrides,
+                    } => self
+                        .preview
+                        .scene_mut()
                         .begin_stepped_play(animations, overrides, &mut NullSceneSink)
-                        .map_err(execution_error)?.map(ActiveSegment::Play),
+                        .map_err(execution_error)?
+                        .map(ActiveSegment::Play),
                     NativeSegment::Wait { duration } => Some(ActiveSegment::Wait(
-                        self.preview.scene_mut().begin_stepped_wait(duration, &mut NullSceneSink)
+                        self.preview
+                            .scene_mut()
+                            .begin_stepped_wait(duration, &mut NullSceneSink)
                             .map_err(execution_error)?,
                     )),
                     NativeSegment::Build { build } => {
                         let generated = build(&mut NativeBuildContext {
                             scene: self.preview.scene_mut(),
                             spans: &mut self.spans,
-                        }).map_err(execution_error)?;
+                        })
+                        .map_err(execution_error)?;
                         self.validate_camera()?;
                         self.prepend(generated)?;
                         None
@@ -346,16 +414,22 @@ impl NativeSceneProgram {
             };
             let mut capture = CaptureOne::default();
             match active.advance(self.preview.scene_mut(), &mut capture) {
-                Ok(false) => active.finish(self.preview.scene_mut()).map_err(execution_error)?,
+                Ok(false) => active
+                    .finish(self.preview.scene_mut())
+                    .map_err(execution_error)?,
                 Ok(true) => {
                     self.active = Some(active);
                     let expected = self.frame + 1;
-                    let packet = capture.packet.ok_or_else(|| execution_error("native step omitted its capture"))?;
+                    let packet = capture
+                        .packet
+                        .ok_or_else(|| execution_error("native step omitted its capture"))?;
                     if capture.invalid
                         || u64::try_from(packet.frame_index()).ok() != Some(expected)
                         || self.preview.scene().time() != packet.time()
                     {
-                        return Err(execution_error("native capture disagreed with its rational clock"));
+                        return Err(execution_error(
+                            "native capture disagreed with its rational clock",
+                        ));
                     }
                     self.frame = expected;
                     return Ok(Some(packet));

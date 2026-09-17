@@ -5,7 +5,8 @@ use std::rc::Rc;
 
 use fmn_mobject::{Mob, Mobject};
 use fmn_scene::{
-    EventPayload, InteractiveClipboard, InteractiveScene, Key, Modifiers, MouseButton, NullSceneSink,
+    EventPayload, InteractiveClipboard, InteractiveScene, Key, Modifiers, MouseButton,
+    NullSceneSink,
 };
 
 fn dispatch(scene: &mut InteractiveScene, event: EventPayload) {

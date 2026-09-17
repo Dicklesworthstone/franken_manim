@@ -29,15 +29,28 @@ fn values(camera: &Camera) -> [f64; 12] {
     let center = frame.center();
     let orientation = frame.orientation();
     let light = camera.light_source_position();
-    [center[0], center[1], center[2], frame.width(),
-        orientation[0], orientation[1], orientation[2], orientation[3],
-        frame.field_of_view(), light[0], light[1], light[2]]
+    [
+        center[0],
+        center[1],
+        center[2],
+        frame.width(),
+        orientation[0],
+        orientation[1],
+        orientation[2],
+        orientation[3],
+        frame.field_of_view(),
+        light[0],
+        light[1],
+        light[2],
+    ]
 }
 
 fn allocate(stage: &mut Stage, values: [f64; 12]) -> Result<CameraRig, SceneError> {
     let root = stage.add(Mobject::new());
     let channels = values.map(|value| stage.add_value_tracker(value));
-    for channel in channels { stage.attach(root, channel)?; }
+    for channel in channels {
+        stage.attach(root, channel)?;
+    }
     Ok(CameraRig { root, channels })
 }
 
@@ -62,7 +75,11 @@ impl CameraRig {
     /// target is a fresh, updater-free family, not a copy that could keep moving
     /// under the source's callbacks. Quaternion target signs are chosen in the
     /// current orientation's hemisphere to avoid the q-to-minus-q zero midpoint.
-    pub fn animate_to(self, scene: &mut Scene, target: &CameraConfig) -> Result<Transform, SceneError> {
+    pub fn animate_to(
+        self,
+        scene: &mut Scene,
+        target: &CameraConfig,
+    ) -> Result<Transform, SceneError> {
         let target_camera = Camera::new(target.clone())?;
         let current = self.sample(scene.stage(), target)?;
         let from = current.frame.orientation();
@@ -70,7 +87,9 @@ impl CameraRig {
         let mut target_values = values(&target_camera);
         let dot = from[0] * to[0] + from[1] * to[1] + from[2] * to[2] + from[3] * to[3];
         if dot < 0.0 {
-            for value in &mut target_values[4..8] { *value = -*value; }
+            for value in &mut target_values[4..8] {
+                *value = -*value;
+            }
         }
         let target = allocate(scene.stage_mut(), target_values)?;
         Ok(Transform::new(self.root, target.root))
@@ -78,7 +97,9 @@ impl CameraRig {
 
     /// Point-free family root; suitable for a native updater or suspension.
     #[must_use]
-    pub const fn root(self) -> Mob { self.root }
+    pub const fn root(self) -> Mob {
+        self.root
+    }
 
     /// World-space center tracker handles, in xyz order.
     #[must_use]
@@ -88,17 +109,26 @@ impl CameraRig {
 
     /// Frame width. Height follows the output aspect ratio on each sample.
     #[must_use]
-    pub const fn width(self) -> Mob { self.channels[3] }
+    pub const fn width(self) -> Mob {
+        self.channels[3]
+    }
 
     /// Quaternion tracker handles in the existing scipy xyzw convention.
     #[must_use]
     pub const fn orientation(self) -> [Mob; 4] {
-        [self.channels[4], self.channels[5], self.channels[6], self.channels[7]]
+        [
+            self.channels[4],
+            self.channels[5],
+            self.channels[6],
+            self.channels[7],
+        ]
     }
 
     /// Vertical field of view in radians, strictly between zero and pi.
     #[must_use]
-    pub const fn field_of_view(self) -> Mob { self.channels[8] }
+    pub const fn field_of_view(self) -> Mob {
+        self.channels[8]
+    }
 
     /// World-space light-position handles, in xyz order.
     #[must_use]
@@ -110,14 +140,23 @@ impl CameraRig {
     /// It deliberately excludes the process-local arena ID. Removing/replacing
     /// a channel or root is an error, not permission to bind a different camera.
     pub fn binding_index(self, stage: &Stage) -> Result<u64, SceneError> {
-        let index = stage.roots().iter().position(|&root| root == self.root)
-            .ok_or(SceneError::InvalidState("camera rig root is not in this Scene"))?;
-        let entry = stage.get(self.root)
+        let index = stage
+            .roots()
+            .iter()
+            .position(|&root| root == self.root)
+            .ok_or(SceneError::InvalidState(
+                "camera rig root is not in this Scene",
+            ))?;
+        let entry = stage
+            .get(self.root)
             .ok_or(SceneError::InvalidState("camera rig root is stale"))?;
         if entry.submobjects() != self.channels.as_slice() {
-            return Err(SceneError::InvalidState("camera rig channel topology changed"));
+            return Err(SceneError::InvalidState(
+                "camera rig channel topology changed",
+            ));
         }
-        u64::try_from(index).map_err(|_| SceneError::InvalidState("camera rig root index exceeds u64"))
+        u64::try_from(index)
+            .map_err(|_| SceneError::InvalidState("camera rig root index exceeds u64"))
     }
 
     /// Read a capture configuration without running callbacks or mutating the
@@ -128,8 +167,9 @@ impl CameraRig {
         self.binding_index(stage)?;
         let mut values = [0.0; 12];
         for (value, handle) in values.iter_mut().zip(self.channels) {
-            *value = stage.tracker_value(handle)
-                .ok_or(SceneError::InvalidState("camera rig channel is not a live scalar tracker"))?;
+            *value = stage.tracker_value(handle).ok_or(SceneError::InvalidState(
+                "camera rig channel is not a live scalar tracker",
+            ))?;
             if !value.is_finite() {
                 return Err(SceneError::InvalidState("camera rig channel is non-finite"));
             }
@@ -138,7 +178,9 @@ impl CameraRig {
         config.frame.set_center([values[0], values[1], values[2]])?;
         config.frame.set_width(values[3])?;
         let orientation = [values[4], values[5], values[6], values[7]];
-        if orientation != config.frame.orientation() { config.frame.set_orientation(orientation)?; }
+        if orientation != config.frame.orientation() {
+            config.frame.set_orientation(orientation)?;
+        }
         config.frame.set_field_of_view(values[8])?;
         config.light_source_position = [values[9], values[10], values[11]];
         let camera = Camera::new(config.clone())?;

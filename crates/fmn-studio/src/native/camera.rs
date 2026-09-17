@@ -16,18 +16,27 @@ pub(super) struct CameraCapture {
 }
 
 impl CameraCapture {
-    pub fn new(config: CameraConfig, renderer: RetainedFrameRendererConfig) -> Result<Self, ServiceError> {
+    pub fn new(
+        config: CameraConfig,
+        renderer: RetainedFrameRendererConfig,
+    ) -> Result<Self, ServiceError> {
         let viewport = renderer.frame.viewport;
         if config.resolution != (viewport.width, viewport.height) {
-            return Err(invalid("native camera resolution must match the output viewport"));
+            return Err(invalid(
+                "native camera resolution must match the output viewport",
+            ));
         }
         if config.background != renderer.frame.background {
-            return Err(invalid("native camera background must match the output background"));
+            return Err(invalid(
+                "native camera background must match the output background",
+            ));
         }
         // render_with_camera executes ThreeDJob, not a selected affine/annex
         // FrameJob engine. Never mislabel this route.
         if renderer.engine != EngineIdentity::certified() {
-            return Err(invalid("native camera capture requires the certified CPU engine"));
+            return Err(invalid(
+                "native camera capture requires the certified CPU engine",
+            ));
         }
         let camera = Camera::new(config).map_err(execution_error)?;
         let mut identity = Writer::new(CAMERA_CAPTURE_SCHEMA);
@@ -42,18 +51,30 @@ impl CameraCapture {
             .put_u8(camera.samples())
             .put_f64(camera.max_allowable_norm());
         let frame = camera.frame();
-        for value in frame.center() { identity.put_f64(value); }
-        for value in frame.shape() { identity.put_f64(value); }
-        for value in frame.orientation() { identity.put_f64(value); }
+        for value in frame.center() {
+            identity.put_f64(value);
+        }
+        for value in frame.shape() {
+            identity.put_f64(value);
+        }
+        for value in frame.orientation() {
+            identity.put_f64(value);
+        }
         identity.put_f64(frame.field_of_view());
-        for value in camera.light_source_position() { identity.put_f64(value); }
+        for value in camera.light_source_position() {
+            identity.put_f64(value);
+        }
         let background = camera.background();
-        for value in [background.r, background.g, background.b, background.a] { identity.put_f64(value); }
+        for value in [background.r, background.g, background.b, background.a] {
+            identity.put_f64(value);
+        }
         // This is the normalized base policy. With a rig, per-capture pose is
         // native SceneState and the factory binding has its own identity.
         let backend = RenderBackendRecord::new(
-            RenderBackendRole::FrameStream, identity.finish().map_err(execution_error)?,
-        ).map_err(execution_error)?;
+            RenderBackendRole::FrameStream,
+            identity.finish().map_err(execution_error)?,
+        )
+        .map_err(execution_error)?;
         Ok(Self { camera, backend })
     }
 }

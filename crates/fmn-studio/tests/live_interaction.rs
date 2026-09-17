@@ -207,7 +207,10 @@ fn a_live_seek_refuses_before_relabeling_time_or_state() {
     let time = live.scene().time();
     let bounds = live.stage().get_bounding_box(root);
     let result = live.seek_frame(99, 99);
-    assert!(matches!(result, Err(InteractivePreviewError::LiveSeekRequiresReplay)));
+    assert!(matches!(
+        result,
+        Err(InteractivePreviewError::LiveSeekRequiresReplay)
+    ));
     assert_eq!(live.frame_index(), 0);
     assert_eq!(live.scene().time(), time);
     assert_eq!(live.stage().get_bounding_box(root), bounds);
@@ -218,7 +221,9 @@ fn captured_seek_and_explicit_reset_remain_separate_from_live_advancement() {
     let (scene, _) = scene_with_point();
     let source = scene.stage().snapshot().materialize();
     let mut preview = InteractivePreview::from_scene(scene).expect("live");
-    preview.reset(&source, 30, 17, 4).expect("explicit captured reset");
+    preview
+        .reset(&source, 30, 17, 4)
+        .expect("explicit captured reset");
     assert!(!preview.is_live());
     preview.seek_frame(5, 5).expect("captured relabel");
     assert_eq!(preview.frame_index(), 5);

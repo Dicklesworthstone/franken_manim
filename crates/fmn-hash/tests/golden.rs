@@ -112,7 +112,10 @@ fn valid_checksum_does_not_authorize_a_different_schema() {
             fmn_hash::Limits::DEFAULT,
             UnknownPolicy::Strict,
         ),
-        Err(fmn_hash::SerialError::SchemaMismatch { expected: 2, found: 1 })
+        Err(fmn_hash::SerialError::SchemaMismatch {
+            expected: 2,
+            found: 1
+        })
     ));
 }
 

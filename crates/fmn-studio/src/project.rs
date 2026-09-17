@@ -94,20 +94,39 @@ impl CargoBuildConfig {
         artifact_dir: PathBuf,
     ) -> Self {
         Self {
-            cargo, manifest, package, target, target_triple, target_dir, artifact_dir,
-            release: false, offline: true, features: Vec::new(),
-            build_env: Vec::new(), worker_argv: Vec::new(), worker_env: Vec::new(),
-            worker_cwd: None, timeout: Duration::from_secs(300),
+            cargo,
+            manifest,
+            package,
+            target,
+            target_triple,
+            target_dir,
+            artifact_dir,
+            release: false,
+            offline: true,
+            features: Vec::new(),
+            build_env: Vec::new(),
+            worker_argv: Vec::new(),
+            worker_env: Vec::new(),
+            worker_cwd: None,
+            timeout: Duration::from_secs(300),
             max_output_bytes: 8 * 1024 * 1024,
-            max_artifact_bytes: 512 * 1024 * 1024, max_artifacts: 32,
+            max_artifact_bytes: 512 * 1024 * 1024,
+            max_artifacts: 32,
         }
     }
 
     fn validate(&self) -> Result<(), BuildError> {
-        for path in [&self.cargo, &self.manifest, &self.target_dir, &self.artifact_dir] {
+        for path in [
+            &self.cargo,
+            &self.manifest,
+            &self.target_dir,
+            &self.artifact_dir,
+        ] {
             absolute(path)?;
         }
-        if let Some(path) = &self.worker_cwd { absolute(path)?; }
+        if let Some(path) = &self.worker_cwd {
+            absolute(path)?;
+        }
         name(&self.package)?;
         name(self.target.selection().1)?;
         name(&self.target_triple)?;
@@ -115,50 +134,103 @@ impl CargoBuildConfig {
             return Err(fail("an explicit host target triple is required"));
         }
         for feature in &self.features {
-            if feature.len() > 128 || feature.is_empty()
-                || !feature.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_/".contains(&c))
-            { return Err(fail("invalid explicit Cargo feature")); }
+            if feature.len() > 128
+                || feature.is_empty()
+                || !feature
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_/".contains(&c))
+            {
+                return Err(fail("invalid explicit Cargo feature"));
+            }
         }
         environment(&self.build_env)?;
         environment(&self.worker_env)?;
-        if self.worker_argv.len() > 128 || self.worker_argv.iter().any(|arg| arg.len() > 8192 || arg.contains('\0')) {
-            return Err(fail("worker argv exceeds its count/byte limit or contains NUL"));
+        if self.worker_argv.len() > 128
+            || self
+                .worker_argv
+                .iter()
+                .any(|arg| arg.len() > 8192 || arg.contains('\0'))
+        {
+            return Err(fail(
+                "worker argv exceeds its count/byte limit or contains NUL",
+            ));
         }
-        if self.timeout.is_zero() || self.max_output_bytes == 0 || self.max_output_bytes > 16 * 1024 * 1024
-            || self.max_artifact_bytes == 0 || self.max_artifact_bytes > 2 * 1024 * 1024 * 1024
-            || self.max_artifacts == 0 || self.max_artifacts > 128 || self.features.len() > 128
-        { return Err(fail("invalid native build deadline or resource bounds")); }
+        if self.timeout.is_zero()
+            || self.max_output_bytes == 0
+            || self.max_output_bytes > 16 * 1024 * 1024
+            || self.max_artifact_bytes == 0
+            || self.max_artifact_bytes > 2 * 1024 * 1024 * 1024
+            || self.max_artifacts == 0
+            || self.max_artifacts > 128
+            || self.features.len() > 128
+        {
+            return Err(fail("invalid native build deadline or resource bounds"));
+        }
         Ok(())
     }
 
     fn process(&self) -> Result<ProcessSpec, BuildError> {
         let (flag, target) = self.target.selection();
-        let project = self.manifest.parent().ok_or_else(|| fail("manifest has no project directory"))?;
+        let project = self
+            .manifest
+            .parent()
+            .ok_or_else(|| fail("manifest has no project directory"))?;
         let mut argv = vec![
-            "-Z".into(), "unstable-options".into(), "-C".into(), text(project)?.into(),
-            "build".into(), "--locked".into(), "--color".into(), "never".into(),
-            "--message-format".into(), "short".into(),
-            "--manifest-path".into(), text(&self.manifest)?.into(),
-            "--package".into(), self.package.clone(), flag.into(), target.into(),
-            "--target".into(), self.target_triple.clone(),
-            "--target-dir".into(), text(&self.target_dir)?.into(),
+            "-Z".into(),
+            "unstable-options".into(),
+            "-C".into(),
+            text(project)?.into(),
+            "build".into(),
+            "--locked".into(),
+            "--color".into(),
+            "never".into(),
+            "--message-format".into(),
+            "short".into(),
+            "--manifest-path".into(),
+            text(&self.manifest)?.into(),
+            "--package".into(),
+            self.package.clone(),
+            flag.into(),
+            target.into(),
+            "--target".into(),
+            self.target_triple.clone(),
+            "--target-dir".into(),
+            text(&self.target_dir)?.into(),
         ];
-        if self.release { argv.push("--release".into()); }
-        if self.offline { argv.push("--offline".into()); }
+        if self.release {
+            argv.push("--release".into());
+        }
+        if self.offline {
+            argv.push("--offline".into());
+        }
         if !self.features.is_empty() {
-            argv.push("--features".into()); argv.push(self.features.join(","));
+            argv.push("--features".into());
+            argv.push(self.features.join(","));
         }
         Ok(ProcessSpec {
-            program: self.cargo.clone(), argv, env: self.build_env.clone(), cwd: None,
-            stdin: None, timeout: self.timeout, max_output_bytes: self.max_output_bytes,
+            program: self.cargo.clone(),
+            argv,
+            env: self.build_env.clone(),
+            cwd: None,
+            stdin: None,
+            timeout: self.timeout,
+            max_output_bytes: self.max_output_bytes,
         })
     }
 
     fn output(&self) -> PathBuf {
-        let mut path = self.target_dir.join(&self.target_triple)
+        let mut path = self
+            .target_dir
+            .join(&self.target_triple)
             .join(if self.release { "release" } else { "debug" });
-        if matches!(&self.target, CargoTarget::Example(_)) { path.push("examples"); }
-        path.push(format!("{}{}", self.target.selection().1, std::env::consts::EXE_SUFFIX));
+        if matches!(&self.target, CargoTarget::Example(_)) {
+            path.push("examples");
+        }
+        path.push(format!(
+            "{}{}",
+            self.target.selection().1,
+            std::env::consts::EXE_SUFFIX
+        ));
         path
     }
 }
@@ -184,41 +256,73 @@ pub struct CargoRebuildDriver {
 }
 
 impl CargoRebuildDriver {
-    pub fn new(config: CargoBuildConfig, runner: Arc<dyn ProcessRunner>) -> Result<Self, BuildError> {
+    pub fn new(
+        config: CargoBuildConfig,
+        runner: Arc<dyn ProcessRunner>,
+    ) -> Result<Self, BuildError> {
         config.validate()?;
-        Ok(Self { artifacts: ArtifactStore::new(config.artifact_dir.clone()), config, runner, last_outcome: None })
+        Ok(Self {
+            artifacts: ArtifactStore::new(config.artifact_dir.clone()),
+            config,
+            runner,
+            last_outcome: None,
+        })
     }
 
     /// Last bounded compiler output, including unsuccessful exits/timeouts.
     #[must_use]
-    pub fn last_outcome(&self) -> Option<&ProcessOutcome> { self.last_outcome.as_ref() }
+    pub fn last_outcome(&self) -> Option<&ProcessOutcome> {
+        self.last_outcome.as_ref()
+    }
 
     /// Private published-image directory, once the first image is admitted.
     #[must_use]
-    pub fn artifact_directory(&self) -> Option<&Path> { self.artifacts.directory() }
+    pub fn artifact_directory(&self) -> Option<&Path> {
+        self.artifacts.directory()
+    }
 
     /// Remove only this driver's privately created images. Stop all consumers
     /// first; never call while a supervisor might restart an old generation.
-    pub fn cleanup(self) -> Result<(), BuildError> { self.artifacts.cleanup() }
+    pub fn cleanup(self) -> Result<(), BuildError> {
+        self.artifacts.cleanup()
+    }
 
     /// Query an explicitly selected Cargo executable's host triple. This is a
     /// bounded host operation, not ambient tool discovery. Useful for composing
     /// the explicit --target setting from the same compiler used for builds.
     pub fn host_triple(
-        runner: &dyn ProcessRunner, cargo: &Path, env: &[(String, String)],
+        runner: &dyn ProcessRunner,
+        cargo: &Path,
+        env: &[(String, String)],
     ) -> Result<String, BuildError> {
-        absolute(cargo)?; environment(env)?;
-        let outcome = runner.run(&ProcessSpec {
-            program: cargo.to_path_buf(), argv: vec!["--version".into(), "--verbose".into()],
-            env: env.to_vec(), cwd: None, stdin: None,
-            timeout: Duration::from_secs(15), max_output_bytes: 64 * 1024,
-        }).map_err(fail)?;
-        if !outcome.success() || outcome.stdout.len() > 64 * 1024 || outcome.stderr.len() > 64 * 1024 {
-            return Err(fail("selected Cargo could not report a bounded host triple"));
+        absolute(cargo)?;
+        environment(env)?;
+        let outcome = runner
+            .run(&ProcessSpec {
+                program: cargo.to_path_buf(),
+                argv: vec!["--version".into(), "--verbose".into()],
+                env: env.to_vec(),
+                cwd: None,
+                stdin: None,
+                timeout: Duration::from_secs(15),
+                max_output_bytes: 64 * 1024,
+            })
+            .map_err(fail)?;
+        if !outcome.success()
+            || outcome.stdout.len() > 64 * 1024
+            || outcome.stderr.len() > 64 * 1024
+        {
+            return Err(fail(
+                "selected Cargo could not report a bounded host triple",
+            ));
         }
         let output = std::str::from_utf8(&outcome.stdout).map_err(fail)?;
-        let mut hosts = output.lines().filter_map(|line| line.strip_prefix("host: "));
-        let host = hosts.next().ok_or_else(|| fail("Cargo omitted its host triple"))?;
+        let mut hosts = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("host: "));
+        let host = hosts
+            .next()
+            .ok_or_else(|| fail("Cargo omitted its host triple"))?;
         name(host)?;
         if hosts.next().is_some() || host.split('-').count() < 3 {
             return Err(fail("Cargo returned an ambiguous host triple"));
@@ -231,65 +335,101 @@ impl RebuildDriver for CargoRebuildDriver {
     fn rebuild(&mut self) -> Result<WorkerArtifact, BuildError> {
         self.last_outcome = None;
         self.config.validate()?;
-        if !self.config.manifest.is_file() { return Err(fail("Cargo manifest is not a regular file")); }
+        if !self.config.manifest.is_file() {
+            return Err(fail("Cargo manifest is not a regular file"));
+        }
         let outcome = self.runner.run(&self.config.process()?).map_err(fail)?;
         // Revalidate injected runners before storing output or publishing images.
         if outcome.stdout.len() as u64 > self.config.max_output_bytes
             || outcome.stderr.len() as u64 > self.config.max_output_bytes
-        { return Err(fail("compiler runner exceeded its declared output bound")); }
+        {
+            return Err(fail("compiler runner exceeded its declared output bound"));
+        }
         let success = outcome.success();
         self.last_outcome = Some(outcome);
         if !success {
-            let outcome = self.last_outcome.as_ref().ok_or_else(|| fail("missing build result"))?;
+            let outcome = self
+                .last_outcome
+                .as_ref()
+                .ok_or_else(|| fail("missing build result"))?;
             let tail = &outcome.stderr[outcome.stderr.len().saturating_sub(16 * 1024)..];
             let mut diagnostic = String::new();
             for c in String::from_utf8_lossy(tail).chars() {
-                if c == '\n' || c == '\t' || !c.is_control() { diagnostic.push(c); }
-                else { diagnostic.extend(c.escape_default()); }
+                if c == '\n' || c == '\t' || !c.is_control() {
+                    diagnostic.push(c);
+                } else {
+                    diagnostic.extend(c.escape_default());
+                }
             }
-            return Err(fail(format!("Cargo {:?}\n{diagnostic}", outcome.termination)));
+            return Err(fail(format!(
+                "Cargo {:?}\n{diagnostic}",
+                outcome.termination
+            )));
         }
         let (executable, build_id) = self.artifacts.publish(
-            &self.config.output(), self.config.max_artifact_bytes, self.config.max_artifacts,
+            &self.config.output(),
+            self.config.max_artifact_bytes,
+            self.config.max_artifacts,
         )?;
         Ok(WorkerArtifact {
-            executable, build_id, argv: self.config.worker_argv.clone(),
-            env: self.config.worker_env.clone(), cwd: self.config.worker_cwd.clone(),
+            executable,
+            build_id,
+            argv: self.config.worker_argv.clone(),
+            env: self.config.worker_env.clone(),
+            cwd: self.config.worker_cwd.clone(),
         })
     }
 }
 
 fn name(value: &str) -> Result<(), BuildError> {
-    if value.is_empty() || value.len() > 128 || !value.as_bytes()[0].is_ascii_alphanumeric()
-        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
-    { return Err(fail("invalid package, executable target or host triple")); }
+    if value.is_empty()
+        || value.len() > 128
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+    {
+        return Err(fail("invalid package, executable target or host triple"));
+    }
     Ok(())
 }
 
 fn absolute(path: &Path) -> Result<(), BuildError> {
     if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(fail("native build paths must be absolute without parent traversal"));
+        return Err(fail(
+            "native build paths must be absolute without parent traversal",
+        ));
     }
     let _ = text(path)?;
     Ok(())
 }
 
 fn text(path: &Path) -> Result<&str, BuildError> {
-    path.to_str().filter(|s| !s.contains('\0'))
+    path.to_str()
+        .filter(|s| !s.contains('\0'))
         .ok_or_else(|| fail("native build paths must be losslessly representable UTF-8"))
 }
 
 fn environment(env: &[(String, String)]) -> Result<(), BuildError> {
-    if env.len() > 128 { return Err(fail("too many explicit environment variables")); }
+    if env.len() > 128 {
+        return Err(fail("too many explicit environment variables"));
+    }
     let mut names = BTreeSet::new();
     let mut size = 0_usize;
     for (key, value) in env {
         size = size.saturating_add(key.len()).saturating_add(value.len());
-        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0')
-            || !names.insert(key.to_ascii_uppercase()) || size > 256 * 1024
-        { return Err(fail("invalid, duplicate or oversized explicit environment")); }
+        if key.is_empty()
+            || key.contains(['=', '\0'])
+            || value.contains('\0')
+            || !names.insert(key.to_ascii_uppercase())
+            || size > 256 * 1024
+        {
+            return Err(fail("invalid, duplicate or oversized explicit environment"));
+        }
     }
     Ok(())
 }
 
-pub(super) fn fail(error: impl std::fmt::Display) -> BuildError { BuildError::new(error.to_string()) }
+pub(super) fn fail(error: impl std::fmt::Display) -> BuildError {
+    BuildError::new(error.to_string())
+}
