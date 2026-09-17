@@ -6,6 +6,8 @@ on:
       - '.github/workflows/studio-sessions.yml'
       - 'scripts/patches/studio-session-*.patch'
       - 'crates/fmn-studio/src/supervisor/session.rs'
+      - 'crates/fmn-studio/src/host/session.rs'
+      - 'crates/fmn-cli/src/studio_session.rs'
   workflow_dispatch:
 permissions:
   contents: write
@@ -15,6 +17,7 @@ concurrency:
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   CARGO_TARGET_DIR: target/portable
+  PYO3_PYTHON: python
 jobs:
   native:
     runs-on: ubuntu-24.04
@@ -24,7 +27,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - run: rustup show active-toolchain
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - run: |
+          rustup show active-toolchain
+          python -m pip install numpy
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -32,26 +40,33 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Integrate reviewed session module declaration
+      - name: Integrate reviewed session entry points
         run: |
           if ! grep -q '^pub mod session;' crates/fmn-studio/src/supervisor.rs; then
             git apply --check scripts/patches/studio-session-core.patch
             git apply scripts/patches/studio-session-core.patch
           fi
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-studio/src/supervisor/session.rs
+          if ! grep -q '^mod studio_session;' crates/fmn-cli/src/lib.rs; then
+            git apply --check scripts/patches/studio-session-host.patch
+            git apply scripts/patches/studio-session-host.patch
+          fi
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs
           git diff --check
-      - name: Verify saved session and existing recovery machinery
+      - name: Generate the CLI contract from its single schema
+        run: UPDATE_API_ARTIFACTS=1 cargo test --locked -p fmn-conformance --test api_schema
+      - name: Verify saved sessions and existing native recovery
         run: |
           cargo test --locked -p fmn-studio --lib
           cargo test --locked -p fmn-studio --test supervisor --test native_committed_input --test native_worker
+          cargo test --locked -p fmn-cli --features cli,batch --lib studio_
           cargo clippy --locked -p fmn-studio --lib -- -D warnings
       - name: Commit validated integration to main
         run: |
-          git add crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs
+          git add API_OVERLAY.tsv crates/fmn-cli/src/lib.rs crates/fmn-cli/src/generated.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-config/src/generated.rs docs/api/cli_flags.md docs/api/schema.md docs/api/ledger.tsv docs/api/out_of_tier.tsv docs/api/parity_coverage.svg crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(studio): integrate validated saved-session export and strict resume'
+            git commit -m 'feat(studio): enable saved session downloads and strict CLI resume'
             git fetch origin main
             git merge --no-edit origin/main
             git push origin HEAD:main
