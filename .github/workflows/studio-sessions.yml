@@ -4,13 +4,18 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/studio-sessions.yml'
-      - 'scripts/patches/studio-session-*.patch'
+      - 'crates/fmn-studio/src/**'
+      - 'crates/fmn-studio/tests/**'
+      - 'crates/fmn-cli/src/**'
+      - 'crates/fmn-scene/src/journal.rs'
+      - 'crates/fmn-scene/tests/journal.rs'
+      - 'API_OVERLAY.tsv'
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: studio-sessions
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   CARGO_TARGET_DIR: target/portable
@@ -23,7 +28,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.13'
@@ -37,51 +42,28 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Integrate reviewed typed input and corresponding protocol version fixtures
+      - name: Verify versioned archives, native editing and recovery
         run: |
-          if ! grep -q 'frame-stamped-native-input-track-v2' crates/fmn-studio/src/native/service.rs; then
-            git apply --check scripts/patches/studio-session-typed-input.patch
-            git apply scripts/patches/studio-session-typed-input.patch
-          fi
-          if ! grep -q '^request=464d4e490100000001000100' crates/fmn-studio/fixtures/protocol_v1.hex; then
-            git apply --check scripts/patches/studio-session-protocol-golden.patch
-            git apply scripts/patches/studio-session-protocol-golden.patch
-          fi
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-scene/src/journal.rs crates/fmn-scene/tests/journal.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/native/service/pending.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/native_committed_input.rs crates/fmn-conformance/tests/e2e_scenarios.rs
-          git diff --check
-      - name: Verify native input, versioned sessions and recovery
-        run: |
-          cargo test --locked -p fmn-scene --test journal --test runtime
-          cargo test --locked -p fmn-studio --lib
-          cargo test --locked -p fmn-studio --test supervisor --test protocol --test native_committed_input --test native_worker --test native_deferred_worker
-          cargo test --locked -p fmn-cli --features cli,batch --lib studio_
-          cargo test --locked -p fmn-conformance --test e2e_scenarios studio_native_ -- --nocapture
+          cargo test --locked -p fmn-conformance --test api_schema
+          cargo test --locked -p fmn-studio
+          cargo test --locked -p fmn-cli --features cli,batch --lib
+          cargo test --locked -p fmn-scene
           cargo clippy --locked -p fmn-studio --lib -- -D warnings
           node --test crates/fmn-studio/tests/input_queue.mjs
-      - name: Commit validated typed input integration to main
-        run: |
-          git add crates/fmn-scene/src/journal.rs crates/fmn-scene/tests/journal.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/native/service/pending.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/native_committed_input.rs crates/fmn-studio/tests/browser.mjs crates/fmn-conformance/tests/e2e_scenarios.rs crates/fmn-studio/fixtures/protocol_v1.hex
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(studio): preserve typed input replayability in saved and restarted sessions'
-            git fetch origin main
-            git merge --no-edit origin/main
-            git push origin HEAD:main
-          fi
-          git rev-parse HEAD > /tmp/session-source-sha.txt
-          git archive --format=tar.gz HEAD > /tmp/session-source.tar.gz
-      - name: Prove browser download and two whole-host restarts retain editable native state
+      - name: Verify authenticated HTTP and worker lifecycle
+        run: cargo test --locked -p fmn-conformance --test e2e_scenarios studio_native_ -- --nocapture
+      - name: Verify real browser downloads and editable sessions across whole-host restarts
         run: |
           cargo build --locked -p fmn-cli --features cli,batch --bin fmn
           node crates/fmn-studio/tests/browser.mjs "$PWD/target/portable/debug/fmn" "$RUNNER_TEMP/saved-session-browser"
+          git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: studio-session-evidence-${{ github.sha }}
+          name: studio-session-browser-${{ github.sha }}
           path: |
-            /tmp/session-source-sha.txt
-            /tmp/session-source.tar.gz
-            ${{ runner.temp }}/saved-session-browser
-          retention-days: 1
+            ${{ runner.temp }}/saved-session-browser/*.json
+            ${{ runner.temp }}/saved-session-browser/*.png
+            ${{ runner.temp }}/saved-session-browser/saved-*/studio-session.fmns
+          retention-days: 3
           if-no-files-found: warn

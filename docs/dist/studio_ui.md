@@ -48,7 +48,7 @@ Everything else under the UI surface is refused: unknown clean paths get 404
 from the exact-route table; ambiguous paths (`..` components, percent escapes,
 backslashes) get 400 at the request parser, before any routing. Dynamic
 routes (`/stream`, `/api/scrub`, `/api/restart`, `/api/event`, `/api/inspect`,
-`/api/overlays`) serve protocol data, never files.
+`/api/overlays`, `/api/session`) serve protocol data, never arbitrary files.
 
 Every request is authenticated with the per-session 256-bit capability
 (header or `cap` query, never both), Host/Origin-validated, rate-limited, and
@@ -91,7 +91,7 @@ cargo run --locked -p fmn-cli --features cli,batch --bin fmn -- \
 fmn studio @builtin interactive.v1
 ```
 
-Open the private loopback launch URL, enable **Forward scene input**, and focus
+Open the private loopback launch URL, enable **Send preview input to the scene**, and focus
 the preview canvas. This route has a blue circle nested in a group and a red
 square to use as a color source. It needs neither CPython nor ffmpeg. Its native
 windowed clock is 30 fps: frame zero is the constructed state, followed by 60
@@ -134,12 +134,58 @@ the native hit-testing and selection owner instead.
 
 This is a registered affine native editing surface, not arbitrary Rust-source
 compilation, perspective picking, a Python Studio worker, or graphical edits
-written back into source files. Journal/checkpoint authority is session-local:
-worker restart is supported, but closing the entire Studio host does not save
-an edit project for a later invocation. The reusable native worker and explicit
+written back into source files. Worker restart retains the session in memory;
+use **Save session** before closing the entire host to keep committed edits
+for a later invocation. The reusable native worker and explicit
 source-project host are described in `docs/NATIVE_STUDIO_WORKER.md` and
 `docs/NATIVE_PROJECT_STUDIO.md`; their own capability boundaries still apply.
 No warm-restart latency or full G3/certification claim follows from this route.
+
+## Save and reopen native editing sessions
+
+On the registered live native canvas, **Save session** downloads
+`studio-session.fmns`. It first drains accepted input and releases held edit
+modes. The archive preserves committed commands, checkpoints, native editing
+history, and the last committed timeline position. Merely playing or previewing
+a different frame does not change that saved position. Saving is explicit, not
+automatic; wait for the browser download to complete before closing Studio.
+
+Reopen with the same executable, scene and resolved render settings:
+
+```bash
+fmn studio --resolution 384x216 --threads 1 \
+  --restore-session /path/to/studio-session.fmns @builtin interactive.v1
+```
+
+Use the resolution and other settings from the original invocation, not
+necessarily the example above. Thread count may change: it is deliberately
+excluded by the engine's canonical configuration identity. Session ports and
+capability tokens are newly created on each invocation. The old capability
+does not authenticate the new host. Resume never changes the input archive;
+continue editing and download a new session to retain further work.
+
+The versioned `FMNS` archive carries the canonical journal and checkpoints,
+so no old cache directory is required. It is bounded to 64 MiB overall and to
+the receiving worker's tighter journal/checkpoint budgets. Checksums detect
+corruption, not authorship. Archives contain no launch command, executable
+path, environment settings, capability token, or arbitrary-code deserialization.
+The selected host validates the scene, build, resolved configuration, and
+independently resolved native input identities before restoring through the
+existing worker protocol. Corruption, unsupported versions, changed inputs,
+opaque effects and replay divergence refuse rather than silently starting an
+empty or partially restored project.
+
+Typed native editing commands use the journal's `Input` vocabulary, retaining
+their stateful effect classification and input identities. They are not
+arbitrary `Custom` callbacks; those remain opaque replay barriers. The journal
+minor version and native edited-checkpoint schema distinguish the two, and
+the live worker handshake refuses incompatible versions.
+
+`--restore-session` currently requires the registered `@builtin interactive.v1`
+adapter and an existing regular file. It does not import arbitrary Rust/Python
+scenes, migrate across builds, or write graphical changes back into source.
+The exact authenticated `GET /api/session` endpoint exports in-memory data;
+there is no HTTP upload, server-side save-path parameter, or filesystem browser.
 
 ## The acceptance tests
 
@@ -180,3 +226,9 @@ resizes, recolors, copies/pastes, undoes, resumes playback, scrubs and restarts;
 it compares inspected state and decoded rendered pixels. Existing immutable
 input-refusal scenarios remain. Screenshots and a capability-redacted receipt
 record the source state, executable hash and actual results.
+
+The saved-session scenario additionally downloads through the real browser,
+closes the entire host, reopens with a different render-thread count, checks
+native state and decoded pixels, performs undo and further edits, saves again,
+and repeats the whole-host restart. It also checks export authentication and
+refuses damaged, truncated, over-budget, linked and mismatched-input archives.
