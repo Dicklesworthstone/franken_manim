@@ -77,9 +77,10 @@ operations:
 fmn-python [--robot] --version
 fmn-python [--robot] --list-scenes SOURCE.py
 fmn-python [--robot] --construct-only SOURCE.py [SCENE]
-fmn-python [--robot] SOURCE.py [SCENE] [--format png_sequence|png|gif|y4m|wav]
+fmn-python [--robot] SOURCE.py [SCENE ...] [--format png_sequence|png|gif|y4m|wav|mp4|mov]
            [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
-           [--video_dir PATH]
+           [--video_dir PATH] [--transparent]
+           [--vcodec ENCODER] [--pix_fmt FORMAT] [--ffmpeg_bin PATH]
 ```
 
 `--construct-only` is an explicit engine-lifecycle diagnostic and reports
@@ -107,8 +108,41 @@ The permanent native, installed-wheel and registered E2E suites independently
 decode GIF/y4m/WAV bytes and check motion, primary colors, cue placement,
 thread-count replay and preservation of destinations after failures.
 
-Certified output (`--reproducible`), ffmpeg video containers, opener/write-all flags,
-and `studio` remain fail-closed capability errors. In particular, the portal
+MP4 and MOV use Reel's content-hashed, governed ffmpeg process boundary, not a
+Python subprocess encoder. `SceneFileWriter.ffmpeg_bin`, `video_codec`, and
+`pixel_format` are negotiated before acquiring an output generation. The
+default is libx264 with NV12 transport; `auto` selects the container's software
+encoder. `--pix_fmt` selects the native **input wire**, not arbitrary ffmpeg
+filters: `rgba`/`rgba8`, `bgra`/`bgra8`, `nv12`/`yuv420p`, or
+`p010`/`p010le`/`yuv420p10le`. P010 retains 10-bit transport/output planes; it
+does not assert an HDR pipeline or additional source color precision.
+
+`--transparent` (`-t`) preserves the scene's RGB background and camera pose,
+changing only background alpha. PNG and PNG sequences carry alpha natively.
+MOV automatically promotes the ordinary writer defaults to RGBA/qtrle; an
+explicit transparent video profile must use RGBA/BGRA and qtrle/auto. MP4,
+GIF, y4m and WAV reject this switch rather than silently flattening it.
+Ordinary video requires even dimensions. Alpha cannot be introduced midway
+through an already-negotiated opaque video generation.
+
+```bash
+fmn-python scene.py Example -s --transparent --video_dir still.png
+fmn-python scene.py Example --format mov -t --pix_fmt bgra --video_dir alpha.mov
+fmn-python scene.py Example --format mp4 --vcodec libx264 --pix_fmt p010le --video_dir tenbit.mp4
+fmn-python scene.py First Second --format mov -t --video_dir batch
+```
+
+All selected scenes receive these overrides **after** their normal constructors
+run, including constructors that accept no keyword arguments. `--write_all`
+and named batches retain independent atomic destinations and ordered receipts.
+For programmatic rendering, set `camera_config={"background_opacity": 0}` and
+the corresponding `file_writer_config` on a Scene, then call
+`fmn_python.render_scene(scene, "alpha.mov")`. An explicit `ffmpeg_bin` can
+contain spaces and is resolved without shell tokenization. Invalid profiles,
+missing encoders and failed frames do not replace existing destinations.
+
+Certified output (`--reproducible`), opener flags, and Python `studio`
+remain fail-closed capability errors. In particular, the portal
 does not expose a partial certified path before the Python input closure and
 provenance sidecar are complete, and it does not label lifecycle-only work as
 a render. Python scenes execute with the host interpreter's full user

@@ -135,3 +135,53 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-options-") as directory:
         assert not target.exists(), "failed generation published a partial video"
 
 print("portal-video: profile refusals verified; decoded alpha/channel/wire tests=" + str(bool(ffmpeg)))
+
+# The installed console owner, with the real extension, must propagate the
+# same profile through single and batch generations without rewriting source.
+from fmn_python.console_rendering import try_render_cli
+import contextlib
+import io
+import json
+
+with tempfile.TemporaryDirectory(prefix="fmn-video-console-") as directory:
+    root = pathlib.Path(directory)
+    source = root / "scene.py"
+    source.write_text("from manimlib import *\n"
+                      "class First(Scene):\n"
+                      "    def __init__(self):\n        super().__init__()\n"
+                      "    def construct(self):\n"
+                      "        self.add(Square(side_length=2, fill_color=RED, fill_opacity=1, stroke_width=0).shift(UP))\n"
+                      "        self.wait(2 / 8)\n"
+                      "class Second(First):\n    pass\n")
+
+    def console_output(*arguments):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = try_render_cli(m, ["--robot", str(source), "--resolution", "96x54",
+                                      "--fps", "8", "--threads", "1", *arguments])
+        report = json.loads(stdout.getvalue())
+        assert report["exit"]["code"] == code
+        return code, report
+
+    target = root / "still.png"
+    code, report = console_output("First", "-s", "--transparent", "--video_dir", str(target))
+    assert code == 0 and report["frame_count"] == 1, report
+    if ffmpeg:
+        png = decode(target)
+        assert len(png) == 1 and png[0, 0, 0, 3] == 0
+        target = root / "single.mov"
+        code, report = console_output("First", "--format", "mov", "-t", "--pix_fmt", "bgra",
+                                      "--vcodec", "qtrle", "--ffmpeg_bin", ffmpeg,
+                                      "--video_dir", str(target))
+        assert code == 0 and report["frame_count"] == 2, report
+        assert report["ffmpeg_invocations"][0]["encoder"] == "qtrle"
+        assert np.all(decode(target)[:, 0, 0, 3] == 0)
+        batch = root / "batch"
+        code, report = console_output("Second", "First", "--format", "mov", "-t",
+                                      "--vcodec", "qtrle", "--pix_fmt", "rgba",
+                                      "--video_dir", str(batch))
+        assert code == 0, report
+        for name in ("First", "Second"):
+            frames = decode(batch / (name + ".mov"))
+            assert len(frames) == 2 and np.all(frames[:, 0, 0, 3] == 0)
+    print("portal-video-console: transparent PNG and native single/batch MOV accepted")

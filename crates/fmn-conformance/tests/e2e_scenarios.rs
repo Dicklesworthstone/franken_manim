@@ -2038,6 +2038,8 @@ fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
         video_capability_refusals: video_refusals,
     } = manimlib::run_portal_gauntlet_native_outputs(&root)
         .map_err(|error| fail(format!("decoded Python native outputs: {error}")))?;
+    manimlib::run_portal_gauntlet_video_options()
+        .map_err(|error| fail(format!("negotiated Python output profiles: {error}")))?;
     ctx.event(
         LogEvent::new("e2e.python.native_outputs")
             .field("frames", frames)
@@ -2050,6 +2052,7 @@ fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
             .field("video_capability_refusals", video_refusals),
     );
     let mut outcome = RunOutcome::ok()
+        .with_counter("portal_output_options_suite", 1)
         .with_counter("native_output_frames", frames)
         .with_counter("native_output_formats", formats)
         .with_counter("native_output_publication_failures", refusals)
@@ -4462,6 +4465,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             Assertion::FileInventory(portal_output_inventory),
+            counter_eq("portal_output_options_suite", 1),
             counter_eq("video_output_capability_refusals", 1),
             counter_eq("native_output_frames", 4),
             counter_eq("native_output_formats", 3),

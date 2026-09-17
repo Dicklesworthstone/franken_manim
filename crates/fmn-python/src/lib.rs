@@ -11055,6 +11055,20 @@ pub fn run_portal_gauntlet_native_outputs(
     })
 }
 
+/// Exercise negotiated output through both programmatic and console owners.
+/// The shared acceptance source independently decodes real encoder output;
+/// `FMN_REQUIRE_FFMPEG=1` makes encoder availability a hard prerequisite.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_video_options() -> Result<(), String> {
+    with_python_test_module("video options Gauntlet", |py, _module, globals| {
+        let source = CString::new(include_str!("../tests/video_options.py"))
+            .expect("video options suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Observations from independently decoded portal artifacts and planted failures.
 #[cfg(feature = "gauntlet")]
 #[derive(Debug)]
