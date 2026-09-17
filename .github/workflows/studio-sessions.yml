@@ -50,7 +50,15 @@ jobs:
             git apply --check scripts/patches/studio-session-host.patch
             git apply scripts/patches/studio-session-host.patch
           fi
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs
+          if ! grep -q 'ledger_reviewed_digest.*44ce27d59' API_OVERLAY.tsv; then
+            git apply --check scripts/patches/studio-session-schema.patch
+            git apply scripts/patches/studio-session-schema.patch
+          fi
+          if ! grep -q 'id="save-session"' crates/fmn-studio/src/ui.rs; then
+            git apply --check scripts/patches/studio-session-browser.patch
+            git apply scripts/patches/studio-session-browser.patch
+          fi
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs crates/fmn-studio/src/ui.rs
           git diff --check
       - name: Generate the CLI contract from its single schema
         run: UPDATE_API_ARTIFACTS=1 cargo test --locked -p fmn-conformance --test api_schema
@@ -60,23 +68,31 @@ jobs:
           cargo test --locked -p fmn-studio --test supervisor --test native_committed_input --test native_worker
           cargo test --locked -p fmn-cli --features cli,batch --lib studio_
           cargo clippy --locked -p fmn-studio --lib -- -D warnings
+          node --test crates/fmn-studio/tests/input_queue.mjs
       - name: Commit validated integration to main
         run: |
-          git add API_OVERLAY.tsv crates/fmn-cli/src/lib.rs crates/fmn-cli/src/generated.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-config/src/generated.rs docs/api/cli_flags.md docs/api/schema.md docs/api/ledger.tsv docs/api/out_of_tier.tsv docs/api/parity_coverage.svg crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs
+          git add API_OVERLAY.tsv crates/fmn-cli/src/lib.rs crates/fmn-cli/src/generated.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-config/src/generated.rs docs/api/cli_flags.md docs/api/schema.md docs/api/ledger.tsv docs/api/out_of_tier.tsv docs/api/parity_coverage.svg crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs crates/fmn-studio/src/ui.rs crates/fmn-studio/src/studio.js crates/fmn-studio/tests/input_queue.mjs crates/fmn-studio/tests/browser.mjs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(studio): enable saved session downloads and strict CLI resume'
+            git commit -m 'feat(studio): ship session downloads and strict fresh-host restoration'
             git fetch origin main
             git merge --no-edit origin/main
             git push origin HEAD:main
           fi
           git rev-parse HEAD > /tmp/session-source-sha.txt
           git archive --format=tar.gz HEAD > /tmp/session-source.tar.gz
+      - name: Prove browser download and two whole-host restarts retain editable native state
+        run: |
+          cargo build --locked -p fmn-cli --features cli,batch --bin fmn
+          node crates/fmn-studio/tests/browser.mjs "$PWD/target/portable/debug/fmn" "$RUNNER_TEMP/saved-session-browser"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: studio-session-source-${{ github.sha }}
+          name: studio-session-evidence-${{ github.sha }}
           path: |
             /tmp/session-source-sha.txt
             /tmp/session-source.tar.gz
+            ${{ runner.temp }}/saved-session-browser
           retention-days: 1
+          if-no-files-found: warn
