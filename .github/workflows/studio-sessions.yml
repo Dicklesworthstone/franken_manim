@@ -5,9 +5,6 @@ on:
     paths:
       - '.github/workflows/studio-sessions.yml'
       - 'scripts/patches/studio-session-*.patch'
-      - 'crates/fmn-studio/src/supervisor/session.rs'
-      - 'crates/fmn-studio/src/host/session.rs'
-      - 'crates/fmn-cli/src/studio_session.rs'
   workflow_dispatch:
 permissions:
   contents: write
@@ -40,42 +37,30 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Integrate reviewed session entry points
+      - name: Integrate typed native input without weakening custom-command barriers
         run: |
-          if ! grep -q '^pub mod session;' crates/fmn-studio/src/supervisor.rs; then
-            git apply --check scripts/patches/studio-session-core.patch
-            git apply scripts/patches/studio-session-core.patch
+          if ! grep -q 'frame-stamped-native-input-track-v2' crates/fmn-studio/src/native/service.rs; then
+            git apply --check scripts/patches/studio-session-typed-input.patch
+            git apply scripts/patches/studio-session-typed-input.patch
           fi
-          if ! grep -q '^mod studio_session;' crates/fmn-cli/src/lib.rs; then
-            git apply --check scripts/patches/studio-session-host.patch
-            git apply scripts/patches/studio-session-host.patch
-          fi
-          if ! grep -q 'ledger_reviewed_digest.*44ce27d59' API_OVERLAY.tsv; then
-            git apply --check scripts/patches/studio-session-schema.patch
-            git apply scripts/patches/studio-session-schema.patch
-          fi
-          if ! grep -q 'id="save-session"' crates/fmn-studio/src/ui.rs; then
-            git apply --check scripts/patches/studio-session-browser.patch
-            git apply scripts/patches/studio-session-browser.patch
-          fi
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs crates/fmn-studio/src/ui.rs
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-scene/src/journal.rs crates/fmn-scene/tests/journal.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/native/service/pending.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/native_committed_input.rs crates/fmn-conformance/tests/e2e_scenarios.rs
           git diff --check
-      - name: Generate the CLI contract from its single schema
-        run: UPDATE_API_ARTIFACTS=1 cargo test --locked -p fmn-conformance --test api_schema
-      - name: Verify saved sessions and existing native recovery
+      - name: Verify native input, versioned sessions and recovery
         run: |
+          cargo test --locked -p fmn-scene --test journal --test runtime
           cargo test --locked -p fmn-studio --lib
-          cargo test --locked -p fmn-studio --test supervisor --test native_committed_input --test native_worker
+          cargo test --locked -p fmn-studio --test supervisor --test protocol --test native_committed_input --test native_worker --test native_deferred_worker
           cargo test --locked -p fmn-cli --features cli,batch --lib studio_
+          cargo test --locked -p fmn-conformance --test e2e_scenarios studio_native_ -- --nocapture
           cargo clippy --locked -p fmn-studio --lib -- -D warnings
           node --test crates/fmn-studio/tests/input_queue.mjs
-      - name: Commit validated integration to main
+      - name: Commit validated typed input integration to main
         run: |
-          git add API_OVERLAY.tsv crates/fmn-cli/src/lib.rs crates/fmn-cli/src/generated.rs crates/fmn-cli/src/studio_live.rs crates/fmn-cli/src/studio_session.rs crates/fmn-config/src/generated.rs docs/api/cli_flags.md docs/api/schema.md docs/api/ledger.tsv docs/api/out_of_tier.tsv docs/api/parity_coverage.svg crates/fmn-studio/src/host.rs crates/fmn-studio/src/host/session.rs crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs crates/fmn-studio/src/interaction.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/supervisor.rs crates/fmn-studio/src/ui.rs crates/fmn-studio/src/studio.js crates/fmn-studio/tests/input_queue.mjs crates/fmn-studio/tests/browser.mjs
+          git add crates/fmn-scene/src/journal.rs crates/fmn-scene/tests/journal.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/native/service/pending.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/native_committed_input.rs crates/fmn-studio/tests/browser.mjs crates/fmn-conformance/tests/e2e_scenarios.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(studio): ship session downloads and strict fresh-host restoration'
+            git commit -m 'fix(studio): preserve typed input replayability in saved and restarted sessions'
             git fetch origin main
             git merge --no-edit origin/main
             git push origin HEAD:main
