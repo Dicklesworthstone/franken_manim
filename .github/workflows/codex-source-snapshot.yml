@@ -16,18 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
       - name: Package the exact source tree
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf .git target
-          tar --exclude='./.git' --exclude='./target' -czf /tmp/franken-manim-source.tar.gz .
+          git rev-parse HEAD > /tmp/franken-manim-source-sha.txt
+          git archive --format=tar.gz HEAD > /tmp/franken-manim-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: codex-franken-manim-source
-          path: /tmp/franken-manim-source.tar.gz
+          path: |
+            /tmp/franken-manim-source.tar.gz
+            /tmp/franken-manim-source-sha.txt
           if-no-files-found: error
           retention-days: 1
