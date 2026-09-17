@@ -740,6 +740,18 @@ pub const FLAG_SPECS: &[FlagSpec] = &[
         source: FlagSource::Native,
         help: "Select permanent multipart PNG or optional MJPEG preview",
     },
+    FlagSpec {
+        options: &["--restore-session"],
+        binding: "restore_session",
+        command: CommandScope::Studio,
+        action: FlagAction::Store,
+        arity: FlagArity::One,
+        default: None,
+        value_type: Some("path"),
+        status: FlagStatus::Improved,
+        source: FlagSource::Native,
+        help: "Restore a saved native Studio session with matching scene and render settings",
+    },
 ];
 
 pub const SUBCOMMAND_SPECS: &[SubcommandSpec] = &[

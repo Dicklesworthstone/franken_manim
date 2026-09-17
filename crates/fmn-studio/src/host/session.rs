@@ -13,7 +13,8 @@ impl StudioWorkerSession {
             return Err(HostError::Configuration("negative restored session frame"));
         }
         self.session_context = Some(context);
-        self.committed_frame.store(committed_frame, Ordering::Release);
+        self.committed_frame
+            .store(committed_frame, Ordering::Release);
         Ok(self)
     }
 

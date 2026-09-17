@@ -35,6 +35,7 @@ use crate::supervisor::{
 use crate::ui;
 
 mod input;
+mod session;
 
 /// Multipart boundary used by the permanent browser preview floor.
 pub const MULTIPART_BOUNDARY: &str = "fmn-frame";
@@ -505,6 +506,7 @@ pub struct StudioWorkerSession {
     committed_frame: AtomicI64,
     operations: Mutex<()>,
     guarded_input: bool,
+    session_context: Option<Digest>,
 }
 
 impl fmt::Debug for StudioWorkerSession {
@@ -548,6 +550,7 @@ impl StudioWorkerSession {
             committed_frame: AtomicI64::new(0),
             operations: Mutex::new(()),
             guarded_input: false,
+            session_context: None,
         })
     }
 
@@ -1055,6 +1058,7 @@ impl HostHandler {
             (Method::Post, "/api/event") => self.event(stream, &request),
             (Method::Get, "/api/inspect") => self.inspect(stream),
             (Method::Get, "/api/overlays") => self.overlays(stream, &request),
+            (Method::Get, "/api/session") => self.saved_session(stream),
             _ => write_http_response(
                 stream,
                 404,
@@ -1172,7 +1176,17 @@ impl HostHandler {
                 "OK",
                 "application/json; charset=utf-8",
                 &bytes,
-                &[("X-FMN-Worker-Generation", &generation.to_string())],
+                &[
+                    ("X-FMN-Worker-Generation", &generation.to_string()),
+                    (
+                        "X-FMN-Session-Export",
+                        if self.session.session_context.is_some() {
+                            "true"
+                        } else {
+                            "false"
+                        },
+                    ),
+                ],
             )
         } else {
             self.write_worker_response(stream, response, Some(StudioDataKind::Inspection))

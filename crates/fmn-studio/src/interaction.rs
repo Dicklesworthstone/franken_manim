@@ -130,9 +130,8 @@ impl InteractivePreview {
         // This in-memory snapshot is immediately dropped, never serialized.
         // Capturing it neither executes nor replaces the native callbacks.
         let _ = scene.scene_mut().state()?;
-        let frame_index = u64::try_from(scene.scene().time().frames()).map_err(|_| {
-            SceneError::InvalidState("interactive frame must be non-negative")
-        })?;
+        let frame_index = u64::try_from(scene.scene().time().frames())
+            .map_err(|_| SceneError::InvalidState("interactive frame must be non-negative"))?;
         Ok(Self {
             frame_index,
             scene,
@@ -186,8 +185,10 @@ impl InteractivePreview {
             .snapshot()
             .to_bytes()
             .map_err(|error| InteractivePreviewError::SnapshotEncode(error.to_string()))?;
-        let mut config = RuntimeConfig::default();
-        config.fps = fps;
+        let config = RuntimeConfig {
+            fps,
+            ..RuntimeConfig::default()
+        };
         let scene = Scene::new(config, seed)?;
         let mut scene = InteractiveScene::new(scene)?;
         let decoded = Snapshot::from_bytes(&bytes, scene.scene().stage())
@@ -205,9 +206,8 @@ impl InteractivePreview {
         }
         scene.scene_mut().stage_mut().restore(&decoded.snapshot);
         scene.scene_mut().seek_interactive_frame(
-            i64::try_from(frame_index).map_err(|_| {
-                SceneError::InvalidState("interactive frame exceeds i64")
-            })?,
+            i64::try_from(frame_index)
+                .map_err(|_| SceneError::InvalidState("interactive frame exceeds i64"))?,
         )?;
         Ok(Self {
             frame_index,
@@ -340,7 +340,13 @@ mod tests {
         let receipt = preview
             .dispatch(primary_click([0.0, 0.0, 0.0]))
             .expect("select");
-        assert_eq!(receipt, InteractiveDispatch { sequence: 0, dispatched: 1 });
+        assert_eq!(
+            receipt,
+            InteractiveDispatch {
+                sequence: 0,
+                dispatched: 1
+            }
+        );
         assert_eq!(preview.selection().len(), 1);
         preview
             .dispatch(EventPayload::KeyPress {
@@ -413,8 +419,8 @@ mod tests {
     #[test]
     fn invalid_fps_is_a_typed_scene_error() {
         let source = point_stage();
-        let error = InteractivePreview::from_stage(&source, 0, 1, 0)
-            .expect_err("zero fps must fail");
+        let error =
+            InteractivePreview::from_stage(&source, 0, 1, 0).expect_err("zero fps must fail");
         assert!(matches!(error, InteractivePreviewError::Scene(_)));
     }
 }

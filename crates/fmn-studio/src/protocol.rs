@@ -178,7 +178,7 @@ pub fn studio_input_payload(
     }
     let mut document = vec_with_capacity(hex.len() / 2, "Studio input command document")?;
     let bytes = hex.as_bytes();
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         document.push(hex_digit(pair[0])? << 4 | hex_digit(pair[1])?);
     }
     let limits = Limits {

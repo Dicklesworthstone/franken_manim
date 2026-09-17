@@ -13,6 +13,8 @@
 //! It is not exposed to scene code and cannot be used as an external-tool
 //! escape hatch.
 
+pub mod session;
+
 use std::collections::{BTreeSet, TryReserveError, VecDeque};
 use std::fmt;
 use std::io::Read as _;

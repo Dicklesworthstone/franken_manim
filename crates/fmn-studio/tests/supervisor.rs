@@ -2400,3 +2400,140 @@ fn real_worker_process_panic_is_isolated_and_auto_restarted() {
         SupervisorReply::Worker(WorkerResponse::Scenes(vec!["Demo".to_owned()]))
     );
 }
+
+#[test]
+fn saved_session_restores_into_a_new_supervisor_without_the_old_cache() {
+    use fmn_studio::supervisor::session::SavedSession;
+    let clock = Arc::new(FakeClock::new());
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let mut original = fake_supervisor(state.clone(), clock.clone(), Duration::ZERO);
+    original
+        .install_session("Demo", make_journal(4, Some(1)))
+        .unwrap();
+    original
+        .build_and_start(&mut ScriptedBuilder::fake(clock.clone(), Duration::ZERO))
+        .unwrap();
+    let context = sha256(b"resolved configuration");
+    let bytes = original.save_session(context, 3, &|_| true).unwrap();
+    original.shutdown_worker();
+    drop(original);
+    // fake_supervisor opens an independent VirtualFs cache each time.
+    let mut resumed = fake_supervisor(state.clone(), clock.clone(), Duration::ZERO);
+    let saved = SavedSession::from_bytes(&bytes, ProtocolLimits::default()).unwrap();
+    let result = resumed
+        .resume_saved_session(
+            &mut ScriptedBuilder::fake(clock, Duration::ZERO),
+            saved,
+            "Demo",
+            context,
+            &|_| true,
+        )
+        .unwrap();
+    assert_eq!(result.plan.reuse, 4);
+    assert_eq!(result.restored_checkpoint, Some(1));
+    assert_eq!(result.replayed_entries, 2);
+    assert!(!result.cold_fallback);
+    assert_eq!(resumed.save_session(context, 3, &|_| true).unwrap(), bytes);
+    assert_eq!(state.lock().unwrap().launches, 2);
+}
+
+#[test]
+fn saved_session_does_not_replace_a_running_supervisor() {
+    use fmn_studio::supervisor::session::SavedSession;
+    let clock = Arc::new(FakeClock::new());
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let mut supervisor = fake_supervisor(state.clone(), clock.clone(), Duration::ZERO);
+    supervisor
+        .install_session("Demo", make_journal(3, Some(0)))
+        .unwrap();
+    supervisor
+        .build_and_start(&mut ScriptedBuilder::fake(clock.clone(), Duration::ZERO))
+        .unwrap();
+    let context = sha256(b"context");
+    let bytes = supervisor.save_session(context, 2, &|_| true).unwrap();
+    let saved = SavedSession::from_bytes(&bytes, ProtocolLimits::default()).unwrap();
+    let error = supervisor
+        .resume_saved_session(
+            &mut ScriptedBuilder::fake(clock, Duration::ZERO),
+            saved,
+            "Demo",
+            context,
+            &|_| true,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("fresh supervisor"));
+    assert_eq!(
+        supervisor.save_session(context, 2, &|_| true).unwrap(),
+        bytes
+    );
+    assert_eq!(state.lock().unwrap().launches, 1);
+    assert_eq!(state.lock().unwrap().terminated, 0);
+}
+
+#[test]
+fn saved_session_changed_context_or_build_refuses_before_worker_launch() {
+    use fmn_studio::supervisor::session::SavedSession;
+    let clock = Arc::new(FakeClock::new());
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let mut original = fake_supervisor(state.clone(), clock.clone(), Duration::ZERO);
+    original
+        .install_session("Demo", make_journal(3, Some(0)))
+        .unwrap();
+    original
+        .build_and_start(&mut ScriptedBuilder::fake(clock.clone(), Duration::ZERO))
+        .unwrap();
+    let context = sha256(b"config");
+    let bytes = original.save_session(context, 2, &|_| true).unwrap();
+    original.shutdown_worker();
+    for (name, supplied_context, build, diagnostic) in [
+        ("Other", context, 0, "configuration"),
+        ("Demo", sha256(b"different"), 0, "configuration"),
+        ("Demo", context, 1, "worker build"),
+    ] {
+        let mut resumed = fake_supervisor(state.clone(), clock.clone(), Duration::ZERO);
+        let saved = SavedSession::from_bytes(&bytes, ProtocolLimits::default()).unwrap();
+        let mut builder = ScriptedBuilder::fake(clock.clone(), Duration::ZERO);
+        builder.build = build;
+        let error = resumed
+            .resume_saved_session(&mut builder, saved, name, supplied_context, &|_| true)
+            .unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{error}");
+        assert_eq!(state.lock().unwrap().launches, 1);
+        assert_eq!(resumed.generation(), 0);
+    }
+}
+
+#[test]
+fn saved_session_replay_divergence_is_failure_not_successful_cold_fallback() {
+    use fmn_studio::supervisor::session::SavedSession;
+    let clock = Arc::new(FakeClock::new());
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let mut original = fake_supervisor(state.clone(), clock.clone(), Duration::ZERO);
+    original
+        .install_session("Demo", make_journal(3, Some(0)))
+        .unwrap();
+    original
+        .build_and_start(&mut ScriptedBuilder::fake(clock.clone(), Duration::ZERO))
+        .unwrap();
+    let context = sha256(b"config");
+    let bytes = original.save_session(context, 2, &|_| true).unwrap();
+    original.shutdown_worker();
+    state.lock().unwrap().diverge_next_replay = true;
+    let mut resumed = fake_supervisor(state.clone(), clock.clone(), Duration::ZERO);
+    let saved = SavedSession::from_bytes(&bytes, ProtocolLimits::default()).unwrap();
+    let error = resumed
+        .resume_saved_session(
+            &mut ScriptedBuilder::fake(clock, Duration::ZERO),
+            saved,
+            "Demo",
+            context,
+            &|_| true,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("refusing partial recovery"),
+        "{error}"
+    );
+    let state = state.lock().unwrap();
+    assert_eq!(state.launches, state.terminated);
+}

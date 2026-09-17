@@ -56,7 +56,8 @@ const STUDIO_INDEX_HTML_PREFIX: &str = concat!(
     "<title>FrankenManim Studio</title></head><body>",
     r#"<header><div><p class="eyebrow">FRANKENMANIM</p><h1>Studio</h1></div>
 <div class="session"><p id="worker" role="status">Connecting to worker…</p>
-<button id="inspect">Refresh inspector</button><button id="restart">Restart worker</button></div></header>
+<button id="inspect">Refresh inspector</button><button id="restart">Restart worker</button>
+<button id="save-session" disabled>Save session</button><span id="session-save" role="status"></span></div></header>
 <p id="error" role="alert" hidden></p>
 <main><section class="stage" aria-label="Scene preview and timeline">
 <div class="preview-wrap"><canvas id="preview" width="960" height="540" tabindex="0"

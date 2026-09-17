@@ -71,7 +71,11 @@ fn configuration(
     closure.extend_from_slice(include_bytes!("../../fmn/src/lib.rs"));
     closure.extend_from_slice(SUITE_LOCK_BYTES);
     closure.extend_from_slice(build.as_bytes());
-    closure.extend_from_slice(format!("{config:?}").as_bytes());
+    closure.extend_from_slice(
+        &config
+            .canonical_bytes()
+            .map_err(|error| internal(error.to_string()))?,
+    );
     let mut native = NativeWorkerConfig::new(
         fmn::builtins::INTERACTIVE_SCENE_NAME,
         build,

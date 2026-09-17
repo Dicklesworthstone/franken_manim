@@ -1,8 +1,8 @@
 // Real Chrome + shipped fmn Studio acceptance. No browser framework or mock
 // server. Build fmn through RCH first, then pass its exact executable path.
 // Usage: /usr/bin/node browser.mjs /absolute/fmn /absolute/evidence-directory
-import {spawn, execFileSync} from "node:child_process";
-import {mkdir, mkdtemp, readFile, writeFile} from "node:fs/promises";
+import {spawn, spawnSync, execFileSync} from "node:child_process";
+import {mkdir, mkdtemp, readFile, writeFile, open, symlink} from "node:fs/promises";
 import {createHash} from "node:crypto";
 import {tmpdir} from "node:os";
 import {join, resolve} from "node:path";
@@ -30,8 +30,8 @@ async function stop(child) {
   const killTimer = setTimeout(() => child.kill("SIGKILL"), 10000);
   try { await stopped; } finally { clearTimeout(timer); clearTimeout(killTimer); }
 }
-async function startStudio(scene) {
-  const child = spawn(binary, ["studio","--robot","--no-browser","--resolution","384x216","--fps","8","--threads","1","@builtin",scene],
+async function startStudio(scene, extra = [], threads = "1") {
+  const child = spawn(binary, ["studio","--robot","--no-browser","--resolution","384x216","--fps","8","--threads",threads,...extra,"@builtin",scene],
     {stdio:["pipe","pipe","pipe"], env:{...process.env, PYTHONHOME:"", PYTHONPATH:""}});
   let stdout = "";
   let stderr = "";
@@ -350,8 +350,94 @@ try {
   receipt.scenarios.push({scene:"interactive.v1",nested_selection:true,drag:true,resize:true,recolor:true,clipboard:true,undo:true,
     pause_resume:true,restart_same_pixels:true,restart_same_state:true,initial_pixels:initialPixels,final_pixels:finalPixels,
     refusals:refusalCases.map(([,status])=>status),unauthorized:deniedInput.status});
+
+  // Download through the actual UI, terminate the entire host (not /restart),
+  // then resume with an independent process, cache and fresh capability.
+  async function download(directory) {
+    const folder = join(output, directory); await mkdir(folder, {recursive:true});
+    await command("Browser.setDownloadBehavior", {behavior:"allow",downloadPath:folder});
+    assert.equal(await evaluate("document.getElementById('save-session').disabled"), false);
+    await click("#save-session");
+    const path = join(folder, "studio-session.fmns");
+    const bytes = await until(async () => {
+      try { const data = await readFile(path); return data.length > 4 ? data : null; } catch { return null; }
+    }, "complete browser session download");
+    assert.equal(bytes.subarray(0,4).toString(), "FMNS");
+    assert.ok(secrets.every(secret => !bytes.includes(Buffer.from(secret))), "saved data carries no session capability");
+    await until(() => evaluate("document.getElementById('session-save').textContent.includes('download started') && !document.getElementById('inspect').disabled"), "save status");
+    return {path,bytes};
+  }
+  const saved = await download("saved-session");
+  for (const headers of [{}, {"X-FMN-Capability":"0".repeat(64)}, {"X-FMN-Capability":studio.cap,"Origin":"https://untrusted.invalid"}]) {
+    const response = await fetch(new URL("/api/session",studio.url), {headers:{"User-Agent":userAgent,...headers},signal:AbortSignal.timeout(10000)});
+    assert.equal(response.status, 403, "session export retains authentication and origin checks");
+    assert.ok(!(await response.text()).includes(studio.cap));
+  }
+  const oldCapability = studio.cap, committedFrame = restoredState.view.frame_index;
+  // A transient scrub is deliberately excluded from the saved position.
+  await evaluate("document.getElementById('timeline').value='0'; document.getElementById('timeline').dispatchEvent(new Event('input',{bubbles:true}));");
+  await synchronized(0);
+  const previewSaved = await download("saved-preview");
+  assert.deepEqual(previewSaved.bytes, saved.bytes, "preview-only navigation leaves the committed archive unchanged");
   await command("Page.navigate",{url:"about:blank"}); await stop(studio.child);
   assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
+  studio = await startStudio("interactive.v1", ["--restore-session",saved.path], "4");
+  assert.notEqual(studio.cap, oldCapability, "fresh host rotates the capability");
+  await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
+  await command("Page.navigate", {url:studio.url.href}); await synchronized(committedFrame);
+  assert.deepEqual((await inspect()).nodes, restoredState.nodes, "entire-host restart restores exact edited nodes");
+  assert.equal((await inspect()).view.input_revision, restoredState.view.input_revision);
+  assert.equal(await pixelHash(), finalPixels, "one-to-four-thread fresh-host resume restores exact decoded pixels");
+  const stale = await fetch(new URL("/api/session",studio.url), {headers:{"User-Agent":userAgent,"X-FMN-Capability":oldCapability},signal:AbortSignal.timeout(10000)});
+  assert.equal(stale.status,403);
+  await click("#input-events"); await evaluate("document.getElementById('preview').focus()");
+  await nativeKey("z",2);
+  assert.equal(await pixelHash(), coloredPixels, "native undo history survives closing the entire host");
+  await nativeKey("ArrowRight"); await nativeKey("ArrowRight");
+  const continuedState = await inspect(), continuedPixels = await pixelHash();
+  assert.notEqual(continuedPixels, finalPixels, "resumed scene remains editable");
+  await screenshot("interactive.v1.session-resumed.desktop.png");
+  const continued = await download("saved-continued");
+  await command("Page.navigate",{url:"about:blank"}); await stop(studio.child);
+  assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
+  studio = await startStudio("interactive.v1", ["--restore-session",continued.path]);
+  await command("Page.navigate", {url:studio.url.href}); await synchronized(committedFrame);
+  assert.deepEqual((await inspect()).nodes, continuedState.nodes, "re-saved continuation survives a second whole-host restart");
+  assert.equal(await pixelHash(), continuedPixels);
+  await screenshot("interactive.v1.session-reopened.desktop.png");
+  await command("Page.navigate",{url:"about:blank"}); await stop(studio.child);
+  assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
+
+  // Import refusals must happen before publishing a ready listener, without
+  // modifying the input archive or falling back to an empty scene.
+  const badPath = join(output,"damaged-session.fmns"), shortPath = join(output,"truncated-session.fmns");
+  const damaged = Buffer.from(saved.bytes); damaged[40] ^= 1; await writeFile(badPath,damaged);
+  await writeFile(shortPath,saved.bytes.subarray(0,saved.bytes.length-1));
+  const hugePath = join(output,"oversize-session.fmns");
+  const huge = await open(hugePath,"wx"); await huge.truncate(64*1024*1024+1); await huge.close();
+  const linkPath = join(output,"linked-session.fmns"); await symlink(saved.path,linkPath);
+  const rejected = [];
+  for (const [path,scene,resolution,diagnostic] of [
+    [badPath,"interactive.v1","384x216",/decode saved session/],
+    [shortPath,"interactive.v1","384x216",/decode saved session/],
+    [hugePath,"interactive.v1","384x216",/read saved session/],
+    [linkPath,"interactive.v1","384x216",/regular file/],
+    [saved.path,"circle_shift.v1","384x216",/registered live/],
+    [saved.path,"interactive.v1","192x108",/configuration/],
+  ]) {
+    const result = spawnSync(binary,["studio","--robot","--no-browser","--resolution",resolution,"--fps","8","--threads","1","--restore-session",path,"@builtin",scene],
+      {input:"",encoding:"utf8",timeout:15000,maxBuffer:65536});
+    assert.equal(result.signal,null,"invalid session must not hang");
+    assert.notEqual(result.status,0,"invalid session must refuse");
+    assert.ok(!result.stdout.includes('"kind":"studio_ready"'), "invalid session must not publish a listener");
+    assert.match(result.stdout + result.stderr,diagnostic);
+    rejected.push(result.status);
+  }
+  assert.deepEqual(await readFile(saved.path),saved.bytes,"restore never overwrites the archive");
+  receipt.scenarios.push({scene:"saved-session.v1",whole_host_restarts:2,preview_not_committed:true,
+    cross_thread_resume:true,undo_history:true,continued_editing:true,rotated_capability:true,
+    rejected_imports:rejected,session_sha256:createHash("sha256").update(saved.bytes).digest("hex"),
+    saved_frame:committedFrame,saved_pixels:finalPixels,continued_pixels:continuedPixels});
   assert.deepEqual(receipt.browser_errors,[]);
   receipt.passed = true;
 } catch (error) {
