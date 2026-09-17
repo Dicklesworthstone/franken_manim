@@ -37,19 +37,30 @@ impl PortalVideoConfig {
                 )));
             }
         }
-        let rgba: [f64; 4] = scene.getattr("camera")?.getattr("background_rgba")?.extract()?;
-        if !rgba.iter().all(|component| component.is_finite())
-            || !(0.0..=1.0).contains(&rgba[3])
-        {
+        let rgba: [f64; 4] = scene
+            .getattr("camera")?
+            .getattr("background_rgba")?
+            .extract()?;
+        if !rgba.iter().all(|component| component.is_finite()) || !(0.0..=1.0).contains(&rgba[3]) {
             return Err(PyValueError::new_err(
                 "camera background must be finite with opacity in 0..=1",
             ));
         }
         if ffmpeg_bin.is_empty() || ffmpeg_bin.contains('\0') {
-            return Err(PyValueError::new_err("file_writer.ffmpeg_bin must be nonempty and contain no NUL"));
+            return Err(PyValueError::new_err(
+                "file_writer.ffmpeg_bin must be nonempty and contain no NUL",
+            ));
         }
-        let job = video_job(format, width, height, fps, &codec, &pixel_format, rgba[3] < 1.0)
-            .map_err(PyValueError::new_err)?;
+        let job = video_job(
+            format,
+            width,
+            height,
+            fps,
+            &codec,
+            &pixel_format,
+            rgba[3] < 1.0,
+        )
+        .map_err(PyValueError::new_err)?;
         Ok(Self { ffmpeg_bin, job })
     }
 }
@@ -73,12 +84,18 @@ fn video_job(
         "bgra" | "bgra8" => WireFormat::Bgra8,
         "nv12" | "yuv420p" => WireFormat::Nv12,
         "p010" | "p010le" | "yuv420p10le" => WireFormat::P010,
-        _ => return Err(format!(
-            "unsupported file_writer.pixel_format {pixel_format:?}; choose rgba, bgra, nv12/yuv420p, or p010le"
-        )),
+        _ => {
+            return Err(format!(
+                "unsupported file_writer.pixel_format {pixel_format:?}; choose rgba, bgra, nv12/yuv420p, or p010le"
+            ));
+        }
     };
     let codec = codec.trim();
-    if codec.is_empty() || !codec.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+    if codec.is_empty()
+        || !codec
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    {
         return Err("file_writer.video_codec must be a nonempty encoder name (letters, digits, underscores)".into());
     }
     let encoder = if codec.eq_ignore_ascii_case("auto") || (transparent && codec == "libx264") {
@@ -91,7 +108,11 @@ fn video_job(
         height,
         fps: (fps, 1),
         wire,
-        color: if wire.has_alpha() { ColorDescription::srgb_full() } else { ColorDescription::video_bt709() },
+        color: if wire.has_alpha() {
+            ColorDescription::srgb_full()
+        } else {
+            ColorDescription::video_bt709()
+        },
         container: if transparent {
             Container::MovTransparent
         } else if format == PortalFrameFormat::Mov {
@@ -125,10 +146,16 @@ pub(crate) fn convert_frame(
     };
     rgba16f_to_rgba8(source, rgba8)?;
     match destination.layout().format() {
-        PixelFormat::Nv12 => rgba_to_nv12(rgba8, destination, ColorRange::Limited, ChromaSiting::Left),
-        PixelFormat::P010 => rgba_to_p010(rgba8, destination, ColorRange::Limited, ChromaSiting::Left),
+        PixelFormat::Nv12 => {
+            rgba_to_nv12(rgba8, destination, ColorRange::Limited, ChromaSiting::Left)
+        }
+        PixelFormat::P010 => {
+            rgba_to_p010(rgba8, destination, ColorRange::Limited, ChromaSiting::Left)
+        }
         PixelFormat::Bgra8 => swap_rb8(rgba8, destination),
-        _ => Err(FrameError::UnsupportedConversion("unsupported portal output wire")),
+        _ => Err(FrameError::UnsupportedConversion(
+            "unsupported portal output wire",
+        )),
     }
 }
 
@@ -139,10 +166,14 @@ mod tests {
     #[test]
     fn portal_video_defaults_and_all_wire_aliases() {
         for (name, expected) in [
-            ("rgba", WireFormat::Rgba8), ("rgba8", WireFormat::Rgba8),
-            ("BGRA", WireFormat::Bgra8), ("bgra8", WireFormat::Bgra8),
-            ("nv12", WireFormat::Nv12), ("yuv420p", WireFormat::Nv12),
-            ("p010", WireFormat::P010), ("p010le", WireFormat::P010),
+            ("rgba", WireFormat::Rgba8),
+            ("rgba8", WireFormat::Rgba8),
+            ("BGRA", WireFormat::Bgra8),
+            ("bgra8", WireFormat::Bgra8),
+            ("nv12", WireFormat::Nv12),
+            ("yuv420p", WireFormat::Nv12),
+            ("p010", WireFormat::P010),
+            ("p010le", WireFormat::P010),
             ("yuv420p10le", WireFormat::P010),
         ] {
             let job = video_job(PortalFrameFormat::Mp4, 96, 54, 8, "libx264", name, false).unwrap();

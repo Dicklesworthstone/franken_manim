@@ -19,6 +19,7 @@ mod ladder;
 mod method_cache;
 pub mod perf_harness;
 mod portal_playback;
+mod portal_video;
 mod report;
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
@@ -34,8 +35,7 @@ use std::time::Instant;
 use crossing::CrossingClass;
 use portal_playback::OutputTimeline;
 
-use fmn_frame::convert::{rgba_to_nv12, rgba16f_to_rgba8};
-use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
+use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_mobject::{
     JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Snapshot, Stage,
     StageError, Uniforms,
@@ -163,11 +163,19 @@ impl PortalRenderSession {
         fps: u32,
         threads: usize,
         format: PortalOutputFormat,
+        video: Option<portal_video::PortalVideoConfig>,
     ) -> PyResult<(Self, RuntimeConfig)> {
         match format {
             PortalOutputFormat::Frames(format) => {
-                let (session, config) =
-                    PortalFrameSession::new(destination, width, height, fps, threads, format)?;
+                let (session, config) = PortalFrameSession::new(
+                    destination,
+                    width,
+                    height,
+                    fps,
+                    threads,
+                    format,
+                    video,
+                )?;
                 Ok((Self::Frames(Box::new(session)), config))
             }
             PortalOutputFormat::Wav => {
@@ -342,11 +350,13 @@ struct PortalFrameSession {
     soundtrack: Option<fmn_output::FfmpegSoundtrack>,
     light_mob: Option<Mob>,
     rgba8_scratch: Option<FrameBuffer>,
+    opaque_video: bool,
     next_sequence: u64,
     timeline: OutputTimeline,
 }
 
 impl PortalFrameSession {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         destination: PathBuf,
         width: u32,
@@ -354,6 +364,7 @@ impl PortalFrameSession {
         fps: u32,
         max_threads: usize,
         format: PortalFrameFormat,
+        video: Option<portal_video::PortalVideoConfig>,
     ) -> PyResult<(Self, RuntimeConfig)> {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err(
@@ -374,15 +385,23 @@ impl PortalFrameSession {
         config.camera.fps = fps;
         config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
 
+        let opaque_video = video
+            .as_ref()
+            .is_some_and(|video| video.job.container != fmn_output::Container::MovTransparent);
+
         // ubs:ignore — compares a public output-format enum, not a secret.
-        let yuv_output = matches!(
-            format,
-            PortalFrameFormat::Y4m | PortalFrameFormat::Mp4 | PortalFrameFormat::Mov
-        );
-        let output_format = if yuv_output {
-            fmn_runtime::OutputPixelFormat::Nv12
+        let wire = if let Some(video) = &video {
+            video.job.wire
+        } else if format == PortalFrameFormat::Y4m {
+            fmn_output::WireFormat::Nv12
         } else {
-            fmn_runtime::OutputPixelFormat::Rgba8
+            fmn_output::WireFormat::Rgba8
+        };
+        let output_format = match wire {
+            fmn_output::WireFormat::Rgba8 => fmn_runtime::OutputPixelFormat::Rgba8,
+            fmn_output::WireFormat::Bgra8 => fmn_runtime::OutputPixelFormat::Bgra8,
+            fmn_output::WireFormat::Nv12 => fmn_runtime::OutputPixelFormat::Nv12,
+            fmn_output::WireFormat::P010 => fmn_runtime::OutputPixelFormat::P010,
         };
         let request = fmn_runtime::PlanRequest::standard(
             fmn_runtime::RenderIntent::Offline,
@@ -438,15 +457,11 @@ impl PortalFrameSession {
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
         // ubs:ignore — compares a public output-format enum, not a secret.
-        let pixel_format = if yuv_output {
-            PixelFormat::Nv12
-        } else {
-            PixelFormat::Rgba8
-        };
+        let pixel_format = wire.frame_format();
         let output_layout = FrameLayout::tight(pixel_format, width, height)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         // ubs:ignore — compares a public output-format enum, not a secret.
-        let rgba8_scratch = if yuv_output {
+        let rgba8_scratch = if pixel_format != PixelFormat::Rgba8 {
             Some(FrameBuffer::new(
                 FrameLayout::tight(PixelFormat::Rgba8, width, height)
                     .map_err(|error| PyValueError::new_err(error.to_string()))?,
@@ -554,10 +569,17 @@ impl PortalFrameSession {
                 use fmn_platform::process::{
                     FfmpegLocator as _, StdFfmpegLocator, StdProcessRunner,
                 };
+                let video =
+                    video.ok_or_else(|| PyValueError::new_err("missing video negotiation"))?;
+                let encoder = video
+                    .job
+                    .resolved_encoder()
+                    .map_err(native_error)?
+                    .ok_or_else(|| PyValueError::new_err("video requires an encoder"))?;
                 let runner: Arc<dyn fmn_platform::process::ProcessRunner> =
                     Arc::new(StdProcessRunner);
                 let executable = StdFfmpegLocator::from_host_path()
-                    .locate_ffmpeg(std::path::Path::new(&config.file_writer.ffmpeg_bin))
+                    .locate_ffmpeg(std::path::Path::new(&video.ffmpeg_bin))
                     .map_err(|error| {
                         CapabilityError::new_err(format!(
                             "ffmpeg is unavailable: {error}; {}",
@@ -574,10 +596,10 @@ impl PortalFrameSession {
                     .map_err(|error| {
                     CapabilityError::new_err(format!("ffmpeg encoders: {error}"))
                 })?;
-                if !capabilities.offers(&config.file_writer.video_codec) {
+                if !capabilities.offers(&encoder) {
                     return Err(CapabilityError::new_err(format!(
                         "installed ffmpeg does not offer encoder {:?}; {}",
-                        config.file_writer.video_codec,
+                        encoder,
                         fmn_output::NATIVE_ALTERNATIVE,
                     )));
                 }
@@ -586,23 +608,7 @@ impl PortalFrameSession {
                     fmn_output::FfmpegSinkConfig {
                         tool,
                         capabilities,
-                        job: fmn_output::VideoJob {
-                            width,
-                            height,
-                            fps: (fps, 1),
-                            wire: fmn_output::WireFormat::Nv12,
-                            color: fmn_output::ColorDescription::video_bt709(),
-                            // ubs:ignore — compares a public media format, not a secret.
-                            container: if format == PortalFrameFormat::Mp4 {
-                                fmn_output::Container::Mp4
-                            } else {
-                                fmn_output::Container::Mov
-                            },
-                            encoder: fmn_output::EncoderChoice::Named(
-                                config.file_writer.video_codec.clone(),
-                            ),
-                            crf: None,
-                        },
+                        job: video.job,
                         audio: None,
                         destination,
                         workdir_root,
@@ -642,6 +648,7 @@ impl PortalFrameSession {
                 soundtrack,
                 light_mob: None,
                 rgba8_scratch,
+                opaque_video,
                 next_sequence: 0,
                 timeline: OutputTimeline::new(single_frame),
             },
@@ -684,20 +691,12 @@ impl PortalFrameSession {
             })?
             .reserve(self.next_sequence)
             .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
-        if let Some(rgba8) = &mut self.rgba8_scratch {
-            rgba16f_to_rgba8(self.renderer.frame(), rgba8)
-                .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
-            rgba_to_nv12(
-                rgba8,
-                reservation.frame_mut(),
-                ColorRange::Limited,
-                ChromaSiting::Left,
-            )
-            .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
-        } else {
-            rgba16f_to_rgba8(self.renderer.frame(), reservation.frame_mut())
-                .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
-        }
+        portal_video::convert_frame(
+            self.renderer.frame(),
+            reservation.frame_mut(),
+            self.rgba8_scratch.as_mut(),
+        )
+        .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
         reservation
             .publish()
             .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
@@ -720,6 +719,11 @@ impl PortalFrameSession {
             .set_light_source_position(light_position)
             .map_err(camera_error)?;
         if let Some(background) = background {
+            if self.opaque_video && background.a < 1.0 {
+                return Err(PyValueError::new_err(
+                    "portal-render: alpha cannot be added to an opaque video generation; configure a transparent MOV before rendering",
+                ));
+            }
             self.camera
                 .set_background(background)
                 .map_err(camera_error)?;
@@ -7642,6 +7646,18 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         }
         Arc::clone(&scene.render)
     };
+    let video = match &format {
+        PortalOutputFormat::Frames(
+            frame_format @ (PortalFrameFormat::Mp4 | PortalFrameFormat::Mov),
+        ) => Some(portal_video::PortalVideoConfig::from_scene(
+            slf,
+            *frame_format,
+            width,
+            height,
+            fps,
+        )?),
+        _ => None,
+    };
     let (session, runtime_config) = PortalRenderSession::new(
         PathBuf::from(destination),
         width,
@@ -7649,6 +7665,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         fps,
         threads,
         format,
+        video,
     )?;
     let replacement = match Scene::new(runtime_config, seed) {
         Ok(scene) => Rc::new(EngineState::new(scene)),

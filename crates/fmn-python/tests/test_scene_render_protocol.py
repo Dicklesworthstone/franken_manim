@@ -156,8 +156,6 @@ class SceneRenderTests(unittest.TestCase):
             ("show_file_location_upon_completion", True, "gif"),
             ("png_mode", "RGB", "png"),
             ("gamma", 1.2, "y4m"), ("saturation", .5, "gif"),
-            ("ffmpeg_bin", "/custom/ffmpeg", "mp4"),
-            ("video_codec", "libvpx", "mov"), ("pixel_format", "yuv444p", "mp4"),
         ):
             scene = self.native.Scene()
             setattr(scene.file_writer, name, value)
@@ -171,10 +169,19 @@ class SceneRenderTests(unittest.TestCase):
         self.assertEqual(result.format, "wav")
 
     def test_public_render_scene_also_validates_writer_configuration(self):
-        self.scene.file_writer.video_codec = "custom"
-        with self.assertRaisesRegex(RuntimeError, "video_codec"):
+        self.scene.file_writer.gamma = 2.0
+        with self.assertRaisesRegex(RuntimeError, "gamma"):
             render_scene(self.scene, "out.mp4")
         self.assertEqual(self.scene.events, [])
+
+    def test_negotiated_writer_options_reach_native_generation(self):
+        self.scene.file_writer.video_codec = "qtrle"
+        self.scene.file_writer.pixel_format = "bgra"
+        self.scene.file_writer.ffmpeg_bin = "/custom/ffmpeg"
+        result = render_scene(self.scene, "out.mov")
+        self.assertEqual(result.format, "mov")
+        self.assertEqual(self.scene.file_writer.pixel_format, "bgra")
+        self.assertIn(("finish",), self.scene.events)
 
     def test_explicit_path_does_not_require_file_writer(self):
         del self.scene.file_writer

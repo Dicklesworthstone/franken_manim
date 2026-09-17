@@ -289,10 +289,8 @@ def _validate_writer_options(scene: Any, format: str, native: Any) -> None:
                 unsupported.append(name)
     if format in {"png", "png_sequence"} and getattr(writer, "png_mode", "RGBA") != "RGBA":
         unsupported.append("png_mode")
-    if format in _VIDEO_FORMATS:
-        for name, default in (("ffmpeg_bin", "ffmpeg"), ("video_codec", "libx264"), ("pixel_format", "yuv420p")):
-            if getattr(writer, name, default) != default:
-                unsupported.append(name)
+    # Video codec, wire format and executable are validated and negotiated by
+    # the native generation before it acquires a process/output reservation.
     if unsupported:
         error_type = getattr(native, "_CapabilityError", RuntimeError)
         raise error_type(
