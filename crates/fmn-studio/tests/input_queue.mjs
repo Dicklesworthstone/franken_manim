@@ -163,3 +163,43 @@ test('stale admitted owner is rejected locally without sending it to a replaceme
   assert.equal(f.calls.length, 0);
   assert.equal(f.errors.length, 1);
 });
+
+
+test('modifier changes release the physical key originally admitted by native input', async () => {
+  const f = fixture();
+  f.$('preview').emit('keydown', {key:'g', code:'KeyG'});
+  f.window.emit('keyup', {key:'G', code:'KeyG', shiftKey:true});
+  await f.settled();
+  assert.deepEqual(eventCalls(f).map(x => [x.type,x.key,x.modifiers]), [
+    ['key_press','g','0'], ['key_release','g','1'],
+  ]);
+  assert.equal(f.queue.heldKeys.size, 0);
+  assert.equal(f.errors.length, 0);
+});
+
+test('layout changes during a held repeat do not strand a second native key', async () => {
+  const f = fixture();
+  f.$('preview').emit('keydown', {key:'z', code:'KeyY'});
+  f.$('preview').emit('keydown', {key:'y', code:'KeyY', repeat:true});
+  f.window.emit('keyup', {key:'y', code:'KeyY'});
+  await f.settled();
+  assert.deepEqual(eventCalls(f).map(x => [x.type,x.key]), [
+    ['key_press','z'], ['key_press','z'], ['key_release','z'],
+  ]);
+  assert.equal(f.queue.heldKeys.size, 0);
+  assert.equal(f.errors.length, 0);
+});
+
+test('focus loss releases multiple physical keys using their admitted native values', async () => {
+  const f = fixture();
+  f.$('preview').emit('keydown', {key:'G', code:'KeyG', shiftKey:true});
+  f.$('preview').emit('keydown', {key:'t', code:'KeyT'});
+  f.window.emit('blur');
+  f.window.emit('keyup', {key:'g', code:'KeyG'});
+  await f.settled();
+  assert.deepEqual(eventCalls(f).map(x => [x.type,x.key]), [
+    ['key_press','G'], ['key_press','t'], ['key_release','G'], ['key_release','t'],
+  ]);
+  assert.equal(f.queue.heldKeys.size, 0);
+  assert.equal(f.errors.length, 0);
+});
