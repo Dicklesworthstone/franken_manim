@@ -37,11 +37,15 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Integrate typed native input without weakening custom-command barriers
+      - name: Integrate reviewed typed input and corresponding protocol version fixtures
         run: |
           if ! grep -q 'frame-stamped-native-input-track-v2' crates/fmn-studio/src/native/service.rs; then
             git apply --check scripts/patches/studio-session-typed-input.patch
             git apply scripts/patches/studio-session-typed-input.patch
+          fi
+          if ! grep -q '^request=464d4e490100000001000100' crates/fmn-studio/fixtures/protocol_v1.hex; then
+            git apply --check scripts/patches/studio-session-protocol-golden.patch
+            git apply scripts/patches/studio-session-protocol-golden.patch
           fi
           rustfmt --edition 2024 --config skip_children=true crates/fmn-scene/src/journal.rs crates/fmn-scene/tests/journal.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/native/service/pending.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/native_committed_input.rs crates/fmn-conformance/tests/e2e_scenarios.rs
           git diff --check
@@ -56,7 +60,7 @@ jobs:
           node --test crates/fmn-studio/tests/input_queue.mjs
       - name: Commit validated typed input integration to main
         run: |
-          git add crates/fmn-scene/src/journal.rs crates/fmn-scene/tests/journal.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/native/service/pending.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/native_committed_input.rs crates/fmn-studio/tests/browser.mjs crates/fmn-conformance/tests/e2e_scenarios.rs
+          git add crates/fmn-scene/src/journal.rs crates/fmn-scene/tests/journal.rs crates/fmn-studio/src/protocol.rs crates/fmn-studio/src/native/edits.rs crates/fmn-studio/src/native/service.rs crates/fmn-studio/src/native/service/pending.rs crates/fmn-studio/src/native/service/recovery.rs crates/fmn-studio/tests/native_committed_input.rs crates/fmn-studio/tests/browser.mjs crates/fmn-conformance/tests/e2e_scenarios.rs crates/fmn-studio/fixtures/protocol_v1.hex
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
