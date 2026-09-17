@@ -14,7 +14,7 @@ permissions:
   contents: write
 concurrency:
   group: portal-studio-preview
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   preview:
     runs-on: ubuntu-24.04
@@ -57,10 +57,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-studio/src/recorded.rs
-          cargo test --locked -p fmn-studio recorded::tests:: -- --nocapture 2>&1 | tee /tmp/studio-native.log
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-studio/src/recorded.rs crates/fmn-studio/src/native/camera.rs crates/fmn-studio/src/host.rs
+          cargo test --locked -p fmn-studio --lib -- --nocapture 2>&1 | tee /tmp/studio-native.log
           grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-native.log
           cargo clippy --locked -p fmn-studio --lib -- -D warnings
+          cargo test --locked -p fmn-studio --test native_camera --test native_camera_motion --test native_camera_transition
       - name: Verify portal and clean installed wheel
         shell: bash
         run: |
@@ -70,6 +71,7 @@ jobs:
             cargo test --locked -p fmn-python portal_studio -- --nocapture 2>&1 | tee /tmp/studio-portal.log
             grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-portal.log
             cargo clippy --locked -p fmn-python --lib -- -D warnings
+            python scripts/check_crate_dag.py
             python -m maturin build --locked --interpreter python --profile dev --out target/studio-wheel
             python -m venv target/studio-venv
             target/studio-venv/bin/python -m pip install numpy target/studio-wheel/*.whl
@@ -82,7 +84,7 @@ jobs:
           set -euo pipefail
           git add crates/fmn-studio/src/recorded.rs
           if test -f scripts/patches/portal-studio-preview.patch; then
-            git add Cargo.lock crates/fmn-python/Cargo.toml crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_studio.rs scripts/check_crate_dag.py
+            git add Cargo.lock crates/fmn-python/Cargo.toml crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/portal_playback.rs scripts/check_crate_dag.py crates/fmn-studio/src/native.rs crates/fmn-studio/src/native/camera.rs crates/fmn-studio/src/host.rs crates/fmn-python/python/fmn_python/__main__.py crates/fmn-python/python/fmn_python/console_rendering.py
           fi
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'

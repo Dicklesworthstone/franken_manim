@@ -1,0 +1,312 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 4a9e928..bb54607 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -929,6 +929,7 @@ dependencies = [
+  "fmn-render",
+  "fmn-runtime",
+  "fmn-scene",
++ "fmn-studio",
+  "pyo3",
+ ]
+ 
+diff --git a/crates/fmn-python/Cargo.toml b/crates/fmn-python/Cargo.toml
+index c0df8fb..f936b4b 100644
+--- a/crates/fmn-python/Cargo.toml
++++ b/crates/fmn-python/Cargo.toml
+@@ -27,6 +27,8 @@ fmn-library.workspace = true
+ fmn-scene.workspace = true
+ fmn-output = { workspace = true, features = ["exact-process"] }
+ fmn-runtime.workspace = true
++# Host-CPython preview composition only; the standalone CLI has no Python edge.
++fmn-studio.workspace = true
+ pyo3.workspace = true
+ 
+ [lints]
+diff --git a/crates/fmn-python/python/fmn_python/__main__.py b/crates/fmn-python/python/fmn_python/__main__.py
+index 3e6d61b..e395683 100644
+--- a/crates/fmn-python/python/fmn_python/__main__.py
++++ b/crates/fmn-python/python/fmn_python/__main__.py
+@@ -79,10 +79,14 @@ def main():
+     from manimlib import _native
+     from .console_rendering import _tokens, try_render_cli
+     from .scene_controls import try_scene_cli
++    from .studio import try_studio_cli
+ 
+     arguments = list(sys.argv[1:])
+     if "--audit-parity" in _tokens(arguments)[2]:
+         return _emit_parity_audit(_native)
++    result = try_studio_cli(_native, arguments)
++    if result is not None:
++        return result
+     result = try_render_cli(_native, arguments)
+     if result is None:
+         result = try_scene_cli(_native, arguments)
+diff --git a/crates/fmn-python/python/fmn_python/console_rendering.py b/crates/fmn-python/python/fmn_python/console_rendering.py
+index e75eed9..3a98ba7 100644
+--- a/crates/fmn-python/python/fmn_python/console_rendering.py
++++ b/crates/fmn-python/python/fmn_python/console_rendering.py
+@@ -127,7 +127,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
+         text = native._portal_cli_help().replace(
+             "Certified output, opener flags, write-all, and Studio",
+             "Certified output, opener flags, and Studio",
+-        ) + "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP
++        ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
++        from .studio import _HELP as _STUDIO_HELP
++        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + _STUDIO_HELP
+         if robot:
+             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
+         print(text)
+diff --git a/crates/fmn-python/src/lib.rs b/crates/fmn-python/src/lib.rs
+index 7e76f05..3af8cd4 100644
+--- a/crates/fmn-python/src/lib.rs
++++ b/crates/fmn-python/src/lib.rs
+@@ -20,6 +20,7 @@ mod method_cache;
+ pub mod perf_harness;
+ mod portal_audio;
+ mod portal_playback;
++mod portal_studio;
+ mod portal_video;
+ mod report;
+ 
+@@ -150,6 +151,7 @@ enum PortalOutputFormat {
+ }
+ 
+ enum PortalRenderSession {
++    Preview(Box<portal_studio::Capture>),
+     Frames(Box<PortalFrameSession>),
+     Soundtrack {
+         destination: PathBuf,
+@@ -217,6 +219,7 @@ impl PortalRenderSession {
+     ) -> Result<(), fmn_scene::IntegrationError> {
+         match self {
+             Self::Frames(session) => session.capture(packet),
++            Self::Preview(session) => session.capture(packet),
+             Self::Soundtrack { .. } => Ok(()),
+         }
+     }
+@@ -229,6 +232,7 @@ impl PortalRenderSession {
+         light_mob: Option<Mob>,
+     ) -> PyResult<()> {
+         match self {
++            Self::Preview(session) => session.bind_camera(frame, light_position, background, light_mob),
+             Self::Frames(session) => {
+                 session.bind_camera(frame, light_position, background, light_mob)
+             }
+@@ -238,6 +242,7 @@ impl PortalRenderSession {
+ 
+     fn needs_final_capture(&self) -> bool {
+         matches!(self, Self::Frames(session) if session.frame_count() == 0)
++            || matches!(self, Self::Preview(session) if session.is_empty())
+     }
+ 
+     fn abort(self) {
+@@ -248,6 +253,7 @@ impl PortalRenderSession {
+ 
+     fn finish(self, scene: &Scene) -> PyResult<(PortalArtifactReport, String, usize)> {
+         match self {
++            Self::Preview(_) => Err(PyRuntimeError::new_err("Studio capture must finish through _finish_studio_capture, not file publication")),
+             // ubs:ignore — finalizes frame publication; no security token or randomness is generated.
+             Self::Frames(session) => session.finish(scene),
+             Self::Soundtrack {
+@@ -7524,7 +7530,7 @@ fn portal_has_frame_render(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
+         .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?;
+     Ok(matches!(
+         render.as_ref(),
+-        Some(PortalRenderSession::Frames(_))
++        Some(PortalRenderSession::Frames(_) | PortalRenderSession::Preview(_))
+     ))
+ }
+ 
+@@ -7777,6 +7783,18 @@ impl PyScene {
+         )
+     }
+ 
++    #[allow(clippy::too_many_arguments)]
++    fn _begin_studio_capture(slf: &Bound<'_, Self>, name: String, build: &str, source: &str,
++        width: u32, height: u32, fps: u32, threads: usize, seed: u64,
++        max_frames: usize, max_bytes: usize,
++    ) -> PyResult<()> {
++        portal_studio::begin(slf, name, build, source, width, height, fps, threads, seed, max_frames, max_bytes)
++    }
++
++    fn _finish_studio_capture(slf: &Bound<'_, Self>) -> PyResult<portal_studio::Recording> {
++        portal_studio::finish(slf)
++    }
++
+     /// Cancel an active generation and join its ordered output worker.
+     fn _abort_render(slf: &Bound<'_, Self>) -> PyResult<()> {
+         let render = Arc::clone(&slf.borrow().render);
+@@ -7798,6 +7816,11 @@ impl PyScene {
+         camera: Option<PyRef<'_, PyCameraFrameCore>>,
+         light_position: Option<[f64; 3]>,
+     ) -> PyResult<(String, u64, u64, String, String, usize)> {
++        if matches!(slf.borrow().render.lock()
++            .map_err(|_| PyRuntimeError::new_err("render generation lock poisoned"))?.as_ref(),
++            Some(PortalRenderSession::Preview(_))) {
++            return Err(PyRuntimeError::new_err("Studio capture is not a file render; use _finish_studio_capture"));
++        }
+         portal_playback::synchronize(slf)?;
+         synchronize_portal_camera(slf)?;
+         let engine = Rc::clone(&slf.borrow().engine);
+@@ -10687,6 +10710,8 @@ fn _composition_intervals(run_times: Vec<f64>, lag_ratio: f64) -> Vec<(f64, f64)
+ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+     module.add_class::<BridgeMobject>()?;
+     module.add_class::<PyScene>()?;
++    module.add_class::<portal_studio::Recording>()?;
++    module.add_class::<portal_studio::Host>()?;
+     module.add_class::<PyRecordView>()?;
+     module.add_class::<PyGilProbe>()?;
+     module.add_class::<PyCameraFrameCore>()?;
+diff --git a/crates/fmn-python/src/portal_playback.rs b/crates/fmn-python/src/portal_playback.rs
+index 921e0d4..0cb267e 100644
+--- a/crates/fmn-python/src/portal_playback.rs
++++ b/crates/fmn-python/src/portal_playback.rs
+@@ -66,6 +66,7 @@ impl PortalRenderSession {
+     fn output_timeline(&self) -> &OutputTimeline {
+         match self {
+             Self::Frames(session) => &session.timeline,
++            Self::Preview(session) => &session.timeline,
+             Self::Soundtrack { timeline, .. } => timeline,
+         }
+     }
+@@ -73,6 +74,7 @@ impl PortalRenderSession {
+     fn output_timeline_mut(&mut self) -> &mut OutputTimeline {
+         match self {
+             Self::Frames(session) => &mut session.timeline,
++            Self::Preview(session) => &mut session.timeline,
+             Self::Soundtrack { timeline, .. } => timeline,
+         }
+     }
+diff --git a/crates/fmn-studio/src/host.rs b/crates/fmn-studio/src/host.rs
+index d1a1357..b63d340 100644
+--- a/crates/fmn-studio/src/host.rs
++++ b/crates/fmn-studio/src/host.rs
+@@ -507,6 +507,7 @@ pub struct StudioWorkerSession {
+     operations: Mutex<()>,
+     guarded_input: bool,
+     session_context: Option<Digest>,
++    fresh_capture_reload: bool,
+ }
+ 
+ impl fmt::Debug for StudioWorkerSession {
+@@ -551,9 +552,19 @@ impl StudioWorkerSession {
+             operations: Mutex::new(()),
+             guarded_input: false,
+             session_context: None,
++            fresh_capture_reload: false,
+         })
+     }
+ 
++    /// Reload an imperative, read-only capture from frame zero. A new source
++    /// may have a shorter timeline; old preview positions are not authored
++    /// commands and must not be replayed against the new Python execution.
++    #[must_use]
++    pub fn with_fresh_capture_reload(mut self) -> Self {
++        self.fresh_capture_reload = true;
++        self
++    }
++
+     /// Active scene identity.
+     #[must_use]
+     pub fn scene(&self) -> &str {
+@@ -601,7 +612,7 @@ impl StudioWorkerSession {
+     fn restart(&self) -> Result<StudioRestart, HostError> {
+         let mut builder = lock(&self.builder);
+         let mut supervisor = lock(&self.supervisor);
+-        let incoming = supervisor.current_commands()?;
++        let incoming = if self.fresh_capture_reload { Vec::new() } else { supervisor.current_commands()? };
+         let recovery =
+             supervisor.rebuild_and_restart(&mut **builder, &incoming, &*self.asset_ok)?;
+         let invalidated_at = recovery.plan.reuse;
+@@ -627,13 +638,14 @@ impl StudioWorkerSession {
+         let frame = worker_response(supervisor.request(
+             SupervisorRequest::Scrub {
+                 scene: self.try_owned_scene()?,
+-                frame: self.committed_frame.load(Ordering::Acquire),
++                frame: if self.fresh_capture_reload { 0 } else { self.committed_frame.load(Ordering::Acquire) },
+             },
+             &*self.asset_ok,
+         )?)?;
+         let WorkerResponse::Frame(frame) = frame else {
+             return Err(HostError::UnexpectedWorkerResponse);
+         };
++        if self.fresh_capture_reload { self.committed_frame.store(0, Ordering::Release); }
+         Ok(StudioRestart {
+             recovery,
+             reexecuted_entries,
+diff --git a/crates/fmn-studio/src/native.rs b/crates/fmn-studio/src/native.rs
+index 9ebc297..0502904 100644
+--- a/crates/fmn-studio/src/native.rs
++++ b/crates/fmn-studio/src/native.rs
+@@ -13,5 +13,6 @@ mod raster;
+ mod service;
+ 
+ pub use build::{NativeBuild, NativeBuildContext};
++pub use camera::camera_capture_backend;
+ pub use program::{MAX_NATIVE_SEGMENTS, NativeSceneProgram, NativeSegment};
+ pub use service::{NativeReplayPolicy, NativeSceneWorker, NativeWorkerConfig};
+diff --git a/crates/fmn-studio/src/native/camera.rs b/crates/fmn-studio/src/native/camera.rs
+index c193a57..f1977e8 100644
+--- a/crates/fmn-studio/src/native/camera.rs
++++ b/crates/fmn-studio/src/native/camera.rs
+@@ -39,6 +39,22 @@ impl CameraCapture {
+             ));
+         }
+         let camera = Camera::new(config).map_err(execution_error)?;
++        let backend = camera_capture_backend(&camera, renderer)?;
++        Ok(Self { camera, backend })
++    }
++}
++
++/// Identity of the actual retained-camera CPU route. Imperative front doors
++/// call this at capture time so background, lighting and authored camera pose
++/// are represented without claiming an affine/annex FrameJob executed instead.
++pub fn camera_capture_backend(
++    camera: &Camera, renderer: RetainedFrameRendererConfig,
++) -> Result<RenderBackendRecord, ServiceError> {
++        if renderer.engine != EngineIdentity::certified()
++            || camera.pixel_shape() != (renderer.frame.viewport.width, renderer.frame.viewport.height)
++        {
++            return Err(invalid("camera capture requires the matching certified CPU viewport"));
++        }
+         let mut identity = Writer::new(CAMERA_CAPTURE_SCHEMA);
+         identity
+             .put_str("lumen-retained-camera-cpu-v1")
+@@ -70,11 +86,9 @@ impl CameraCapture {
+         }
+         // This is the normalized base policy. With a rig, per-capture pose is
+         // native SceneState and the factory binding has its own identity.
+-        let backend = RenderBackendRecord::new(
++        RenderBackendRecord::new(
+             RenderBackendRole::FrameStream,
+             identity.finish().map_err(execution_error)?,
+         )
+-        .map_err(execution_error)?;
+-        Ok(Self { camera, backend })
+-    }
++        .map_err(execution_error)
+ }
+diff --git a/scripts/check_crate_dag.py b/scripts/check_crate_dag.py
+index 2a21066..1dc78cd 100755
+--- a/scripts/check_crate_dag.py
++++ b/scripts/check_crate_dag.py
+@@ -147,6 +147,8 @@ EXPECTED: dict[str, set[str]] = {
+         "fmn-scene",
+         "fmn-output",
+         "fmn-runtime",
++        # Host-CPython Studio front door; no Python enters the native CLI.
++        "fmn-studio",
+     },
+     # W5 tier-1 wasm surface (fm-l97, §10.7): the browser leaf. dmath is a
+     # direct dependency because scene construction evaluates parametric
+diff --git a/crates/fmn-studio/src/recorded.rs b/crates/fmn-studio/src/recorded.rs
+--- a/crates/fmn-studio/src/recorded.rs
++++ b/crates/fmn-studio/src/recorded.rs
+@@ -236,4 +236,5 @@
+     frames.publish(&first, supervisor.protocol_limits())?;
+-    let session = Arc::new(StudioWorkerSession::new(scene, supervisor, builder, Arc::new(|_| false))?);
++    let session = Arc::new(StudioWorkerSession::new(scene, supervisor, builder, Arc::new(|_| false))?
++        .with_fresh_capture_reload());
+     let host = StudioHost::bind(Arc::clone(&session), frames.clone(), token, clock, config)?;
+     Ok((host, session, frames))
