@@ -309,6 +309,9 @@
     if (state.inputs.length) void drainInputs(); else void restartWorker();
   });
   const keyNames = {ArrowLeft:"arrow_left", ArrowRight:"arrow_right", ArrowUp:"arrow_up", ArrowDown:"arrow_down", Escape:"escape", Enter:"enter", Tab:"tab", Backspace:"backspace"};
+  // Physical ownership survives modifier/layout changes between down and up.
+  // The native key itself remains the value admitted by the original press.
+  const keyIdentity = (event, key) => typeof event.code === "string" && event.code && event.code !== "Unidentified" ? "code:" + event.code : "key:" + key;
   const heldKeys = new Map();
   let heldPointer = null, lastPointer = null;
   const MAX_PENDING_INPUTS = 256, MAX_HELD_KEYS = 16;
@@ -366,8 +369,8 @@
   }
   function releaseInputs() {
     releasePointer();
-    for (const [key, owner] of heldKeys) {
-      enqueueInput({type:"key_release", key, modifiers:owner.modifiers}, owner, true);
+    for (const owner of heldKeys.values()) {
+      enqueueInput({type:"key_release", key:owner.key, modifiers:owner.modifiers}, owner, true);
     }
     heldKeys.clear();
   }
@@ -376,19 +379,19 @@
     const key = keyNames[event.key] || ([...event.key].length === 1 ? event.key : null);
     if (!key) return;
     event.preventDefault();
-    const prior = heldKeys.get(key);
+    const identity = keyIdentity(event, key), prior = heldKeys.get(identity);
     if (!prior && heldKeys.size >= MAX_HELD_KEYS) { report(new Error("Too many held scene keys.")); return; }
     const modifiers = modifierBits(event);
-    const owner = prior || {generation:state.generation, frame:state.snapshot.view.frame_index, modifiers};
-    if (enqueueInput({type:"key_press", key, modifiers}, prior)) heldKeys.set(key, owner);
+    const owner = prior || {generation:state.generation, frame:state.snapshot.view.frame_index, modifiers, key};
+    if (enqueueInput({type:"key_press", key:owner.key, modifiers}, prior)) heldKeys.set(identity, owner);
   });
   // Listen outside the canvas too: moving focus must not strand a held native key.
   window.addEventListener("keyup", event => {
     const key = keyNames[event.key] || ([...event.key].length === 1 ? event.key : null);
-    const owner = heldKeys.get(key);
+    const identity = keyIdentity(event, key), owner = heldKeys.get(identity);
     if (!owner) return;
-    event.preventDefault(); heldKeys.delete(key);
-    enqueueInput({type:"key_release", key, modifiers:modifierBits(event)}, owner, true);
+    event.preventDefault(); heldKeys.delete(identity);
+    enqueueInput({type:"key_release", key:owner.key, modifiers:modifierBits(event)}, owner, true);
   });
   function pointerPoint(event) {
     const v = state.snapshot?.view, rect = $("preview").getBoundingClientRect();
