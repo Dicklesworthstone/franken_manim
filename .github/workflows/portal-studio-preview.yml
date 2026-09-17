@@ -8,6 +8,7 @@ on:
       - 'crates/fmn-python/src/portal_studio.rs'
       - 'crates/fmn-python/python/fmn_python/studio.py'
       - 'crates/fmn-python/tests/studio_preview.py'
+      - 'crates/fmn-python/tests/test_studio_protocol.py'
       - 'scripts/patches/portal-studio-preview.patch'
   workflow_dispatch:
 permissions:
@@ -43,8 +44,9 @@ jobs:
       - name: Install pinned compiler and Python build tools
         run: |
           rustup show active-toolchain
-          python -m pip install numpy 'maturin>=1.9,<2'
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cargo-cache
         with:
           path: |
             ~/.cargo/registry
@@ -52,7 +54,14 @@ jobs:
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portal-studio-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-portal-studio-
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - name: Verify console and host policies
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests
+          python -m unittest test_render_session_protocol test_console_rendering_protocol test_batch_rendering_protocol test_render_selection_protocol test_video_console_protocol test_studio_protocol 2>&1 | tee /tmp/studio-protocol.log
       - name: Verify native captured timeline and preview boundaries
         shell: bash
         run: |
@@ -72,6 +81,9 @@ jobs:
             grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-portal.log
             cargo clippy --locked -p fmn-python --lib -- -D warnings
             python scripts/check_crate_dag.py
+            rustfmt --edition 2024 --config skip_children=true crates/fmn-conformance/tests/e2e_scenarios.rs
+            cargo test --locked -p fmn-conformance --test e2e_scenarios python_studio_capture_scenario_passes -- --nocapture 2>&1 | tee /tmp/studio-e2e.log
+            grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/studio-e2e.log
             python -m maturin build --locked --interpreter python --profile dev --out target/studio-wheel
             python -m venv target/studio-venv
             target/studio-venv/bin/python -m pip install numpy target/studio-wheel/*.whl
@@ -83,8 +95,9 @@ jobs:
         run: |
           set -euo pipefail
           git add crates/fmn-studio/src/recorded.rs
+          git add crates/fmn-python/tests/studio_preview.py
           if test -f scripts/patches/portal-studio-preview.patch; then
-            git add Cargo.lock crates/fmn-python/Cargo.toml crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/portal_playback.rs scripts/check_crate_dag.py crates/fmn-studio/src/native.rs crates/fmn-studio/src/native/camera.rs crates/fmn-studio/src/host.rs crates/fmn-python/python/fmn_python/__main__.py crates/fmn-python/python/fmn_python/console_rendering.py
+            git add Cargo.lock crates/fmn-python/Cargo.toml crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/portal_playback.rs scripts/check_crate_dag.py crates/fmn-studio/src/native.rs crates/fmn-studio/src/native/camera.rs crates/fmn-studio/src/host.rs crates/fmn-python/python/fmn_python/__main__.py crates/fmn-python/python/fmn_python/console_rendering.py crates/fmn-conformance/tests/e2e_scenarios.rs docs/dist/python_wheel.md
           fi
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
@@ -108,3 +121,12 @@ jobs:
             /tmp/studio-source-sha.txt
             /tmp/studio-working.patch
           retention-days: 1
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

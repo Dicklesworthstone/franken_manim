@@ -10,6 +10,78 @@ index 4a9e928..bb54607 100644
   "pyo3",
  ]
  
+diff --git a/crates/fmn-conformance/tests/e2e_scenarios.rs b/crates/fmn-conformance/tests/e2e_scenarios.rs
+index 8a956e6..39825cd 100644
+--- a/crates/fmn-conformance/tests/e2e_scenarios.rs
++++ b/crates/fmn-conformance/tests/e2e_scenarios.rs
+@@ -2021,6 +2021,27 @@ fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
+     python_portal_sequence_run(ctx, false)
+ }
+ 
++fn python_studio_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
++    let report = manimlib::run_portal_gauntlet_studio_capture()
++        .map_err(|error| fail(format!("Python Studio capture: {error}")))?;
++    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
++        .map_err(|error| fail(format!("decode first Studio frame: {error}")))?;
++    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
++        .map_err(|error| fail(format!("decode last Studio frame: {error}")))?;
++    if report.frames != 6 || (first.width, first.height) != (96, 54)
++        || (last.width, last.height) != (96, 54) || first.rgba == last.rgba
++    {
++        return Err(fail("Studio capture did not render six moving native frames"));
++    }
++    ctx.event(LogEvent::new("e2e.python.studio_capture")
++        .field("frames", report.frames).field("read_only", true)
++        .field("native_inspector", true));
++    Ok(RunOutcome::ok().with_counter("python_studio_frames", report.frames)
++        .with_artifact("studio_first.png", report.first_png)
++        .with_artifact("studio_last.png", report.last_png)
++        .with_artifact("studio_inspector.json", report.last_inspector))
++}
++
+ fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+     python_portal_sequence_run(ctx, true)
+ }
+@@ -4434,6 +4455,22 @@ pub fn catalog() -> Vec<ScenarioSpec> {
+             ],
+         )],
+     ));
++    specs.push(spec(
++        "lifecycle.python_studio_capture.v1",
++        ScenarioClass::LifecycleDrill,
++        Surface::PythonInProcess,
++        Invocation::new(python_studio_capture_run),
++        vec![
++            Assertion::ExitCode(0),
++            Assertion::FileInventory(vec!["studio_first.png".to_owned(), "studio_last.png".to_owned(), "studio_inspector.json".to_owned()]),
++            counter_eq("python_studio_frames", 6),
++        ],
++        vec![LogExpect::span_present("e2e.python.studio_capture", vec![
++            FieldPred::u64_eq("frames", 6),
++            FieldPred::str_eq("read_only", "true"),
++            FieldPred::str_eq("native_inspector", "true"),
++        ])],
++    ));
+     let mut portal_output_inventory = vec![
+         "native_scene.py".to_owned(),
+         "motion.gif".to_owned(),
+@@ -5210,6 +5247,16 @@ fn python_portal_png_scenario_passes() {
+     assert!(report.is_pass(), "{}", report.summary());
+ }
+ 
++/// The production Python capture and native read-only worker in the fast tier.
++#[test]
++fn python_studio_capture_scenario_passes() {
++    let scenario = catalog().into_iter()
++        .find(|scenario| scenario.name == "lifecycle.python_studio_capture.v1")
++        .expect("Python Studio capture is registered");
++    let report = Runner::from_env().run(scenario);
++    assert!(report.is_pass(), "{}", report.summary());
++}
++
+ /// Decoded native GIF/y4m/WAV, ordering, cue placement, and failure atomicity.
+ #[test]
+ fn python_native_outputs_scenario_passes() {
 diff --git a/crates/fmn-python/Cargo.toml b/crates/fmn-python/Cargo.toml
 index c0df8fb..f936b4b 100644
 --- a/crates/fmn-python/Cargo.toml
@@ -58,7 +130,7 @@ index e75eed9..3a98ba7 100644
              return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
          print(text)
 diff --git a/crates/fmn-python/src/lib.rs b/crates/fmn-python/src/lib.rs
-index 7e76f05..3af8cd4 100644
+index 7e76f05..f919a31 100644
 --- a/crates/fmn-python/src/lib.rs
 +++ b/crates/fmn-python/src/lib.rs
 @@ -20,6 +20,7 @@ mod method_cache;
@@ -158,6 +230,17 @@ index 7e76f05..3af8cd4 100644
      module.add_class::<PyRecordView>()?;
      module.add_class::<PyGilProbe>()?;
      module.add_class::<PyCameraFrameCore>()?;
+@@ -10963,6 +10988,10 @@ fn with_python_test_module<R>(
+     })
+ }
+ 
++/// Production captured-preview seam, available only to the Gauntlet.
++#[cfg(feature = "gauntlet")]
++pub use portal_studio::{PortalStudioGauntletReport, run_portal_gauntlet_studio_capture};
++
+ /// Structured result from the feature-gated in-process Gauntlet portal row.
+ #[cfg(feature = "gauntlet")]
+ #[derive(Debug, Clone, PartialEq, Eq)]
 diff --git a/crates/fmn-python/src/portal_playback.rs b/crates/fmn-python/src/portal_playback.rs
 index 921e0d4..0cb267e 100644
 --- a/crates/fmn-python/src/portal_playback.rs
@@ -287,6 +370,45 @@ index c193a57..f1977e8 100644
 -    }
 +        .map_err(execution_error)
  }
+diff --git a/docs/dist/python_wheel.md b/docs/dist/python_wheel.md
+index 406fe83..9572761 100644
+--- a/docs/dist/python_wheel.md
++++ b/docs/dist/python_wheel.md
+@@ -98,8 +98,9 @@ width. `--video_dir` names the output directory for a PNG sequence and the
+ destination file for the other formats.
+ 
+ WAV output runs the sampled scene lifecycle without rasterization and mixes
+-`Scene.add_sound` cues through Reel. Cue inputs currently must be PCM WAV;
+-missing, malformed or over-budget audio fails before atomic publication. At
++`Scene.add_sound` cues through Reel. PCM/float WAV inputs remain native-only;
++compressed audio uses the optional governed decoder described in
++[Python audio](python_audio.md). Missing, malformed or over-budget audio fails before atomic publication. At
+ least one cue is required. Output is 48 kHz, stereo, signed 16-bit PCM, with
+ frame-clock cue placement, `time_offset`, `gain`, and `gain_to_background`.
+ Robot output identifies `native-sound-mixer` and reports `sample_frames`,
+@@ -141,8 +142,20 @@ the corresponding `file_writer_config` on a Scene, then call
+ contain spaces and is resolved without shell tokenization. Invalid profiles,
+ missing encoders and failed frames do not replace existing destinations.
+ 
+-Certified output (`--reproducible`), opener flags, and Python `studio`
+-remain fail-closed capability errors. In particular, the portal
++Python `studio` now captures existing scenes in disposable host-CPython workers:
++
++```bash
++fmn-python studio scene.py Example --resolution 640x360 --fps 30
++```
++
++The authenticated native browser UI supports playback, reverse scrubbing,
++per-frame native inspection and explicit source reload. Preview is bounded,
++silent and read-only; it does not expose arbitrary callback checkpoints or
++live `InteractiveScene` editing. See [Python Studio](python_studio.md) for the
++programmatic context manager, resource controls and worker-failure semantics.
++
++Certified output (`--reproducible`) and opener flags remain fail-closed
++capability errors. In particular, the portal
+ does not expose a partial certified path before the Python input closure and
+ provenance sidecar are complete, and it does not label lifecycle-only work as
+ a render. Python scenes execute with the host interpreter's full user
 diff --git a/scripts/check_crate_dag.py b/scripts/check_crate_dag.py
 index 2a21066..1dc78cd 100755
 --- a/scripts/check_crate_dag.py
@@ -310,3 +432,112 @@ diff --git a/crates/fmn-studio/src/recorded.rs b/crates/fmn-studio/src/recorded.
 +        .with_fresh_capture_reload());
      let host = StudioHost::bind(Arc::clone(&session), frames.clone(), token, clock, config)?;
      Ok((host, session, frames))
+diff --git a/crates/fmn-python/src/portal_studio.rs b/crates/fmn-python/src/portal_studio.rs
+index d324565..ed01753 100644
+--- a/crates/fmn-python/src/portal_studio.rs
++++ b/crates/fmn-python/src/portal_studio.rs
+@@ -209,7 +209,7 @@ impl fmn_studio::RebuildDriver for PythonBuilder {
+         Python::attach(|py| {
+             let result = self.callback.call0(py).map_err(|e| fmn_studio::BuildError::new(e.to_string()))?;
+             type Launch = (String, Vec<String>, Vec<(String, String)>, String, String);
+-            let (executable, argv, env, cwd, build): Launch = result.extract(py)
++            let (executable, argv, env, cwd, build) = result.extract::<Launch>(py)
+                 .map_err(|e| fmn_studio::BuildError::new(e.to_string()))?;
+             let build_id = ProtocolDigest::from_hex(&build).map_err(|e| fmn_studio::BuildError::new(e.to_string()))?;
+             Ok(fmn_studio::WorkerArtifact { executable: executable.into(), argv, env, cwd: Some(cwd.into()), build_id })
+@@ -246,8 +246,9 @@ impl Host {
+         let token = fmn_studio::CapabilityToken::from_hex(token).map_err(native_error)?;
+         let config = fmn_studio::StudioHostConfig {
+             bind_addr: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+-            // Close is responsive even when a browser leaves its stream open.
+-            stream_idle_timeout: Duration::from_secs(1),
++            // FrameHub::close wakes idle streams on shutdown. Retain the
++            // native idle interval so a paused preview does not reconnect
++            // continuously while the author is inspecting it.
+             ..fmn_studio::StudioHostConfig::default()
+         };
+         let (host, session, frames) = py.detach(move || fmn_studio::recorded::start_host(
+@@ -283,10 +284,19 @@ impl Host {
+     }
+ }
+ 
+-#[cfg(test)]
+-mod tests {
+-    #[test]
+-    fn portal_studio_capture_uses_stepped_scene_and_native_inspector() {
++/// Real captured artifacts for the mandatory Gauntlet lifecycle row.
++#[cfg(any(test, feature = "gauntlet"))]
++pub struct PortalStudioGauntletReport {
++    pub first_png: Vec<u8>,
++    pub last_png: Vec<u8>,
++    pub last_inspector: Vec<u8>,
++    pub frames: u64,
++}
++
++/// Exercise the production capture and worker protocol without publishing an
++/// offline render or claiming that Python callbacks are replayable.
++#[cfg(any(test, feature = "gauntlet"))]
++pub fn run_portal_gauntlet_studio_capture() -> Result<PortalStudioGauntletReport, String> {
+         crate::with_python_test_module("Studio native capture", |py, _module, globals| {
+             let source = std::ffi::CString::new(r#"
+ import json
+@@ -315,7 +325,44 @@ static.camera.fps = 8
+ static.add(m.Circle())
+ assert static._finish_studio_capture().frame_count == 1
+ "#).unwrap();
+-            py.run(source.as_c_str(), Some(globals), Some(globals)).inspect_err(|e| e.print(py)).unwrap();
+-        });
++            py.run(source.as_c_str(), Some(globals), Some(globals))
++                .inspect_err(|e| e.print(py)).map_err(|e| e.to_string())?;
++            let object = globals.get_item("r").map_err(|e| e.to_string())?
++                .ok_or_else(|| "Studio capture produced no recording".to_owned())?;
++            let mut recording = object.extract::<PyRefMut<'_, Recording>>().map_err(|e| e.to_string())?;
++            let timeline = recording.timeline.as_mut().ok_or_else(|| "Studio recording was already consumed".to_owned())?;
++            let scene = timeline.active_scene().unwrap_or_default().to_owned();
++            let frames = timeline.frame_count() as u64;
++            let png = |timeline: &mut fmn_studio::recorded::RecordedTimeline, index| {
++                let response = timeline.handle(fmn_studio::SupervisorRequest::Scrub {
++                    scene: scene.clone(), frame: index,
++                }).map_err(|e| e.to_string())?;
++                match response {
++                    fmn_studio::WorkerResponse::Frame(FrameStream { payload: FramePayload::Pipe { bytes, .. }, .. }) => Ok(bytes),
++                    _ => Err("Studio did not return an owned PNG".to_owned()),
++                }
++            };
++            let first_png = png(timeline, 0)?;
++            let last_png = png(timeline, 5)?;
++            let fmn_studio::WorkerResponse::StudioData { bytes: last_inspector, .. } = timeline.handle(
++                fmn_studio::SupervisorRequest::Inspect { scene: scene.clone() },
++            ).map_err(|e| e.to_string())? else {
++                return Err("Studio did not return its native inspector".to_owned());
++            };
++            Ok(PortalStudioGauntletReport { first_png, last_png, last_inspector, frames })
++        })
++}
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn portal_studio_capture_uses_stepped_scene_and_native_inspector() {
++        let report = super::run_portal_gauntlet_studio_capture().unwrap();
++        let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default()).unwrap();
++        let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default()).unwrap();
++        assert_eq!(report.frames, 6);
++        assert_eq!((first.width, first.height), (96, 54));
++        assert_ne!(first.rgba, last.rgba, "animation must reach the captured native pixels");
++        assert!(!report.last_inspector.is_empty());
+     }
+ }
+diff --git a/crates/fmn-python/tests/studio_preview.py b/crates/fmn-python/tests/studio_preview.py
+index 3eae3cf..4c7a85b 100644
+--- a/crates/fmn-python/tests/studio_preview.py
++++ b/crates/fmn-python/tests/studio_preview.py
+@@ -258,7 +258,7 @@ class StudioWheelTests(unittest.TestCase):
+                 process.stdout.close()
+         help = subprocess.run([sys.executable, "-I", "-m", "fmn_python", "--robot", "studio", "--help"],
+                               capture_output=True, text=True, timeout=15, check=True)
+-        self.assertIn("read-only", json.loads(help.stdout)["help"])
++        self.assertIn("read-only", json.loads(help.stdout)["help"].lower())
+ 
+ 
+ if __name__ == "__main__":
