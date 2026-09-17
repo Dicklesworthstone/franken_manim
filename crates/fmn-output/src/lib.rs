@@ -41,6 +41,7 @@
 #![cfg_attr(windows, feature(windows_by_handle))]
 #![forbid(unsafe_code)]
 
+pub mod audio;
 pub mod emitter;
 pub mod ffmpeg;
 pub mod negotiate;
@@ -49,6 +50,11 @@ pub mod sinks;
 pub mod sound;
 
 pub use fmn_hash::Digest as ArtifactDigest;
+
+pub use audio::{
+    AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, AudioInputFormat,
+    DecodedAudio,
+};
 
 pub use emitter::{
     CancelOutcome, EmitterConfig, EmitterError, EmitterFailure, EmitterHandle, EmitterReport,
