@@ -277,6 +277,13 @@ with open(pack_path, encoding="utf-8") as source:
 with open(publish_path, encoding="utf-8") as source:
     publish = json.load(source)
 pack = pack[0] if isinstance(pack, list) else pack
+# npm >= 10 emits a bare receipt object; npm 9 wraps it in a
+# {package-name: receipt} mapping. Accept both so the gate records the
+# same inventory regardless of the host npm major.
+if isinstance(publish, dict) and set(publish) != {"files"} and all(
+    isinstance(value, dict) for value in publish.values()
+):
+    publish = next(iter(publish.values()))
 publish = publish[0] if isinstance(publish, list) else publish
 
 expected = {
