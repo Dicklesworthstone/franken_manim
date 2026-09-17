@@ -1,17 +1,20 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-derived 2026-09-08 on the RCH `hz3` worker. The current locked
-dependency tree, wasm32 target check, locked Node smoke, and complete serial /
-shared-memory package and Chromium gate all exited 0. The graph now consumes
-`fnp-random-core` and the `fsci-linalg` gateway described below. The Node smoke
-digest remains `1f248a71347b82aa`.
+**Status:** re-derived 2026-09-17 on the local qualified-tool host at commit
+`efdf8e4041bbbe9f2a63b4b91f30b59286861b89`. The current locked dependency
+tree, wasm32 target build, locked Node smoke, and the complete serial /
+shared-memory package and Chromium gate all exited 0 on a **clean tree**
+(`source_dirty=false`, receipt schema `fmn-wasm-package-receipt/2`). The
+Node smoke digest remains `1f248a71347b82aa`; the browser digests are
+byte-identical to the prior diagnostic run
+(`f5b7f4b9` / `c864b03d` / `8d9ea9c9`).
 The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes, forcing this audit to be re-run instead of leaving a
 plausible but stale “current pins” claim behind.
 
 - `SUITE.lock` SHA-256: `d38bb18884f060d3867dfbb26b1c985e90ddf8ce716589dd13d2e68aa404b3d3`
-- `Cargo.lock` SHA-256: `24c65127892ce9b523360cd67c4ad4c201731ff5117a9822f5cbf9e26367aec6`
-- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `91749761fa4469a197c91355f3b559ae6a84e6fdafb045f12470b3229bff4421`
+- `Cargo.lock` SHA-256: `5b752767e3636d9edf829e753b41ff4edb9ce07bd3275e82d6d6f2be5ac9c6c3`
+- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `01f3e42a699383d33b42379bab14661069b40496b869cfbbd7d35b7e58fde53b`
 
 Method labels are deliberately narrow:
 
@@ -76,36 +79,41 @@ deployment. WASM remains standard-mode only.
 
 ### Current package receipt
 
-The complete RCH job exited 0 in 138.7 seconds; retained evidence is
-`.rch-results/wasm-package-20260908-0410/receipt.json` and
-`/tmp/fmn-gap-execution-20260908/wasm-package-current-3.log`. This receipt records
-source commit `a40c4a882ff5d04b294e8d942f901813cff6a935` with
-**`source_dirty=true`**: it validates the transferred working tree, including
-the smoke-lock and request-header fixes, and is not a clean release receipt.
+The release-grade run exited 0 in 111.9 seconds on a clean clone of commit
+`efdf8e4041bbbe9f2a63b4b91f30b59286861b89` (`source_dirty=false`); retained
+evidence is `.rch-results/wasm-package-20260917-fm7wm6/release-receipt.json`
+(evidence root `/tmp/fmn-fm7wm6-release-20260917`). An independent dirty-tree
+diagnostic run at the same commit produced byte-identical browser digests,
+retained at `.rch-results/wasm-package-20260917-fm7wm6/receipt.json`. The
+gate script now accepts both npm receipt shapes (npm 10 bare object and the
+npm 9 `{package-name: receipt}` mapping); this host's npm is 11.19.1.
 No registry publication occurred.
 
 | Identity or result | Executed value |
 |---|---|
-| Tools | wasm-pack 0.15.0; wasm-bindgen 0.2.127; Binaryen 117; Node 22.22.1; npm 10.9.4; webpack 5.109.2 / CLI 7.2.2; Chrome 152.0.7977.82 |
-| npm tarball | 401,989 bytes; SHA-256 `41a94cd24309166f9f7640bf86364d7e1c772906a2ccfe34e8c56bfd2639cf85` |
-| Serial Wasm | 471,227 raw bytes; 189,664 gzip bytes |
-| Shared-memory Wasm | 471,400 raw bytes; 189,980 gzip bytes |
+| Tools | wasm-pack 0.15.0; wasm-bindgen 0.2.127; Binaryen 117; Node 22.22.1; npm 11.19.1; webpack 5.109.2 / CLI 7.2.2; Chrome 153.0.8010.47 |
+| npm tarball | 409,605 bytes; SHA-256 `2a7a7f4de062b4f112619baebec2aa79db953c78e4c303dc179013ea3c2d2a18` |
+| Serial Wasm | 487,503 raw bytes; 194,668 gzip bytes |
+| Shared-memory Wasm | 487,117 raw bytes; 195,145 gzip bytes |
 | `FmnScene` | 45 rendered frames; digest `f5b7f4b9` |
 | `FmnPlayer` | 45 rendered frames; digest `c864b03d`; engine identity `certified-cpu:scalar:6` |
 | Workers | 2 workers over shared memory; 4 frames; digest `8d9ea9c9`; serial/threaded byte equality passed |
 | Isolation refusal | `FMN_WASM_CROSS_ORIGIN_ISOLATION_REQUIRED` before worker startup in the nonisolated document |
 
-Chrome ran with its sandbox enabled after qualifying the installed sandbox
-helper. Earlier missing-Git-object and sandbox-configuration failures remain
-in the first two attempt logs; neither was counted as successful execution.
-The player engine identifier names the semantic renderer serialized in the
-timeline; it does not change the browser's standard-only certification scope.
+Chrome ran with its sandbox enabled. The asupersync malformed-fixture cargo
+diagnostic is the intentionally non-fatal upstream diagnostic tracked by
+bead fm-asupersync-fixture-diagnostic-5bxf; it did not affect tree
+generation or any build. The player engine identifier names the semantic
+renderer serialized in the timeline; it does not change the browser's
+standard-only certification scope.
 
 Historical evidence: the v0.4.0 release-commit receipt passed at
 `d1e4274aa32ba5c59934029db397bbbeb9bfa18c` with `source_dirty=false`; its
 395,038-byte tarball had SHA-256
 `f531940b5849ed2f3e091424931581bf4450e2811ec66e850aebfe3a76dc371d`.
-That older dry-run receipt does not qualify the current dependency locks.
+The 2026-09-08 a40c4a88 receipt (npm 10.9.4, Chrome 152, tarball
+`41a94cd2…cf85`) qualified the August locks and is superseded by the
+receipt above.
 
 ## Intentionally absent from the current wasm graph
 
