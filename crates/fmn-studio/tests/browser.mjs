@@ -110,7 +110,7 @@ try {
     await command("Input.dispatchKeyEvent", {type:"keyUp",key,code,windowsVirtualKeyCode:virtualKey});
   }
   async function synchronized(frame) {
-    await until(() => evaluate(`document.getElementById("display").dataset.synchronized === "true" && document.getElementById("display").dataset.frame === ${JSON.stringify(String(frame))} && !document.getElementById("inspect").disabled`), `frame ${frame} synchronized`);
+    await until(() => evaluate(`document.getElementById("display")?.dataset.synchronized === "true" && document.getElementById("display")?.dataset.frame === ${JSON.stringify(String(frame))} && document.getElementById("inspect")?.disabled === false`), `frame ${frame} synchronized`);
   }
   async function inspect() {
     return evaluate(`fetch("/api/inspect",{headers:{"X-FMN-Capability":${JSON.stringify(studio.cap)}},signal:AbortSignal.timeout(10000)}).then(r=>r.json())`);
@@ -325,8 +325,8 @@ try {
     [{...guarded,worker_generation:"1"},400,/stale.*generation/],
     [{...guarded,revision:"0"},422,/stale native input revision/],
     [{...guarded,target:String(pastedId)},422,/stale native input object/],
-    [{...guarded,type:"mouse_press",x:"NaN",y:"0",button:"left"},400,/invalid finite event payload/],
-    [{...guarded,type:"mouse_press",x:"10000000",y:"0",button:"left"},422,/budget/],
+    [{...guarded,type:"mouse_motion",x:"NaN",y:"0",dx:"0",dy:"0"},400,/invalid event coordinates/],
+    [{...guarded,type:"mouse_motion",x:"10000000",y:"0",dx:"0",dy:"0"},422,/budget/],
   ];
   for (const [fields,status,diagnostic] of refusalCases) {
     const response = await fetch(new URL("/api/event",studio.url), {method:"POST",headers:{"User-Agent":userAgent,"X-FMN-Capability":studio.cap,"Origin":studio.url.origin,"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(fields),signal:AbortSignal.timeout(10000)});
