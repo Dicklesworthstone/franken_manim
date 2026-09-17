@@ -34,6 +34,8 @@ use crate::supervisor::{
 };
 use crate::ui;
 
+mod input;
+
 /// Multipart boundary used by the permanent browser preview floor.
 pub const MULTIPART_BOUNDARY: &str = "fmn-frame";
 
@@ -501,6 +503,8 @@ pub struct StudioWorkerSession {
     builder: Mutex<Box<dyn RebuildDriver + Send>>,
     asset_ok: Arc<dyn Fn(&AssetRead) -> bool + Send + Sync>,
     committed_frame: AtomicI64,
+    operations: Mutex<()>,
+    guarded_input: bool,
 }
 
 impl fmt::Debug for StudioWorkerSession {
@@ -542,6 +546,8 @@ impl StudioWorkerSession {
             builder: Mutex::new(builder),
             asset_ok,
             committed_frame: AtomicI64::new(0),
+            operations: Mutex::new(()),
+            guarded_input: false,
         })
     }
 
@@ -577,6 +583,9 @@ impl StudioWorkerSession {
             },
             &*self.asset_ok,
         )?)?;
+        if matches!(response, WorkerResponse::Error { .. }) {
+            return Ok(response);
+        }
         if !matches!(response, WorkerResponse::JournalSegment { .. }) {
             return Err(HostError::UnexpectedWorkerResponse);
         }
@@ -587,9 +596,9 @@ impl StudioWorkerSession {
     }
 
     fn restart(&self) -> Result<StudioRestart, HostError> {
-        let incoming = lock(&self.supervisor).current_commands()?;
         let mut builder = lock(&self.builder);
         let mut supervisor = lock(&self.supervisor);
+        let incoming = supervisor.current_commands()?;
         let recovery =
             supervisor.rebuild_and_restart(&mut **builder, &incoming, &*self.asset_ok)?;
         let invalidated_at = recovery.plan.reuse;
@@ -1093,6 +1102,7 @@ impl HostHandler {
     }
 
     fn scrub(&self, stream: &mut TcpStream, request: &HttpRequest) -> Result<(), HostError> {
+        let _operation = lock(&self.session.operations);
         require_form_content_type(request)?;
         let form = parse_form(&request.body)?;
         let frame = required_form(&form, "frame")?
@@ -1117,6 +1127,7 @@ impl HostHandler {
     }
 
     fn restart(&self, stream: &mut TcpStream) -> Result<(), HostError> {
+        let _operation = lock(&self.session.operations);
         let restarted = self.session.restart()?;
         let published = self
             .frames
@@ -1131,24 +1142,45 @@ impl HostHandler {
     }
 
     fn event(&self, stream: &mut TcpStream, request: &HttpRequest) -> Result<(), HostError> {
+        let _operation = lock(&self.session.operations);
         require_form_content_type(request)?;
         let form = parse_form(&request.body)?;
         let event = event_from_form(&form)?;
-        let response = self.session.request(SupervisorRequest::Event {
-            scene: self.session.try_owned_scene()?,
-            event,
-        })?;
+        let response = if self.session.guarded_input || input::has_guard(&form) {
+            self.session.guarded_event(&form, event)?
+        } else {
+            self.session.request(SupervisorRequest::Event {
+                scene: self.session.try_owned_scene()?,
+                event,
+            })?
+        };
         self.write_worker_response(stream, response, None)
     }
 
     fn inspect(&self, stream: &mut TcpStream) -> Result<(), HostError> {
-        let response = self.session.request(SupervisorRequest::Inspect {
-            scene: self.session.try_owned_scene()?,
-        })?;
-        self.write_worker_response(stream, response, Some(StudioDataKind::Inspection))
+        let _operation = lock(&self.session.operations);
+        let (response, generation) = self.session.inspect_generation()?;
+        if let WorkerResponse::StudioData {
+            kind: StudioDataKind::Inspection,
+            bytes,
+            ..
+        } = response
+        {
+            write_response_with_headers(
+                stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                &bytes,
+                &[("X-FMN-Worker-Generation", &generation.to_string())],
+            )
+        } else {
+            self.write_worker_response(stream, response, Some(StudioDataKind::Inspection))
+        }
     }
 
     fn overlays(&self, stream: &mut TcpStream, request: &HttpRequest) -> Result<(), HostError> {
+        let _operation = lock(&self.session.operations);
         let layers = match request.query_one("layers")? {
             Some(raw) => DebugLayerSet::from_bits(
                 raw.parse::<u8>()

@@ -1,0 +1,67 @@
+name: Studio saved sessions
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/studio-sessions.yml'
+      - 'scripts/patches/studio-session-*.patch'
+      - 'crates/fmn-studio/src/supervisor/session.rs'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: studio-sessions
+  cancel-in-progress: false
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  CARGO_TARGET_DIR: target/portable
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Integrate reviewed session module declaration
+        run: |
+          if ! grep -q '^pub mod session;' crates/fmn-studio/src/supervisor.rs; then
+            git apply --check scripts/patches/studio-session-core.patch
+            git apply scripts/patches/studio-session-core.patch
+          fi
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-studio/src/supervisor/session.rs
+          git diff --check
+      - name: Verify saved session and existing recovery machinery
+        run: |
+          cargo test --locked -p fmn-studio --lib
+          cargo test --locked -p fmn-studio --test supervisor --test native_committed_input --test native_worker
+          cargo clippy --locked -p fmn-studio --lib -- -D warnings
+      - name: Commit validated integration to main
+        run: |
+          git add crates/fmn-studio/src/supervisor.rs crates/fmn-studio/src/supervisor/session.rs
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(studio): integrate validated saved-session export and strict resume'
+            git fetch origin main
+            git merge --no-edit origin/main
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD > /tmp/session-source-sha.txt
+          git archive --format=tar.gz HEAD > /tmp/session-source.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: studio-session-source-${{ github.sha }}
+          path: |
+            /tmp/session-source-sha.txt
+            /tmp/session-source.tar.gz
+          retention-days: 1

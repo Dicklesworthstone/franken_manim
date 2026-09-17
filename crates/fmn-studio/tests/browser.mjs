@@ -54,9 +54,10 @@ const browser = spawn(chrome, ["--headless=new","--disable-gpu","--disable-dev-s
 browser.stderr.resume();
 let ws;
 let studio;
+let captureFailure;
 const receipt = {schema:"fmn.studio.browser.v1", source_commit:execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),
   source_status:execFileSync("git",["status","--porcelain","--untracked-files=no"],{encoding:"utf8"}).trim(),
-  binary_sha256:createHash("sha256").update(await readFile(binary)).digest("hex"), scenarios:[], browser_errors:[]};
+  binary_sha256:createHash("sha256").update(await readFile(binary)).digest("hex"), scenarios:[], browser_errors:[], input_transport:[]};
 try {
   const port = await until(async () => { try { return Number((await readFile(join(profile,"DevToolsActivePort"),"utf8")).split("\n")[0]); } catch { return null; } }, "Chrome DevTools port");
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, {headers:{"User-Agent":userAgent},signal:AbortSignal.timeout(10000)})).json();
@@ -65,6 +66,16 @@ try {
   ws.addEventListener("message", event => {
     const m = JSON.parse(event.data);
     if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); clearTimeout(p.timer); if (m.error) p.reject(new Error(m.error.message)); else p.resolve(m.result); }
+    if (m.method === "Network.requestWillBeSent" || m.method === "Network.responseReceived") {
+      const packet = m.params.request || m.params.response;
+      const path = new URL(packet.url).pathname;
+      if (path.startsWith("/api/")) {
+        if (receipt.input_transport.length >= 512) receipt.input_transport.shift();
+        receipt.input_transport.push({event:m.method, id:m.params.requestId, path,
+          ...(packet.postData ? {body:redact(packet.postData).slice(0,4096)} : {}),
+          ...(packet.status ? {status:packet.status} : {})});
+      }
+    }
     // ubs:ignore — this compares a public CDP event name, not an authentication secret.
     if (m.method === "Runtime.exceptionThrown") receipt.browser_errors.push(redact(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text));
   });
@@ -79,6 +90,16 @@ try {
     if (result.exceptionDetails) throw new Error(redact(result.exceptionDetails.exception?.description || result.exceptionDetails.text));
     return result.result.value;
   }
+  captureFailure = () => evaluate(`({
+    error:document.getElementById("error")?.textContent,
+    error_hidden:document.getElementById("error")?.hidden,
+    display:document.getElementById("display")?.dataset,
+    replay:document.getElementById("replay")?.textContent,
+    input_enabled:document.getElementById("input-events")?.checked,
+    busy:document.getElementById("inspect")?.disabled,
+    focused:document.activeElement?.id,
+    input_trace:window.__fmnInputTrace || [],
+  })`);
   async function click(selector) {
     const point = await evaluate(`(() => { const element=document.querySelector(${JSON.stringify(selector)}); element.scrollIntoView({block:"center"}); const r=element.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
     await command("Input.dispatchMouseEvent", {type:"mousePressed",button:"left",clickCount:1,...point});
@@ -89,13 +110,25 @@ try {
     await command("Input.dispatchKeyEvent", {type:"keyUp",key,code,windowsVirtualKeyCode:virtualKey});
   }
   async function synchronized(frame) {
-    await until(() => evaluate(`document.getElementById("display").dataset.synchronized === "true" && document.getElementById("display").dataset.frame === ${JSON.stringify(String(frame))} && !document.getElementById("inspect").disabled`), `frame ${frame} synchronized`);
+    await until(() => evaluate(`document.getElementById("display")?.dataset.synchronized === "true" && document.getElementById("display")?.dataset.frame === ${JSON.stringify(String(frame))} && document.getElementById("inspect")?.disabled === false`), `frame ${frame} synchronized`);
   }
   async function inspect() {
     return evaluate(`fetch("/api/inspect",{headers:{"X-FMN-Capability":${JSON.stringify(studio.cap)}},signal:AbortSignal.timeout(10000)}).then(r=>r.json())`);
   }
   async function screenshot(name) { const result = await command("Page.captureScreenshot",{format:"png",captureBeyondViewport:true}); await writeFile(join(output,name),Buffer.from(result.data,"base64")); }
-  await command("Page.enable"); await command("Runtime.enable");
+  await command("Page.enable"); await command("Runtime.enable"); await command("Network.enable");
+  // Observe actual browser delivery without intercepting the installed handler.
+  await command("Page.addScriptToEvaluateOnNewDocument", {source:`
+    window.__fmnInputTrace = [];
+    for (const name of ["keydown","keyup","pointerdown","pointermove","pointerup","pointercancel","gotpointercapture","lostpointercapture","blur"]) {
+      window.addEventListener(name, event => {
+        if (event.target?.id !== "preview" || window.__fmnInputTrace.length >= 256) return;
+        window.__fmnInputTrace.push({type:event.type, key:event.key, code:event.code,
+          id:event.pointerId, button:event.button, buttons:event.buttons,
+          x:event.clientX, y:event.clientY});
+      }, true);
+    }
+  `});
   await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
   for (const scene of ["circle_shift.v1","tex_span.v1"]) {
     studio = await startStudio(scene);
@@ -200,6 +233,8 @@ try {
   await evaluate("document.getElementById('preview').focus()");
   async function inputReady(revision) {
     await until(async () => {
+      const error = await evaluate("document.getElementById('error').hidden ? null : document.getElementById('error').textContent");
+      if (error) throw new Error(`Native input refused: ${error}`);
       if (!await evaluate("!document.getElementById('inspect').disabled && document.getElementById('display').dataset.synchronized === 'true'")) return false;
       return (await inspect()).view.input_revision >= revision;
     }, `native input revision ${revision}`);
@@ -215,8 +250,11 @@ try {
   async function nativePointer(point, type = "mouseMoved", modifiers = 0, buttons = 0) {
     const revision = (await inspect()).view.input_revision;
     const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[0]}) * r.width / ${interactiveInitial.view.width}, y:r.y + (${point[1]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[1]}) * r.height / ${interactiveInitial.view.height}}; })()`);
+    // CDP requires the held button on mouseMoved too. Omitting it can drop
+    // pointer capture even when the buttons bitmask still says left is down.
     await command("Input.dispatchMouseEvent", {type,...position,modifiers,buttons,
-      ...(type === "mouseMoved" ? {} : {button:"left",clickCount:1})});
+      button: type === "mouseMoved" ? (buttons & 1 ? "left" : "none") : "left",
+      ...(type === "mouseMoved" ? {} : {clickCount:1})});
     await inputReady(revision + 1);
   }
   async function pixelHash() {
@@ -318,6 +356,8 @@ try {
   receipt.passed = true;
 } catch (error) {
   receipt.passed = false; receipt.error = redact(error.stack || error); process.exitCode = 1;
+  try { receipt.failure_state = await captureFailure?.(); }
+  catch (diagnostic) { receipt.diagnostic_error = redact(diagnostic.message || diagnostic); }
 } finally {
   if (studio) await stop(studio.child);
   ws?.close(); browser.kill("SIGTERM"); await stop(browser);

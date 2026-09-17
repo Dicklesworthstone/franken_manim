@@ -99,7 +99,19 @@ pub fn studio_input_command(
         .event
         .validate()
         .map_err(|_| ProtocolError::Malformed("invalid Studio input event"))?;
-    let mut document = Writer::new(STUDIO_INPUT_COMMAND_SCHEMA);
+    // Bound every writer append before allocation, including the hex label's
+    // tighter effective document ceiling. A huge scene name cannot allocate an
+    // unbounded intermediate document only to be rejected afterward.
+    let document_limit = STUDIO_INPUT_DOCUMENT_LIMIT
+        .min((MAX_STUDIO_INPUT_LABEL_BYTES - STUDIO_INPUT_LABEL_PREFIX.len()) / 2);
+    limit_payload("Studio input scene name", scene.len(), document_limit)?;
+    let mut document = Writer::with_limits(
+        STUDIO_INPUT_COMMAND_SCHEMA,
+        Limits {
+            max_total: document_limit,
+            max_field: document_limit,
+        },
+    );
     document
         .put_str(scene)
         .put_i64(input.frame)
@@ -121,7 +133,8 @@ pub fn studio_input_command(
         STUDIO_INPUT_DOCUMENT_LIMIT,
     )?;
     let identity = sha256(&document);
-    let mut label = string_with_capacity(256, "Studio input command label")?;
+    let label_bytes = STUDIO_INPUT_LABEL_PREFIX.len() + document.len() * 2;
+    let mut label = string_with_capacity(label_bytes, "Studio input command label")?;
     label.push_str(STUDIO_INPUT_LABEL_PREFIX);
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in document {
