@@ -103,7 +103,7 @@ fn scripted_session(stage: &mut Stage, rng: &Pcg64Dxsm) -> (Journal, Vec<Command
 }
 
 #[test]
-fn journal_minor_two_reads_legacy_journals_without_newer_streams() {
+fn journal_reads_legacy_journals_without_newer_streams() {
     let mut writer = Writer::new(Schema::new(*b"FMNA", 3, 1, 0));
     writer.put_u32(0);
     let minor_zero = writer.finish().expect("minor-zero fixture encodes");
@@ -113,7 +113,11 @@ fn journal_minor_two_reads_legacy_journals_without_newer_streams() {
     writer.put_u32(0);
     let minor_one = writer.finish().expect("minor-one fixture encodes");
 
-    for legacy in [&minor_zero, &minor_one] {
+    let mut writer = Writer::new(Schema::new(*b"FMNA", 3, 1, 2));
+    writer.put_u32(0).put_u32(0).put_u32(0);
+    let minor_two = writer.finish().expect("minor-two fixture encodes");
+
+    for legacy in [&minor_zero, &minor_one, &minor_two] {
         let decoded = Journal::from_bytes(legacy).expect("legacy journal remains readable");
         assert!(decoded.entries().is_empty());
         assert!(decoded.events().is_empty());
@@ -357,6 +361,52 @@ fn custom_commands_are_opaque_by_decree() {
     assert_eq!(
         plan.reason,
         Some(InvalidationReason::ReplayBarrier { index: 0 })
+    );
+}
+
+#[test]
+fn typed_input_remains_stateful_replayable_and_bound_to_its_input_closure() {
+    let mut journal = Journal::new();
+    let mut input = entry_for(CommandKind::Input, "typed edit", b"edited state");
+    input.effect = EffectClass::Stateful(vec![ImpureEffectTag::UnclassifiedAnimation]);
+    input.reads.push(AssetRead {
+        path: "native/source".into(),
+        digest: sha256(b"source"),
+    });
+    let incoming = vec![input.command.clone()];
+    journal.record(input).unwrap();
+    let bytes = journal.to_bytes().unwrap();
+    let decoded = Journal::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded.to_bytes().unwrap(), bytes);
+    assert_eq!(decoded.entries()[0].command.kind, CommandKind::Input);
+    assert!(matches!(
+        decoded.entries()[0].effect,
+        EffectClass::Stateful(_)
+    ));
+    assert!(!decoded.entries()[0].is_replay_barrier());
+    assert_eq!(plan_replay(&decoded, &incoming, &|_| true).reuse, 1);
+    assert_eq!(plan_replay(&decoded, &incoming, &|_| false).reuse, 0);
+}
+
+#[test]
+fn input_discriminant_cannot_be_smuggled_into_an_older_journal_minor() {
+    let mut writer = Writer::new(Schema::new(*b"FMNA", 3, 1, 2));
+    writer
+        .put_u32(1)
+        .put_u8(7)
+        .put_digest(&sha256(b"input"))
+        .put_str("typed input")
+        .put_u8(0)
+        .put_u32(0)
+        .put_u32(0)
+        .put_bool(false)
+        .put_digest(&sha256(b"state"))
+        .put_u32(0)
+        .put_u32(0);
+    let error = Journal::from_bytes(&writer.finish().unwrap()).unwrap_err();
+    assert!(
+        error.to_string().contains("requires journal minor 1.3"),
+        "{error}"
     );
 }
 

@@ -18,13 +18,13 @@ use fmn_scene::{
 };
 
 /// Canonical request envelope schema.
-pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 0);
+pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 1);
 /// Canonical response envelope schema.
-pub const RESPONSE_SCHEMA: Schema = Schema::new(*b"FMNI", 2, 1, 1);
+pub const RESPONSE_SCHEMA: Schema = Schema::new(*b"FMNI", 2, 1, 2);
 const STUDIO_SEEK_COMMAND_SCHEMA: Schema = Schema::new(*b"FMNI", 3, 1, 0);
 
 /// The live protocol version advertised during the mandatory handshake.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 2 };
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
 
 /// Maximum distinct renderer/backend identities attached to one frame.
 ///
@@ -147,7 +147,7 @@ pub fn studio_input_command(
         MAX_STUDIO_INPUT_LABEL_BYTES,
     )?;
     Ok(CommandRecord {
-        kind: CommandKind::Custom,
+        kind: CommandKind::Input,
         identity,
         label,
     })
@@ -157,7 +157,7 @@ pub fn studio_input_payload(
     scene: &str,
     command: &CommandRecord,
 ) -> Result<StudioInput, ProtocolError> {
-    if command.kind != CommandKind::Custom {
+    if command.kind != CommandKind::Input {
         return Err(ProtocolError::Malformed("Studio input command kind"));
     }
     let hex = command
@@ -1599,6 +1599,7 @@ const fn command_kind_code(kind: CommandKind) -> u8 {
         CommandKind::CameraChange => 4,
         CommandKind::Sound => 5,
         CommandKind::Custom => 6,
+        CommandKind::Input => 7,
     }
 }
 
@@ -1611,6 +1612,7 @@ fn command_kind_from_code(code: u8) -> Result<CommandKind, ProtocolError> {
         4 => Ok(CommandKind::CameraChange),
         5 => Ok(CommandKind::Sound),
         6 => Ok(CommandKind::Custom),
+        7 => Ok(CommandKind::Input),
         _ => Err(ProtocolError::Malformed("command kind")),
     }
 }
@@ -2320,7 +2322,7 @@ mod studio_command_tests {
             },
         };
         let command = studio_input_command("interactive.v1", &input).expect("valid input");
-        assert_eq!(command.kind, CommandKind::Custom);
+        assert_eq!(command.kind, CommandKind::Input);
         assert!(command.label.starts_with("studio input "));
         assert!(command.label.len() <= MAX_STUDIO_INPUT_LABEL_BYTES);
         assert_eq!(
@@ -2362,6 +2364,8 @@ mod studio_command_tests {
 
         let mut wrong_kind = command.clone();
         wrong_kind.kind = CommandKind::Wait;
+        assert!(studio_input_payload("interactive.v1", &wrong_kind).is_err());
+        wrong_kind.kind = CommandKind::Custom;
         assert!(studio_input_payload("interactive.v1", &wrong_kind).is_err());
 
         let mut wrong_identity = command.clone();

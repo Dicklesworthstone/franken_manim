@@ -10,7 +10,7 @@ use crate::protocol::{StudioInput, studio_input_payload};
 use super::NativeSceneProgram;
 use super::program::{execution_error, invalid};
 
-const EDIT_STATE_SCHEMA: Schema = Schema::new(*b"FMEI", 1, 1, 0);
+const EDIT_STATE_SCHEMA: Schema = Schema::new(*b"FMEI", 1, 2, 0);
 /// Hard ceiling independent of caller policy; each label is separately bounded.
 pub(super) const MAX_RECORDED_INPUTS: usize = 65_536;
 
@@ -248,7 +248,7 @@ pub(super) fn decode_state<'a>(
             .map_err(execution_error)?;
         owned.push_str(label);
         let command = CommandRecord {
-            kind: CommandKind::Custom,
+            kind: CommandKind::Input,
             identity: Digest::from_bytes(digest),
             label: owned,
         };

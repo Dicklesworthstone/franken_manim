@@ -316,7 +316,9 @@ try {
   await screenshot("interactive.v1.edited.desktop.png");
   await click("#restart"); await synchronized(interactiveInitial.view.frame_count - 1);
   await until(() => evaluate("/Restart restored/.test(document.getElementById('replay').textContent)"), "native edit replay completes");
-  assert.match(await evaluate("document.getElementById('replay').textContent"), /1 reused/);
+  const replayStatus = await evaluate("document.getElementById('replay').textContent");
+  assert.ok(replayStatus.includes(`${finalState.view.input_revision} reused`), "typed input has no opaque replay barrier");
+  assert.match(replayStatus, /0 re-executed/);
   const restoredState = await inspect();
   assert.deepEqual(restoredState.nodes, finalState.nodes, "checkpoint plus input reexecution restores native scene state");
   assert.equal(await pixelHash(), finalPixels, "checkpoint plus input reexecution restores decoded pixels");

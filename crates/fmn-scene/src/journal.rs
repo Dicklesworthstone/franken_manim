@@ -31,8 +31,9 @@
 //! schema minor 1.1, the same container carries the exact typed input stream
 //! (sequence + rational-clock timestamp + payload). Minor 1.2 adds the
 //! renderer/backend identities actually used by the session, separate from
-//! replay-command identity. Minors 1.0 and 1.1 remain readable with absent
-//! newer streams represented as empty.
+//! replay-command identity. Minor 1.3 distinguishes typed scene input from
+//! opaque custom callbacks. Older minors remain readable with absent newer
+//! streams represented as empty; they cannot claim the new input vocabulary.
 
 use fmn_anim::RationalTime;
 use fmn_anim::purity::{ImpureEffect, Purity};
@@ -43,7 +44,7 @@ use std::collections::TryReserveError;
 use crate::events::{EventError, EventPayload, EventType, InputEvent, Key, Modifiers, MouseButton};
 
 /// The journal's versioned container schema (FMNA/3).
-pub const JOURNAL_SCHEMA: Schema = Schema::new(*b"FMNA", 3, 1, 2);
+pub const JOURNAL_SCHEMA: Schema = Schema::new(*b"FMNA", 3, 1, 3);
 /// The repro bundle's versioned container schema (FMNA/4).
 pub const BUNDLE_SCHEMA: Schema = Schema::new(*b"FMNA", 4, 1, 0);
 
@@ -295,6 +296,9 @@ pub enum CommandKind {
     Sound,
     /// Anything the vocabulary does not recognize.
     Custom,
+    /// Typed, recorded scene input. Its effect and input closure must still be
+    /// classified and verified; this is not a purity claim or arbitrary code.
+    Input,
 }
 
 impl CommandKind {
@@ -307,6 +311,7 @@ impl CommandKind {
             Self::CameraChange => 4,
             Self::Sound => 5,
             Self::Custom => 6,
+            Self::Input => 7,
         }
     }
 
@@ -319,6 +324,7 @@ impl CommandKind {
             4 => Self::CameraChange,
             5 => Self::Sound,
             6 => Self::Custom,
+            7 => Self::Input,
             _ => return Err(JournalError::Malformed("command kind")),
         })
     }
@@ -824,6 +830,11 @@ impl Journal {
         let mut entries = Vec::with_capacity(count.min(65_536));
         for _ in 0..count {
             let command = get_command(&mut r)?;
+            if command.kind == CommandKind::Input && r.version().1 < 3 {
+                return Err(JournalError::Malformed(
+                    "input command requires journal minor 1.3",
+                ));
+            }
             let effect = get_effect(&mut r)?;
             if command.kind == CommandKind::Custom && effect != EffectClass::Opaque {
                 return Err(JournalError::Malformed("custom command effect"));
