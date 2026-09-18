@@ -10784,6 +10784,12 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.setattr("__distribution__", "franken-manim")?;
     module.setattr("__franken_manim__", true)?;
     module.setattr("__abi_policy__", "cpython-3.13-full-abi")?;
+    // The accompanying pure-Python package is part of the portal. Direct
+    // ExtensionFileLoader and embedded users must see the same playback,
+    // recovery, output and interaction semantics as the installed wheel.
+    py.import("fmn_python.initialization")?
+        .getattr("initialize")?
+        .call1((module,))?;
     Ok(())
 }
 
@@ -10846,10 +10852,18 @@ pub(crate) fn with_python_test_module<T>(
 
         let hook_globals = PyDict::new(py);
         hook_globals
+            .set_item(
+                "_fmn_source_package",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/python"),
+            )
+            .expect("embedding source package path");
+        hook_globals
             .set_item("_fmn_unraisable", PyList::empty(py))
             .expect("install unraisable capture list");
         let hook_source = CString::new(
             r#"import sys as _fmn_sys
+_fmn_previous_path = _fmn_sys.path[:]
+_fmn_sys.path.insert(0, _fmn_source_package)
 _fmn_old_unraisablehook = _fmn_sys.unraisablehook
 def _fmn_capture_unraisable(event):
     _fmn_unraisable.append(
@@ -10883,6 +10897,12 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
             manimlib(py, &module).expect("initialize manimlib");
             body(py, &module, &suite_globals)
         }));
+        py.run(
+            c"_fmn_sys.path[:] = _fmn_previous_path",
+            Some(&hook_globals),
+            None,
+        )
+        .expect("restore embedding host module search path");
         let lifetime_globals = PyDict::new(py);
         lifetime_globals.set_item("gc", &gc).expect("GC observer");
         lifetime_globals
@@ -11656,6 +11676,87 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("decoded native GIF/y4m/WAV acceptance suite");
+        });
+    }
+
+    #[test]
+    fn production_camera_runtime_acceptance_suite() {
+        crate::with_python_test_module("camera runtime acceptance", |py, module, globals| {
+            assert_eq!(
+                module
+                    .getattr("_FMN_PORTAL_RUNTIME_STATE")
+                    .and_then(|state| state.extract::<String>())
+                    .expect("complete production initialization"),
+                "ready"
+            );
+            for (name, text) in [
+                (
+                    "camera_motion.py",
+                    include_str!("../tests/camera_motion.py"),
+                ),
+                (
+                    "camera_execution.py",
+                    include_str!("../tests/camera_execution.py"),
+                ),
+                (
+                    "updater_family.py",
+                    include_str!("../tests/updater_family.py"),
+                ),
+            ] {
+                globals.set_item("__file__", name).expect("suite filename");
+                let source = CString::new(text).expect("camera suite contains no NUL");
+                py.run(source.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .expect("native camera and updater family acceptance");
+            }
+        });
+    }
+
+    #[test]
+    fn production_persistent_runtime_acceptance_suite() {
+        crate::with_python_test_module("persistent runtime recovery", |py, _module, globals| {
+            for (name, text) in [
+                (
+                    "animation_updaters.py",
+                    include_str!("../tests/animation_updaters.py"),
+                ),
+                (
+                    "persistent_recovery.py",
+                    include_str!("../tests/persistent_recovery.py"),
+                ),
+            ] {
+                globals.set_item("__file__", name).expect("suite filename");
+                let source = CString::new(text).expect("persistent suite contains no NUL");
+                py.run(source.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .expect("native persistent lifecycle and failure ownership");
+            }
+        });
+    }
+
+    #[test]
+    fn production_portal_runtime_acceptance_suite() {
+        crate::with_python_test_module("complete portal runtime", |py, _module, globals| {
+            for (name, text) in [
+                (
+                    "portal_initialization.py",
+                    include_str!("../tests/portal_initialization.py"),
+                ),
+                (
+                    "fading_semantics.py",
+                    include_str!("../tests/fading_semantics.py"),
+                ),
+                (
+                    "fading_family.py",
+                    include_str!("../tests/fading_family.py"),
+                ),
+            ] {
+                globals.set_item("__file__", name).expect("suite filename");
+                let source = CString::new(text).expect("portal suite contains no NUL");
+                py.run(source.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .expect("identical production initialization and exact fade restoration");
+            }
         });
     }
 

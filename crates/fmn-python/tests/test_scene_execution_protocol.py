@@ -312,6 +312,24 @@ class ExecutionTests(unittest.TestCase):
             old.Scene().play(old.Animation(mob, fail="begin"))
         self.assertTrue(mob.suspended)
         self.assertTrue(mob._is_animating)
+    def test_private_camera_clock_exposes_only_its_public_animation_roots(self):
+        class Clock:
+            def __init__(self, animations):
+                self.animations = tuple(animations)
+        self.g._fmn_camera_clock_driver_type = Clock
+        camera = self.g.Mobject()
+        first, second = self.animation(), self.g.Animation(camera)
+        group = self.g.AnimationGroup(first, second)
+        clock = Clock([group, first])
+        roots = list(execution._roots(clock, vars(self.g)))
+        self.assertEqual(roots, [group.mobject, self.mob, camera])
+
+        class Unrelated:
+            @property
+            def animations(self):
+                self.fail("arbitrary animation-like attributes were traversed")
+        self.assertEqual(list(execution._roots(Unrelated(), vars(self.g))), [])
+
     def test_installation_is_idempotent(self):
         play = self.g.Scene.play
         execution.install_scene_execution(self.g)

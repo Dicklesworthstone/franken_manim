@@ -45,6 +45,16 @@ def install_fading(native: Any) -> None:
         mobject.save_state()
         self._fade_source = mobject
         self._fade_saved_source = mobject.saved_state
+        # Piece alignment inserts invisible siblings between existing children,
+        # so restoring by aligned index can both leak padding and restore a
+        # Circle into the wrong original Square. Retain the original graph,
+        # not just its size, while the native record snapshot owns appearance.
+        self._fade_source_topology = []
+        seen = set()
+        for member in mobject.get_family():
+            if id(member) not in seen:
+                seen.add(id(member))
+                self._fade_source_topology.append((member, tuple(member.submobjects)))
         self.to_add_on_completion = target_mobject
         self.stretch, self.dim_to_match = bool(stretch), dimension
         self._fade_active = self._fade_finished = False
@@ -156,6 +166,11 @@ def install_fading(native: Any) -> None:
         if not self._fade_finished or self._fade_cleaned:
             return
         scene.remove(self.mobject, self._fade_source)
+        # Remove only the temporary alignment topology before assigning the
+        # saved records. Preserve original proxy identities and shared-child
+        # edges; trimming the padded list by length would select wrong pieces.
+        for member, children in reversed(self._fade_source_topology):
+            member.set_submobjects(children)
         self._fade_source.become(self._fade_saved_source)
         if not self.is_remover():
             scene.add(self.to_add_on_completion)

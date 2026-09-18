@@ -15,48 +15,16 @@ from fmn_python.library_constructor_authority import (
     REFERENCE_CLASS_BY_RUST_HELPER as _CONTRACT_REFERENCE_CLASS_BY_RUST_HELPER,
     REFERENCE_MODULE_BY_RUST_HELPER as _CONTRACT_REFERENCE_MODULE_BY_RUST_HELPER,
 )
-from fmn_python.schema_provenance import (
-    SchemaProvenanceError as _SchemaProvenanceError,
-    apply_schema_placeholder_provenance as _apply_schema_placeholder_provenance,
-)
-from fmn_python.rendering import install_scene_rendering as _install_scene_rendering
-from fmn_python.fading import install_fading as _install_fading
-from fmn_python.playback import install_scene_playback as _install_scene_playback
-from fmn_python.scene_state import install_scene_state as _install_scene_state
-from fmn_python.streamline_animation import install_streamline_animation as _install_streamline_animation
-from fmn_python.traced_path import install_traced_path as _install_traced_path
-from fmn_python.interaction import install_interaction as _install_interaction
-from fmn_python.interactive_editing import install_interactive_editing as _install_interactive_editing
-from fmn_python.control_events import install_control_events as _install_control_events
-from fmn_python.color_sliders import install_color_sliders as _install_color_sliders
-from fmn_python.scene_execution import install_scene_execution as _install_scene_execution
+from fmn_python.initialization import initialize as _initialize_portal
 
 _ensure_exclusive_manimlib_namespace()
 
 from . import manimlib as _native
 
-try:
-    _apply_schema_placeholder_provenance(_native)
-except _SchemaProvenanceError as error:
-    raise ImportError(f"invalid manimlib schema provenance: {error}") from error
-del _SchemaProvenanceError, _apply_schema_placeholder_provenance
-
-_install_scene_rendering(_native)
-_install_fading(_native)
-_install_scene_playback(_native)
-_install_scene_state(_native)
-_install_streamline_animation(_native)
-_install_traced_path(_native)
-_install_interactive_editing(_native)
-_install_interaction(_native)
-_install_control_events(_native)
-_install_color_sliders(_native)
-_install_scene_execution(_native)
-del _install_scene_rendering, _install_fading, _install_scene_playback, _install_scene_state
-del _install_streamline_animation, _install_traced_path
-del _install_interaction, _install_control_events, _install_color_sliders
-del _install_interactive_editing
-del _install_scene_execution
+# The extension initializes itself too. This idempotent call also makes the
+# packaging boundary explicitly reject incomplete/failed native initialization.
+_initialize_portal(_native)
+del _initialize_portal
 
 
 # The Rust API deliberately exposes ergonomic snake_case constructors, while

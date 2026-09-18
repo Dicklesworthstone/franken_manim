@@ -13,6 +13,8 @@ import math
 import sys
 from typing import Any
 
+from .scene_execution import _Execution
+
 
 def _note(error, message):
     try:
@@ -148,7 +150,7 @@ class _PersistentAnimation:
         self.groups = ()
         self.closed = self.busy = self.begun = False
         self.cleanup_pending = False
-        self.prior_suspension = []
+        self.execution = _Execution(g)
 
         def update(current, dt):
             return self.step(current, dt)
@@ -181,29 +183,29 @@ class _PersistentAnimation:
 
     def _unwind(self, original=None):
         self.cleanup_pending = False
-        actions = []
-        if self.begun:
-            if callable(getattr(self.driver, "abort", None)):
-                actions.append(lambda: self.call("abort"))
-            actions.append(lambda: self.anchor.set_animating_status(False))
-            if isinstance(self.animation, self.g["Transform"]):
-                actions.append(self.anchor.unlock_data)
-            for member, suspended in self.prior_suspension:
-                if not suspended:
-                    actions.append(lambda member=member: member.resume_updating(
-                        recurse=False, call_updater=False,
-                    ) if member._is_updating_suspended() else None)
-        actions.append(self.detach)
         first = None
-        for action in actions:
-            try:
-                action()
-            except BaseException as error:
-                if first is None:
-                    first = error
-                if original is not None:
-                    _note(original, "animation updater cleanup failed: " + type(error).__name__)
-        self.driver = None
+        diagnostic = original if original is not None else RuntimeError("animation updater cancellation failed")
+        try:
+            if self.begun:
+                # Use the same snapshots and exactly-once abort ownership as
+                # Scene.play. Root-only resumption lost prior locks, ancestor
+                # flags and already-suspended descendants after a bad callback.
+                with _composition_context(self.g, self.animation, self.scene, self.groups):
+                    first = self.execution.unwind(diagnostic)
+        except BaseException as error:
+            first = error
+            if original is not None:
+                _note(original, "animation updater cleanup failed: " + type(error).__name__)
+        try:
+            self.detach()
+        except BaseException as error:
+            if first is None:
+                first = error
+            if original is not None:
+                _note(original, "animation updater detachment failed: " + type(error).__name__)
+        finally:
+            self.execution.release()
+            self.driver = None
         if first is not None and original is None:
             raise first
 
@@ -228,10 +230,14 @@ class _PersistentAnimation:
         duration = _duration(self.driver)
         if self.cycle and duration == 0:
             raise ValueError("a cycling animation updater requires positive run_time")
-        self.prior_suspension = [
-            (member, member._is_updating_suspended())
-            for member in self.anchor.get_family()
-        ]
+        # Snapshot actual public roots before begin, including ancestors and
+        # shared descendants. A native-only adapter may expose no Python root,
+        # so capture the public animation even when driving a native handle.
+        public_handle, = self.execution.wrap((self.animation,))
+        if self.driver is self.animation:
+            self.driver = public_handle
+        else:
+            self.driver, = self.execution.wrap((self.driver,))
         self.begun = True
         self.call("begin")
         return not self.closed
@@ -293,6 +299,7 @@ class _PersistentAnimation:
                             if isinstance(retained, group_driver) and retained.group is group:
                                 group._composition_driver = None
                     self.driver = None
+                    self.execution.release()
                 return
             following = elapsed + delta
             if not math.isfinite(following):

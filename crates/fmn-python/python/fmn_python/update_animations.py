@@ -39,7 +39,9 @@ def install_update_animations(native: Any) -> None:
         original_init(self, mobject, tracked_mobject, **kwargs)
         # Reference update.py: capture exactly here, before either object can
         # move between Animation construction and Scene.play.
-        self.diff = mobject.get_center() - tracked_mobject.get_center()
+        if not (getattr(original_init, "_fmn_captures_camera_offset", False)
+                and isinstance(mobject, g.get("CameraFrame", ()))):
+            self.diff = mobject.get_center() - tracked_mobject.get_center()
 
     def prepare(self):
         tracked = self.tracked_mobject

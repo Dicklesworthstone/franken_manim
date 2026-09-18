@@ -587,6 +587,7 @@ def install(native):
     _install_matching_strings(g)
     _install_composition_lifecycle(g)
     _install_camera_pose(g)
+    _install_camera_motion(g)
     _install_camera_choreography(g)
     _install_partial_reveals(g)
     _install_border_write(g)
@@ -725,7 +726,7 @@ def _install_matching_parts(g):
             return self.animation.get_run_time()
 
         def begin(self):
-            self.begun = True
+            self.begun, self.finished = True, False
             self.animation.begin()
 
         def update_mobjects(self, dt):
@@ -744,6 +745,9 @@ def _install_matching_parts(g):
         def abort(self):
             if not self.begun or self.finished:
                 return
+            # Several nested owners may unwind the same leaf. An authored
+            # abort belongs to this execution once, even when it raises.
+            self.finished = True
             animation = self.animation
             abort_animation = getattr(animation, "abort", None)
             if callable(abort_animation):
@@ -754,7 +758,7 @@ def _install_matching_parts(g):
                     animation.mobject.unlock_data()
                 if (animation.suspend_mobject_updating
                         and getattr(animation, "mobject_was_updating", False)):
-                    animation.mobject.resume_updating()
+                    animation.mobject.resume_updating(call_updater=False)
 
     def make_driver(scene, animation):
         if isinstance(animation.mobject, g["CameraFrame"]):
@@ -1213,17 +1217,17 @@ def _install_composition_lifecycle(g):
         else:
             driver.abort()
 
-    def release(self):
+    def release(self, *, call_updater=True):
         cameras = getattr(self, "_composition_camera_resumes", ())
         self._composition_camera_resumes = []
         try:
             self.mobject.set_animating_status(False)
             if getattr(self, "_composition_resumes_updating", False):
                 self._composition_resumes_updating = False
-                self.mobject.resume_updating()
+                self.mobject.resume_updating(call_updater=call_updater)
         finally:
             for camera in cameras:
-                camera.resume_updating()
+                camera.resume_updating(call_updater=call_updater)
 
     def abort(self):
         driver = getattr(self, "_composition_driver", None)
@@ -1233,7 +1237,7 @@ def _install_composition_lifecycle(g):
             abort_children(driver)
         finally:
             self._composition_driver = None
-            release(self)
+            release(self, call_updater=False)
 
     def drive(self, method, *args):
         driver = getattr(self, "_composition_driver", None)
@@ -1523,6 +1527,91 @@ def _install_camera_pose(g):
     CameraFrame.interpolate = interpolate
 
 
+def _install_camera_motion(g):
+    """Give spatial camera animations a real pose protocol, not empty records.
+
+    These are the same public classes used for drawables. Choreo continues to
+    own sampling and composition; the CameraFrame core owns rotations and the
+    VMobject path owns true-arclength sampling. No alternate camera clock or
+    substitute point buffer is introduced.
+    """
+    if g.get("_FMN_CAMERA_MOTION_INSTALLED", False):
+        return
+    CameraFrame = g["CameraFrame"]
+    supported = []
+    Rotating = g.get("Rotating")
+    if Rotating is not None:
+        original_rotation_interpolate = Rotating.interpolate_mobject
+
+        def rotating_interpolate(self, alpha):
+            frame = self.mobject
+            if not isinstance(frame, CameraFrame):
+                return original_rotation_interpolate(self, alpha)
+            starting = self.starting_mobject
+            # A CameraFrame has no drawable records. Rotating's ordinary
+            # family_members_with_points()/match_points() loop therefore
+            # cannot restore its pose. Reset the spatial components before
+            # each absolute-angle rotation, including begin(0) and finish,
+            # so orientation does not accumulate with the frame count.
+            # FOV is an optical uniform, not part of that spatial reset.
+            frame._core.set_center(starting._core.center())
+            frame._core.set_shape(starting._core.shape())
+            frame._core.set_orientation(starting._core.orientation())
+            # As for drawable Rotating, restoration precedes rate evaluation:
+            # an authored easing function may inspect or modify the live pose.
+            angle = self.rate_func(self.time_spanned_alpha(float(alpha))) * self.angle
+            # Keep authored CameraFrame.rotate overrides on their receiver.
+            # The dispatched method owns validation; pre-calling the stock
+            # core would wrongly reject inputs an override knows how to use.
+            # Like CameraFrame.rotate itself, about_point/about_edge do not
+            # translate the frame; the native core rotates its orientation.
+            frame.rotate(angle, axis=self.axis, about_point=self.about_point,
+                         about_edge=self.about_edge)
+
+        rotating_interpolate.__name__ = "interpolate_mobject"
+        rotating_interpolate.__qualname__ = Rotating.__qualname__ + ".interpolate_mobject"
+        rotating_interpolate.__module__ = Rotating.__module__
+        Rotating.interpolate_mobject = rotating_interpolate
+        supported.append(Rotating)
+
+    PathMotion = g.get("MoveAlongPath")
+    if PathMotion is not None:
+        # The existing Python lifecycle calls path.point_from_proportion and
+        # frame.move_to. Both already dispatch to the correct native core.
+        supported.append(PathMotion)
+
+    Maintain = g.get("MaintainPositionRelativeTo")
+    if Maintain is not None:
+        original_init = Maintain.__init__
+        original_maintain_interpolate = Maintain.interpolate_mobject
+
+        def maintain_init(self, mobject, tracked_mobject=None, **kwargs):
+            original_init(self, mobject, tracked_mobject, **kwargs)
+            if isinstance(mobject, CameraFrame):
+                # Reference update.py captures the offset at construction,
+                # not when a later Succession interval begins.
+                self.diff = mobject.get_center() - tracked_mobject.get_center()
+
+        def maintain_interpolate(self, alpha):
+            if not isinstance(self.mobject, CameraFrame):
+                return original_maintain_interpolate(self, alpha)
+            self.mobject.shift(self.tracked_mobject.get_center()
+                               - self.mobject.get_center() + self.diff)
+
+        # The separately installed wheel's all-mobject tracking adapter
+        # must not sample authored center getters a second time.
+        maintain_init._fmn_captures_camera_offset = True
+        for name, function in (("__init__", maintain_init),
+                               ("interpolate_mobject", maintain_interpolate)):
+            function.__name__ = name
+            function.__qualname__ = Maintain.__qualname__ + "." + name
+            function.__module__ = Maintain.__module__
+            setattr(Maintain, name, function)
+        supported.append(Maintain)
+    g["_fmn_camera_motion_types"] = tuple(supported)
+    g["_FMN_CAMERA_MOTION_INSTALLED"] = True
+
+
 def _install_camera_choreography(g):
     """Run camera and drawable animations on the same Choreo release boundary."""
     import math
@@ -1547,8 +1636,23 @@ def _install_camera_choreography(g):
             raise ValueError("Camera animation must target this Scene.frame")
         if animation.remover or getattr(animation, "replace_mobject_with_target_in_scene", False):
             raise NotImplementedError("Camera animation cannot remove or replace the scene's camera identity")
-        if getattr(animation, "_native_kind", None) and not isinstance(animation, Transform):
+        if (getattr(animation, "_native_kind", None)
+                and not isinstance(animation, (Transform, *g.get("_fmn_camera_motion_types", ())))):
             raise NotImplementedError(type(animation).__name__ + " has no camera-pose animation protocol; use Transform or frame.animate")
+        # The live camera deliberately has no Stage owner. Check helper
+        # ownership against the Scene explicitly instead of comparing with
+        # camera._scene (which would silently allow foreign paths/targets).
+        for class_name, attribute in (("MoveAlongPath", "path"),
+                                      ("MaintainPositionRelativeTo", "tracked_mobject")):
+            cls = g.get(class_name)
+            if cls is not None and isinstance(animation, cls):
+                helper = getattr(animation, attribute)
+                for member in helper.get_family():
+                    owner = getattr(member, "_scene", None)
+                    if owner is not None and owner is not scene:
+                        error = g.get("_ForeignStageError", ValueError)
+                        raise error("Camera motion cannot reference a " + attribute
+                                    + " from another Scene; copy it")
         if isinstance(animation, Transform) and animation._target_attr is None:
             raise NotImplementedError("A camera Transform requires a camera target")
         target = getattr(animation, "target_mobject", None)
@@ -1610,7 +1714,7 @@ def _install_camera_choreography(g):
                 if (not self.was_suspended and animation.suspend_mobject_updating
                         and animation.mobject._is_updating_suspended()):
                     animation.mobject_was_updating = False
-                    animation.mobject.resume_updating()
+                    animation.mobject.resume_updating(call_updater=False)
 
     g["_fmn_make_camera_driver"] = CameraLeaf
 
@@ -1653,8 +1757,12 @@ def _install_camera_choreography(g):
 
     class ClockDriver:
         """One non-rendering timing slot; no independent sampling or clock."""
-        def __init__(self, scene, slot, children):
+        def __init__(self, scene, slot, children, animations):
             self.scene, self.slot, self.children = scene, slot, children
+            # Retain the actual public roots separately from the private
+            # timing slot. The execution owner snapshots these BEFORE begin;
+            # the point-free slot has none of their suspension/lock state.
+            self.animations = tuple(animations)
             self.run_times = [float(child.get_run_time()) for child in children]
             if any(not math.isfinite(value) or value < 0 for value in self.run_times):
                 raise ValueError("Camera play runtimes must be finite and nonnegative")
@@ -1706,6 +1814,8 @@ def _install_camera_choreography(g):
                         first = error
             if first is not None:
                 raise first
+
+    g["_fmn_camera_clock_driver_type"] = ClockDriver
 
     def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
         if getattr(self, "_fmn_camera_play_active", False):
@@ -1782,16 +1892,20 @@ def _install_camera_choreography(g):
                         self.add(root)
                 children.append(make_driver(self, animation))
             self._adopt(slot)
-            clock = ClockDriver(self, slot, children)
+            clock = ClockDriver(self, slot, children, animations)
             spec = ("python_callback", slot, None, clock.run_time, None, 0., {"remover": True})
             return self._play_animations([spec], [clock], None, None, None, None)
-        except BaseException:
+        except BaseException as primary:
             failed = True
             for child in children:
                 try:
                     abort_driver(child)
-                except BaseException:
-                    pass
+                except BaseException as cleanup_error:
+                    try:
+                        BaseException.add_note(primary, "camera animation abort also failed: "
+                                               + type(cleanup_error).__name__)
+                    except BaseException:
+                        pass
             raise
         finally:
             try:

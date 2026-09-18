@@ -37,7 +37,11 @@ def _roots(callback, g):
         root = getattr(current, "mobject", None)
         if isinstance(root, g["Mobject"]):
             yield root
-        if isinstance(current, g.get("AnimationGroup", ())):
+        if isinstance(current, (g.get("AnimationGroup", ()),
+                                g.get("_fmn_camera_clock_driver_type", ()))):
+            # A mixed camera play is lowered to one private clock slot. Its
+            # public animations (including nested cameras and drawable
+            # siblings) own the real transients, not the empty slot.
             pending.extend(reversed(tuple(current.animations)))
         elif isinstance(current, composition_type):
             pending.append(current.group)
@@ -59,6 +63,7 @@ class _TransientState:
 
     def restore(self, primary):
         mob = self.mob
+        first_error = None
         # Independent best efforts: a stale native handle must not prevent
         # recovery of another family member or its Python lock projection.
         try:
@@ -68,6 +73,7 @@ class _TransientState:
             elif not self.suspended and now:
                 mob.resume_updating(recurse=False, call_updater=False)
         except BaseException as error:
+            first_error = error
             _note(primary, "animation suspension recovery failed: " + type(error).__name__)
         try:
             attrs = vars(mob)
@@ -82,7 +88,10 @@ class _TransientState:
             for name in self.absent_locks:
                 attrs.pop(name, None)
         except BaseException as error:
+            if first_error is None:
+                first_error = error
             _note(primary, "animation lock recovery failed: " + type(error).__name__)
+        return first_error
 
 
 class _Callback:
@@ -154,6 +163,7 @@ class _Execution:
         if self.closed:
             return
         self.closed = True
+        first_error = None
         seen = set()
         for handle in reversed(self.begun):
             callback = handle.callback
@@ -166,11 +176,18 @@ class _Execution:
                     if callable(abort) and not getattr(abort, "_fmn_schema_placeholder", False):
                         abort()
                 except BaseException as cleanup_error:
+                    if first_error is None:
+                        first_error = cleanup_error
                     _note(error, "animation abort also failed: " + type(cleanup_error).__name__)
         # Restore only after all specialized/legacy abort handlers have run.
         if self.begun:
             for snapshot in reversed(tuple(self.snapshots.values())):
-                snapshot.restore(error)
+                recovery_error = snapshot.restore(error)
+                if first_error is None:
+                    first_error = recovery_error
+        # Scene failures preserve their primary exception; explicit persistent
+        # cancellation has no primary and must surface a failed abort/recovery.
+        return first_error
 
 
 def install_scene_execution(native: Any) -> None:

@@ -2132,12 +2132,32 @@ class Mobject(_BridgeMobject):
         return self
 
     def suspend_updating(self, recurse=True):
-        self._suspend_updating(bool(recurse))
+        recurse = bool(recurse)
+        if self._is_bound() or not recurse:
+            self._suspend_updating(recurse)
+        else:
+            # A detached proxy's nursery contains only its own root. The
+            # family graph still lives in Python until Scene.add adopts it;
+            # a recursive Stage operation on that nursery misses every child.
+            # Use the same durable native flag for each actual family member.
+            for member in _family_preorder(self):
+                member._suspend_updating(False)
         return self
 
     def resume_updating(self, recurse=True, call_updater=True):
         recurse = bool(recurse)
-        self._resume_updating(recurse)
+        if self._is_bound() or not recurse:
+            self._resume_updating(recurse)
+        else:
+            for member in _family_preorder(self):
+                member._resume_updating(False)
+        # Native ancestry is complete only within the bound Stage. Detached
+        # parents (including a partially adopted Group's parent links) are
+        # Python back-edges and must be cleared without visiting siblings or
+        # invoking their updaters. Preserve the single requested update(0).
+        for parent in self.get_ancestors():
+            if not parent._is_bound():
+                parent._resume_updating(False)
         if call_updater:
             self.update(0.0, recurse=recurse)
         return self
