@@ -82,6 +82,19 @@ class LiveInputContextTests(unittest.TestCase):
         self.assertEqual(self.scene.events, [])
         self.assertIsNone(_LIVE_EVENT.get())
 
+    def test_authored_override_can_dispatch_directly_before_calling_a_scene_gateway(self):
+        seen = []
+        def override(symbol, modifiers):
+            seen.append(input_modifiers(self.scene))
+            self.dispatcher.dispatch(self.g["EventType"].KeyPressEvent,
+                                     symbol=symbol, modifiers=modifiers)
+        self.scene.on_key_press = override
+        dispatch_live_input(self.scene, "on_key_press", (ord("h"), 2), 2)
+        self.assertEqual(seen, [2])
+        self.assertTrue(self.dispatcher.is_key_pressed(ord("h")))
+        self.assertFalse(input_key_pressed(self.scene, ord("h")))
+        self.assertIsNone(_LIVE_EVENT.get())
+
 
 if __name__ == "__main__":
     unittest.main()

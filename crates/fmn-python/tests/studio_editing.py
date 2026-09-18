@@ -141,6 +141,154 @@ class NativeEditingTests(unittest.TestCase):
         self.assertEqual(len(self.s.undo_stack), 0)
         self.box.clear_event_listners()
 
+    def test_drag_owned_by_gesture_does_not_redispatch_motion_or_pan_camera(self):
+        self.motion([0, 0, 0])
+        seen = []
+        self.box.add_mouse_motion_listner(lambda mob, event: seen.append("motion"))
+        camera = self.s.frame.get_center().copy()
+        self.key("h")
+        dispatch_live_input(self.s, "on_mouse_drag", (np.array([0.5, 0.5, 0]),
+                            np.array([0.5, 0.5, 0]), 1, 0), 0)
+        self.assertEqual(seen, [])
+        np.testing.assert_allclose(self.box.get_center(), [0.5, 0, 0])
+        np.testing.assert_allclose(self.s.frame.get_center(), camera)
+        self.box.clear_event_listners()
+
+    def test_removed_selection_cannot_be_moved_by_a_stale_gesture(self):
+        self.motion([0, 0, 0])
+        self.key("g")
+        self.s.remove(self.box)
+        self.motion([1, 2, 3])
+        np.testing.assert_allclose(self.box.get_center(), [0, 0, 0])
+        self.assertFalse(self.s.is_grabbing)
+        self.assertEqual(len(self.s.undo_stack), 0)
+
+    def test_resize_admission_refuses_extreme_scale_before_geometry_or_history_changes(self):
+        self.motion([1, 1, 0])
+        self.key("t")
+        points = self.box.get_points().copy()
+        with self.assertRaisesRegex(ValueError, "resize scale"):
+            self.motion([1e10, 1e10, 0])
+        np.testing.assert_array_equal(points, self.box.get_points())
+        self.assertEqual(len(self.s.undo_stack), 0)
+
+    def test_fixed_frame_grab_and_resize_use_frame_not_world_coordinates(self):
+        self.box.fix_in_frame()
+        self.s.frame.shift(m.RIGHT + 2 * m.UP).scale(2).rotate(m.PI / 2)
+        to_world = self.s.frame.from_fixed_frame_point
+        self.motion(to_world([0, 0, 0]))
+        self.key("h")
+        self.motion(to_world([1, 2, 0]))
+        np.testing.assert_allclose(self.box.get_center(), [1, 0, 0], atol=1e-6)
+        self.key("h", release=True)
+        self.motion(to_world([2, 1, 0]))
+        self.key("t")
+        self.motion(to_world([3, 2, 0]))
+        np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [4, 4], atol=1e-5)
+
+    def test_mixed_coordinate_space_selection_is_refused_before_mutation(self):
+        fixed = m.Square().shift(3 * m.RIGHT).fix_in_frame()
+        self.s.add(fixed)
+        self.s.add_to_selection(fixed)
+        self.motion([0, 0, 0])
+        with self.assertRaisesRegex(ValueError, "world-space and fixed-frame"):
+            self.key("g")
+        self.assertEqual(len(self.s.undo_stack), 0)
+        np.testing.assert_allclose(self.box.get_center(), [0, 0, 0])
+        np.testing.assert_allclose(fixed.get_center(), [3, 0, 0])
+
+    def test_rotated_camera_marquee_and_topmost_tap_project_all_bounds_corners(self):
+        top = m.Square(side_length=1)
+        self.s.add(top)
+        self.s.clear_selection()
+        self.s.frame.shift(m.RIGHT).scale(1.5).rotate(m.PI / 2)
+        self.motion([0, 0, 0])
+        self.key("s")
+        self.key("s", release=True)
+        self.assertEqual(tuple(self.s.selection), (top,))
+        self.s.clear_selection()
+        center = self.s.frame.to_fixed_frame_point([0, 0, 0])
+        self.motion(self.s.frame.from_fixed_frame_point(center - np.array([1.5, 1.5, 0])))
+        self.key("s")
+        self.motion(self.s.frame.from_fixed_frame_point(center + np.array([1.5, 1.5, 0])))
+        self.key("s", release=True)
+        self.assertEqual(set(self.s.selection), {self.box, top})
+        self.assertEqual(len(self.s.undo_stack), 0, "selection alone is not a geometry edit")
+
+    def test_shift_sweep_is_additive_and_release_does_not_toggle_collected_objects(self):
+        second = m.Square(side_length=1).shift(3 * m.RIGHT)
+        self.s.add(second)
+        self.s.clear_selection()
+        self.motion([-3, 0, 0])
+        self.key("s", 1)
+        self.motion([0, 0, 0], 1)
+        self.motion([3, 0, 0], 1)
+        self.motion([0, 0, 0], 1)  # revisiting a hit does not deselect it
+        self.key("s", 1, release=True)
+        self.assertEqual(set(self.s.selection), {self.box, second})
+        self.assertFalse(self.s.is_selecting)
+        self.assertNotIn(self.s.selection_rectangle, self.s.mobjects)
+
+    def test_fixed_frame_tap_under_moved_camera_selects_the_visible_object(self):
+        self.box.fix_in_frame().shift(m.RIGHT)
+        self.s.clear_selection()
+        self.s.frame.shift(4 * m.LEFT + m.UP).rotate(m.PI / 2).scale(2)
+        self.motion(self.s.frame.from_fixed_frame_point([1, 0, 0]))
+        self.key("s")
+        self.key("s", release=True)
+        self.assertEqual(tuple(self.s.selection), (self.box,))
+
+    def test_pointful_scope_excludes_disabled_descendants_and_deduplicates_aliases(self):
+        child = m.Square().shift(3 * m.RIGHT)
+        group = m.Group(self.box, child)
+        self.s.add(group)
+        self.s.disable_interaction(child)
+        self.s.select_top_level_mobs = False
+        self.s.regenerate_selection_search_set()
+        candidates = self.s.get_selection_search_set()
+        self.assertIn(self.box, candidates)
+        self.assertNotIn(child, candidates)
+        self.assertEqual(len(candidates), len({id(mob) for mob in candidates}))
+        self.s.enable_interaction(child)
+        self.assertIn(child, self.s.get_selection_search_set())
+
+    def test_group_ungroup_delete_and_nudge_keep_native_history_and_clear_redo_branch(self):
+        other = m.Square().shift(3 * m.RIGHT)
+        self.s.add(other)
+        self.s.add_to_selection(other)
+        self.key("g", 2)
+        self.assertEqual(len(self.s.selection), 1)
+        group = self.s.selection[0]
+        self.assertEqual(set(group), {self.box, other})
+        self.key("g", 3)
+        self.assertEqual(set(self.s.selection), {self.box, other})
+        self.key(0xff08)  # Reference BACKSPACE
+        self.assertNotIn(self.box, self.s.mobjects)
+        self.key("z", 2)
+        self.assertIn(self.box, self.s.mobjects)
+        self.assertTrue(self.s.redo_stack)
+        self.s.add_to_selection(self.box)
+        self.key(0xff53, 1)  # Reference RIGHT, with shift = 10x nudge
+        np.testing.assert_allclose(self.box.get_center(), [0.5, 0, 0])
+        self.assertFalse(self.s.redo_stack)
+
+    def test_palette_swatch_is_pickable_without_becoming_selectable_or_history_content(self):
+        original = self.box.get_color()
+        self.s.frame.shift(m.RIGHT).rotate(m.PI / 2).scale(1.5)
+        self.key("c")
+        self.assertIn(self.s.color_palette, self.s.mobjects)
+        self.assertNotIn(self.s.color_palette, self.s.get_selection_search_set())
+        self.assertEqual(len(self.s.undo_stack), 0)
+        swatch = next(s for s in self.s.color_palette if s.get_color() != original)
+        expected = swatch.get_color()
+        world = self.s.frame.from_fixed_frame_point(swatch.get_center())
+        self.s.choose_color(world)
+        self.assertEqual(self.box.get_color(), expected)
+        self.assertNotIn(self.s.color_palette, self.s.mobjects)
+        self.key("z", 2)
+        self.assertEqual(self.box.get_color(), original)
+        self.assertNotIn(self.s.color_palette, self.s.mobjects)
+
 
 class WorkerEditingTests(unittest.TestCase):
     def test_unedited_interactive_scene_uses_real_modifiers_native_history_and_pixels(self):

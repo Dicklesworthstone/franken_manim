@@ -7,6 +7,7 @@ still uses the normal SceneState scope (not arbitrary Python-effect rollback).
 """
 from __future__ import annotations
 
+from itertools import product
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,6 +29,16 @@ def install_interactive_editing(native: Any) -> None:
     def selected(scene):
         return tuple(id(mob) for mob in scene.selection)
 
+    def fixed_selection(scene):
+        spaces = {mob.is_fixed_in_frame() for mob in scene.selection.family_members_with_points()}
+        if len(spaces) > 1:
+            raise ValueError("select world-space and fixed-frame objects separately before transforming")
+        return spaces == {True}
+
+    def pointer(scene, point, fixed):
+        point = np.asarray(g["_vec3"](point))
+        return scene.frame.to_fixed_frame_point(point) if fixed else point
+
     def remember(scene, gesture=None):
         if gesture is None or not gesture.saved:
             scene.save_state()
@@ -43,9 +54,13 @@ def install_interactive_editing(native: Any) -> None:
 
     def current(scene, kind):
         gesture = scene.__dict__.get("_fmn_edit_gesture")
-        if gesture is not None and (gesture.members != selected(scene) or not gesture.members):
-            cancel(scene)
-            return None
+        if gesture is not None:
+            visible = {id(member) for root in scene.mobjects for member in root.get_family()}
+            if (gesture.members != selected(scene) or not gesture.members
+                    or not set(gesture.members).issubset(visible)
+                    or gesture.fixed != fixed_selection(scene)):
+                cancel(scene)
+                return None
         return gesture if gesture is not None and gesture.kind == kind else None
 
     def prepare_grab(self):
@@ -53,10 +68,11 @@ def install_interactive_editing(native: Any) -> None:
             cancel(self)
             return
         old = self.__dict__.get("_fmn_edit_gesture")
-        self.mouse_to_selection = self.mouse_point.get_center() - self.selection.get_center()
+        fixed = fixed_selection(self)
+        self.mouse_to_selection = pointer(self, self.mouse_point.get_center(), fixed) - self.selection.get_center()
         self._fmn_edit_gesture = SimpleNamespace(
             kind="grab", members=selected(self), saved=bool(old and old.saved),
-            key=None, axis=None,
+            key=None, axis=None, fixed=fixed,
         )
         self.is_grabbing = True
 
@@ -64,7 +80,7 @@ def install_interactive_editing(native: Any) -> None:
         gesture = current(self, "grab")
         if gesture is None:
             return
-        desired = np.asarray(g["_vec3"](point)) - self.mouse_to_selection
+        desired = pointer(self, point, gesture.fixed) - self.mouse_to_selection
         delta = desired - self.selection.get_center()
         k = keys()
         # The key that opened a gesture is its owner; unrelated held keys and
@@ -88,14 +104,15 @@ def install_interactive_editing(native: Any) -> None:
             cancel(self)
             return
         old = self.__dict__.get("_fmn_edit_gesture")
-        center, mouse = self.selection.get_center(), self.mouse_point.get_center()
+        fixed = fixed_selection(self)
+        center, mouse = self.selection.get_center(), pointer(self, self.mouse_point.get_center(), fixed)
         self.scale_about_point = (self.selection.get_corner(center - mouse)
                                   if about_corner else center.copy())
         self.scale_ref_vect = mouse - self.scale_about_point
         self.scale_ref_width, self.scale_ref_height = self.selection.get_width(), self.selection.get_height()
         self._fmn_edit_gesture = SimpleNamespace(
             kind="resize", members=selected(self), saved=bool(old and old.saved),
-            key=keys().resize, scales=np.ones(3),
+            key=keys().resize, scales=np.ones(3), fixed=fixed,
         )
         self.is_grabbing = False
 
@@ -103,7 +120,7 @@ def install_interactive_editing(native: Any) -> None:
         gesture = current(self, "resize")
         if gesture is None:
             return
-        vector = np.asarray(g["_vec3"](point)) - self.scale_about_point
+        vector = pointer(self, point, gesture.fixed) - self.scale_about_point
         reference = self.scale_ref_vect
         if input_modifiers(self) & control:
             target = np.ones(3)
@@ -131,8 +148,7 @@ def install_interactive_editing(native: Any) -> None:
                         self.selection.stretch(float(ratio), dim, about_point=self.scale_about_point)
             gesture.scales = target
 
-    def on_mouse_motion(self, point, d_point):
-        Scene.on_mouse_motion(self, point, d_point)
+    def edit_motion(self, point):
         self.crosshair.move_to(self.frame.to_fixed_frame_point(point))
         gesture = self.__dict__.get("_fmn_edit_gesture")
         if gesture is not None:
@@ -147,15 +163,97 @@ def install_interactive_editing(native: Any) -> None:
             else:
                 self.update_selection_rectangle(self.selection_rectangle)
 
+    def on_mouse_motion(self, point, d_point):
+        Scene.on_mouse_motion(self, point, d_point)
+        edit_motion(self, point)
+
     def on_mouse_drag(self, point, d_point, buttons, modifiers):
         # Preserve ordinary camera drag when no editing gesture owns it.
         # Listeners already had their chance to consume the event in the
         # scene input gateway; editing never dispatches them a second time.
         if self.__dict__.get("_fmn_edit_gesture") is not None or self.is_selecting:
-            on_mouse_motion(self, point, d_point)
+            edit_motion(self, point)
         else:
             Scene.on_mouse_drag(self, point, d_point, buttons, modifiers)
             self.crosshair.move_to(self.frame.to_fixed_frame_point(point))
+
+    def projected_bounds(scene, mob):
+        # Transform ALL eight native bounding-box corners. Transforming only
+        # min and max reverses/loses extents under a rotated camera. Fixed
+        # objects already occupy the advertised frame plane; do not map twice.
+        bounds = mob.get_bounding_box()
+        corners = np.array(list(product(*zip(bounds[0], bounds[2]))))
+        if not mob.is_fixed_in_frame():
+            corners = np.array([scene.frame.to_fixed_frame_point(point) for point in corners])
+        if not np.isfinite(corners).all():
+            raise ValueError("selection requires finite projected bounds")
+        return corners[:, :2].min(axis=0), corners[:, :2].max(axis=0)
+
+    def regenerate_selection_search_set(self):
+        excluded = {id(mob) for mob in getattr(self, "unselectables", ())}
+        candidates, seen = [], set()
+        for root in self.mobjects:
+            if id(root) in excluded:
+                continue
+            members = [root] if self.select_top_level_mobs else root.family_members_with_points()
+            for mob in members:
+                if id(mob) not in excluded and id(mob) not in seen:
+                    seen.add(id(mob))
+                    candidates.append(mob)
+        self.selection_search_set = candidates
+
+    def gather_new_selection(self):
+        self.is_selecting = False
+        rectangle = self.selection_rectangle
+        if rectangle not in self.mobjects:
+            return
+        self.remove(rectangle)
+        bounds = rectangle.get_bounding_box()
+        low, high = bounds[0, :2], bounds[2, :2]
+        tap = bool(np.max(high - low) < 1e-2)
+        additions = []
+        for mob in reversed(self.get_selection_search_set()):
+            start, end = projected_bounds(self, mob)
+            if np.all(end >= low - 1e-2) and np.all(start <= high + 1e-2):
+                additions.append(mob)
+                if tap:
+                    break
+        self.toggle_from_selection(*additions)
+
+    def handle_sweeping_selection(self, point):
+        fixed = self.frame.to_fixed_frame_point(point)[:2]
+        for mob in reversed(self.get_selection_search_set()):
+            low, high = projected_bounds(self, mob)
+            if np.all(fixed >= low - g["_SMALL_BUFF"]) and np.all(fixed <= high + g["_SMALL_BUFF"]):
+                self.add_to_selection(mob)
+                break
+
+    def choose_color(self, point):
+        fixed = self.frame.to_fixed_frame_point(point)[:2]
+        # The palette is deliberately unselectable but must remain pickable.
+        # Include its actual native swatches, not a duplicate color lookup.
+        candidates = [member for root in self.mobjects
+                      if root is self.color_palette or root not in self.unselectables
+                      for member in root.family_members_with_points()]
+        color = None
+        for mob in reversed(candidates):
+            low, high = projected_bounds(self, mob)
+            if np.all(fixed >= low) and np.all(fixed <= high):
+                color = mob.get_color()
+                break
+        # The palette is transient UI, not part of the authored edit to undo.
+        self.remove(self.color_palette)
+        if color is not None and len(self.selection):
+            remember(self)
+            self.selection.set_color(color)
+
+    def toggle_color_palette(self):
+        if not len(self.selection):
+            return
+        if self.color_palette in self.mobjects:
+            self.remove(self.color_palette)
+        else:
+            self.add(self.color_palette)
 
     def on_key_press(self, symbol, modifiers):
         k = keys()
@@ -221,6 +319,7 @@ def install_interactive_editing(native: Any) -> None:
             self.delete_selection()
         elif symbol in g["_PYGLET_ARROW_SYMBOLS"] and len(self.selection):
             cancel(self)
+            fixed_selection(self)
             remember(self)
             vectors = (g["_LEFT"], g["_UP"], g["_RIGHT"], g["_DOWN"])
             self.nudge_selection(vectors[g["_PYGLET_ARROW_SYMBOLS"].index(symbol)], large=bool(modifiers & shift))
@@ -269,6 +368,10 @@ def install_interactive_editing(native: Any) -> None:
         "on_mouse_motion": on_mouse_motion, "on_mouse_drag": on_mouse_drag,
         "on_key_press": on_key_press, "on_key_release": on_key_release,
         "restore_state": restore_state,
+        "regenerate_selection_search_set": regenerate_selection_search_set,
+        "gather_new_selection": gather_new_selection,
+        "handle_sweeping_selection": handle_sweeping_selection,
+        "choose_color": choose_color, "toggle_color_palette": toggle_color_palette,
     }.items():
         _method(Interactive, name, method)
     g["_FMN_INTERACTIVE_EDITING_INSTALLED"] = True

@@ -318,35 +318,50 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
     let core: Bound<'_, PyCameraFrameCore> = frame.getattr("_core")?.cast_into()?;
     let camera = core.borrow().frame.clone();
     let np = scene.py().import("numpy")?;
+    let deliver = scene
+        .py()
+        .import("fmn_python.interaction")?
+        .getattr("dispatch_live_input")?;
     let point = |p: [f64; 3], relative| {
         let p = camera.from_fixed_frame_point([p[0], -p[1], p[2]], relative);
         np.call_method1("array", (p,))
     };
     match event {
         EventPayload::MouseMotion {
-            point: p, delta, ..
+            point: p,
+            delta,
+            modifiers: m,
         } => {
-            scene.call_method1("on_mouse_motion", (point(p, false)?, point(delta, true)?))?;
+            deliver.call1((
+                scene,
+                "on_mouse_motion",
+                (point(p, false)?, point(delta, true)?),
+                modifiers(m),
+            ))?;
         }
         EventPayload::MousePress {
             point: p,
             button: b,
             modifiers: m,
         } => {
-            scene.call_method1(
+            deliver.call1((
+                scene,
                 "on_mouse_press",
                 (point(p, false)?, button(b), modifiers(m)),
-            )?;
+                modifiers(m),
+            ))?;
         }
         EventPayload::MouseRelease {
             point: p,
             button: b,
             modifiers: m,
         } => {
-            scene.call_method1(
+            deliver.call1((
+                scene,
                 "on_mouse_release",
                 (point(p, false)?, button(b), modifiers(m)),
-            )?;
+                modifiers(m),
+            ))?;
         }
         EventPayload::MouseDrag {
             point: p,
@@ -354,7 +369,8 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
             button: b,
             modifiers: m,
         } => {
-            scene.call_method1(
+            deliver.call1((
+                scene,
                 "on_mouse_drag",
                 (
                     point(p, false)?,
@@ -362,10 +378,13 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
                     button(b),
                     modifiers(m),
                 ),
-            )?;
+                modifiers(m),
+            ))?;
         }
         EventPayload::MouseScroll {
-            point: p, offset, ..
+            point: p,
+            offset,
+            modifiers: m,
         } => {
             // Wheel units are pixels on the browser wire. Existing Scene zoom
             // expects an up-positive y pixel offset and a scene-space vector.
@@ -381,22 +400,29 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
                 "array",
                 ([offset[0] * pixel_size, -offset[1] * pixel_size, 0.0],),
             )?;
-            scene.call_method1(
+            deliver.call1((
+                scene,
                 "on_mouse_scroll",
                 (point(p, false)?, vector, offset[0], -offset[1]),
-            )?;
+                modifiers(m),
+            ))?;
         }
         EventPayload::KeyPress {
             key: k,
             modifiers: m,
         } => {
-            scene.call_method1("on_key_press", (key(k), modifiers(m)))?;
+            deliver.call1((scene, "on_key_press", (key(k), modifiers(m)), modifiers(m)))?;
         }
         EventPayload::KeyRelease {
             key: k,
             modifiers: m,
         } => {
-            scene.call_method1("on_key_release", (key(k), modifiers(m)))?;
+            deliver.call1((
+                scene,
+                "on_key_release",
+                (key(k), modifiers(m)),
+                modifiers(m),
+            ))?;
         }
     }
     Ok(())

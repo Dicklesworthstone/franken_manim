@@ -188,8 +188,14 @@ journal entries; they do not enable callback replay or certification. The
 existing 4,096-command generation budget applies to clock steps, edits and
 committed seeks together. On exhaustion, reload creates a fresh generation.
 
+`InteractiveScene` supports configurable selection, axis grabs, center/corner
+resize, Control-stretch, grouping, nudging, color picking, and bounded edit
+undo/redo through the same native records. Rotated-camera and fixed-frame
+selection use native camera coordinates. See [BN-19 — InteractiveScene editing](../behavior_notes/BN-19-interactive-editing.md)
+for keys, gesture bounds, and the scene-state history scope.
+
 This mode does not yet provide animated playback of the frames inside an
-input callback, constrained windowed grab/resize modes,
+input callback,
 IPython `embed`, audio playback, or the complete `InteractiveScene` windowed
 resize/sweep lifecycle. Read-only captured Studio and offline output remain
 separate modes with their existing behavior.

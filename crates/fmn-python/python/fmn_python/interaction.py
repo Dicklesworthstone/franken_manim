@@ -16,6 +16,52 @@ import weakref
 
 
 _INPUT = ContextVar("fmn_scene_input", default=None)
+_LIVE_EVENT = ContextVar("fmn_live_event", default=None)
+
+
+def dispatch_live_input(scene, method, arguments, modifiers):
+    """Deliver one admitted native event without changing Reference signatures.
+
+    Motion and scroll methods do not take modifier bits in manimlib. Keep the
+    wire's authoritative snapshot in a scoped context rather than guessing from
+    modifier-key presses (browsers do not always deliver those). Nested delivery
+    and exceptions restore the previous context; no state crosses scenes.
+    """
+    if method not in {"on_mouse_motion", "on_mouse_drag", "on_mouse_press",
+                      "on_mouse_release", "on_mouse_scroll", "on_key_press",
+                      "on_key_release"}:
+        raise ValueError("unsupported live Scene input method")
+    if type(modifiers) is not int or modifiers < 0 or modifiers & ~0x47:
+        raise ValueError("invalid live input modifier bits")
+    token = _LIVE_EVENT.set((scene, modifiers))
+    try:
+        return getattr(scene, method)(*arguments)
+    finally:
+        _LIVE_EVENT.reset(token)
+
+
+def input_modifiers(scene):
+    """Current scene modifier snapshot, with a real host window taking precedence."""
+    window = scene.get_window()
+    if window is not None:
+        return sum(bit for bit, keys in ((1, (0xffe1, 0xffe2)),
+                   (2, (0xffe3, 0xffe4)), (4, (0xffe9, 0xffea)),
+                   (64, (0xffeb, 0xffec)))
+                   if any(window.is_key_pressed(key) for key in keys))
+    live = _LIVE_EVENT.get()
+    if live is not None and live[0] is scene:
+        return live[1]
+    entry = scene.__dict__.get("_fmn_input_state")
+    return getattr(entry[1], "modifiers", 0) if entry is not None else 0
+
+
+def input_key_pressed(scene, symbol):
+    """Use existing window or scene-scoped dispatcher state, never global keys."""
+    window = scene.get_window()
+    if window is not None:
+        return bool(window.is_key_pressed(symbol))
+    entry = scene.__dict__.get("_fmn_input_state")
+    return entry is not None and symbol in entry[1].pressed_keys
 
 
 def _method(cls, name, function):
@@ -35,7 +81,7 @@ def _state(dispatcher):
         state = SimpleNamespace(
             mouse_point=dispatcher.mouse_point.copy(),
             mouse_drag_point=dispatcher.mouse_drag_point.copy(),
-            pressed_keys=set(), draggable_object_listners=[],
+            pressed_keys=set(), draggable_object_listners=[], modifiers=0,
         )
         scene.__dict__["_fmn_input_state"] = (weakref.ref(dispatcher), state)
         return state
@@ -88,6 +134,12 @@ def _install_dispatcher(g):
         if not isinstance(event_type, Event):
             raise TypeError("dispatch requires an EventType")
         state = _state(self)
+        live = _LIVE_EVENT.get()
+        owner = _INPUT.get()
+        if live is not None and owner is not None and live[0] is owner.scene:
+            state.modifiers = live[1]
+        elif "modifiers" in event_data or "mods" in event_data:
+            state.modifiers = int(event_data.get("modifiers", event_data.get("mods", 0)))
         mouse = event_type.value.startswith("mouse")
         if mouse:
             point = np.asarray(event_data["point"], dtype=float)
@@ -216,9 +268,10 @@ def _install_scene_input(g):
                 point = g["_np"].asarray(data["point"], dtype=float)
                 if point.shape != (3,) or not g["_np"].isfinite(point).all():
                     raise ValueError("mouse input requires a finite 3D point")
-                if event_type == Event.MouseMotionEvent:
-                    self.mouse_point.move_to(point)
-                elif event_type in (Event.MouseDragEvent, Event.MousePressEvent):
+                # A press/scroll may be the first event after focus. Both the
+                # Scene cursor and dispatcher must use that event's point.
+                self.mouse_point.move_to(point)
+                if event_type in (Event.MouseDragEvent, Event.MousePressEvent):
                     self.mouse_drag_point.move_to(point)
             context = SimpleNamespace(scene=self, event_type=event_type,
                                       phase="dispatch", owner=cls)
