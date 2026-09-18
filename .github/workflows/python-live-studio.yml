@@ -6,6 +6,8 @@ on:
       - '.github/workflows/python-live-studio.yml'
       - 'scripts/patches/studio-live-tail.patch'
       - 'scripts/patches/python-live-studio.patch'
+      - 'scripts/patches/studio-live-navigation.patch'
+      - 'crates/fmn-python/tests/test_studio_navigation_protocol.py'
       - 'crates/fmn-studio/src/recorded/live.rs'
       - 'crates/fmn-python/src/portal_studio/live.rs'
       - 'crates/fmn-python/tests/studio_live.py'
@@ -44,6 +46,10 @@ jobs:
             git apply --check scripts/patches/python-live-studio.patch
             git apply scripts/patches/python-live-studio.patch
           fi
+          if ! grep -q '_fmn_studio_live_input' crates/fmn-python/python/manimlib_bootstrap.py; then
+            git apply --check scripts/patches/studio-live-navigation.patch
+            git apply scripts/patches/studio-live-navigation.patch
+          fi
       - name: Install compiler and wheel tools
         run: |
           rustup show active-toolchain
@@ -73,7 +79,7 @@ jobs:
           set -euo pipefail
           if test -f crates/fmn-python/src/portal_studio/live.rs; then
             rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/portal_studio/live.rs
-            PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_studio_protocol test_interaction_protocol test_control_events_protocol
+            PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_studio_protocol test_studio_navigation_protocol test_interaction_protocol test_control_events_protocol
             cargo test --locked -p fmn-python portal_studio -- --nocapture 2>&1 | tee /tmp/live-portal.log
             cargo clippy --locked -p fmn-python --lib -- -D warnings
             python -m maturin build --locked --interpreter python --profile dev --out target/live-wheel
@@ -89,7 +95,7 @@ jobs:
           set -euo pipefail
           git add crates/fmn-studio/src/recorded.rs crates/fmn-studio/src/recorded/live.rs
           if test -f crates/fmn-python/src/portal_studio/live.rs; then
-            git add crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/portal_studio/live.rs crates/fmn-python/python/fmn_python/studio.py crates/fmn-python/tests/test_studio_protocol.py
+            git add crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/portal_studio/live.rs crates/fmn-python/python/fmn_python/studio.py crates/fmn-python/python/manimlib_bootstrap.py crates/fmn-python/tests/test_studio_protocol.py crates/fmn-python/tests/studio_live.py docs/dist/python_studio.md
           fi
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'

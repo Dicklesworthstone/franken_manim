@@ -1083,6 +1083,7 @@ impl HostHandler {
             (Method::Post, "/api/scrub") => self.scrub(stream, &request),
             (Method::Post, "/api/restart") => self.restart(stream),
             (Method::Post, "/api/event") => self.event(stream, &request),
+            (Method::Post, "/api/advance") => self.advance(stream, &request),
             (Method::Get, "/api/inspect") => self.inspect(stream),
             (Method::Get, "/api/overlays") => self.overlays(stream, &request),
             (Method::Get, "/api/session") => self.saved_session(stream),

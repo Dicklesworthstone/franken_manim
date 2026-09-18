@@ -143,7 +143,10 @@ last frame to resume input.
 
 The native camera maps the browser's coordinates into the live world frame,
 including translation, scale and rotation. The existing dispatcher handles
-fixed-frame controls, hit tests, drag capture and listener order. Events carry
+fixed-frame controls, hit tests, drag capture and listener order. Holding the
+configured pan key (default `f`) or 3D-orbit key (default `d`) while moving the
+pointer applies the existing native camera operations. Key release ends the
+mode; no synthetic Window is installed and offline hover is unchanged. Events carry
 the selected frame, an increasing input revision and the worker generation.
 Stale events, foreign scenes and edits against historical frames are rejected
 before any Python callback runs. Reload starts a fresh input revision and a new
@@ -157,8 +160,36 @@ that worker, without automatically executing the source again. The stable host
 retains its displayed frame and accepts an explicit reload. Live commands are
 opaque journal barriers, never serialized callback replay or certified state.
 
-This mode does not yet provide continuous idle updater ticks, animated playback
-of the frames inside an input callback, a native-window key-state adapter,
+Select the final frame to enable **Step live frame** and **Run live**. A step
+advances the existing rational scene clock by exactly `1/fps`, then runs the
+ordinary Python and native updater passes once. It does not manufacture a
+`Scene.wait`, consume an authored play index, or grow the captured timeline.
+The final capture is replaced atomically; historical frames remain unchanged.
+
+**Run live** paces one nominal frame at a time with at most one outstanding
+request. Slow rendering runs slower than wall time rather than skipping scene
+samples or accumulating catch-up work. Pause stops admission immediately; an
+already accepted frame may finish. Scene input, history navigation, reload,
+loss of focus, a hidden tab, or a disconnected stream stops the live clock.
+Returning to a tab never restarts authored execution automatically.
+
+Programmatic hosts can call `host.advance(frames=1)` after selecting the final
+timeline frame. A call accepts at most one nominal second (and at most 240
+frames), publishes its completed final frame, and returns its native PNG
+receipt. This is a bounded update batch, not playback of its intermediate
+frames. Browser and programmatic requests share `/api/advance` and the same
+worker-generation, selected-frame and input-revision guards as live input.
+Conflicts and timeouts are never automatically retried.
+
+If an updater fails partway through a batch, the last good PNG and inspector
+remain available and both live time and live input freeze until reload. The
+underlying authored effects are **not rolled back**. Live advances are opaque
+journal entries; they do not enable callback replay or certification. The
+existing 4,096-command generation budget applies to clock steps, edits and
+committed seeks together. On exhaustion, reload creates a fresh generation.
+
+This mode does not yet provide animated playback of the frames inside an
+input callback, constrained windowed grab/resize modes,
 IPython `embed`, audio playback, or the complete `InteractiveScene` windowed
 resize/sweep lifecycle. Read-only captured Studio and offline output remain
 separate modes with their existing behavior.

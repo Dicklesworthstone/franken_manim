@@ -98,7 +98,7 @@ class Studio:
         max_frames: int = _DEFAULT_FRAMES, max_bytes: int = _DEFAULT_BYTES,
         timeout: int = 120, port: int = 0,
         autoreload: bool = False, watch_paths: tuple[os.PathLike[str] | str, ...] | list = (),
-        debounce_ms: int = 200,
+        debounce_ms: int = 200, interactive: bool = False,
     ) -> None:
         _ensure_exclusive_manimlib_namespace()
         from manimlib import _native
@@ -107,6 +107,8 @@ class Studio:
             raise ValueError("Studio requires one explicit Scene class name")
         if not isinstance(autoreload, bool):
             raise ValueError("autoreload must be a bool")
+        if not isinstance(interactive, bool):
+            raise ValueError("interactive must be a bool")
         if not isinstance(watch_paths, (tuple, list)) or len(watch_paths) > 62:
             raise ValueError("watch_paths must be a list or tuple of at most 62 paths")
         if watch_paths and not autoreload:
@@ -129,6 +131,7 @@ class Studio:
             "threads": _integer(threads, "threads", 1, 96),
             "max_frames": _integer(max_frames, "max_frames", 1, 100000),
             "max_bytes": _integer(max_bytes, "max_bytes", 1, 1024 * 1024 * 1024),
+            "interactive": interactive,
         }
         timeout = _integer(timeout, "timeout", 1, 900)
         port = _integer(port, "port", 0, 65535)
@@ -161,6 +164,7 @@ class Studio:
         self._watch = _native._StudioHost.watch_sources(roots, debounce_ms) if autoreload else None
         self._timeout = timeout + 5
         self._autoreload = autoreload
+        self._interactive = interactive
         self._reload_status = {"revision": 0, "completed": 0, "error": None, "result": None}
         self._host = _native._StudioHost(rebuild, scene, secrets.token_hex(32), port, timeout)
         try:
@@ -188,6 +192,10 @@ class Studio:
     @property
     def autoreload(self) -> bool:
         return self._autoreload
+
+    @property
+    def interactive(self) -> bool:
+        return self._interactive
 
     @property
     def reload_status(self) -> dict[str, Any]:
@@ -220,6 +228,21 @@ class Studio:
                 raise
             self._record_reload(result=result)
             return copy.deepcopy(result)
+
+    def advance(self, frames: int = 1) -> dict[str, Any]:
+        """Execute nominal live frames and return the native final-frame receipt.
+
+        Select the final timeline frame first. This runs real authored updaters
+        and does not add an authored wait. One command is bounded to one second
+        and one optimistic revision; conflicts and timeouts are never retried.
+        """
+        from .studio_clock import advance
+        with self._operation:
+            if self._stop.is_set() or not self._host.alive:
+                raise RuntimeError("Studio is closed")
+            if not self._interactive:
+                raise RuntimeError("Live stepping requires interactive=True")
+            return advance(self._host.url, self._timeout, frames)
 
     def close(self) -> None:
         self._stop.set()
@@ -319,6 +342,19 @@ def _capture(request: dict[str, Any], native: Any):
                 scene.run()
             except native.EndScene:
                 pass
+            if request.get("interactive", False):
+                # Retain both the source/import context and the actual scene
+                # on this worker thread for event callbacks. Never reconstruct
+                # their behavior from snapshots or execute them in the host.
+                # Enable only the existing scene-scoped dispatcher's key
+                # state while this worker owns live input. No fake Window is
+                # installed and ordinary offline Scene input stays unchanged.
+                scene.__dict__["_fmn_studio_live_input"] = True
+                try:
+                    scene._serve_studio_live()
+                finally:
+                    scene.__dict__.pop("_fmn_studio_live_input", None)
+                return None
             return scene._finish_studio_capture()
         except BaseException:
             scene._abort_render()
@@ -345,14 +381,15 @@ def _worker(encoded: str) -> int:
         if request["runtime"] != actual:
             raise RuntimeError("Studio worker interpreter/engine differs from the selected host runtime")
         recording = _capture(request, _native)
-    recording.serve()
+    if recording is not None:
+        recording.serve()
     return 0
 
 
 _HELP = """Read-only native Studio for Python scenes:
   fmn-python studio SOURCE.py SCENE [--resolution WxH] [--fps N] [--threads N]
                     [--max_frames N] [--max_bytes N] [--timeout SECONDS] [--port N]
-                    [--autoreload] [--watch PATH ...] [--debounce_ms N]
+                    [--autoreload] [--watch PATH ...] [--debounce_ms N] [--interactive]
 
 Executes once in a disposable host-CPython worker; scrub and inspect the captured
 frames in the authenticated native Studio UI. Reload explicitly executes fresh
@@ -361,8 +398,14 @@ source and imports. Ctrl-C closes the host and worker. This is not a sandbox.
 files; --watch adds directories or explicit asset files. Native bounded scans
 ignore caches/virtualenvs and debounce edits. A failed edit retains the healthy
 preview and is retried only after another edit, not in an execution loop.
-No live Python event editing, sound playback, callback checkpoints, or certified
-render claim. Default: 640x360, 30 FPS, 7200 frames, 256 MiB encoded capture budget.
+--interactive retains the live scene in its worker. Select the last timeline
+frame and enable Scene input to send keyboard, pointer, drag and wheel events
+through existing scene callbacks. Prior frames remain read-only. Failed callbacks
+freeze input until reload; they are not rolled back or automatically retried.
+Select the final frame to Step live frame or Run live nominal updater ticks.
+Run is bounded and pauses on input, navigation, focus loss or worker changes.
+No sound playback, callback checkpoints, or certified render claim.
+Default: 640x360, 30 FPS, 7200 frames, 256 MiB encoded capture budget.
 """
 
 
@@ -384,6 +427,7 @@ def try_studio_cli(native: Any, arguments: list[str]) -> int | None:
     parser.add_argument("scene")
     parser.add_argument("--resolution", default="640x360")
     parser.add_argument("--autoreload", action="store_true")
+    parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--watch", dest="watch_paths", action="append", default=[])
     parser.add_argument("--debounce_ms", type=int, default=200)
     for flag, default in (("fps", 30), ("threads", 1), ("max_frames", _DEFAULT_FRAMES),
@@ -401,10 +445,11 @@ def try_studio_cli(native: Any, arguments: list[str]) -> int | None:
         with Studio(**config) as host:
             if robot:
                 native._portal_cli_emit(0, "success", "studio", "Python Studio is ready", True,
-                                       url=host.url, scene=options.scene, preview_mode="captured-read-only",
+                                       url=host.url, scene=options.scene,
+                                       preview_mode="live-final-frame" if host.interactive else "captured-read-only",
                                        certified=False, autoreload=host.autoreload)
             else:
-                print("Python Studio (read-only): " + host.url)
+                print("Python Studio (" + ("live final frame" if host.interactive else "read-only") + "): " + host.url)
                 print("Reload runs fresh source. Ctrl-C closes Studio.", file=sys.stderr)
             sys.stdout.flush()
             phase = "serve"

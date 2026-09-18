@@ -243,6 +243,42 @@ class Live(InteractiveScene):
             self.assertNotEqual(rgba_png(selected)[2], rgba_png(nudged)[2])
             self.assertTrue(self.inspect(api)[0]["view"]["input_events"])
 
+    def test_held_keys_pan_and_orbit_the_native_camera_without_a_window(self):
+        self.source.write_text("from manimlib import *\nimport json\n" + f'''
+class Live(Scene):
+    def construct(self):
+        self.add(Square(fill_color=BLUE, fill_opacity=1, stroke_width=0))
+        self.wait(0.25)
+    def on_mouse_motion(self, point, d_point):
+        super().on_mouse_motion(point, d_point)
+        assert self.window is None
+        with open({str(self.events)!r}, 'a') as stream:
+            stream.write(json.dumps(dict(kind='camera', center=self.frame.get_center().tolist(),
+                                         angles=self.frame.get_euler_angles().tolist())) + '\\n')
+''')
+        with self.host() as host:
+            api = Preview(host)
+            api.json("/api/scrub", {"frame": 1})
+            scene_time = self.inspect(api)[0]["scene_time"]
+            self.event(api, "key_press", key="f")
+            self.event(api, "mouse_motion", x=1, y=0, dx=1, dy=0)
+            panned = self.facts()[-1]
+            self.assertEqual(panned["center"], [-1.0, 0.0, 0.0])
+            self.event(api, "key_release", key="f")
+            self.event(api, "mouse_motion", x=2, y=0, dx=1, dy=0)
+            self.assertEqual(self.facts()[-1], panned, "released pan key remained active")
+            before = api.frame()
+            self.event(api, "key_press", key="d")
+            self.event(api, "mouse_motion", x=3, y=-1, dx=1, dy=-1)
+            orbited = self.facts()[-1]
+            self.assertEqual(orbited["center"], panned["center"])
+            self.assertNotEqual(orbited["angles"], panned["angles"])
+            self.assertNotEqual(rgba_png(api.frame())[2], rgba_png(before)[2])
+            self.event(api, "key_release", key="d")
+            self.event(api, "mouse_motion", x=4, y=-1, dx=1, dy=0)
+            self.assertEqual(self.facts()[-1], orbited, "released orbit key remained active")
+            self.assertEqual(self.inspect(api)[0]["scene_time"], scene_time)
+
     def test_hung_callback_is_killed_without_reexecution_and_host_can_reload(self):
         with self.host(timeout=3) as host:
             api = Preview(host)

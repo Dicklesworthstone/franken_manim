@@ -22,6 +22,9 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+mod idle;
+pub use idle::IdleFrame;
+
 use fmn_anim::{
     AnimError, Animation, AnimationBoundary, FramePacket, ImpureEffect, OpenSegment, OpenWait,
     Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind,
@@ -333,7 +336,7 @@ pub enum CaptureReason {
     Show,
     /// The configured windowed preview at the end of a skipped segment.
     SkippedPreview,
-    /// A frame emitted while presenter mode is holding.
+    /// A frame emitted at a live idle boundary or while presenter mode holds.
     PresenterHold,
 }
 
@@ -588,6 +591,8 @@ enum QueuedEvent {
 
 /// The Scene state machine.
 pub struct Scene {
+    idle_owner: std::rc::Rc<()>,
+    idle_sequence: u64,
     config: RuntimeConfig,
     stage: Stage,
     clock: RationalFrameClock,
@@ -685,6 +690,8 @@ impl Scene {
         let skipping = original_skipping || config.start_at_play.is_some();
         let event_inbox = EventInbox::new(config.max_pending_events)?;
         Ok(Self {
+            idle_owner: std::rc::Rc::new(()),
+            idle_sequence: 0,
             config,
             stage: Stage::new(),
             clock: RationalFrameClock::new(fps).map_err(AnimError::Clock)?,
@@ -860,6 +867,9 @@ impl Scene {
         }
         let mut clock = RationalFrameClock::new(self.fps()).map_err(AnimError::Clock)?;
         clock.advance_frames(frame).map_err(AnimError::Clock)?;
+        // A discontinuous seek supersedes a yielded live frame even when the
+        // caller seeks back to precisely the same rational time afterwards.
+        self.idle_owner = std::rc::Rc::new(());
         self.clock = clock;
         self.sync_stage_time();
         Ok(())
@@ -1926,6 +1936,9 @@ impl Scene {
                 "an in-memory SceneState belongs to a different scene",
             ));
         }
+        // A restored snapshot is a new execution boundary, not completion of
+        // the host-updater window belonging to the previous live state.
+        self.idle_owner = std::rc::Rc::new(());
         self.stage.restore(snapshot);
         self.clock = restored_clock;
         self.sync_stage_time();

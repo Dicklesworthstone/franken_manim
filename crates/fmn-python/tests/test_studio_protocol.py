@@ -73,6 +73,18 @@ class StudioPolicyTests(unittest.TestCase):
                 host._host.builder()
             self.assertTrue(host.alive)
 
+    def test_interactive_authority_is_explicit_and_part_of_the_worker_identity(self):
+        with Studio(self.source, "Lesson") as recorded:
+            first = recorded._host.artifact[-1]
+            self.assertFalse(recorded.interactive)
+        with Studio(self.source, "Lesson", interactive=True) as live:
+            request = json.loads(live._host.artifact[1][-1])
+            self.assertTrue(request["interactive"])
+            self.assertTrue(live.interactive)
+            self.assertNotEqual(first, request["build_id"])
+        with self.assertRaisesRegex(ValueError, "interactive must be a bool"):
+            Studio(self.source, "Lesson", interactive=1)
+
     def test_invalid_resource_profiles_fail_before_launch(self):
         for options in ({"fps": True}, {"fps": 0}, {"threads": 97}, {"max_frames": 0},
                         {"max_bytes": 2**31}, {"resolution": (16384, 16384)},

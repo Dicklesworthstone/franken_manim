@@ -7810,6 +7810,10 @@ impl PyScene {
         portal_studio::finish(slf)
     }
 
+    fn _serve_studio_live(slf: &Bound<'_, Self>) -> PyResult<()> {
+        portal_studio::live::serve(slf)
+    }
+
     /// Cancel an active generation and join its ordered output worker.
     fn _abort_render(slf: &Bound<'_, Self>) -> PyResult<()> {
         let render = Arc::clone(&slf.borrow().render);

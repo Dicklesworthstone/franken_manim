@@ -365,6 +365,8 @@ pub struct InspectorView {
     /// Whether the selected worker implements live input events.
     pub input_events: bool,
     pub input_revision: Option<u64>,
+    /// Explicit capability to execute nominal live-clock steps, not seeks.
+    pub live_advance: bool,
 }
 
 impl InspectorView {
@@ -393,6 +395,7 @@ impl InspectorView {
             origin: map.origin,
             input_events,
             input_revision: None,
+            live_advance: false,
         }
         .validate()
     }
@@ -632,6 +635,9 @@ impl InspectorSnapshot {
             push_f64_array(&mut out, &view.origin)?;
             out.push_str(",\"input_events\":")?;
             push_bool(&mut out, view.input_events)?;
+            if view.live_advance {
+                out.push_str(",\"live_advance\":true")?;
+            }
             if let Some(input_revision) = view.input_revision {
                 out.push_str(",\"input_revision\":")?;
                 push_display(&mut out, input_revision)?;

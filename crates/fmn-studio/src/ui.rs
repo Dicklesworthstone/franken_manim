@@ -74,6 +74,10 @@ const STUDIO_INDEX_HTML_PREFIX: &str = concat!(
 <label for="frame">Frame</label><input id="frame" type="number" min="0" max="0" value="0" required>
 <button id="seek" type="submit">Go</button></div></form>
 <p id="replay">Release the timeline to commit a replay position.</p>
+<div class="transport" aria-label="Live scene clock">
+<button type="button" id="live-step" disabled>Step live frame</button>
+<button type="button" id="live-run" disabled>Run live</button>
+<span id="live-clock" role="status">Live clock unavailable on this capture.</span></div>
 <fieldset id="layers"><legend>Debug overlays</legend>
 <label><input type="checkbox" value="1"> Tiles</label>
 <label><input type="checkbox" value="2"> Control points</label>
