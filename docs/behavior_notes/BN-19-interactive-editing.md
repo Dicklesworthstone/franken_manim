@@ -34,6 +34,11 @@ when explicitly supplied, retains precedence. A consumed event never also
 runs the selection gesture. An editing drag does not dispatch a second motion
 event or pan the camera.
 
+The Python portal translates browser ASCII letter keys to the Reference's
+unshifted integer symbols; Shift/Caps Lock text casing does not disable bindings
+such as Shift+`t` or Control+Shift+`z`. Modifier flags remain separate. Native
+Studio wire values, Unicode characters, and non-letter keys are unchanged.
+
 ## Correctness differences
 
 The pinned Reference is `3b1b/manim` at

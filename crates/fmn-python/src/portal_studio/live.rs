@@ -296,7 +296,10 @@ fn button(value: MouseButton) -> u32 {
 }
 fn key(value: Key) -> u32 {
     match value {
-        Key::Character(c) => c as u32,
+        // Browser text keys include Shift/Caps Lock casing. Reference ASCII
+        // key symbols are unshifted; modifiers travel separately. Normalize
+        // only this portal, not the native Studio wire or Unicode characters.
+        Key::Character(c) => c.to_ascii_lowercase() as u32,
         Key::Backspace => 0xff08,
         Key::Tab => 0xff09,
         Key::Enter => 0xff0d,
@@ -432,6 +435,20 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
 mod tests {
     use super::*;
     use fmn_studio::protocol::{StudioInput, studio_input_command};
+
+    #[test]
+    fn portal_studio_ascii_key_symbols_keep_modifiers_separate() {
+        for (input, expected) in [('A', 'a'), ('T', 't'), ('Z', 'z'), ('g', 'g')] {
+            assert_eq!(key(Key::Character(input)), expected as u32);
+        }
+        assert_eq!(key(Key::Character('Σ')), 0x03a3);
+        assert_eq!(key(Key::Character('!')), u32::from(b'!'));
+        assert_eq!(key(Key::ArrowRight), 0xff53);
+        assert_eq!(modifiers(Modifiers::SHIFT), 1);
+        assert_eq!(modifiers(Modifiers::CONTROL), 2);
+        assert_eq!(modifiers(Modifiers::ALT), 4);
+        assert_eq!(modifiers(Modifiers::COMMAND), 64);
+    }
 
     #[test]
     fn portal_studio_live_executes_real_callbacks_and_freezes_failed_input() {

@@ -354,8 +354,8 @@ def install_interactive_editing(native: Any) -> None:
         elif char == k.information:
             self.display_information(False)
 
-    def restore_state(self, state):
-        old_restore(self, state)
+    def restore_state(self, scene_state):
+        old_restore(self, scene_state)
         cancel(self)
         self.is_selecting = False
         self.__dict__.pop("_fmn_selection_swept", None)

@@ -289,6 +289,16 @@ class NativeEditingTests(unittest.TestCase):
         self.assertEqual(self.box.get_color(), original)
         self.assertNotIn(self.s.color_palette, self.s.mobjects)
 
+    def test_qualified_class_alias_and_keyword_restore_keep_the_public_contract(self):
+        from manimlib.scene.interactive_scene import InteractiveScene
+        self.assertIs(InteractiveScene, m.InteractiveScene)
+        checkpoint = self.s.get_state()
+        self.box.shift(2 * m.RIGHT)
+        self.s.restore_state(scene_state=checkpoint)
+        np.testing.assert_allclose(self.box.get_center(), [0, 0, 0])
+        self.assertFalse(self.s.is_grabbing)
+        self.assertEqual(len(self.s.selection), 0)
+
 
 class WorkerEditingTests(unittest.TestCase):
     def test_unedited_interactive_scene_uses_real_modifiers_native_history_and_pixels(self):
@@ -346,10 +356,21 @@ class Edit(InteractiveScene):
                 event("key_release", key="z", modifiers=2)
                 state = json.loads(facts.read_text())
                 np.testing.assert_allclose([state["width"], state["height"]], [2, 2])
-                event("key_press", key="z", modifiers=3)
-                event("key_release", key="z", modifiers=3)
+                # Browser Shift-modified letter keys are uppercase, unlike
+                # the Reference's unshifted integer key symbols.
+                event("key_press", key="Z", modifiers=3)
+                event("key_release", key="Z", modifiers=3)
                 state = json.loads(facts.read_text())
                 np.testing.assert_allclose([state["width"], state["height"]], [4, 1])
+                event("key_press", key="a", modifiers=2)
+                event("key_release", key="a", modifiers=2)
+                event("mouse_motion", x=3, y=-0.5, dx=0, dy=0, modifiers=0)
+                event("key_press", key="T", modifiers=1)
+                event("mouse_motion", x=7, y=-1.5, dx=4, dy=-1, modifiers=1)
+                event("key_release", key="T", modifiers=1)
+                state = json.loads(facts.read_text())
+                np.testing.assert_allclose([state["width"], state["height"]], [8, 2])
+                np.testing.assert_allclose(state["center"], [3, 0.5, 0])
                 api.json("/api/scrub", {"frame": 0})
                 self.assertEqual(history, api.frame(), "editing rewrote historical captures")
                 self.assertTrue(host.alive)
