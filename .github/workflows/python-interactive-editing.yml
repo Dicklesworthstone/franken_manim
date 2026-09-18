@@ -9,6 +9,7 @@ on:
       - 'crates/fmn-python/tests/test_live_input_context_protocol.py'
       - 'scripts/patches/interactive-editing.patch'
       - 'scripts/patches/interactive-selection.patch'
+      - 'scripts/patches/interactive-key-symbols.patch'
   workflow_dispatch:
 permissions:
   contents: write
@@ -42,6 +43,10 @@ jobs:
             git apply --check scripts/patches/interactive-selection.patch
             git apply scripts/patches/interactive-selection.patch
           fi
+          if ! grep -q 'c.to_ascii_lowercase()' crates/fmn-python/src/portal_studio/live.rs; then
+            git apply --check scripts/patches/interactive-key-symbols.patch
+            git apply scripts/patches/interactive-key-symbols.patch
+          fi
       - name: Install pinned build tools
         run: |
           rustup show active-toolchain
@@ -65,6 +70,7 @@ jobs:
           set -euo pipefail
           rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/portal_studio/live.rs
           PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_live_input_context_protocol test_interaction_protocol test_control_events_protocol test_dispatcher_binding_protocol test_studio_navigation_protocol 2>&1 | tee /tmp/editing-protocol.log
+          node --test crates/fmn-studio/tests/input_queue.mjs 2>&1 | tee /tmp/editing-browser.log
           PYTHONPATH="$PWD/crates/fmn-python/python" cargo test --locked -p fmn-python portal_studio -- --nocapture 2>&1 | tee /tmp/editing-native.log
           grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/editing-native.log
           cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/editing-clippy.log
@@ -83,11 +89,11 @@ jobs:
         run: |
           set -euo pipefail
           git add crates/fmn-python/python/fmn_python/interaction.py crates/fmn-python/python/manimlib/__init__.py crates/fmn-python/src/portal_studio/live.rs
-          git add crates/fmn-python/python/fmn_python/interactive_editing.py crates/fmn-python/tests/studio_editing.py crates/fmn-python/tests/test_live_input_context_protocol.py docs/dist/python_studio.md
+          git add crates/fmn-python/python/fmn_python/interactive_editing.py crates/fmn-python/tests/studio_editing.py crates/fmn-python/tests/test_live_input_context_protocol.py docs/dist/python_studio.md docs/behavior_notes/BN-19-interactive-editing.md
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(studio): activate tested InteractiveScene gestures and modifier delivery'
+            git commit -m 'fix(studio): preserve shifted editing bindings and native state restoration'
             git push origin HEAD:main
           fi
       - name: Preserve exact source and terminal evidence
