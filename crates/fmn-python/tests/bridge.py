@@ -12887,16 +12887,11 @@ assert all(isinstance(line, VMobject) and line.has_points() for line in cylinder
 for unsupported_surface in (None, VMobject()):
     try:
         three_dimensions.SurfaceMesh(unsupported_surface)
-    except NotImplementedError as error:
-        assert str(error) == (
-            "SurfaceMesh needs a native-rebuildable source surface "
-            "(Sphere is native); "
-            + type(unsupported_surface).__name__
-            + " does not carry solid params yet"
-        )
+    except TypeError as error:
+        assert str(error) == "SurfaceMesh source must be a Surface"
     else:
         raise AssertionError(
-            "SurfaceMesh accepted a source without native solid params"
+            "SurfaceMesh accepted a non-surface source"
         )
 
 cone = three_dimensions.Cone(

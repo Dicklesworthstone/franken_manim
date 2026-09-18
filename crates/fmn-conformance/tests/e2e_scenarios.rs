@@ -2021,6 +2021,32 @@ fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     python_portal_sequence_run(ctx, false)
 }
 
+fn python_surface_mesh_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_surface_mesh")?;
+    let (png, checks) = manimlib::run_portal_gauntlet_surface_mesh(&root, ctx.seed)
+        .map_err(|error| fail(format!("Python surface mesh: {error}")))?;
+    let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode surface mesh: {error}")))?;
+    let visible = image
+        .rgba
+        .chunks_exact(4)
+        .filter(|pixel| pixel[0] > pixel[1] && pixel[0] > pixel[2])
+        .count() as u64;
+    if (image.width, image.height) != (128, 128) || visible == 0 {
+        return Err(fail("surface mesh did not render visible 128x128 geometry"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.surface_mesh")
+            .field("checks", checks)
+            .field("analytic_oracle", true)
+            .field("thread_replay", true),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("surface_mesh_checks", checks)
+        .with_counter("surface_mesh_visible_pixels", visible)
+        .with_artifact("surface_mesh.png", png))
+}
+
 fn python_studio_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_studio_capture()
         .map_err(|error| fail(format!("Python Studio capture: {error}")))?;
@@ -4537,6 +4563,22 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_surface_mesh.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_surface_mesh_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["surface_mesh.png".to_owned()]),
+            counter_eq("surface_mesh_checks", 12),
+            counter_ge("surface_mesh_visible_pixels", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.surface_mesh",
+            vec![FieldPred::u64_eq("checks", 12)],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_animation_semantics.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -5280,6 +5322,17 @@ fn python_native_outputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_native_outputs.v1")
         .expect("Python native output scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Sampled wireframes through the native portal, renderer and PNG publisher.
+#[test]
+fn python_surface_mesh_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_surface_mesh.v1")
+        .expect("Python surface mesh scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

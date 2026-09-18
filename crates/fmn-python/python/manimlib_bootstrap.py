@@ -3983,6 +3983,11 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
     flat_stroke = kwargs.pop("flat_stroke", None)
     fill_border_width = kwargs.pop("fill_border_width", None)
     shading = kwargs.pop("shading", None)
+    joint_type = kwargs.pop("joint_type", None)
+    anti_alias_width = kwargs.pop("anti_alias_width", None)
+    scale_stroke_with_zoom = kwargs.pop("scale_stroke_with_zoom", None)
+    depth_test = kwargs.pop("depth_test", None)
+    fixed_in_frame = kwargs.pop("is_fixed_in_frame", None)
     if kwargs:
         raise TypeError(
             "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
@@ -4018,6 +4023,21 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
         )
     if shading is not None:
         mob.set_shading(*shading, recurse=recurse)
+    # Native builders do not call VMobject.__init__. Apply inherited
+    # rendering options through the same live setters rather than keeping
+    # Python-only attributes that the renderer never sees.
+    if joint_type is not None:
+        mob.set_joint_type(joint_type, recurse=recurse)
+    if anti_alias_width is not None:
+        mob.set_anti_alias_width(anti_alias_width, recurse=recurse)
+    if scale_stroke_with_zoom is not None:
+        mob.set_scale_stroke_with_zoom(scale_stroke_with_zoom, recurse=recurse)
+    if depth_test is not None:
+        method = mob.apply_depth_test if depth_test else mob.deactivate_depth_test
+        method(recurse=recurse)
+    if fixed_in_frame is not None:
+        method = mob.fix_in_frame if fixed_in_frame else mob.unfix_from_frame
+        method(recurse=recurse)
     return mob
 
 
@@ -4033,6 +4053,11 @@ _NATIVE_VMOBJECT_STYLE_KEYS = frozenset(
         "stroke_behind",
         "flat_stroke",
         "fill_border_width",
+        "joint_type",
+        "anti_alias_width",
+        "scale_stroke_with_zoom",
+        "depth_test",
+        "is_fixed_in_frame",
     }
 )
 
@@ -4043,6 +4068,12 @@ def _preflight_vmobject_style_kwargs(kwargs):
         raise TypeError(
             "unexpected keyword arguments: " + ", ".join(sorted(unknown))
         )
+    if "joint_type" in kwargs and kwargs["joint_type"] not in VMobject.joint_type_map:
+        raise ValueError(f"unknown VMobject joint type: {kwargs['joint_type']}")
+    if "anti_alias_width" in kwargs:
+        width = float(kwargs["anti_alias_width"])
+        if not _math.isfinite(width) or width < 0:
+            raise ValueError("anti_alias_width must be finite and non-negative")
 
 
 def _split_native_vgroup3d_kwargs(class_name, kwargs, default_shading):
@@ -12569,9 +12600,11 @@ class Prismify(VGroup3D):
 
 
 class SurfaceMesh(VGroup):
-    """The wireframe over a native surface — a VMobject family (Reference
-    MRO SurfaceMesh(VGroup)), built by the native mesher through the
-    rebuild oracle and re-seated onto the source's current geometry."""
+    """A native wireframe over a Surface's current sampled geometry.
+
+    Transforms, live record edits and authored unit-normal overrides are
+    captured as they stand; constructing a mesh never re-runs uv_func.
+    """
 
     def __init__(
         self,
@@ -12590,33 +12623,13 @@ class SurfaceMesh(VGroup):
             "SurfaceMesh()",
             [(name, True) for name in sorted(kwargs)],
         )
-        params = getattr(uv_surface, "_solid_params", None)
-        if params is None:
-            raise NotImplementedError(
-                "SurfaceMesh needs a native-rebuildable source surface "
-                "(Sphere is native); "
-                + type(uv_surface).__name__
-                + " does not carry solid params yet"
-            )
-        source_kind = params[0]
-        source_axis = (0.0, 0.0, 1.0)
-        if source_kind == "torus":
-            source_radius = float(params[1])
-            source_minor_radius = float(params[2])
-        elif source_kind in ("cylinder", "cone"):
-            source_radius = float(params[2])
-            source_minor_radius = float(params[1])
-            source_axis = tuple(float(component) for component in params[3])
-        else:
-            source_radius = float(params[1])
-            source_minor_radius = 0.0
+        if not isinstance(uv_surface, Surface):
+            raise TypeError("SurfaceMesh source must be a Surface")
         _install_live_state(self)
+        self.uv_surface = uv_surface
         specs = self._build_surface_mesh(
             _native_shell_factory,
-            source_kind,
-            source_radius,
-            source_minor_radius,
-            source_axis,
+            uv_surface,
             (int(resolution[0]), int(resolution[1])),
             float(normal_nudge),
             float(stroke_width),
@@ -12625,15 +12638,6 @@ class SurfaceMesh(VGroup):
             float(VMobject.joint_type_map[joint_type]),
         )
         _hang_native_children(self, specs)
-        # Re-seat onto the source's CURRENT geometry (the rebuild is at
-        # native scale/origin) — exact for uniform rescales and moves.
-        native_height = getattr(
-            uv_surface, "_solid_native_height", 2.0 * float(params[1])
-        )
-        current_height = uv_surface.get_height()
-        if current_height > 0 and abs(current_height - native_height) > 1e-12:
-            self.scale(current_height / native_height)
-        self.move_to(uv_surface.get_center())
         if depth_test:
             self.apply_depth_test()
         else:
@@ -14806,7 +14810,11 @@ class Scene(_SceneCore):
                     )
                 if not mobject._is_bound():
                     self.add(mobject)
-                params = {"remover": bool(getattr(proto, "remover", False))}
+                # The Python lifecycle owns cleanup, including authored
+                # overrides and publishing replacement families. A native
+                # placeholder remover would run after that cleanup and
+                # remove shared target children a second time.
+                params = {"remover": False}
                 if getattr(proto, "time_span", None) is not None:
                     params["time_span"] = proto.time_span
                 return (

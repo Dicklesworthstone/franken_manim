@@ -5817,18 +5817,14 @@ impl BridgeMobject {
         .collect()
     }
 
-    /// `SurfaceMesh(uv_surface, ...)` — the rebuild oracle: the source
-    /// surface reconstructs from its stored solid params and the native
-    /// wireframe samples it; the bootstrap re-seats the mesh onto the
-    /// source's current center/scale afterwards.
+    /// `SurfaceMesh(uv_surface, ...)` over the source's live sampled grid.
+    /// Read authored accessors without an arena borrow, then give one owned
+    /// snapshot to Atlas. Never re-evaluate the source's original UV recipe.
     #[allow(clippy::too_many_arguments)]
     fn _build_surface_mesh<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
-        source_kind: &str,
-        source_radius: f64,
-        source_minor_radius: f64,
-        source_axis: [f64; 3],
+        source: &Bound<'py, PyAny>,
         resolution: (usize, usize),
         normal_nudge: f64,
         stroke_width: f64,
@@ -5836,25 +5832,33 @@ impl BridgeMobject {
         depth_test: bool,
         joint_code: f64,
     ) -> PyResult<Bound<'py, PyList>> {
-        let surface = match source_kind {
-            "sphere" => fmn_library::Sphere::new(source_radius).build(),
-            "torus" => fmn_library::Torus::new(source_radius, source_minor_radius).build(),
-            "cylinder" => fmn_library::Cylinder::new(source_minor_radius, source_radius)
-                .axis(source_axis)
-                .build(),
-            "cone" => fmn_library::Cone::new(source_minor_radius, source_radius)
-                .axis(source_axis)
-                .build(),
-            "disk" => fmn_library::Disk3D::new(source_radius).build(),
-            "square" => fmn_library::Square3D::new(source_radius).build(),
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "SurfaceMesh over `{other}` awaits its native rebuild \
-                     path; spheres are native"
-                )));
-            }
-        };
-        let mut mesh = fmn_library::SurfaceMesh::new(surface)
+        let source_resolution = source.getattr("resolution")?.extract::<(usize, usize)>()?;
+        let budget = fmn_library::SamplingBudget::DEFAULT.max_samples();
+        let count = source_resolution
+            .0
+            .checked_mul(source_resolution.1)
+            .filter(|&count| {
+                count <= budget && source_resolution.0 <= budget && source_resolution.1 <= budget
+            })
+            .ok_or_else(|| {
+                PyValueError::new_err("SurfaceMesh source exceeds the Atlas sampling budget")
+            })?;
+        let points = source.call_method0("get_points")?;
+        if points.len()? != count {
+            return Err(PyValueError::new_err(
+                "SurfaceMesh source resolution does not match its point records",
+            ));
+        }
+        let points = points.extract::<Vec<[f64; 3]>>()?;
+        let normals = source.call_method0("get_unit_normals")?;
+        if normals.len()? != count {
+            return Err(PyValueError::new_err(
+                "SurfaceMesh source resolution does not match its normal records",
+            ));
+        }
+        let normals = normals.extract::<Vec<[f64; 3]>>()?;
+        let mut mesh = fmn_library::SurfaceMesh::from_samples(points, normals, source_resolution)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
             .resolution(resolution.0, resolution.1)
             .normal_nudge(normal_nudge)
             .stroke_width(stroke_width)
@@ -5863,7 +5867,10 @@ impl BridgeMobject {
         if let Some(color) = stroke_color {
             mesh = mesh.stroke_color(srgb_from_py(color)?);
         }
-        install_native_tree(slf, factory, mesh.build())
+        let mesh = mesh
+            .try_build()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        install_native_tree(slf, factory, mesh)
     }
 
     /// `DecimalNumber(number, ...)` over the numbers shelf (the de-TeX'd
@@ -11129,6 +11136,32 @@ pub struct PortalOutputGauntletReport {
     pub video_capability_refusals: u64,
 }
 
+/// Exercise live sampled wireframes and an independently authored PNG oracle.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_surface_mesh(
+    destination: &std::path::Path,
+    seed: u64,
+) -> Result<(Vec<u8>, u64), String> {
+    let destination = destination
+        .to_str()
+        .ok_or_else(|| "surface mesh destination is not UTF-8".to_owned())?;
+    with_python_test_module("surface mesh Gauntlet", |py, _module, globals| {
+        let source = CString::new(include_str!("../tests/surface_mesh.py"))
+            .expect("surface mesh suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("render_surface_mesh")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "surface mesh renderer is absent".to_owned())?
+            .call1((destination, seed))
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<(Vec<u8>, u64)>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Exercise the shared Animation/Transform lifecycle through native PNG output.
 #[cfg(feature = "gauntlet")]
 pub fn run_portal_gauntlet_animation_lifecycle(
@@ -11681,6 +11714,46 @@ mod tests {
                 assert!(!stage.is_updating_suspended(mob));
             })
             .expect("read native abort state");
+        });
+    }
+
+    #[test]
+    fn production_callback_cleanup_acceptance_suite() {
+        crate::with_python_test_module("callback cleanup acceptance", |py, _module, globals| {
+            let source = CString::new(include_str!("../tests/callback_cleanup.py"))
+                .expect("callback cleanup suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("load native callback cleanup acceptance");
+            let checks = globals
+                .get_item("verify_callback_cleanup")
+                .expect("find callback cleanup acceptance")
+                .expect("callback cleanup acceptance is defined")
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .and_then(|value| value.extract::<u64>())
+                .expect("native callback cleanup acceptance");
+            assert_eq!(checks, 4);
+        });
+    }
+
+    #[test]
+    fn production_surface_mesh_acceptance_suite() {
+        crate::with_python_test_module("surface mesh acceptance", |py, _module, globals| {
+            let source = CString::new(include_str!("../tests/surface_mesh.py"))
+                .expect("surface mesh suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("load native surface mesh acceptance");
+            let checks = globals
+                .get_item("verify_surface_mesh")
+                .expect("find surface mesh acceptance")
+                .expect("surface mesh acceptance is defined")
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .and_then(|value| value.extract::<u64>())
+                .expect("native surface mesh acceptance");
+            assert_eq!(checks, 12);
         });
     }
 

@@ -42,6 +42,35 @@ no point moves and the bounding box is untouched.
 
 ## Migration guidance
 
+### Native-built shapes accept inherited rendering options
+
+The shared native-constructor style route now accepts `joint_type`,
+`anti_alias_width`, `scale_stroke_with_zoom`, `depth_test`, and
+`is_fixed_in_frame`. These options use the existing live setters and reach
+the generated family, including dashed paths and number glyphs. They are
+no longer rejected merely because a class bypasses `VMobject.__init__`
+while constructing its geometry in Rust. Omitted options retain the
+constructor's native defaults. Unknown joints and negative or non-finite
+anti-alias widths are refused before this style pass mutates the family.
+
+### SurfaceMesh styles apply to the visible wireframe
+
+`SurfaceMesh(..., stroke_width=..., stroke_color=..., depth_test=...,
+joint_type=...)` applies those settings to every generated path, not just
+the point-free group. The Reference left constructor settings on that empty
+parent, so the visible paths used unrelated VMobject defaults. Native and
+Python wireframes now agree on the explicitly requested style. A default
+mesh uses width `1`, `GREY_A`, depth testing and `no_joint`; specify width
+`4`, `auto` joints and `depth_test=False` to request the old visible defaults.
+
+The Python constructor also consumes the source's **current sampled grid**,
+including rotations, nonuniform stretches, live point edits and authored
+`get_unit_normals` overrides. Any `Surface`/`ParametricSurface` can supply
+the grid. It never calls the original UV function again, rebuilds a solid
+at its original resolution, or recenters an asymmetric wireframe. A mesh
+is a snapshot; construct another mesh (or use `always_redraw`) to follow
+subsequent source changes.
+
 - Code that called `get_scale_stroke_with_zoom()` and happened to rely on
   it returning `flat_stroke` (almost certainly none — the coincidence was
   never documented) now gets the honest answer. Read `get_flat_stroke()`
