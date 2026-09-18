@@ -246,11 +246,21 @@ fn with_owned_python_module<T>(
         }
 
         let hook_globals = PyDict::new(py);
+        #[cfg(any(test, feature = "gauntlet"))]
+        hook_globals
+            .set_item(
+                "_fmn_source_package",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/python"),
+            )
+            .map_err(|error| error.to_string())?;
         hook_globals
             .set_item("_fmn_unraisable", PyList::empty(py))
             .map_err(|error| error.to_string())?;
         let hook_source = std::ffi::CString::new(
             r#"import sys as _fmn_sys
+_fmn_previous_path = _fmn_sys.path[:]
+if "_fmn_source_package" in globals():
+    _fmn_sys.path.insert(0, _fmn_source_package)
 _fmn_old_unraisablehook = _fmn_sys.unraisablehook
 def _fmn_capture_unraisable(event):
     _fmn_unraisable.append(
@@ -286,10 +296,22 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         }));
 
         // Python callbacks retain their globals and the globals retain the
-        // scene graph. Break that cycle before clearing PyO3's built-in
-        // function <-> extension-module cycle.
+        // scene graph. Cache entries strongly own those Python classes. A
+        // class can retain module globals or even an unsendable native proxy;
+        // release those owners while this same worker still holds the GIL.
+        // Waiting for Rust thread-local destruction defers their decrefs to a
+        // later worker and can both leak the module and finalize on the wrong
+        // OS thread. This is required for production measurements too.
+        crate::method_cache::clear_for_worker_teardown(py);
         globals.clear();
         let mut cleanup_errors = Vec::new();
+        if let Err(error) = py.run(
+            c"_fmn_sys.path[:] = _fmn_previous_path",
+            Some(&hook_globals),
+            None,
+        ) {
+            cleanup_errors.push(format!("restore module search path: {error}"));
+        }
         match module_names() {
             Ok(names) => {
                 for name in names {
@@ -309,8 +331,16 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         }
         module.dict().clear();
         drop(module);
-        if let Err(error) = gc.call_method0("collect") {
-            cleanup_errors.push(format!("collect Python cycles: {error}"));
+        // As with the scene-worker teardown, a finalizer can release another
+        // class/global cycle. Two collections are not a waiver: the module
+        // weak reference and unraisable hook below must still be clean.
+        for _ in 0..2 {
+            if let Err(error) = gc.call_method0("collect") {
+                cleanup_errors.push(format!("collect Python cycles: {error}"));
+            }
+        }
+        if crate::method_cache::stats().entries != 0 {
+            cleanup_errors.push("method cache retained entries after worker teardown".to_owned());
         }
 
         match hook_globals.get_item("_fmn_old_unraisablehook") {
@@ -348,7 +378,11 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         if cleanup_errors.is_empty() {
             result
         } else {
-            Err(cleanup_errors.join("; "))
+            let cleanup = cleanup_errors.join("; ");
+            match result {
+                Ok(_) => Err(cleanup),
+                Err(primary) => Err(format!("{primary}; worker cleanup also failed: {cleanup}")),
+            }
         }
     })
 }
@@ -592,6 +626,34 @@ mod tests {
         assert!(sample.invalid_reason.is_some());
         let sample = observation(std::time::Duration::from_nanos(7), None);
         assert!(sample.invalid_reason.is_none());
+    }
+
+    #[test]
+    fn failed_workloads_release_cached_class_owners_before_thread_exit() {
+        for _ in 0..2 {
+            std::thread::spawn(|| {
+                let error = with_owned_python_module(|py, _module, globals| {
+                    py.run(
+                        c"from manimlib import Mobject\nclass Owned(Mobject):\n    pass\nOwned.retained = Owned()\n",
+                        Some(globals),
+                        Some(globals),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    assert!(crate::method_cache::stats().entries > 0);
+                    py.run(
+                        c"raise RuntimeError('authored owned workload failed')",
+                        Some(globals),
+                        Some(globals),
+                    )
+                    .map_err(|error| error.to_string())
+                })
+                .expect_err("authored error must survive teardown");
+                assert_eq!(error, "RuntimeError: authored owned workload failed");
+                assert_eq!(crate::method_cache::stats().entries, 0);
+            })
+            .join()
+            .expect("failing workload owner thread");
+        }
     }
 
     #[test]

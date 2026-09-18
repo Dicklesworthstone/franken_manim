@@ -207,7 +207,6 @@ pub fn reset_stats() {
 /// Release this embedding worker's cached Python owners while its thread is
 /// still attached. ADR-0015's strong type references remain intact throughout
 /// execution; they must not outlive the isolated worker's module teardown.
-#[cfg(any(test, feature = "gauntlet"))]
 pub(crate) fn clear_for_worker_teardown(_py: Python<'_>) {
     let entries = CACHE.with(|cache| std::mem::take(&mut cache.borrow_mut().entries));
     // A decref can invoke Python finalizers. Release the RefCell borrow before
