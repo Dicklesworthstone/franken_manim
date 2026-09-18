@@ -9,6 +9,7 @@
 //! reusable `SceneState` and replay the journal's verified suffix.
 #![forbid(unsafe_code)]
 
+pub mod advance;
 pub mod host;
 pub mod inspect;
 pub mod interaction;

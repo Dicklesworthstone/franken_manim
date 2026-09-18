@@ -55,26 +55,12 @@ impl RecordedTimeline {
         scene: &str,
         command: &CommandRecord,
     ) -> Result<StudioInput, ServiceError> {
-        self.check_scene(scene)?;
         let input = studio_input_payload(scene, command).map_err(failed)?;
-        let revision = self
-            .input_revision
-            .ok_or_else(|| invalid("live input is disabled; reload the scene"))?;
-        if input.frame != self.frames.len() as i64 - 1 || input.frame != self.position as i64 {
-            return Err(invalid(
-                "live input requires the selected final frame; historical frames are read-only",
-            ));
-        }
-        if input.revision != revision {
-            return Err(invalid("stale live input revision"));
-        }
+        self.check_live_owner(scene, input.frame, input.revision)?;
         if input.target.is_some() {
             return Err(invalid(
                 "Python input uses scene hit testing, not native object targets",
             ));
-        }
-        if self.commands >= 4096 {
-            return Err(invalid("recorded position journal budget exceeded"));
         }
         Ok(input)
     }

@@ -22,6 +22,9 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+mod idle;
+pub use idle::IdleFrame;
+
 use fmn_anim::{
     AnimError, Animation, AnimationBoundary, FramePacket, ImpureEffect, OpenSegment, OpenWait,
     Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind,
@@ -333,7 +336,7 @@ pub enum CaptureReason {
     Show,
     /// The configured windowed preview at the end of a skipped segment.
     SkippedPreview,
-    /// A frame emitted while presenter mode is holding.
+    /// A frame emitted at a live idle boundary or while presenter mode holds.
     PresenterHold,
 }
 
@@ -588,6 +591,8 @@ enum QueuedEvent {
 
 /// The Scene state machine.
 pub struct Scene {
+    idle_owner: std::rc::Rc<()>,
+    idle_sequence: u64,
     config: RuntimeConfig,
     stage: Stage,
     clock: RationalFrameClock,
@@ -685,6 +690,8 @@ impl Scene {
         let skipping = original_skipping || config.start_at_play.is_some();
         let event_inbox = EventInbox::new(config.max_pending_events)?;
         Ok(Self {
+            idle_owner: std::rc::Rc::new(()),
+            idle_sequence: 0,
             config,
             stage: Stage::new(),
             clock: RationalFrameClock::new(fps).map_err(AnimError::Clock)?,

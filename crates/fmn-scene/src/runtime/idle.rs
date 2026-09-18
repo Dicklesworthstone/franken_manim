@@ -18,9 +18,13 @@ pub struct IdleFrame {
 
 impl IdleFrame {
     #[must_use]
-    pub fn dt(&self) -> f64 { 1.0 / f64::from(self.time.fps()) }
+    pub fn dt(&self) -> f64 {
+        1.0 / f64::from(self.time.fps())
+    }
     #[must_use]
-    pub const fn time(&self) -> RationalTime { self.time }
+    pub const fn time(&self) -> RationalTime {
+        self.time
+    }
 }
 
 impl Scene {
@@ -28,33 +32,50 @@ impl Scene {
     /// No elapsed-wall-time rounding, skipped sampling, or play-count change.
     /// A host callback failure is not rollback: the live owner must freeze the
     /// generation rather than automatically retrying arbitrary authored work.
-    pub fn prepare_idle_frame(&mut self, sink: &mut dyn SceneSink) -> Result<IdleFrame, SceneError> {
+    pub fn prepare_idle_frame(
+        &mut self,
+        sink: &mut dyn SceneSink,
+    ) -> Result<IdleFrame, SceneError> {
         self.ensure_preflight(&[], sink)?;
-        let sequence = self.idle_sequence.checked_add(1)
+        let sequence = self
+            .idle_sequence
+            .checked_add(1)
             .ok_or(SceneError::InvalidState("idle frame sequence exhausted"))?;
         self.clock.advance_frames(1).map_err(AnimError::Clock)?;
         self.sync_stage_time();
         self.idle_sequence = sequence;
         Ok(IdleFrame {
-            owner: Rc::clone(&self.idle_owner), sequence,
-            time: self.clock.now(), play_count: self.play_count,
+            owner: Rc::clone(&self.idle_owner),
+            sequence,
+            time: self.clock.now(),
+            play_count: self.play_count,
         })
     }
 
     /// Complete native updaters and queued input, then capture the exact frame
     /// prepared above. The order is the same as a presenter hold, with a
     /// borrow-free host-updater window inserted before native updaters.
-    pub fn complete_idle_frame(&mut self, frame: IdleFrame, sink: &mut dyn SceneSink) -> Result<(), SceneError> {
+    pub fn complete_idle_frame(
+        &mut self,
+        frame: IdleFrame,
+        sink: &mut dyn SceneSink,
+    ) -> Result<(), SceneError> {
         self.ensure_ready()?;
-        if !Rc::ptr_eq(&frame.owner, &self.idle_owner) || frame.sequence != self.idle_sequence
-            || frame.time != self.clock.now() || frame.play_count != self.play_count
+        if !Rc::ptr_eq(&frame.owner, &self.idle_owner)
+            || frame.sequence != self.idle_sequence
+            || frame.time != self.clock.now()
+            || frame.play_count != self.play_count
         {
-            return Err(SceneError::InvalidState("idle frame was superseded or belongs to another Scene"));
+            return Err(SceneError::InvalidState(
+                "idle frame was superseded or belongs to another Scene",
+            ));
         }
         self.stage.update_at_time(frame.dt(), frame.time.to_f64());
         self.dispatch_pending_events()?;
-        sink.capture(CaptureReason::PresenterHold,
-            FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root))?;
+        sink.capture(
+            CaptureReason::PresenterHold,
+            FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
+        )?;
         Ok(())
     }
 }
@@ -65,9 +86,15 @@ mod tests {
     use std::cell::RefCell;
 
     #[derive(Default)]
-    struct Sink { frames: Vec<FramePacket> }
+    struct Sink {
+        frames: Vec<FramePacket>,
+    }
     impl SceneSink for Sink {
-        fn capture(&mut self, reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+        fn capture(
+            &mut self,
+            reason: CaptureReason,
+            packet: FramePacket,
+        ) -> Result<(), IntegrationError> {
             assert_eq!(reason, CaptureReason::PresenterHold);
             self.frames.push(packet);
             Ok(())
@@ -76,15 +103,34 @@ mod tests {
 
     #[test]
     fn idle_frames_use_nonzero_nominal_dt_and_do_not_consume_play_indices() {
-        let mut scene = Scene::new(RuntimeConfig { fps: 7, end_at_play: Some(1), ..RuntimeConfig::default() }, 7).unwrap();
-        let source = scene.add_mobject(Mobject::from_points(&[[0.0; 3]])).unwrap();
-        let follower = scene.add_mobject(Mobject::from_points(&[[0.0; 3]])).unwrap();
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: 7,
+                end_at_play: Some(1),
+                ..RuntimeConfig::default()
+            },
+            7,
+        )
+        .unwrap();
+        let source = scene
+            .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+            .unwrap();
+        let follower = scene
+            .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+            .unwrap();
         let seen = Rc::new(RefCell::new(Vec::new()));
         let observations = Rc::clone(&seen);
-        scene.stage_mut().add_updater(follower, move |stage, me| {
-            observations.borrow_mut().push(stage.time());
-            stage.set_x(me, stage.get_center(source)[0]);
-        }, false).unwrap();
+        scene
+            .stage_mut()
+            .add_updater(
+                follower,
+                move |stage, me| {
+                    observations.borrow_mut().push(stage.time());
+                    stage.set_x(me, stage.get_center(source)[0]);
+                },
+                false,
+            )
+            .unwrap();
         let mut sink = Sink::default();
         for index in 1..=21 {
             let frame = scene.prepare_idle_frame(&mut sink).unwrap();
@@ -99,9 +145,16 @@ mod tests {
         }
         assert_eq!(scene.time().frames(), 21);
         assert_eq!(scene.time().to_f64(), 3.0);
-        assert_eq!(seen.borrow().len(), 21, "exactly one native updater pass per idle frame");
+        assert_eq!(
+            seen.borrow().len(),
+            21,
+            "exactly one native updater pass per idle frame"
+        );
         assert_eq!(sink.frames.len(), 21);
-        assert_eq!(sink.frames[0].materialize_stage().get_center(follower)[0], 1.0);
+        assert_eq!(
+            sink.frames[0].materialize_stage().get_center(follower)[0],
+            1.0
+        );
     }
 
     #[test]

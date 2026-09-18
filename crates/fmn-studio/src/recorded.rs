@@ -10,6 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+mod advance;
 mod live;
 
 use fmn_codec::{PngLimits, decode_png};
@@ -53,6 +54,7 @@ pub struct RecordedTimeline {
     max_bytes: usize,
     commands: u64,
     input_revision: Option<u64>,
+    advance_enabled: bool,
     limits: ProtocolLimits,
 }
 
@@ -86,6 +88,7 @@ impl RecordedTimeline {
             max_bytes,
             commands: 0,
             input_revision: None,
+            advance_enabled: false,
             limits,
         })
     }
@@ -303,6 +306,7 @@ impl WorkerService for RecordedTimeline {
                 view.frame_count = count;
                 view.input_events = revision.is_some();
                 view.input_revision = revision;
+                view.live_advance = self.advance_enabled && revision.is_some();
                 let bytes = snapshot
                     .to_json(InspectorLimits {
                         max_json_bytes: self.limits.max_studio_data_bytes,
