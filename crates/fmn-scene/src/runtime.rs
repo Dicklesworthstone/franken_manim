@@ -867,6 +867,9 @@ impl Scene {
         }
         let mut clock = RationalFrameClock::new(self.fps()).map_err(AnimError::Clock)?;
         clock.advance_frames(frame).map_err(AnimError::Clock)?;
+        // A discontinuous seek supersedes a yielded live frame even when the
+        // caller seeks back to precisely the same rational time afterwards.
+        self.idle_owner = std::rc::Rc::new(());
         self.clock = clock;
         self.sync_stage_time();
         Ok(())
@@ -1933,6 +1936,9 @@ impl Scene {
                 "an in-memory SceneState belongs to a different scene",
             ));
         }
+        // A restored snapshot is a new execution boundary, not completion of
+        // the host-updater window belonging to the previous live state.
+        self.idle_owner = std::rc::Rc::new(());
         self.stage.restore(snapshot);
         self.clock = restored_clock;
         self.sync_stage_time();

@@ -13,7 +13,7 @@
   const MAX_JSON = 8 * 1024 * 1024, MAX_PNG = 64 * 1024 * 1024;
   const state = {snapshot: null, overlay: null, selected: null, collapsed: new Set(),
     shown: null, expected: null, busy: false, busyKind: null, pending: null, refreshNeeded: false, playing: false, connected: false,
-    generation: null, inputs: [], restartPending: false, savePending: false, canSave: false};
+    generation: null, inputs: [], restartPending: false, savePending: false, canSave: false, liveRunning: false};
   const safeText = value => String(value).split(capability).join("[session]").slice(0, 600);
   function report(error) {
     $("error").textContent = safeText(error.message || error);
@@ -69,6 +69,7 @@
       if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Missing or invalid worker generation.");
       const replaced = state.generation !== null && state.generation !== generation;
       state.generation = generation;
+      if (replaced) stopLive();
       if (replaced && (state.inputs.length || heldKeys.size || heldPointer)) {
         discardInputs();
         throw new Error("The worker was replaced. Pending input was not sent to the new generation; refresh before editing again.");
@@ -96,6 +97,7 @@
       (!state.expected || (state.expected.frame_index === state.shown.index && state.expected.sha256 === state.shown.hash));
   }
   function displayState() {
+    liveControls();
     $("save-session").disabled = !state.canSave || state.savePending || state.busyKind === "save";
     const matched = matchesFrame(), shown = state.shown;
     $("display").textContent = shown ? `Displayed frame ${shown.index}${matched ? " · inspector synchronized" : " · waiting for synchronized inspector / stream"}` : "Waiting for the first frame…";
@@ -260,9 +262,10 @@
     if (state.busy) return;
     state.busy = true; state.busyKind = kind; $("restart").disabled = kind === "restart"; $("inspect").disabled = true;
     try { clearError(); await operation(); }
-    catch (error) { state.playing = false; state.savePending = false; report(error); }
+    catch (error) { stopLive(); state.playing = false; state.savePending = false; report(error); }
     finally {
       state.busy = false; state.busyKind = null; $("restart").disabled = false; $("inspect").disabled = false; $("play").textContent = state.playing ? "Pause" : "Play";
+      liveControls();
       if (state.inputs.length) void drainInputs();
       else if (state.restartPending) void restartWorker();
       else if (state.pending) void drain();
@@ -270,6 +273,46 @@
       else if (state.refreshNeeded) { state.refreshNeeded = false; void run(refresh); }
     }
   }
+  function supportsAdvance(v = state.snapshot?.view) {
+    return Boolean(v?.live_advance === true && supportsInput(v) && v.frame_index === v.frame_count - 1);
+  }
+  function liveControls() {
+    const supported = supportsAdvance();
+    if (!supported) state.liveRunning = false;
+    const ready = supported && matchesFrame() && !state.busy && !state.pending && !state.inputs.length &&
+      !state.restartPending && !state.savePending && !document.hidden;
+    $("live-step").disabled = !ready || state.liveRunning;
+    $("live-run").disabled = !state.liveRunning && !ready;
+    $("live-run").textContent = state.liveRunning ? "Pause live" : "Run live";
+    $("live-clock").textContent = !supported ? "Select the final frame of a live worker to advance updaters." :
+      state.liveRunning ? "Executing nominal live frames; no wall-time catch-up." : "Paused. Step advances one frame without adding an authored wait.";
+  }
+  function stopLive() { state.liveRunning = false; liveControls(); }
+  async function advanceLive() {
+    if (!supportsAdvance() || !matchesFrame() || state.busy || state.pending || state.inputs.length ||
+        state.restartPending || state.savePending || document.hidden) return;
+    const generation = state.generation, frame = state.snapshot.view.frame_index, revision = state.snapshot.view.input_revision;
+    await run(async () => {
+      state.expected = await api("/api/advance", {worker_generation:String(generation), frame:String(frame),
+        revision:String(revision), frames:"1"});
+      await refresh();
+      if (state.generation !== generation || state.snapshot.view.input_revision !== revision + 1) {
+        throw new Error("Live clock ownership changed; the command was not retried.");
+      }
+      $("replay").textContent = `Advanced one live frame · revision ${revision + 1}. Authored effects are not replayed on reload.`;
+    }, "advance");
+  }
+  $("live-step").addEventListener("click", () => {
+    if (state.liveRunning) return;
+    state.playing = false; void advanceLive();
+  });
+  $("live-run").addEventListener("click", () => {
+    if (state.liveRunning) { stopLive(); return; }
+    liveControls();
+    if ($("live-run").disabled) return;
+    releaseInputs(); state.playing = false; state.liveRunning = true;
+    liveControls();
+  });
   async function drain() {
     await run(async () => {
       while (state.pending && !state.inputs.length && !state.restartPending) {
@@ -282,6 +325,7 @@
     }, "seek");
   }
   function seek(frame, commit = true) {
+    stopLive();
     if (state.savePending || state.busyKind === "save") return;
     const v = state.snapshot?.view;
     if (!v || !Number.isSafeInteger(frame) || frame < 0 || frame >= v.frame_count) { report(new Error(`Choose an integer frame from 0 to ${v ? v.frame_count - 1 : "the available range"}.`)); return; }
@@ -296,12 +340,18 @@
     ["previous", () => Math.max(0, state.snapshot.view.frame_index - 1)], ["next", () => Math.min(state.snapshot.view.frame_count - 1, state.snapshot.view.frame_index + 1)]]) {
     $(id).addEventListener("click", () => { state.playing = false; if (state.snapshot) seek(next()); });
   }
-  $("play").addEventListener("click", () => { if (state.savePending || state.busyKind === "save") return; const playing = !state.playing; releaseInputs(); state.playing = playing; $("play").textContent = state.playing ? "Pause" : "Play"; });
+  $("play").addEventListener("click", () => { if (state.savePending || state.busyKind === "save") return; stopLive(); const playing = !state.playing; releaseInputs(); state.playing = playing; $("play").textContent = state.playing ? "Pause" : "Play"; });
   // Preview playback advances nominal frames; it never invents variable sampling
   // or claims real-time rendering when the worker takes longer than a frame.
   let lastTick = 0;
   function tick(now) {
     const v = state.snapshot?.view;
+    if (state.liveRunning && v && !state.busy && !state.inputs.length && !state.pending &&
+        !state.restartPending && !state.savePending && !document.hidden && now - lastTick >= 1000 / v.fps) {
+      // One in-flight nominal step. Slow rendering drops pacing opportunities,
+      // never skips scene samples and never accumulates a catch-up queue.
+      lastTick = now; void advanceLive();
+    }
     if (state.playing && v && !state.busy && !state.inputs.length && !state.restartPending && now - lastTick >= 1000 / v.fps) {
       lastTick = now;
       if (v.frame_index + 1 < v.frame_count) seek(v.frame_index + 1, false);
@@ -313,6 +363,7 @@
   $("inspect").addEventListener("click", () => void run(refresh));
   $("layers").addEventListener("change", () => { if (!state.busy) void run(refresh); else state.refreshNeeded = true; });
   async function restartWorker() {
+    stopLive();
     await run(async () => {
     state.restartPending = false;
     state.playing = false; state.pending = null; state.overlay = null; state.snapshot = null; displayState();
@@ -325,6 +376,7 @@
     }, "restart");
   }
   $("restart").addEventListener("click", () => {
+    stopLive();
     if (state.savePending || state.busyKind === "save") return;
     releaseInputs(); state.playing = false; state.pending = null; state.restartPending = true;
     if (state.inputs.length) void drainInputs(); else void restartWorker();
@@ -342,6 +394,7 @@
     }, "save");
   }
   $("save-session").addEventListener("click", () => {
+    stopLive();
     if (!state.canSave || state.savePending || state.busyKind === "save") return;
     // Release held modes with their original frame owner, then drain admitted
     // input and an earlier seek. Never silently commit preview-only playback.
@@ -374,6 +427,7 @@
   // Every admitted event keeps its order, including rapid key-up and pointer-up
   // transitions while a render is in flight. Do not coalesce nonlinear drags.
   function enqueueInput(fields, owner = null, release = false) {
+    stopLive();
     if (!supportsInput() || (!$("input-events").checked && !release)) return false;
     if (!release && (state.savePending || state.busyKind === "save")) return false;
     if (!owner && (state.restartPending || state.busyKind === "seek" || state.busyKind === "restart" ||
@@ -414,6 +468,7 @@
     if ($("preview").hasPointerCapture(pointer.id)) $("preview").releasePointerCapture(pointer.id);
   }
   function releaseInputs() {
+    stopLive();
     releasePointer();
     for (const owner of heldKeys.values()) {
       enqueueInput({type:"key_release", key:owner.key, modifiers:owner.modifiers}, owner, true);
@@ -562,7 +617,7 @@
     while (failures < 5) {
       try { await streamOnce(); failures = 0; }
       catch (error) { failures++; report(error); }
-      state.connected = false; displayState();
+      state.connected = false; stopLive(); displayState();
       await new Promise(resolve => setTimeout(resolve, Math.min(1000 * 2 ** failures, 16000)));
     }
     $("worker").textContent = "Preview disconnected. Reopen the Studio launch URL to reconnect.";

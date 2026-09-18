@@ -35,22 +35,22 @@ function fixture() {
     return elements.get(id);
   };
   const window = new Element(), document = new Element();
-  let frame = 5, revision = 0, generation = 3, release, first = true;
+  let frame = 5, revision = 0, generation = 3, release, first = true, animationFrame;
   const gate = new Promise(resolve => { release = resolve; });
   const calls = [], errors = [], control = {fail:false, conflict:false};
   const state = {snapshot:null, shown:null, expected:null, connected:true, generation,
     inputs:[], restartPending:false, busy:false, pending:null, playing:false,
-    collapsed:new Set(), refreshNeeded:false, canSave:true, savePending:false};
+    collapsed:new Set(), refreshNeeded:false, canSave:true, savePending:false, liveRunning:false};
   const refresh = async () => {
     state.generation = generation;
-    state.snapshot = {view:{frame_index:frame, frame_count:61, width:96, height:54,
-      scale:6, origin:[48,27], fps:30, input_events:true, input_revision:revision}};
+    state.snapshot = {view:{frame_index:frame, frame_count:control.live ? 6 : 61, width:96, height:54,
+      scale:6, origin:[48,27], fps:30, input_events:true, input_revision:revision, live_advance:Boolean(control.live)}};
   };
   void refresh();
   const api = async (path, fields) => {
     calls.push({path, ...fields});
     if (first) { first = false; await gate; }
-    if (path === '/api/event') {
+    if (path === '/api/event' || path === '/api/advance') {
       if (control.fail) throw new Error('native refusal');
       assert.equal(Number(fields.worker_generation), generation, 'original worker owner');
       assert.equal(Number(fields.revision), revision, 'optimistic revision');
@@ -63,9 +63,10 @@ function fixture() {
   const context = vm.createContext({$,window,document,state,api,refresh,
     async downloadSession() { calls.push({path:'/api/session'}); if (control.failDownload) throw new Error('download refused'); },
     clearError() {}, report(error) { errors.push(error.message); }, displayState() {},
-    matchesFrame() { return true; }, requestAnimationFrame() {}});
+    matchesFrame() { return control.matched !== false; }, requestAnimationFrame(callback) { animationFrame = callback; }});
   vm.runInContext(controller + '\n globalThis.queue = {enqueueInput,seek,heldKeys};', context);
-  return {$,window,document,state,calls,errors,control,release,queue:context.queue,
+  return {$,window,document,state,calls,errors,control,release,queue:context.queue, refresh,
+    tick(now) { animationFrame(now); },
     async settled() {
       release();
       for (let i=0; i<1000 && (state.busy || state.inputs.length || state.restartPending || state.pending || state.savePending); i++) {
@@ -230,4 +231,83 @@ test('focus loss releases multiple physical keys using their admitted native val
   ]);
   assert.equal(f.queue.heldKeys.size, 0);
   assert.equal(f.errors.length, 0);
+});
+
+async function liveFixture() {
+  const f = fixture(); f.control.live = true; await f.refresh(); return f;
+}
+
+test('live clock is opt-in, single-flight, nominally paced, and does not catch up', async () => {
+  const f = await liveFixture();
+  f.tick(1000); assert.equal(f.calls.length, 0, 'paused must execute nothing');
+  f.$('live-run').emit('click');
+  f.tick(2000); f.tick(5000); f.tick(9000);
+  assert.equal(f.calls.length, 1, 'slow worker must not accumulate clock requests');
+  assert.equal(f.calls[0].path, '/api/advance');
+  assert.equal(f.calls[0].frames, '1');
+  assert.equal(f.calls[0].frame, '5');
+  assert.equal(f.calls[0].worker_generation, '3');
+  assert.equal(f.calls[0].revision, '0');
+  await f.settled();
+  f.tick(10000); await f.settled();
+  assert.equal(f.calls.length, 2, 'only one step even after a long scheduling gap');
+  assert.equal(f.calls[1].revision, '1');
+  f.tick(10001); assert.equal(f.calls.length, 2, 'nominal pacing bound');
+  f.$('live-run').emit('click'); f.tick(20000);
+  assert.equal(f.calls.length, 2, 'Pause must not restart clock execution');
+});
+
+test('pause during an accepted live frame completes only that frame', async () => {
+  const f = await liveFixture();
+  f.$('live-run').emit('click'); f.tick(1000);
+  f.$('live-run').emit('click');
+  await f.settled(); f.tick(2000);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.state.liveRunning, false);
+});
+
+test('single live step cannot execute captures or queue a second step', async () => {
+  const captured = fixture();
+  captured.$('live-step').emit('click');
+  assert.equal(captured.calls.length, 0, 'missing capability cannot run updaters');
+  const f = await liveFixture();
+  f.$('live-step').emit('click'); f.$('live-step').emit('click');
+  await f.settled(); f.tick(1000);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.state.liveRunning, false, 'single step must not enable automatic execution');
+});
+
+test('clock conflicts and updater failures stop execution without retry', async () => {
+  for (const error of ['conflict', 'fail']) {
+    const f = await liveFixture(); f.control[error] = true;
+    f.$('live-run').emit('click'); f.tick(1000); await f.settled(); f.tick(2000);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.state.liveRunning, false);
+    assert.equal(f.errors.length, 1);
+  }
+});
+
+test('input, history navigation, and reload stop the clock behind an accepted frame', async () => {
+  for (const action of ['input', 'seek', 'restart']) {
+    const f = await liveFixture();
+    f.$('live-run').emit('click'); f.tick(1000);
+    if (action === 'input') f.$('preview').emit('keydown', {key:'k'});
+    else if (action === 'seek') f.queue.seek(0);
+    else f.$('restart').emit('click');
+    await f.settled(); f.tick(2000);
+    assert.equal(f.calls[0].path, '/api/advance');
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.state.liveRunning, false);
+    if (action === 'input') assert.equal(f.calls[1].revision, '1');
+  }
+});
+
+test('hidden documents and unsynchronized previews never execute live clock requests', async () => {
+  const f = await liveFixture();
+  f.$('live-run').emit('click'); f.document.hidden = true; f.tick(1000);
+  assert.equal(f.calls.length, 0);
+  f.document.emit('visibilitychange'); f.document.hidden = false; f.tick(2000);
+  assert.equal(f.state.liveRunning, false, 'returning to a tab does not authorize execution');
+  f.control.matched = false; f.$('live-run').emit('click'); f.tick(3000);
+  assert.equal(f.calls.length, 0);
 });

@@ -4,6 +4,7 @@
 
 use super::*;
 use fmn_scene::{CommandKind, EventPayload, Key, Modifiers, MouseButton};
+use fmn_studio::advance::is_advance_command;
 use fmn_studio::{ServiceError, SupervisorRequest, WorkerErrorCode, WorkerResponse};
 
 fn failure(error: impl std::fmt::Display) -> ServiceError {
@@ -59,6 +60,57 @@ fn refresh(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     result
 }
 
+/// Use the ordinary native clock and updater ordering, without manufacturing
+/// authored waits or consuming play indices. No borrow spans host callbacks.
+/// Intermediate steps are deliberately not published: a command either yields
+/// its completed final view or freezes input with the last good view retained.
+fn advance(scene: &Bound<'_, PyScene>, frames: u32) -> PyResult<()> {
+    let engine = Rc::clone(&scene.try_borrow()?.engine);
+    let render = Arc::clone(&scene.try_borrow()?.render);
+    let mut sink = PortalSceneSink {
+        render,
+        ..PortalSceneSink::default()
+    };
+    for index in 0..frames {
+        portal_playback::synchronize(scene)?;
+        if !Rc::ptr_eq(&engine, &scene.try_borrow()?.engine) {
+            return Err(PyRuntimeError::new_err(
+                "live Studio engine changed before clock stepping",
+            ));
+        }
+        let frame = engine
+            .borrow_mut()
+            .prepare_idle_frame(&mut sink)
+            .map_err(native_error)?;
+        run_python_updaters(scene, frame.dt())?;
+        synchronize_portal_camera(scene)?;
+        if !Rc::ptr_eq(&engine, &scene.try_borrow()?.engine) {
+            return Err(PyRuntimeError::new_err(
+                "live Studio engine changed during clock stepping",
+            ));
+        }
+        // Complete the normal updater pass, capturing only the final step.
+        // Do not call refresh/show afterwards: its zero-dt updater pass would
+        // execute unconditional user callbacks twice for every live frame.
+        with_capture(scene, |c| {
+            c.live_refresh = index + 1 == frames;
+            Ok(())
+        })
+        .map_err(native_error)?;
+        let result = engine
+            .borrow_mut()
+            .complete_idle_frame(frame, &mut sink)
+            .map_err(native_error);
+        with_capture(scene, |c| {
+            c.live_refresh = false;
+            Ok(())
+        })
+        .map_err(native_error)?;
+        result?;
+    }
+    Ok(())
+}
+
 struct LiveWorker {
     scene: Py<PyScene>,
     name: String,
@@ -81,6 +133,7 @@ impl LiveWorker {
         }
         let (name, build) = with_capture(scene, |capture| {
             capture.recorded.enable_live_input()?;
+            capture.recorded.enable_live_advance()?;
             capture.live = true;
             Ok((capture.scene.clone(), capture.recorded.build_id()))
         })
@@ -104,6 +157,38 @@ impl LiveWorker {
     ) -> Result<WorkerResponse, ServiceError> {
         let scene = self.scene.bind(py);
         let result = match request {
+            SupervisorRequest::Play {
+                scene: name,
+                command,
+            } if is_advance_command(&command) => {
+                if let Some(error) = &self.failed {
+                    return Err(failure(format!(
+                        "live input is frozen after callback failure; reload: {error}"
+                    )));
+                }
+                let request =
+                    with_capture(scene, |c| c.recorded.prepare_live_advance(&name, &command))?;
+                if let Err(error) = advance(scene, request.frames) {
+                    let message = error.to_string();
+                    self.failed = Some(message.clone());
+                    let _ = with_capture(scene, |c| {
+                        c.recorded.disable_live_input();
+                        Ok(())
+                    });
+                    return Err(failure(format!(
+                        "live updater failed; input frozen until reload: {message}"
+                    )));
+                }
+                let committed = with_capture(scene, |c| c.recorded.commit_live_advance(command));
+                if let Err(error) = &committed {
+                    self.failed = Some(error.to_string());
+                    let _ = with_capture(scene, |c| {
+                        c.recorded.disable_live_input();
+                        Ok(())
+                    });
+                }
+                committed
+            }
             SupervisorRequest::Play {
                 scene: name,
                 command,

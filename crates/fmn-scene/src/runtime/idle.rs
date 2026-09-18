@@ -174,4 +174,51 @@ mod tests {
         assert!(scene.complete_idle_frame(frame, &mut sink).is_err());
         assert_eq!(sink.frames.len(), 1);
     }
+
+    #[test]
+    fn idle_tokens_cannot_survive_discontinuous_seek_or_state_restore() {
+        let mut scene = Scene::default();
+        let mut sink = Sink::default();
+        let before_seek = scene.prepare_idle_frame(&mut sink).unwrap();
+        let time = before_seek.time().frames();
+        scene.seek_interactive_frame(0).unwrap();
+        scene.seek_interactive_frame(time).unwrap();
+        assert!(scene.complete_idle_frame(before_seek, &mut sink).is_err());
+
+        let before_restore = scene.prepare_idle_frame(&mut sink).unwrap();
+        let state = scene.state().unwrap();
+        scene.restore_state(&state).unwrap();
+        assert!(
+            scene
+                .complete_idle_frame(before_restore, &mut sink)
+                .is_err()
+        );
+
+        let before_durable_restore = scene.prepare_idle_frame(&mut sink).unwrap();
+        let bytes = scene.state_bytes().unwrap();
+        scene.restore_state_bytes(&bytes).unwrap();
+        assert!(
+            scene
+                .complete_idle_frame(before_durable_restore, &mut sink)
+                .is_err()
+        );
+        assert!(sink.frames.is_empty(), "superseded frames must not publish");
+
+        let resumed = scene.prepare_idle_frame(&mut sink).unwrap();
+        scene.complete_idle_frame(resumed, &mut sink).unwrap();
+        assert_eq!(sink.frames.len(), 1);
+    }
+
+    #[test]
+    fn rejected_seek_and_restore_leave_the_pending_idle_frame_valid() {
+        let mut scene = Scene::default();
+        let mut other = Scene::default();
+        let mut sink = Sink::default();
+        let frame = scene.prepare_idle_frame(&mut sink).unwrap();
+        assert!(scene.seek_interactive_frame(-1).is_err());
+        assert!(scene.restore_state(&other.state().unwrap()).is_err());
+        assert!(scene.restore_state_bytes(b"not a scene state").is_err());
+        scene.complete_idle_frame(frame, &mut sink).unwrap();
+        assert_eq!(sink.frames.len(), 1);
+    }
 }

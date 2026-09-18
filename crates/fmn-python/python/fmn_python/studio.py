@@ -229,6 +229,21 @@ class Studio:
             self._record_reload(result=result)
             return copy.deepcopy(result)
 
+    def advance(self, frames: int = 1) -> dict[str, Any]:
+        """Execute nominal live frames and return the native final-frame receipt.
+
+        Select the final timeline frame first. This runs real authored updaters
+        and does not add an authored wait. One command is bounded to one second
+        and one optimistic revision; conflicts and timeouts are never retried.
+        """
+        from .studio_clock import advance
+        with self._operation:
+            if self._stop.is_set() or not self._host.alive:
+                raise RuntimeError("Studio is closed")
+            if not self._interactive:
+                raise RuntimeError("Live stepping requires interactive=True")
+            return advance(self._host.url, self._timeout, frames)
+
     def close(self) -> None:
         self._stop.set()
         thread = self._watch_thread
@@ -387,6 +402,8 @@ preview and is retried only after another edit, not in an execution loop.
 frame and enable Scene input to send keyboard, pointer, drag and wheel events
 through existing scene callbacks. Prior frames remain read-only. Failed callbacks
 freeze input until reload; they are not rolled back or automatically retried.
+Select the final frame to Step live frame or Run live nominal updater ticks.
+Run is bounded and pauses on input, navigation, focus loss or worker changes.
 No sound playback, callback checkpoints, or certified render claim.
 Default: 640x360, 30 FPS, 7200 frames, 256 MiB encoded capture budget.
 """

@@ -13,8 +13,12 @@ pub(super) fn display(error: &ChannelError, f: &mut fmt::Formatter<'_>) -> fmt::
         f.write_str("\nworker stderr (tail):\n")?;
         let start = error.stderr_tail.len().saturating_sub(4096);
         let tail = String::from_utf8_lossy(&error.stderr_tail[start..]);
-        if start > 0 { f.write_str("[earlier output omitted]\n")?; }
-        if !visible(f, &tail, 4096)? { f.write_str(" [truncated]")?; }
+        if start > 0 {
+            f.write_str("[earlier output omitted]\n")?;
+        }
+        if !visible(f, &tail, 4096)? {
+            f.write_str(" [truncated]")?;
+        }
     }
     Ok(())
 }
@@ -30,12 +34,16 @@ fn visible(f: &mut fmt::Formatter<'_>, text: &str, budget: usize) -> Result<bool
             || ('\u{2066}'..='\u{2069}').contains(&c);
         if escape {
             for safe in c.escape_default() {
-                if remaining == 0 { return Ok(false); }
+                if remaining == 0 {
+                    return Ok(false);
+                }
                 write!(f, "{safe}")?;
                 remaining -= 1;
             }
         } else {
-            if remaining < c.len_utf8() { return Ok(false); }
+            if remaining < c.len_utf8() {
+                return Ok(false);
+            }
             write!(f, "{c}")?;
             remaining -= c.len_utf8();
         }
@@ -49,8 +57,11 @@ mod tests {
 
     #[test]
     fn closed_worker_diagnostic_includes_authored_cause_without_terminal_controls() {
-        let error = ChannelError { kind: ChannelFailureKind::Closed, detail: "worker IPC pipe closed".into(),
-            stderr_tail: b"Python Studio worker failed: invalid updater\n\x1b[2J\x00\xff".to_vec() };
+        let error = ChannelError {
+            kind: ChannelFailureKind::Closed,
+            detail: "worker IPC pipe closed".into(),
+            stderr_tail: b"Python Studio worker failed: invalid updater\n\x1b[2J\x00\xff".to_vec(),
+        };
         let text = error.to_string();
         assert!(text.starts_with("worker channel Closed: worker IPC pipe closed"));
         assert!(text.contains("Python Studio worker failed: invalid updater\n"));
@@ -60,8 +71,11 @@ mod tests {
 
     #[test]
     fn human_worker_errors_are_bounded_and_keep_the_latest_stderr() {
-        let mut error = ChannelError { kind: ChannelFailureKind::Timeout,
-            detail: "d".repeat(100_000), stderr_tail: vec![b'x'; 100_000] };
+        let mut error = ChannelError {
+            kind: ChannelFailureKind::Timeout,
+            detail: "d".repeat(100_000),
+            stderr_tail: vec![b'x'; 100_000],
+        };
         error.stderr_tail.extend_from_slice(b"LATEST CAUSE");
         let text = error.to_string();
         assert!(text.len() < 8192);
@@ -71,7 +85,11 @@ mod tests {
         let text = error.to_string();
         assert!(text.len() < 8192);
         assert!(!text.contains('\x1b'));
-        let plain = ChannelError { kind: ChannelFailureKind::Closed, detail: "closed".into(), stderr_tail: Vec::new() };
+        let plain = ChannelError {
+            kind: ChannelFailureKind::Closed,
+            detail: "closed".into(),
+            stderr_tail: Vec::new(),
+        };
         assert_eq!(plain.to_string(), "worker channel Closed: closed");
     }
 }

@@ -249,9 +249,11 @@ impl ChannelError {
 
 impl fmt::Display for ChannelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "worker channel {:?}: {}", self.kind, self.detail)
+        diagnostic::display(self, f)
     }
 }
+
+mod diagnostic;
 
 impl std::error::Error for ChannelError {}
 
