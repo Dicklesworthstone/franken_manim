@@ -20,6 +20,7 @@ def _refuses(call, exception=ValueError):
 
 def verify_surface_mesh():
     verify_constructor_uniforms()
+    verify_grid_edge_cases()
     calls = []
 
     def uv(u, v):
@@ -123,6 +124,32 @@ def verify_constructor_uniforms():
                    dict(anti_alias_width=float("inf"))):
         _refuses(lambda kwargs=kwargs: m.Line(**kwargs))
     _refuses(lambda: m.Line(unsupported_render_option=True), TypeError)
+
+
+def verify_grid_edge_cases():
+    """Compare both iso-curve directions against independent sampled rows."""
+    for nu in (1, 2, 3, 7, 11):
+        for nv in (1, 2, 4, 9):
+            surface = m.ParametricSurface(
+                lambda u, v: (u, v, u * v), resolution=(nu, nv))
+            surface.stretch(1.3, 0).rotate(0.4, axis=m.UP).shift((0.2, -0.4, 0.7))
+            nudged = (surface.get_points() + 0.025 * surface.get_unit_normals()).reshape(nu, nv, 3)
+            for rows, columns in ((0, 0), (1, 1), (3, 5), (7, 2)):
+                mesh = m.SurfaceMesh(surface, resolution=(rows, columns), normal_nudge=0.025)
+                assert len(mesh) == rows + columns
+                for line, index in zip(mesh[:rows], np.linspace(0, nu - 1, rows)):
+                    lo, hi = int(np.floor(index)), int(np.ceil(index))
+                    row = (1 - index % 1) * nudged[lo] + (index % 1) * nudged[hi]
+                    assert np.allclose(line.get_points()[[0, -1]], row[[0, -1]], atol=2e-6)
+                for line, index in zip(mesh[rows:], np.linspace(0, nv - 1, columns)):
+                    lo, hi = int(np.floor(index)), int(np.ceil(index))
+                    column = (1 - index % 1) * nudged[:, lo] + (index % 1) * nudged[:, hi]
+                    assert np.allclose(line.get_points()[[0, -1]], column[[0, -1]], atol=2e-6)
+    copied = mesh.copy()
+    before = mesh[0].get_points().copy()
+    assert np.array_equal(copied[0].get_points(), before)
+    copied.shift(m.RIGHT)
+    assert np.array_equal(mesh[0].get_points(), before)
 
 
 def render_surface_mesh(destination, seed=0):

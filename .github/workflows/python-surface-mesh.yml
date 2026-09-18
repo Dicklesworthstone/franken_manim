@@ -102,6 +102,7 @@ jobs:
           fi
       - name: Run unfiltered workspace regression gate
         run: |
+          set +e
           set -uo pipefail
           # Preserve both broad results even when the legacy bridge stops on
           # obsolete matching-plan metadata. Do not turn either failure green.
