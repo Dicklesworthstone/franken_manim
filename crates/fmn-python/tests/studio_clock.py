@@ -23,12 +23,19 @@ class LiveClockTests(LiveStudioTests):
 """, 1)
         source += """
     def tick(self, mob, dt):
-        self.log('tick', dt=dt, time=self.time, plays=self.num_plays, pid=os.getpid())
+        self.log('tick', dt=dt, time=self.get_time(), plays=self.num_plays, pid=os.getpid())
         if dt > 0:
             self.ticks += 1
             mob.shift(dt * RIGHT)
 """
         self.source.write_text(source)
+
+    def test_startup_exception_reports_the_worker_cause_without_terminal_escapes(self):
+        self.source.write_text(r"raise ValueError('visible startup cause\x1b[2J')" + "\n")
+        with self.assertRaisesRegex(RuntimeError, "visible startup cause") as failure:
+            self.host()
+        self.assertLess(len(str(failure.exception)), 8192)
+        self.assertNotIn("\x1b", str(failure.exception))
 
     def test_nominal_ticks_execute_once_without_wait_indices_or_growing_history(self):
         with self.host() as host:
@@ -128,6 +135,7 @@ class LiveClockTests(LiveStudioTests):
 # are useful shared helpers but must not silently double its accepted coverage.
 if __name__ == "__main__":
     suite = unittest.TestSuite(LiveClockTests(name) for name in (
+        "test_startup_exception_reports_the_worker_cause_without_terminal_escapes",
         "test_nominal_ticks_execute_once_without_wait_indices_or_growing_history",
         "test_live_advance_refuses_stale_unbounded_and_incomplete_commands_before_effects",
         "test_partial_updater_failure_keeps_last_good_frame_and_freezes_until_reload",
