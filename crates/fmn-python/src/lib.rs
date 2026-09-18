@@ -11735,6 +11735,28 @@ mod tests {
     }
 
     #[test]
+    fn production_drawing_runtime_acceptance_suite() {
+        crate::with_python_test_module("native drawing runtime", |py, _module, globals| {
+            for (name, text) in [
+                (
+                    "creation_semantics.py",
+                    include_str!("../tests/creation_semantics.py"),
+                ),
+                (
+                    "drawing_runtime.py",
+                    include_str!("../tests/drawing_runtime.py"),
+                ),
+            ] {
+                globals.set_item("__file__", name).expect("suite filename");
+                let source = CString::new(text).expect("drawing suite contains no NUL");
+                py.run(source.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .expect("native creation phases and failure ownership");
+            }
+        });
+    }
+
+    #[test]
     fn production_portal_runtime_acceptance_suite() {
         crate::with_python_test_module("complete portal runtime", |py, _module, globals| {
             for (name, text) in [

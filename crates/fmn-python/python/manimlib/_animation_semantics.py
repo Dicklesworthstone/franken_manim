@@ -511,13 +511,21 @@ def install(native):
 
     def draw_border_get_outline(self):
         """Expose a native-backed outline copy without changing the source."""
+        # The animation accepts one RGB color, not a per-vertex color list.
+        # Normalize it once so array/tuple RGB values do not enter the style
+        # setter's gradient-list interpretation or an ambiguous truth test.
+        color = (None if self.stroke_color is None else
+                 g["_ColorValue"](g["_color_to_rgb"](self.stroke_color)))
         outline = self.mobject.copy()
         outline.set_fill(opacity=0)
         for member in outline.family_members_with_points():
             member.set_stroke(
-                color=self.stroke_color or member.get_stroke_color(),
+                color=color if color is not None else member.get_stroke_color(),
                 width=self.stroke_width,
-                behind=self.mobject.stroke_behind,
+                # Native-built shapes skip VMobject.__init__, and a later
+                # set_stroke(behind=...) changes the renderer's live uniform,
+                # not the constructor's cached Python attribute.
+                behind=bool(self.mobject.uniforms["stroke_behind"]),
             )
         return outline
 
@@ -1975,7 +1983,8 @@ def _install_partial_reveals(g):
                     and not self._partial_was_suspended
                     and self.mobject._is_updating_suspended()):
                 self.mobject_was_updating = False
-                self.mobject.resume_updating()
+                # Failure unwinding must not execute another authored updater.
+                self.mobject.resume_updating(call_updater=False)
 
     def abort_preserving_error(self):
         try:
@@ -2200,7 +2209,8 @@ def _install_border_write(g):
             if (self.suspend_mobject_updating and not self._border_was_suspended
                     and self.mobject._is_updating_suspended()):
                 self.mobject_was_updating = False
-                self.mobject.resume_updating()
+                # Failure unwinding must not execute another authored updater.
+                self.mobject.resume_updating(call_updater=False)
 
     def abort_preserving_error(self):
         try:

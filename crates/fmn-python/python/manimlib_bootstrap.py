@@ -3231,6 +3231,14 @@ class VMobject(Mobject):
             border_width=self.fill_border_width,
         )
 
+    def refresh_joint_angles(self):
+        # This public method invalidates the whole family's derived metadata;
+        # it does not alter geometry or consume the renderer's native data.
+        # Marionette already maintains joint-angle columns on point writes.
+        for member in self.get_family():
+            member.needs_new_joint_angles = True
+        return self
+
     def get_group_class(self):
         return getattr(_FMN_ROOT, "VGroup", VMobject)
 
