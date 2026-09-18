@@ -39,6 +39,10 @@ jobs:
             git apply --check scripts/patches/surface-mesh-portal.patch
             git apply scripts/patches/surface-mesh-portal.patch
           fi
+          if ! grep -q 'Native builders do not call VMobject.__init__' crates/fmn-python/python/manimlib_bootstrap.py; then
+            git apply --check scripts/patches/surface-mesh-uniforms.patch
+            git apply scripts/patches/surface-mesh-uniforms.patch
+          fi
           python -m py_compile crates/fmn-python/tests/surface_mesh.py crates/fmn-python/python/manimlib_bootstrap.py
       - name: Install pinned build tools
         run: |
@@ -115,4 +119,4 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/portable
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-surface-mesh-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}

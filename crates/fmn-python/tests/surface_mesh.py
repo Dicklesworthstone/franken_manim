@@ -19,6 +19,7 @@ def _refuses(call, exception=ValueError):
 
 
 def verify_surface_mesh():
+    verify_constructor_uniforms()
     calls = []
 
     def uv(u, v):
@@ -96,6 +97,32 @@ def verify_surface_mesh():
     else:
         raise AssertionError("normal callback failure was swallowed")
     return 12
+
+
+def verify_constructor_uniforms():
+    """Inherited VMobject options must reach real native-built descendants."""
+    constructors = (m.Line, m.Circle, m.Square, m.Arrow, m.DashedLine,
+                    m.Elbow, m.DecimalNumber, m.Integer)
+    for constructor in constructors:
+        obj = constructor(joint_type="bevel", anti_alias_width=0.75,
+                          scale_stroke_with_zoom=True, depth_test=True,
+                          is_fixed_in_frame=True)
+        family = [part for part in obj.get_family() if part.has_points()]
+        assert family, constructor.__name__
+        for part in family:
+            assert part.get_joint_type() == m.VMobject.joint_type_map["bevel"]
+            assert np.isclose(part.get_anti_alias_width(), 0.75)
+            assert part.get_scale_stroke_with_zoom()
+            assert part.uniforms["depth_test"] is True
+            assert part.is_fixed_in_frame()
+        defaults = constructor()
+        assert defaults.get_joint_type() == m.VMobject.joint_type_map["auto"]
+    for kwargs in (dict(joint_type="not-a-joint"),
+                   dict(anti_alias_width=-1),
+                   dict(anti_alias_width=float("nan")),
+                   dict(anti_alias_width=float("inf"))):
+        _refuses(lambda kwargs=kwargs: m.Line(**kwargs))
+    _refuses(lambda: m.Line(unsupported_render_option=True), TypeError)
 
 
 def render_surface_mesh(destination, seed=0):
