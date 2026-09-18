@@ -1,0 +1,95 @@
+name: Camera motion and runtime recovery
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/camera-runtime.yml'
+      - 'scripts/patches/camera-runtime.patch'
+      - 'crates/fmn-python/tests/camera_motion.py'
+      - 'crates/fmn-python/tests/camera_execution.py'
+      - 'crates/fmn-python/tests/updater_family.py'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: camera-runtime
+  cancel-in-progress: false
+jobs:
+  native-acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TARGET_DIR: target/camera-runtime
+      CARGO_TERM_COLOR: never
+      PYO3_PYTHON: python
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - name: Apply the reviewed runtime source changes
+        run: |
+          set -euo pipefail
+          if ! grep -q '^def _install_camera_motion' crates/fmn-python/python/manimlib/_animation_semantics.py; then
+            git apply --check scripts/patches/camera-runtime.patch
+            git apply scripts/patches/camera-runtime.patch
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/check_portal_runtime.sh')
+          text = path.read_text()
+          if 'camera_motion camera_execution updater_family' not in text:
+              old = 'camera_animation_semantics creation_semantics'
+              assert text.count(old) == 1
+              path.write_text(text.replace(old, 'camera_animation_semantics camera_motion camera_execution updater_family creation_semantics'))
+          PY
+          git diff --check
+      - name: Build the exact source with pinned tools
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
+          python -m maturin build --locked --interpreter python --profile dev --out target/camera-wheel 2>&1 | tee /tmp/camera-build.log
+          python -m venv target/camera-venv
+          target/camera-venv/bin/python -m pip install 'numpy==2.5.2' target/camera-wheel/*.whl
+      - name: Exercise installed wheel, all sample poses and native pixels
+        run: |
+          set -euo pipefail
+          for suite in camera_motion camera_execution updater_family camera_animation_semantics rotation_semantics movement_semantics composition_lifecycle matching_transform_semantics callback_cleanup scene_execution; do
+            target/camera-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/camera-$suite.log
+          done
+          python crates/fmn-python/tests/test_scene_execution_protocol.py 2>&1 | tee /tmp/camera-protocol.log
+      - name: Exercise embedded initialization and native Rust checks
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$PWD/crates/fmn-python/python" cargo test --locked -p fmn-python production_camera -- --nocapture 2>&1 | tee /tmp/camera-embedded.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/camera-embedded.log
+          cargo test --locked -p fmn-anim --lib 2>&1 | tee /tmp/camera-choreo.log
+          cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/camera-clippy.log
+      - name: Commit verified production code directly to main
+        run: |
+          set -euo pipefail
+          git add crates/fmn-python/python/fmn_python/scene_execution.py crates/fmn-python/python/fmn_python/update_animations.py crates/fmn-python/python/manimlib/_animation_semantics.py crates/fmn-python/python/manimlib_bootstrap.py crates/fmn-python/tests/test_scene_execution_protocol.py scripts/check_portal_runtime.sh
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(runtime): enable camera spatial motion and recover real animation families (fm-5wq.4.142)'
+            git push origin HEAD:main
+          fi
+      - name: Preserve exact source and validation
+        if: always()
+        run: |
+          git rev-parse HEAD > /tmp/camera-source-sha.txt
+          git archive --format=tar.gz HEAD > /tmp/camera-source.tar.gz
+          git diff > /tmp/camera-working.patch
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: camera-runtime-${{ github.sha }}
+          path: |
+            /tmp/camera-*
+            target/camera-wheel/*.whl
+          retention-days: 2
