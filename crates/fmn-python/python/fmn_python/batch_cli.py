@@ -16,7 +16,7 @@ _VALUE_FLAGS = frozenset({"--format", "--resolution", "--fps", "--threads", "--v
                           "-n", "--start_at_animation_number"})
 _BATCH_HELP = """Multi-scene output:
   fmn-python [--robot] SOURCE.py --write_all [--keep-going]
-             [--format png|png_sequence|gif|y4m|wav|mp4|mov]
+             [--format png|png_sequence|gif|y4m|wav|svg|mp4|mov]
              [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
              [--video_dir DIRECTORY]
 

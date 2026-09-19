@@ -1833,6 +1833,48 @@ pub fn publish_svg(
     })
 }
 
+/// Publish a complete SVG only if no destination exists, including a symlink.
+///
+/// Like [`publish_svg`], this is bounded and atomic, but the filesystem's
+/// create-new capability arbitrates competing publishers at the final commit.
+/// An existence precheck alone cannot establish this no-clobber contract.
+///
+/// # Errors
+/// An existing destination, invalid budget, oversized document or filesystem
+/// publication error. Existing bytes remain untouched on every failure.
+pub fn publish_svg_new(
+    fs: &dyn FileSystem,
+    config: &SvgPublicationConfig,
+    document: &[u8],
+) -> Result<SvgPublicationReport, SinkAdapterError> {
+    validate_destination(&config.destination)?;
+    if config.max_artifact_bytes == 0 {
+        return Err(SinkAdapterError::InvalidConfig(
+            "SVG max_artifact_bytes must be nonzero",
+        ));
+    }
+    let bytes = byte_len(document)?;
+    enforce_artifact_limit(bytes, config.max_artifact_bytes)?;
+    let _span = config
+        .profile
+        .as_ref()
+        .and_then(|profile| profile.span(None, ProfilePhase::Encode));
+    if !fs
+        .create_new(&config.destination, document)
+        .map_err(|error| publish_error(&config.destination, error))?
+    {
+        return Err(publish_error(
+            &config.destination,
+            "SVG destination already exists",
+        ));
+    }
+    Ok(SvgPublicationReport {
+        path: config.destination.clone(),
+        bytes,
+        digest: sha256(document),
+    })
+}
+
 struct FrameState {
     expected_sequence: u64,
     frame_count: u64,

@@ -5,7 +5,7 @@
 //! self-goldens (§16.3).
 //!
 //! Format guarantees, exactly the §6.7 policy:
-//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.6,
+//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.8,
 //!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v2.0; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
@@ -51,7 +51,7 @@ use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn, UpdaterId};
 use crate::uniforms::{JointType, Uniforms};
 use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, RenderPrimitive};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.7.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.8.
 ///
 /// Minor history: 1.1 appended the shape tag; 1.2 appended `z_index`; 1.3
 /// preserves the monotonic updater-id cursor, including identities removed
@@ -59,8 +59,9 @@ use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, 
 /// (fm-7if); 1.5 appended durable renderer primitive/topology identity;
 /// 1.6 appended immutable image descriptors and RGBA8 bytes; **1.7 appends
 /// the per-buffer `_data_defaults` phantom record** (fm-laky): one
-/// presence bool and, when set, exactly one stride of f32 lanes.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 7);
+/// presence bool and, when set, exactly one stride of f32 lanes. **1.8 appends
+/// durable dark-side image resources**, retaining the full 1.7 payload prefix.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 8);
 
 /// The scene-state envelope: magic `FMNA`, schema id 2, version 2.0.
 ///
@@ -1017,6 +1018,24 @@ impl Snapshot {
                 }
             }
         }
+        // Minor 1.8: a dark texture is part of the same immutable material,
+        // not an ambient file path or a renderer-only cache. Preserve the old
+        // primary-image table verbatim and append a liveness-parallel table.
+        for (_, entry) in &self.slots {
+            match entry {
+                Some(entry) => {
+                    w.put_bool(true);
+                    let dark = entry.image.as_ref().and_then(ImageResource::dark_image);
+                    w.put_bool(dark.is_some());
+                    if let Some(dark) = dark {
+                        put_image_resource(&mut w, dark);
+                    }
+                }
+                None => {
+                    w.put_bool(false);
+                }
+            }
+        }
         w.finish()
     }
 
@@ -1444,6 +1463,34 @@ impl Snapshot {
                     _ => {
                         return Err(PersistError::Malformed(
                             "image-resource table does not match arena liveness",
+                        ));
+                    }
+                }
+            }
+        }
+        if r.version().1 >= 8 {
+            for (_, entry) in &mut slots {
+                let present = r.get_bool()?;
+                match (present, entry) {
+                    (false, None) => {}
+                    (true, Some(entry)) => {
+                        if r.get_bool()? {
+                            budget.charge(
+                                std::mem::size_of::<ImageResource>(),
+                                "dark image descriptor",
+                            )?;
+                            let dark = get_image_resource(&mut r, &mut budget)?;
+                            let light = entry.image.take().ok_or(PersistError::Malformed(
+                                "dark image requires a primary image resource",
+                            ))?;
+                            entry.image = Some(light.with_dark_image(dark).map_err(|_| {
+                                PersistError::Malformed("invalid light/dark image pair")
+                            })?);
+                        }
+                    }
+                    _ => {
+                        return Err(PersistError::Malformed(
+                            "dark-image table does not match arena liveness",
                         ));
                     }
                 }

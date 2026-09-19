@@ -22740,7 +22740,7 @@ def _portal_cli_help():
     return """usage: fmn-python [--robot] --version
        fmn-python [--robot] --list-scenes SOURCE.py
        fmn-python [--robot] --construct-only SOURCE.py [SCENE]
-       fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence|gif|y4m|wav|mp4|mov]
+       fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence|gif|y4m|wav|svg|mp4|mov]
                   [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
                   [--video_dir PATH]
        fmn-python studio SOURCE.py [SCENE]
@@ -22843,10 +22843,10 @@ def _portal_cli_render_arguments(arguments):
         positionals.append(argument)
         index += 1
 
-    if values["format"] not in ("png", "png_sequence", "gif", "y4m", "wav", "mp4", "mov"):
+    if values["format"] not in ("png", "png_sequence", "gif", "y4m", "wav", "svg", "mp4", "mov"):
         raise RuntimeError(
             f"CAPABILITY: portal output format {values['format']!r} is not connected; "
-            "use --format png, png_sequence, gif, y4m, wav, mp4, or mov"
+            "use --format png, png_sequence, gif, y4m, wav, svg, mp4, or mov"
         )
     if values["reproducible"] and values["format"] not in ("png", "png_sequence", "wav"):
         raise RuntimeError(

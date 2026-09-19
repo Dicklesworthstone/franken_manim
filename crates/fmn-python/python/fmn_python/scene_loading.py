@@ -10,6 +10,7 @@ roots are refused rather than silently reusing another checkout's children.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import importlib
 import importlib.abc
@@ -81,7 +82,12 @@ class _FreshSource(importlib.machinery.SourceFileLoader):
         # Timestamp/size-based pyc validation can miss an equal-length edit in
         # the same timestamp tick. Compile exactly the bytes observed here.
         source = self.get_data(self.path)
-        self.owner.source_digests[Path(self.path).resolve()] = hashlib.sha256(source).hexdigest()
+        path = Path(self.path).resolve()
+        digest = hashlib.sha256(source).hexdigest()
+        # Check the exact bytes about to execute, not just a scan after import.
+        # Failed code must not get to run top-level authored effects first.
+        self.owner._check_source(path, digest)
+        self.owner.source_digests[path] = digest
         return self.source_to_code(source, self.path)
 
     def exec_module(self, module: ModuleType) -> None:
@@ -99,7 +105,7 @@ class _ProjectFinder(importlib.abc.MetaPathFinder):
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is not None and spec.loader is None and spec.submodule_search_locations is not None:
             locations = tuple(Path(item).resolve() for item in spec.submodule_search_locations)
-            if not _local_namespace(fullname, locations, self.owner.root):
+            if not self.owner._owns_namespace(fullname, locations):
                 return None
             spec.loader = _FreshNamespace(fullname, spec.submodule_search_locations, self.owner)
             return spec
@@ -107,7 +113,8 @@ class _ProjectFinder(importlib.abc.MetaPathFinder):
                 or not isinstance(spec.origin, str)):
             return None
         origin = Path(spec.origin).resolve()
-        if not origin.is_relative_to(self.owner.root):
+        if not self.owner._owns_source(origin):
+            self.owner._check_package_scope(fullname, origin)
             return None
         spec.loader = _FreshSource(fullname, str(origin), self.owner)
         return spec
@@ -122,9 +129,18 @@ class SceneSource:
     stale modules or pyc files. Previously loaded project modules are restored
     afterward; foreign modules and authored sys.path changes are not discarded.
     Returned classes are intended for use inside the context.
+
+    ``source_inputs`` optionally freezes a declared path-to-SHA256 table from
+    the native Studio scan. Declared shared helpers outside the scene directory
+    then use the same fresh loader, and changed/undeclared project source is
+    refused before execution. This does not change import search precedence or
+    certify third-party packages, assets, or arbitrary Python host effects.
     """
 
-    def __init__(self, source: str | Path, scene_type: type) -> None:
+    def __init__(
+        self, source: str | Path, scene_type: type, *,
+        source_inputs: Mapping[str | Path, str] | None = None,
+    ) -> None:
         self.path = Path(source).resolve()
         if self.path.suffix.lower() not in (".py", ".pyw"):
             raise ValueError("the Python portal accepts only .py or .pyw scene sources")
@@ -143,6 +159,11 @@ class SceneSource:
                 raise ImportError("the filesystem root cannot be a scene package")
             root = root.parent
         self.root = root
+        self._source_inputs = self._freeze_inputs(source_inputs)
+        self._source_directories = frozenset(
+            path.parent for path in (self._source_inputs or {})
+            if path.suffix.lower() in (".py", ".pyw")
+        )
         self.package = ".".join(parts)
         if self.package and self.path.name == "__init__.py":
             self.name = self.package
@@ -163,6 +184,65 @@ class SceneSource:
         self._entered = False
         self._active = False
 
+    @staticmethod
+    def _freeze_inputs(values):
+        if values is None:
+            return None
+        if not isinstance(values, Mapping) or not 1 <= len(values) <= 4096:
+            raise ValueError("declared scene sources require a mapping of 1..4096 inputs")
+        result = {}
+        for name, digest in values.items():
+            path = Path(name)
+            if not path.is_absolute() or "\0" in str(path) or ".." in path.parts:
+                raise ValueError("declared scene source paths must be absolute without NUL or parent traversal")
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(char not in "0123456789abcdef" for char in digest)):
+                raise ValueError("declared scene sources require lowercase SHA-256 digests")
+            if path in result:
+                raise ValueError("declared scene source paths must be unique")
+            result[path] = digest
+        return result
+
+    def _owns_source(self, path: Path) -> bool:
+        return path.is_relative_to(self.root) or (
+            self._source_inputs is not None and path in self._source_inputs
+        )
+
+    def _owns_namespace(self, name: str, paths: tuple[Path, ...]) -> bool:
+        # Namespace containers have no source file. Refresh them when they
+        # contain declared helper sources, or cached child attributes bypass
+        # the loader even after the children's sys.modules entries are evicted.
+        local = [path.is_relative_to(self.root) or any(
+            directory.is_relative_to(path) for directory in self._source_directories
+        ) for path in paths]
+        if any(local) and not all(local):
+            raise ImportError(f"scene namespace {name!r} has locations outside the scene project")
+        return bool(local) and all(local)
+
+    def _check_package_scope(self, name: str, origin: Path | None) -> None:
+        if (origin is not None and origin.name == "__init__.py"
+                and not self._owns_source(origin)
+                and any(directory.is_relative_to(origin.parent)
+                        for directory in self._source_directories)):
+            # An exact helper-file declaration does not authorize stale cached
+            # package initializers. Declare the whole containing package.
+            raise ImportError(
+                f"declared helper package {name!r} has an undeclared initializer; "
+                "include the containing package directory in watch_paths"
+            )
+
+    def _check_source(self, path: Path, digest: str) -> None:
+        if self._source_inputs is None:
+            return
+        expected = self._source_inputs.get(path)
+        if expected is None:
+            raise RuntimeError(
+                f"Studio imported undeclared project source {path}; "
+                "include it in watch_paths"
+            )
+        if expected != digest:
+            raise RuntimeError(f"Studio executed changed project source {path}; reload")
+
     def _prepare(self) -> None:
         # A pre-existing foreign package must not redirect relative imports to
         # another checkout. Refuse before executing either project's code.
@@ -180,7 +260,7 @@ class SceneSource:
                 continue
             for directory in (self.root, self.path.parent):
                 namespace = _namespace_paths(module)
-                if namespace and (directory / name).is_dir() and not _local_namespace(name, namespace, self.root):
+                if namespace and (directory / name).is_dir() and not self._owns_namespace(name, namespace):
                     raise ImportError(f"scene namespace {name!r} has locations outside the scene project")
                 candidates = (directory / (name + ".py"), directory / name / "__init__.py")
                 for candidate in candidates:
@@ -193,8 +273,9 @@ class SceneSource:
             if _protected(name):
                 continue
             origin = _origin(module)
-            local_namespace = _local_namespace(name, _namespace_paths(module), self.root)
-            if (origin is not None and origin.is_relative_to(self.root)) or local_namespace:
+            self._check_package_scope(name, origin)
+            local_namespace = self._owns_namespace(name, _namespace_paths(module))
+            if (origin is not None and self._owns_source(origin)) or local_namespace:
                 # A namespace has no __file__, but retains child attributes.
                 # Refresh its container as well as its source children, or
                 # `from namespace import helper` can bypass sys.modules and

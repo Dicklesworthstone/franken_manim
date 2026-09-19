@@ -26,7 +26,8 @@ class NativeHost:
 
     @staticmethod
     def watch_sources(roots, debounce_ms):
-        return SimpleNamespace(poll=lambda: False, watched=(roots, debounce_ms))
+        from test_studio_inputs_protocol import fake_snapshot
+        return fake_snapshot(roots, debounce_ms)
 
 
 class StudioPolicyTests(unittest.TestCase):
@@ -169,7 +170,7 @@ class StudioPolicyTests(unittest.TestCase):
                 super().__init__(*args)
         self.native._StudioHost = OrderedHost
         with Studio(self.source, "Lesson", autoreload=True):
-            self.assertEqual(events, ["snapshot", "worker"])
+            self.assertEqual(events, ["snapshot", "worker", "snapshot"])
 
     def test_cli_studio_usage_refuses_extra_or_missing_options(self):
         receipts = []

@@ -330,21 +330,30 @@ impl RetainedFrameRenderer {
                         },
                     )?;
                 }
-                RenderPrimitive::SurfaceGrid { resolution } => {
-                    let mesh = surface_mesh(stage, item.mob, Some(resolution))?;
+                RenderPrimitive::SurfaceGrid { .. } | RenderPrimitive::TriangleMesh => {
+                    let resolution = match entry.render_primitive() {
+                        RenderPrimitive::SurfaceGrid { resolution } => Some(resolution),
+                        _ => None,
+                    };
+                    // Raster resources do not change a surface's topology.
+                    // Reuse the durable image slot and the same interned sampler
+                    // used by ImageQuad, but keep surface lighting/alpha policy.
+                    let image = entry
+                        .image_resource()
+                        .map(|resource| image_frame.intern(resource).map_err(SyncError::from))
+                        .transpose()?;
+                    let dark_image = entry
+                        .image_resource()
+                        .and_then(fmn_mobject::ImageResource::dark_image)
+                        .map(|resource| image_frame.intern(resource).map_err(SyncError::from))
+                        .transpose()?;
+                    let mesh = surface_mesh(stage, item.mob, resolution)?;
                     let mesh_index = meshes.len();
                     meshes.push(mesh);
                     commands.push(PreparedCommand::Surface {
                         mesh: mesh_index,
-                        uniforms: *entry.uniforms(),
-                    });
-                }
-                RenderPrimitive::TriangleMesh => {
-                    let mesh = surface_mesh(stage, item.mob, None)?;
-                    let mesh_index = meshes.len();
-                    meshes.push(mesh);
-                    commands.push(PreparedCommand::Surface {
-                        mesh: mesh_index,
+                        image,
+                        dark_image,
                         uniforms: *entry.uniforms(),
                     });
                 }
@@ -362,6 +371,12 @@ impl RetainedFrameRenderer {
                             reason: "image primitive has no image resource",
                         },
                     )?;
+                    if resource.dark_image().is_some() {
+                        return Err(RetainedFrameRendererError::InvalidPrimitive {
+                            mob: item.mob,
+                            reason: "light/dark textures require a surface or triangle mesh",
+                        });
+                    }
                     let image = image_frame.intern(resource).map_err(SyncError::from)?;
                     let mesh = image_mesh(stage, item.mob)?;
                     let mesh_index = meshes.len();
@@ -391,11 +406,34 @@ impl RetainedFrameRenderer {
                 PreparedCommand::Vector(instance) => {
                     ThreeDDraw::Vector(VectorDraw::new(&self.plan, instance))
                 }
-                PreparedCommand::Surface { mesh, uniforms } => {
+                PreparedCommand::Surface {
+                    mesh,
+                    image,
+                    dark_image,
+                    uniforms,
+                } => {
                     let mesh = meshes
                         .get(mesh)
                         .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
                     let mut draw = SurfaceDraw::new(mesh);
+                    if let Some(image) = image {
+                        let image = image_frame
+                            .get(image)
+                            .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
+                        let dark = dark_image
+                            .map(|index| {
+                                image_frame
+                                    .get(index)
+                                    .ok_or(RetainedFrameRendererError::VectorPlanMismatch)
+                            })
+                            .transpose()?;
+                        let mut material = crate::TextureMaterial::surface(
+                            image.texture(),
+                            dark.map(|image| image.texture()),
+                        );
+                        material.sampler = image.sampler();
+                        draw.material = SurfaceMaterial::Texture(material);
+                    }
                     draw.shading = uniforms.shading;
                     draw.is_fixed_in_frame = uniforms.is_fixed_in_frame;
                     draw.clip_planes = uniforms.clip_planes;
@@ -464,6 +502,8 @@ enum PreparedCommand {
     Vector(u32),
     Surface {
         mesh: usize,
+        image: Option<u32>,
+        dark_image: Option<u32>,
         uniforms: fmn_mobject::Uniforms,
     },
     Dot(TrueDotDraw),
@@ -550,11 +590,43 @@ fn surface_mesh(
             d_normal[1] - point[1],
             d_normal[2] - point[2],
         ]));
-        vertices.push(SurfaceVertex::colored(
-            placement.apply_point(point),
-            normal,
-            record_rgba(stage, mob, record)?,
-        ));
+        let vertex = if entry.image_resource().is_some() {
+            let uv = entry
+                .buffer
+                .read(record, "im_coords")
+                .and_then(|value| <[f32; 2]>::try_from(value.as_slice()).ok())
+                .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "textured surface im_coords field is absent",
+                })?;
+            let opacity = entry
+                .buffer
+                .read(record, "opacity")
+                .and_then(|value| value.first().copied())
+                .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "textured surface opacity field is absent",
+                })?;
+            if !uv.iter().all(|value| value.is_finite()) || !opacity.is_finite() {
+                return Err(RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "textured surface UV and opacity must be finite",
+                });
+            }
+            SurfaceVertex::textured(
+                placement.apply_point(point),
+                normal,
+                uv.map(f64::from),
+                f64::from(opacity),
+            )
+        } else {
+            SurfaceVertex::colored(
+                placement.apply_point(point),
+                normal,
+                record_rgba(stage, mob, record)?,
+            )
+        };
+        vertices.push(vertex);
     }
     match resolution {
         Some((nu, nv)) => {
@@ -1056,3 +1128,7 @@ mod tests {
         assert_eq!(renderer.frame().as_bytes(), before);
     }
 }
+
+#[cfg(test)]
+#[path = "retained_texture_tests.rs"]
+mod texture_tests;

@@ -79,7 +79,7 @@ pub use sinks::{
     NativeArtifactKind, NativeArtifactReport, OutputProfile, PngSink, PngSinkConfig, PngTarget,
     ReceiptError, SinkAdapterError, SinkLimits, SinkReceipt, SvgPublicationConfig,
     SvgPublicationReport, WavPublicationConfig, WavPublicationReport, Y4mSink, Y4mSinkConfig,
-    publish_svg, publish_wav,
+    publish_svg, publish_svg_new, publish_wav,
 };
 pub use sound::{
     COMPILED_MIX_LANES, COMPILED_MIX_TIER, DitherPolicy, MixKernel, MixReport, MixerConfig,

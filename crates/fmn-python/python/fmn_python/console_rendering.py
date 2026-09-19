@@ -13,6 +13,7 @@ import sys
 from typing import Any
 
 from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result
+from .checkpoint_cli import CHECKPOINT_HELP, CHECKPOINT_VALUES, take_checkpoint_options
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
     _name_key, render_scenes,
@@ -22,6 +23,8 @@ from .rendering import (
 )
 from .scene_loading import SceneSource
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
+
+_VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
 _SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
@@ -37,7 +40,7 @@ With one scene, --video_dir retains its existing single-output destination meani
 """
 
 _OUTPUT_HELP = """Native output profiles:
-  --transparent, -t       Preserve alpha in PNG/PNG sequences or qtrle MOV.
+  --transparent, -t       Preserve alpha in PNG, SVG or qtrle MOV.
   --vcodec ENCODER        Installed ffmpeg encoder name, or auto (video only).
   --pix_fmt FORMAT        Native wire: rgba, bgra, nv12/yuv420p, p010le.
   --ffmpeg_bin PATH       Video encoder or WAV input decoder; paths with spaces work.
@@ -46,6 +49,10 @@ Transparent MOV defaults to RGBA/qtrle. Explicit transparent video profiles
 require rgba/bgra and qtrle/auto. MP4, GIF, y4m and WAV do not accept -t.
 Output options apply to every selected scene without constructor changes.
 Video remains uncertified. P010 is a 10-bit transport, not an HDR claim.
+--format svg exports one final-state vector document, including native text
+and math outlines, camera pan/zoom, flat paints, background and stroke order.
+It does not rasterize or embed fonts. Depth, lighting, user clip planes,
+per-vertex gradients and perspective-varying curves require PNG instead.
 """
 
 
@@ -59,8 +66,8 @@ def _output_overrides(options):
     if "ffmpeg_bin" in result and format not in {"mp4", "mov", "wav"}:
         raise ValueError("--ffmpeg_bin requires mp4, mov, or wav output")
     if result.get("transparent"):
-        if format not in {"png", "png_sequence", "mov"}:
-            raise ValueError("--transparent requires png, png_sequence, or mov output")
+        if format not in {"png", "png_sequence", "svg", "mov"}:
+            raise ValueError("--transparent requires png, png_sequence, svg, or mov output")
         if format == "mov":
             if result.get("pix_fmt", "rgba").lower() not in {"rgba", "rgba8", "bgra", "bgra8"}:
                 raise ValueError("transparent video requires an rgba or bgra wire pixel format")
@@ -133,13 +140,16 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             "Certified output, opener flags, and Studio",
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
-        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + _STUDIO_HELP
+        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
     batch = bool(write_all or len(raw_positionals) > 2)
     try:
+        native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
+        if recovery and not batch:
+            raise ValueError("checkpoint recovery requires multiple scene names or --write_all")
         # Strip playback selection only. Delegate output options and their
         # values to the existing native parser, with exactly one source. Put
         # that source first so a missing trailing option value stays missing.
@@ -218,6 +228,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
                     **({} if selection is None else {"animation_range": selection}),
                     **({} if not output_options else {"_output_options": output_options}),
+                    **recovery,
                     on_result=lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
                         file=sys.stderr,

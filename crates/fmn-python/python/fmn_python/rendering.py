@@ -20,7 +20,7 @@ from typing import Any
 
 from .render_selection import animation_range as _animation_range, apply_animation_range
 
-_FORMATS = frozenset({"png", "png_sequence", "gif", "y4m", "wav", "mp4", "mov"})
+_FORMATS = frozenset({"png", "png_sequence", "gif", "y4m", "wav", "svg", "mp4", "mov"})
 _VIDEO_FORMATS = frozenset({"mp4", "mov"})
 
 
@@ -153,7 +153,7 @@ class RenderSession:
         if format is None:
             format = path.suffix.lower().lstrip(".") if path.suffix else "png_sequence"
         if not isinstance(format, str) or format not in _FORMATS:
-            raise ValueError("render format must be png, png_sequence, gif, y4m, wav, mp4, or mov")
+            raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
         if reproducible:
             if format not in ("png", "png_sequence", "wav"):
                 error_type = getattr(native, "_CapabilityError", RuntimeError)
@@ -462,7 +462,7 @@ def _configured_destination(scene: Any, destination: Any, format: str | None, na
             return writer.get_movie_file_path(), None
         format = "png" if still else "png_sequence"
     if not isinstance(format, str) or format not in _FORMATS:
-        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, mp4, or mov")
+        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
     if format == "png":
         return writer.get_image_file_path(), format
     root = writer.get_output_file_rootname()
@@ -476,8 +476,9 @@ def install_scene_rendering(native: Any) -> None:
 
     ``run`` remains the engine lifecycle used by construct-only and externally
     owned CLI generations. ``render`` owns its generation and delegates to the
-    same run hook. Low-level ExtensionFileLoader consumers can use the public
-    render_scene/render_session functions without the package initializer.
+    same run hook. ``render_session`` exposes the same generation for imperative
+    scenes without calling ``run`` or reconstructing the scene. Both bindings
+    capture their owning native module, including in embedded interpreters.
     """
     if vars(native).get("_FMN_SCENE_RENDERING_INSTALLED", False):
         return
@@ -499,6 +500,25 @@ def install_scene_rendering(native: Any) -> None:
             raise RuntimeError("scene execution ended without publishing its render generation")
         self.render_result = session.result
         return session.result
+
+    def scene_render_session(
+        self, destination=None, *, format=None, resolution=None, fps=None, threads=None,
+        animation_range=None,
+    ):
+        """Record imperative add/play/wait calls in one native output generation.
+
+        Construction is side-effect free: the returned context acquires its
+        generation only on entry. Read ``session.result`` after successful exit.
+        Exceptions cancel the owned generation without publishing an artifact.
+        """
+        destination, format = _configured_destination(self, destination, format, native)
+        return RenderSession(self, destination, format=format, resolution=resolution,
+                             fps=fps, threads=threads, animation_range=animation_range, _native=native)
+
+    scene_render_session.__name__ = "render_session"
+    scene_render_session.__qualname__ = Scene.__qualname__ + ".render_session"
+    scene_render_session.__module__ = Scene.__module__
+    Scene.render_session = scene_render_session
 
     render.__name__ = "render"
     render.__qualname__ = Scene.__qualname__ + ".render"

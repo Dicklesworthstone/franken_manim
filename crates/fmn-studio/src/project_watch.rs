@@ -158,6 +158,40 @@ impl SourceWatch {
         })
     }
 
+    /// Content identity of the last complete observed scan. This is independent
+    /// of debounce state and binds paths, entry kinds and file content, not
+    /// mtimes. Construct a fresh watcher for a launch/publication snapshot.
+    /// Path encodings are host-local; this is not a certified portable closure.
+    #[must_use]
+    pub fn content_fingerprint(&self) -> ProtocolDigest {
+        let mut hash = fmn_hash::Sha256::new();
+        hash.update(b"FMN-SOURCE-WATCH\0\x01");
+        for (path, input) in &self.observed {
+            let bytes = path.as_os_str().as_encoded_bytes();
+            hash.update(&(bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+            match input {
+                Input::Missing => hash.update(&[0]),
+                Input::Directory => hash.update(&[1]),
+                Input::File(digest) => {
+                    hash.update(&[2]);
+                    hash.update(digest.as_bytes());
+                }
+            }
+        }
+        hash.finalize()
+    }
+
+    /// Borrow the file rows from that same observed scan, in path order.
+    /// Consumers can compare actually compiled source bytes without rescanning
+    /// or inventing another directory traversal/filtering policy.
+    pub fn source_files(&self) -> impl Iterator<Item = (&std::path::Path, ProtocolDigest)> {
+        self.observed.iter().filter_map(|(path, input)| match input {
+            Input::File(digest) => Some((path.as_path(), *digest)),
+            _ => None,
+        })
+    }
+
     /// Return true once a different content set has remained stable for the
     /// debounce interval. `now` is monotone elapsed time from the host's Clock.
     pub fn poll(&mut self, now: Duration) -> Result<bool, BuildError> {

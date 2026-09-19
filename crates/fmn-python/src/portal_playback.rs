@@ -67,6 +67,7 @@ impl PortalRenderSession {
         match self {
             Self::Frames(session) => &session.timeline,
             Self::Preview(session) => &session.timeline,
+            Self::Vector(session) => &session.timeline,
             Self::Soundtrack { timeline, .. } => timeline,
         }
     }
@@ -75,6 +76,7 @@ impl PortalRenderSession {
         match self {
             Self::Frames(session) => &mut session.timeline,
             Self::Preview(session) => &mut session.timeline,
+            Self::Vector(session) => &mut session.timeline,
             Self::Soundtrack { timeline, .. } => timeline,
         }
     }

@@ -2721,20 +2721,26 @@ impl TexturedGeometry {
 
 impl From<TexturedGeometry> for Mobject {
     fn from(t: TexturedGeometry) -> Self {
-        let mut buffer = RecordBuffer::new(textured_surface_schema(), t.points.len())
-            .expect("record sizing bounded by the surface grid");
-        buffer.write_range("point", 0, &flat_f32(&t.points));
-        buffer.write_range("d_normal_point", 0, &flat_f32(&t.d_normal_point));
-        #[allow(clippy::cast_possible_truncation)]
-        let im_coords: Vec<f32> = t
-            .im_coords
-            .iter()
-            .flat_map(|c| c.iter().map(|v| *v as f32))
-            .collect();
-        buffer.write_range("im_coords", 0, &im_coords);
-        #[allow(clippy::cast_possible_truncation)]
-        let opacity: Vec<f32> = vec![t.opacity as f32; t.points.len()];
-        buffer.write_range("opacity", 0, &opacity);
+        // TriangleMesh consumes consecutive triples. Expanding only here
+        // preserves shared-vertex normal computation while retaining face
+        // winding, order, repetition and UV seams in the rendered records.
+        let mut buffer = RecordBuffer::new(textured_surface_schema(), t.triangle_indices.len())
+            .expect("record sizing bounded by the mesh face count");
+        for (row, &index) in t.triangle_indices.iter().enumerate() {
+            let index = index as usize; // validated by from_mesh
+            #[allow(clippy::cast_possible_truncation)]
+            let point = t.points[index].map(|value| value as f32);
+            #[allow(clippy::cast_possible_truncation)]
+            let normal = t.d_normal_point[index].map(|value| value as f32);
+            #[allow(clippy::cast_possible_truncation)]
+            let uv = t.im_coords[index].map(|value| value as f32);
+            #[allow(clippy::cast_possible_truncation)]
+            let opacity = [t.opacity as f32];
+            buffer.write(row, "point", &point);
+            buffer.write(row, "d_normal_point", &normal);
+            buffer.write(row, "im_coords", &uv);
+            buffer.write(row, "opacity", &opacity);
+        }
         Mobject {
             buffer,
             uniforms: t.uniforms,

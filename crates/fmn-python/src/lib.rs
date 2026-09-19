@@ -16,14 +16,26 @@
 mod corpus;
 mod crossing;
 mod ladder;
+#[cfg(any(test, feature = "gauntlet"))]
+mod live_tex;
 mod method_cache;
 pub mod perf_harness;
 mod portal_audio;
 mod portal_playback;
 mod portal_studio;
+mod portal_svg;
+mod portal_texture;
 mod portal_video;
+#[cfg(feature = "gauntlet")]
+pub use portal_texture::run_portal_gauntlet_textures;
 mod report;
 mod portal_provenance;
+
+#[cfg(feature = "gauntlet")]
+pub use live_tex::{PortalLiveTexReport, run_portal_gauntlet_live_tex};
+
+#[cfg(feature = "gauntlet")]
+pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
@@ -148,11 +160,13 @@ enum PortalReceipt {
 
 enum PortalOutputFormat {
     Frames(PortalFrameFormat),
+    Svg,
     Wav,
 }
 
 enum PortalRenderSession {
     Preview(Box<portal_studio::Capture>),
+    Vector(Box<portal_svg::SvgSession>),
     Frames(Box<PortalFrameSession>),
     Soundtrack {
         destination: PathBuf,
@@ -176,6 +190,11 @@ impl PortalRenderSession {
         reproducible: bool,
     ) -> PyResult<(Self, RuntimeConfig)> {
         match format {
+            PortalOutputFormat::Svg => {
+                let (session, runtime) =
+                    portal_svg::SvgSession::new(destination, width, height, fps, threads)?;
+                Ok((Self::Vector(Box::new(session)), runtime))
+            }
             PortalOutputFormat::Frames(format) => {
                 let (session, config) = PortalFrameSession::new(
                     destination,
@@ -229,6 +248,7 @@ impl PortalRenderSession {
             Self::Frames(session) => session.capture(packet),
             Self::Preview(session) => session.capture(packet),
             Self::Soundtrack { .. } => Ok(()),
+            Self::Vector(_) => Ok(()),
         }
     }
 
@@ -247,12 +267,14 @@ impl PortalRenderSession {
                 session.bind_camera(frame, light_position, background, light_mob)
             }
             Self::Soundtrack { .. } => Ok(()),
+            Self::Vector(session) => session.bind_camera(frame, background),
         }
     }
 
     fn needs_final_capture(&self) -> bool {
         matches!(self, Self::Frames(session) if session.frame_count() == 0)
             || matches!(self, Self::Preview(session) if session.is_empty())
+            || matches!(self, Self::Vector(_))
     }
 
     fn abort(self) {
@@ -266,6 +288,7 @@ impl PortalRenderSession {
             Self::Preview(_) => Err(PyRuntimeError::new_err(
                 "Studio capture must finish through _finish_studio_capture, not file publication",
             )),
+            Self::Vector(session) => session.finish(scene),
             // ubs:ignore — finalizes frame publication; no security token or randomness is generated.
             Self::Frames(session) => session.finish(scene),
             Self::Soundtrack {
@@ -7564,7 +7587,11 @@ fn portal_has_frame_render(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
         .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?;
     Ok(matches!(
         render.as_ref(),
-        Some(PortalRenderSession::Frames(_) | PortalRenderSession::Preview(_))
+        Some(
+            PortalRenderSession::Frames(_)
+                | PortalRenderSession::Preview(_)
+                | PortalRenderSession::Vector(_)
+        )
     ))
 }
 
@@ -7798,11 +7825,12 @@ impl PyScene {
             "gif" => PortalOutputFormat::Frames(PortalFrameFormat::Gif),
             "y4m" => PortalOutputFormat::Frames(PortalFrameFormat::Y4m),
             "wav" => PortalOutputFormat::Wav,
+            "svg" => PortalOutputFormat::Svg,
             "mp4" => PortalOutputFormat::Frames(PortalFrameFormat::Mp4),
             "mov" => PortalOutputFormat::Frames(PortalFrameFormat::Mov),
             _ => {
                 return Err(CapabilityError::new_err(
-                    "portal output requires png, png_sequence, gif, y4m, wav, mp4, or mov",
+                    "portal output requires png, png_sequence, gif, y4m, wav, svg, mp4, or mov",
                 ));
             }
         };
@@ -10804,6 +10832,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
         "__thread_policy__",
         "scene and mobject proxies are confined to their creating scene-worker thread",
     )?;
+    portal_texture::install(module)?;
     execute_bootstrap(py, module)?;
     // Packaging identity is owned by Cargo, not a second hand-maintained
     // Python version string.  W11's wheel and console entry point both read
