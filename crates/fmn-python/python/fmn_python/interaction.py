@@ -145,11 +145,11 @@ def _install_dispatcher(g):
             point = np.asarray(event_data["point"], dtype=float)
             if point.shape != (3,) or not np.isfinite(point).all():
                 raise ValueError("mouse input requires a finite 3D point")
-            # Press, scroll and release carry their own authoritative point;
-            # a preceding hover event is not required for correct hit tests.
-            if event_type != Event.MouseDragEvent:
+            # Press and scroll carry their own authoritative point; drag and release
+            # preserve the existing motion/press cursor position.
+            if event_type not in (Event.MouseDragEvent, Event.MouseReleaseEvent):
                 state.mouse_point = point.copy()
-            if event_type == Event.MouseDragEvent:
+            if event_type in (Event.MouseDragEvent, Event.MousePressEvent):
                 state.mouse_drag_point = point.copy()
         elif event_type == Event.KeyPressEvent:
             state.pressed_keys.add(event_data["symbol"])
@@ -271,7 +271,7 @@ def _install_scene_input(g):
                     raise ValueError("mouse input requires a finite 3D point")
                 # A press/scroll may be the first event after focus. Both the
                 # Scene cursor and dispatcher must use that event's point.
-                if event_type != Event.MouseDragEvent:
+                if event_type not in (Event.MouseDragEvent, Event.MouseReleaseEvent):
                     self.mouse_point.move_to(point)
                 if event_type in (Event.MouseDragEvent, Event.MousePressEvent):
                     self.mouse_drag_point.move_to(point)
