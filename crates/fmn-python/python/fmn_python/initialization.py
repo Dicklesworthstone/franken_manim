@@ -32,6 +32,7 @@ _STEPS = (
     ("color_sliders", "install_color_sliders"),
     ("scene_execution", "install_scene_execution"),
     ("embedded_shell", "install_embedded_shell"),
+    ("source_autoreload", "install_source_autoreload"),
 )
 _STATE = "_FMN_PORTAL_RUNTIME_STATE"
 

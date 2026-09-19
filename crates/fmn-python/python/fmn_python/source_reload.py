@@ -121,15 +121,14 @@ def reload_source(owner: SceneSource, *, if_changed: bool = False) -> ModuleType
             pass
     changed = any(data is None or hashlib.sha256(data).hexdigest() != old_digests.get(path)
                   for path, data in inputs.sources.items())
-    if if_changed and not changed:
-        return owner.module
-
     loaded = owner._loaded
     previous = {name: sys.modules.get(name, _MISSING) for name in loaded}
     for name, module in loaded.items():
         current = previous[name]
         if current is not _MISSING and current is not module:
             raise ImportError(f"scene module {name!r} was replaced outside its source owner")
+    if if_changed and not changed:
+        return owner.module
     old_module, old_scenes = owner.module, owner.scenes
     owner._reload_inputs = inputs
     owner._loaded = {}
