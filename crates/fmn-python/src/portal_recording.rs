@@ -87,6 +87,17 @@ fn _portal_begin_recording(
     let destination = std::path::absolute(destination).map_err(native_error)?;
     let format = recording_format(format)?;
     check_available(scene)?;
+    // Refuse known collisions before invoking descriptors or opening encoders.
+    // This is only an early diagnostic: Reel's final create-only publication
+    // still arbitrates files created while the recording is in progress.
+    if fmn_platform::fs::FileSystem::node_kind_no_follow(&fmn_platform::fs::StdFs, &destination)
+        .map_err(native_error)?
+        .is_some()
+    {
+        return Err(pyo3::exceptions::PyFileExistsError::new_err(format!(
+            "recording destination already exists: {}", destination.display()
+        )));
+    }
     if fps != scene.borrow().engine.borrow().fps() {
         return Err(PyValueError::new_err(
             "recording FPS must equal the live Scene clock; it cannot resample or reset an existing scene",
@@ -163,6 +174,17 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("real native live recording and audio rebasing");
+        });
+    }
+
+    #[test]
+    fn native_output_ownership_acceptance() {
+        crate::with_python_test_module("output publication ownership", |py, _module, globals| {
+            globals.set_item("__file__", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/output_no_clobber.py")).unwrap();
+            let source = CString::new(include_str!("../tests/output_no_clobber.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("real native publication races, retries, symlinks and cross-filesystem video");
         });
     }
 }
