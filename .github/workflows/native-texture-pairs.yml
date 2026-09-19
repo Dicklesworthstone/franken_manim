@@ -29,6 +29,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          def boundary(match):
+              old, path = match[1], match[2]
+              mode = 'new file mode 100644\n' if old == '/dev/null' else ''
+              return f'diff --git a/{path} b/{path}\n' + mode + match[0]
+          for name in ('native-texture-pairs', 'portal-texture-pairs'):
+              path = Path('scripts/patches') / (name + '.patch')
+              if path.exists():
+                  text = path.read_text()
+                  if not text.startswith('diff --git '):
+                      path.write_text(re.sub(r'(?m)^--- ([^\n]+)\n\+\+\+ b/([^\n]+)\n', boundary, text))
+          PY
           if ! grep -q 'pub fn with_dark_image' crates/fmn-mobject/src/mobject.rs; then
             git apply --recount --check scripts/patches/native-texture-pairs.patch
             git apply --recount scripts/patches/native-texture-pairs.patch
