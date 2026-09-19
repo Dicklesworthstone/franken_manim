@@ -35,6 +35,8 @@ def _entry_config(matrix: Any, config: dict, *, decimal: bool) -> dict:
     if decimal:
         result["num_decimal_places"] = getattr(matrix, "_matrix_decimal_places", 2)
     result.update(config)
+    if not decimal:
+        result.pop("num_decimal_places", None)
     return result
 
 
@@ -56,6 +58,8 @@ def install_matrix(native: Any) -> None:
     np = vars(native)["_np"]
 
     def element_to_mobject(self, element, **config):
+        if not isinstance(self, Matrix):
+            raise TypeError("Matrix.element_to_mobject requires a Matrix instance")
         if isinstance(element, VMobject):
             return element
         if isinstance(element, (float, complex, np.floating, np.complexfloating)):
@@ -63,6 +67,8 @@ def install_matrix(native: Any) -> None:
         return Tex(str(element), **_entry_config(self, config, decimal=False))
 
     def decimal_element_to_mobject(self, element, **config):
+        if not isinstance(self, DecimalMatrix):
+            raise TypeError("DecimalMatrix.element_to_mobject requires a DecimalMatrix instance")
         return DecimalNumber(element, **_entry_config(self, config, decimal=True))
 
     def create_brackets(self, rows, v_buff, h_buff):
