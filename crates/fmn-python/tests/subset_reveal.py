@@ -4,6 +4,7 @@ Run against the installed wheel or the embedded production test module. There
 is deliberately no mock fallback for manimlib, geometry, child lists or sinks.
 """
 from pathlib import Path
+import copy
 import math
 import os
 import tempfile
@@ -70,11 +71,13 @@ class NativeSubsetTests(unittest.TestCase):
                 seen.append(tuple(self.mobject.submobjects))
         animation = Authored(group, int_func=math.floor, rate_func=m.linear,
                              run_time=.5, suspend_mobject_updating=True)
-        scene.play(m.AnimationGroup(animation))
+        composition = m.AnimationGroup(animation)
+        scene.play(composition)
         self.assertEqual(list(group.submobjects), members)
         self.assertTrue(any(0 < len(row) < len(members) for row in seen))
         self.assertTrue(all(list(row) == members[:len(row)] for row in seen))
-        self.assertEqual(list(scene.mobjects), [group])
+        self.assertEqual(list(scene.mobjects), [composition.mobject])
+        self.assertEqual(list(composition.mobject.submobjects), [group])
         self.assertTrue(all(node.parents == [group] for node in members))
         assert_released(self, group, members)
 
@@ -114,6 +117,32 @@ class NativeSubsetTests(unittest.TestCase):
         self.assertEqual(list(group.submobjects), members)
         duplicate.abort()
         self.assertEqual(list(duplicate.mobject.submobjects), duplicate.all_submobs)
+
+    def test_native_deepcopy_preserves_previsited_and_cross_root_aliases(self):
+        for bound in (False, True):
+            for child_first in (False, True):
+                member = children()[0]
+                left, right = m.VGroup(member), m.VGroup(member)
+                left.label = {"child": member}
+                if bound:
+                    scene = m.Scene().add(left, right)
+                    original_roots = tuple(scene.mobjects)
+                source = [member, left, right] if child_first else [left, right, member]
+                duplicate = copy.deepcopy(source)
+                if child_first:
+                    copied_member, copied_left, copied_right = duplicate
+                else:
+                    copied_left, copied_right, copied_member = duplicate
+                self.assertIs(copied_left.submobjects[0], copied_member)
+                self.assertIs(copied_right.submobjects[0], copied_member)
+                self.assertIs(copied_left.label["child"], copied_member)
+                self.assertIsNot(copied_member, member)
+                original_points = member.get_points().copy()
+                copied_member.shift(m.RIGHT)
+                np.testing.assert_array_equal(member.get_points(), original_points)
+                self.assertFalse(np.array_equal(copied_member.get_points(), original_points))
+                if bound:
+                    self.assertEqual(tuple(scene.mobjects), original_roots)
 
     def test_native_setter_failure_after_splice_rolls_back(self):
         members = children()

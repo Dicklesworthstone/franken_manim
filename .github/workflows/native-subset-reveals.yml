@@ -9,6 +9,7 @@ on:
       - 'crates/fmn-python/python/fmn_python/text_reveal.py'
       - 'crates/fmn-python/tests/test_text_selector_protocol.py'
       - 'crates/fmn-python/tests/test_subset_reveal_protocol.py'
+      - 'crates/fmn-python/tests/test_copy_graph_protocol.py'
       - 'crates/fmn-python/tests/subset_reveal.py'
   workflow_dispatch:
 permissions:
@@ -40,17 +41,17 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/activate_subset_reveal.py
-          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_subset_reveal_protocol test_text_selector_protocol test_text_reveal_protocol test_text_reveal_lifecycle_protocol test_scene_execution_protocol 2>&1 | tee /tmp/subset-protocol.log
+          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_copy_graph_protocol test_subset_reveal_protocol test_text_selector_protocol test_text_reveal_protocol test_text_reveal_lifecycle_protocol test_scene_execution_protocol 2>&1 | tee /tmp/subset-protocol.log
           python -m py_compile crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/tests/bridge.py crates/fmn-python/tests/subset_reveal.py
           git diff --check
       - name: Commit exercised integration directly to main
         run: |
           set -euo pipefail
-          git add crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/src/lib.rs crates/fmn-python/tests/bridge.py scripts/check_portal_runtime.sh
+          git add crates/fmn-python/python/manimlib_bootstrap.py crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/src/lib.rs crates/fmn-python/tests/bridge.py scripts/check_portal_runtime.sh
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(python): activate live subset selectors in native and installed portal runtimes'
+            git commit -m 'fix(python): preserve deepcopy family aliases in production reveal runtimes'
             for attempt in 1 2 3; do
               git fetch --no-tags origin main
               if ! git merge-base --is-ancestor origin/main HEAD; then

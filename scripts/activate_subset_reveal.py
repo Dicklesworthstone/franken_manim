@@ -3,7 +3,7 @@
 
 Large pre-existing bootstrap/bridge files are not replaced wholesale. The
 activation workflow checks the resulting production code and commits only these
-four integration paths, preserving other agents' changes on main.
+five integration paths, preserving other agents' changes on main.
 """
 from pathlib import Path
 
@@ -105,4 +105,17 @@ mod subset_reveal_acceptance {
     }
 }
 ''')
+# deepcopy may visit an Animation's child aliases before its mobject root.
+# Marionette allocates a family of shells, but a previously memoized child
+# remains the one authoritative Python copy. Never replace that memo entry or
+# reinitialize an already copied descendant while filling the new root shell.
+replace_once(
+    ROOT / "crates/fmn-python/python/manimlib_bootstrap.py",
+    "    mapping = {old: new for old, new in pairs}\n"
+    "    for old, new in pairs:\n",
+    "    mapping = {old: memo.get(id(old), new) for old, new in pairs}\n"
+    "    pairs = [(old, new) for old, new in pairs if id(old) not in memo]\n"
+    "    for old, new in pairs:\n",
+)
+
 print("subset reveal production initialization and native/wheel witnesses integrated")
