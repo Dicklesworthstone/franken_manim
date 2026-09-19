@@ -12,6 +12,7 @@ import sys
 from typing import Any
 
 from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result
+from .checkpoint_cli import CHECKPOINT_HELP, CHECKPOINT_VALUES, take_checkpoint_options
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
     _name_key, render_scenes,
@@ -19,6 +20,8 @@ from .batch_rendering import (
 from .rendering import RenderSession, _positive_integer, _apply_output_options
 from .scene_loading import SceneSource
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
+
+_VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
 _SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
@@ -133,13 +136,16 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             "Certified output, opener flags, and Studio",
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
-        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + _STUDIO_HELP
+        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
     batch = bool(write_all or len(raw_positionals) > 2)
     try:
+        native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
+        if recovery and not batch:
+            raise ValueError("checkpoint recovery requires multiple scene names or --write_all")
         # Strip playback selection only. Delegate output options and their
         # values to the existing native parser, with exactly one source. Put
         # that source first so a missing trailing option value stays missing.
@@ -200,6 +206,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
                     **({} if selection is None else {"animation_range": selection}),
                     **({} if not output_options else {"_output_options": output_options}),
+                    **recovery,
                     on_result=lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
                         file=sys.stderr,

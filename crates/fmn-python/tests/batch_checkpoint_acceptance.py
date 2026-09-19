@@ -1,0 +1,128 @@
+"""Installed-wheel recovery acceptance using real native output and CLI sessions."""
+import contextlib
+import hashlib
+import io
+import json
+from pathlib import Path
+import sys
+import tempfile
+
+import manimlib
+from fmn_python import BatchRenderError, render_scenes
+from fmn_python.__main__ import main
+
+CALLS = []
+FAIL = True
+
+
+class Motion(manimlib.Scene):
+    def construct(self):
+        CALLS.append("motion")
+        square = manimlib.Square(side_length=1, fill_color=manimlib.WHITE,
+                                fill_opacity=1, stroke_width=0)
+        self.add(square)
+        self.wait(1 / 8)
+        self.play(square.animate.shift(2 * manimlib.RIGHT), run_time=1 / 4,
+                  rate_func=manimlib.linear)
+
+
+class Recoverable(Motion):
+    def construct(self):
+        CALLS.append("recoverable")
+        super().construct()
+        if FAIL:
+            raise RuntimeError("fail after native frame capture")
+
+
+def inventory(path):
+    files = sorted(path.rglob("*")) if path.is_dir() else [path]
+    return [(str(file), file.stat().st_mtime_ns, hashlib.sha256(file.read_bytes()).hexdigest())
+            for file in files if file.is_file()]
+
+
+def real_output_resume(root, format):
+    global FAIL
+    FAIL = True
+    CALLS.clear()
+    jobs = {"first": Motion, "recover": Recoverable, "last": Motion}
+    options = dict(format=format, resolution=(96, 54), fps=8, threads=1,
+                   checkpoint=root / "progress.json", resume_key="native-fixture-v1")
+    try:
+        render_scenes(jobs, root / "output", **options)
+    except BatchRenderError as error:
+        partial = error.result
+    else:
+        raise AssertionError("authored failure did not fail the batch")
+    assert [row.status for row in partial.outcomes] == ["succeeded", "failed", "not_run"]
+    first = partial.outcomes[0]
+    before = inventory(first.destination)
+    assert before, "expected a real native publication"
+    if format != "png_sequence":
+        assert first.result.digest == before[0][2]
+    FAIL = False
+    CALLS.clear()
+    result = render_scenes(jobs, root / "output", resume=True, **options)
+    assert result.ok and CALLS == ["recoverable", "motion", "motion"], CALLS
+    assert inventory(first.destination) == before, "completed output was rewritten"
+    assert result.outcomes[0].result.as_dict() == first.result.as_dict()
+    CALLS.clear()
+    replay = render_scenes(jobs, root / "output", resume=True, **options)
+    assert replay.as_dict() == result.as_dict() and CALLS == []
+    assert not replay.as_dict()["certified"]
+
+
+def invoke(arguments):
+    previous = sys.argv
+    output, diagnostics = io.StringIO(), io.StringIO()
+    try:
+        sys.argv = ["fmn-python", "--robot", *map(str, arguments)]
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(diagnostics):
+            code = main()
+    finally:
+        sys.argv = previous
+    report = json.loads(output.getvalue())
+    assert report["exit"]["code"] == code
+    return code, report
+
+
+def real_cli_resume(root):
+    root.mkdir(parents=True)
+    source, marker, ready = root / "scenes.py", root / "calls.txt", root / "ready"
+    source.write_text(f'''from manimlib import *
+from pathlib import Path
+marker = Path({str(marker)!r})
+ready = Path({str(ready)!r})
+class A(Scene):
+    def construct(self):
+        with marker.open("a") as stream: stream.write("A\\n")
+        self.add(Square(fill_opacity=1))
+class B(Scene):
+    def construct(self):
+        with marker.open("a") as stream: stream.write("B\\n")
+        self.add(Circle(fill_opacity=1))
+        if not ready.exists(): raise RuntimeError("retry me")
+''')
+    arguments = [source, "--write_all", "--format", "png", "--resolution", "96x54", "--fps", "8", "--threads", "1",
+                 "--video_dir", root / "output", "--checkpoint", root / "progress.json", "--resume-key", "cli-native-v1"]
+    code, report = invoke(arguments)
+    assert code == 5 and report["batch"]["counts"]["succeeded"] == 1, report
+    original = inventory(root / "output/A.png")
+    ready.write_text("retry failed B only")
+    code, report = invoke([*arguments, "--resume"])
+    assert code == 0 and report["batch"]["counts"]["succeeded"] == 2, report
+    assert marker.read_text().splitlines() == ["A", "B", "B"]
+    assert inventory(root / "output/A.png") == original
+    code, report = invoke([*arguments, "--resume"])
+    assert code == 0 and marker.read_text().splitlines() == ["A", "B", "B"], report
+    (root / "output/A.png").write_bytes(b"damaged-output")
+    code, report = invoke([*arguments, "--resume"])
+    assert code == 2 and "modified" in report["message"], report
+    assert marker.read_text().splitlines() == ["A", "B", "B"]
+
+
+with tempfile.TemporaryDirectory(prefix="fmn-native-recovery-") as directory:
+    root = Path(directory)
+    for format in ("png", "png_sequence", "svg", "y4m", "gif", "wav"):
+        real_output_resume(root / format, format)
+    real_cli_resume(root / "cli")
+print("native batch recovery acceptance passed: six formats and CLI fail/resume/integrity")
