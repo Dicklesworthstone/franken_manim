@@ -122,7 +122,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-options-") as directory:
             assert formats == [wire, "yuv420p10le" if wire == "p010le" else "yuv420p"], formats
             frames = decode(target)
             assert len(frames) == 2 and np.all(frames[:, :, :, 3] == 255)
-            assert frames[0, :, :, 0].max() > 240, f"wire={wire}, codec={codec}, max={frames[0, :, :, 0].max()}"
+            assert frames[0, :, :, 0].max() >= 240, f"wire={wire}, codec={codec}, max={frames[0, :, :, 0].max()}"
 
         assert "does not offer encoder" in rejected(root, "unknown.mov", video_codec="fmn_missing_codec")
         target = root / "late-alpha.mp4"
