@@ -77,7 +77,7 @@ def install(native):
                         method = getattr(animation, name)
                         if getattr(method, "__func__", method) is not expected:
                             return True
-                    break
+                    return False
         return original_requires_python(animation)
 
     def mobject_str(self):
