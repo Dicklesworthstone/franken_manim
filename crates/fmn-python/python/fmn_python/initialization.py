@@ -16,6 +16,7 @@ from types import ModuleType
 _STEPS = (
     ("rendering", "install_scene_rendering"),
     ("live_tex", "install_live_tex"),
+    ("text_reveal", "install_text_reveal"),
     ("fading", "install_fading"),
     ("playback", "install_scene_playback"),
     ("scene_state", "install_scene_state"),
