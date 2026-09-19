@@ -645,7 +645,8 @@ def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
         else:
             pairs = list(bound_shells)
 
-    mapping = {old: new for old, new in pairs}
+    mapping = {old: memo.get(id(old), new) for old, new in pairs}
+    pairs = [(old, new) for old, new in pairs if id(old) not in memo]
     for old, new in pairs:
         memo[id(old)] = new
         _install_live_state(new)
