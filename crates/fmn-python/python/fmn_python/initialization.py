@@ -19,6 +19,7 @@ _STEPS = (
     ("surface_textures", "install_surface_textures"),
     ("live_tex", "install_live_tex"),
     ("matrix", "install_matrix"),
+    ("graphing", "install_graphing"),
     ("text_reveal", "install_text_reveal"),
     ("subset_reveal", "install_subset_reveal"),
     ("fading", "install_fading"),
