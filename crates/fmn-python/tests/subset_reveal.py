@@ -76,8 +76,12 @@ class NativeSubsetTests(unittest.TestCase):
         self.assertEqual(list(group.submobjects), members)
         self.assertTrue(any(0 < len(row) < len(members) for row in seen))
         self.assertTrue(all(list(row) == members[:len(row)] for row in seen))
-        self.assertEqual(list(scene.mobjects), [composition.mobject])
-        self.assertEqual(list(composition.mobject.submobjects), [group])
+        # A stock composition delegates root allocation to Choreo; the
+        # authoring descriptor does not own that generated native proxy.
+        self.assertEqual(len(scene.mobjects), 1)
+        native_root = scene.mobjects[0]
+        self.assertIsInstance(native_root, m.Group)
+        self.assertEqual(list(native_root.submobjects), [group])
         self.assertTrue(all(node.parents == [group] for node in members))
         assert_released(self, group, members)
 
@@ -244,7 +248,7 @@ class NativeSubsetTests(unittest.TestCase):
 
     def test_native_output_contains_progressive_pixels_and_is_thread_reproducible(self):
         outputs = []
-        for threads in (1, 4):
+        for threads in (1, 4, 16):
             destination = evidence / f"subset-{threads}.y4m"
             result = render_scene(SubsetScene, destination, threads=threads)
             self.assertEqual(result.frame_count, 8)
@@ -264,6 +268,7 @@ class NativeSubsetTests(unittest.TestCase):
             self.assertGreater(len(set(counts)), 2)
             outputs.append(data)
         self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(outputs[0], outputs[2])
 
     def test_render_failure_after_capture_restores_children_and_does_not_publish(self):
         scene = BrokenSubsetScene()

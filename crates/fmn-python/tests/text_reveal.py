@@ -4,10 +4,13 @@ This suite intentionally imports manimlib without a fixture fallback. Run via
 scripts/check_portal_runtime.sh against a wheel built from the tested source.
 """
 from pathlib import Path
+import math
+import os
 import tempfile
 
 import numpy as np
 import manimlib as m
+from manimlib.animation.creation import AddTextLetterByLetter
 from fmn_python import render_scene
 
 
@@ -33,7 +36,7 @@ def assert_restored(rows):
         assert not getattr(node, "_is_animating", False)
 
 
-for cls in (m.AddTextWordByWord, m.AddTextLetterByLetter):
+for cls in (m.AddTextWordByWord, AddTextLetterByLetter):
     text = nested_text()
     rows = snapshot(text)
     animation = cls(text, suspend_mobject_updating=True, run_time=.5)
@@ -63,6 +66,26 @@ class RevealScene(m.Scene):
         assert_restored(self.rows)
 
 
+class CustomWordReveal(RevealScene):
+    animation_class = m.AddTextWordByWord
+
+    def construct(self):
+        self.text = nested_text()
+        self.rows = snapshot(self.text)
+        self.selector_samples = []
+        def select(value):
+            self.selector_samples.append(value)
+            return math.floor(value)
+        self.play(self.animation_class(self.text, int_func=select, run_time=.5,
+                                       rate_func=m.linear, suspend_mobject_updating=True))
+        assert self.selector_samples and any(value > 0 for value in self.selector_samples)
+        assert_restored(self.rows)
+
+
+class CustomLetterReveal(CustomWordReveal):
+    animation_class = AddTextLetterByLetter
+
+
 def luma_frames(path):
     header, payload = Path(path).read_bytes().split(b"\n", 1)
     assert header == b"YUV4MPEG2 W192 H108 F8:1 Ip A1:1 C420mpeg2", header
@@ -75,16 +98,27 @@ def luma_frames(path):
     return frames
 
 
-root = Path(tempfile.mkdtemp(prefix="fmn-text-reveal-"))
-outputs = []
-for threads in (1, 4):
-    result = render_scene(RevealScene, root / f"reveal-{threads}.y4m", threads=threads)
-    assert result.frame_count == 4 and result.certified is False
-    frames = luma_frames(result.destination)
-    assert len(frames) == 4
-    assert np.count_nonzero(frames[-1] > 180) > np.count_nonzero(frames[0] > 180)
-    outputs.append(result.destination.read_bytes())
-assert outputs[0] == outputs[1]
+root = Path(tempfile.mkdtemp(prefix="fmn-text-reveal-",
+                             dir=os.environ.get("FMN_SUBSET_EVIDENCE_DIR")))
+rendered = {}
+for scene_type in (RevealScene, CustomWordReveal, CustomLetterReveal):
+    outputs = []
+    for threads in (1, 4, 16):
+        destination = root / f"{scene_type.__name__}-{threads}.y4m"
+        result = render_scene(scene_type, destination, threads=threads)
+        assert result.frame_count == 4 and result.certified is False
+        frames = luma_frames(result.destination)
+        assert len(frames) == 4
+        counts = [int(np.count_nonzero(frame > 180)) for frame in frames]
+        assert counts == sorted(counts), counts
+        assert counts[-1] > counts[0], counts
+        assert len(set(counts)) >= 3, counts
+        outputs.append(result.destination.read_bytes())
+    assert outputs[0] == outputs[1] == outputs[2]
+    rendered[scene_type] = outputs[0]
+# The custom floor selector must change an intermediate frame, not merely be
+# invoked and discarded while native code silently keeps the default round.
+assert rendered[RevealScene] != rendered[CustomWordReveal]
 
 
 class RevealFailure(RuntimeError):
@@ -99,7 +133,7 @@ class BrokenReveal(RevealScene):
             if alpha > .5:
                 raise RevealFailure("failure after real native frame capture")
             return alpha
-        self.play(m.AddTextLetterByLetter(self.text, rate_func=rate, run_time=.5,
+        self.play(AddTextLetterByLetter(self.text, rate_func=rate, run_time=.5,
                                          suspend_mobject_updating=True))
 
 
@@ -113,4 +147,4 @@ else:
     raise AssertionError("authored reveal failure was not propagated")
 assert not destination.exists()
 assert_restored(failed.rows)
-print("native text reveal acceptance: nested glyph identity, playback, thread replay, cancellation")
+print("native text reveal acceptance: nested glyph identity, authored selectors in pixels, 1/4/16-thread replay, cancellation")

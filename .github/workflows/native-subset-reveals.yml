@@ -11,6 +11,7 @@ on:
       - 'crates/fmn-python/tests/test_subset_reveal_protocol.py'
       - 'crates/fmn-python/tests/test_copy_graph_protocol.py'
       - 'crates/fmn-python/tests/subset_reveal.py'
+      - 'crates/fmn-python/tests/text_reveal.py'
   workflow_dispatch:
 permissions:
   contents: write
