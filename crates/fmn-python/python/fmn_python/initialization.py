@@ -19,6 +19,7 @@ _STEPS = (
     ("surface_textures", "install_surface_textures"),
     ("live_tex", "install_live_tex"),
     ("matrix", "install_matrix"),
+    ("graphing", "install_graphing"),
     ("text_reveal", "install_text_reveal"),
     ("subset_reveal", "install_subset_reveal"),
     ("fading", "install_fading"),
@@ -33,6 +34,7 @@ _STEPS = (
     ("scene_execution", "install_scene_execution"),
     ("embedded_shell", "install_embedded_shell"),
     ("source_autoreload", "install_source_autoreload"),
+    ("project_editor", "install_scene_project_editor"),
 )
 _STATE = "_FMN_PORTAL_RUNTIME_STATE"
 
