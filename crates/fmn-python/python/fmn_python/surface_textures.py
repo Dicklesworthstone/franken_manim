@@ -60,6 +60,7 @@ def install_surface_textures(native: Any) -> None:
             self.set_shading(*values["shading"])
         if "z_index" in values:
             self.set_z_index(values["z_index"])
+            self.z_index = int(values["z_index"])
         if "depth_test" in values:
             if values["depth_test"]:
                 self.apply_depth_test()
@@ -106,9 +107,11 @@ def install_surface_textures(native: Any) -> None:
         values = options(kwargs)
         # Accept the Reference's geometry protocol without importing trimesh.
         # The native mesh builder validates indices and constructs C-4 normals.
-        vertices = np.asarray(geometry.vertices)
-        faces = np.asarray(geometry.faces)
-        uv = np.asarray(geometry.visual.uv)
+        try:
+            vertices, faces, uv = geometry.vertices, geometry.faces, geometry.visual.uv
+        except AttributeError:
+            raise TypeError("TexturedGeometry requires vertices, triangle faces and visual.uv") from None
+        vertices, faces, uv = np.asarray(vertices), np.asarray(faces), np.asarray(uv)
         if vertices.ndim != 2 or vertices.shape[1] != 3:
             raise ValueError("textured geometry vertices must have shape (N, 3)")
         if faces.ndim != 2 or faces.shape[1] != 3 or not len(faces):

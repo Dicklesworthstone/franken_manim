@@ -22,6 +22,38 @@ def texture_fixture(path):
     return path
 
 
+def decode_png(data):
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    offset, packed = 8, bytearray()
+    while offset < len(data):
+        size = int.from_bytes(data[offset:offset + 4], 'big')
+        kind, body = data[offset + 4:offset + 8], data[offset + 8:offset + 8 + size]
+        assert zlib.crc32(kind + body) == int.from_bytes(data[offset + 8 + size:offset + 12 + size], 'big')
+        offset += size + 12
+        if kind == b'IHDR':
+            width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', body)
+            assert (depth, color, compression, filtering, interlace) == (8, 6, 0, 0, 0)
+        elif kind == b'IDAT':
+            packed.extend(body)
+        elif kind == b'IEND':
+            assert offset == len(data)
+            break
+    raw, stride = zlib.decompress(packed), width * 4
+    assert len(raw) == height * (stride + 1)
+    decoded = bytearray(height * stride)
+    for y in range(height):
+        mode = raw[y * (stride + 1)]
+        assert mode in range(5)
+        for x, value in enumerate(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)]):
+            left = decoded[y * stride + x - 4] if x >= 4 else 0
+            up = decoded[(y - 1) * stride + x] if y else 0
+            corner = decoded[(y - 1) * stride + x - 4] if x >= 4 and y else 0
+            prediction = left + up - corner
+            paeth = min((left, up, corner), key=lambda candidate: abs(prediction - candidate))
+            decoded[y * stride + x] = (value + (0, left, up, (left + up) // 2, paeth)[mode]) & 255
+    return np.frombuffer(decoded, dtype=np.uint8).reshape(height, width, 4)
+
+
 def mesh_fixture():
     return SimpleNamespace(
         vertices=np.array([[-2., -2., 0.], [2., -2., 0.], [2., 2., 0.], [-2., 2., 0.]]),
@@ -147,6 +179,12 @@ def verify_textured_rendering():
         assert frames[0] != frames[1] != frames[2] and frames[2] != frames[3]
         sequences.append(frames)
     assert sequences[0] == sequences[1] == sequences[2]
+    # Independent PNG decode proves texture orientation, not merely a moving silhouette.
+    first = decode_png(sequences[0][0]).astype(int)
+    assert first.shape == (54, 96, 4)
+    for (y, x), channel in (((17, 38), 0), ((17, 58), 1), ((37, 38), 2)):
+        color = first[y, x, :3]
+        assert all(color[channel] > color[other] + 40 for other in range(3) if other != channel), color
     # A resource is frozen at decode, not read from its filename each frame.
     class Frozen(m.Scene):
         default_camera_config = dict(resolution=(96, 54), fps=8)
