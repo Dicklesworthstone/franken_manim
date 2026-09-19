@@ -30,12 +30,12 @@ jobs:
         run: |
           set -euo pipefail
           if ! grep -q 'pub fn with_dark_image' crates/fmn-mobject/src/mobject.rs; then
-            git apply --check scripts/patches/native-texture-pairs.patch
-            git apply scripts/patches/native-texture-pairs.patch
+            git apply --recount --check scripts/patches/native-texture-pairs.patch
+            git apply --recount scripts/patches/native-texture-pairs.patch
           fi
           if test -f scripts/patches/portal-texture-pairs.patch && ! grep -q 'dark_payload' crates/fmn-python/src/portal_texture.rs; then
-            git apply --check scripts/patches/portal-texture-pairs.patch
-            git apply scripts/patches/portal-texture-pairs.patch
+            git apply --recount --check scripts/patches/portal-texture-pairs.patch
+            git apply --recount scripts/patches/portal-texture-pairs.patch
           fi
           git diff --check
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
@@ -81,9 +81,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/fmn-mobject/src/mobject.rs crates/fmn-mobject/src/persist.rs crates/fmn-mobject/tests/persist.rs crates/fmn-mobject/tests/texture_pairs.rs crates/fmn-render/src/retained.rs crates/fmn-render/src/revision.rs crates/fmn-render/tests/texture_pairs.rs
+          native=(crates/fmn-mobject/src/mobject.rs crates/fmn-mobject/src/persist.rs crates/fmn-mobject/tests/persist.rs crates/fmn-mobject/tests/texture_pairs.rs crates/fmn-render/src/retained.rs crates/fmn-render/src/revision.rs crates/fmn-render/tests/texture_pairs.rs)
+          git add "${native[@]}"
+          git diff --cached -- "${native[@]}" > /tmp/native-texture-pairs.patch
+          if test -s /tmp/native-texture-pairs.patch; then
+            cp /tmp/native-texture-pairs.patch scripts/patches/native-texture-pairs.patch
+            git add scripts/patches/native-texture-pairs.patch
+          fi
           if test -f crates/fmn-python/tests/texture_pairs.py; then
-            git add crates/fmn-python/src/portal_texture.rs crates/fmn-python/python/fmn_python/surface_textures.py crates/fmn-python/tests/texture_pairs.py crates/fmn-python/tests/textured_surfaces.py
+            portal=(crates/fmn-python/src/portal_texture.rs crates/fmn-python/python/fmn_python/surface_textures.py crates/fmn-python/tests/texture_pairs.py crates/fmn-python/tests/textured_surfaces.py)
+            git add "${portal[@]}"
+            git diff --cached -- "${portal[@]}" > /tmp/portal-texture-pairs.patch
+            if test -s /tmp/portal-texture-pairs.patch; then
+              cp /tmp/portal-texture-pairs.patch scripts/patches/portal-texture-pairs.patch
+              git add scripts/patches/portal-texture-pairs.patch
+            fi
           fi
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
