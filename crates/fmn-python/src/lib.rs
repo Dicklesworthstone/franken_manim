@@ -26,6 +26,7 @@ mod portal_console;
 #[cfg(feature = "gauntlet")]
 pub use portal_console::run_portal_gauntlet_console;
 mod portal_playback;
+mod portal_readback;
 mod portal_recording;
 mod portal_studio;
 mod portal_svg;
@@ -10813,6 +10814,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_class::<PyGilProbe>()?;
     module.add_class::<PyCameraFrameCore>()?;
     module.add_class::<PyCameraCore>()?;
+    module.add_class::<portal_readback::CameraCapture>()?;
     module.add_class::<PyFieldProbe>()?;
     module.add_class::<ladder::PyBatchedUpdater>()?;
     module.add_class::<ladder::PyArrayUpdater>()?;
@@ -12182,7 +12184,6 @@ mod tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod subset_reveal_acceptance {

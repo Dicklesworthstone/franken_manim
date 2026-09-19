@@ -21942,31 +21942,23 @@ _gl_refused = {
     "init_context": lambda: _cam.init_context(),
     "init_fbo": lambda: _cam.init_fbo(),
     "blit": lambda: _cam.blit(),
-    "clear": lambda: _cam.clear(),
     "get_fbo": lambda: _cam.get_fbo(),
     "get_texture": lambda: _cam.get_texture(),
     "get_raw_fbo_data": lambda: _cam.get_raw_fbo_data(np.uint8),
 }
 _gl_results = {name: _raises(fn, Exception) for name, fn in _gl_refused.items()}
 _check("gl surface refuses toward lumen", all(_gl_results.values()))
-_capture_refused = False
-try:
-    _cam.capture()
-except Exception as error:
-    _capture_refused = "Lumen" in str(error) and "run" in str(error)
+_cam.clear()
+_cam.capture()
+_pixels = _cam.get_pixel_array()
+_check("camera readback is real RGBA", _pixels.shape == (720, 1280, 4)
+       and _pixels.dtype == np.uint8)
 _img_refused = False
 try:
     _cam.get_image()
 except Exception as error:
     _img_refused = "Lumen" in str(error)
-_check("capture and get image refuse toward native png",
-       _capture_refused and _img_refused)
-_px_refused = False
-try:
-    _cam.get_pixel_array()
-except Exception as error:
-    _px_refused = "Lumen" in str(error)
-_check("pixel array access refuses toward native png", _px_refused)
+_check("Pillow image surface remains separate", _img_refused)
 _check("headless queries stay live",
        _cam.use_window_fbo() is False
        and _cam.init_frame() is None
