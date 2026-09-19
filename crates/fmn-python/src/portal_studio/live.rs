@@ -25,9 +25,21 @@ fn with_capture<T>(
     f(capture)
 }
 
+/// The worker freezes this callable at startup, outside authored scene fields.
+/// It must run unborrowed, before callbacks and before publishing their pixels.
+fn validate_inputs(py: Python<'_>, validator: Option<&Py<PyAny>>) -> PyResult<()> {
+    if let Some(validator) = validator
+        && !validator.call0(py)?.bind(py).is_none()
+    {
+        return Err(PyTypeError::new_err("Studio input validator must return None"));
+    }
+    Ok(())
+}
+
 /// Snapshot after synchronization, never while a Python callback has an engine
 /// borrow. The original engine/generation must survive all camera descriptors.
-fn refresh(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+fn refresh(scene: &Bound<'_, PyScene>, validator: Option<&Py<PyAny>>) -> PyResult<()> {
+    validate_inputs(scene.py(), validator)?;
     let engine = Rc::clone(&scene.try_borrow()?.engine);
     portal_playback::synchronize(scene)?;
     // Match Scene.update_mobjects at the ordinary release boundary. Native
@@ -41,6 +53,9 @@ fn refresh(scene: &Bound<'_, PyScene>) -> PyResult<()> {
             "live Studio engine changed during synchronization",
         ));
     }
+    // Includes lazy imports and input edits made by zero-dt updaters and
+    // camera descriptors. No frame has replaced the healthy recording yet.
+    validate_inputs(scene.py(), validator)?;
     with_capture(scene, |capture| {
         capture.live_refresh = true;
         Ok(())
@@ -64,7 +79,12 @@ fn refresh(scene: &Bound<'_, PyScene>) -> PyResult<()> {
 /// authored waits or consuming play indices. No borrow spans host callbacks.
 /// Intermediate steps are deliberately not published: a command either yields
 /// its completed final view or freezes input with the last good view retained.
-fn advance(scene: &Bound<'_, PyScene>, frames: u32) -> PyResult<()> {
+fn advance(
+    scene: &Bound<'_, PyScene>,
+    frames: u32,
+    validator: Option<&Py<PyAny>>,
+) -> PyResult<()> {
+    validate_inputs(scene.py(), validator)?;
     let engine = Rc::clone(&scene.try_borrow()?.engine);
     let render = Arc::clone(&scene.try_borrow()?.render);
     let mut sink = PortalSceneSink {
@@ -88,6 +108,12 @@ fn advance(scene: &Bound<'_, PyScene>, frames: u32) -> PyResult<()> {
             return Err(PyRuntimeError::new_err(
                 "live Studio engine changed during clock stepping",
             ));
+        }
+        // Scans are command-boundary work, not another per-frame watcher.
+        // Earlier steps have no publication; validate after the last Python
+        // callback before allowing the native final capture to replace it.
+        if index + 1 == frames {
+            validate_inputs(scene.py(), validator)?;
         }
         // Complete the normal updater pass, capturing only the final step.
         // Do not call refresh/show afterwards: its zero-dt updater pass would
@@ -113,6 +139,7 @@ fn advance(scene: &Bound<'_, PyScene>, frames: u32) -> PyResult<()> {
 
 struct LiveWorker {
     scene: Py<PyScene>,
+    input_validator: Option<Py<PyAny>>,
     name: String,
     build: ProtocolDigest,
     state_hash: Option<ProtocolDigest>,
@@ -121,6 +148,17 @@ struct LiveWorker {
 
 impl LiveWorker {
     fn new(scene: &Bound<'_, PyScene>) -> PyResult<Self> {
+        let input_validator = scene
+            .getattr("__dict__")?
+            .cast::<PyDict>()?
+            .get_item("_fmn_studio_validate_inputs")?
+            .map(Bound::unbind);
+        if input_validator
+            .as_ref()
+            .is_some_and(|v| !v.bind(scene.py()).is_callable())
+        {
+            return Err(PyTypeError::new_err("Studio input validator must be callable"));
+        }
         let empty = with_capture(scene, |capture| {
             if capture.live {
                 return Err(failure("live Studio is already serving this scene"));
@@ -129,7 +167,7 @@ impl LiveWorker {
         })
         .map_err(native_error)?;
         if empty {
-            refresh(scene)?;
+            refresh(scene, input_validator.as_ref())?;
         }
         let (name, build) = with_capture(scene, |capture| {
             capture.recorded.enable_live_input()?;
@@ -138,11 +176,12 @@ impl LiveWorker {
             Ok((capture.scene.clone(), capture.recorded.build_id()))
         })
         .map_err(native_error)?;
-        refresh(scene)?;
+        refresh(scene, input_validator.as_ref())?;
         let state_hash =
             with_capture(scene, |c| Ok(c.recorded.last_state_hash())).map_err(native_error)?;
         Ok(Self {
             scene: scene.clone().unbind(),
+            input_validator,
             name,
             build,
             state_hash,
@@ -168,7 +207,7 @@ impl LiveWorker {
                 }
                 let request =
                     with_capture(scene, |c| c.recorded.prepare_live_advance(&name, &command))?;
-                if let Err(error) = advance(scene, request.frames) {
+                if let Err(error) = advance(scene, request.frames, self.input_validator.as_ref()) {
                     let message = error.to_string();
                     self.failed = Some(message.clone());
                     let _ = with_capture(scene, |c| {
@@ -201,7 +240,9 @@ impl LiveWorker {
                 let input =
                     with_capture(scene, |c| c.recorded.prepare_live_input(&name, &command))?;
                 // No Rust scene borrow or generation mutex crosses this call.
-                let dispatched = dispatch(scene, input.event).and_then(|()| refresh(scene));
+                let dispatched = validate_inputs(py, self.input_validator.as_ref())
+                    .and_then(|()| dispatch(scene, input.event))
+                    .and_then(|()| refresh(scene, self.input_validator.as_ref()));
                 if let Err(error) = dispatched {
                     let message = error.to_string();
                     self.failed = Some(message.clone());
@@ -430,6 +471,10 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "live_input_identity_tests.rs"]
+mod input_identity_tests;
 
 #[cfg(test)]
 mod tests {

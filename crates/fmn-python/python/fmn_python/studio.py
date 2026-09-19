@@ -23,6 +23,7 @@ from typing import Any
 import weakref
 
 from . import _ensure_exclusive_manimlib_namespace
+from .studio_inputs import StudioInputs, project_directory
 
 _SCHEMA = "fmn-python.studio-worker"
 _MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -116,7 +117,7 @@ class Studio:
         debounce_ms = _integer(debounce_ms, "debounce_ms", 0, 10000)
         path = Path(source).resolve()
         _source(path)
-        roots = list(dict.fromkeys([str(path), str(path.parent),
+        roots = list(dict.fromkeys([str(path), str(project_directory(path)),
                                    *(str(Path(value).resolve()) for value in watch_paths)]))
         try:
             width, height = resolution
@@ -141,6 +142,8 @@ class Studio:
         extension = Path(_native.__file__).resolve()
         runtime = {"python": _file_digest(executable), "native": _file_digest(extension),
                    "portal": _file_digest(Path(__file__).resolve()),
+                   "inputs": _file_digest(Path(sys.modules[StudioInputs.__module__].__file__).resolve()),
+                   "loader": _file_digest(Path(__file__).with_name("scene_loading.py")),
                    "abi": sys.implementation.cache_tag}
         # Freeze environment and interpreter authority at the host front door.
         # This is not a claim to record the complete C1-C10 certified closure.
@@ -148,8 +151,11 @@ class Studio:
 
         def rebuild():
             data = _source(path)
-            request = {"schema": _SCHEMA, "version": 1, "source": str(path), "scene": scene,
-                       "source_sha256": hashlib.sha256(data).hexdigest(),
+            inputs = StudioInputs(_native, roots)
+            source_sha256 = hashlib.sha256(data).hexdigest()
+            inputs.require_source(path, source_sha256)
+            request = {"schema": _SCHEMA, "version": 2, "source": str(path), "scene": scene,
+                       "source_sha256": source_sha256, "inputs": inputs.as_request(),
                        "runtime": runtime, **options}
             request["build_id"] = _build_id(request)
             return (str(executable), ["-I", "-m", "fmn_python.studio", "--worker", _canonical(request)],
@@ -321,17 +327,21 @@ def _capture(request: dict[str, Any], native: Any):
     from .rendering import _seed
 
     path = Path(request["source"])
+    inputs = StudioInputs.from_request(native, request.get("inputs"))
+    inputs.require_source(path, request["source_sha256"])
     if hashlib.sha256(_source(path)).hexdigest() != request["source_sha256"]:
         raise RuntimeError("Studio source changed between launch and capture; reload")
-    with SceneSource(path, native.Scene) as loaded:
+    with SceneSource(path, native.Scene, source_inputs=inputs.files) as loaded:
         if loaded.source_digests.get(path) != request["source_sha256"]:
             raise RuntimeError("Studio executed source differs from the requested generation")
+        inputs.verify(loaded)
         if request["scene"] not in loaded.scenes:
             raise ValueError(f"Scene {request['scene']!r} was not defined in {path.name}")
         scene = loaded.scenes[request["scene"]]()
+        inputs.verify(loaded)
         # No source rewrite, no constructor kwargs, no duplicated frame clock.
         scene._begin_studio_capture(
-            request["scene"], request["build_id"], request["source_sha256"],
+            request["scene"], request["build_id"], inputs.fingerprint,
             request["width"], request["height"], request["fps"], request["threads"],
             _seed(scene.random_seed), request["max_frames"], request["max_bytes"],
         )
@@ -342,6 +352,7 @@ def _capture(request: dict[str, Any], native: Any):
                 scene.run()
             except native.EndScene:
                 pass
+            inputs.verify(loaded)
             if request.get("interactive", False):
                 # Retain both the source/import context and the actual scene
                 # on this worker thread for event callbacks. Never reconstruct
@@ -350,14 +361,23 @@ def _capture(request: dict[str, Any], native: Any):
                 # state while this worker owns live input. No fake Window is
                 # installed and ordinary offline Scene input stays unchanged.
                 scene.__dict__["_fmn_studio_live_input"] = True
+                scene.__dict__["_fmn_studio_validate_inputs"] = lambda: inputs.verify(loaded)
                 try:
                     scene._serve_studio_live()
                 finally:
                     scene.__dict__.pop("_fmn_studio_live_input", None)
+                    scene.__dict__.pop("_fmn_studio_validate_inputs", None)
                 return None
-            return scene._finish_studio_capture()
-        except BaseException:
-            scene._abort_render()
+            recording = scene._finish_studio_capture()
+            # Finishing an empty scene can capture a frame and invoke authored
+            # camera/updater hooks. Validate after those effects, before serve.
+            inputs.verify(loaded)
+            return recording
+        except BaseException as error:
+            try:
+                scene._abort_render()
+            except BaseException as cleanup:
+                error.add_note("Studio capture cleanup also failed: " + type(cleanup).__name__)
             raise
 
 
@@ -365,7 +385,7 @@ def _worker(encoded: str) -> int:
     if len(encoded) > 65536:
         raise ValueError("Studio worker request exceeds its launch budget")
     request = json.loads(encoded)
-    if not isinstance(request, dict) or request.get("schema") != _SCHEMA or request.get("version") != 1:
+    if not isinstance(request, dict) or request.get("schema") != _SCHEMA or request.get("version") != 2:
         raise ValueError("unsupported Studio worker request")
     if request.get("build_id") != _build_id(request):
         raise ValueError("Studio worker request identity mismatch")
@@ -377,6 +397,8 @@ def _worker(encoded: str) -> int:
         actual = {"python": _file_digest(Path(sys.executable)),
                   "native": _file_digest(Path(_native.__file__).resolve()),
                   "portal": _file_digest(Path(__file__).resolve()),
+                  "inputs": _file_digest(Path(sys.modules[StudioInputs.__module__].__file__).resolve()),
+                  "loader": _file_digest(Path(__file__).with_name("scene_loading.py")),
                   "abi": sys.implementation.cache_tag}
         if request["runtime"] != actual:
             raise RuntimeError("Studio worker interpreter/engine differs from the selected host runtime")
@@ -394,14 +416,19 @@ _HELP = """Read-only native Studio for Python scenes:
 Executes once in a disposable host-CPython worker; scrub and inspect the captured
 frames in the authenticated native Studio UI. Reload explicitly executes fresh
 source and imports. Ctrl-C closes the host and worker. This is not a sandbox.
---autoreload explicitly reruns source on content changes to local .py/.pyw
-files; --watch adds directories or explicit asset files. Native bounded scans
+Launch and publication bind the containing package's .py/.pyw inputs and
+explicitly watched assets to the native capture identity. Changed or undeclared
+compiled project inputs refuse publication, rather than serving a stale build.
+--autoreload explicitly reruns source on content changes in that package;
+--watch adds directories or explicit asset files. Native bounded scans
 ignore caches/virtualenvs and debounce edits. A failed edit retains the healthy
 preview and is retried only after another edit, not in an execution loop.
 --interactive retains the live scene in its worker. Select the last timeline
 frame and enable Scene input to send keyboard, pointer, drag and wheel events
 through existing scene callbacks. Prior frames remain read-only. Failed callbacks
 freeze input until reload; they are not rolled back or automatically retried.
+Live commands also check the declared-input generation before callbacks and
+before final capture: a helper/asset edit cannot silently mix two generations.
 Select the final frame to Step live frame or Run live nominal updater ticks.
 Run is bounded and pauses on input, navigation, focus loss or worker changes.
 No sound playback, callback checkpoints, or certified render claim.

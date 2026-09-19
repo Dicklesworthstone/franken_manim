@@ -451,6 +451,24 @@ pub(super) struct SourceWatcher {
 
 #[pymethods]
 impl SourceWatcher {
+    #[getter]
+    fn fingerprint(&self) -> String {
+        self.watch.content_fingerprint().to_hex()
+    }
+
+    #[getter]
+    fn files(&self) -> PyResult<Vec<(String, String)>> {
+        self.watch
+            .source_files()
+            .map(|(path, digest)| {
+                let path = path.to_str().ok_or_else(|| {
+                    PyValueError::new_err("Studio source identity requires UTF-8 paths")
+                })?;
+                Ok((path.to_owned(), digest.to_hex()))
+            })
+            .collect()
+    }
+
     fn poll(&mut self, py: Python<'_>) -> PyResult<bool> {
         py.detach(|| {
             self.watch
