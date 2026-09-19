@@ -3775,6 +3775,7 @@ class VMobject(Mobject):
         if behind is not None:
             for mob in _family_preorder(self) if recurse else [self]:
                 mob.uniforms["stroke_behind"] = bool(behind)
+                mob.stroke_behind = bool(behind)
 
         if flat is not None:
             self.set_flat_stroke(flat)

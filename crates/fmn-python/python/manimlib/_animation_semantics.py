@@ -518,14 +518,19 @@ def install(native):
                  g["_ColorValue"](g["_color_to_rgb"](self.stroke_color)))
         outline = self.mobject.copy()
         outline.set_fill(opacity=0)
+        behind = bool(
+            getattr(self.mobject, "stroke_behind", False)
+            or (hasattr(self.mobject, "uniforms") and self.mobject.uniforms.get("stroke_behind", False))
+        )
         for member in outline.family_members_with_points():
+            member_behind = behind or bool(
+                getattr(member, "stroke_behind", False)
+                or (hasattr(member, "uniforms") and member.uniforms.get("stroke_behind", False))
+            )
             member.set_stroke(
                 color=color if color is not None else member.get_stroke_color(),
                 width=self.stroke_width,
-                # Native-built shapes skip VMobject.__init__, and a later
-                # set_stroke(behind=...) changes the renderer's live uniform,
-                # not the constructor's cached Python attribute.
-                behind=bool(self.mobject.uniforms["stroke_behind"]),
+                behind=member_behind,
             )
         return outline
 
