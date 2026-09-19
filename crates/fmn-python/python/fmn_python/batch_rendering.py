@@ -10,10 +10,12 @@ import importlib
 import os
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .batch_checkpoint import BatchCheckpoint
 from .render_selection import animation_range as _animation_range
 from .rendering import RenderResult, _FORMATS, _positive_integer, render_scene
 
@@ -96,7 +98,7 @@ def _name_key(name: Any) -> str:
     return key
 
 
-def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int):
+def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int, existing=frozenset()):
     text = os.fspath(directory)
     if not isinstance(text, str):
         raise TypeError("batch output directory must be a text path")
@@ -141,7 +143,7 @@ def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int):
         destination = root / job.name / "frames" if format == "png_sequence" else root / (job.name + "." + format)
         # This is an early diagnostic, not a replacement for Reel's atomic
         # no-clobber check (another process may create a destination later).
-        if os.path.lexists(destination):
+        if existing is not None and os.path.lexists(destination) and destination not in existing:
             raise FileExistsError(f"render destination already exists: {destination}")
         for parent in destination.parents:
             if parent.exists() and not parent.is_dir():
@@ -190,6 +192,8 @@ def render_scenes(
     on_result: Callable[[SceneRenderOutcome], Any] | None = None,
     max_jobs: int = 1024,
     animation_range: tuple[int, int | None] | None = None,
+    checkpoint: os.PathLike[str] | str | None = None,
+    resume: bool = False, resume_key: str | None = None,
     _output_options: dict[str, Any] | None = None,
 ) -> BatchRenderResult:
     """Render named scenes in input order using independent native sessions.
@@ -205,9 +209,23 @@ def render_scenes(
     render_batch_result on the exception preserves progress. on_result runs
     after each outcome and cannot turn a published artifact into a failure.
     Observer exceptions stop the batch and carry the same progress attribute.
+
+    checkpoint writes an atomic progress journal after each native publication,
+    before observers run. Supply a nonempty resume_key identifying scene/asset
+    inputs. With resume=True, matching completed artifacts are hash-verified
+    and reused; failed, cancelled and unattempted jobs run afresh. Reused scenes
+    are not constructed. Constructor kwargs must be JSON-compatible when using
+    a checkpoint. Reuse is explicit, uncertified, and not a source-code cache:
+    change resume_key when inputs for completed scenes change. A crash between
+    publication and checkpointing leaves an unrecorded artifact which fails
+    no-clobber preflight; it is never silently reused, deleted, or overwritten.
     """
     if not isinstance(format, str) or format not in _FORMATS:
-        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, mp4, or mov")
+        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
+    if not isinstance(resume, bool):
+        raise TypeError("resume must be bool")
+    if checkpoint is None and (resume or resume_key is not None):
+        raise ValueError("resume and resume_key require a checkpoint path")
     if not isinstance(continue_on_error, bool):
         raise TypeError("continue_on_error must be bool")
     if on_result is not None and not callable(on_result):
@@ -223,32 +241,103 @@ def render_scenes(
     fps = None if fps is None else _positive_integer(fps, "fps")
     threads = None if threads is None else _positive_integer(threads, "threads")
     native = importlib.import_module("manimlib")
-    jobs, destinations = _plan(scenes, directory, format, native, maximum)
-    outcomes = [SceneRenderOutcome(job.name, path, "not_run") for job, path in zip(jobs, destinations)]
-    for index, (job, path) in enumerate(zip(jobs, destinations)):
-        failure = None
+    owner = nullcontext(None) if checkpoint is None else BatchCheckpoint(checkpoint, resume=resume, key=resume_key)
+    jobs, destinations = _plan(scenes, directory, format, native, maximum, None)
+    if checkpoint is not None:
+        owner.validate_destinations(destinations)
+    with owner as journal:
+        existing = frozenset() if journal is None else journal.existing_destinations
+        for destination in destinations:
+            if os.path.lexists(destination) and destination not in existing:
+                raise FileExistsError(f"render destination already exists: {destination}")
+        outcomes = [SceneRenderOutcome(job.name, path, "not_run") for job, path in zip(jobs, destinations)]
+        completed = {}
+        if journal is not None:
+            journal.prepare(jobs, destinations, {
+                "format": format, "resolution": resolution, "fps": fps,
+                "threads": threads, "animation_range": selection,
+                "output_options": _output_options,
+            })
+            completed = journal.completed
+            for index, job in enumerate(jobs):
+                if job.name in completed:
+                    outcomes[index] = _restored_outcome(completed[job.name])
+            _record_checkpoint(journal, outcomes)
+        for index, (job, path) in enumerate(zip(jobs, destinations)):
+            failure = None
+            if job.name not in completed:
+                try:
+                    receipt = render_scene(job.scene, path, format=format, resolution=resolution,
+                                           fps=fps, threads=threads, scene_kwargs=job.scene_kwargs,
+                                           **({} if not _output_options else {"_output_options": _output_options}),
+                                           **({} if selection is None else {"animation_range": selection}))
+                except Exception as error:
+                    failure = error
+                    kind, message = _error_fields(error)
+                    outcomes[index] = SceneRenderOutcome(job.name, path, "failed", error_type=kind, message=message, notes=_error_notes(error))
+                except BaseException as error:
+                    kind, message = _error_fields(error)
+                    outcomes[index] = SceneRenderOutcome(job.name, path, "cancelled", error_type=kind, message=message, notes=_error_notes(error))
+                    _attach_result(error, outcomes)
+                    try:
+                        _record_checkpoint(journal, outcomes)
+                    except BaseException as reporting_error:
+                        error.add_note("batch checkpoint also failed: " + _error_fields(reporting_error)[1])
+                    raise
+                else:
+                    outcomes[index] = SceneRenderOutcome(job.name, receipt.destination, "succeeded", result=receipt)
+                _record_checkpoint(journal, outcomes)
+            if on_result is not None:
+                try:
+                    on_result(outcomes[index])
+                except BaseException as error:
+                    _attach_result(error, outcomes)
+                    raise
+            if failure is not None and not continue_on_error:
+                raise BatchRenderError(BatchRenderResult(tuple(outcomes))) from failure
+        return BatchRenderResult(tuple(outcomes))
+
+
+def _record_checkpoint(journal, outcomes):
+    if journal is not None:
         try:
-            receipt = render_scene(job.scene, path, format=format, resolution=resolution,
-                                   fps=fps, threads=threads, scene_kwargs=job.scene_kwargs,
-                                   **({} if not _output_options else {"_output_options": _output_options}),
-                                   **({} if selection is None else {"animation_range": selection}))
-        except Exception as error:
-            failure = error
-            kind, message = _error_fields(error)
-            outcomes[index] = SceneRenderOutcome(job.name, path, "failed", error_type=kind, message=message, notes=_error_notes(error))
+            journal.record(outcomes)
         except BaseException as error:
-            kind, message = _error_fields(error)
-            outcomes[index] = SceneRenderOutcome(job.name, path, "cancelled", error_type=kind, message=message, notes=_error_notes(error))
             _attach_result(error, outcomes)
             raise
-        else:
-            outcomes[index] = SceneRenderOutcome(job.name, receipt.destination, "succeeded", result=receipt)
-        if on_result is not None:
-            try:
-                on_result(outcomes[index])
-            except BaseException as error:
-                _attach_result(error, outcomes)
-                raise
-        if failure is not None and not continue_on_error:
-            raise BatchRenderError(BatchRenderResult(tuple(outcomes))) from failure
-    return BatchRenderResult(tuple(outcomes))
+
+
+def _restored_outcome(row):
+    """Restore data only, never a pickled Scene or executable Python object."""
+    data = dict(row["result"])
+    for name in ("fps", "threads", "bytes", "seed", "frame_count", "sample_frames"):
+        value = data.get(name)
+        if value is None and name in {"frame_count", "sample_frames"}:
+            continue
+        if type(value) is not int or value < (1 if name in {"fps", "threads"} else 0):
+            raise ValueError("invalid checkpoint receipt field: " + name)
+    resolution = data.get("resolution")
+    if not isinstance(resolution, list) or len(resolution) != 2 or any(type(value) is not int or value <= 0 for value in resolution):
+        raise ValueError("invalid checkpoint receipt resolution")
+    digest = data.get("digest")
+    if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("invalid checkpoint receipt digest")
+    if not isinstance(data.get("engine"), str) or not data["engine"]:
+        raise ValueError("invalid checkpoint receipt engine")
+    if data.get("format") == "wav":
+        data.pop("sample_rate", None)
+        data.pop("channels", None)
+    data["destination"] = Path(data["destination"])
+    data["resolution"] = tuple(resolution)
+    for name in ("ffmpeg_invocations", "audio_inputs"):
+        items = data.get(name, [])
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise ValueError("invalid checkpoint receipt field: " + name)
+        data[name] = tuple(items)
+    if "animation_range" in data:
+        data["animation_range"] = _animation_range(data["animation_range"])
+    try:
+        result = RenderResult(**data)
+    except TypeError as error:
+        raise ValueError("invalid checkpoint publication receipt") from error
+    return SceneRenderOutcome(row["name"], result.destination, "succeeded", result=result)
