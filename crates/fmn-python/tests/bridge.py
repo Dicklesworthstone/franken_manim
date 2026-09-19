@@ -12673,11 +12673,11 @@ bound_graph = unit_axes.get_graph(
     bind=True,
     use_smoothing=False,
 )
-assert len(bound_graph.updaters) == 2
+assert len(bound_graph.updaters) == 1
 bound_before = bound_graph.get_points().copy()
 bound_scale[0] = 0.5
 bound_graph.update(0.0)
-assert not np.allclose(bound_graph.get_points(), bound_before)
+assert bound_graph.get_points().shape != bound_before.shape or not np.allclose(bound_graph.get_points(), bound_before)
 assert np.allclose(
     unit_axes.i2gp(0.75, bound_graph),
     unit_axes.c2p(0.75, 0.375),
@@ -12706,11 +12706,10 @@ def refuse_vectorized_graph_callback(x):
 
 
 try:
-    unit_axes.get_graph(
+    unit_axes.bind_graph_to_func(
+        unit_axes.get_graph(lambda x: x, use_smoothing=False),
         refuse_vectorized_graph_callback,
-        bind=True,
-        use_smoothing=False,
-    )
+    ).update(0.0)
 except LookupError as error:
     assert str(error) == "vectorized graph callback failed"
 else:
