@@ -2,7 +2,8 @@
 
 A capture copies native records, not Python objects. Detached and scene-bound
 families can be observed without adoption, clocks, callbacks or file creation.
-Successful captures replace the previous immutable frame atomically.
+Successful captures replace the previous immutable frame atomically. PNG
+snapshots support IPython/Jupyter display without Pillow or filesystem output.
 """
 from __future__ import annotations
 
@@ -73,6 +74,16 @@ def install_camera_capture(native: Any) -> None:
     def capture(self, *mobjects):
         render(self, mobjects, True)
 
+    def capture_snapshot(self, *mobjects):
+        """Render current native state and return an independent image snapshot.
+
+        The result supports pixels(), png(), size and the IPython PNG display
+        protocol. Keeping it retains only image bytes, not any scene objects.
+        Later captures, geometry edits and camera changes cannot change it.
+        """
+        render(self, mobjects, True)
+        return self.__dict__["_fmn_camera_capture"]
+
     def clear(self):
         render(self, (), False)
 
@@ -90,7 +101,20 @@ def install_camera_capture(native: Any) -> None:
         # scene view. Return an independently writable Reference-shaped array.
         return np.frombuffer(snapshot.pixels(), dtype=np.uint8).reshape(height, width, 4).copy()
 
-    for name, method in {"capture": capture, "clear": clear, "get_pixel_array": pixels}.items():
+    def png(self):
+        """Return the last immutable capture as native-encoded PNG bytes."""
+        return current(self).png()
+
+    def repr_png(self):
+        # A representation observes the last frame. It must not run capture's
+        # authored uniform hooks merely because a notebook redisplays it.
+        return png(self)
+
+    for name, method in {
+        "capture": capture, "capture_snapshot": capture_snapshot,
+        "clear": clear, "get_pixel_array": pixels, "get_png": png,
+        "_repr_png_": repr_png,
+    }.items():
         method.__name__ = name
         method.__qualname__ = Camera.__qualname__ + "." + name
         method.__module__ = Camera.__module__

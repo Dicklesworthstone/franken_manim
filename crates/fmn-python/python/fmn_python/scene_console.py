@@ -205,6 +205,25 @@ class SceneConsole:
         # It neither advances the clock nor opens/emits a file generation.
         self.scene.camera.capture(*tuple(self.scene.mobjects))
 
+    def preview(self):
+        """Return a native PNG-displayable snapshot without executing a cell.
+
+        Unlike a cell's post-execution refresh, this is observational: it does
+        not tick updaters, change checkpoints, open output, or advance time.
+        It is also available when automatic post-cell capture is disabled.
+        """
+        with self._operation():
+            return self.scene.camera.capture_snapshot(*tuple(self.scene.mobjects))
+
+    def _repr_png_(self):
+        # IPython can inspect a console during run_cell. Never reenter a cell,
+        # touch an unsendable native Scene on another thread, or resurrect a
+        # closed console just to format a representation.
+        if (threading.get_ident() != self._thread or self._closed
+                or self._busy or not self.capture):
+            return None
+        return self.scene.camera.get_png()
+
     def _execute(self, source: str, *, skip: bool, record: bool, progress_bar: bool,
                  record_to=None, recording_options=None):
         for name, value in (("skip", skip), ("record", record), ("progress_bar", progress_bar)):

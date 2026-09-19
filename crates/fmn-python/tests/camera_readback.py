@@ -19,8 +19,9 @@ def run_camera_readback_acceptance():
     np.testing.assert_array_equal(before, top.get_points())
     image[:] = 0
     assert camera.get_pixel_array().any(), "returned pixel arrays must own their data"
+    frozen = camera.get_pixel_array()
     top.shift(m.DOWN * 4)
-    np.testing.assert_array_equal(camera.get_pixel_array(), camera.get_pixel_array())
+    np.testing.assert_array_equal(frozen, camera.get_pixel_array())
     camera.capture(top)
     assert np.where(camera.get_pixel_array()[:, :, 3] > 128)[0].mean() > 32
 
@@ -37,8 +38,8 @@ def run_camera_readback_acceptance():
     assert not left._is_bound() and not right._is_bound()
 
     # Preserve explicit root order, even if z_index differs from that order.
-    red = m.Square(side_length=2, fill_color=m.RED, fill_opacity=1, stroke_width=0, z_index=10)
-    blue = m.Square(side_length=2, fill_color=m.BLUE, fill_opacity=1, stroke_width=0, z_index=-10)
+    red = m.Square(side_length=2, fill_color=m.RED, fill_opacity=1, stroke_width=0).set_z_index(10)
+    blue = m.Square(side_length=2, fill_color=m.BLUE, fill_opacity=1, stroke_width=0).set_z_index(-10)
     camera.capture(red, blue)
     pixel = camera.get_pixel_array()[32, 48]
     assert int(pixel[2]) > int(pixel[0])
