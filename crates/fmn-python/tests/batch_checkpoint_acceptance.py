@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import traceback
 
 import manimlib
 from fmn_python import BatchRenderError, render_scenes
@@ -53,7 +54,7 @@ def real_output_resume(root, format):
         partial = error.result
     else:
         raise AssertionError("authored failure did not fail the batch")
-    assert [row.status for row in partial.outcomes] == ["succeeded", "failed", "not_run"]
+    assert [row.status for row in partial.outcomes] == ["succeeded", "failed", "not_run"], (format, partial.as_dict())
     first = partial.outcomes[0]
     before = inventory(first.destination)
     assert before, "expected a real native publication"
@@ -122,7 +123,21 @@ class B(Scene):
 
 with tempfile.TemporaryDirectory(prefix="fmn-native-recovery-") as directory:
     root = Path(directory)
+    failures = []
     for format in ("png", "png_sequence", "svg", "y4m", "gif", "wav"):
-        real_output_resume(root / format, format)
-    real_cli_resume(root / "cli")
+        try:
+            real_output_resume(root / format, format)
+        except Exception:
+            failures.append(format)
+            traceback.print_exc()
+        else:
+            print(f"native batch recovery passed: {format}", flush=True)
+    try:
+        real_cli_resume(root / "cli")
+    except Exception:
+        failures.append("cli")
+        traceback.print_exc()
+    else:
+        print("native batch recovery passed: cli", flush=True)
+    assert not failures, "native batch recovery failed: " + ", ".join(failures)
 print("native batch recovery acceptance passed: six formats and CLI fail/resume/integrity")

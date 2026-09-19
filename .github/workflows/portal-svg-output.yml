@@ -13,6 +13,7 @@ on:
       - 'crates/fmn-python/python/fmn_python/console_rendering.py'
       - 'crates/fmn-python/tests/test_batch_checkpoint_helpers.py'
       - 'crates/fmn-python/tests/test_batch_checkpoint_cli.py'
+      - 'crates/fmn-python/tests/test_batch_checkpoint_io.py'
       - 'crates/fmn-python/tests/batch_checkpoint_acceptance.py'
       - 'crates/fmn-python/tests/svg_output.py'
       - 'crates/fmn-python/tests/svg_console.py'
@@ -70,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           rustfmt --edition 2024 --config skip_children=true crates/fmn-library/src/svg_export.rs crates/fmn-output/src/lib.rs crates/fmn-output/src/sinks.rs crates/fmn-output/tests/sinks.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_playback.rs crates/fmn-python/src/portal_svg.rs crates/fmn-conformance/tests/e2e_scenarios.rs
-          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_imperative_rendering_protocol test_svg_output_protocol test_render_session_protocol test_batch_rendering_protocol test_console_rendering_protocol test_render_selection_protocol test_batch_checkpoint_helpers test_batch_checkpoint_cli
+          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_imperative_rendering_protocol test_svg_output_protocol test_render_session_protocol test_batch_rendering_protocol test_console_rendering_protocol test_render_selection_protocol test_batch_checkpoint_helpers test_batch_checkpoint_cli test_batch_checkpoint_io
           cargo test --locked -p fmn-library svg_export::tests
           cargo test --locked -p fmn-output --test sinks svg_
           cargo test --locked -p fmn-python portal_svg -- --nocapture

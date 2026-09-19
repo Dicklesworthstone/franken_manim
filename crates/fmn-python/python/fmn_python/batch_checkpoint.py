@@ -24,26 +24,61 @@ def _json(value: Any) -> bytes:
                       sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _regular_file(path: Path) -> dict[str, Any]:
-    """Hash without admitting links, devices, or files changed during the read."""
+def _signature(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _open_regular(path: Path):
+    """Refuse special files and links before opening, without a FIFO race hang."""
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode):
-        raise ValueError(f"checkpoint artifact must be a regular file: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    with os.fdopen(os.open(path, flags), "rb") as stream:
-        opened = os.fstat(stream.fileno())
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise ValueError(f"checkpoint artifact changed while opening: {path}")
+        raise ValueError(f"checkpoint input must be a regular file: {path}")
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _signature(opened) != _signature(before):
+            raise ValueError(f"checkpoint input changed while opening: {path}")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _regular_file(path: Path) -> dict[str, Any]:
+    """Hash without admitting links, devices, or files changed during the read."""
+    with _open_regular(path) as stream:
+        before = os.fstat(stream.fileno())
         digest, size = hashlib.sha256(), 0
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
             size += len(chunk)
         after = os.fstat(stream.fileno())
     current = path.lstat()
-    signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-    if signature(before) != signature(after) or signature(after) != signature(current) or size != after.st_size:
+    if _signature(before) != _signature(after) or _signature(after) != _signature(current) or size != after.st_size:
         raise ValueError(f"checkpoint artifact changed while hashing: {path}")
     return {"bytes": size, "sha256": digest.hexdigest()}
+
+
+def _read_document(path: Path):
+    with _open_regular(path) as stream:
+        before = os.fstat(stream.fileno())
+        if before.st_size > _MAX_BYTES:
+            raise ValueError("checkpoint exceeds its byte budget")
+        raw = stream.read(_MAX_BYTES + 1)
+        after = os.fstat(stream.fileno())
+    if len(raw) > _MAX_BYTES:
+        raise ValueError("checkpoint exceeds its byte budget")
+    if _signature(before) != _signature(after) or _signature(after) != _signature(path.lstat()) or len(raw) != after.st_size:
+        raise ValueError("checkpoint changed while reading")
+    return json.loads(raw)
+
+
+def _scan_error(error):
+    # os.walk otherwise silently skips unreadable directories. An incomplete
+    # inventory cannot be evidence that a completed render remains intact.
+    raise error
 
 
 def _inventory(destination: Path) -> list[dict[str, Any]]:
@@ -52,7 +87,7 @@ def _inventory(destination: Path) -> list[dict[str, Any]]:
     if not destination.is_dir():
         return [{"path": "", **_regular_file(destination)}]
     files = []
-    for directory, dirs, names in os.walk(destination, followlinks=False):
+    for directory, dirs, names in os.walk(destination, followlinks=False, onerror=_scan_error):
         for name in dirs:
             if (Path(directory) / name).is_symlink():
                 raise ValueError("checkpoint sequences cannot contain symlinks")
@@ -118,11 +153,7 @@ class BatchCheckpoint:
             if self.path.is_symlink():
                 raise ValueError("checkpoint cannot be a symlink")
             if self.resume:
-                with self.path.open("rb") as stream:
-                    raw = stream.read(_MAX_BYTES + 1)
-                if len(raw) > _MAX_BYTES:
-                    raise ValueError("checkpoint exceeds its byte budget")
-                document = json.loads(raw)
+                document = _read_document(self.path)
                 if not isinstance(document, dict) or document.get("schema") != _SCHEMA or document.get("version") != 1:
                     raise ValueError("unsupported batch checkpoint schema/version")
                 if document.get("key") != self.key:
