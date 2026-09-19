@@ -376,7 +376,10 @@ def install_animation_updaters(native: Any) -> None:
 
     def turn_animation_into_updater(animation, cycle=False, **kwargs):
         if not isinstance(animation, Animation):
-            raise TypeError("turn_animation_into_updater requires an Animation")
+            raise TypeError(
+                "turn_animation_into_updater requires an Animation; got "
+                + type(animation).__name__
+            )
         current_anchor = getattr(animation, "mobject", None)
         if isinstance(current_anchor, Mobject):
             for updater in tuple(current_anchor.updaters):

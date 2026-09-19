@@ -22,7 +22,7 @@ def _parameters(window, spacing):
     if math.isnan(window) or window < 0:
         raise ValueError("TracedPath time_traced must be nonnegative or infinite")
     if not math.isfinite(spacing) or spacing <= 0:
-        raise ValueError("TracedPath time_per_anchor must be positive and finite")
+        raise ValueError("TracedPath time_per_anchor must be finite and positive")
     if math.isfinite(window) and window / spacing > _MAX_ANCHORS - 3:
         raise ValueError("TracedPath time window exceeds the anchor budget; increase time_per_anchor")
     return window, spacing
@@ -71,7 +71,10 @@ def install_traced_path(native: Any) -> None:
     def initialize(self, traced_point_func, time_traced=None, time_per_anchor=1.0 / 15,
                    stroke_color=None, stroke_width=2.0, stroke_opacity=1.0, **kwargs):
         if not callable(traced_point_func):
-            raise TypeError("TracedPath requires a callable returning a point")
+            raise TypeError(
+                "TracedPath requires a callable returning the traced "
+                "point; got " + type(traced_point_func).__name__
+            )
         window, spacing = _parameters(time_traced, time_per_anchor)
         super(Trace, self).__init__(**kwargs)
         self.traced_point_func = traced_point_func
@@ -161,13 +164,21 @@ def install_traced_path(native: Any) -> None:
     Tail = g.get("TracingTail")
     if Tail is not None:
         def tail_init(self, mobject_or_func, time_traced=1.0, stroke_color=None,
-                      stroke_width=(0, 3), stroke_opacity=(0, 1), **kwargs):
+                      stroke_width=(0, 3), stroke_opacity=(0, 1), time_per_anchor=1.0 / 15, **kwargs):
+            if not isinstance(mobject_or_func, g["Mobject"]) and not callable(mobject_or_func):
+                raise TypeError(
+                    "TracingTail traces a Mobject or a point-returning "
+                    "callable; got " + type(mobject_or_func).__name__
+                )
+            anchor_dt = float(time_per_anchor)
+            if not math.isfinite(anchor_dt) or anchor_dt <= 0:
+                raise ValueError("TracingTail time_per_anchor must be finite and positive")
             source = mobject_or_func.get_center if isinstance(mobject_or_func, g["Mobject"]) else mobject_or_func
             # A tail has a finite duration; an unbounded trace is TracedPath.
-            window, spacing = _parameters(time_traced, kwargs.get("time_per_anchor", 1.0 / 15))
+            window, spacing = _parameters(time_traced, anchor_dt)
             if not math.isfinite(window):
                 raise ValueError("TracingTail requires a finite time_traced")
-            super(Tail, self).__init__(source, time_traced=window, stroke_color=stroke_color,
+            super(Tail, self).__init__(source, time_traced=window, time_per_anchor=anchor_dt, stroke_color=stroke_color,
                                       stroke_width=stroke_width, stroke_opacity=stroke_opacity, **kwargs)
             point = _point(np, self.traced_point_func())
             count = math.ceil(window / spacing)

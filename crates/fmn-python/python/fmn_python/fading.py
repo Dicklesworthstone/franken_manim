@@ -177,10 +177,20 @@ def install_fading(native: Any) -> None:
         self._fade_cleaned = True
 
     def pieces_init(self, mobject, target_mobject, **kwargs):
-        if not isinstance(mobject, VMobject) or not isinstance(target_mobject, VMobject):
-            raise TypeError("FadeTransformPieces requires VMobject families")
-        if not mobject.family_members_with_points() or not target_mobject.family_members_with_points():
-            raise ValueError("FadeTransformPieces requires point-bearing families")
+        for role, value in (("source", mobject), ("target", target_mobject)):
+            if not isinstance(value, VMobject):
+                raise TypeError(
+                    "FadeTransformPieces requires a non-empty VMobject pair; "
+                    + role
+                    + " is "
+                    + type(value).__name__
+                )
+            if not value.family_members_with_points():
+                raise ValueError(
+                    "FadeTransformPieces requires a non-empty VMobject pair; "
+                    + role
+                    + " has no points"
+                )
         super(Pieces, self).__init__(mobject, target_mobject, **kwargs)
 
     def pieces_begin(self):

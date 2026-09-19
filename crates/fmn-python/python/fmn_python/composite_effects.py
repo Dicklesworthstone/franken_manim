@@ -39,13 +39,21 @@ def _count(value, name):
 def _point(g, point, name):
     if isinstance(point, g["Mobject"]):
         return point
+    if point is None:
+        raise TypeError(name + " must be a 3D point or a Mobject; got NoneType")
     np = g["_np"]
-    coordinates = np.asarray(point, dtype=float)
+    try:
+        coordinates = np.asarray(point, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise TypeError(
+            name + " must be a 3D point or a Mobject; got " + type(point).__name__
+        ) from error
     if coordinates.shape != (3,) or not np.isfinite(coordinates).all():
         raise ValueError(name + " must be a Mobject or a finite 3D point")
     # A caller may mutate the supplied array/list while the effect runs.
     # Validate its coordinates without replacing that live input identity.
     return point
+
 
 
 def _bind_root(animation, root):
@@ -95,10 +103,16 @@ def _install_flash(g):
     def create_line_anims(self):
         return [g["ShowCreationThenDestruction"](line) for line in self.lines]
 
+    def flash_clean_up(self, scene):
+        super(Flash, self).clean_up_from_scene(scene)
+        self.lines.update()
+
+
     Flash._native_kind = "animation_group"
     for name, function in {
         "__init__": flash_init, "create_lines": create_lines,
         "create_line_anims": create_line_anims,
+        "clean_up_from_scene": flash_clean_up,
     }.items():
         _method(Flash, name, function)
     # The shared initializer froze a legacy leaf-style Flash lifecycle on
@@ -107,7 +121,7 @@ def _install_flash(g):
     # later authored changes to AnimationGroup itself. Do not freeze aliases.
     for name in (
         "_ensure_runtime_defaults", "get_all_mobjects", "begin",
-        "update_mobjects", "interpolate", "finish", "clean_up_from_scene", "abort",
+        "update_mobjects", "interpolate", "finish", "abort",
     ):
         if name in vars(Flash):
             delattr(Flash, name)
