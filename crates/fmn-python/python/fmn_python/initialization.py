@@ -20,6 +20,7 @@ _STEPS = (
     ("live_tex", "install_live_tex"),
     ("matrix", "install_matrix"),
     ("graphing", "install_graphing"),
+    ("vector_fields", "install_vector_fields"),
     ("text_reveal", "install_text_reveal"),
     ("subset_reveal", "install_subset_reveal"),
     ("fading", "install_fading"),
