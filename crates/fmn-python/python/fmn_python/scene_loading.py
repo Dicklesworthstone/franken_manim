@@ -16,6 +16,7 @@ import importlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import os
 import sys
 import threading
 from pathlib import Path
@@ -26,6 +27,10 @@ from typing import Any
 # owner instead of blocking: authored code may join a thread trying to render.
 _SOURCE_OWNER = threading.Lock()
 _MISSING = object()
+# Retaining source bytes must not make an ordinary render an unbounded archive.
+# Exceeding either budget disables provenance capture, not Python execution.
+_MAX_CAPTURED_SOURCES = 4096
+_MAX_CAPTURED_SOURCE_BYTES = 64 * 1024 * 1024
 
 
 def _origin(module: Any) -> Path | None:
@@ -87,8 +92,9 @@ class _FreshSource(importlib.machinery.SourceFileLoader):
         # Check the exact bytes about to execute, not just a scan after import.
         # Failed code must not get to run top-level authored effects first.
         self.owner._check_source(path, digest)
-        self.owner.source_digests[path] = digest
-        return self.source_to_code(source, self.path)
+        code = self.source_to_code(source, self.path)
+        self.owner._record_source(path, source, digest)
+        return code
 
     def exec_module(self, module: ModuleType) -> None:
         self.owner._loaded[module.__name__] = module
@@ -177,6 +183,9 @@ class SceneSource:
         # Source-only observations, including lazy imports. This deliberately
         # does not purport to capture C2-C10 or arbitrary Python host effects.
         self.source_digests: dict[Path, str] = {}
+        self._source_bytes: dict[Path, bytes] = {}
+        self._source_capture_bytes = 0
+        self._source_capture_error: str | None = None
         self._saved: dict[str, Any] = {}
         self._loaded: dict[str, ModuleType] = {}
         self._paths: list[str] = []
@@ -242,6 +251,28 @@ class SceneSource:
             )
         if expected != digest:
             raise RuntimeError(f"Studio executed changed project source {path}; reload")
+
+    def _record_source(self, path: Path, source: bytes, digest: str) -> None:
+        """Retain the exact compilation input, never a later filesystem read.
+
+        Ordinary Python may reload edited code. A one-version-per-path closure
+        cannot represent that execution, so refuse its snapshot rather than
+        changing ordinary render semantics or silently blessing the last edit.
+        """
+        self.source_digests[path] = digest
+        if self._source_capture_error is not None:
+            return
+        previous = self._source_bytes.get(path)
+        if previous is not None:
+            if previous != source:
+                self._source_capture_error = f"scene source changed during execution: {path}"
+            return
+        if (len(self._source_bytes) >= _MAX_CAPTURED_SOURCES
+                or len(source) > _MAX_CAPTURED_SOURCE_BYTES - self._source_capture_bytes):
+            self._source_capture_error = "executed scene source capture exceeds its count or byte budget"
+            return
+        self._source_bytes[path] = source
+        self._source_capture_bytes += len(source)
 
     def _prepare(self) -> None:
         # A pre-existing foreign package must not redirect relative imports to
@@ -374,27 +405,23 @@ class SceneSource:
 
     @property
     def sources(self) -> dict[str, bytes]:
-        """Expose raw byte contents of the primary source and imported modules."""
-        result: dict[str, bytes] = {}
-        primary_key = (
-            self.path.relative_to(self.root).as_posix()
-            if self.path.is_relative_to(self.root)
-            else self.path.name
-        )
+        """Snapshot exact compilation bytes, including imports observed so far.
+
+        Snapshots do not reread files and remain valid after context exit,
+        edits, or deletion. Local-only projects keep their root-relative names.
+        Declared external helpers expand the common root instead of collapsing
+        to basenames and overwriting other inputs. These are source-only
+        observations, not a claim to capture assets or arbitrary host effects.
+        """
+        if self._source_capture_error is not None:
+            raise RuntimeError(self._source_capture_error)
+        if not self._source_bytes:
+            return {}
         try:
-            result[primary_key] = self.path.read_bytes()
-        except OSError:
-            pass
-        for p in sorted(self.source_digests.keys()):
-            if p == self.path:
-                continue
-            vpath = (
-                p.relative_to(self.root).as_posix()
-                if p.is_relative_to(self.root)
-                else p.name
-            )
-            try:
-                result[vpath] = p.read_bytes()
-            except OSError:
-                pass
-        return result
+            root = Path(os.path.commonpath((self.root, *self._source_bytes)))
+        except ValueError as error:
+            raise RuntimeError("scene source capture cannot span filesystem volumes") from error
+        return {
+            path.relative_to(root).as_posix(): source
+            for path, source in sorted(self._source_bytes.items())
+        }

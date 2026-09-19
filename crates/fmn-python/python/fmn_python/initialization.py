@@ -28,6 +28,7 @@ _STEPS = (
     ("control_events", "install_control_events"),
     ("color_sliders", "install_color_sliders"),
     ("scene_execution", "install_scene_execution"),
+    ("embedded_shell", "install_embedded_shell"),
 )
 _STATE = "_FMN_PORTAL_RUNTIME_STATE"
 

@@ -1,0 +1,118 @@
+name: Native live scene recording
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-scene-recording.yml'
+      - 'scripts/patches/live-recording-integration.patch'
+      - 'scripts/patches/live-recording-api.patch'
+      - 'crates/fmn-python/src/portal_recording.rs'
+      - 'crates/fmn-python/tests/live_recording.py'
+      - 'crates/fmn-python/python/fmn_python/recording.py'
+      - 'crates/fmn-python/tests/test_recording_protocol.py'
+      - 'crates/fmn-python/tests/recording_sessions.py'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: live-scene-recording
+  cancel-in-progress: false
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  CARGO_TARGET_DIR: target/portable
+  PYO3_PYTHON: python
+jobs:
+  native:
+    if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 100
+          clean: false
+      - name: Integrate live output with the existing generation
+        run: |
+          set -euo pipefail
+          if ! grep -qx 'mod portal_recording;' crates/fmn-python/src/lib.rs; then
+            git apply --check scripts/patches/live-recording-integration.patch
+            git apply scripts/patches/live-recording-integration.patch
+          fi
+          if test -f scripts/patches/live-recording-api.patch && ! grep -q '"RecordingSession", "record_scene"' crates/fmn-python/python/fmn_python/__init__.py; then
+            git apply --check scripts/patches/live-recording-api.patch
+            git apply scripts/patches/live-recording-api.patch
+          fi
+          git diff --check
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - name: Install pinned compiler and host packages
+        run: |
+          rustup show active-toolchain
+          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1' 'IPython==9.14.0'
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-recording-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-recording-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-svg-
+            cargo-${{ runner.os }}-${{ runner.arch }}-texture-pairs-
+      - name: Test native live geometry, clock, audio and cancellation
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/portal_recording.rs crates/fmn-python/src/portal_playback.rs crates/fmn-python/src/portal_audio.rs crates/fmn-python/src/portal_video.rs
+          cargo test --locked -p fmn-python portal_recording -- --nocapture
+          cargo test --locked -p fmn-python portal_playback::tests::insert_timeline
+          python -m maturin build --locked --profile dev --out /tmp/recording-wheels
+          python -m pip install --no-deps --force-reinstall /tmp/recording-wheels/*.whl
+          python crates/fmn-python/tests/live_recording.py
+          python crates/fmn-python/tests/batch_rendering.py
+          if test -f crates/fmn-python/tests/test_recording_protocol.py; then
+            PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_recording_protocol test_scene_console_protocol test_scene_console_ipython test_embedded_shell_protocol test_embedded_shell_ipython test_scene_console_worker
+            FMN_REQUIRE_FFMPEG=1 python crates/fmn-python/tests/recording_sessions.py
+          fi
+          git diff --check
+      - name: Commit tested native integration directly to main
+        run: |
+          set -euo pipefail
+          git add Cargo.lock crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_recording.rs crates/fmn-python/src/portal_playback.rs crates/fmn-python/src/portal_audio.rs crates/fmn-python/src/portal_video.rs
+          git add crates/fmn-python/python/fmn_python/__init__.py crates/fmn-python/python/fmn_python/scene_console.py crates/fmn-python/python/fmn_python/embedded_shell.py crates/fmn-python/tests/test_embedded_shell_protocol.py
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(python): attach native clip recording to live scenes without resetting state'
+            for attempt in 1 2 3; do
+              git fetch --no-tags origin main
+              if ! git merge-base --is-ancestor origin/main HEAD; then
+                git rebase origin/main
+                cargo test --locked -p fmn-python portal_recording -- --nocapture
+              fi
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" != 3
+            done
+          fi
+          git rev-parse HEAD
+          git archive --format=tar.gz HEAD > /tmp/live-recording-source.tar.gz
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: live-recording-${{ github.sha }}
+          path: |
+            /tmp/live-recording-source.tar.gz
+            /tmp/recording-wheels/*.whl
+          if-no-files-found: ignore
+          retention-days: 1

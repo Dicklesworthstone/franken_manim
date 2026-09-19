@@ -58,6 +58,14 @@ def _ensure_exclusive_manimlib_namespace():
 
 
 def __getattr__(name):
+    if name == "embed_scene":
+        from .embedded_shell import embed_scene
+
+        return embed_scene
+    if name == "SceneConsole":
+        from .scene_console import SceneConsole
+
+        return SceneConsole
     if name == "__version__":
         _ensure_exclusive_manimlib_namespace()
         from manimlib import __version__

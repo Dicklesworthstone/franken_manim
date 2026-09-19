@@ -2069,6 +2069,13 @@ fn python_textured_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         .with_artifact("textures_last.png", last))
 }
 
+fn python_scene_console_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_console()
+        .map_err(|error| fail(format!("Python scene console: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.scene_console").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("console_checks", checks))
+}
+
 fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_svg()
         .map_err(|error| fail(format!("Python native SVG: {error}")))?;
@@ -4630,6 +4637,17 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_scene_console.v1",
+        ScenarioClass::Lifecycle,
+        Surface::PythonInProcess,
+        Invocation::new(python_scene_console_run),
+        vec![Assertion::ExitCode(0), counter_eq("console_checks", 7)],
+        vec![LogExpect::span_present(
+            "e2e.python.scene_console",
+            vec![FieldPred::u64_eq("checks", 7)],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_svg.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -5784,4 +5802,14 @@ fn catalog_invariants_hold() {
             .any(|scenario| scenario.surface == Surface::PythonInProcess),
         "Python lost its production composition scenario"
     );
+}
+
+#[test]
+fn python_scene_console_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_scene_console.v1")
+        .expect("Python scene console scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }

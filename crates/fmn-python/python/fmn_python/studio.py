@@ -402,7 +402,12 @@ def _worker(encoded: str) -> int:
                   "abi": sys.implementation.cache_tag}
         if request["runtime"] != actual:
             raise RuntimeError("Studio worker interpreter/engine differs from the selected host runtime")
-        recording = _capture(request, _native)
+        from .scene_console import _STUDIO_WORKER
+        token = _STUDIO_WORKER.set(True)
+        try:
+            recording = _capture(request, _native)
+        finally:
+            _STUDIO_WORKER.reset(token)
     if recording is not None:
         recording.serve()
     return 0
