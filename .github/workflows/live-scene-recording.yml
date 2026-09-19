@@ -44,6 +44,14 @@ jobs:
         run: |
           rustup show active-toolchain
           python -m pip install 'numpy==2.5.2' 'maturin==1.14.1' 'IPython==9.14.0'
+      - name: Install the optional video tool for required video acceptance
+        run: |
+          set -euo pipefail
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: cache
         with:
@@ -54,6 +62,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-recording-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-recording-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-recording-
             cargo-${{ runner.os }}-${{ runner.arch }}-svg-
             cargo-${{ runner.os }}-${{ runner.arch }}-texture-pairs-
       - name: Implement and test create-only native publication
