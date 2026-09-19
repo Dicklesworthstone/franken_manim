@@ -7381,17 +7381,13 @@ grow_point.path_arc = 0.0
 grow_point_source.shift(2.0 * manimlib.RIGHT)
 grow_point_identity = id(grow_point_source)
 grow_point_samples = []
-import traceback
-grow_point_stacks = []
 grow_point_source.add_updater(
-    lambda mob: (
-        grow_point_samples.append(
-            (mob.get_center().copy(), mob.get_width(), mob.get_color())
-        ),
-        grow_point_stacks.append("".join(traceback.format_stack())),
+    lambda mob: grow_point_samples.append(
+        (mob.get_center().copy(), mob.get_width(), mob.get_color())
     ),
     call=False,
 )
+
 grow_point_scene = Scene()
 grow_point_scene.play(
     grow_point,
@@ -7400,7 +7396,7 @@ grow_point_scene.play(
 )
 assert id(grow_point_source) == grow_point_identity
 assert grow_point_scene.get_mobjects()[0] is grow_point_source
-assert len(grow_point_samples) == 3, f"actual={len(grow_point_samples)}, samples={grow_point_samples}, stacks={'---'.join(grow_point_stacks)}"
+assert len(grow_point_samples) == 3, f"len={len(grow_point_samples)}, samples={grow_point_samples}"
 assert np.allclose(grow_point_samples[0][0], manimlib.ORIGIN)
 assert np.isclose(grow_point_samples[0][1], 1.0)
 assert grow_point_samples[0][2] not in (manimlib.RED, manimlib.BLUE)
@@ -16184,16 +16180,20 @@ arc_scene.play(
 )
 assert np.allclose(arc_dot.get_center(), [0.0, -1.0, 0.0], atol=1e-6)
 
-# An arbitrary user path function keeps the precise refusal (no silent
-# straight-line substitution).
+# fm-5wq.4.63 / f9e529b1: Transform accepts an authored path function
+# through the callback lifecycle; non-callable stays TypeError.
+custom_transform = transform_module.Transform(
+    manimlib.Dot(), manimlib.Dot(), path_func=lambda s, e, alpha: s
+)
+assert callable(custom_transform.path_func)
 try:
     transform_module.Transform(
-        manimlib.Dot(), manimlib.Dot(), path_func=lambda s, e, alpha: s
+        manimlib.Dot(), manimlib.Dot(), path_func="not_callable"
     )
-except NotImplementedError as error:
+except TypeError as error:
     assert "path_func" in str(error), error
 else:
-    raise AssertionError("Transform accepted an unrouted path function")
+    raise AssertionError("Transform accepted a non-callable path function")
 
 # fm-5wq.4.68: TransformMatchingParts / TransformMatchingShapes ride the
 # native shape matcher — user pairs claim first, the same-shape product
@@ -16353,16 +16353,19 @@ except AssertionError:
 else:
     raise AssertionError("always accepted a non-method")
 
+# fm-5wq.4.143: turn_animation_into_updater accepts native-segment classes;
+# non-Animation stays TypeError.
+creation_updater_mob = geometry.Rectangle(width=1.0, height=1.0)
+creation_updater_res = update_utils.turn_animation_into_updater(
+    manimlib.ShowCreation(creation_updater_mob)
+)
+assert creation_updater_res is creation_updater_mob
 try:
-    update_utils.turn_animation_into_updater(
-        manimlib.ShowCreation(geometry.Rectangle(width=1.0, height=1.0))
-    )
-except NotImplementedError as error:
-    assert "persistent-updater seam" in str(error)
+    update_utils.turn_animation_into_updater(object())
+except TypeError as error:
+    assert "requires an Animation" in str(error), error
 else:
-    raise AssertionError(
-        "turn_animation_into_updater accepted a native-segment class"
-    )
+    raise AssertionError("turn_animation_into_updater accepted a non-Animation")
 
 # always_shift / always_rotate are thin dt-updater skins: Scene.wait and
 # Scene.play own the frame clock, while the helpers only apply dt-scaled
@@ -16657,7 +16660,7 @@ focus_scene.play(
 assert np.allclose(focus_target.get_center(), [1.25, -0.75, 0.0])
 assert np.allclose(
     focus_anim.mobject.get_center(), focus_target.get_center(), atol=1e-6
-)
+), f"actual {focus_anim.mobject.get_center()} vs expected {focus_target.get_center()}"
 
 # A numeric focus point still constructs (fm-5wq.4.52 surface untouched).
 numeric_focus = indication_module.FocusOn([0.5, 0.5, 0.0], run_time=2.0 / 30.0)
@@ -16948,13 +16951,13 @@ assert np.allclose(inplace_dot.get_center(), [1.0, 0.0, 0.0], atol=1e-9)
 
 # The deferred resolution respects the class contracts around it: fades
 # stay target-less (bare Fade keeps its named play-time refusal, pinned
-# above), and target-free Transform subclasses resolve no identity target.
+# above), while cyclic replacements resolve their cycled target group.
 assert fading.FadeIn(manimlib.Dot())._native_target() is None
 assert (
     transform_module.CyclicReplace(
         manimlib.Dot(), manimlib.Dot().shift((1.0, 0.0, 0.0))
     )._native_target()
-    is None
+    is not None
 )
 
 # Named negative: a non-Mobject Transform source.
@@ -17425,17 +17428,14 @@ assert np.allclose(
 assert np.isclose(
     explicit_cam_frame.get_width(), explicit_cam_start_width * 2.0
 )
-try:
-    explicit_cam_scene.play(
-        manimlib.AnimationGroup(
-            manimlib.Transform(explicit_cam_frame, explicit_cam_frame.copy())
-        ),
-        run_time=1.0 / 30.0,
-    )
-except NotImplementedError as error:
-    assert "cannot nest inside a composition" in str(error), error
-else:
-    raise AssertionError("a nested camera-frame transform did not refuse")
+# fm-5wq.4.143: nested camera choreography executes on the shared native
+# frame clock inside AnimationGroup / Succession compositions.
+explicit_cam_scene.play(
+    manimlib.AnimationGroup(
+        manimlib.Transform(explicit_cam_frame, explicit_cam_frame.copy())
+    ),
+    run_time=1.0 / 30.0,
+)
 
 
 class _CallbackFrameAnimation(Animation):
