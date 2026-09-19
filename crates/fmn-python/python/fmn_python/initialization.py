@@ -17,6 +17,7 @@ _STEPS = (
     ("rendering", "install_scene_rendering"),
     ("surface_textures", "install_surface_textures"),
     ("live_tex", "install_live_tex"),
+    ("matrix", "install_matrix"),
     ("text_reveal", "install_text_reveal"),
     ("fading", "install_fading"),
     ("playback", "install_scene_playback"),
