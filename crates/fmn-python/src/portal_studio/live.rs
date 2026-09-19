@@ -31,7 +31,9 @@ fn validate_inputs(py: Python<'_>, validator: Option<&Py<PyAny>>) -> PyResult<()
     if let Some(validator) = validator
         && !validator.call0(py)?.bind(py).is_none()
     {
-        return Err(PyTypeError::new_err("Studio input validator must return None"));
+        return Err(PyTypeError::new_err(
+            "Studio input validator must return None",
+        ));
     }
     Ok(())
 }
@@ -79,11 +81,7 @@ fn refresh(scene: &Bound<'_, PyScene>, validator: Option<&Py<PyAny>>) -> PyResul
 /// authored waits or consuming play indices. No borrow spans host callbacks.
 /// Intermediate steps are deliberately not published: a command either yields
 /// its completed final view or freezes input with the last good view retained.
-fn advance(
-    scene: &Bound<'_, PyScene>,
-    frames: u32,
-    validator: Option<&Py<PyAny>>,
-) -> PyResult<()> {
+fn advance(scene: &Bound<'_, PyScene>, frames: u32, validator: Option<&Py<PyAny>>) -> PyResult<()> {
     validate_inputs(scene.py(), validator)?;
     let engine = Rc::clone(&scene.try_borrow()?.engine);
     let render = Arc::clone(&scene.try_borrow()?.render);
@@ -157,7 +155,9 @@ impl LiveWorker {
             .as_ref()
             .is_some_and(|v| !v.bind(scene.py()).is_callable())
         {
-            return Err(PyTypeError::new_err("Studio input validator must be callable"));
+            return Err(PyTypeError::new_err(
+                "Studio input validator must be callable",
+            ));
         }
         let empty = with_capture(scene, |capture| {
             if capture.live {

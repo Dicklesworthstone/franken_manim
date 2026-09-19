@@ -4,9 +4,18 @@ use fmn_studio::advance::{StudioAdvance, studio_advance_command};
 use fmn_studio::protocol::{StudioInput, studio_input_command};
 
 fn frame(worker: &mut LiveWorker) -> Vec<u8> {
-    let WorkerResponse::Frame(FrameStream { payload: FramePayload::Pipe { bytes, .. }, .. }) = worker
-        .handle(SupervisorRequest::Scrub { scene: "Live".into(), frame: 1 }).unwrap()
-    else { panic!("expected native PNG") };
+    let WorkerResponse::Frame(FrameStream {
+        payload: FramePayload::Pipe { bytes, .. },
+        ..
+    }) = worker
+        .handle(SupervisorRequest::Scrub {
+            scene: "Live".into(),
+            frame: 1,
+        })
+        .unwrap()
+    else {
+        panic!("expected native PNG")
+    };
     bytes
 }
 
@@ -14,7 +23,8 @@ fn frame(worker: &mut LiveWorker) -> Vec<u8> {
 fn portal_studio_live_input_identity_preserves_the_last_good_frame() {
     for mode in ["before", "callback", "updater", "advance"] {
         crate::with_python_test_module("live input identity", |py, _module, globals| {
-            let source = std::ffi::CString::new(r#"
+            let source = std::ffi::CString::new(
+                r#"
 import manimlib as m
 valid, mode, events = True, 'idle', 0
 def validate():
@@ -43,25 +53,76 @@ def update(box, dt):
 s.box.add_updater(update)
 s.add(s.box)
 s.wait(0.25)
-"#).unwrap();
-            py.run(source.as_c_str(), Some(globals), Some(globals)).unwrap();
-            let scene = globals.get_item("s").unwrap().unwrap().cast_into::<PyScene>().unwrap();
+"#,
+            )
+            .unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .unwrap();
+            let scene = globals
+                .get_item("s")
+                .unwrap()
+                .unwrap()
+                .cast_into::<PyScene>()
+                .unwrap();
             let mut worker = LiveWorker::new(&scene).unwrap();
             let before = frame(&mut worker);
             globals.set_item("mode", mode).unwrap();
-            if mode == "before" { globals.set_item("valid", false).unwrap(); }
-            let command = if mode == "advance" {
-                studio_advance_command("Live", StudioAdvance { frame: 1, revision: 0, frames: 2 }).unwrap()
-            } else {
-                studio_input_command("Live", &StudioInput { frame: 1, revision: 0, target: None,
-                    event: EventPayload::KeyPress { key: Key::Character('a'), modifiers: Modifiers::NONE } }).unwrap()
-            };
-            let error = worker.handle(SupervisorRequest::Play { scene: "Live".into(), command }).unwrap_err();
-            assert!(error.to_string().contains("declared project inputs changed"), "{mode}: {error}");
-            assert!(worker.failed.is_some(), "{mode}");
-            assert_eq!(before, frame(&mut worker), "{mode} replaced the healthy capture");
             if mode == "before" {
-                assert_eq!(globals.get_item("events").unwrap().unwrap().extract::<u32>().unwrap(), 0);
+                globals.set_item("valid", false).unwrap();
+            }
+            let command = if mode == "advance" {
+                studio_advance_command(
+                    "Live",
+                    StudioAdvance {
+                        frame: 1,
+                        revision: 0,
+                        frames: 2,
+                    },
+                )
+                .unwrap()
+            } else {
+                studio_input_command(
+                    "Live",
+                    &StudioInput {
+                        frame: 1,
+                        revision: 0,
+                        target: None,
+                        event: EventPayload::KeyPress {
+                            key: Key::Character('a'),
+                            modifiers: Modifiers::NONE,
+                        },
+                    },
+                )
+                .unwrap()
+            };
+            let error = worker
+                .handle(SupervisorRequest::Play {
+                    scene: "Live".into(),
+                    command,
+                })
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("declared project inputs changed"),
+                "{mode}: {error}"
+            );
+            assert!(worker.failed.is_some(), "{mode}");
+            assert_eq!(
+                before,
+                frame(&mut worker),
+                "{mode} replaced the healthy capture"
+            );
+            if mode == "before" {
+                assert_eq!(
+                    globals
+                        .get_item("events")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<u32>()
+                        .unwrap(),
+                    0
+                );
             }
             scene.call_method0("_abort_render").unwrap();
         });
@@ -71,8 +132,18 @@ s.wait(0.25)
 #[test]
 fn portal_studio_live_validator_refuses_noncallable_or_success_shaped_false() {
     crate::with_python_test_module("live validator contract", |py, _module, globals| {
-        py.run(c"import manimlib as m; s=m.Scene(); s._fmn_studio_validate_inputs=False", Some(globals), Some(globals)).unwrap();
-        let scene = globals.get_item("s").unwrap().unwrap().cast_into::<PyScene>().unwrap();
+        py.run(
+            c"import manimlib as m; s=m.Scene(); s._fmn_studio_validate_inputs=False",
+            Some(globals),
+            Some(globals),
+        )
+        .unwrap();
+        let scene = globals
+            .get_item("s")
+            .unwrap()
+            .unwrap()
+            .cast_into::<PyScene>()
+            .unwrap();
         assert!(LiveWorker::new(&scene).is_err());
         let validator = py.eval(c"lambda: False", None, None).unwrap().unbind();
         assert!(validate_inputs(py, Some(&validator)).is_err());

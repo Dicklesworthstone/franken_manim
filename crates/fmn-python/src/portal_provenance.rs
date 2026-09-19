@@ -497,15 +497,14 @@ pub(crate) fn _portal_publish_manifest(
     let mut items = vec![build_item, suite_item, c3, c4, c5, c6, c7, c8, c9, c10];
     items.extend(source_items);
 
-    let manifest =
-        ProvenanceManifest::new(ManifestMode::Certified, items, identity, outputs, None)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let manifest = ProvenanceManifest::new(ManifestMode::Certified, items, identity, outputs, None)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     let sidecar_dir =
         adjacent_manifest_destination(&destination).map_err(PyRuntimeError::new_err)?;
     preflight_manifest_generation(fs.as_ref(), &sidecar_dir).map_err(PyRuntimeError::new_err)?;
-    let manifest_file =
-        publish_manifest_generation(&fs, &sidecar_dir, &manifest).map_err(PyRuntimeError::new_err)?;
+    let manifest_file = publish_manifest_generation(&fs, &sidecar_dir, &manifest)
+        .map_err(PyRuntimeError::new_err)?;
 
     Ok((
         manifest_file.to_string_lossy().into_owned(),
@@ -536,4 +535,3 @@ mod tests {
         assert_eq!(sidecar, PathBuf::from("/tmp/test/render.png.manifest"));
     }
 }
-

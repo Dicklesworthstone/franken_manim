@@ -10912,9 +10912,7 @@ pub(crate) fn with_python_test_module<T>(
         };
         let before = module_names().expect("snapshot sys.modules");
         assert!(
-            before
-                .iter()
-                .all(|name| !name.starts_with("manimlib")),
+            before.iter().all(|name| !name.starts_with("manimlib")),
             "{suite}: a prior Python suite leaked manimlib modules"
         );
         let videos_ref = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

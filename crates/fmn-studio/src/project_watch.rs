@@ -186,10 +186,12 @@ impl SourceWatch {
     /// Consumers can compare actually compiled source bytes without rescanning
     /// or inventing another directory traversal/filtering policy.
     pub fn source_files(&self) -> impl Iterator<Item = (&std::path::Path, ProtocolDigest)> {
-        self.observed.iter().filter_map(|(path, input)| match input {
-            Input::File(digest) => Some((path.as_path(), *digest)),
-            _ => None,
-        })
+        self.observed
+            .iter()
+            .filter_map(|(path, input)| match input {
+                Input::File(digest) => Some((path.as_path(), *digest)),
+                _ => None,
+            })
     }
 
     /// Return true once a different content set has remained stable for the
