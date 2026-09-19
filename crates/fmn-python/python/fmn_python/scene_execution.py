@@ -294,7 +294,10 @@ def install_scene_execution(native: Any) -> None:
             if options:
                 raise NotImplementedError("Scene.wait unsupported keyword(s): " + ", ".join(sorted(options)))
             if stop_condition is not None and not callable(stop_condition):
-                raise TypeError("Scene.wait stop_condition must be callable or None")
+                raise TypeError(
+                    "Scene.wait stop_condition must be callable or None; got "
+                    + type(stop_condition).__name__
+                )
             value = float(scene.default_wait_time if duration is None else duration)
             if not math.isfinite(value) or value < 0:
                 raise ValueError("Scene.wait duration must be finite and non-negative")
