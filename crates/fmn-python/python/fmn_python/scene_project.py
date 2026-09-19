@@ -176,6 +176,7 @@ class SceneProject:
         self._state = "entering"
         self._busy = True
         opened = False
+        token = _BUILDING.set(self)
         try:
             if self._owns_source:
                 self._source.__enter__()
@@ -191,6 +192,7 @@ class SceneProject:
                 self._source.__exit__(None, None, None)
             raise
         finally:
+            _BUILDING.reset(token)
             self._busy = False
 
     def rebuild(self, *, if_changed: bool = False):
@@ -206,6 +208,7 @@ class SceneProject:
     def _rebuild(self, *, if_changed=False, prepare=None):
         previous = self._current
         self._busy = True
+        token = _BUILDING.set(self)
         def build(module):
             candidate = self._build(module)
             if prepare is not None:
@@ -220,7 +223,13 @@ class SceneProject:
             self._current = previous
             raise
         finally:
+            _BUILDING.reset(token)
             self._busy = False
+
+    def edit(self, *, clipboard=None):
+        """Open the host IPython editor; reload() reconstructs in the same shell."""
+        from .project_editor import edit_project
+        return edit_project(self, clipboard=clipboard)
 
     def close(self):
         self._check_thread()
