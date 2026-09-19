@@ -86,7 +86,7 @@ def active_source(path: str | Path | None = None) -> SceneSource | None:
     return None
 
 
-def reload_source(owner: SceneSource, *, if_changed: bool = False) -> ModuleType:
+def reload_source(owner: SceneSource, *, if_changed: bool = False, _prepare=None) -> ModuleType:
     """Reload a live project once; unchanged conditional reload returns its module.
 
     All previously observed source files are syntax-checked before any module
@@ -95,6 +95,11 @@ def reload_source(owner: SceneSource, *, if_changed: bool = False) -> ModuleType
     them. Module identity is fresh on success; existing objects keep their old
     class/function identities until the author deliberately replaces them.
     """
+    # The scene-project front door validates a candidate scene before the
+    # import generation commits. Lazy imports during construction participate
+    # in the same rollback and compilation-input budget as module execution.
+    if _prepare is not None and not callable(_prepare):
+        raise TypeError("source reload preparation must be callable")
     if not isinstance(if_changed, bool):
         raise TypeError("if_changed must be bool")
     if not owner._active or owner.module is None or active_source(owner.path) is not owner:
@@ -145,6 +150,8 @@ def reload_source(owner: SceneSource, *, if_changed: bool = False) -> ModuleType
             and issubclass(value, owner.scene_type) and value.__module__ == owner.name
         }
         owner.module, owner.scenes = module, scenes
+        if _prepare is not None:
+            _prepare(module)
         return module
     except BaseException:
         for name, module in owner._loaded.items():

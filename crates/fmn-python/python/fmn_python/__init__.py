@@ -58,6 +58,10 @@ def _ensure_exclusive_manimlib_namespace():
 
 
 def __getattr__(name):
+    if name == "SceneProject":
+        from .scene_project import SceneProject
+
+        return SceneProject
     if name in {"RecordingSession", "record_scene"}:
         from . import recording
 
