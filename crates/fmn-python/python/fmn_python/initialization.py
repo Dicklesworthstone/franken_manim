@@ -34,6 +34,7 @@ _STEPS = (
     ("color_sliders", "install_color_sliders"),
     ("scene_execution", "install_scene_execution"),
     ("speed", "install_speed"),
+    ("speed_updaters", "install_speed_updaters"),
     ("embedded_shell", "install_embedded_shell"),
     ("source_autoreload", "install_source_autoreload"),
     ("project_editor", "install_scene_project_editor"),

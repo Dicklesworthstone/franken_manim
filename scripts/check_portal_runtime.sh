@@ -26,6 +26,10 @@ print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
 
+# These unittest suites include native geometry/clock and failure-recovery cases.
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed_updaters.py
+
 report_file="$(mktemp)"
 echo "retaining installed-wheel parity receipt: $report_file" >&2
 set +e
