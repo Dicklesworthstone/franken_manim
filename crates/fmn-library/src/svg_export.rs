@@ -46,13 +46,74 @@ pub fn stage_svg_document(
     frame_width: f64,
     frame_height: f64,
 ) -> Result<String, GeomError> {
-    let shapes = stage_svg_shapes(stage, pixel_width, frame_width)?;
+    stage_svg_document_with_background(
+        stage,
+        pixel_width,
+        pixel_height,
+        frame_width,
+        frame_height,
+        None,
+    )
+}
+
+/// Export the same vector document with an optional native camera background.
+///
+/// The background is an ordinary vector rectangle below the painter sequence;
+/// transparent backgrounds add no geometry. Text remains outlined paths and
+/// does not depend on fonts installed in the SVG viewer.
+///
+/// # Errors
+/// The same path-invariant refusals as [`stage_svg_document`].
+pub fn stage_svg_document_with_background(
+    stage: &Stage,
+    pixel_width: f64,
+    pixel_height: f64,
+    frame_width: f64,
+    frame_height: f64,
+    background: Option<fmn_core::color::LinearRgba>,
+) -> Result<String, GeomError> {
+    let mut shapes = stage_svg_shapes(stage, pixel_width, frame_width)?;
     let view_box = [
         -frame_width / 2.0,
         -frame_height / 2.0,
         frame_width,
         frame_height,
     ];
+    if let Some(background) = background.filter(|color| color.a > 0.0) {
+        let x = frame_width / 2.0;
+        let y = frame_height / 2.0;
+        let path = QuadPath::from_points(vec![
+            [-x, -y, 0.0],
+            [0.0, -y, 0.0],
+            [x, -y, 0.0],
+            [x, 0.0, 0.0],
+            [x, y, 0.0],
+            [0.0, y, 0.0],
+            [-x, y, 0.0],
+            [-x, 0.0, 0.0],
+            [-x, -y, 0.0],
+        ])?;
+        shapes.insert(
+            0,
+            SvgShape {
+                path,
+                style: SvgStyle {
+                    fill: Some(Paint::Color(background.to_srgb())),
+                    fill_opacity: background.a,
+                    stroke: None,
+                    fill_rule: FillRule::NonZero,
+                    stroke_width: 0.0,
+                    stroke_opacity: 0.0,
+                    line_cap: LineCap::Butt,
+                    line_join: LineJoin::Round,
+                    miter_limit: 4.0,
+                    stroke_dasharray: Vec::new(),
+                    stroke_dashoffset: 0.0,
+                    opacity: 1.0,
+                },
+            },
+        );
+    }
     Ok(emit_svg(&shapes, pixel_width, pixel_height, Some(view_box)))
 }
 
@@ -114,7 +175,7 @@ fn append_shape(
     } else {
         None
     };
-    shapes.push(SvgShape {
+    let mut shape = SvgShape {
         path,
         style: SvgStyle {
             fill,
@@ -132,7 +193,20 @@ fn append_shape(
             stroke_dashoffset: 0.0,
             opacity: 1.0,
         },
-    });
+    };
+    if stage.uniforms(mob).is_some_and(|u| u.stroke_behind)
+        && shape.style.fill.is_some()
+        && shape.style.stroke.is_some()
+    {
+        // SVG normally paints fill then stroke. Two adjacent native shapes
+        // preserve the opposite pass order without relying on viewer-specific
+        // paint-order support, and keep translucent strokes below their fill.
+        let mut stroke = shape.clone();
+        stroke.style.fill = None;
+        shapes.push(stroke);
+        shape.style.stroke = None;
+    }
+    shapes.push(shape);
     Ok(())
 }
 
@@ -284,5 +358,54 @@ mod tests {
     fn mobject_round_trip_stays_available() {
         let mobject = Mobject::from_points(&[[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]);
         assert_eq!(mobject.buffer.len(), 2);
+    }
+
+    #[test]
+    fn native_background_is_below_vectors_and_can_be_transparent() {
+        let mut stage = Stage::new();
+        let mob = stage.add(styled_circle());
+        stage.add_to_scene(mob).unwrap();
+        let black = Srgb::from_rgb8(0, 0, 0).to_linear(0.5);
+        let document =
+            stage_svg_document_with_background(&stage, 160.0, 90.0, 16.0, 9.0, Some(black))
+                .unwrap();
+        let parsed = SvgDocument::parse(document.as_bytes()).unwrap();
+        assert_eq!(parsed.shapes.len(), 2);
+        assert_eq!(
+            parsed.shapes[0].style.fill,
+            Some(Paint::Color(Srgb::from_rgb8(0, 0, 0)))
+        );
+        assert_eq!(parsed.shapes[0].style.fill_opacity, 0.5);
+        assert!(parsed.shapes[0].style.stroke.is_none());
+        let transparent = stage_svg_document_with_background(
+            &stage,
+            160.0,
+            90.0,
+            16.0,
+            9.0,
+            Some(Srgb::from_rgb8(0, 0, 0).to_linear(0.0)),
+        )
+        .unwrap();
+        assert_eq!(
+            transparent,
+            stage_svg_document(&stage, 160.0, 90.0, 16.0, 9.0).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_svg_preserves_stroke_behind_with_two_adjacent_passes() {
+        let mut stage = Stage::new();
+        let mob = stage.add(styled_circle());
+        stage.add_to_scene(mob).unwrap();
+        stage.uniforms_mut(mob).unwrap().stroke_behind = true;
+        let shapes = stage_svg_shapes(&stage, 160.0, 16.0).unwrap();
+        assert_eq!(shapes.len(), 2);
+        assert!(shapes[0].style.fill.is_none());
+        assert!(shapes[0].style.stroke.is_some());
+        assert!(shapes[1].style.fill.is_some());
+        assert!(shapes[1].style.stroke.is_none());
+        assert_eq!(shapes[0].path.points(), shapes[1].path.points());
+        stage.uniforms_mut(mob).unwrap().stroke_behind = false;
+        assert_eq!(stage_svg_shapes(&stage, 160.0, 16.0).unwrap().len(), 1);
     }
 }

@@ -2175,3 +2175,27 @@ mod ffmpeg_boundary {
         assert!(runs[1].cwd.is_none());
     }
 }
+
+#[test]
+fn svg_create_new_keeps_existing_bytes_and_arbitrates_competing_publishers() {
+    let fs = VirtualFs::new();
+    let destination = PathBuf::from("/render/new.svg");
+    let config = SvgPublicationConfig {
+        destination: destination.clone(),
+        max_artifact_bytes: 128,
+        profile: None,
+    };
+    let document = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+    let report = fmn_output::publish_svg_new(&fs, &config, document).unwrap();
+    assert_eq!(report.bytes, document.len() as u64);
+    assert_eq!(report.digest, fmn_hash::sha256(document));
+    assert!(fmn_output::publish_svg_new(&fs, &config, b"replacement").is_err());
+    assert_eq!(fs.read(&destination).unwrap(), document);
+    let bounded = SvgPublicationConfig {
+        destination: PathBuf::from("/render/oversized.svg"),
+        max_artifact_bytes: 1,
+        profile: None,
+    };
+    assert!(fmn_output::publish_svg_new(&fs, &bounded, document).is_err());
+    assert!(fs.read(&bounded.destination).is_err());
+}

@@ -19,7 +19,7 @@ from typing import Any
 
 from .render_selection import animation_range as _animation_range, apply_animation_range
 
-_FORMATS = frozenset({"png", "png_sequence", "gif", "y4m", "wav", "mp4", "mov"})
+_FORMATS = frozenset({"png", "png_sequence", "gif", "y4m", "wav", "svg", "mp4", "mov"})
 _VIDEO_FORMATS = frozenset({"mp4", "mov"})
 
 
@@ -116,7 +116,7 @@ class RenderSession:
         if format is None:
             format = path.suffix.lower().lstrip(".") if path.suffix else "png_sequence"
         if not isinstance(format, str) or format not in _FORMATS:
-            raise ValueError("render format must be png, png_sequence, gif, y4m, wav, mp4, or mov")
+            raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
         _validate_writer_options(scene, format, native)
         camera = scene.camera
         dimensions = camera.get_pixel_shape() if resolution is None else resolution
@@ -341,7 +341,7 @@ def _configured_destination(scene: Any, destination: Any, format: str | None, na
             return writer.get_movie_file_path(), None
         format = "png" if still else "png_sequence"
     if not isinstance(format, str) or format not in _FORMATS:
-        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, mp4, or mov")
+        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
     if format == "png":
         return writer.get_image_file_path(), format
     root = writer.get_output_file_rootname()

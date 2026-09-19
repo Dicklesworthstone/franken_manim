@@ -2069,6 +2069,25 @@ fn python_textured_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         .with_artifact("textures_last.png", last))
 }
 
+fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_svg()
+        .map_err(|error| fail(format!("Python native SVG: {error}")))?;
+    let document = fmn_library::svg::SvgDocument::parse(&report.document)
+        .map_err(|error| fail(format!("parse native SVG: {error}")))?;
+    if document.width != 160.0 || document.height != 90.0 || document.shapes.len() < 6 {
+        return Err(fail("SVG lost its viewport or native text/math outlines"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.svg")
+            .field("thread_counts", report.thread_counts)
+            .field("failure_paths", report.failure_paths),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("svg_thread_counts", report.thread_counts)
+        .with_counter("svg_failure_paths", report.failure_paths)
+        .with_artifact("diagram.svg", report.document))
+}
+
 fn python_surface_mesh_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_surface_mesh")?;
     let (png, checks) = manimlib::run_portal_gauntlet_surface_mesh(&root, ctx.seed)
@@ -4611,6 +4630,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_svg.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_svg_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["diagram.svg".to_owned()]),
+            counter_eq("svg_thread_counts", 3),
+            counter_eq("svg_failure_paths", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.svg",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("failure_paths", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_live_tex.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -5430,6 +5468,16 @@ fn python_live_tex_scenario_passes() {
 }
 
 /// Sampled wireframes through the native portal, renderer and PNG publisher.
+#[test]
+fn python_svg_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_svg.v1")
+        .expect("Python SVG scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 #[test]
 fn python_textured_surfaces_scenario_passes() {
     let scenario = catalog()
