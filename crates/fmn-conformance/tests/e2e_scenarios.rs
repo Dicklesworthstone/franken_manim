@@ -2103,7 +2103,9 @@ fn python_surface_mesh_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         .map_err(|error| fail(format!("decode surface mesh: {error}")))?;
     let visible = image
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| pixel[0] > pixel[1] && pixel[0] > pixel[2])
         .count() as u64;
     if (image.width, image.height) != (128, 128) || visible == 0 {
@@ -4638,7 +4640,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     ));
     specs.push(spec(
         "lifecycle.python_scene_console.v1",
-        ScenarioClass::Lifecycle,
+        ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
         Invocation::new(python_scene_console_run),
         vec![Assertion::ExitCode(0), counter_eq("console_checks", 7)],
