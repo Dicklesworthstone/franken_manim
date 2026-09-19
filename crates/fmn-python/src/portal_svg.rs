@@ -6,6 +6,7 @@
 //! reproduce Lumen's antialiasing or linear-light compositing in a browser.
 
 use super::*;
+use fmn_library::VStyle;
 use fmn_library::svg_export::stage_svg_document_with_background;
 use fmn_mobject::RenderPrimitive;
 
@@ -160,8 +161,12 @@ fn scene_document(stage: &Stage, camera: &Camera) -> PyResult<String> {
                 }
                 weight = Some(w);
                 let pixel = clip.pixel((width, height)).ok_or_else(|| unsupported("invalid camera projection"))?;
-                mapped.push([pixel[0] - f64::from(width) / 2.0,
-                    f64::from(height) / 2.0 - pixel[1], 0.0]);
+                let point = [pixel[0] - f64::from(width) / 2.0,
+                    f64::from(height) / 2.0 - pixel[1], 0.0];
+                if point.iter().any(|value| !value.is_finite() || value.abs() > f64::from(f32::MAX)) {
+                    return Err(unsupported("projected coordinates exceed native record precision"));
+                }
+                mapped.push(point);
             }
             projected.set_points(mob, &mapped).map_err(native_error)?;
             if uniforms.scale_stroke_with_zoom {
@@ -245,6 +250,44 @@ mod tests {
         camera = Camera::new(CameraConfig::default()).unwrap();
         stage.get_mut(shape).unwrap().buffer.write(0, "fill_rgba", &[1.0, 0.0, 0.0, 1.0]);
         assert!(scene_document(&stage, &camera).is_err());
+    }
+
+    #[test]
+    fn svg_camera_attachment_keeps_fractional_mix_and_overlay_geometry() {
+        let mut stage = Stage::new();
+        let shape = stage.add(fmn_library::Square::new().build());
+        stage.add_to_scene(shape).unwrap();
+        let mut camera = Camera::new(CameraConfig {
+            resolution: (160, 90), ..CameraConfig::default()
+        }).unwrap();
+        camera.frame_mut().set_center([2.0, 0.0, 0.0]).unwrap();
+        let mut centers = Vec::new();
+        for attachment in [0.0, 0.5, 1.0] {
+            stage.uniforms_mut(shape).unwrap().is_fixed_in_frame = attachment;
+            let svg = scene_document(&stage, &camera).unwrap();
+            let document = fmn_library::svg::SvgDocument::parse(svg.as_bytes()).unwrap();
+            let points = document.shapes[1].path.points();
+            let low = points.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+            let high = points.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+            centers.push((low + high) / 2.0);
+        }
+        assert!(centers[0] < centers[1] && centers[1] < centers[2]);
+        assert!((centers[1] - (centers[0] + centers[2]) / 2.0).abs() < 1e-5);
+        let fixed = scene_document(&stage, &camera).unwrap();
+        camera.frame_mut().rotate(0.5, [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(fixed, scene_document(&stage, &camera).unwrap());
+    }
+
+    #[test]
+    fn svg_refuses_projection_overflow_before_writing_nonfinite_records() {
+        let mut stage = Stage::new();
+        let shape = stage.add(fmn_library::Square::new().build());
+        stage.add_to_scene(shape).unwrap();
+        stage.shift(shape, [1e38, 0.0, 0.0]);
+        let before = stage.get_points(shape).unwrap();
+        let camera = Camera::new(CameraConfig::default()).unwrap();
+        assert!(scene_document(&stage, &camera).is_err());
+        assert_eq!(stage.get_points(shape).unwrap(), before);
     }
 
     #[test]
