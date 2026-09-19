@@ -59,6 +59,14 @@
 +sampling, alpha, lighting and depth. Both sides of a light/dark pair are
 +immutable native resources carried by copies, snapshots and replay.
  """
+@@ -33,5 +33,7 @@
+     Surface, Textured, Geometry = (g[name] for name in ("Surface", "TexturedSurface", "TexturedGeometry"))
+-    build_surface, build_mesh = (g[name] for name in ("_build_textured_surface", "_build_textured_geometry"))
++    # Resolve native functions through this module's dictionary. Capturing
++    # builtins directly also captures their __self__ module and prevents an
++    # embedded owner from releasing that module by clearing its globals.
+     np = g["_np"]
+ 
 @@ -80,11 +80,7 @@
          values = options(kwargs)
          path = g["_resolve_raster_image_path"](image_file).resolve()
@@ -77,7 +85,7 @@
 @@ -96,10 +91,11 @@
          g["_install_live_state"](self)
 -        specs = build_surface(self, uv_surface, payload, g["_native_surface_shell_factory"])
-+        specs = build_surface(self, uv_surface, payload, g["_native_surface_shell_factory"],
++        specs = g["_build_textured_surface"](self, uv_surface, payload, g["_native_surface_shell_factory"],
 +                              dark_payload)
          g["_hang_native_children"](self, specs)
          self.__dict__.update(metadata)
@@ -89,6 +97,12 @@
 +        self.num_textures = 1 if dark_payload is None else 2
          self.compute_triangle_indices()
          apply_options(self, values)
+@@ -130,5 +128,5 @@
+         g["_install_live_state"](self)
+-        specs = build_mesh(self, vertices, faces.reshape(-1), uv, payload,
++        specs = g["_build_textured_geometry"](self, vertices, faces.reshape(-1), uv, payload,
+                            g["_native_surface_shell_factory"])
+         g["_hang_native_children"](self, specs)
 --- a/crates/fmn-python/tests/textured_surfaces.py
 +++ b/crates/fmn-python/tests/textured_surfaces.py
 @@ -149,4 +149,6 @@
@@ -209,7 +223,7 @@
 +                format='png_sequence', resolution=(96, 54), fps=8, threads=1))
 +        assert not (root / 'failed').exists()
 +        print('light/dark textures: native pixels, copy/pickle, deleted sources, opacity, '
-+              '1/4/16-thread animation and cancellation passed')
++              '1/4/16-thread animation and cancellation passed', flush=True)
 +
 +
 +if __name__ == '__main__':
