@@ -283,10 +283,10 @@ fn unknown_durable_render_primitive_is_a_typed_corruption_refusal() {
     stage.add(Mobject::new());
     let mut bytes = stage.snapshot_bytes().unwrap();
     let body_len = bytes.len() - 32;
-    // The v1.6 image table trails the primitive table with one liveness bit
-    // and one absent-resource bit for this entry.
-    assert_eq!(&bytes[body_len - 3..body_len], &[0, 1, 0]);
-    bytes[body_len - 3] = u8::MAX;
+    // The v1.6 primary and v1.8 dark-image tables each trail the primitive
+    // table with one liveness bit and one absent-resource bit for this entry.
+    assert_eq!(&bytes[body_len - 5..body_len], &[0, 1, 0, 1, 0]);
+    bytes[body_len - 5] = u8::MAX;
     let digest = sha256(&bytes[..body_len]);
     bytes[body_len..].copy_from_slice(digest.as_bytes());
 

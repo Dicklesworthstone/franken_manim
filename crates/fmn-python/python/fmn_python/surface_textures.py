@@ -2,8 +2,8 @@
 
 The portal resolves local image paths and preserves Python object metadata.
 Atlas owns mesh normals, fmn-codec owns decoding, and Lumen owns perspective
-sampling, alpha, lighting and depth. A distinct light/dark pair is still a
-named capability gap, never silently replaced by the light image.
+sampling, alpha, lighting and depth. Both sides of a light/dark pair are
+immutable native resources carried by copies, snapshots and replay.
 """
 from __future__ import annotations
 
@@ -33,7 +33,9 @@ def install_surface_textures(native: Any) -> None:
     if g.get("_FMN_SURFACE_TEXTURES_INSTALLED", False):
         return
     Surface, Textured, Geometry = (g[name] for name in ("Surface", "TexturedSurface", "TexturedGeometry"))
-    build_surface, build_mesh = (g[name] for name in ("_build_textured_surface", "_build_textured_geometry"))
+    # Resolve native functions through this module's dictionary. Capturing
+    # builtins directly also captures their __self__ module and prevents an
+    # embedded owner from releasing that module by clearing its globals.
     np = g["_np"]
 
     def options(kwargs):
@@ -86,25 +88,22 @@ def install_surface_textures(native: Any) -> None:
             raise TypeError("TexturedSurface uv_surface must be a Surface")
         values = options(kwargs)
         path = g["_resolve_raster_image_path"](image_file).resolve()
-        if dark_image_file is not None:
-            dark = g["_resolve_raster_image_path"](dark_image_file).resolve()
-            if dark != path:
-                raise g["_CapabilityError"](
-                    "TexturedSurface distinct light/dark images require a durable texture-pair resource; "
-                    "single-image TexturedSurface is supported"
-                )
+        dark = (path if dark_image_file is None else
+                g["_resolve_raster_image_path"](dark_image_file).resolve())
         payload = _payload(path)
+        dark_payload = None if dark == path else _payload(dark)
         metadata = {name: getattr(uv_surface, name) for name in (
             "resolution", "u_range", "v_range", "preferred_creation_axis", "epsilon", "normal_nudge",
         )}
         g["_install_live_state"](self)
-        specs = build_surface(self, uv_surface, payload, g["_native_surface_shell_factory"])
+        specs = g["_build_textured_surface"](self, uv_surface, payload, g["_native_surface_shell_factory"],
+                              dark_payload)
         g["_hang_native_children"](self, specs)
         self.__dict__.update(metadata)
         self.uv_surface = uv_surface
         self.image_file = self.image_path = str(path)
-        self.dark_image_file = str(path)
-        self.num_textures = 1
+        self.dark_image_file = str(dark)
+        self.num_textures = 1 if dark_payload is None else 2
         self.compute_triangle_indices()
         apply_options(self, values)
 
@@ -130,7 +129,7 @@ def install_surface_textures(native: Any) -> None:
         path = g["_resolve_raster_image_path"](texture_file).resolve()
         payload = _payload(path)
         g["_install_live_state"](self)
-        specs = build_mesh(self, vertices, faces.reshape(-1), uv, payload,
+        specs = g["_build_textured_geometry"](self, vertices, faces.reshape(-1), uv, payload,
                            g["_native_surface_shell_factory"])
         g["_hang_native_children"](self, specs)
         self.geometry = geometry

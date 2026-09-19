@@ -408,6 +408,17 @@ fn image_key(entry: &Entry) -> u64 {
     };
     let mut mixer = Mixer::new();
     mixer.write_u64(entry.image_revision());
+    mix_image_descriptor(&mut mixer, image);
+    // A restore can legitimately reuse an edit counter. Include the dark
+    // descriptor as well, not just the primary digest or that counter.
+    if let Some(dark) = image.dark_image() {
+        mixer.write_u64(1);
+        mix_image_descriptor(&mut mixer, dark);
+    }
+    mixer.finish()
+}
+
+fn mix_image_descriptor(mixer: &mut Mixer, image: &fmn_mobject::ImageResource) {
     mixer.write_u64(u64::from(image.width()));
     mixer.write_u64(u64::from(image.height()));
     match image.color_space() {
@@ -428,7 +439,6 @@ fn image_key(entry: &Entry) -> u64 {
     for chunk in image.content_digest().as_bytes().as_chunks::<8>().0 {
         mixer.write_u64(u64::from_le_bytes(*chunk));
     }
-    mixer.finish()
 }
 
 #[cfg(test)]

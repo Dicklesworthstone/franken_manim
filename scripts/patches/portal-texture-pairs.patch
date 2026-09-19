@@ -1,56 +1,8 @@
---- a/crates/fmn-python/src/portal_texture.rs
-+++ b/crates/fmn-python/src/portal_texture.rs
-@@ -33,7 +33,8 @@
--#[pyfunction]
-+#[pyfunction(signature = (target, source, payload, factory, dark_payload=None))]
- fn _build_textured_surface<'py>(
-     target: &Bound<'py, BridgeMobject>,
-     source: &Bound<'py, BridgeMobject>,
-     payload: &Bound<'py, PyBytes>,
-     factory: &Bound<'py, PyAny>,
-+    dark_payload: Option<&Bound<'py, PyBytes>>,
- ) -> PyResult<Bound<'py, PyList>> {
-@@ -47,3 +49,8 @@
--    // Decode first: unreadable input cannot mutate source or target state.
--    let image = image(payload)?;
-+    // Decode BOTH inputs first: an unreadable dark image cannot mutate the
-+    // source's baked placement or install a half-initialized target material.
-+    let mut resource = image(payload)?;
-+    if let Some(dark_payload) = dark_payload {
-+        resource = resource.with_dark_image(image(dark_payload)?)
-+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
-+    }
-     let mut tree = with_stage(source, |stage, mob| -> PyResult<Mobject> {
-@@ -121,6 +128,6 @@
--    tree.image = Some(image);
-+    tree.image = Some(resource);
-     install_native_tree(target, factory, tree)
- }
- 
- #[pyfunction]
- fn _build_textured_geometry<'py>(
-@@ -180,4 +187,18 @@
- mod tests {
-     use super::*;
-+    #[test]
-+    fn native_light_dark_texture_pair_acceptance() {
-+        crate::with_python_test_module("light/dark texture acceptance", |py, _module, globals| {
-+            for text in [include_str!("../tests/textured_surfaces.py"),
-+                         include_str!("../tests/texture_pairs.py")] {
-+                let source = std::ffi::CString::new(text).unwrap();
-+                py.run(source.as_c_str(), Some(globals), Some(globals))
-+                    .inspect_err(|error| error.print(py)).unwrap();
-+            }
-+            globals.get_item("verify_texture_pairs").unwrap().unwrap()
-+                .call0().inspect_err(|error| error.print(py)).unwrap();
-+        });
-+    }
-+
-     #[test]
-     fn native_textured_surface_and_mesh_acceptance() {
+diff --git a/crates/fmn-python/python/fmn_python/surface_textures.py b/crates/fmn-python/python/fmn_python/surface_textures.py
+index e5f59cc..df6796a 100644
 --- a/crates/fmn-python/python/fmn_python/surface_textures.py
 +++ b/crates/fmn-python/python/fmn_python/surface_textures.py
-@@ -2,6 +2,6 @@
+@@ -2,8 +2,8 @@
  
  The portal resolves local image paths and preserves Python object metadata.
  Atlas owns mesh normals, fmn-codec owns decoding, and Lumen owns perspective
@@ -59,7 +11,11 @@
 +sampling, alpha, lighting and depth. Both sides of a light/dark pair are
 +immutable native resources carried by copies, snapshots and replay.
  """
-@@ -33,5 +33,7 @@
+ from __future__ import annotations
+ 
+@@ -33,7 +33,9 @@ def install_surface_textures(native: Any) -> None:
+     if g.get("_FMN_SURFACE_TEXTURES_INSTALLED", False):
+         return
      Surface, Textured, Geometry = (g[name] for name in ("Surface", "TexturedSurface", "TexturedGeometry"))
 -    build_surface, build_mesh = (g[name] for name in ("_build_textured_surface", "_build_textured_geometry"))
 +    # Resolve native functions through this module's dictionary. Capturing
@@ -67,7 +23,9 @@
 +    # embedded owner from releasing that module by clearing its globals.
      np = g["_np"]
  
-@@ -80,11 +80,7 @@
+     def options(kwargs):
+@@ -86,25 +88,22 @@ def install_surface_textures(native: Any) -> None:
+             raise TypeError("TexturedSurface uv_surface must be a Surface")
          values = options(kwargs)
          path = g["_resolve_raster_image_path"](image_file).resolve()
 -        if dark_image_file is not None:
@@ -82,7 +40,8 @@
          payload = _payload(path)
 +        dark_payload = None if dark == path else _payload(dark)
          metadata = {name: getattr(uv_surface, name) for name in (
-@@ -96,10 +91,11 @@
+             "resolution", "u_range", "v_range", "preferred_creation_axis", "epsilon", "normal_nudge",
+         )}
          g["_install_live_state"](self)
 -        specs = build_surface(self, uv_surface, payload, g["_native_surface_shell_factory"])
 +        specs = g["_build_textured_surface"](self, uv_surface, payload, g["_native_surface_shell_factory"],
@@ -97,22 +56,93 @@
 +        self.num_textures = 1 if dark_payload is None else 2
          self.compute_triangle_indices()
          apply_options(self, values)
-@@ -130,5 +128,5 @@
+ 
+@@ -130,7 +129,7 @@ def install_surface_textures(native: Any) -> None:
+         path = g["_resolve_raster_image_path"](texture_file).resolve()
+         payload = _payload(path)
          g["_install_live_state"](self)
 -        specs = build_mesh(self, vertices, faces.reshape(-1), uv, payload,
 +        specs = g["_build_textured_geometry"](self, vertices, faces.reshape(-1), uv, payload,
                             g["_native_surface_shell_factory"])
          g["_hang_native_children"](self, specs)
---- a/crates/fmn-python/tests/textured_surfaces.py
-+++ b/crates/fmn-python/tests/textured_surfaces.py
-@@ -149,4 +149,6 @@
-     # Validation is not a successful-looking substitute for missing capabilities.
-     refuses(TypeError, lambda: m.TexturedSurface(m.Circle(), path))
--    refuses(m._CapabilityError, lambda: m.TexturedSurface(source, path, other))
-+    paired = m.TexturedSurface(source, path, other)
-+    assert paired.num_textures == 2
-+    assert paired.dark_image_file == str(other.resolve())
-     same = m.TexturedSurface(source, path, path)
+         self.geometry = geometry
+diff --git a/crates/fmn-python/src/portal_texture.rs b/crates/fmn-python/src/portal_texture.rs
+index 99d0d7b..0b6c760 100644
+--- a/crates/fmn-python/src/portal_texture.rs
++++ b/crates/fmn-python/src/portal_texture.rs
+@@ -29,12 +29,13 @@ fn detached(target: &Bound<'_, BridgeMobject>) -> PyResult<()> {
+     Ok(())
+ }
+ 
+-#[pyfunction]
++#[pyfunction(signature = (target, source, payload, factory, dark_payload=None))]
+ fn _build_textured_surface<'py>(
+     target: &Bound<'py, BridgeMobject>,
+     source: &Bound<'py, BridgeMobject>,
+     payload: &Bound<'py, PyBytes>,
+     factory: &Bound<'py, PyAny>,
++    dark_payload: Option<&Bound<'py, PyBytes>>,
+ ) -> PyResult<Bound<'py, PyList>> {
+     detached(target)?;
+     if target.is(source) {
+@@ -42,8 +43,14 @@ fn _build_textured_surface<'py>(
+             "TexturedSurface must copy a distinct source surface",
+         ));
+     }
+-    // Decode first: unreadable input cannot mutate source or target state.
+-    let image = image(payload)?;
++    // Decode BOTH inputs first: an unreadable dark image cannot mutate the
++    // source's baked placement or install a half-initialized target material.
++    let mut resource = image(payload)?;
++    if let Some(dark_payload) = dark_payload {
++        resource = resource
++            .with_dark_image(image(dark_payload)?)
++            .map_err(|error| PyValueError::new_err(error.to_string()))?;
++    }
+     let mut tree = with_stage(source, |stage, mob| -> PyResult<Mobject> {
+         stage.bake_placement(mob).map_err(stage_error)?;
+         let entry = stage
+@@ -114,7 +121,7 @@ fn _build_textured_surface<'py>(
+             .with_z_index(stage.z_index(mob))
+             .with_render_primitive(entry.render_primitive()))
+     })??;
+-    tree.image = Some(image);
++    tree.image = Some(resource);
+     install_native_tree(target, factory, tree)
+ }
+ 
+@@ -167,6 +174,28 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    #[test]
++    fn native_light_dark_texture_pair_acceptance() {
++        crate::with_python_test_module("light/dark texture acceptance", |py, _module, globals| {
++            for text in [
++                include_str!("../tests/textured_surfaces.py"),
++                include_str!("../tests/texture_pairs.py"),
++            ] {
++                let source = std::ffi::CString::new(text).unwrap();
++                py.run(source.as_c_str(), Some(globals), Some(globals))
++                    .inspect_err(|error| error.print(py))
++                    .unwrap();
++            }
++            globals
++                .get_item("verify_texture_pairs")
++                .unwrap()
++                .unwrap()
++                .call0()
++                .inspect_err(|error| error.print(py))
++                .unwrap();
++        });
++    }
++
+     #[test]
+     fn native_textured_surface_and_mesh_acceptance() {
+         crate::with_python_test_module("textured surface acceptance", |py, _module, globals| {
+diff --git a/crates/fmn-python/tests/texture_pairs.py b/crates/fmn-python/tests/texture_pairs.py
+new file mode 100644
+index 0000000..47af11c
 --- /dev/null
 +++ b/crates/fmn-python/tests/texture_pairs.py
 @@ -0,0 +1,112 @@
@@ -228,3 +258,18 @@
 +
 +if __name__ == '__main__':
 +    verify_texture_pairs()
+diff --git a/crates/fmn-python/tests/textured_surfaces.py b/crates/fmn-python/tests/textured_surfaces.py
+index 1a60abe..dcf6714 100644
+--- a/crates/fmn-python/tests/textured_surfaces.py
++++ b/crates/fmn-python/tests/textured_surfaces.py
+@@ -149,7 +149,9 @@ def verify_textured_surfaces():
+     assert not np.array_equal(geometry.get_points(), old)
+     # Validation is not a successful-looking substitute for missing capabilities.
+     refuses(TypeError, lambda: m.TexturedSurface(m.Circle(), path))
+-    refuses(m._CapabilityError, lambda: m.TexturedSurface(source, path, other))
++    paired = m.TexturedSurface(source, path, other)
++    assert paired.num_textures == 2
++    assert paired.dark_image_file == str(other.resolve())
+     same = m.TexturedSurface(source, path, path)
+     assert same.num_textures == 1
+     refuses(TypeError, lambda: m.TexturedSurface(source, path, unknown_option=True))

@@ -149,7 +149,9 @@ def verify_textured_surfaces():
     assert not np.array_equal(geometry.get_points(), old)
     # Validation is not a successful-looking substitute for missing capabilities.
     refuses(TypeError, lambda: m.TexturedSurface(m.Circle(), path))
-    refuses(m._CapabilityError, lambda: m.TexturedSurface(source, path, other))
+    paired = m.TexturedSurface(source, path, other)
+    assert paired.num_textures == 2
+    assert paired.dark_image_file == str(other.resolve())
     same = m.TexturedSurface(source, path, path)
     assert same.num_textures == 1
     refuses(TypeError, lambda: m.TexturedSurface(source, path, unknown_option=True))

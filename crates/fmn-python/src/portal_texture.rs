@@ -29,12 +29,13 @@ fn detached(target: &Bound<'_, BridgeMobject>) -> PyResult<()> {
     Ok(())
 }
 
-#[pyfunction]
+#[pyfunction(signature = (target, source, payload, factory, dark_payload=None))]
 fn _build_textured_surface<'py>(
     target: &Bound<'py, BridgeMobject>,
     source: &Bound<'py, BridgeMobject>,
     payload: &Bound<'py, PyBytes>,
     factory: &Bound<'py, PyAny>,
+    dark_payload: Option<&Bound<'py, PyBytes>>,
 ) -> PyResult<Bound<'py, PyList>> {
     detached(target)?;
     if target.is(source) {
@@ -42,8 +43,14 @@ fn _build_textured_surface<'py>(
             "TexturedSurface must copy a distinct source surface",
         ));
     }
-    // Decode first: unreadable input cannot mutate source or target state.
-    let image = image(payload)?;
+    // Decode BOTH inputs first: an unreadable dark image cannot mutate the
+    // source's baked placement or install a half-initialized target material.
+    let mut resource = image(payload)?;
+    if let Some(dark_payload) = dark_payload {
+        resource = resource
+            .with_dark_image(image(dark_payload)?)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    }
     let mut tree = with_stage(source, |stage, mob| -> PyResult<Mobject> {
         stage.bake_placement(mob).map_err(stage_error)?;
         let entry = stage
@@ -114,7 +121,7 @@ fn _build_textured_surface<'py>(
             .with_z_index(stage.z_index(mob))
             .with_render_primitive(entry.render_primitive()))
     })??;
-    tree.image = Some(image);
+    tree.image = Some(resource);
     install_native_tree(target, factory, tree)
 }
 
@@ -167,6 +174,28 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_light_dark_texture_pair_acceptance() {
+        crate::with_python_test_module("light/dark texture acceptance", |py, _module, globals| {
+            for text in [
+                include_str!("../tests/textured_surfaces.py"),
+                include_str!("../tests/texture_pairs.py"),
+            ] {
+                let source = std::ffi::CString::new(text).unwrap();
+                py.run(source.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .unwrap();
+            }
+            globals
+                .get_item("verify_texture_pairs")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
+
     #[test]
     fn native_textured_surface_and_mesh_acceptance() {
         crate::with_python_test_module("textured surface acceptance", |py, _module, globals| {

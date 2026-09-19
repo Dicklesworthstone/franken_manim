@@ -98,6 +98,10 @@ impl Default for ImageSampler {
 pub enum ImageResourceError {
     /// Width and height must both be non-zero and their RGBA8 product must fit.
     InvalidDimensions,
+    /// A dark-side resource cannot itself contain another texture pair.
+    NestedTexturePair,
+    /// A material has one addressing policy shared by its light/dark images.
+    SamplerMismatch,
     /// The byte count was not exactly `width * height * 4`.
     InvalidByteLength {
         /// Exact byte count implied by the dimensions.
@@ -113,6 +117,8 @@ impl std::fmt::Display for ImageResourceError {
             Self::InvalidDimensions => {
                 f.write_str("image dimensions must be non-zero and fit the RGBA8 layout")
             }
+            Self::NestedTexturePair => f.write_str("a dark image cannot contain a texture pair"),
+            Self::SamplerMismatch => f.write_str("light and dark images must use the same sampler"),
             Self::InvalidByteLength { expected, actual } => write!(
                 f,
                 "RGBA8 image needs exactly {expected} bytes, received {actual}"
@@ -137,6 +143,10 @@ pub struct ImageResource {
     color_space: ImageColorSpace,
     sampler: ImageSampler,
     content_digest: Digest,
+    // A single-level pair keeps both immutable resources in the same Stage
+    // revision/snapshot axis. The primary pixel digest remains a pixel address;
+    // the canonical snapshot commits to both complete descriptors and payloads.
+    dark_image: Option<Arc<ImageResource>>,
 }
 
 impl ImageResource {
@@ -168,7 +178,41 @@ impl ImageResource {
             color_space,
             sampler,
             content_digest,
+            dark_image: None,
         })
+    }
+
+    /// Attach or replace the dark-side texture for a sampled surface or mesh.
+    ///
+    /// Dimensions and transfer encodings may differ. Each image is decoded and
+    /// filtered independently by Lumen, then the existing light-facing shader
+    /// crossfades the samples. Copies and snapshots share both pixel buffers.
+    ///
+    /// # Errors
+    /// Rejects nested pairs and conflicting sampler policies rather than
+    /// silently discarding a third image or an authored addressing policy.
+    pub fn with_dark_image(mut self, dark: Self) -> Result<Self, ImageResourceError> {
+        if dark.dark_image.is_some() {
+            return Err(ImageResourceError::NestedTexturePair);
+        }
+        if self.sampler != dark.sampler {
+            return Err(ImageResourceError::SamplerMismatch);
+        }
+        self.dark_image = Some(Arc::new(dark));
+        Ok(self)
+    }
+
+    /// Optional dark-side image. This resource never contains another pair.
+    #[must_use]
+    pub fn dark_image(&self) -> Option<&Self> {
+        self.dark_image.as_deref()
+    }
+
+    /// Return the primary image alone, preserving its original pixel storage.
+    #[must_use]
+    pub fn without_dark_image(mut self) -> Self {
+        self.dark_image = None;
+        self
     }
 
     /// Width in texels.
