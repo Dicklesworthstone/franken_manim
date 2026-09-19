@@ -1,0 +1,90 @@
+name: Studio declared input generations
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/studio-input-identity.yml'
+      - 'scripts/apply_studio_input_identity.py'
+      - 'crates/fmn-python/python/fmn_python/studio_inputs.py'
+      - 'crates/fmn-python/tests/studio_input_identity.py'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: studio-input-identity
+  cancel-in-progress: false
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  CARGO_TARGET_DIR: target/portable
+  PYO3_PYTHON: python
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Connect declared input snapshots to native capture
+        run: |
+          set -euo pipefail
+          python scripts/apply_studio_input_identity.py
+          cp scripts/patches/studio-source-identity.rs crates/fmn-studio/tests/source_identity.rs
+          git add crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/python/fmn_python/studio.py crates/fmn-python/tests/test_studio_protocol.py
+          git diff --cached --check
+          git rev-parse HEAD > /tmp/studio-source-parent.txt
+          git ls-files -z | tar --null -T - -czf /tmp/studio-source.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: studio-input-source-${{ github.sha }}
+          path: |
+            /tmp/studio-source.tar.gz
+            /tmp/studio-source-parent.txt
+          retention-days: 1
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - name: Install pinned host and compiler components
+        run: |
+          rustup show active-toolchain
+          python -m pip install 'maturin==1.14.1' 'numpy==2.5.2'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Native identity and capture acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs
+          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest -v test_studio_inputs_protocol test_studio_protocol
+          cargo test --locked -p fmn-studio --test source_identity
+          cargo test --locked -p fmn-studio project_watch::tests
+          cargo test --locked -p fmn-python portal_studio_capture_uses_stepped_scene_and_native_inspector
+          python -m maturin build --locked --profile dev --out /tmp/studio-wheels
+          python -m pip install --no-deps --force-reinstall /tmp/studio-wheels/*.whl
+          python crates/fmn-python/tests/studio_input_identity.py
+          git diff --check
+      - name: Commit tested runtime integration directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/python/fmn_python/studio.py crates/fmn-python/tests/test_studio_protocol.py
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(studio): bind native captures to package and asset generations'
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: studio-input-wheel-${{ github.sha }}
+          path: /tmp/studio-wheels/*.whl
+          if-no-files-found: ignore
+          retention-days: 1
