@@ -274,6 +274,24 @@ impl Storage {
         })
     }
 
+    fn clone_with_revisions(&self) -> Arc<Self> {
+        let n_fields = self.field_revisions.len();
+        let fresh = Self::new(self.copy_cells(), n_fields);
+        fresh
+            .revision
+            .store(self.revision.load(Ordering::Acquire), Ordering::Release);
+        for (new, old) in fresh
+            .field_revisions
+            .iter()
+            .zip(self.field_revisions.iter())
+        {
+            new.store(old.load(Ordering::Acquire), Ordering::Release);
+        }
+        *fresh.dirty_spans.lock().expect("span lock poisoned") =
+            self.dirty_spans.lock().expect("span lock poisoned").clone();
+        fresh
+    }
+
     fn copy_cells(&self) -> Box<[f32]> {
         self.cells.read().expect("storage lock poisoned").clone()
     }
@@ -412,26 +430,7 @@ impl RecordBuffer {
     /// spans carry over so mirror laziness stays correct across unshares.
     fn unshare(&mut self) {
         if self.shared_beyond_views() {
-            let n_fields = self.schema.fields().len();
-            let fresh = Storage::new(self.storage.copy_cells(), n_fields);
-            fresh.revision.store(
-                self.storage.revision.load(Ordering::Acquire),
-                Ordering::Release,
-            );
-            for (new, old) in fresh
-                .field_revisions
-                .iter()
-                .zip(self.storage.field_revisions.iter())
-            {
-                new.store(old.load(Ordering::Acquire), Ordering::Release);
-            }
-            *fresh.dirty_spans.lock().expect("span lock poisoned") = self
-                .storage
-                .dirty_spans
-                .lock()
-                .expect("span lock poisoned")
-                .clone();
-            self.storage = fresh;
+            self.storage = self.storage.clone_with_revisions();
         }
     }
 
@@ -859,10 +858,9 @@ impl RecordBuffer {
     #[must_use]
     pub fn snapshot_clone(&self) -> Self {
         if self.live_view_count() > 0 {
-            let n_fields = self.schema.fields().len();
             Self {
                 schema: Arc::clone(&self.schema),
-                storage: Storage::new(self.storage.copy_cells(), n_fields),
+                storage: self.storage.clone_with_revisions(),
                 len: self.len,
                 defaults: self.defaults.clone(),
                 locked: self.locked.clone(),
@@ -881,10 +879,9 @@ impl RecordBuffer {
     /// Independent deep copy (mobject `copy()` semantics, §8.3).
     #[must_use]
     pub fn deep_clone(&self) -> Self {
-        let n_fields = self.schema.fields().len();
         Self {
             schema: Arc::clone(&self.schema),
-            storage: Storage::new(self.storage.copy_cells(), n_fields),
+            storage: self.storage.clone_with_revisions(),
             len: self.len,
             defaults: self.defaults.clone(),
             locked: self.locked.clone(),
