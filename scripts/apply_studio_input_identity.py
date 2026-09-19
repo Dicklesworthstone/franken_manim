@@ -76,8 +76,8 @@ edit(portal, "impl SourceWatcher {\n    fn poll", '''impl SourceWatcher {
 portal_py = "crates/fmn-python/python/fmn_python/studio.py"
 edit(portal_py, "from . import _ensure_exclusive_manimlib_namespace", "from . import _ensure_exclusive_manimlib_namespace\nfrom .studio_inputs import StudioInputs, project_directory")
 edit(portal_py, "roots = list(dict.fromkeys([str(path), str(path.parent),", "roots = list(dict.fromkeys([str(path), str(project_directory(path)),")
-edit(portal_py, '"portal": _file_digest(Path(__file__).resolve()),\n                   "abi"', '"portal": _file_digest(Path(__file__).resolve()),\n                   "inputs": _file_digest(Path(sys.modules[StudioInputs.__module__].__file__).resolve()),\n                   "abi"')
-edit(portal_py, '"portal": _file_digest(Path(__file__).resolve()),\n                  "abi"', '"portal": _file_digest(Path(__file__).resolve()),\n                  "inputs": _file_digest(Path(sys.modules[StudioInputs.__module__].__file__).resolve()),\n                  "abi"')
+edit(portal_py, '"portal": _file_digest(Path(__file__).resolve()),\n                   "abi"', '"portal": _file_digest(Path(__file__).resolve()),\n                   "inputs": _file_digest(Path(sys.modules[StudioInputs.__module__].__file__).resolve()),\n                   "loader": _file_digest(Path(__file__).with_name("scene_loading.py")),\n                   "abi"')
+edit(portal_py, '"portal": _file_digest(Path(__file__).resolve()),\n                  "abi"', '"portal": _file_digest(Path(__file__).resolve()),\n                  "inputs": _file_digest(Path(sys.modules[StudioInputs.__module__].__file__).resolve()),\n                  "loader": _file_digest(Path(__file__).with_name("scene_loading.py")),\n                  "abi"')
 edit(portal_py, '''        def rebuild():
             data = _source(path)
             request = {"schema": _SCHEMA, "version": 1, "source": str(path), "scene": scene,
@@ -95,6 +95,8 @@ edit(portal_py, '''    path = Path(request["source"])
     inputs = StudioInputs.from_request(native, request.get("inputs"))
     inputs.require_source(path, request["source_sha256"])
     if hashlib.sha256(_source(path)).hexdigest() != request["source_sha256"]:''')
+edit(portal_py, 'with SceneSource(path, native.Scene) as loaded:',
+     'with SceneSource(path, native.Scene, source_inputs=inputs.files) as loaded:')
 edit(portal_py, '''        if request["scene"] not in loaded.scenes:''', '''        inputs.verify(loaded)
         if request["scene"] not in loaded.scenes:''')
 edit(portal_py, '''        scene = loaded.scenes[request["scene"]]()
