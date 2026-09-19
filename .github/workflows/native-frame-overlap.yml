@@ -59,8 +59,9 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-frame-overlap-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-frame-overlap-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
-            cargo-${{ runner.os }}-${{ runner.arch }}-texture-pairs-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
-            cargo-${{ runner.os }}-${{ runner.arch }}-svg-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-frame-overlap-
+            cargo-${{ runner.os }}-${{ runner.arch }}-texture-pairs-
+            cargo-${{ runner.os }}-${{ runner.arch }}-svg-
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - name: Verify bounded scheduling and exact native pixels
         shell: bash
@@ -80,13 +81,14 @@ jobs:
             python crates/fmn-python/tests/batch_rendering.py
             python crates/fmn-python/tests/batch_checkpoint_acceptance.py
             python crates/fmn-python/tests/svg_output.py
+            python crates/fmn-python/tests/texture_pairs.py
           fi
           git diff --check
       - name: Commit tested native integration directly to main
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs
+          git add Cargo.lock crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs
           if test -f crates/fmn-python/src/portal_pipeline.rs; then
             git add crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs
           fi
