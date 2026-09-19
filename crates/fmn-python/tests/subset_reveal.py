@@ -1,0 +1,211 @@
+"""Real native subset selection, playback, cancellation and rendered frames.
+
+Run against the installed wheel or the embedded production test module. There
+is deliberately no mock fallback for manimlib, geometry, child lists or sinks.
+"""
+from pathlib import Path
+import math
+import os
+import tempfile
+import unittest
+
+import numpy as np
+import manimlib as m
+from fmn_python import render_scene
+
+
+def children():
+    return [m.Square(side_length=.65, fill_opacity=1, stroke_width=0)
+            .set_color(m.WHITE).shift((2 * index - 3) * m.RIGHT)
+            for index in range(4)]
+
+
+def assert_released(test, group, members):
+    for node in [group, *members]:
+        test.assertFalse(node._is_updating_suspended())
+        test.assertFalse(getattr(node, "_is_animating", False))
+
+
+class NativeSubsetTests(unittest.TestCase):
+    def test_public_qualified_identity_and_live_callback_selection(self):
+        from manimlib.animation.creation import ShowIncreasingSubsets
+        self.assertIs(ShowIncreasingSubsets, m.ShowIncreasingSubsets)
+        members = children()
+        group = m.VGroup(*members)
+        calls = []
+        animation = ShowIncreasingSubsets(group, rate_func=m.linear,
+                                         int_func=lambda value: calls.append(value) or math.floor(value))
+        self.assertEqual(calls, [])
+        animation.interpolate(.625)
+        self.assertEqual(calls, [2.5])
+        self.assertEqual(list(group.submobjects), members[:2])
+        animation.int_func = lambda value: 3
+        animation.interpolate(.25)
+        self.assertEqual(list(group.submobjects), members[:3])
+
+    def test_empty_native_family_and_one_by_one_reference_endpoint(self):
+        for cls in (m.ShowIncreasingSubsets, m.ShowSubmobjectsOneByOne):
+            empty = m.VGroup()
+            animation = cls(empty, int_func=math.floor)
+            animation.begin()
+            animation.finish()
+            self.assertEqual(list(empty.submobjects), [])
+        members = children()
+        group = m.VGroup(*members)
+        animation = m.ShowSubmobjectsOneByOne(group, suspend_mobject_updating=True)
+        animation.begin()
+        animation.finish()
+        self.assertEqual(list(group.submobjects), [members[-2]])
+        assert_released(self, group, members)
+
+    def test_native_scene_play_and_composition_preserve_source_identities(self):
+        members = children()
+        group = m.VGroup(*members)
+        scene = m.Scene(camera_config=dict(resolution=(192, 108), fps=8))
+        scene.add(group)
+        seen = []
+        class Authored(m.ShowIncreasingSubsets):
+            def update_submobject_list(self, index):
+                super().update_submobject_list(index)
+                seen.append(tuple(self.mobject.submobjects))
+        animation = Authored(group, int_func=math.floor, rate_func=m.linear,
+                             run_time=.5, suspend_mobject_updating=True)
+        scene.play(m.AnimationGroup(animation))
+        self.assertEqual(list(group.submobjects), members)
+        self.assertTrue(any(0 < len(row) < len(members) for row in seen))
+        self.assertTrue(all(list(row) == members[:len(row)] for row in seen))
+        self.assertEqual(list(scene.mobjects), [group])
+        self.assertTrue(all(node.parents == [group] for node in members))
+        assert_released(self, group, members)
+
+    def test_partial_finish_abort_replay_and_prior_suspension(self):
+        members = children()
+        group = m.VGroup(*members)
+        members[-1].suspend_updating()
+        animation = m.ShowIncreasingSubsets(group, int_func=math.floor,
+                                            rate_func=m.linear, final_alpha_value=.5,
+                                            suspend_mobject_updating=True)
+        animation.begin()
+        animation.finish()
+        self.assertEqual(list(group.submobjects), members[:2])
+        self.assertTrue(members[-1]._is_updating_suspended())
+        assert_released(self, group, members[:-1])
+        animation.begin()
+        animation.interpolate(.75)
+        animation.abort()
+        self.assertEqual(list(group.submobjects), members[:2])
+        animation.final_alpha_value = 1
+        animation.begin()
+        animation.finish()
+        self.assertEqual(list(group.submobjects), members)
+        self.assertTrue(members[-1]._is_updating_suspended())
+        assert_released(self, group, members[:-1])
+
+    def test_native_copy_does_not_reuse_live_candidates(self):
+        members = children()
+        group = m.VGroup(*members)
+        animation = m.ShowIncreasingSubsets(group, int_func=math.floor, rate_func=m.linear)
+        duplicate = animation.copy()
+        self.assertIsNot(duplicate.mobject, group)
+        self.assertTrue(all(a is not b for a, b in zip(members, duplicate.all_submobs)))
+        self.assertEqual(list(duplicate.mobject.submobjects), duplicate.all_submobs)
+        duplicate.begin()
+        duplicate.interpolate(.5)
+        self.assertEqual(list(group.submobjects), members)
+        duplicate.abort()
+        self.assertEqual(list(duplicate.mobject.submobjects), duplicate.all_submobs)
+
+    def test_native_setter_failure_after_splice_rolls_back(self):
+        members = children()
+        group = m.VGroup(*members)
+        scene = m.Scene().add(group)
+        animation = m.ShowIncreasingSubsets(group, rate_func=m.linear,
+                                            suspend_mobject_updating=True)
+        animation.begin()
+        original = group.set_submobjects
+        failure, calls = RuntimeError("authored child splice"), []
+        def fail_once(values):
+            original(values)
+            calls.append(tuple(values))
+            if len(calls) == 1:
+                raise failure
+        group.set_submobjects = fail_once
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                animation.interpolate(.5)
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(list(group.submobjects), members)
+            self.assertEqual(list(scene.mobjects), [group])
+            assert_released(self, group, members)
+        finally:
+            group.__dict__.pop("set_submobjects", None)
+
+    def test_native_output_contains_progressive_pixels_and_is_thread_reproducible(self):
+        outputs = []
+        for threads in (1, 4):
+            destination = evidence / f"subset-{threads}.y4m"
+            result = render_scene(SubsetScene, destination, threads=threads)
+            self.assertEqual(result.frame_count, 8)
+            self.assertFalse(result.certified)
+            data = destination.read_bytes()
+            header, payload = data.split(b"\n", 1)
+            self.assertEqual(header, b"YUV4MPEG2 W192 H108 F8:1 Ip A1:1 C420mpeg2")
+            size = 192 * 108 * 3 // 2
+            self.assertEqual(len(payload), 8 * (size + 6))
+            counts = []
+            for offset in range(0, len(payload), size + 6):
+                self.assertEqual(payload[offset:offset + 6], b"FRAME\n")
+                luma = np.frombuffer(payload[offset + 6:offset + 6 + 192 * 108], dtype=np.uint8)
+                counts.append(int(np.count_nonzero(luma > 180)))
+            self.assertEqual(counts, sorted(counts))
+            self.assertGreater(counts[-1], counts[0])
+            self.assertGreater(len(set(counts)), 2)
+            outputs.append(data)
+        self.assertEqual(outputs[0], outputs[1])
+
+    def test_render_failure_after_capture_restores_children_and_does_not_publish(self):
+        scene = BrokenSubsetScene()
+        destination = evidence / "not-published.y4m"
+        with self.assertRaises(SelectorFailure) as caught:
+            render_scene(scene, destination, threads=1)
+        self.assertIs(caught.exception, scene.failure)
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(scene.group.submobjects), scene.members)
+        assert_released(self, scene.group, scene.members)
+        scene.play(m.ShowIncreasingSubsets(scene.group, int_func=math.floor, run_time=.5))
+        self.assertEqual(list(scene.group.submobjects), scene.members)
+
+
+class SubsetScene(m.Scene):
+    default_camera_config = dict(resolution=(192, 108), fps=8)
+    def construct(self):
+        self.members = children()
+        self.group = m.VGroup(*self.members)
+        self.play(m.ShowIncreasingSubsets(self.group, int_func=math.floor,
+                                         rate_func=m.linear, run_time=1,
+                                         suspend_mobject_updating=True))
+
+
+class SelectorFailure(RuntimeError):
+    pass
+
+
+class BrokenSubsetScene(SubsetScene):
+    def construct(self):
+        self.members = children()
+        self.group = m.VGroup(*self.members)
+        self.failure = SelectorFailure("selector failed after native capture")
+        def select(count):
+            if count > 2:
+                raise self.failure
+            return math.floor(count)
+        self.play(m.ShowIncreasingSubsets(self.group, int_func=select,
+                                         rate_func=m.linear, run_time=1,
+                                         suspend_mobject_updating=True))
+
+
+evidence = Path(tempfile.mkdtemp(prefix="fmn-native-subset-", dir=os.environ.get("FMN_SUBSET_EVIDENCE_DIR")))
+suite = unittest.defaultTestLoader.loadTestsFromTestCase(NativeSubsetTests)
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+assert result.wasSuccessful(), "native subset reveal acceptance failed"
+print("native subset reveal output evidence:", evidence)
