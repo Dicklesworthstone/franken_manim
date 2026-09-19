@@ -181,17 +181,7 @@ def install_fading(native: Any) -> None:
             scene.add(self.to_add_on_completion)
         self._fade_cleaned = True
 
-    _refuse = g.get("_refuse_unrouted")
-
     def pieces_init(self, mobject, target_mobject, **kwargs):
-        if _refuse is not None:
-            _refuse(
-                "FadeTransformPieces()",
-                [
-                    ("stretch", kwargs.get("stretch", True) is not True),
-                    ("dim_to_match", kwargs.get("dim_to_match", 1) != 1),
-                ],
-            )
         for role, value in (("source", mobject), ("target", target_mobject)):
             if not isinstance(value, VMobject):
                 raise TypeError(

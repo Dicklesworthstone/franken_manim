@@ -2170,7 +2170,7 @@ else:
 for embed_refusal, fragment in (
     ("ensure_frame_update_post_cell", "create an IPython shell"),
     ("ensure_flash_on_error", "Studio owns interactive windows"),
-    ("auto_reload", "IPython embed loop"),
+    ("auto_reload", "embedded scene session"),
     ("reload_scene", "IPython embed loop"),
 ):
     try:
@@ -17680,16 +17680,12 @@ except ValueError as error:
 else:
     raise AssertionError("FadeTransform accepted dim_to_match=7")
 
-try:
-    manimlib.FadeTransformPieces(
-        geometry.Rectangle(width=1.0, height=1.0),
-        geometry.Rectangle(width=1.0, height=1.0),
-        stretch=False,
-    )
-except NotImplementedError as error:
-    assert "stretch" in str(error)
-else:
-    raise AssertionError("FadeTransformPieces silently dropped stretch")
+ftp = manimlib.FadeTransformPieces(
+    geometry.Rectangle(width=1.0, height=1.0),
+    geometry.Rectangle(width=1.0, height=1.0),
+    stretch=False,
+)
+assert ftp.stretch is False
 
 # fm-5wq.4.99: .animate anim args — path_arc/path_arc_axis ride the native
 # transform's arc surface; anything else stays a refusal naming the key.
