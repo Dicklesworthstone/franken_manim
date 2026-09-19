@@ -619,6 +619,7 @@ pub struct PngSink {
     artifact_bytes: u64,
     artifact_hasher: Sha256,
     receipt: SinkReceipt<NativeArtifactReport>,
+    no_clobber: bool,
 }
 
 impl PngSink {
@@ -662,7 +663,16 @@ impl PngSink {
             artifact_bytes: 0,
             artifact_hasher,
             receipt: SinkReceipt::pending(),
+            no_clobber: false,
         })
+    }
+
+    /// Require atomic create-only publication of a single PNG. Sequences
+    /// already use immutable create-only directory generations.
+    #[must_use]
+    pub fn with_no_clobber(mut self) -> Self {
+        self.no_clobber = true;
+        self
     }
 
     /// Completion report handle to retain before moving this sink into a binding.
@@ -799,12 +809,13 @@ impl PngSink {
     fn commit(&mut self) -> Result<NativeArtifactReport, SinkAdapterError> {
         self.state.grant_commit()?;
         match &self.config.target {
-            PngTarget::Single(path) => self
-                .prepared_file
-                .take()
-                .ok_or(SinkAdapterError::AlreadyFinalized)?
-                .commit()
-                .map_err(|error| publish_error(path, error))?,
+            PngTarget::Single(path) => commit_file(
+                self.prepared_file
+                    .take()
+                    .ok_or(SinkAdapterError::AlreadyFinalized)?,
+                self.no_clobber,
+            )
+            .map_err(|error| publish_error(path, error))?,
             PngTarget::Sequence { directory, .. } => self
                 .prepared_directory
                 .take()
@@ -920,6 +931,7 @@ pub struct GifSink {
     artifact_bytes: u64,
     artifact_hasher: Sha256,
     receipt: SinkReceipt<NativeArtifactReport>,
+    no_clobber: bool,
 }
 
 impl GifSink {
@@ -954,7 +966,15 @@ impl GifSink {
             artifact_bytes: 0,
             artifact_hasher: Sha256::new(),
             receipt: SinkReceipt::pending(),
+            no_clobber: false,
         })
+    }
+
+    /// Refuse an occupied destination atomically when the complete GIF commits.
+    #[must_use]
+    pub fn with_no_clobber(mut self) -> Self {
+        self.no_clobber = true;
+        self
     }
 
     /// Completion report handle.
@@ -1066,11 +1086,13 @@ impl GifSink {
 
     fn commit(&mut self) -> Result<NativeArtifactReport, SinkAdapterError> {
         self.state.grant_commit()?;
-        self.prepared
-            .take()
-            .ok_or(SinkAdapterError::AlreadyFinalized)?
-            .commit()
-            .map_err(|error| publish_error(&self.config.destination, error))?;
+        commit_file(
+            self.prepared
+                .take()
+                .ok_or(SinkAdapterError::AlreadyFinalized)?,
+            self.no_clobber,
+        )
+        .map_err(|error| publish_error(&self.config.destination, error))?;
         Ok(NativeArtifactReport {
             kind: NativeArtifactKind::Gif,
             path: self.config.destination.clone(),
@@ -1167,6 +1189,7 @@ pub struct Y4mSink {
     artifact_bytes: u64,
     artifact_hasher: Sha256,
     receipt: SinkReceipt<NativeArtifactReport>,
+    no_clobber: bool,
 }
 
 impl Y4mSink {
@@ -1199,7 +1222,15 @@ impl Y4mSink {
             artifact_bytes: 0,
             artifact_hasher: Sha256::new(),
             receipt: SinkReceipt::pending(),
+            no_clobber: false,
         })
+    }
+
+    /// Refuse an occupied destination atomically when the complete stream commits.
+    #[must_use]
+    pub fn with_no_clobber(mut self) -> Self {
+        self.no_clobber = true;
+        self
     }
 
     /// Completion report handle.
@@ -1291,11 +1322,13 @@ impl Y4mSink {
 
     fn commit(&mut self) -> Result<NativeArtifactReport, SinkAdapterError> {
         self.state.grant_commit()?;
-        self.prepared
-            .take()
-            .ok_or(SinkAdapterError::AlreadyFinalized)?
-            .commit()
-            .map_err(|error| publish_error(&self.config.destination, error))?;
+        commit_file(
+            self.prepared
+                .take()
+                .ok_or(SinkAdapterError::AlreadyFinalized)?,
+            self.no_clobber,
+        )
+        .map_err(|error| publish_error(&self.config.destination, error))?;
         Ok(NativeArtifactReport {
             kind: NativeArtifactKind::Y4m,
             path: self.config.destination.clone(),
@@ -1415,6 +1448,7 @@ pub struct FfmpegSink {
     input_bytes: u64,
     receipt: SinkReceipt<FfmpegArtifactReport>,
     deferred_soundtrack: Option<Receiver<Option<MixReport>>>,
+    no_clobber: bool,
 }
 
 /// One-use soundtrack completion for a live video sink. Scene construction
@@ -1488,7 +1522,17 @@ impl FfmpegSink {
             input_bytes: 0,
             receipt: SinkReceipt::pending(),
             deferred_soundtrack: None,
+            no_clobber: false,
         })
+    }
+
+    /// Publish the verified video only if the destination remains absent.
+    /// The final create-only operation, not an existence precheck, arbitrates
+    /// concurrent renders after encoding and optional audio muxing finish.
+    #[must_use]
+    pub fn with_no_clobber(mut self) -> Self {
+        self.no_clobber = true;
+        self
     }
 
     /// Connect a soundtrack whose cues become known while frames are emitted.
@@ -1638,12 +1682,16 @@ impl FfmpegSink {
 
     fn commit(&mut self) -> Result<FfmpegArtifactReport, SinkAdapterError> {
         self.state.grant_commit()?;
-        let report = self
+        let prepared = self
             .prepared
             .take()
-            .ok_or(SinkAdapterError::AlreadyFinalized)?
-            .commit()
-            .map_err(boundary_error)?;
+            .ok_or(SinkAdapterError::AlreadyFinalized)?;
+        let report = if self.no_clobber {
+            prepared.commit_new()
+        } else {
+            prepared.commit()
+        }
+        .map_err(boundary_error)?;
         Ok(FfmpegArtifactReport {
             boundary: report,
             frame_count: self.state.frame_count,
@@ -1736,6 +1784,29 @@ pub fn publish_wav(
     config: &WavPublicationConfig,
     mix: &MixReport,
 ) -> Result<WavPublicationReport, SinkAdapterError> {
+    publish_wav_with_policy(fs, config, mix, false)
+}
+
+/// Publish a complete native WAV without replacing an existing destination.
+/// Uses the same codec, budgets and receipt as [`publish_wav`], with the
+/// filesystem's atomic create-new operation as its publication point.
+///
+/// # Errors
+/// Invalid configuration, codec/budget errors, or an occupied destination.
+pub fn publish_wav_new(
+    fs: &dyn FileSystem,
+    config: &WavPublicationConfig,
+    mix: &MixReport,
+) -> Result<WavPublicationReport, SinkAdapterError> {
+    publish_wav_with_policy(fs, config, mix, true)
+}
+
+fn publish_wav_with_policy(
+    fs: &dyn FileSystem,
+    config: &WavPublicationConfig,
+    mix: &MixReport,
+    no_clobber: bool,
+) -> Result<WavPublicationReport, SinkAdapterError> {
     validate_destination(&config.destination)?;
     if config.max_artifact_bytes == 0 {
         return Err(SinkAdapterError::InvalidConfig(
@@ -1760,7 +1831,19 @@ pub fn publish_wav(
         })?;
     let bytes = byte_len(&encoded)?;
     enforce_artifact_limit(bytes, config.max_artifact_bytes)?;
-    publish_atomic(fs, &config.destination, &encoded)?;
+    if no_clobber {
+        if !fs
+            .create_new(&config.destination, &encoded)
+            .map_err(|error| publish_error(&config.destination, error))?
+        {
+            return Err(publish_error(
+                &config.destination,
+                "WAV destination already exists",
+            ));
+        }
+    } else {
+        publish_atomic(fs, &config.destination, &encoded)?;
+    }
     let channels = u64::from(mix.audio.channels);
     let sample_count = u64::try_from(mix.audio.samples.len())
         .map_err(|_| SinkAdapterError::InvalidConfig("WAV sample count is not representable"))?;
@@ -1873,6 +1956,17 @@ pub fn publish_svg_new(
         bytes,
         digest: sha256(document),
     })
+}
+
+fn commit_file(
+    prepared: Box<dyn PreparedAtomicFile>,
+    no_clobber: bool,
+) -> Result<(), fmn_platform::fs::FsError> {
+    if no_clobber {
+        prepared.commit_new()
+    } else {
+        prepared.commit()
+    }
 }
 
 struct FrameState {

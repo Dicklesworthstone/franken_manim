@@ -18,8 +18,8 @@ def replace_once(path, old, new):
 
 
 replace_once('crates/fmn-python/src/lib.rs',
-             'mod portal_playback;\nmod portal_studio;',
-             'mod portal_playback;\nmod portal_readback;\nmod portal_studio;')
+             'mod portal_studio;\n',
+             'mod portal_readback;\nmod portal_studio;\n')
 replace_once('crates/fmn-python/src/lib.rs',
              '    module.add_class::<PyCameraCore>()?;\n    module.add_class::<PyFieldProbe>()?;',
              '    module.add_class::<PyCameraCore>()?;\n    module.add_class::<portal_readback::CameraCapture>()?;\n    module.add_class::<PyFieldProbe>()?;')

@@ -15762,8 +15762,7 @@ assert set(one_counts) <= {0, 1}, one_counts
 assert len(one_group.submobjects) == 1
 assert one_group.submobjects[0] is one_children[1]
 
-# int_func routes as data: the two native rounding rules pass, anything
-# else refuses precisely.
+# Authored subset selectors run through the production callback boundary.
 assert (
     creation_animation.ShowIncreasingSubsets(
         manimlib.VGroup(geometry.Rectangle(width=0.5, height=0.5)),
@@ -15771,30 +15770,37 @@ assert (
     )._native_params()["int_round"]
     == "ceil"
 )
-try:
-    creation_animation.ShowIncreasingSubsets(
-        manimlib.VGroup(geometry.Rectangle(width=0.5, height=0.5)),
-        int_func=abs,
-    )
-except NotImplementedError as error:
-    assert "np.round or np.ceil" in str(error)
-else:
-    raise AssertionError("ShowIncreasingSubsets accepted a foreign int_func")
-
-# Named refusals: a non-Mobject target and an empty family.
+custom_members = [geometry.Rectangle(width=0.5, height=0.5) for _ in range(3)]
+custom_group = manimlib.VGroup(*custom_members)
+custom_selector = creation_animation.ShowIncreasingSubsets(
+    custom_group, int_func=lambda value: int(value), rate_func=manimlib.linear,
+)
+custom_selector.interpolate(.5)
+assert list(custom_group.submobjects) == custom_members[:1]
+custom_selector.int_func = lambda value: 2
+custom_selector.interpolate(.5)
+assert list(custom_group.submobjects) == custom_members[:2]
+assert custom_selector._native_params() == {}
+for invalid in ("round", 7):
+    try:
+        creation_animation.ShowIncreasingSubsets(custom_group, int_func=invalid)
+    except TypeError as error:
+        assert "int_func must be callable" in str(error)
+    else:
+        raise AssertionError("ShowIncreasingSubsets accepted a non-callable selector")
 try:
     creation_animation.ShowIncreasingSubsets("not a mobject")
 except TypeError as error:
     assert "requires a Mobject family" in str(error)
 else:
     raise AssertionError("ShowIncreasingSubsets accepted a non-Mobject")
-
-try:
-    creation_animation.ShowSubmobjectsOneByOne(manimlib.VGroup())
-except ValueError as error:
-    assert "the group is empty" in str(error)
-else:
-    raise AssertionError("ShowSubmobjectsOneByOne accepted an empty family")
+for empty_cls in (creation_animation.ShowIncreasingSubsets,
+                  creation_animation.ShowSubmobjectsOneByOne):
+    empty_group = manimlib.VGroup()
+    empty_reveal = empty_cls(empty_group)
+    empty_reveal.begin()
+    empty_reveal.finish()
+    assert list(empty_group.submobjects) == []
 
 # fm-5wq.4.65: isolate= and tex_to_color_map= ride the native span map — the
 # isolated pieces become their own submobject groups (source-identity

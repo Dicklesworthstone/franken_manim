@@ -26,14 +26,15 @@ mod portal_console;
 #[cfg(feature = "gauntlet")]
 pub use portal_console::run_portal_gauntlet_console;
 mod portal_playback;
+mod portal_recording;
 mod portal_studio;
 mod portal_svg;
 mod portal_texture;
 mod portal_video;
 #[cfg(feature = "gauntlet")]
 pub use portal_texture::run_portal_gauntlet_textures;
-mod report;
 mod portal_provenance;
+mod report;
 
 #[cfg(feature = "gauntlet")]
 pub use live_tex::{PortalLiveTexReport, run_portal_gauntlet_live_tex};
@@ -313,7 +314,7 @@ impl PortalRenderSession {
                     .checked_mul(u64::from(config.channels) * 2)
                     .and_then(|bytes| bytes.checked_add(1024))
                     .ok_or_else(|| PyOverflowError::new_err("WAV artifact budget overflow"))?;
-                let report = fmn_output::publish_wav(
+                let report = fmn_output::publish_wav_new(
                     &fmn_platform::fs::StdFs,
                     &fmn_output::WavPublicationConfig {
                         destination,
@@ -542,6 +543,7 @@ impl PortalFrameSession {
                     },
                 )
                 .map_err(|error| PyValueError::new_err(error.to_string()))?
+                .with_no_clobber()
                 .into_binding(if single_frame {
                     "python-png"
                 } else {
@@ -564,6 +566,7 @@ impl PortalFrameSession {
                     },
                 )
                 .map_err(|error| PyValueError::new_err(error.to_string()))?
+                .with_no_clobber()
                 .into_binding("python-gif");
                 (binding, PortalReceipt::Native(receipt))
             }
@@ -582,6 +585,7 @@ impl PortalFrameSession {
                     },
                 )
                 .map_err(|error| PyValueError::new_err(error.to_string()))?
+                .with_no_clobber()
                 .into_binding("python-y4m");
                 (binding, PortalReceipt::Native(receipt))
             }
@@ -639,6 +643,7 @@ impl PortalFrameSession {
                     },
                 )
                 .map_err(native_error)?;
+                let sink = sink.with_no_clobber();
                 let (sink, completion) = sink.with_deferred_soundtrack().map_err(native_error)?;
                 soundtrack = Some(completion);
                 let (binding, receipt) = sink.into_binding("python-ffmpeg-video");
@@ -10838,6 +10843,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     )?;
     portal_texture::install(module)?;
     execute_bootstrap(py, module)?;
+    portal_recording::install(module)?;
     // Packaging identity is owned by Cargo, not a second hand-maintained
     // Python version string.  W11's wheel and console entry point both read
     // these sentinels after the schema bootstrap has assembled `manimlib`.
@@ -12174,5 +12180,20 @@ mod tests {
                 drop(object);
             },
         );
+    }
+}
+
+
+#[cfg(test)]
+mod subset_reveal_acceptance {
+    #[test]
+    fn production_subset_reveal_acceptance() {
+        crate::with_python_test_module("native subset reveals", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/subset_reveal.py"))
+                .expect("subset reveal source contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("real native subset selection, lifecycle and output");
+        });
     }
 }

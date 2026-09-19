@@ -102,6 +102,146 @@ fn write_direct(sink: &mut dyn FrameSink, sequence: u64, frame: &FrameBuffer) {
     );
 }
 
+fn create_only_sink(
+    kind: &str,
+    fs: Arc<dyn FileSystem>,
+    path: &Path,
+) -> (
+    Box<dyn FrameSink>,
+    fmn_output::SinkReceipt<fmn_output::NativeArtifactReport>,
+    FrameBuffer,
+) {
+    let (rgba, _) = padded_frame(PixelFormat::Rgba8, 17);
+    match kind {
+        "png" => {
+            let sink = PngSink::new(
+                fs,
+                png_config(
+                    PngTarget::Single(path.into()),
+                    exact_limits(1),
+                    CompressionLevel::Default,
+                    1,
+                ),
+            )
+            .unwrap()
+            .with_no_clobber();
+            let receipt = sink.receipt();
+            (Box::new(sink), receipt, rgba)
+        }
+        "gif" => {
+            let sink = GifSink::new(
+                fs,
+                GifSinkConfig {
+                    destination: path.into(),
+                    width: 4,
+                    height: 2,
+                    fps: (8, 1),
+                    loop_forever: false,
+                    first_sequence: 7,
+                    limits: exact_limits(1),
+                    profile: None,
+                },
+            )
+            .unwrap()
+            .with_no_clobber();
+            let receipt = sink.receipt();
+            (Box::new(sink), receipt, rgba)
+        }
+        "y4m" => {
+            let sink = Y4mSink::new(
+                fs,
+                Y4mSinkConfig {
+                    destination: path.into(),
+                    width: 4,
+                    height: 2,
+                    fps: (8, 1),
+                    colorspace: Y4mColorspace::C420Mpeg2,
+                    first_sequence: 7,
+                    limits: exact_limits(1),
+                    profile: None,
+                },
+            )
+            .unwrap()
+            .with_no_clobber();
+            let receipt = sink.receipt();
+            (
+                Box::new(sink),
+                receipt,
+                padded_frame(PixelFormat::Nv12, 17).0,
+            )
+        }
+        _ => panic!("unrecognized test sink"),
+    }
+}
+
+#[test]
+fn create_only_native_sinks_publish_one_complete_winner_at_commit() {
+    for kind in ["png", "gif", "y4m"] {
+        let fs = Arc::new(VirtualFs::new());
+        let path = Path::new("/out/artifact");
+        let (mut first, receipt, frame) = create_only_sink(kind, fs.clone(), path);
+        let (mut second, loser, _) = create_only_sink(kind, fs.clone(), path);
+        write_direct(first.as_mut(), 7, &frame);
+        write_direct(second.as_mut(), 7, &frame);
+        first.prepare_finish().unwrap();
+        second.prepare_finish().unwrap();
+        assert!(!fs.exists(path), "prepared {kind} leaked output");
+        first.commit_finish().unwrap();
+        let bytes = fs.read(path).unwrap();
+        assert_eq!(receipt.take().unwrap().digest, sha256(&bytes));
+        assert!(second.commit_finish().is_err(), "{kind} replaced winner");
+        assert!(loser.take().is_err());
+        assert_eq!(fs.read(path).unwrap(), bytes);
+        let (mut late, late_receipt, _) = create_only_sink(kind, fs.clone(), path);
+        write_direct(late.as_mut(), 7, &frame);
+        assert!(late.finish().is_err(), "{kind} replaced existing output");
+        assert!(late_receipt.take().is_err());
+        assert_eq!(fs.read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn create_only_native_sinks_refuse_external_writers_after_preparation() {
+    for kind in ["png", "gif", "y4m"] {
+        let fs = Arc::new(VirtualFs::new());
+        let path = Path::new("/out/artifact");
+        let (mut sink, receipt, frame) = create_only_sink(kind, fs.clone(), path);
+        write_direct(sink.as_mut(), 7, &frame);
+        sink.prepare_finish().unwrap();
+        fs.insert(path, b"concurrent external writer".to_vec());
+        assert!(sink.commit_finish().is_err());
+        assert!(receipt.take().is_err());
+        assert_eq!(fs.read(path).unwrap(), b"concurrent external writer");
+    }
+}
+
+#[test]
+fn create_only_wav_preserves_existing_bytes_and_replace_is_still_explicit() {
+    let fs = VirtualFs::new();
+    let config = WavPublicationConfig {
+        destination: PathBuf::from("/out/audio.wav"),
+        format: SampleFormat::S16,
+        dither: DitherPolicy::None,
+        max_artifact_bytes: 1024,
+        profile: None,
+    };
+    let report = fmn_output::publish_wav_new(&fs, &config, &mix_report()).unwrap();
+    let bytes = fs.read(&config.destination).unwrap();
+    assert_eq!(report.digest, sha256(&bytes));
+    assert_eq!(
+        decode_wav(&bytes, &WavLimits::default())
+            .unwrap()
+            .samples
+            .len(),
+        4
+    );
+    fs.insert(&config.destination, b"keep me".to_vec());
+    assert!(fmn_output::publish_wav_new(&fs, &config, &mix_report()).is_err());
+    assert_eq!(fs.read(&config.destination).unwrap(), b"keep me");
+    publish_wav(&fs, &config, &mix_report()).unwrap();
+    assert_eq!(fs.read(&config.destination).unwrap(), bytes);
+}
+
 #[test]
 fn sink_limits_reject_invalid_and_truncated_stream_contracts() {
     assert!(matches!(
@@ -1697,6 +1837,56 @@ mod ffmpeg_boundary {
             limits: exact_limits(1),
             profile,
         }
+    }
+
+    #[test]
+    fn create_only_ffmpeg_sink_refuses_an_output_created_after_encode() {
+        let (root, tool, runner) = fake_tool("create-only-race");
+        let destination = root.join("movie.mp4");
+        let (frame, _) = padded_frame(PixelFormat::Rgba8, 17);
+        let mut sink = FfmpegSink::new(
+            runner.clone(),
+            ffmpeg_config(
+                tool.clone(),
+                &root,
+                WireFormat::Rgba8,
+                destination.clone(),
+                None,
+                None,
+            ),
+        )
+        .unwrap()
+        .with_no_clobber();
+        let receipt = sink.receipt();
+        write_direct(&mut sink, 7, &frame);
+        sink.prepare_finish().unwrap();
+        assert!(!destination.exists());
+        std::fs::write(&destination, b"other producer").unwrap();
+        assert!(sink.commit_finish().is_err());
+        assert!(receipt.take().is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"other producer");
+
+        let fresh = root.join("fresh.mp4");
+        let mut sink = FfmpegSink::new(
+            runner,
+            ffmpeg_config(tool, &root, WireFormat::Rgba8, fresh.clone(), None, None),
+        )
+        .unwrap()
+        .with_no_clobber();
+        let receipt = sink.receipt();
+        write_direct(&mut sink, 7, &frame);
+        sink.finish().unwrap();
+        let report = receipt.take().unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"video-artifact");
+        assert_eq!(report.boundary.artifact_digest, sha256(b"video-artifact"));
+        assert_eq!(report.boundary.invocations.len(), 1);
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".fmn-stream")
+        }));
     }
 
     #[test]

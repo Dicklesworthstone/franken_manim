@@ -9,12 +9,25 @@ use super::*;
 #[derive(Default)]
 pub(super) struct OutputTimeline {
     pub(super) final_state_only: bool,
+    origin_frame: i64,
     last_frame: i64,
     skipping: bool,
     omitted: Vec<(i64, i64)>,
 }
 
 impl OutputTimeline {
+    /// Start an insert at the live clock, without including pre-recording time.
+    pub(super) fn start_at(&mut self, frame: i64) -> PyResult<()> {
+        if frame < 0 || self.last_frame != 0 || !self.omitted.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "recording timeline requires an unused timeline and a nonnegative frame",
+            ));
+        }
+        self.origin_frame = frame;
+        self.last_frame = frame;
+        Ok(())
+    }
+
     pub(super) fn new(final_state_only: bool) -> Self {
         Self {
             final_state_only,
@@ -48,7 +61,7 @@ impl OutputTimeline {
     }
 
     pub(super) fn output_frame(&self, frame: i64) -> PyResult<i64> {
-        if frame < 0 || frame > self.last_frame {
+        if frame < self.origin_frame || frame > self.last_frame {
             return Err(PyRuntimeError::new_err(
                 "portal-render: audio timestamp is outside the observed scene timeline",
             ));
@@ -58,7 +71,7 @@ impl OutputTimeline {
             .iter()
             .map(|&(start, end)| (frame.min(end) - start).max(0))
             .sum();
-        Ok(frame - removed)
+        Ok(frame - self.origin_frame - removed)
     }
 }
 
@@ -72,7 +85,7 @@ impl PortalRenderSession {
         }
     }
 
-    fn output_timeline_mut(&mut self) -> &mut OutputTimeline {
+    pub(super) fn output_timeline_mut(&mut self) -> &mut OutputTimeline {
         match self {
             Self::Frames(session) => &mut session.timeline,
             Self::Preview(session) => &mut session.timeline,
@@ -121,6 +134,23 @@ pub(super) fn synchronize(scene: &Bound<'_, PyScene>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_timeline_rebases_live_time_and_skipped_intervals() {
+        let mut timeline = OutputTimeline::default();
+        timeline.start_at(90).unwrap();
+        timeline.observe(90, false).unwrap();
+        timeline.observe(96, true).unwrap();
+        timeline.observe(102, false).unwrap();
+        timeline.observe(108, false).unwrap();
+        for (scene, output) in [(90, 0), (96, 6), (99, 6), (102, 6), (108, 12)] {
+            assert_eq!(timeline.output_frame(scene).unwrap(), output);
+        }
+        assert!(timeline.output_frame(89).is_err());
+        assert!(timeline.output_frame(109).is_err());
+        assert!(timeline.observe(107, false).is_err());
+        assert!(timeline.start_at(0).is_err());
+    }
 
     #[test]
     fn omitted_intervals_rebase_cues_and_duration_on_integer_frames() {

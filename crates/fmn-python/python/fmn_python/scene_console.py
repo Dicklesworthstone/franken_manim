@@ -8,7 +8,7 @@ scene state, NOT Python globals, files, network effects or published output.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import importlib
 import inspect
@@ -133,6 +133,7 @@ class SceneConsole:
         self._busy = False
         self._cells = 0
         self._bound_shell = None
+        self.last_recording = None
 
     def _check(self) -> None:
         # Check BEFORE reading an unsendable native proxy on another thread.
@@ -204,7 +205,27 @@ class SceneConsole:
         # It neither advances the clock nor opens/emits a file generation.
         self.scene.camera.capture(*tuple(self.scene.mobjects))
 
-    def _execute(self, source: str, *, skip: bool, record: bool, progress_bar: bool):
+    def preview(self):
+        """Return a native PNG-displayable snapshot without executing a cell.
+
+        Unlike a cell's post-execution refresh, this is observational: it does
+        not tick updaters, change checkpoints, open output, or advance time.
+        It is also available when automatic post-cell capture is disabled.
+        """
+        with self._operation():
+            return self.scene.camera.capture_snapshot(*tuple(self.scene.mobjects))
+
+    def _repr_png_(self):
+        # IPython can inspect a console during run_cell. Never reenter a cell,
+        # touch an unsendable native Scene on another thread, or resurrect a
+        # closed console just to format a representation.
+        if (threading.get_ident() != self._thread or self._closed
+                or self._busy or not self.capture):
+            return None
+        return self.scene.camera.get_png()
+
+    def _execute(self, source: str, *, skip: bool, record: bool, progress_bar: bool,
+                 record_to=None, recording_options=None):
         for name, value in (("skip", skip), ("record", record), ("progress_bar", progress_bar)):
             if type(value) is not bool:
                 raise TypeError(name + " must be bool")
@@ -212,56 +233,80 @@ class SceneConsole:
         self._bind_shell()
         code = self._compile(source)
         key = leading_comment(source)
+        recording = None
+        if recording_options is not None and record_to is None:
+            raise ValueError("recording_options requires record_to")
+        if record_to is not None:
+            from .recording import RecordingSession
+            if recording_options is not None and not isinstance(recording_options, Mapping):
+                raise TypeError("recording_options must be a mapping")
+            recording = RecordingSession(self.scene, record_to, _native=self._native,
+                                         **dict(recording_options or {}))
         # Capability/configuration refusal precedes checkpoint creation/restore.
-        # In particular record=True retains the native insert-path refusal.
-        with self.scene.temp_config_change(skip, record, progress_bar):
+        # A clip is opened AFTER restore, so retries never rewind a live sink.
+        # record=True without an explicit destination still refuses guessing.
+        with self.scene.temp_config_change(skip, False if recording else record, progress_bar):
             checkpoint(self.checkpoint_manager, self.scene, key, self.max_checkpoints)
-            self._cells += 1
-            primary = None
             try:
-                if self.shell is None:
-                    exec(code, self.namespace, self.namespace)
-                    return None
-                result = self.shell.run_cell(source)
-                if inspect.isawaitable(result):
-                    # run_cell is the synchronous protocol; do not leak an
-                    # unawaited coroutine or accidentally report it as success.
-                    if inspect.iscoroutine(result):
-                        result.close()
-                    raise TypeError("scene console shell.run_cell must be synchronous")
-                error = getattr(result, "error_before_exec", None)
-                if error is None:
-                    error = getattr(result, "error_in_exec", None)
-                if error is not None:
-                    if not isinstance(error, BaseException):
-                        raise TypeError("shell execution error must be an exception")
-                    raise error
-                return result
-            except BaseException as error:
-                primary = error
-                raise
+                with recording if recording is not None else nullcontext():
+                    return self._run_compiled(source, code)
             finally:
-                try:
-                    self._refresh()
-                except BaseException as error:
-                    if primary is None:
-                        raise
-                    _note(primary, "native cell preview also failed: " + type(error).__name__)
+                if recording is not None and recording.result is not None:
+                    self.last_recording = recording.result
+
+    def _run_compiled(self, source, code):
+        self._cells += 1
+        primary = None
+        try:
+            if self.shell is None:
+                exec(code, self.namespace, self.namespace)
+                return None
+            result = self.shell.run_cell(source)
+            if inspect.isawaitable(result):
+                # run_cell is synchronous; never leak a returned coroutine.
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise TypeError("scene console shell.run_cell must be synchronous")
+            error = getattr(result, "error_before_exec", None)
+            if error is None:
+                error = getattr(result, "error_in_exec", None)
+            if error is not None:
+                if not isinstance(error, BaseException):
+                    raise TypeError("shell execution error must be an exception")
+                raise error
+            return result
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                self._refresh()
+            except BaseException as error:
+                if primary is None:
+                    raise
+                _note(primary, "native cell preview also failed: " + type(error).__name__)
 
     def run_cell(self, source: str, *, skip: bool = False, record: bool = False,
-                 progress_bar: bool = True):
-        """Run one cell; exceptions and interrupts keep their original identity."""
+                 progress_bar: bool = True, record_to=None, recording_options=None):
+        """Run a cell, optionally recording its animation to an explicit path.
+
+        recording_options accepts record_scene's format/resolution/fps/threads.
+        Read last_recording after success. Retry with a new output path; native
+        publication never overwrites an earlier successful clip.
+        """
         with self._operation():
-            return self._execute(source, skip=skip, record=record, progress_bar=progress_bar)
+            return self._execute(source, skip=skip, record=record, progress_bar=progress_bar,
+                                 record_to=record_to, recording_options=recording_options)
 
     def checkpoint_paste(self, *, skip: bool = False, record: bool = False,
-                         progress_bar: bool = True):
+                         progress_bar: bool = True, record_to=None, recording_options=None):
         """Read one explicitly granted clipboard value and run its keyed cell."""
         with self._operation():
             if self.clipboard is None:
                 error_type = getattr(self._native, "_CapabilityError", RuntimeError)
                 raise error_type("checkpoint_paste requires a host clipboard callable; use run_cell(text) otherwise")
-            return self._execute(self.clipboard(), skip=skip, record=record, progress_bar=progress_bar)
+            return self._execute(self.clipboard(), skip=skip, record=record, progress_bar=progress_bar,
+                                 record_to=record_to, recording_options=recording_options)
 
     def clear_checkpoints(self) -> None:
         with self._operation():

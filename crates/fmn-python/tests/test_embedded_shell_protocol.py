@@ -110,8 +110,15 @@ class EmbeddedShellTests(unittest.TestCase):
         self.assertEqual(str(inspect.signature(classes[0])), "()")
         self.assertEqual(str(inspect.signature(classes[1])), "(scene)")
         self.assertEqual(str(inspect.signature(classes[1].checkpoint_paste)),
-                         "(self, skip=False, record=False, progress_bar=True)")
+                         "(self, skip=False, record=False, progress_bar=True, *, record_to=None, recording_options=None)")
         self.assertIsNone(self.native.Scene().embed())
+    def test_paste_forwards_explicit_recording_destination(self):
+        calls = []
+        self.embed._fmn_launching = True
+        self.embed._fmn_console = SimpleNamespace(checkpoint_paste=lambda **kw: calls.append(kw))
+        self.embed.checkpoint_paste(record_to="clip.y4m", recording_options={"threads": 4})
+        self.assertEqual(calls, [{"skip": False, "record": False, "progress_bar": True,
+                                  "record_to": "clip.y4m", "recording_options": {"threads": 4}}])
     def test_launch_installs_real_bound_shortcuts_and_removes_callbacks(self):
         def body(shell):
             self.assertEqual(shell.user_ns["add"], self.scene.add)
