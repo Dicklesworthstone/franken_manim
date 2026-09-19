@@ -198,7 +198,13 @@ def install_graphing(native):
                 # All user evaluation and native smoothing already succeeded.
                 if not np.isfinite(candidate.get_points()).all():
                     raise ValueError("native graph construction produced nonfinite points")
-                current.match_points(candidate)
+                # set_points uses the existing Python/native resize protocol:
+                # when the whole domain vanishes it saves the current style
+                # defaults, then reseeds those defaults when samples return.
+                # Raw match_points would resize an empty native buffer without
+                # that protocol and could bring back invisible zero-style rows.
+                current.get_points()  # Bake any live placement before writing world points.
+                current.set_points(candidate.get_points())
             finally:
                 vars(current).pop(_BUSY, None)
 
@@ -208,7 +214,7 @@ def install_graphing(native):
         if previous is not None:
             graph.remove_updater(previous.updater)
         vars(graph)[_BINDING] = _Binding(update, self, samples)
-        graph.underlying_function = query
+        graph.underlying_function = func if scalar else query
         return graph
 
     def unbind(self, graph):
@@ -229,4 +235,145 @@ def install_graphing(native):
 
     _bind_method(Coordinates, "bind_graph_to_func", bind)
     _bind_method(Coordinates, "unbind_graph_from_func", unbind)
+    _install_graph_queries(native)
     g["_FMN_GRAPHING_INSTALLED"] = True
+
+
+def _graph_range(values, density):
+    """Validate only the sampling request; native ParametricCurve samples it."""
+    values = tuple(itertools.islice(iter(values), 4))
+    if len(values) not in (2, 3):
+        raise ValueError("graph x_range requires two or three values")
+    start, stop = (_finite(value, "graph range endpoint") for value in values[:2])
+    step = _finite(values[2] if len(values) == 3 else 1., "graph range step")
+    density = _finite(density, "graph sampling density")
+    if start >= stop or step <= 0 or density <= 0:
+        raise ValueError("graph range must increase with positive step and sampling density")
+    spacing = step / density
+    if not math.isfinite(spacing) or spacing <= 0:
+        raise ValueError("graph sample spacing must be positive and finite")
+    count = (stop - start) / spacing
+    if not math.isfinite(count) or math.ceil(count) + 1 > _MAX_SAMPLES:
+        raise ValueError("graph sampling request exceeds its 65536-point budget")
+    return (start, stop) if len(values) == 2 else (start, stop, step)
+
+
+def _install_graph_queries(native):
+    g = vars(native)
+    Coordinates, VMobject, np = g["CoordinateSystem"], g["VMobject"], g["_np"]
+    original_graph = Coordinates.get_graph
+
+    def get_graph(self, function, x_range=None, bind=False, **kwargs):
+        if not callable(function):
+            raise TypeError("graph function must be callable")
+        if not isinstance(bind, bool):
+            raise TypeError("graph bind must be bool")
+        # Avoid NumPy's ambiguous truth test in the original x_range-or-default
+        # expression, and stop invalid/huge requests before authored effects.
+        domain = _graph_range(self.x_range if x_range is None else x_range,
+                              self.num_sampled_graph_points_per_tick)
+        options = dict(kwargs)
+        if "discontinuities" in options:
+            values = options["discontinuities"]
+            options["discontinuities"] = tuple(_discontinuities(
+                () if values is None else values, domain[0], domain[1]))
+        if "epsilon" in options and _finite(options["epsilon"], "graph epsilon") <= 0:
+            raise ValueError("graph epsilon must be positive")
+        # Keep native sampling, style handling and constructor identity. Do not
+        # vectorize scalar callbacks by trial, swallow exceptions, or probe a
+        # function twice to guess whether its author supports arrays.
+        graph = original_graph(self, function, x_range=domain, bind=False, **options)
+        if bind:
+            token = _SCALAR_BIND.set((graph, function))
+            try:
+                # Preserve public override dispatch and the exact callable the
+                # author supplied. The context applies only to this graph.
+                self.bind_graph_to_func(graph, function)
+            finally:
+                _SCALAR_BIND.reset(token)
+        return graph
+
+    def point(value):
+        result = np.asarray(value)
+        if result.dtype.kind not in "biuf" or result.shape != (3,) or not np.isfinite(result).all():
+            raise ValueError("graph point must have three finite real coordinates")
+        return result.astype(float, copy=True)
+
+    def input_to_graph_point(self, x, graph):
+        x = _finite(x, "graph query x")
+        function = getattr(graph, "underlying_function", None)
+        if function is not None:
+            if not callable(function):
+                raise TypeError("graph underlying_function must be callable")
+            # Analytic graphs keep their original public callable semantics;
+            # direct vectorized bindings supply an explicit scalar query view.
+            return point(self.c2p(x, function(x)))
+        if not isinstance(graph, VMobject):
+            raise TypeError("geometric graph lookup requires a VMobject")
+        n_points = graph.get_num_points()
+        if n_points == 0:
+            return None
+        if n_points > _MAX_RECORDS or n_points % 2 != 1:
+            raise ValueError("geometric graph lookup requires a bounded shared-anchor path")
+
+        def coordinate(p):
+            coordinates = np.asarray(self.p2c(p.copy()))
+            if (coordinates.ndim != 1 or not len(coordinates)
+                    or coordinates.dtype.kind not in "biuf" or not np.isfinite(coordinates).all()):
+                raise ValueError("graph inverse coordinates must be a finite real vector")
+            return float(coordinates[0])
+
+        if n_points == 1:
+            only = point(graph.get_points()[0])
+            return only if coordinate(only) == x else None
+        ends = np.asarray(graph.get_subpath_end_indices())
+        if (ends.ndim != 1 or not len(ends) or ends.dtype.kind not in "iu"
+                or ends[-1] != n_points - 1 or np.any(ends % 2)
+                or np.any(ends < 0) or np.any(ends >= n_points)
+                or np.any(np.diff(ends.astype(np.int64)) <= 0)):
+            raise ValueError("graph subpath boundaries do not describe its shared-anchor path")
+        # A null curve is a topological break, not a drawable chord. Searching
+        # it would return invented points across a pole or missing interval.
+        breaks = {int(end) // 2 for end in ends[:-1]}
+        for index in range(n_points // 2):
+            if index in breaks:
+                continue
+            curve = graph.get_nth_curve_function(index)
+            left_point, right_point = point(curve(0.)), point(curve(1.))
+            left_x, right_x = coordinate(left_point), coordinate(right_point)
+            if left_x == x:
+                return left_point
+            if right_x == x:
+                return right_point
+            if not min(left_x, right_x) < x < max(left_x, right_x):
+                continue
+            # Invert a continuous, x-monotone function-graph curve using its
+            # public native-backed evaluator. Axis ranges are data coordinates,
+            # NEVER the allowed [0,1] parameter range. Direction may decrease.
+            lower, upper = 0., 1.
+            increasing = left_x < right_x
+            best_point = left_point if abs(left_x - x) < abs(right_x - x) else right_point
+            best_error = min(abs(left_x - x), abs(right_x - x))
+            tolerance = 8 * np.finfo(np.float32).eps * max(1., abs(x), abs(left_x), abs(right_x))
+            for _ in range(64):
+                middle = (lower + upper) * .5
+                if middle == lower or middle == upper:
+                    break
+                middle_point = point(curve(middle))
+                middle_x = coordinate(middle_point)
+                error = abs(middle_x - x)
+                if error < best_error:
+                    best_point, best_error = middle_point, error
+                if error == 0:
+                    return middle_point
+                if (middle_x < x) == increasing:
+                    lower = middle
+                else:
+                    upper = middle
+            if best_error <= tolerance:
+                return best_point
+            raise ValueError("graph curve did not resolve the requested x coordinate within f32 precision")
+        return None
+
+    _bind_method(Coordinates, "get_graph", get_graph)
+    _bind_method(Coordinates, "input_to_graph_point", input_to_graph_point)

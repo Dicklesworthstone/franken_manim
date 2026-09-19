@@ -69,8 +69,8 @@ def fixture():
                 self.points = np.concatenate((self.points, self.points[-1:], points))
             return self
 
-        def match_points(self, other):
-            self.points = other.points.copy()
+        def set_points(self, points):
+            self.points = np.asarray(points).copy()
             self.matches += 1
             return self
 
