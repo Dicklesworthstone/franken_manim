@@ -19,6 +19,7 @@ _STEPS = (
     ("live_tex", "install_live_tex"),
     ("matrix", "install_matrix"),
     ("text_reveal", "install_text_reveal"),
+    ("subset_reveal", "install_subset_reveal"),
     ("fading", "install_fading"),
     ("playback", "install_scene_playback"),
     ("scene_state", "install_scene_state"),

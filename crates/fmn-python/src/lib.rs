@@ -12182,3 +12182,18 @@ mod tests {
         );
     }
 }
+
+
+#[cfg(test)]
+mod subset_reveal_acceptance {
+    #[test]
+    fn production_subset_reveal_acceptance() {
+        crate::with_python_test_module("native subset reveals", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/subset_reveal.py"))
+                .expect("subset reveal source contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("real native subset selection, lifecycle and output");
+        });
+    }
+}
