@@ -1868,7 +1868,23 @@ impl PreparedFfmpegArtifact {
     ///
     /// # Errors
     /// Artifact revalidation or rename failure.
-    pub fn commit(mut self) -> Result<BoundaryReport, BoundaryError> {
+    pub fn commit(self) -> Result<BoundaryReport, BoundaryError> {
+        self.commit_with_policy(false)
+    }
+
+    /// Publish verified video without replacing any destination node.
+    ///
+    /// Stream through a private destination sibling so the encode workdir may
+    /// be on another filesystem. Resident copy memory is bounded independently
+    /// of movie length. Rehash the copied bytes before atomic link publication.
+    ///
+    /// # Errors
+    /// Artifact revalidation, staging, or atomic create-only publication fails.
+    pub fn commit_new(self) -> Result<BoundaryReport, BoundaryError> {
+        self.commit_with_policy(true)
+    }
+
+    fn commit_with_policy(mut self, no_clobber: bool) -> Result<BoundaryReport, BoundaryError> {
         self.workdir.verify_current("commit ffmpeg artifact")?;
         let (artifact_bytes, artifact_digest) =
             hash_private_artifact(&self.artifact, self.limits.max_artifact_bytes)?;
@@ -1880,15 +1896,25 @@ impl PreparedFfmpegArtifact {
         self.workdir
             .verify_current("publish prepared ffmpeg artifact")?;
         verify_private_artifact(&self.artifact, self.limits.max_artifact_bytes)?;
-        std::fs::rename(&self.artifact, &self.destination).map_err(|error| {
-            BoundaryError::Workdir {
-                detail: format!(
-                    "publish {} -> {}: {error}",
-                    self.artifact.display(),
-                    self.destination.display()
-                ),
-            }
-        })?;
+        if no_clobber {
+            publish_artifact_new(
+                &self.artifact,
+                &self.destination,
+                artifact_bytes,
+                artifact_digest,
+                self.limits.max_artifact_bytes,
+            )?;
+        } else {
+            std::fs::rename(&self.artifact, &self.destination).map_err(|error| {
+                BoundaryError::Workdir {
+                    detail: format!(
+                        "publish {} -> {}: {error}",
+                        self.artifact.display(),
+                        self.destination.display()
+                    ),
+                }
+            })?;
+        }
         self.cleanup = false;
         cleanup_workdir(&self.limits, &self.workdir);
         Ok(BoundaryReport {
@@ -1898,6 +1924,51 @@ impl PreparedFfmpegArtifact {
             artifact_digest,
         })
     }
+}
+
+fn publish_artifact_new(
+    artifact: &Path,
+    destination: &Path,
+    expected_bytes: u64,
+    expected_digest: Digest,
+    limit: u64,
+) -> Result<(), BoundaryError> {
+    use fmn_platform::fs::{FileSystem as _, StdFs};
+
+    let failure = |error: &dyn std::fmt::Display| BoundaryError::Workdir {
+        detail: format!("create-only publication {}: {error}", destination.display()),
+    };
+    let mut source = File::open(artifact).map_err(|error| failure(&error))?;
+    let mut writer = Arc::new(StdFs)
+        .begin_atomic_file(destination)
+        .map_err(|error| failure(&error))?;
+    let mut bytes = 0_u64;
+    let mut digest = Sha256::new();
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = match source.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(failure(&error)),
+        };
+        bytes = bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        if bytes > limit {
+            return Err(BoundaryError::ArtifactOversized { bytes, max: limit });
+        }
+        digest.update(&chunk[..read]);
+        writer
+            .write(&chunk[..read])
+            .map_err(|error| failure(&error))?;
+    }
+    if bytes != expected_bytes || digest.finalize() != expected_digest {
+        return Err(failure(&"prepared artifact changed during publication"));
+    }
+    writer
+        .prepare()
+        .map_err(|error| failure(&error))?
+        .commit_new()
+        .map_err(|error| failure(&error))
 }
 
 impl Drop for PreparedFfmpegArtifact {
@@ -2034,6 +2105,53 @@ fn cleanup_workdir(limits: &JobLimits, workdir: &OwnedWorkdir) {
 mod tests {
     use super::*;
     use fmn_platform::process::{FfmpegLocator as _, ScriptedRunner, StdFfmpegLocator};
+
+    #[test]
+    fn create_only_video_copy_checks_content_and_budget_before_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "fmn-video-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("private-video");
+        let destination = root.join("output.mp4");
+        let bytes = vec![37_u8; 150_000];
+        let digest = fmn_hash::sha256(&bytes);
+        std::fs::write(&source, &bytes).unwrap();
+        for (length, expected, limit) in [
+            (149_999, digest, 150_000),
+            (150_000, fmn_hash::sha256(b"wrong bytes"), 150_000),
+            (150_000, digest, 149_999),
+        ] {
+            assert!(publish_artifact_new(&source, &destination, length, expected, limit).is_err());
+            assert!(!destination.exists());
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        }
+        publish_artifact_new(&source, &destination, 150_000, digest, 150_000).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        std::fs::write(&source, b"changed private bytes").unwrap();
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            bytes,
+            "published video must not alias a retained debug artifact"
+        );
+        assert!(
+            publish_artifact_new(
+                &source,
+                &destination,
+                21,
+                fmn_hash::sha256(b"changed private bytes"),
+                150_000
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn private_copy_path_substitution_is_rejected_before_the_runner() {

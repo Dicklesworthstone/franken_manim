@@ -239,6 +239,26 @@ pub trait PreparedAtomicFile: Send {
     /// # Errors
     /// [`FsError`] when publication fails.
     fn commit(self: Box<Self>) -> Result<(), FsError>;
+
+    /// Publish only if no node exists at the destination, including a dangling
+    /// symlink. The absence check and publication must be one atomic operation;
+    /// a preflight `exists` followed by [`Self::commit`] is not sufficient.
+    ///
+    /// The default refuses rather than weakening a host's publication policy.
+    /// Dropping the refused token must still discard its private staging file.
+    ///
+    /// # Errors
+    /// [`FsError::Io`] with `AlreadyExists` for an occupied destination, or
+    /// `Unsupported` when this capability cannot guarantee create-only output.
+    fn commit_new(self: Box<Self>) -> Result<(), FsError> {
+        Err(io_error(
+            Path::new("<prepared-atomic-file>"),
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "filesystem capability does not support create-only atomic publication",
+            ),
+        ))
+    }
 }
 
 /// Reserved last-published marker for immutable directory generations.
@@ -722,6 +742,15 @@ impl PreparedAtomicFile for StdPreparedAtomicFile {
             .map_err(|error| io_error(&self.destination, error))?;
         self.cleanup = false;
         Ok(())
+    }
+
+    fn commit_new(self: Box<Self>) -> Result<(), FsError> {
+        // Both names are siblings on the same filesystem. Link creation is
+        // atomic and cannot replace any existing node. Bytes were synced by
+        // prepare(); Drop removes only our private name, on success or error.
+        // Filesystems without hard links fail closed, never fall back to rename.
+        std::fs::hard_link(&self.temporary, &self.destination)
+            .map_err(|error| io_error(&self.destination, error))
     }
 }
 
@@ -1426,6 +1455,20 @@ impl PreparedAtomicFile for VirtualPreparedAtomicFile {
     fn commit(self: Box<Self>) -> Result<(), FsError> {
         self.fs.write_atomic(&self.destination, &self.bytes)
     }
+
+    fn commit_new(self: Box<Self>) -> Result<(), FsError> {
+        if self.fs.create_new(&self.destination, &self.bytes)? {
+            Ok(())
+        } else {
+            Err(io_error(
+                &self.destination,
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "atomic file destination already exists",
+                ),
+            ))
+        }
+    }
 }
 
 struct VirtualAtomicDirectoryWriter {
@@ -1838,5 +1881,111 @@ mod tests {
         fs.load_manifest("# comment\n/sys/x\t0-3\\n\n/sys/y\tabc\n");
         assert_eq!(fs.read_to_string(Path::new("/sys/x")).unwrap(), "0-3\n");
         assert_eq!(fs.read_to_string(Path::new("/sys/y")).unwrap(), "abc");
+    }
+
+    fn prepared_bytes(
+        fs: Arc<dyn FileSystem>,
+        path: &Path,
+        byte: u8,
+    ) -> Box<dyn PreparedAtomicFile> {
+        let mut writer = fs.begin_atomic_file(path).unwrap();
+        for _ in 0..4 {
+            writer.write(&[byte; 1024]).unwrap();
+        }
+        writer.prepare().unwrap()
+    }
+
+    #[test]
+    fn virtual_stream_create_new_arbitrates_at_commit_and_keeps_replace_explicit() {
+        let fs = Arc::new(VirtualFs::new());
+        let path = Path::new("/out/file");
+        let first = prepared_bytes(fs.clone(), path, 1);
+        let second = prepared_bytes(fs.clone(), path, 2);
+        assert!(!fs.exists(path));
+        first.commit_new().unwrap();
+        assert!(matches!(second.commit_new(), Err(FsError::Io { err, .. })
+            if err.kind() == std::io::ErrorKind::AlreadyExists));
+        assert_eq!(fs.read(path).unwrap(), vec![1; 4096]);
+        prepared_bytes(fs.clone(), path, 3).commit().unwrap();
+        assert_eq!(fs.read(path).unwrap(), vec![3; 4096]);
+        drop(prepared_bytes(fs.clone(), Path::new("/out/aborted"), 4));
+        assert!(!fs.exists(Path::new("/out/aborted")));
+        fs.create_dir(Path::new("/out/directory")).unwrap();
+        assert!(
+            prepared_bytes(fs.clone(), Path::new("/out/directory"), 5)
+                .commit_new()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unimplemented_create_only_capability_never_falls_back_to_replace() {
+        struct ReplaceOnly;
+        impl PreparedAtomicFile for ReplaceOnly {
+            fn commit(self: Box<Self>) -> Result<(), FsError> {
+                panic!("a create-only request must never dispatch replacement")
+            }
+        }
+        assert!(
+            matches!(Box::new(ReplaceOnly).commit_new(), Err(FsError::Io { err, .. })
+            if err.kind() == std::io::ErrorKind::Unsupported)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn std_stream_create_new_has_one_complete_winner_and_cleans_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "fmn-create-only-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("winner");
+        let fs = Arc::new(StdFs);
+        let ready = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0_u8..8)
+            .map(|byte| {
+                let fs = fs.clone();
+                let path = path.clone();
+                let ready = ready.clone();
+                std::thread::spawn(move || {
+                    let token = prepared_bytes(fs, &path, byte);
+                    ready.wait();
+                    match token.commit_new() {
+                        Ok(()) => Some(byte),
+                        Err(FsError::Io { err, .. })
+                            if err.kind() == std::io::ErrorKind::AlreadyExists =>
+                        {
+                            None
+                        }
+                        Err(error) => panic!("unexpected commit failure: {error}"),
+                    }
+                })
+            })
+            .collect();
+        let winners: Vec<_> = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), vec![winners[0]; 4096]);
+        assert_eq!(fs.list_dir(&root).unwrap(), vec![path.clone()]);
+        drop(prepared_bytes(fs.clone(), &root.join("abort"), 9));
+        assert_eq!(fs.list_dir(&root).unwrap(), vec![path.clone()]);
+        assert!(prepared_bytes(fs.clone(), &root, 8).commit_new().is_err());
+        #[cfg(unix)]
+        for target in [path.clone(), root.join("absent-target")] {
+            let link = root.join(format!(
+                "link-{}",
+                target.file_name().unwrap().to_string_lossy()
+            ));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(prepared_bytes(fs.clone(), &link, 7).commit_new().is_err());
+            assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        }
+        assert!(!root.join("absent-target").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), vec![winners[0]; 4096]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
