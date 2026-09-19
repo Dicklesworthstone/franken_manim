@@ -21,6 +21,10 @@ mod live_tex;
 mod method_cache;
 pub mod perf_harness;
 mod portal_audio;
+#[cfg(any(test, feature = "gauntlet"))]
+mod portal_console;
+#[cfg(feature = "gauntlet")]
+pub use portal_console::run_portal_gauntlet_console;
 mod portal_playback;
 mod portal_studio;
 mod portal_svg;
