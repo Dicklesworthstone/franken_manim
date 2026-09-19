@@ -15,7 +15,9 @@ from fmn_python import render_scene
 
 
 def nested_text():
-    text = m.Text("alpha beta", font_size=36)
+    # Keep glyph interiors resolvable at this deliberately small frame size.
+    # A 36-point glyph is only a few antialiased pixels tall at 192x108.
+    text = m.Text("alpha beta", font_size=144)
     old_paths = [list(path) for path in text._string_sub_paths]
     assert old_paths and len(old_paths) == len(text._string_sub_spans)
     inner = m.VGroup(*list(text.submobjects))
@@ -110,6 +112,8 @@ for scene_type in (RevealScene, CustomWordReveal, CustomLetterReveal):
         frames = luma_frames(result.destination)
         assert len(frames) == 4
         counts = [int(np.count_nonzero(frame > 180)) for frame in frames]
+        print(scene_type.__name__, "threads=", threads, "bright_pixels=", counts,
+              "peak_luma=", [int(frame.max()) for frame in frames], flush=True)
         assert counts == sorted(counts), counts
         assert counts[-1] > counts[0], counts
         assert len(set(counts)) >= 3, counts
