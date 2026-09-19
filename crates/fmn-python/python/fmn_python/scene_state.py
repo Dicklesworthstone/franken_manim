@@ -239,6 +239,9 @@ def install_scene_state(native: Any) -> None:
     def n_changes(self, state):
         if not isinstance(state, State):
             raise TypeError("n_changes expects a SceneState")
+        if self is state:
+            return sum(not _same_mobject(np, mob, saved)
+                       for mob, saved in self.mobjects_to_copies.items())
         other = state.mobjects_to_copies
         # Compare two captured states, not a source object edited afterward.
         count = sum(mob not in other
@@ -276,13 +279,10 @@ def install_scene_state(native: Any) -> None:
             frame.updaters[:] = updaters
 
     for name, function in {
-        "__init__": initialize, "__eq__": equals, "mobjects_match": mobjects_match,
+        "__init__": initialize, "mobjects_match": mobjects_match,
         "n_changes": n_changes, "restore_scene": restore,
     }.items():
         _method(State, name, function)
-    # Defining equality on the existing class must also disable its inherited
-    # identity hash, exactly as a normal Python class definition would.
-    State.__hash__ = None
     _install_history(Scene)
     g["_FMN_SCENE_STATE_INSTALLED"] = True
 
@@ -312,11 +312,6 @@ def _install_history(Scene):
             self.redo_stack.clear()
             return self
         state = self.get_state()
-        if self.undo_stack and state.mobjects_match(self.undo_stack[-1]):
-            trim(self.undo_stack, maximum)
-            return self
-        # A new edit branches from the current state; old redo entries no
-        # longer describe its future. Keep externally retained list aliases.
         self.redo_stack.clear()
         self.undo_stack.append(state)
         trim(self.undo_stack, maximum)
