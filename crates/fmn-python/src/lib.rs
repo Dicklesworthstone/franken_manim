@@ -10914,7 +10914,7 @@ pub(crate) fn with_python_test_module<T>(
         assert!(
             before
                 .iter()
-                .all(|name| name != "manimlib" && !name.starts_with("manimlib.")),
+                .all(|name| !name.starts_with("manimlib")),
             "{suite}: a prior Python suite leaked manimlib modules"
         );
         let videos_ref = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -11001,7 +11001,7 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
 
         let after = module_names().expect("snapshot suite-added modules");
         for name in after.difference(&before) {
-            let is_manimlib = name == "manimlib" || name.starts_with("manimlib.");
+            let is_manimlib = name.starts_with("manimlib");
             let is_corpus_module = videos_ref.as_ref().is_some_and(|root| {
                 modules
                     .get_item(name)
@@ -11101,7 +11101,7 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
             module_names()
                 .expect("verify restored sys.modules")
                 .iter()
-                .all(|name| name != "manimlib" && !name.starts_with("manimlib.")),
+                .all(|name| !name.starts_with("manimlib")),
             "{suite}: embedded Python suite left a manimlib module installed"
         );
 

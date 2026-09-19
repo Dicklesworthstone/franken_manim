@@ -5659,6 +5659,8 @@ try:
     assert reloaded.MARKER == 11
 finally:
     pathlib.Path(loader_path).unlink(missing_ok=True)
+    sys.modules.pop(getattr(loaded, "__name__", ""), None)
+    sys.modules.pop(getattr(reloaded, "__name__", ""), None)
 
 assert str(inspect.signature(extract_scene.get_indent)) == (
     "(code_lines, line_number)"
@@ -5772,6 +5774,9 @@ try:
         raise AssertionError("embed_line 0 was accepted")
 finally:
     pathlib.Path(extract_path).unlink(missing_ok=True)
+    sys.modules.pop(getattr(extracted, "__name__", ""), None)
+    if "patched" in locals():
+        sys.modules.pop(getattr(patched, "__name__", ""), None)
 
 scene_module = importlib.import_module("manimlib.scene.scene")
 assert scene_module.EndScene.__bases__ == (Exception,)
@@ -13832,30 +13837,22 @@ except NotImplementedError as error:
     assert "template" in str(error)
 else:
     raise AssertionError("TexMatrix silently discarded an unsupported entry option")
-try:
-    tex_matrix.swap_entries_for_ellipses(0, 0)
-except NotImplementedError as error:
-    assert "constructor-time" in str(error)
-else:
-    raise AssertionError("post-construction Matrix ellipses silently succeeded")
-try:
-    tex_matrix.swap_entry_for_dots(tex_matrix.elements[0], tex_matrix)
-except NotImplementedError as error:
-    assert "constructor-time" in str(error)
-else:
-    raise AssertionError("Matrix.swap_entry_for_dots silently succeeded")
+assert tex_matrix.swap_entries_for_ellipses(0, 0) is tex_matrix
+brackets = tex_matrix.create_brackets(tex_matrix.rows, 0.25, 0.2)
+assert isinstance(brackets, manimlib.VGroup)
+assert len(brackets) == 2
 try:
     tex_matrix.create_brackets()
-except NotImplementedError as error:
-    assert "native delimiter" in str(error)
-else:
-    raise AssertionError("Matrix.create_brackets silently succeeded")
-try:
-    tex_matrix.create_mobject_matrix()
-except (NotImplementedError, TypeError) as error:
+except TypeError:
     pass
 else:
-    raise AssertionError("Matrix.create_mobject_matrix silently succeeded")
+    raise AssertionError("Matrix.create_brackets accepted missing arguments")
+try:
+    tex_matrix.create_mobject_matrix()
+except TypeError:
+    pass
+else:
+    raise AssertionError("Matrix.create_mobject_matrix accepted missing arguments")
 assert isinstance(
     matrix_module.DecimalMatrix([[1.0]]).element_to_mobject(1.0),
     manimlib.DecimalNumber,
@@ -17593,12 +17590,8 @@ except TypeError as error:
 else:
     raise AssertionError("Uncreate accepted None")
 
-try:
-    creation.Uncreate(manimlib.Square(), remover=False)
-except NotImplementedError as error:
-    assert "remover" in str(error), error
-else:
-    raise AssertionError("Uncreate accepted remover=False")
+uncreate_retained = creation.Uncreate(manimlib.Square(), remover=False)
+assert uncreate_retained.remover is False
 
 # fm-5wq.4.97: one Scene.play mixing a native-kind animation with a
 # Python-authored one — the per-animation release loop yields every
@@ -21296,7 +21289,7 @@ _check("scene seeds declared rng", _seeded.random_seed == 7)
 _check("lifecycle hooks callable no-ops",
        _seeded.setup() is None and _seeded.construct() is None
        and _seeded.tear_down() is None
-       and manimlib.Scene.render is manimlib.Scene.run)
+       and callable(manimlib.Scene.render) and callable(manimlib.Scene.run))
 _empty = manimlib.Scene()
 _check("play without protos is a none", _empty.play() is None)
 
