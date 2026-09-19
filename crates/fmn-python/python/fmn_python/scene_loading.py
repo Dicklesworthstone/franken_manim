@@ -74,6 +74,8 @@ class _FreshNamespace(importlib.machinery.NamespaceLoader):
 
     def exec_module(self, module: ModuleType) -> None:
         module.__file__ = None
+        if self.owner._reload_inputs is not None:
+            self.owner._reload_inputs.remember_parent(module.__name__)
         self.owner._loaded[module.__name__] = module
         super().exec_module(module)
 
@@ -86,8 +88,9 @@ class _FreshSource(importlib.machinery.SourceFileLoader):
     def get_code(self, fullname: str):
         # Timestamp/size-based pyc validation can miss an equal-length edit in
         # the same timestamp tick. Compile exactly the bytes observed here.
-        source = self.get_data(self.path)
         path = Path(self.path).resolve()
+        inputs = self.owner._reload_inputs
+        source = self.get_data(self.path) if inputs is None else inputs.read(path)
         digest = hashlib.sha256(source).hexdigest()
         # Check the exact bytes about to execute, not just a scan after import.
         # Failed code must not get to run top-level authored effects first.
@@ -97,6 +100,8 @@ class _FreshSource(importlib.machinery.SourceFileLoader):
         return code
 
     def exec_module(self, module: ModuleType) -> None:
+        if self.owner._reload_inputs is not None:
+            self.owner._reload_inputs.remember_parent(module.__name__)
         self.owner._loaded[module.__name__] = module
         super().exec_module(module)
 
@@ -192,6 +197,8 @@ class SceneSource:
         self._finder = _ProjectFinder(self)
         self._entered = False
         self._active = False
+        self._owner_thread = None
+        self._reload_inputs = None
 
     @staticmethod
     def _freeze_inputs(values):
@@ -274,7 +281,7 @@ class SceneSource:
         self._source_bytes[path] = source
         self._source_capture_bytes += len(source)
 
-    def _prepare(self) -> None:
+    def _check_collisions(self) -> None:
         # A pre-existing foreign package must not redirect relative imports to
         # another checkout. Refuse before executing either project's code.
         if self.package:
@@ -298,6 +305,8 @@ class SceneSource:
                     if (candidate != self.path and candidate.is_file()
                             and _origin(module) != candidate.resolve()):
                         raise ImportError(f"scene project module {name!r} is already loaded from another location")
+    def _prepare(self) -> None:
+        self._check_collisions()
         for name, module in tuple(sys.modules.items()):
             # Never evict the active engine even if a scene was placed in its
             # installation tree. That would fork native class identity.
@@ -365,6 +374,7 @@ class SceneSource:
         if not _SOURCE_OWNER.acquire(blocking=False):
             raise RuntimeError("another scene source owns this interpreter's import context")
         self._entered = self._active = True
+        self._owner_thread = threading.get_ident()
         try:
             self._prepare()
             self.module = self._load()
@@ -378,7 +388,18 @@ class SceneSource:
             self.__exit__(*sys.exc_info())
             raise
 
+    def reload(self, *, if_changed: bool = False) -> ModuleType:
+        """Refresh project definitions without replacing an existing live Scene.
+
+        Imports are rolled back on failure, not arbitrary authored host effects.
+        A changed reload invalidates a one-version-per-path source manifest.
+        """
+        from .source_reload import reload_source
+        return reload_source(self, if_changed=if_changed)
+
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        if self._reload_inputs is not None:
+            raise RuntimeError("cannot close a scene source during reload")
         if not self._active:
             return False
         try:

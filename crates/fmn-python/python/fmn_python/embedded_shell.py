@@ -161,7 +161,13 @@ def install_embedded_shell(native):
             namespace.setdefault("scene", self.scene)
             namespace.setdefault("self", self.scene)
             user_module = ModuleType("_fmn_scene_embed")
-            user_module.__dict__.update(namespace)
+            # IPython registers user_module under its __name__. Copying the
+            # scene's identity would replace the active SceneSource module in
+            # sys.modules. Keep only package/file context for relative imports.
+            user_module.__dict__.update({
+                key: value for key, value in namespace.items()
+                if key not in {"__name__", "__spec__", "__loader__"}
+            })
             cls = module.InteractiveShellEmbed
             # Constructing IPython changes sys.excepthook and singleton state.
             # Creating a shell must not replace a notebook's active shell.
