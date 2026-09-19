@@ -5,13 +5,15 @@ on:
     paths:
       - '.github/workflows/studio-input-identity.yml'
       - 'scripts/apply_studio_input_identity.py'
+      - 'scripts/apply_studio_live_identity.py'
+      - 'scripts/patches/studio-live-input-identity.rs'
       - 'crates/fmn-python/python/fmn_python/studio_inputs.py'
       - 'crates/fmn-python/tests/studio_input_identity.py'
   workflow_dispatch:
 permissions:
   contents: write
 concurrency:
-  group: studio-input-identity
+  group: studio-input-identity-arm
   cancel-in-progress: false
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
@@ -19,7 +21,7 @@ env:
   PYO3_PYTHON: python
 jobs:
   native:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -29,9 +31,13 @@ jobs:
       - name: Connect declared input snapshots to native capture
         run: |
           set -euo pipefail
-          python scripts/apply_studio_input_identity.py
+          if ! grep -q 'pub fn content_fingerprint' crates/fmn-studio/src/project_watch.rs; then
+            python scripts/apply_studio_input_identity.py
+          fi
+          python scripts/apply_studio_live_identity.py
+          cp scripts/patches/studio-live-input-identity.rs crates/fmn-python/src/portal_studio/live_input_identity_tests.rs
           cp scripts/patches/studio-source-identity.rs crates/fmn-studio/tests/source_identity.rs
-          git add crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/python/fmn_python/studio.py crates/fmn-python/tests/test_studio_protocol.py
+          git add crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/python/fmn_python/studio.py crates/fmn-python/tests/test_studio_protocol.py crates/fmn-python/src/portal_studio/live.rs crates/fmn-python/src/portal_studio/live_input_identity_tests.rs
           git diff --cached --check
           git rev-parse HEAD > /tmp/studio-source-parent.txt
           git ls-files -z | tar --null -T - -czf /tmp/studio-source.tar.gz
@@ -60,11 +66,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/src/portal_studio/live.rs crates/fmn-python/src/portal_studio/live_input_identity_tests.rs
           PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest -v test_studio_inputs_protocol test_studio_protocol
           cargo test --locked -p fmn-studio --test source_identity
           cargo test --locked -p fmn-studio project_watch::tests
           cargo test --locked -p fmn-python portal_studio_capture_uses_stepped_scene_and_native_inspector
+          cargo test --locked -p fmn-python portal_studio_live_
           python -m maturin build --locked --profile dev --out /tmp/studio-wheels
           python -m pip install --no-deps --force-reinstall /tmp/studio-wheels/*.whl
           python crates/fmn-python/tests/studio_input_identity.py
@@ -73,11 +80,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/python/fmn_python/studio.py crates/fmn-python/tests/test_studio_protocol.py
+          git add crates/fmn-studio/src/project_watch.rs crates/fmn-studio/tests/source_identity.rs crates/fmn-python/src/portal_studio.rs crates/fmn-python/python/fmn_python/studio.py crates/fmn-python/tests/test_studio_protocol.py crates/fmn-python/src/portal_studio/live.rs crates/fmn-python/src/portal_studio/live_input_identity_tests.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(studio): bind native captures to package and asset generations'
+            git commit -m 'feat(studio): enforce project generation identity across capture and live callbacks'
             git push origin HEAD:main
           fi
           git rev-parse HEAD
