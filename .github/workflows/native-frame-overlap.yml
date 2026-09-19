@@ -6,6 +6,7 @@ on:
       - '.github/workflows/native-frame-overlap.yml'
       - 'scripts/patches/native-frame-overlap.patch'
       - 'scripts/patches/portal-frame-overlap.patch'
+      - 'scripts/patches/frame-pipeline-acceptance.patch'
       - 'crates/fmn-runtime/src/stream.rs'
       - 'crates/fmn-python/src/portal_pipeline.rs'
       - 'crates/fmn-python/tests/frame_pipeline.py'
@@ -36,9 +37,13 @@ jobs:
             git apply --check scripts/patches/native-frame-overlap.patch
             git apply scripts/patches/native-frame-overlap.patch
           fi
-          if test -f scripts/patches/portal-frame-overlap.patch && ! grep -q '^mod portal_pipeline;' crates/fmn-python/src/lib.rs; then
+          if ! grep -q '^mod portal_pipeline;' crates/fmn-python/src/lib.rs; then
             git apply --check scripts/patches/portal-frame-overlap.patch
             git apply scripts/patches/portal-frame-overlap.patch
+          fi
+          if ! grep -q '^pub use portal_pipeline::run_portal_gauntlet_frame_pipeline;' crates/fmn-python/src/lib.rs; then
+            git apply --check scripts/patches/frame-pipeline-acceptance.patch
+            git apply scripts/patches/frame-pipeline-acceptance.patch
           fi
           git diff --check
           git rev-parse HEAD
@@ -67,31 +72,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs crates/fmn-conformance/tests/e2e_scenarios.rs
+          cargo check --locked -p fmn-python --tests
           cargo test --locked -p fmn-runtime
           cargo test --locked -p fmn-render --lib retained::tests
           cargo test --locked -p fmn-render --test texture_pairs
-          if test -f crates/fmn-python/src/portal_pipeline.rs; then
-            rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs
-            cargo test --locked -p fmn-python portal_pipeline -- --nocapture
-            python -m maturin build --locked --profile dev --out /tmp/frame-overlap-wheels
-            python -m pip install --no-deps --force-reinstall /tmp/frame-overlap-wheels/*.whl
-            python crates/fmn-python/tests/frame_pipeline.py
-            python crates/fmn-python/tests/native_outputs.py
-            python crates/fmn-python/tests/batch_rendering.py
-            python crates/fmn-python/tests/batch_checkpoint_acceptance.py
-            python crates/fmn-python/tests/svg_output.py
-            python crates/fmn-python/tests/texture_pairs.py
-          fi
+          cargo test --locked -p fmn-python portal_pipeline -- --nocapture
+          cargo test --locked -p fmn-conformance --test e2e_scenarios python_frame_pipeline_scenario_passes -- --nocapture
+          python -m maturin build --locked --profile dev --out /tmp/frame-overlap-wheels
+          python -m pip install --no-deps --force-reinstall /tmp/frame-overlap-wheels/*.whl
+          python crates/fmn-python/tests/frame_pipeline.py
+          python crates/fmn-python/tests/native_outputs.py
+          python crates/fmn-python/tests/batch_rendering.py
+          python crates/fmn-python/tests/batch_checkpoint_acceptance.py
+          python crates/fmn-python/tests/svg_output.py
+          python crates/fmn-python/tests/texture_pairs.py
+          cargo clippy --locked -p fmn-runtime -p fmn-render -p fmn-python --lib -- -D warnings
           git diff --check
       - name: Commit tested native integration directly to main
         shell: bash
         run: |
           set -euo pipefail
-          git add Cargo.lock crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs
-          if test -f crates/fmn-python/src/portal_pipeline.rs; then
-            git add crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs
-          fi
+          git add Cargo.lock crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs crates/fmn-python/tests/frame_pipeline.py crates/fmn-conformance/tests/e2e_scenarios.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
