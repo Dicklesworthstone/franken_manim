@@ -56,6 +56,13 @@ jobs:
       - name: Implement and test create-only native publication
         run: |
           set -euo pipefail
+          # The existing provenance build script already depends on fmn-hash.
+          # Repair only that missing workspace edge; keep package pins unchanged.
+          if git apply --include=Cargo.lock --check scripts/patches/live-recording-integration.patch; then
+            git apply --include=Cargo.lock scripts/patches/live-recording-integration.patch
+          else
+            git apply --include=Cargo.lock --reverse --check scripts/patches/live-recording-integration.patch
+          fi
           if ! grep -q 'pub fn publish_wav_new' crates/fmn-output/src/sinks.rs; then
             python - <<'PY'
           from pathlib import Path
@@ -77,7 +84,7 @@ jobs:
       - name: Commit tested filesystem and output implementation directly to main
         run: |
           set -euo pipefail
-          git add crates/fmn-platform/src/fs.rs crates/fmn-output/src/ffmpeg.rs crates/fmn-output/src/lib.rs crates/fmn-output/src/sinks.rs crates/fmn-output/tests/sinks.rs
+          git add Cargo.lock crates/fmn-platform/src/fs.rs crates/fmn-output/src/ffmpeg.rs crates/fmn-output/src/lib.rs crates/fmn-output/src/sinks.rs crates/fmn-output/tests/sinks.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -97,8 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           if ! grep -qx 'mod portal_recording;' crates/fmn-python/src/lib.rs; then
-            git apply --check scripts/patches/live-recording-integration.patch
-            git apply scripts/patches/live-recording-integration.patch
+            git apply --exclude=Cargo.lock --check scripts/patches/live-recording-integration.patch
+            git apply --exclude=Cargo.lock scripts/patches/live-recording-integration.patch
           fi
           if ! grep -q '"RecordingSession", "record_scene"' crates/fmn-python/python/fmn_python/__init__.py; then
             git apply --check scripts/patches/live-recording-api.patch
@@ -121,6 +128,7 @@ jobs:
           python crates/fmn-python/tests/batch_rendering.py
           PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_recording_protocol test_scene_console_protocol test_scene_console_ipython test_embedded_shell_protocol test_embedded_shell_ipython test_scene_console_worker
           FMN_REQUIRE_FFMPEG=1 python crates/fmn-python/tests/recording_sessions.py
+          FMN_REQUIRE_FFMPEG=1 python crates/fmn-python/tests/output_no_clobber.py
           git diff --check
       - name: Commit tested native recording integration directly to main
         run: |
