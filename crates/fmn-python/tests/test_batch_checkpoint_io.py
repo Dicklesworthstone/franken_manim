@@ -73,6 +73,20 @@ class CheckpointIoTests(unittest.TestCase):
         self.assertEqual(self.fixture.calls, [])
         self.assertTrue(self.fixture.run_batch(resume=True).ok)
 
+    def test_checkpoint_and_lock_cannot_obstruct_output_ancestors(self):
+        for checkpoint, output in (
+            (self.fixture.output, self.fixture.output),
+            (self.fixture.journal, self.fixture.journal.with_name(self.fixture.journal.name + ".lock")),
+        ):
+            with self.subTest(checkpoint=checkpoint, output=output):
+                with self.assertRaisesRegex(ValueError, "outside published artifacts"):
+                    fixtures.batch.render_scenes(
+                        self.fixture.jobs, output, format="png", resolution=(96, 54),
+                        fps=8, threads=1, checkpoint=checkpoint, resume_key="inputs-v1")
+                self.assertFalse(checkpoint.exists())
+                self.assertFalse(output.exists())
+        self.assertEqual(self.fixture.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

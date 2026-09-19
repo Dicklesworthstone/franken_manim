@@ -5,8 +5,10 @@ import io
 import json
 from pathlib import Path
 import sys
+import struct
 import tempfile
 import traceback
+import wave
 
 import manimlib
 from fmn_python import BatchRenderError, render_scenes
@@ -14,11 +16,14 @@ from fmn_python.__main__ import main
 
 CALLS = []
 FAIL = True
+SOUND = None
 
 
 class Motion(manimlib.Scene):
     def construct(self):
         CALLS.append("motion")
+        if SOUND is not None:
+            self.add_sound(str(SOUND))
         square = manimlib.Square(side_length=1, fill_color=manimlib.WHITE,
                                 fill_opacity=1, stroke_width=0)
         self.add(square)
@@ -42,8 +47,19 @@ def inventory(path):
 
 
 def real_output_resume(root, format):
-    global FAIL
+    global FAIL, SOUND
     FAIL = True
+    SOUND = None
+    root.mkdir(parents=True)
+    if format == "wav":
+        # WAV publication deliberately refuses scenes without add_sound cues.
+        # This is a test input fixture, not an alternative output encoder.
+        SOUND = root / "source.wav"
+        with wave.open(str(SOUND), "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(48000)
+            stream.writeframes(struct.pack("<hh", 4000, -4000) * 3000)
     CALLS.clear()
     jobs = {"first": Motion, "recover": Recoverable, "last": Motion}
     options = dict(format=format, resolution=(96, 54), fps=8, threads=1,
@@ -60,6 +76,12 @@ def real_output_resume(root, format):
     assert before, "expected a real native publication"
     if format != "png_sequence":
         assert first.result.digest == before[0][2]
+    if format == "wav":
+        assert first.result.sample_frames > 0
+        assert len(first.result.audio_inputs) == 1
+        assert first.result.audio_inputs[0]["decoder"] == "native-wav"
+        assert first.result.audio_inputs[0]["source_sha256"] == hashlib.sha256(SOUND.read_bytes()).hexdigest()
+        assert not first.result.ffmpeg_invocations
     FAIL = False
     CALLS.clear()
     result = render_scenes(jobs, root / "output", resume=True, **options)

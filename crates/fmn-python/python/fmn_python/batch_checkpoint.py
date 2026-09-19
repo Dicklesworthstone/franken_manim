@@ -185,7 +185,8 @@ class BatchCheckpoint:
     def validate_destinations(self, destinations):
         for destination in destinations:
             for own_path in (self.path, self.lock_path):
-                if own_path == destination or destination in own_path.parents:
+                if (own_path == destination or destination in own_path.parents
+                        or own_path in destination.parents):
                     raise ValueError("checkpoint and its lock must be outside published artifacts")
 
     def prepare(self, jobs, destinations, options):
