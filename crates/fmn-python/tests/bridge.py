@@ -7359,9 +7359,14 @@ grow_point.path_arc = 0.0
 grow_point_source.shift(2.0 * manimlib.RIGHT)
 grow_point_identity = id(grow_point_source)
 grow_point_samples = []
+import traceback
+grow_point_stacks = []
 grow_point_source.add_updater(
-    lambda mob: grow_point_samples.append(
-        (mob.get_center().copy(), mob.get_width(), mob.get_color())
+    lambda mob: (
+        grow_point_samples.append(
+            (mob.get_center().copy(), mob.get_width(), mob.get_color())
+        ),
+        grow_point_stacks.append("".join(traceback.format_stack())),
     ),
     call=False,
 )
@@ -7373,7 +7378,7 @@ grow_point_scene.play(
 )
 assert id(grow_point_source) == grow_point_identity
 assert grow_point_scene.get_mobjects()[0] is grow_point_source
-assert len(grow_point_samples) == 3
+assert len(grow_point_samples) == 3, f"actual={len(grow_point_samples)}, samples={grow_point_samples}, stacks={'---'.join(grow_point_stacks)}"
 assert np.allclose(grow_point_samples[0][0], manimlib.ORIGIN)
 assert np.isclose(grow_point_samples[0][1], 1.0)
 assert grow_point_samples[0][2] not in (manimlib.RED, manimlib.BLUE)
