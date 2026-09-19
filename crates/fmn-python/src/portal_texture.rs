@@ -171,6 +171,27 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Run the native textured-surface pixel witness for the permanent Gauntlet.
+///
+/// # Errors
+/// Returns the authored test failure if geometry, rendering or publication drifts.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_textures() -> Result<(Vec<u8>, Vec<u8>), String> {
+    crate::with_python_test_module("texture gauntlet", |py, _module, globals| {
+        let source = CString::new(include_str!("../tests/textured_surfaces.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("verify_textured_rendering")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "texture rendering witness is missing".to_owned())?
+            .call0()
+            .and_then(|value| value.extract())
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,25 +241,4 @@ mod tests {
                 .unwrap();
         });
     }
-}
-
-/// Run the native textured-surface pixel witness for the permanent Gauntlet.
-///
-/// # Errors
-/// Returns the authored test failure if geometry, rendering or publication drifts.
-#[cfg(feature = "gauntlet")]
-pub fn run_portal_gauntlet_textures() -> Result<(Vec<u8>, Vec<u8>), String> {
-    crate::with_python_test_module("texture gauntlet", |py, _module, globals| {
-        let source = CString::new(include_str!("../tests/textured_surfaces.py"))
-            .map_err(|error| error.to_string())?;
-        py.run(source.as_c_str(), Some(globals), Some(globals))
-            .map_err(|error| error.to_string())?;
-        globals
-            .get_item("verify_textured_rendering")
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "texture rendering witness is missing".to_owned())?
-            .call0()
-            .and_then(|value| value.extract())
-            .map_err(|error| error.to_string())
-    })
 }
