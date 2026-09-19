@@ -1,8 +1,6 @@
-"""Real native SceneState and Lumen witnesses for the host cell front door.
+"""Public native SceneConsole acceptance; no camera/storage/IPython doubles."""
+from __future__ import annotations
 
-Run against the installed wheel or through the Rust/Gauntlet entry point.
-No renderer, snapshot, callback, camera or native record is substituted.
-"""
 import numpy as np
 import manimlib as m
 from fmn_python import SceneConsole
@@ -98,11 +96,28 @@ def run_console_acceptance():
     shape = m.Square()
     interactive.add(shape)
     initial = shape.get_center().copy()
+    widgets = ("selection_highlight", "selection_rectangle", "crosshair")
+    assert all(not hasattr(interactive, name) for name in widgets)
+    before_clock = m._portal_scene_clock(interactive)
     with SceneConsole(interactive, {"shape": shape, "RIGHT": m.RIGHT},
                       clipboard=lambda: "# public\nshape.shift(RIGHT)", capture=False):
         interactive.checkpoint_paste()
         interactive.checkpoint_paste()
         np.testing.assert_allclose(shape.get_center(), initial + m.RIGHT, atol=1e-6)
+        assert all(not hasattr(interactive, name) for name in widgets)
+        assert m._portal_scene_clock(interactive) == before_clock
+        # Undo/redo share the same pre-setup checkpoint path, including time.
+        interactive.save_state()
+        interactive.wait(.125)
+        later = m._portal_scene_clock(interactive)
+        shape.shift(m.RIGHT)
+        interactive.undo()
+        assert m._portal_scene_clock(interactive) == before_clock
+        np.testing.assert_allclose(shape.get_center(), initial + m.RIGHT, atol=1e-6)
+        interactive.redo()
+        assert m._portal_scene_clock(interactive) == later
+        np.testing.assert_allclose(shape.get_center(), initial + 2 * m.RIGHT, atol=1e-6)
+        assert all(not hasattr(interactive, name) for name in widgets)
     try:
         interactive.checkpoint_paste()
     except m._CapabilityError:

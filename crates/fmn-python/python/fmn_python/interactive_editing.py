@@ -19,7 +19,6 @@ def install_interactive_editing(native: Any) -> None:
     if g.get("_FMN_INTERACTIVE_EDITING_INSTALLED", False):
         return
     Scene, Interactive, np = g["Scene"], g["InteractiveScene"], g["_np"]
-    old_restore = Interactive.restore_state
     primary = g["_PYGLET_MOD_CTRL"] | g["_PYGLET_MOD_COMMAND"]
     shift, control = g["_PYGLET_MOD_SHIFT"], g["_PYGLET_MOD_CTRL"]
 
@@ -363,8 +362,24 @@ def install_interactive_editing(native: Any) -> None:
         elif char == k.information:
             self.display_information(False)
 
+    def get_state(self):
+        # Host-owned notebooks and consoles can edit a Scene before run/setup.
+        # Snapshot only the overlays which actually exist; taking a checkpoint
+        # must not initialize UI, run authored setup or change drawable roots.
+        overlays = [getattr(self, name, None) for name in (
+            "selection_highlight", "selection_rectangle", "crosshair",
+        )]
+        return g["SceneState"](self, ignore=[mob for mob in overlays if mob is not None])
+
     def restore_state(self, scene_state):
-        old_restore(self, scene_state)
+        # Use the existing Scene/SceneState authority even before interactive
+        # widgets have been initialized. Do not call setup as a repair: authored
+        # setup may allocate content, consume RNG, or overwrite user objects.
+        Scene.restore_state(self, scene_state)
+        highlight = getattr(self, "selection_highlight", None)
+        if highlight is not None:
+            self.add(highlight)
+            self.bring_to_back(highlight)
         cancel(self)
         self.is_selecting = False
         self.__dict__.pop("_fmn_selection_swept", None)
@@ -376,7 +391,7 @@ def install_interactive_editing(native: Any) -> None:
         "prepare_resizing": prepare_resizing, "handle_resizing": handle_resizing,
         "on_mouse_motion": on_mouse_motion, "on_mouse_drag": on_mouse_drag,
         "on_key_press": on_key_press, "on_key_release": on_key_release,
-        "restore_state": restore_state,
+        "get_state": get_state, "restore_state": restore_state,
         "regenerate_selection_search_set": regenerate_selection_search_set,
         "gather_new_selection": gather_new_selection,
         "handle_sweeping_selection": handle_sweeping_selection,
