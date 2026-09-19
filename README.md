@@ -259,11 +259,12 @@ fmn-python scene.py SquareToCircle --format gif            # native animated GIF
 fmn-python scene.py SquareToCircle --format y4m            # native YUV video stream
 fmn-python scene.py SquareToCircle --format png_sequence \
   --resolution 640x360 --fps 30 --threads 4 --video_dir ./media
+fmn-python studio scene.py SquareToCircle                  # browser Studio: scrub, inspect, overlays
 ```
 
 The portal commands below are the **1.0 target contract**, not shipped behavior:
 today they fail closed with capability exit 4, because their input-closure,
-provenance, opener, output, or worker contracts have not landed
+provenance, opener, or render-flag contracts have not landed
 ([wheel policy](docs/dist/python_wheel.md)).
 
 ```bash
@@ -276,9 +277,8 @@ fmn-python scene.py SquareToCircle --uhd --transparent --vcodec prores_ks   # 1.
 # Certified determinism: the whole input closure content-hashed, bits promised
 fmn-python scene.py SquareToCircle --reproducible     # + sidecar provenance manifest
 
-# Live iteration: supervisor + crash-isolated worker, checkpoint replay
+# Standalone scene autoreload without Studio
 fmn-python scene.py SquareToCircle --autoreload
-fmn-python studio scene.py                     # browser Studio: scrub, inspect, overlays
 ```
 
 ## The browser demo (W5 wasm tier 1)
@@ -397,6 +397,9 @@ fmn-python hello.py Hello --format png_sequence --video_dir ./media
 
 # 3. Look at the frames it atomically published
 sha256sum ./media/**/*.png
+
+# 4. Iterate live with crash isolation, scrub and inspect in browser Studio
+fmn-python studio hello.py Hello
 ```
 
 The rest of the loop is the **1.0 target** and fails closed today with capability
@@ -408,9 +411,6 @@ fmn-python hello.py Hello -o
 
 # Prove it's reproducible: same bytes on your laptop and your server
 fmn-python hello.py Hello --reproducible
-
-# Iterate live with crash isolation and scrubbing
-fmn-python studio hello.py
 ```
 
 ## Configuration
