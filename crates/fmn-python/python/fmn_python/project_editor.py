@@ -74,8 +74,12 @@ def _check_editor(embedded, project):
     if shell is None or console.shell is not shell or type(shell.user_ns) is not dict:
         raise RuntimeError("scene reconstruction requires its active shell namespace")
     identity = vars(embedded).get("_fmn_project_shell")
-    if (identity is None or shell is not identity[0]
-            or shell.user_module is not identity[1]):
+    if identity is None or shell is not identity[0]:
+        raise RuntimeError("scene reconstruction cannot replace its owning shell module")
+    user_module = shell.user_module
+    module_dict = getattr(user_module, "__dict__", None)
+    underlying = getattr(module_dict, "_module_dict", None)
+    if user_module is not identity[1] and underlying is not getattr(identity[1], "__dict__", None):
         raise RuntimeError("scene reconstruction cannot replace its owning shell module")
     return console
 

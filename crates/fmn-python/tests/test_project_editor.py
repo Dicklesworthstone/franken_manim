@@ -489,7 +489,8 @@ class ProjectEditCliTests(unittest.TestCase):
         self.native._portal_cli_emit = emit
 
     def run_cli(self, *args, terminal=True):
-        with patch.object(sys, 'stdin', SimpleNamespace(isatty=lambda: terminal)):
+        with patch.object(sys, 'stdin', SimpleNamespace(isatty=lambda: terminal, fileno=lambda: 0,
+                                                        encoding="utf-8", errors="replace")):
             return try_edit_cli(self.native, list(args))
 
     def test_help_does_not_import_authored_source_or_open_shell(self):

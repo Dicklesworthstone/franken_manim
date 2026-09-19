@@ -92,7 +92,11 @@ class _Controller:
             raise RuntimeError("embedded source reload belongs to its creating thread")
         if self.worker_context.get():
             raise self.native._CapabilityError("Studio worker sources reload through their supervisor, not host cells")
-        if (embedded.shell is not self.shell or self.shell.user_module is not self.module
+        user_module = self.shell.user_module
+        module_dict = getattr(user_module, "__dict__", None)
+        underlying = getattr(module_dict, "_module_dict", None)
+        if (embedded.shell is not self.shell
+                or (user_module is not self.module and underlying is not getattr(self.module, "__dict__", None))
                 or (self.namespace is not None and self.shell.user_ns is not self.namespace)):
             raise RuntimeError("source reload cannot switch its owning shell or namespace")
         scene = embedded.scene
