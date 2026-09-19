@@ -163,6 +163,8 @@ def install_traced_path(native: Any) -> None:
     method(Trace, "update_path", update_path)
     Tail = g.get("TracingTail")
     if Tail is not None:
+        original_tail_init = getattr(Tail, "__init__", None)
+
         def tail_init(self, mobject_or_func, time_traced=1.0, stroke_color=None,
                       stroke_width=(0, 3), stroke_opacity=(0, 1), time_per_anchor=1.0 / 15, **kwargs):
             if not isinstance(mobject_or_func, g["Mobject"]) and not callable(mobject_or_func):
@@ -173,6 +175,21 @@ def install_traced_path(native: Any) -> None:
             anchor_dt = float(time_per_anchor)
             if not math.isfinite(anchor_dt) or anchor_dt <= 0:
                 raise ValueError("TracingTail time_per_anchor must be finite and positive")
+            if (
+                isinstance(mobject_or_func, g["Mobject"])
+                and hasattr(self, "_init_native_tracer")
+                and original_tail_init is not None
+            ):
+                return original_tail_init(
+                    self,
+                    mobject_or_func,
+                    time_traced=time_traced,
+                    stroke_color=stroke_color,
+                    stroke_width=stroke_width,
+                    stroke_opacity=stroke_opacity,
+                    time_per_anchor=anchor_dt,
+                    **kwargs,
+                )
             source = mobject_or_func.get_center if isinstance(mobject_or_func, g["Mobject"]) else mobject_or_func
             # A tail has a finite duration; an unbounded trace is TracedPath.
             window, spacing = _parameters(time_traced, anchor_dt)
