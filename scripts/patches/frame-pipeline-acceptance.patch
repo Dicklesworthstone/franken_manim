@@ -147,7 +147,7 @@ diff --git a/crates/fmn-python/tests/frame_pipeline.py b/crates/fmn-python/tests
 diff --git a/crates/fmn-python/src/portal_pipeline.rs b/crates/fmn-python/src/portal_pipeline.rs
 --- a/crates/fmn-python/src/portal_pipeline.rs
 +++ b/crates/fmn-python/src/portal_pipeline.rs
-@@ -88,6 +88,27 @@
+@@ -88,6 +88,26 @@
      if let Some(emitter) = emitter { let _ = emitter.finish(); }
  }
  
@@ -157,7 +157,6 @@ diff --git a/crates/fmn-python/src/portal_pipeline.rs b/crates/fmn-python/src/po
 +pub fn run_portal_gauntlet_frame_pipeline() -> Result<(Vec<u8>, Vec<u8>), String> {
 +    crate::with_python_test_module("native file frame pipeline", |py, _module, globals| {
 +        use pyo3::prelude::*;
-+        use pyo3::types::PyDictMethods as _;
 +        globals.set_item("__file__", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/frame_pipeline.py"))
 +            .map_err(|error| error.to_string())?;
 +        let source = std::ffi::CString::new(include_str!("../tests/frame_pipeline.py"))

@@ -29,7 +29,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 1
-      - name: Integrate owned frames at existing native boundaries
+      - name: Integrate owned frames and observational camera readback
         shell: bash
         run: |
           set -euo pipefail
@@ -45,6 +45,7 @@ jobs:
             git apply --check scripts/patches/frame-pipeline-acceptance.patch
             git apply scripts/patches/frame-pipeline-acceptance.patch
           fi
+          python scripts/enable_camera_readback.py
           git diff --check
           git rev-parse HEAD
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
@@ -68,19 +69,31 @@ jobs:
             cargo-${{ runner.os }}-${{ runner.arch }}-texture-pairs-
             cargo-${{ runner.os }}-${{ runner.arch }}-svg-
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - name: Verify bounded scheduling and exact native pixels
+      - name: Verify native source and scheduler
         shell: bash
         run: |
           set -euo pipefail
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs crates/fmn-conformance/tests/e2e_scenarios.rs
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs crates/fmn-python/src/portal_readback.rs crates/fmn-conformance/tests/e2e_scenarios.rs
           cargo check --locked -p fmn-python --tests
           cargo test --locked -p fmn-runtime
-          cargo test --locked -p fmn-render --lib retained::tests
+          cargo test --locked -p fmn-render --lib
           cargo test --locked -p fmn-render --test texture_pairs
+          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_camera_capture_protocol
+      - name: Verify real camera readback and pipeline pixels
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-python --lib production_camera_readback_acceptance_suite -- --nocapture
           cargo test --locked -p fmn-python portal_pipeline -- --nocapture
           cargo test --locked -p fmn-conformance --test e2e_scenarios python_frame_pipeline_scenario_passes -- --nocapture
+          cargo test --locked -p fmn-python --lib production_bridge_acceptance_suite -- --nocapture
+      - name: Verify installed-wheel output paths
+        shell: bash
+        run: |
+          set -euo pipefail
           python -m maturin build --locked --profile dev --out /tmp/frame-overlap-wheels
           python -m pip install --no-deps --force-reinstall /tmp/frame-overlap-wheels/*.whl
+          python crates/fmn-python/tests/camera_readback.py
           python crates/fmn-python/tests/frame_pipeline.py
           python crates/fmn-python/tests/native_outputs.py
           python crates/fmn-python/tests/batch_rendering.py
@@ -93,11 +106,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add Cargo.lock crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs crates/fmn-python/tests/frame_pipeline.py crates/fmn-conformance/tests/e2e_scenarios.rs
+          git add Cargo.lock crates/fmn-render/src/lib.rs crates/fmn-render/src/retained.rs crates/fmn-runtime/src/lib.rs crates/fmn-runtime/src/stream.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_pipeline.rs crates/fmn-python/src/portal_readback.rs crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/tests/bridge.py crates/fmn-python/tests/frame_pipeline.py crates/fmn-conformance/tests/e2e_scenarios.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(render): integrate owned camera frames and bounded imperative pipeline'
+            git commit -m 'feat(render): activate bounded native frame overlap and camera pixel readback'
             git push origin HEAD:main
           fi
           git archive --format=tar.gz HEAD > /tmp/native-frame-overlap-source.tar.gz
