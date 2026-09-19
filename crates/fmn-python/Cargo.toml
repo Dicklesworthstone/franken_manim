@@ -16,6 +16,7 @@ gauntlet = []
 
 [dependencies]
 fmn-core.workspace = true
+fmn-hash.workspace = true
 fmn-config.workspace = true
 fmn-platform = { workspace = true, features = ["exact-process"] }
 fmn-frame.workspace = true

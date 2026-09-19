@@ -7,6 +7,7 @@ imports available and robot stdout reserved for the terminal receipt.
 from __future__ import annotations
 
 import contextlib
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -16,7 +17,9 @@ from .batch_rendering import (
     BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
     _name_key, render_scenes,
 )
-from .rendering import RenderSession, _positive_integer, _apply_output_options
+from .rendering import (
+    RenderSession, _positive_integer, _apply_output_options, _runtime_identities,
+)
 from .scene_loading import SceneSource
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
@@ -103,9 +106,10 @@ def _single_result(native, result, robot, source, selected):
     count = result.sample_frames if result.format == "wav" else result.frame_count
     details["frame_count"] = count
     unit = "sample frames" if result.format == "wav" else "frames"
+    manifest_part = f"; manifest {result.manifest}" if result.manifest else ""
     return native._portal_cli_emit(
         0, "success", "render",
-        f"rendered {count} {result.format} {unit} to {result.destination}", robot,
+        f"rendered {count} {result.format} {unit} to {result.destination}{manifest_part}", robot,
         source=source, scene=selected, rendered=True, **details,
     )
 
@@ -166,6 +170,24 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         # Freeze both paths before module code or a constructor changes cwd.
         destination = None if supplied is None else Path(supplied).resolve()
         default_root = (Path("media") / "videos" / source_path.stem).resolve()
+        if batch and options.get("reproducible"):
+            raise RuntimeError("CAPABILITY: batch rendering does not participate in certified reproducibility")
+        if options.get("reproducible"):
+            if getattr(native, "_portal_publish_manifest", None) is None:
+                raise RuntimeError(
+                    "CAPABILITY: certified portal rendering awaits the complete "
+                    "content-hashed input closure and provenance sidecar"
+                )
+            if not source_path.is_file():
+                raise RuntimeError(
+                    f"CAPABILITY: portal input closure cannot be established: scene source does not exist: {source_path}"
+                )
+            if destination is not None:
+                sidecar = destination.parent / (destination.name + ".manifest")
+                if os.path.lexists(sidecar):
+                    raise FileExistsError(
+                        f"manifest destination {sidecar} already exists; sidecars are no-clobber generations"
+                    )
     except RuntimeError as error:
         message = _error_fields(error)[1]
         if message.startswith("CAPABILITY: "):
@@ -212,13 +234,25 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 if destination is None:
                     destination = (default_root / selected / "frames" if options["format"] == "png_sequence"
                                    else default_root / (selected + "." + options["format"]))
+                if options.get("reproducible"):
+                    sidecar = destination.parent / (destination.name + ".manifest")
+                    if os.path.lexists(sidecar):
+                        raise FileExistsError(
+                            f"manifest destination {sidecar} already exists; sidecars are no-clobber generations"
+                        )
                 phase = "construct"
                 scene = scenes[selected]()
                 phase = "start"
                 _apply_output_options(scene, output_options)
-                session = RenderSession(scene, destination, format=options["format"],
-                                        resolution=(width, height), fps=fps, threads=threads,
-                                        animation_range=selection, _native=native)
+                session = RenderSession(
+                    scene, destination, format=options["format"],
+                    resolution=(width, height), fps=fps, threads=threads,
+                    animation_range=selection,
+                    reproducible=bool(options.get("reproducible")),
+                    sources=loaded.sources,
+                    runtime_identities=_runtime_identities(native),
+                    _native=native,
+                )
                 with session:
                     phase = "execute"
                     try:

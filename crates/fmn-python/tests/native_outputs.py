@@ -623,6 +623,56 @@ if ffmpeg:
     correlation = np.corrcoef(audio[13000:17000, 0], tone[1000:5000].astype(float))[0, 1]
     assert correlation > 0.95, "late scene cue lost its sample-clock position"
 
+    # Certified portal reproducibility and provenance manifest verification (§16.7, docs/INPUT_CLOSURE.md)
+    for cert_format in ("png", "wav"):
+        cert_dest = output_root / f"certified_scene.{cert_format}"
+        scene_name = "Soundtrack" if cert_format == "wav" else "MovingWhiteSquare"
+        cert_args = (
+            str(source), scene_name, "--format", cert_format,
+            "--reproducible", "--video_dir", str(cert_dest),
+        )
+        code, cert_report = console(*cert_args)
+        assert code == 0, cert_report
+        assert cert_report.get("manifest") is not None, cert_report
+        assert cert_report.get("closure_digest") is not None, cert_report
+        manifest_dir = cert_dest.parent / (cert_dest.name + ".manifest")
+        assert manifest_dir.is_dir(), manifest_dir
+        manifest_fmnp = manifest_dir / "manifest.fmnp"
+        manifest_txt = manifest_dir / "manifest.txt"
+        assert manifest_fmnp.is_file(), manifest_fmnp
+        assert manifest_txt.is_file(), manifest_txt
+        txt_content = manifest_txt.read_text()
+        assert cert_report["closure_digest"] in txt_content
+
+        # Second run to a different destination with same source produces bit-identical output
+        cert_dest2 = output_root / f"certified_scene_2.{cert_format}"
+        code2, cert_report2 = console(
+            str(source), scene_name, "--format", cert_format,
+            "--reproducible", "--video_dir", str(cert_dest2),
+        )
+        assert code2 == 0, cert_report2
+        assert cert_dest.read_bytes() == cert_dest2.read_bytes(), f"certified {cert_format} output drifted across runs"
+        assert cert_report["closure_digest"] == cert_report2["closure_digest"], "closure digest drifted"
+
+        # Preflight no-clobber refusal if manifest destination exists
+        code3, err_report3 = console(*cert_args)
+        assert code3 in (2, 4), err_report3
+
+    # Capability refusal: video format with --reproducible must fail closed
+    bad_video_dest = output_root / "bad_cert.mp4"
+    code_bad, bad_report = console(
+        str(source), "MovingWhiteSquare", "--format", "mp4",
+        "--reproducible", "--video_dir", str(bad_video_dest),
+    )
+    assert code_bad == 4, bad_report
+
+    # Capability refusal: batch with --reproducible must fail closed
+    code_batch, batch_report = console(
+        str(source), "--write_all", "--format", "png",
+        "--reproducible", "--video_dir", str(output_root / "batch_out"),
+    )
+    assert code_batch == 4, batch_report
+
 native_output_report = {"frames": len(gif_frames), "formats": len(reports),
                         "publication_failures": publication_failures,
                         "thread_replays": thread_replays, "centers": centers,

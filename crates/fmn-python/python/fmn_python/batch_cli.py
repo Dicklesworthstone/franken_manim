@@ -114,6 +114,8 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
             raise ValueError("batch output directory must be nonempty and contain no NUL")
         # Source module code, not just constructors, may change cwd.
         directory = Path(directory).resolve()
+        if options.get("reproducible"):
+            raise RuntimeError("CAPABILITY: batch rendering does not participate in certified reproducibility")
     except RuntimeError as error:
         message = _error_fields(error)[1]
         if message.startswith("CAPABILITY: "):

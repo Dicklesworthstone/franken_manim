@@ -22795,6 +22795,7 @@ def _portal_cli_render_arguments(arguments):
         "pix_fmt": None,
         "ffmpeg_bin": None,
         "transparent": False,
+        "reproducible": False,
     }
     positionals = []
     value_flags = ("--format", "--resolution", "--fps", "--threads", "--video_dir",
@@ -22809,10 +22810,16 @@ def _portal_cli_render_arguments(arguments):
             index += 1
             continue
         if argument == "--reproducible":
-            raise RuntimeError(
-                "CAPABILITY: certified portal rendering awaits the complete "
-                "content-hashed input closure and provenance sidecar"
-            )
+            if values["reproducible"]:
+                raise ValueError("--reproducible must not be repeated")
+            if _sys.platform == "win32":
+                raise RuntimeError(
+                    "CAPABILITY: windows-x86-64 is excluded from certified "
+                    "reproducibility by ADR-0019"
+                )
+            values["reproducible"] = True
+            index += 1
+            continue
         if argument in ("-o", "-so", "--write_all", "--autoreload"):
             raise RuntimeError(
                 f"CAPABILITY: {argument} is not connected in the Python portal"
@@ -22840,6 +22847,11 @@ def _portal_cli_render_arguments(arguments):
         raise RuntimeError(
             f"CAPABILITY: portal output format {values['format']!r} is not connected; "
             "use --format png, png_sequence, gif, y4m, wav, mp4, or mov"
+        )
+    if values["reproducible"] and values["format"] not in ("png", "png_sequence", "wav"):
+        raise RuntimeError(
+            f"CAPABILITY: certified reproducibility excludes format {values['format']!r}; "
+            "use --format png, png_sequence, or wav"
         )
     if len(positionals) not in (1, 2):
         raise ValueError("render requires SOURCE.py and accepts one optional SCENE")
@@ -22875,6 +22887,13 @@ def _console_main():
     import platform as _platform
 
     arguments = list(_sys.argv[1:])
+    try:
+        from fmn_python.console_rendering import try_render_cli
+        cli_result = try_render_cli(_FMN_ROOT, arguments)
+        if cli_result is not None:
+            return cli_result
+    except ImportError:
+        pass
     robot = False
     if "--robot" in arguments:
         arguments.remove("--robot")

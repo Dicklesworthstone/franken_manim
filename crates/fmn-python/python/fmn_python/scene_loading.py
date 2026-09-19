@@ -290,3 +290,30 @@ class SceneSource:
             self._active = False
             _SOURCE_OWNER.release()
         return False
+
+    @property
+    def sources(self) -> dict[str, bytes]:
+        """Expose raw byte contents of the primary source and imported modules."""
+        result: dict[str, bytes] = {}
+        primary_key = (
+            self.path.relative_to(self.root).as_posix()
+            if self.path.is_relative_to(self.root)
+            else self.path.name
+        )
+        try:
+            result[primary_key] = self.path.read_bytes()
+        except OSError:
+            pass
+        for p in sorted(self.source_digests.keys()):
+            if p == self.path:
+                continue
+            vpath = (
+                p.relative_to(self.root).as_posix()
+                if p.is_relative_to(self.root)
+                else p.name
+            )
+            try:
+                result[vpath] = p.read_bytes()
+            except OSError:
+                pass
+        return result

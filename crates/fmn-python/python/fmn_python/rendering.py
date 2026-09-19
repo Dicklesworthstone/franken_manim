@@ -12,6 +12,7 @@ import copy
 import importlib
 import operator
 import os
+import sys
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -70,6 +71,8 @@ class RenderResult:
     certified: bool = False
     animation_range: tuple[int, int | None] | None = None
     audio_inputs: tuple[dict[str, Any], ...] = ()
+    manifest: Path | None = None
+    closure_digest: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -86,7 +89,36 @@ class RenderResult:
             result["animation_range"] = list(self.animation_range)
         if self.format == "wav":
             result.update(sample_rate=48000, channels=2)
+        if self.manifest is not None:
+            result["manifest"] = {
+                "path": str(self.manifest),
+                "closure_digest": self.closure_digest,
+            }
+        if self.closure_digest is not None:
+            result["closure_digest"] = self.closure_digest
+        if self.certified:
+            result["artifact_digest"] = self.digest
         return result
+
+
+def _runtime_identities(native: Any = None) -> dict[str, str]:
+    import platform as _platform
+    try:
+        import numpy as _np
+        numpy_id = f"NumPy {_np.__version__}"
+    except Exception:
+        numpy_id = "NumPy unknown"
+    native_mod = importlib.import_module("manimlib") if native is None else native
+    version = getattr(native_mod, "__version__", "unknown")
+    abi = getattr(native_mod, "__abi_policy__", "cpython-3.13-full-abi")
+    cpython = f"{_platform.python_implementation()} {_platform.python_version()}"
+    wheel = f"franken-manim {version}"
+    return {
+        "cpython": cpython,
+        "abi": abi,
+        "wheel": wheel,
+        "numpy": numpy_id,
+    }
 
 
 class RenderSession:
@@ -102,9 +134,14 @@ class RenderSession:
         format: str | None = None, resolution: tuple[int, int] | None = None,
         fps: int | None = None, threads: int | None = None,
         animation_range: tuple[int, int | None] | None = None,
+        reproducible: bool = False,
+        sources: dict[str, bytes] | None = None,
+        runtime_identities: dict[str, str] | None = None,
         _native: Any = None,
     ) -> None:
         native = importlib.import_module("manimlib") if _native is None else _native
+        if not isinstance(reproducible, bool):
+            raise TypeError("reproducible must be bool")
         if not isinstance(scene, native.Scene):
             raise TypeError("render_session requires a Scene instance")
         path_text = os.fspath(destination)
@@ -117,6 +154,19 @@ class RenderSession:
             format = path.suffix.lower().lstrip(".") if path.suffix else "png_sequence"
         if not isinstance(format, str) or format not in _FORMATS:
             raise ValueError("render format must be png, png_sequence, gif, y4m, wav, mp4, or mov")
+        if reproducible:
+            if format not in ("png", "png_sequence", "wav"):
+                error_type = getattr(native, "_CapabilityError", RuntimeError)
+                raise error_type(
+                    f"CAPABILITY: certified reproducibility excludes format {format!r}; "
+                    "use --format png, png_sequence, or wav"
+                )
+            if sys.platform == "win32":
+                error_type = getattr(native, "_CapabilityError", RuntimeError)
+                raise error_type(
+                    "CAPABILITY: windows-x86-64 is excluded from certified "
+                    "reproducibility by ADR-0019"
+                )
         _validate_writer_options(scene, format, native)
         camera = scene.camera
         dimensions = camera.get_pixel_shape() if resolution is None else resolution
@@ -132,6 +182,9 @@ class RenderSession:
         )
         self.seed = _seed(scene.random_seed)
         self.animation_range = _animation_range(animation_range)
+        self.reproducible = reproducible
+        self.sources = sources
+        self.runtime_identities = runtime_identities
         self.scene = scene
         self.destination = path
         self.format = format
@@ -151,12 +204,18 @@ class RenderSession:
         scene = self.scene
         if getattr(scene, "_fmn_owned_render_session", None) is not None:
             raise RuntimeError("this Scene already has an owned render generation")
+        if self.reproducible:
+            sidecar = self.destination.parent / (self.destination.name + ".manifest")
+            if os.path.lexists(sidecar):
+                raise FileExistsError(
+                    f"manifest destination {sidecar} already exists; sidecars are no-clobber generations"
+                )
         # The native start validates pristine Stage ownership, format budgets,
         # and sink capabilities. Do not abort if it refuses: another caller
         # (notably the CLI) might own the existing generation.
         scene._begin_native_output(
             str(self.destination), self.format, *self.resolution,
-            self.fps, self.threads, self.seed,
+            self.fps, self.threads, self.seed, self.reproducible,
         )
         self._state = "active"
         try:
@@ -209,12 +268,64 @@ class RenderSession:
             raise
         self._state = "finished"
         self._release()
+        manifest_path = None
+        closure_digest = None
+        if self.reproducible:
+            publish_fn = getattr(self._native, "_portal_publish_manifest", None)
+            if publish_fn is None:
+                error_type = getattr(self._native, "_CapabilityError", RuntimeError)
+                raise error_type(
+                    "CAPABILITY: certified portal rendering awaits the complete "
+                    "content-hashed input closure and provenance sidecar"
+                )
+            artifact_report = {
+                "path": str(path),
+                "digest": digest,
+            }
+            identities = self.runtime_identities or _runtime_identities(self._native)
+            sources = self.sources or {}
+            cue_assets = None
+            audio_inputs = getattr(self.scene, "_render_audio_inputs", None)
+            if audio_inputs:
+                cue_assets = []
+                for entry in audio_inputs:
+                    cpath = entry.get("path")
+                    if cpath:
+                        p = Path(cpath)
+                        try:
+                            cue_assets.append((p.name, p.read_bytes()))
+                        except OSError:
+                            pass
+            try:
+                manifest_file_str, closure_digest_hex = publish_fn(
+                    Path(self.destination),
+                    self.format,
+                    self.resolution,
+                    self.fps,
+                    self.threads,
+                    self.seed,
+                    artifact_report,
+                    sources,
+                    identities,
+                    cue_assets,
+                )
+                manifest_path = Path(manifest_file_str)
+                closure_digest = closure_digest_hex
+            except BaseException as error:
+                error.add_note(
+                    f"native artifact is already published at {path}; provenance manifest could not be written"
+                )
+                raise
+
         self.result = RenderResult(
             destination=Path(path), format=self.format, resolution=self.resolution,
             fps=self.fps, threads=int(threads), engine=engine, bytes=int(size),
             digest=digest, frame_count=None if self.format == "wav" else int(count),
             sample_frames=int(count) if self.format == "wav" else None,
             seed=self.seed, animation_range=self.animation_range,
+            certified=self.reproducible,
+            manifest=manifest_path,
+            closure_digest=closure_digest,
         )
         if self.format in _VIDEO_FORMATS or self.format == "wav":
             try:
@@ -241,10 +352,15 @@ def render_session(
     resolution: tuple[int, int] | None = None, fps: int | None = None,
     threads: int | None = None,
     animation_range: tuple[int, int | None] | None = None,
+    reproducible: bool = False,
+    sources: dict[str, bytes] | None = None,
+    runtime_identities: dict[str, str] | None = None,
 ) -> RenderSession:
     """Record imperative scene operations without a CLI or temporary script."""
     return RenderSession(scene, destination, format=format, resolution=resolution,
-                         fps=fps, threads=threads, animation_range=animation_range)
+                         fps=fps, threads=threads, animation_range=animation_range,
+                         reproducible=reproducible, sources=sources,
+                         runtime_identities=runtime_identities)
 
 
 def render_scene(
@@ -252,6 +368,9 @@ def render_scene(
     resolution: tuple[int, int] | None = None, fps: int | None = None,
     threads: int | None = None, scene_kwargs: dict[str, Any] | None = None,
     animation_range: tuple[int, int | None] | None = None,
+    reproducible: bool = False,
+    sources: dict[str, bytes] | None = None,
+    runtime_identities: dict[str, str] | None = None,
     _output_options: dict[str, Any] | None = None,
 ) -> RenderResult:
     """Render a Scene instance or class and return its native artifact receipt.
@@ -271,7 +390,9 @@ def render_scene(
     if _output_options:
         _apply_output_options(scene, _output_options)
     session = RenderSession(scene, destination, format=format, resolution=resolution,
-                            fps=fps, threads=threads, animation_range=animation_range, _native=native)
+                            fps=fps, threads=threads, animation_range=animation_range,
+                            reproducible=reproducible, sources=sources,
+                            runtime_identities=runtime_identities, _native=native)
     with session:
         try:
             scene.run()

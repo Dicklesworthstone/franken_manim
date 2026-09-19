@@ -23,6 +23,7 @@ mod portal_playback;
 mod portal_studio;
 mod portal_video;
 mod report;
+mod portal_provenance;
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
@@ -172,6 +173,7 @@ impl PortalRenderSession {
         format: PortalOutputFormat,
         video: Option<portal_video::PortalVideoConfig>,
         audio: Box<portal_audio::PortalAudio>,
+        reproducible: bool,
     ) -> PyResult<(Self, RuntimeConfig)> {
         match format {
             PortalOutputFormat::Frames(format) => {
@@ -184,6 +186,7 @@ impl PortalRenderSession {
                     format,
                     video,
                     audio,
+                    reproducible,
                 )?;
                 Ok((Self::Frames(Box::new(session)), config))
             }
@@ -198,6 +201,11 @@ impl PortalRenderSession {
                     .config;
                 config.camera.resolution = (width, height);
                 config.camera.fps = fps;
+                config.determinism.mode = if reproducible {
+                    fmn_config::config::DeterminismMode::Certified
+                } else {
+                    fmn_config::config::DeterminismMode::Standard
+                };
                 // Run the same sampled lifecycle so updaters can add cues at
                 // their real call-site times. Only rasterization is absent.
                 Ok((
@@ -336,6 +344,7 @@ impl PortalFrameSession {
         format: PortalFrameFormat,
         video: Option<portal_video::PortalVideoConfig>,
         audio: Box<portal_audio::PortalAudio>,
+        reproducible: bool,
     ) -> PyResult<(Self, RuntimeConfig)> {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err(
@@ -354,7 +363,11 @@ impl PortalFrameSession {
             .config;
         config.camera.resolution = (width, height);
         config.camera.fps = fps;
-        config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
+        config.determinism.mode = if reproducible {
+            fmn_config::config::DeterminismMode::Certified
+        } else {
+            fmn_config::config::DeterminismMode::Standard
+        };
 
         let opaque_video = video
             .as_ref()
@@ -374,12 +387,21 @@ impl PortalFrameSession {
             fmn_output::WireFormat::Nv12 => fmn_runtime::OutputPixelFormat::Nv12,
             fmn_output::WireFormat::P010 => fmn_runtime::OutputPixelFormat::P010,
         };
-        let request = fmn_runtime::PlanRequest::standard(
-            fmn_runtime::RenderIntent::Offline,
-            fmn_runtime::SurfaceSpec::lumen(width, height),
-            output_format,
-        )
-        .with_max_cpu_threads(max_threads);
+        let request = if reproducible {
+            fmn_runtime::PlanRequest::certified(
+                fmn_runtime::RenderIntent::Offline,
+                fmn_runtime::SurfaceSpec::lumen(width, height),
+                output_format,
+            )
+            .with_max_cpu_threads(max_threads)
+        } else {
+            fmn_runtime::PlanRequest::standard(
+                fmn_runtime::RenderIntent::Offline,
+                fmn_runtime::SurfaceSpec::lumen(width, height),
+                output_format,
+            )
+            .with_max_cpu_threads(max_threads)
+        };
         let plan = fmn_runtime::ExecutionPlan::derive(
             request,
             &fmn_platform::topology::HardwareTopology::current(),
@@ -7532,6 +7554,7 @@ struct PortalRenderRequest {
     threads: usize,
     seed: u64,
     format: PortalOutputFormat,
+    reproducible: bool,
 }
 
 fn portal_has_frame_render(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
@@ -7612,6 +7635,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         threads,
         seed,
         format,
+        reproducible,
     } = request;
     if destination.is_empty() {
         return Err(PyValueError::new_err(
@@ -7643,6 +7667,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         format,
         video,
         audio,
+        reproducible,
     )?;
     let replacement = match Scene::new(runtime_config, seed) {
         Ok(scene) => Rc::new(EngineState::new(scene)),
@@ -7698,6 +7723,32 @@ impl PyScene {
         self.engine.borrow_mut().end::<()>().map_err(scene_error)
     }
 
+    /// Select standard-mode PNG output with the default Reel limits.
+    #[pyo3(signature = (destination, width, height, fps, threads, seed))]
+    fn _begin_png(
+        slf: &Bound<'_, Self>,
+        destination: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        threads: usize,
+        seed: u64,
+    ) -> PyResult<()> {
+        begin_portal_render(
+            slf,
+            PortalRenderRequest {
+                destination,
+                width,
+                height,
+                fps,
+                threads,
+                seed,
+                format: PortalOutputFormat::Frames(PortalFrameFormat::Png),
+                reproducible: false,
+            },
+        )
+    }
+
     /// Start one no-clobber native PNG-sequence generation before lifecycle
     /// execution. Configuration is accepted only while the Scene is pristine,
     /// so changing fps/seed cannot reinterpret already-created engine state.
@@ -7721,33 +7772,7 @@ impl PyScene {
                 threads,
                 seed,
                 format: PortalOutputFormat::Frames(PortalFrameFormat::PngSequence),
-            },
-        )
-    }
-
-    /// Start one atomic final-state PNG generation. The scene advances every
-    /// segment to its semantic endpoint without intermediate raster work;
-    /// `_finish_render` captures and publishes exactly one frame.
-    #[pyo3(signature = (destination, width, height, fps, threads, seed))]
-    fn _begin_png(
-        slf: &Bound<'_, Self>,
-        destination: String,
-        width: u32,
-        height: u32,
-        fps: u32,
-        threads: usize,
-        seed: u64,
-    ) -> PyResult<()> {
-        begin_portal_render(
-            slf,
-            PortalRenderRequest {
-                destination,
-                width,
-                height,
-                fps,
-                threads,
-                seed,
-                format: PortalOutputFormat::Frames(PortalFrameFormat::Png),
+                reproducible: false,
             },
         )
     }
@@ -7755,7 +7780,7 @@ impl PyScene {
     /// Select a Reel format without changing the scene clock or publication
     /// protocol. Video containers use only the governed ffmpeg boundary.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (destination, format, width, height, fps, threads, seed))]
+    #[pyo3(signature = (destination, format, width, height, fps, threads, seed, reproducible=false))]
     fn _begin_native_output(
         slf: &Bound<'_, Self>,
         destination: String,
@@ -7765,6 +7790,7 @@ impl PyScene {
         fps: u32,
         threads: usize,
         seed: u64,
+        reproducible: bool,
     ) -> PyResult<()> {
         let format = match format {
             "png" => PortalOutputFormat::Frames(PortalFrameFormat::Png),
@@ -7790,6 +7816,7 @@ impl PyScene {
                 threads,
                 seed,
                 format,
+                reproducible,
             },
         )
     }
@@ -10762,6 +10789,10 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_reset, module)?)?;
     module.add_function(wrap_pyfunction!(report::_crossing_report, module)?)?;
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        portal_provenance::_portal_publish_manifest,
+        module
+    )?)?;
     module.add("_StaleHandleError", py.get_type::<StaleHandleError>())?;
     module.add("_ForeignStageError", py.get_type::<ForeignStageError>())?;
     module.add("_FamilyCycleError", py.get_type::<FamilyCycleError>())?;
