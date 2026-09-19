@@ -25,6 +25,31 @@ impl PortalVideoConfig {
         fps: u32,
     ) -> PyResult<Self> {
         check_scene_ownership(scene)?;
+        let config = Self::parse_scene(scene, format, width, height, fps)?;
+        check_scene_ownership(scene)?;
+        Ok(config)
+    }
+
+    pub(crate) fn from_recording_scene(
+        scene: &Bound<'_, PyScene>,
+        format: PortalFrameFormat,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> PyResult<Self> {
+        crate::portal_recording::check_available(scene)?;
+        let config = Self::parse_scene(scene, format, width, height, fps)?;
+        crate::portal_recording::check_available(scene)?;
+        Ok(config)
+    }
+
+    fn parse_scene(
+        scene: &Bound<'_, PyScene>,
+        format: PortalFrameFormat,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> PyResult<Self> {
         // No engine borrow may cross a Python descriptor/callback.
         let writer = scene.getattr("file_writer")?;
         let ffmpeg_bin: String = writer.getattr("ffmpeg_bin")?.extract()?;
@@ -65,7 +90,6 @@ impl PortalVideoConfig {
         // Python getters may adopt mobjects, advance time, or recursively
         // acquire a generation. Never replace that state or probe an encoder
         // against the now-stale preflight in begin_portal_render.
-        check_scene_ownership(scene)?;
         Ok(Self { ffmpeg_bin, job })
     }
 }

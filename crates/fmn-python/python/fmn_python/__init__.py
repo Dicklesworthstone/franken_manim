@@ -58,6 +58,10 @@ def _ensure_exclusive_manimlib_namespace():
 
 
 def __getattr__(name):
+    if name in {"RecordingSession", "record_scene"}:
+        from . import recording
+
+        return getattr(recording, name)
     if name == "embed_scene":
         from .embedded_shell import embed_scene
 

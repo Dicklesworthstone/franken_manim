@@ -17,6 +17,7 @@ pub(crate) struct PortalAudioInput {
 
 pub(crate) struct PortalAudio {
     decoder: AudioDecoder,
+    first_request: usize,
     pub(crate) inputs: Vec<PortalAudioInput>,
 }
 
@@ -51,8 +52,14 @@ impl PortalAudio {
                 .map_err(decode_error)?;
         Ok(Box::new(Self {
             decoder,
+            first_request: 0,
             inputs: Vec::new(),
         }))
+    }
+
+    /// A live recording includes only cues authored after it acquired output.
+    pub(crate) fn begin_at_request(&mut self, first_request: usize) {
+        self.first_request = first_request;
     }
 
     pub(crate) fn mix(
@@ -61,7 +68,14 @@ impl PortalAudio {
         threads: usize,
         timeline: &OutputTimeline,
     ) -> PyResult<Option<fmn_output::MixReport>> {
-        let requests = scene.sound_requests();
+        let requests = scene
+            .sound_requests()
+            .get(self.first_request..)
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "recording sound history was truncated; cancel before restoring scene state",
+                )
+            })?;
         if requests.is_empty() {
             return Ok(None);
         }

@@ -199,11 +199,14 @@ def install_embedded_shell(native):
         shell.events.register("post_run_cell", post_cell)
         self._fmn_hooks.append((shell.events, "post_run_cell", post_cell))
 
-    def paste(self, skip=False, record=False, progress_bar=True):
+    def paste(self, skip=False, record=False, progress_bar=True, *, record_to=None, recording_options=None):
         check(self)
         if self._fmn_console is None or not self._fmn_launching:
             raise capability("checkpoint_paste requires an active embedded scene session")
-        return self._fmn_console.checkpoint_paste(skip=skip, record=record, progress_bar=progress_bar)
+        options = {} if record_to is None and recording_options is None else {
+            "record_to": record_to, "recording_options": recording_options,
+        }
+        return self._fmn_console.checkpoint_paste(skip=skip, record=record, progress_bar=progress_bar, **options)
 
     def cleanup(self, primary):
         first = None
