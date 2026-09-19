@@ -348,9 +348,13 @@ for composition_class, duration in ((AnimationGroup, 1.0), (LaggedStart, 1.05), 
 mapped_members = Mobject(Mobject(), Mobject())
 mapped = LaggedStartMap(Animation, mapped_members)
 assert [child.mobject for child in mapped.animations] == list(mapped_members)
-for targetless_class in (CyclicReplace, Swap):
-    targetless = targetless_class(Mobject(), Mobject())
-    assert targetless._native_target() is None
+for cyclic_class in (CyclicReplace, Swap):
+    cyclic = cyclic_class(Mobject(), Mobject())
+    target = cyclic._native_target()
+    assert target is not None
+    assert cyclic.target_mobject is target
+    assert cyclic._target_attr == "target_mobject"
+
 
 # A Transform subclass's leaf hook must survive the installed dispatch.
 class TransformHookProbe(Transform):
