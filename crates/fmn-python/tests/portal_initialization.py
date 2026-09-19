@@ -11,18 +11,20 @@ assert vars(native).get("_FMN_PORTAL_RUNTIME_STATE") == "ready"
 flags = ("SCENE_RENDERING", "FADING", "SCENE_PLAYBACK", "SCENE_STATE",
          "STREAMLINE_ANIMATION", "TRACED_PATH", "INTERACTIVE_EDITING",
          "INTERACTION", "CONTROL_EVENTS", "COLOR_SLIDERS", "SCENE_EXECUTION",
-         "ANIMATION_UPDATERS", "MOVEMENT", "ROTATION")
+         "ANIMATION_UPDATERS", "MOVEMENT", "ROTATION", "EMBEDDED_SHELL")
 for flag in flags:
     assert vars(native).get("_FMN_" + flag + "_INSTALLED"), flag
 
 identities = (m.Scene.play, m.Scene.wait, m.Scene.render, m.Mobject.remove_updater,
               m.FadeTransform.begin, m.Animation.begin, m.Transform.begin,
-              m.turn_animation_into_updater, m.InteractiveScene.on_key_press)
+              m.turn_animation_into_updater, m.InteractiveScene.on_key_press,
+              m.InteractiveScene.embed, m.InteractiveScene.checkpoint_paste)
 for _ in range(3):
     assert initialization.initialize(native) is native
     assert identities == (m.Scene.play, m.Scene.wait, m.Scene.render, m.Mobject.remove_updater,
                           m.FadeTransform.begin, m.Animation.begin, m.Transform.begin,
-                          m.turn_animation_into_updater, m.InteractiveScene.on_key_press)
+                          m.turn_animation_into_updater, m.InteractiveScene.on_key_press,
+                          m.InteractiveScene.embed, m.InteractiveScene.checkpoint_paste)
 assert importlib.import_module("manimlib.animation.fading").FadeTransform is m.FadeTransform
 assert importlib.import_module("manimlib.animation.transform").Swap is m.Swap
 

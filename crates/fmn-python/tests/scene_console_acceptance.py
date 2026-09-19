@@ -92,7 +92,24 @@ def run_console_acceptance():
         assert shared.updaters[0] is updater
         graph.update_mobjects(0)
         assert events and all(obj is shared for obj, dt in events)
-    return 6
+    # The public compatibility method now executes an owned cell instead of
+    # exposing a native snapshot byte string under the misleading paste name.
+    interactive = m.InteractiveScene()
+    shape = m.Square()
+    interactive.add(shape)
+    initial = shape.get_center().copy()
+    with SceneConsole(interactive, {"shape": shape, "RIGHT": m.RIGHT},
+                      clipboard=lambda: "# public\nshape.shift(RIGHT)", capture=False):
+        interactive.checkpoint_paste()
+        interactive.checkpoint_paste()
+        np.testing.assert_allclose(shape.get_center(), initial + m.RIGHT, atol=1e-6)
+    try:
+        interactive.checkpoint_paste()
+    except m._CapabilityError:
+        pass
+    else:
+        raise AssertionError("unowned public paste did not refuse")
+    return 7
 
 
 if __name__ == "__main__":

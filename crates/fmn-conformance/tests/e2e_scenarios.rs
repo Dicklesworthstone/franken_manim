@@ -4641,10 +4641,10 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         ScenarioClass::Lifecycle,
         Surface::PythonInProcess,
         Invocation::new(python_scene_console_run),
-        vec![Assertion::ExitCode(0), counter_eq("console_checks", 6)],
+        vec![Assertion::ExitCode(0), counter_eq("console_checks", 7)],
         vec![LogExpect::span_present(
             "e2e.python.scene_console",
-            vec![FieldPred::u64_eq("checks", 6)],
+            vec![FieldPred::u64_eq("checks", 7)],
         )],
     ));
     specs.push(spec(

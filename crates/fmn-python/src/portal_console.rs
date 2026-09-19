@@ -29,6 +29,6 @@ pub fn run_portal_gauntlet_console() -> Result<u64, String> {
 mod tests {
     #[test]
     fn native_scene_console_acceptance() {
-        assert_eq!(super::run_portal_gauntlet_console().unwrap(), 6);
+        assert_eq!(super::run_portal_gauntlet_console().unwrap(), 7);
     }
 }

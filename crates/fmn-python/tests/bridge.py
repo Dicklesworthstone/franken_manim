@@ -2147,14 +2147,11 @@ assert "# later" not in checkpoint_manager.checkpoint_states
 checkpoint_manager.clear_checkpoints()
 assert checkpoint_manager.checkpoint_states == {}
 try:
-    importlib.import_module("pyperclip")
-except ImportError:
-    try:
-        checkpoint_manager.checkpoint_paste(None, checkpoint_scene)
-    except Exception as error:
-        assert "pyperclip" in str(error)
-    else:
-        raise AssertionError("checkpoint_paste succeeded without pyperclip")
+    checkpoint_manager.checkpoint_paste(None, checkpoint_scene)
+except bridge_errors.CapabilityError as error:
+    assert "active host SceneConsole" in str(error)
+else:
+    raise AssertionError("checkpoint_paste accepted an unowned clipboard/session")
 
 assert embed_module.InteractiveSceneEmbed.__bases__ == (object,)
 assert str(inspect.signature(embed_module.InteractiveSceneEmbed)) == "(scene)"
@@ -2171,7 +2168,7 @@ except Exception as error:
 else:
     raise AssertionError("enable_gui did not refuse the pyglet GUI hook")
 for embed_refusal, fragment in (
-    ("ensure_frame_update_post_cell", "Studio owns interactive windows"),
+    ("ensure_frame_update_post_cell", "create an IPython shell"),
     ("ensure_flash_on_error", "Studio owns interactive windows"),
     ("auto_reload", "IPython embed loop"),
     ("reload_scene", "IPython embed loop"),
@@ -3193,7 +3190,13 @@ else:
 assert sound_scene._sound_request_facts() == sound_requests_before_refusal
 
 interactive_scene = InteractiveScene()
-assert isinstance(interactive_scene.checkpoint_paste(), bytes)
+try:
+    interactive_scene.checkpoint_paste()
+except bridge_errors.CapabilityError as error:
+    assert "active host scene console" in str(error)
+else:
+    raise AssertionError("checkpoint_paste returned bytes instead of requiring a cell session")
+assert isinstance(interactive_scene._checkpoint_bytes(), bytes)
 assert str(inspect.signature(InteractiveScene.get_crosshair)) == "(self)"
 assert np.isclose(InteractiveScene.crosshair_width, 0.2)
 crosshair = interactive_scene.get_crosshair()

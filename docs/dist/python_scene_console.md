@@ -60,3 +60,54 @@ arbitrary host Python: there is no execution-time or security-sandbox claim.
 This host editing route does not add an HTTP code-execution endpoint, replace
 the isolated Studio worker, make offline native `fmn` depend on Python, or claim
 certified input-closure/reload replay for arbitrary Python effects.
+
+
+## Literal IPython embedding
+
+`InteractiveScene.embed(namespace)` now launches an actual managed
+`InteractiveSceneEmbed` shell. `get_ipython_shell_for_embedded_scene()` returns
+an unlaunched shell, and `launch()` retains and returns that shell instead of
+losing it behind an `IPython.embed()` call. Existing compatibility classes and
+qualified import identities remain unchanged. `Scene.embed()` retains its
+existing headless/offline behavior.
+
+The host can explicitly grant a clipboard reader through the convenience API:
+
+```python
+from fmn_python import embed_scene
+
+shell = embed_scene(scene, {"box": box, "RIGHT": RIGHT},
+                    clipboard=my_text_reader)
+```
+
+For a lower-level host, construct `InteractiveSceneEmbed(scene)`, assign its
+`clipboard` callable, then call `launch()`. No optional clipboard package or
+external clipboard command is automatically located. Without a clipboard,
+ordinary IPython cells still work; `SceneConsole.run_cell(text)` is the
+clipboard-free checkpointed path. IPython is imported only when launching the
+shell, so headless scenes and the programmatic cell runner do not require it.
+
+The shell provides scene-bound `play`, `wait`, `add`, `remove`,
+`checkpoint_paste`, and `clear_checkpoints` shortcuts. Pasting preserves
+`skip`, `record`, and `progress_bar` options. A post-cell event updates native
+preview even for ordinary terminal cells. Scoped event callbacks are removed
+on exit or interruption; IPython singleton slots and `sys.excepthook` are
+restored, preserving an existing notebook's active shell. Terminal nesting is
+refused. The returned shell retains its host namespace; it is not a serialized
+scene replay.
+
+`InteractiveScene.checkpoint_paste()` no longer returns checkpoint **bytes**.
+It runs a cell in the active console/embed session and refuses without one.
+Consumers intentionally requesting the old byte snapshot must use
+`Scene._checkpoint_bytes()` explicitly. Direct `CheckpointManager` snapshots
+remain available through `handle_checkpoint_key`; pasting requires an owned
+session rather than guessing clipboard authority.
+
+The isolated Studio worker reserves stdin/stdout for its native framed
+protocol, including during source imports and constructors. A request to start
+an embedded shell there is a capability error, never a terminal that blocks or
+consumes protocol messages. The existing Studio source-watch/reload path is
+unchanged. IPython in-place module reload, GUI input hooks, error-border flashes,
+and insert-recording are not implemented by this change and retain their
+explicit capability refusals. No Python namespace or external-effect rollback
+is promised.

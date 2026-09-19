@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 import importlib
 import inspect
 import textwrap
 import threading
 from typing import Any
 
+_STUDIO_WORKER = ContextVar("fmn_studio_worker_stdio", default=False)
 _OWNER = "_fmn_scene_console"
 _MAX_SOURCE_BYTES = 1024 * 1024
 _MAX_CHECKPOINTS = 64
@@ -151,7 +153,7 @@ class SceneConsole:
             raise RuntimeError("cannot start a scene console during play/wait")
         if attrs.get("_fmn_owned_render_session") is not None:
             raise RuntimeError("cannot checkpoint an active output generation; finish it first")
-        if attrs.get("_fmn_studio_worker_request") is not None:
+        if _STUDIO_WORKER.get() or attrs.get("_fmn_studio_worker_request") is not None:
             raise RuntimeError("Studio worker stdio belongs to its native protocol, not an embedded shell")
         attrs[_OWNER] = self
         return self
@@ -166,13 +168,14 @@ class SceneConsole:
             self._busy = False
 
     def _bind_shell(self) -> None:
-        if self.shell is None or self._bound_shell is self.shell:
+        if self.shell is None:
             return
         namespace = getattr(self.shell, "user_ns", None)
         if namespace is not None:
             if not isinstance(namespace, dict):
                 raise TypeError("scene console shell.user_ns must be a dictionary")
-            namespace.update(self.namespace)
+            if self._bound_shell is not self.shell:
+                namespace.update(self.namespace)
             self.namespace = namespace
         self._bound_shell = self.shell
 
