@@ -234,16 +234,33 @@ def _install_lifecycle(g):
             alpha = float(alpha)
             if not math.isfinite(alpha):
                 raise ValueError("text reveal alpha must be finite")
-            # Pinned ShowIncreasingSubsets deliberately applies its rate to
-            # raw alpha, not time_spanned_alpha. Keep that semantic and round
-            # ties to even; an authored function is evaluated exactly once.
+            # Pinned ShowIncreasingSubsets applies its rate to raw alpha,
+            # then calls the live int_func once on the number of reveal units.
+            # Preserve authored stateful selectors instead of approximating
+            # their behavior with a fixed rounding enum.
             shaped = float(self.rate_func(alpha))
             if not math.isfinite(shaped):
                 raise ValueError("text reveal rate function must return a finite value")
             units = len(self._boundaries) - 1
-            count = round(min(max(shaped, 0.0), 1.0) * units)
-            self._nested_plan.apply(self._boundaries[count])
+            index = int(self.int_func(shaped * units))
+            self.update_submobject_list(index)
         except BaseException as error:
+            unwind(self, error)
+            raise
+
+    def update_submobject_list(self, index):
+        # Python prefix slicing includes negative indices. Translate the unit
+        # count through Scribe's source spans without flattening the glyph tree
+        # or changing the native painter order. range keeps huge indices cheap.
+        count = len(range(len(self._boundaries) - 1)[:index])
+        self._nested_plan.apply(self._boundaries[count])
+
+    def interpolate(self, alpha):
+        try:
+            Animation.interpolate(self, alpha)
+        except BaseException as error:
+            # Authored interpolate_mobject overrides can fail after super has
+            # already hidden glyphs. Own that failure boundary as well.
             unwind(self, error)
             raise
 
@@ -272,7 +289,11 @@ def _install_lifecycle(g):
     def initializer(original):
         @wraps(original)
         def initialize(self, *args, **kwargs):
+            selector = kwargs.pop("int_func", g["_np"].round)
+            if not callable(selector):
+                raise TypeError("text reveal int_func must be callable")
             original(self, *args, **kwargs)
+            self.int_func = selector
             if not math.isfinite(float(self.run_time)) or self.run_time < 0:
                 raise ValueError("text reveal run_time must be finite and non-negative")
             if not callable(self.rate_func):
@@ -294,7 +315,8 @@ def _install_lifecycle(g):
     for cls in (g["AddTextWordByWord"], letter):
         cls.__init__ = initializer(cls.__init__)
         cls.begin, cls.finish, cls.abort = begin, finish, abort
-        cls.interpolate_mobject = interpolate_mobject
+        cls.interpolate, cls.interpolate_mobject = interpolate, interpolate_mobject
+        cls.update_submobject_list = update_submobject_list
         cls.update_mobjects = update_mobjects
 
 

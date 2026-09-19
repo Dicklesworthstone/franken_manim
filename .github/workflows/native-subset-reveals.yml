@@ -6,6 +6,8 @@ on:
       - '.github/workflows/native-subset-reveals.yml'
       - 'scripts/activate_subset_reveal.py'
       - 'crates/fmn-python/python/fmn_python/subset_reveal.py'
+      - 'crates/fmn-python/python/fmn_python/text_reveal.py'
+      - 'crates/fmn-python/tests/test_text_selector_protocol.py'
       - 'crates/fmn-python/tests/test_subset_reveal_protocol.py'
       - 'crates/fmn-python/tests/subset_reveal.py'
   workflow_dispatch:
@@ -38,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/activate_subset_reveal.py
-          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_subset_reveal_protocol test_text_reveal_protocol test_text_reveal_lifecycle_protocol test_scene_execution_protocol 2>&1 | tee /tmp/subset-protocol.log
+          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_subset_reveal_protocol test_text_selector_protocol test_text_reveal_protocol test_text_reveal_lifecycle_protocol test_scene_execution_protocol 2>&1 | tee /tmp/subset-protocol.log
           python -m py_compile crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/tests/bridge.py crates/fmn-python/tests/subset_reveal.py
           git diff --check
       - name: Commit exercised integration directly to main

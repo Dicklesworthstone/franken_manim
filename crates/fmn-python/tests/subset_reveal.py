@@ -140,6 +140,79 @@ class NativeSubsetTests(unittest.TestCase):
         finally:
             group.__dict__.pop("set_submobjects", None)
 
+    def test_native_word_selector_obeys_source_spans_and_authored_hooks(self):
+        text = m.Text("alpha beta", font_size=36)
+        paths = list(text._string_sub_paths)
+        spans = list(text._string_sub_spans)
+        inner = m.VGroup(*list(text.submobjects))
+        text.set_submobjects([inner])
+        text._string_sub_paths = [[0, *path] for path in paths]
+        leaves = []
+        for path in text._string_sub_paths:
+            node = text
+            for index in path:
+                node = node.submobjects[index]
+            leaves.append(node)
+        expected = [node for node, span in zip(leaves, spans) if span[0] < 5]
+        calls, indices = [], []
+        class Authored(m.AddTextWordByWord):
+            def update_submobject_list(self, index):
+                indices.append(index)
+                super().update_submobject_list(index)
+        animation = Authored(text, int_func=lambda value: calls.append(value) or math.floor(value),
+                             run_time=1, rate_func=m.linear, suspend_mobject_updating=True)
+        self.assertEqual(calls, [])
+        animation.begin()
+        animation.interpolate(.4)
+        visible = text.get_family()
+        self.assertFalse(any(node in visible for node in leaves))
+        animation.interpolate(.6)
+        visible = text.get_family()
+        self.assertEqual([node for node in leaves if node in visible], expected)
+        self.assertEqual(calls, [0., .8, 1.2])
+        self.assertEqual(indices, [0, 0, 1])
+        animation.int_func = lambda _: -1
+        animation.interpolate(.9)
+        visible = text.get_family()
+        self.assertEqual([node for node in leaves if node in visible], expected)
+        animation.abort()
+        self.assertEqual([node for node in leaves if node in text.get_family()], leaves)
+        self.assertEqual(list(text.submobjects), [inner])
+        assert_released(self, text, leaves)
+        animation.int_func = math.floor
+        scene = m.Scene(camera_config=dict(resolution=(192, 108), fps=8))
+        scene.play(m.AnimationGroup(animation))
+        self.assertEqual([node for node in leaves if node in text.get_family()], leaves)
+        assert_released(self, text, leaves)
+
+    def test_native_letter_selector_and_failed_authored_override_restore_glyphs(self):
+        from manimlib.animation.creation import AddTextLetterByLetter
+        text = m.Text("abcd", font_size=36)
+        rows = [(node, tuple(node.submobjects)) for node in text.get_family()]
+        calls = []
+        animation = AddTextLetterByLetter(text, int_func=lambda value: calls.append(value) or math.floor(value),
+                                          rate_func=m.linear, suspend_mobject_updating=True)
+        animation.begin()
+        animation.interpolate(.6)
+        self.assertEqual(calls, [0., 2.4])
+        self.assertEqual(len(text.submobjects), 2)
+        animation.abort()
+        failure = RuntimeError("authored native text interpolation")
+        class Broken(m.AddTextWordByWord):
+            def interpolate_mobject(self, alpha):
+                super().interpolate_mobject(alpha)
+                if alpha > 0:
+                    raise failure
+        broken = Broken(text, suspend_mobject_updating=True)
+        broken.begin()
+        with self.assertRaises(RuntimeError) as caught:
+            broken.interpolate(.5)
+        self.assertIs(caught.exception, failure)
+        for node, original in rows:
+            self.assertEqual(list(node.submobjects), list(original))
+            self.assertFalse(node._is_updating_suspended())
+            self.assertFalse(getattr(node, "_is_animating", False))
+
     def test_native_output_contains_progressive_pixels_and_is_thread_reproducible(self):
         outputs = []
         for threads in (1, 4):
