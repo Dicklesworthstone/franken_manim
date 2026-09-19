@@ -9,6 +9,8 @@ _MISSING = object()
 
 
 class Probe(m.Animation):
+    _fmn_allow_camera_callback = True
+
     def __init__(self, mob, phase=None, broken_abort=False, **kwargs):
         self.phase, self.broken_abort = phase, broken_abort
         self.error = LookupError("camera callback failed")

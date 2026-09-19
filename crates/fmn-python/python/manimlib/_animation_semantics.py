@@ -1682,6 +1682,8 @@ def _install_camera_choreography(g):
             return original_dispatch(self, updater, dt)
 
     def validate_camera(scene, animation):
+        if getattr(animation, "_fmn_allow_camera_callback", False):
+            return
         if animation.mobject is not scene.frame:
             raise ValueError("Camera animation must target this Scene.frame")
         if animation.remover or getattr(animation, "replace_mobject_with_target_in_scene", False):
