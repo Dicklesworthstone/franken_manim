@@ -23,7 +23,10 @@ pub mod perf_harness;
 mod portal_audio;
 mod portal_playback;
 mod portal_studio;
+mod portal_texture;
 mod portal_video;
+#[cfg(feature = "gauntlet")]
+pub use portal_texture::run_portal_gauntlet_textures;
 mod report;
 
 #[cfg(feature = "gauntlet")]
@@ -10778,6 +10781,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
         "__thread_policy__",
         "scene and mobject proxies are confined to their creating scene-worker thread",
     )?;
+    portal_texture::install(module)?;
     execute_bootstrap(py, module)?;
     // Packaging identity is owned by Cargo, not a second hand-maintained
     // Python version string.  W11's wheel and console entry point both read

@@ -2050,6 +2050,25 @@ fn python_live_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_artifact("live_tex_last.png", report.last_png))
 }
 
+fn python_textured_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (first, last) = manimlib::run_portal_gauntlet_textures()
+        .map_err(|error| fail(format!("textured surfaces: {error}")))?;
+    let limits = fmn_codec::PngLimits::default();
+    let decoded = fmn_codec::decode_png(&first, &limits)
+        .map_err(|error| fail(format!("decode texture frame: {error}")))?;
+    if (decoded.width, decoded.height) != (96, 54) || first == last {
+        return Err(fail("textured surface did not animate native pixels"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.textures")
+            .field("frames", 4_u64)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("textures_first.png", first)
+        .with_artifact("textures_last.png", last))
+}
+
 fn python_surface_mesh_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_surface_mesh")?;
     let (png, checks) = manimlib::run_portal_gauntlet_surface_mesh(&root, ctx.seed)
@@ -4616,6 +4635,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_textured_surfaces.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_textured_surfaces_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "textures_first.png".to_owned(),
+                "textures_last.png".to_owned(),
+            ]),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.textures",
+            vec![
+                FieldPred::u64_eq("frames", 4),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_surface_mesh.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -5391,6 +5430,16 @@ fn python_live_tex_scenario_passes() {
 }
 
 /// Sampled wireframes through the native portal, renderer and PNG publisher.
+#[test]
+fn python_textured_surfaces_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_textured_surfaces.v1")
+        .expect("textured surface scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 #[test]
 fn python_surface_mesh_scenario_passes() {
     let scenario = catalog()
