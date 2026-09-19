@@ -164,10 +164,17 @@ def install_matrix(native: Any) -> None:
 def _rows(matrix: Any) -> list[list[Any]]:
     """Bound and materialize input with Atlas's shape/entry budget before conversion."""
     rows, total = [], 0
-    for row in itertools.islice(iter(matrix), _MAX_ENTRIES + 1):
+    try:
+        outer = iter(matrix)
+    except TypeError as error:
+        raise TypeError("matrix must be an iterable of row iterables") from error
+    for row in itertools.islice(outer, _MAX_ENTRIES + 1):
         if len(rows) == _MAX_ENTRIES:
             raise ValueError("matrix rows exceed the declared limit of 4096")
-        values = list(itertools.islice(iter(row), _MAX_ENTRIES + 1))
+        try:
+            values = list(itertools.islice(iter(row), _MAX_ENTRIES + 1))
+        except TypeError as error:
+            raise TypeError("matrix rows must be iterable") from error
         total += len(values)
         if total > _MAX_ENTRIES:
             raise ValueError("matrix entries exceed the declared limit of 4096")
@@ -293,10 +300,7 @@ def _install_construction(native: Any) -> None:
         _owners(native, (entry for row in rows for entry in row))
         # Built-in ordinary scalar matrices keep their existing native layout,
         # glyph decoration, span maps and exact fast-path output. Rich entry
-        # options and caller-owned mobjects need the live constructor protocol.
-        if (unchanged(self, Matrix) and not config
-                and not any(isinstance(entry, (VMobject, complex, np.complexfloating))
-                            for row in rows for entry in row)):
+        if unchanged(self, Matrix) and not config:
             return original[Matrix](self, rows, element_config=config, **common)
         VMobject.__init__(self)
         self._matrix_entry_font_size = config.get("font_size", 48.0)
