@@ -46,6 +46,15 @@ def install_surface_textures(native: Any) -> None:
             if not math.isfinite(value):
                 raise ValueError("texture opacity must be finite")
             result["opacity"] = value
+        if "z_index" in result:
+            # Normalize once; an authored __int__ must not produce a different
+            # native draw key and Python mirror on two successive calls.
+            result["z_index"] = int(result["z_index"])
+        if "is_fixed_in_frame" in result:
+            value = float(result["is_fixed_in_frame"])
+            if not math.isfinite(value):
+                raise ValueError("texture fixed-in-frame mix must be finite")
+            result["is_fixed_in_frame"] = value
         if "shading" in result:
             values = tuple(float(value) for value in result["shading"])
             if len(values) != 3 or not all(math.isfinite(value) for value in values):
@@ -67,10 +76,8 @@ def install_surface_textures(native: Any) -> None:
             else:
                 self.deactivate_depth_test()
         if "is_fixed_in_frame" in values:
-            if values["is_fixed_in_frame"]:
-                self.fix_in_frame()
-            else:
-                self.unfix_from_frame()
+            # Camera projection defines a float mix, not a boolean switch.
+            self.uniforms["is_fixed_in_frame"] = values["is_fixed_in_frame"]
 
     def surface_init(self, uv_surface, image_file, dark_image_file=None, **kwargs):
         if self._is_bound():
@@ -142,8 +149,8 @@ def install_surface_textures(native: Any) -> None:
 
     def set_opacity(self, opacity, recurse=True):
         values = np.asarray(g["_listify"](opacity), dtype=float)
-        if not np.isfinite(values).all():
-            raise ValueError("texture opacity must be finite")
+        if not np.isfinite(values).all() or np.any(np.abs(values) > np.finfo(np.float32).max):
+            raise ValueError("texture opacity must be finite and f32-representable")
         g["ImageMobject"].set_opacity(self, opacity, recurse=recurse)
         if len(values):
             self.opacity = float(values.flat[0])
@@ -165,8 +172,9 @@ def install_surface_textures(native: Any) -> None:
         values = np.asarray([uv_func(float(u), float(v))
                              for u in np.linspace(0, 1, nu)
                              for v in np.linspace(1, 0, nv)], dtype=float)
-        if values.shape != (self.n_records(), 2) or not np.isfinite(values).all():
-            raise ValueError("texture UV map must return two finite coordinates per vertex")
+        if (values.shape != (self.n_records(), 2) or not np.isfinite(values).all()
+                or np.any(np.abs(values) > np.finfo(np.float32).max)):
+            raise ValueError("texture UV map must return two finite f32-representable coordinates per vertex")
         self.data["im_coords"][:] = values
         return self
 

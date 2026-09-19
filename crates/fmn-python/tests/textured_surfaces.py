@@ -111,6 +111,22 @@ def verify_textured_surfaces():
     from_bound = m.TexturedSurface(source, path, opacity=.25, depth_test=False, z_index=3)
     np.testing.assert_array_equal(from_bound.get_points(), source.get_points())
     assert from_bound.get_opacity() == .25 and from_bound.z_index == 3
+    class DrawOrder:
+        calls = 0
+        def __int__(self):
+            self.calls += 1
+            return self.calls + 4
+    order = DrawOrder()
+    partial_fixed = m.TexturedSurface(source, path, is_fixed_in_frame=.25, z_index=order)
+    assert partial_fixed.uniforms['is_fixed_in_frame'] == .25
+    assert order.calls == 1 and partial_fixed.z_index == 5
+    refuses(ValueError, lambda: m.TexturedSurface(source, path, is_fixed_in_frame=float('nan')))
+    uv_before = partial_fixed.data['im_coords'].copy()
+    opacity_before = partial_fixed.get_opacities().copy()
+    refuses(ValueError, lambda: partial_fixed.set_image_coords_by_uv_func(lambda u, v: (1e100, v)))
+    refuses(ValueError, lambda: partial_fixed.set_opacity(1e100))
+    np.testing.assert_array_equal(partial_fixed.data['im_coords'], uv_before)
+    np.testing.assert_array_equal(partial_fixed.get_opacities(), opacity_before)
     scene.add(texture, from_bound)
     texture.data['im_coords'][:, 0] = .75
     np.testing.assert_allclose(texture.data['im_coords'][:, 0], .75)
