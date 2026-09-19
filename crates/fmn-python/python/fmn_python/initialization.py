@@ -15,6 +15,7 @@ from types import ModuleType
 # an incomplete wheel must fail closed, not expose a partly initialized engine.
 _STEPS = (
     ("rendering", "install_scene_rendering"),
+    ("live_tex", "install_live_tex"),
     ("fading", "install_fading"),
     ("playback", "install_scene_playback"),
     ("scene_state", "install_scene_state"),
