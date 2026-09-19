@@ -1186,7 +1186,7 @@ def _install_composition_lifecycle(g):
         if not hasattr(cls, "abort"):
             cls.abort = legacy_abort
 
-    def timing_signature(animation):
+    def timing_profile(animation):
         return tuple((id(member), start, end) for member, start, end in animation.anims_with_timings)
 
     def group_init(self, *animations, run_time=-1, lag_ratio=None, group=None, group_type=None, **kwargs):
@@ -1196,7 +1196,7 @@ def _install_composition_lifecycle(g):
             raise TypeError("AnimationGroup group_type must be callable")
         original_init(self, *animations, run_time=run_time, lag_ratio=lag_ratio, **kwargs)
         self._composition_authored_root = group is not None or group_type is not None
-        self._composition_initial_timings = timing_signature(self)
+        self._composition_initial_timings = timing_profile(self)
         if group is not None:
             self.mobject = self.group = group
         elif group_type is not None:
@@ -1387,7 +1387,7 @@ def _install_composition_lifecycle(g):
 
     def custom_timings(animation):
         initial = getattr(animation, "_composition_initial_timings", None)
-        if initial is not None and timing_signature(animation) != initial:
+        if initial is not None and timing_profile(animation) != initial:
             return True
         for cls in type(animation).__mro__:
             baseline = protocols.get(cls)
