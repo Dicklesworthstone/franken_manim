@@ -13,6 +13,9 @@ on:
       - 'crates/fmn-python/python/fmn_python/recording.py'
       - 'crates/fmn-python/tests/test_recording_protocol.py'
       - 'crates/fmn-python/tests/recording_sessions.py'
+      - 'crates/fmn-python/tests/output_no_clobber.py'
+      - 'crates/fmn-python/tests/recording_preview.py'
+      - 'scripts/enable_camera_readback.py'
   workflow_dispatch:
 permissions:
   contents: write
@@ -150,6 +153,40 @@ jobs:
             done
           fi
           git rev-parse HEAD
+      - name: Activate observational preview for ordinary and recorded cells
+        run: |
+          set -euo pipefail
+          python scripts/enable_camera_readback.py
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_readback.rs
+          PYTHONPATH=crates/fmn-python/python:crates/fmn-python/tests python -m unittest test_camera_capture_protocol test_scene_console_protocol test_scene_console_ipython test_embedded_shell_protocol test_embedded_shell_ipython test_scene_console_worker test_recording_protocol
+          cargo test --locked -p fmn-python production_camera_readback_acceptance_suite -- --nocapture
+          cargo test --locked -p fmn-python portal_console -- --nocapture
+          python -m maturin build --locked --profile dev --out /tmp/preview-wheels
+          python -m pip install --no-deps --force-reinstall /tmp/preview-wheels/*.whl
+          python crates/fmn-python/tests/camera_readback.py
+          python crates/fmn-python/tests/scene_console_acceptance.py
+          python crates/fmn-python/tests/recording_preview.py
+          git diff --check
+      - name: Commit tested recorded-cell preview directly to main
+        run: |
+          set -euo pipefail
+          git add crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_readback.rs crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/tests/bridge.py
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(python): activate native camera previews for recorded and checkpointed cells'
+            for attempt in 1 2 3; do
+              git fetch --no-tags origin main
+              if ! git merge-base --is-ancestor origin/main HEAD; then
+                git rebase origin/main
+                cargo test --locked -p fmn-python production_camera_readback_acceptance_suite -- --nocapture
+                cargo test --locked -p fmn-python portal_console -- --nocapture
+              fi
+              if git push origin HEAD:main; then break; fi
+              test "$attempt" != 3
+            done
+          fi
+          git rev-parse HEAD
       - name: Preserve exact tested source and publication state
         if: always()
         run: |
@@ -173,5 +210,6 @@ jobs:
             /tmp/live-recording-worktree.patch
             /tmp/live-recording-commits.txt
             /tmp/recording-wheels/*.whl
+            /tmp/preview-wheels/*.whl
           if-no-files-found: error
           retention-days: 1
