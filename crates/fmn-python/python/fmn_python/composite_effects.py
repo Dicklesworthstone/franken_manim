@@ -134,9 +134,15 @@ def _install_lagged_map(g):
 
     def map_init(self, anim_func, group, run_time=2.0, lag_ratio=0.05, **kwargs):
         if not callable(anim_func):
-            raise TypeError("LaggedStartMap requires an animation constructor")
+            raise TypeError(
+                "LaggedStartMap requires an animation constructor to map; "
+                "got " + type(anim_func).__name__
+            )
         if not isinstance(group, g["Mobject"]):
-            raise TypeError("LaggedStartMap requires a Mobject group")
+            raise TypeError(
+                "LaggedStartMap requires a Mobject family to map over; "
+                "got " + type(group).__name__
+            )
         # Let the group's own iterator control membership, as in the pinned
         # Reference: a factory may intentionally mutate the group. kwargs
         # belong to each child; run_time/lag_ratio belong to the group.
