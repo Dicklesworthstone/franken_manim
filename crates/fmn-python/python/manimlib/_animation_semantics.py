@@ -59,6 +59,8 @@ def install(native):
         self.path_func = path_func
 
     def requires_python_animation(animation):
+        if not getattr(animation, "_native_kind", None):
+            return True
         # Consult the live path, not a constructor-time flag: scene authors
         # may replace it between plays or install it on an animation instance.
         if (
@@ -192,7 +194,14 @@ def install(native):
         return getattr(self, "name", type(self).__name__)
 
     def create_starting_mobject(self):
-        return self.mobject.copy()
+        starting = self.mobject.copy()
+        CameraFrame = g.get("CameraFrame")
+        if CameraFrame is not None and isinstance(self.mobject, CameraFrame):
+            if hasattr(starting, "clear_updaters"):
+                starting.clear_updaters()
+            elif hasattr(starting, "updaters"):
+                starting.updaters.clear()
+        return starting
 
     def get_all_mobjects(self):
         return self.mobject, self.starting_mobject
@@ -206,9 +215,12 @@ def install(native):
     def get_all_mobjects_to_update(self):
         result = []
         seen = set()
+        CameraFrame = g.get("CameraFrame")
         for mobject in self.get_all_mobjects():
             identity = id(mobject)
             if mobject is self.mobject or identity in seen:
+                continue
+            if CameraFrame is not None and isinstance(mobject, CameraFrame):
                 continue
             seen.add(identity)
             result.append(mobject)
@@ -515,7 +527,9 @@ def install(native):
         # Normalize it once so array/tuple RGB values do not enter the style
         # setter's gradient-list interpretation or an ambiguous truth test.
         color = (None if self.stroke_color is None else
-                 g["_ColorValue"](g["_color_to_rgb"](self.stroke_color)))
+                 (g["_ColorValue"](g["_color_to_rgb"](self.stroke_color))
+                  if "_ColorValue" in g and "_color_to_rgb" in g
+                  else self.stroke_color))
         outline = self.mobject.copy()
         outline.set_fill(opacity=0)
         behind = bool(
@@ -602,8 +616,10 @@ def install(native):
     _install_camera_pose(g)
     _install_camera_motion(g)
     _install_camera_choreography(g)
-    _install_partial_reveals(g)
-    _install_border_write(g)
+    if "ShowPartial" in g:
+        _install_partial_reveals(g)
+    if "DrawBorderThenFill" in g and "Write" in g:
+        _install_border_write(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
 
 
@@ -771,7 +787,10 @@ def _install_matching_parts(g):
                     animation.mobject.unlock_data()
                 if (animation.suspend_mobject_updating
                         and getattr(animation, "mobject_was_updating", False)):
-                    animation.mobject.resume_updating(call_updater=False)
+                    try:
+                        animation.mobject.resume_updating(call_updater=False)
+                    except TypeError:
+                        animation.mobject.resume_updating()
 
     def make_driver(scene, animation):
         if isinstance(animation.mobject, g["CameraFrame"]):
@@ -886,12 +905,21 @@ def _install_matching_parts(g):
 
     def clean_up_from_scene(self, scene):
         drive(self, "clean_up_from_scene", scene)
-        scene.remove(self.mobject, self.source)
+        for mobject in (self.mobject, self.source):
+            if getattr(mobject, "_is_bound", lambda: False)():
+                try:
+                    scene.remove(mobject)
+                except Exception:
+                    pass
         scene.add(self.target)
         self._matching_driver = None
 
     # Retain every already-published class object, including qualified
     # imports. Both front doors install this after bootstrap construction.
+    if g.get("__engine__") == "FrankenManim":
+        Parts._native_kind = "transform_matching_parts"
+        Shapes._native_kind = "transform_matching_shapes"
+        return
     Parts.__bases__ = (AnimationGroup,)
     Parts.__doc__ = "Match through public planning hooks, with native or authored leaves on Choreo's shared timeline."
     Parts._native_kind = None
@@ -1099,16 +1127,18 @@ def _install_matching_strings(g):
         # when two unrelated glyphs happen to have the same shape.
         return []
 
-    def callback_params(self):
-        return {}
-
+    if g.get("__engine__") == "FrankenManim":
+        Strings._native_kind = "transform_matching_strings"
+        Tex._native_kind = "transform_matching_tex"
+        Strings.matching_blocks = matching_blocks
+        Strings.find_pairs_with_matching_shapes = no_shape_fallback
+        return
     Strings.__bases__ = (Parts,)
     Strings._native_kind = None
     Tex._native_kind = None
     methods = {
         "__init__": strings_init, "matching_blocks": matching_blocks,
         "find_pairs_with_matching_shapes": no_shape_fallback,
-        "_native_params": callback_params,
     }
     for name, function in methods.items():
         function.__name__ = name
@@ -1237,10 +1267,16 @@ def _install_composition_lifecycle(g):
             self.mobject.set_animating_status(False)
             if getattr(self, "_composition_resumes_updating", False):
                 self._composition_resumes_updating = False
-                self.mobject.resume_updating(call_updater=call_updater)
+                try:
+                    self.mobject.resume_updating(call_updater=call_updater)
+                except TypeError:
+                    self.mobject.resume_updating()
         finally:
             for camera in cameras:
-                camera.resume_updating(call_updater=call_updater)
+                try:
+                    camera.resume_updating(call_updater=call_updater)
+                except TypeError:
+                    camera.resume_updating()
 
     def abort(self):
         driver = getattr(self, "_composition_driver", None)
@@ -1649,8 +1685,13 @@ def _install_camera_choreography(g):
             raise ValueError("Camera animation must target this Scene.frame")
         if animation.remover or getattr(animation, "replace_mobject_with_target_in_scene", False):
             raise NotImplementedError("Camera animation cannot remove or replace the scene's camera identity")
-        if (getattr(animation, "_native_kind", None)
-                and not isinstance(animation, (Transform, *g.get("_fmn_camera_motion_types", ())))):
+        if not getattr(animation, "_native_kind", None):
+            raise NotImplementedError(
+                "Python-callback animations of the camera frame await the "
+                "camera track's per-frame callback seam; use frame.animate or "
+                "Transform onto a CameraFrame target"
+            )
+        if not isinstance(animation, (Transform, *g.get("_fmn_camera_motion_types", ()))):
             raise NotImplementedError(type(animation).__name__ + " has no camera-pose animation protocol; use Transform or frame.animate")
         # The live camera deliberately has no Stage owner. Check helper
         # ownership against the Scene explicitly instead of comparing with
@@ -1727,7 +1768,10 @@ def _install_camera_choreography(g):
                 if (not self.was_suspended and animation.suspend_mobject_updating
                         and animation.mobject._is_updating_suspended()):
                     animation.mobject_was_updating = False
-                    animation.mobject.resume_updating(call_updater=False)
+                    try:
+                        animation.mobject.resume_updating(call_updater=False)
+                    except TypeError:
+                        animation.mobject.resume_updating()
 
     g["_fmn_make_camera_driver"] = CameraLeaf
 
@@ -1989,7 +2033,10 @@ def _install_partial_reveals(g):
                     and self.mobject._is_updating_suspended()):
                 self.mobject_was_updating = False
                 # Failure unwinding must not execute another authored updater.
-                self.mobject.resume_updating(call_updater=False)
+                try:
+                    self.mobject.resume_updating(call_updater=False)
+                except TypeError:
+                    self.mobject.resume_updating()
 
     def abort_preserving_error(self):
         try:
@@ -2078,13 +2125,12 @@ def _install_partial_reveals(g):
 
     # Fix the hierarchy in place, preserving all previously published names.
     Passing.__bases__ = (Partial,)
-    Partial._native_kind = None
     Partial.__doc__ = "Reveal native curves or surfaces through a live, overridable get_bounds rule."
     methods = {
         Partial: {"begin": begin, "finish": finish, "interpolate": interpolate,
                   "update_mobjects": update_mobjects, "abort": abort,
                   "interpolate_submobject": interpolate_submobject,
-                  "_ensure_runtime_defaults": ensure_defaults, "_native_params": partial_params},
+                  "_ensure_runtime_defaults": ensure_defaults},
         Creation: {"_native_params": show_params},
         Uncreate: {"__init__": uncreate_init, "_native_params": uncreate_native_params},
         Passing: {"__init__": passing_init, "finish": passing_finish, "_native_params": passing_params},
@@ -2215,7 +2261,10 @@ def _install_border_write(g):
                     and self.mobject._is_updating_suspended()):
                 self.mobject_was_updating = False
                 # Failure unwinding must not execute another authored updater.
-                self.mobject.resume_updating(call_updater=False)
+                try:
+                    self.mobject.resume_updating(call_updater=False)
+                except TypeError:
+                    self.mobject.resume_updating()
 
     def abort_preserving_error(self):
         try:
@@ -2301,18 +2350,24 @@ def _install_border_write(g):
                    stroke_color=None, **kwargs):
         if not isinstance(vmobject, VMobject):
             raise TypeError("Write requires a VMobject")
+        explicit_stroke_color = stroke_color
         if stroke_color is None:
             stroke_color = vmobject.get_color()
         original_write_init(self, vmobject, run_time=run_time, lag_ratio=lag_ratio,
                             rate_func=g["linear"] if rate_func is None else rate_func,
                             stroke_color=stroke_color, **kwargs)
+        self._explicit_stroke_color = explicit_stroke_color
 
     def native_params(self):
         return {**original_border_params(self), "remover": self.remover,
                 "final_alpha_value": self.final_alpha_value}
 
     def write_native_params(self):
-        return native_params(self)
+        if getattr(self, "_explicit_stroke_color", None) is None:
+            return {}
+        if "_color_to_rgb" in g:
+            return {"stroke_color": tuple(g["_color_to_rgb"](self.stroke_color))}
+        return {"stroke_color": tuple(self.stroke_color)}
 
     methods = {
         Border: {"begin": begin, "finish": finish, "abort": abort,

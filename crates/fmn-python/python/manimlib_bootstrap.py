@@ -17906,7 +17906,13 @@ class Transform(_NativeAnimation):
         return self.target_mobject
 
     def create_starting_mobject(self):
-        return self.mobject.copy()
+        starting = self.mobject.copy()
+        if isinstance(self.mobject, CameraFrame):
+            if hasattr(starting, "clear_updaters"):
+                starting.clear_updaters()
+            elif hasattr(starting, "updaters"):
+                starting.updaters.clear()
+        return starting
 
     def begin(self):
         # fm-5wq.4.91: the Python updater-driving fallback (never touched
@@ -18987,8 +18993,10 @@ class TransformMatchingStrings(_NativeAnimation):
         )
 
     def _native_params(self):
-        source_keys = self._native_span_keys(self.mobject)
-        target_keys = self._native_span_keys(self.target_mobject)
+        source = getattr(self, "source", self.mobject)
+        target = getattr(self, "target", self.target_mobject)
+        source_keys = self._native_span_keys(source)
+        target_keys = self._native_span_keys(target)
         source_claimed = []
         target_claimed = []
         if self.matched_pairs:
@@ -22326,6 +22334,11 @@ def _install_path_functions():
         def path(start_points, end_points, alpha):
             start_points = _np.asarray(start_points)
             end_points = _np.asarray(end_points)
+            if _np.isscalar(alpha):
+                if float(alpha) == 0.0:
+                    return start_points
+                if float(alpha) == 1.0:
+                    return end_points
             if isinstance(arc_angle, (float, int)):
                 theta = arc_angle
             else:

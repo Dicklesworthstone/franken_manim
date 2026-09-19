@@ -212,19 +212,4 @@ def _install_deferred_transforms(g: dict[str, Any]) -> None:
         init_path_func.__module__ = Complex.__module__
         Complex.init_path_func = init_path_func
 
-    families = tuple(g[name] for name in (
-        "ApplyMethod", "ApplyFunction", "ApplyPointwiseFunctionToCenter",
-        "ApplyComplexFunction",
-    ) if name in g)
-    if not families:
-        return
-    previous_requires = g["_requires_python_animation"]
 
-    def requires(animation):
-        # ApplyMethod also covers ApplyMatrix, pointwise functions, color and
-        # scale transforms. Their targets must see the predecessor's final
-        # state, even when several leaves share a single source. In contrast,
-        # MoveToTarget/_MethodAnimation deliberately retain authored targets.
-        return isinstance(animation, families) or previous_requires(animation)
-
-    g["_requires_python_animation"] = requires

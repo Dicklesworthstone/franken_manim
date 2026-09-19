@@ -291,43 +291,8 @@ def install_indication(native: Any) -> None:
 
 
 def _install_transform_indications(g):
-    """Use existing Transform target/start hooks for the indication shelf."""
-    names = (
-        "GrowFromPoint", "GrowFromCenter", "GrowFromEdge", "GrowArrow",
-        "SpinInFromNothing", "Indicate", "TurnInsideOut",
-    )
-    classes = tuple(g[name] for name in names if name in g)
-    if not classes:
-        return ()
-    Transform = g["Transform"]
-    Grow = g.get("GrowFromPoint")
-    if Grow is not None:
-        def starting_mobject(self):
-            start = super(Grow, self).create_starting_mobject()
-            start.scale(0)
-            start.move_to(self.point)
-            if self.point_color is not None:
-                start.set_color(self.point_color)
-            return start
-
-        _method(Grow, "create_starting_mobject", starting_mobject)
-    for cls in classes:
-        cls._native_kind = "transform"
-        cls._target_attr = "target_mobject"
-        cls._native_target = Transform._native_target
-        cls._native_params = Transform._native_params
-    previous_requires = g["_requires_python_animation"]
-
-    def requires(animation):
-        # The native factories eagerly copy their targets while planning the
-        # whole play. These create_target/create_starting_mobject protocols
-        # instead observe the preceding Succession member's completed state.
-        # Public hooks already implement collapse, recoloring and reversal;
-        # reuse them, including authored paths, endpoints and remover flags.
-        return isinstance(animation, classes) or previous_requires(animation)
-
-    g["_requires_python_animation"] = requires
-    return classes
+    del g
+    return ()
 
 
 def _install_wave(g):
