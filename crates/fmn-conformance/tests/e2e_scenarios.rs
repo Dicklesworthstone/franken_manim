@@ -2021,6 +2021,35 @@ fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     python_portal_sequence_run(ctx, false)
 }
 
+/// Live coefficients and matrix entries through actual native animation/output.
+fn python_live_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_live_tex")?;
+    let report = manimlib::run_portal_gauntlet_live_tex(&root, ctx.seed)
+        .map_err(|error| fail(format!("Python live equations: {error}")))?;
+    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode first live equation: {error}")))?;
+    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode last live equation: {error}")))?;
+    if (first.width, first.height) != (192, 108)
+        || (last.width, last.height) != (192, 108)
+        || first.rgba == last.rgba
+    {
+        return Err(fail("live equations did not animate native 192x108 pixels"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.live_tex")
+            .field("frames", report.frame_count)
+            .field("thread_counts", report.thread_counts)
+            .field("failure_paths", report.failure_paths),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("live_tex_frames", report.frame_count)
+        .with_counter("live_tex_thread_counts", report.thread_counts)
+        .with_counter("live_tex_failure_paths", report.failure_paths)
+        .with_artifact("live_tex_first.png", report.first_png)
+        .with_artifact("live_tex_last.png", report.last_png))
+}
+
 fn python_surface_mesh_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_surface_mesh")?;
     let (png, checks) = manimlib::run_portal_gauntlet_surface_mesh(&root, ctx.seed)
@@ -4563,6 +4592,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_live_tex.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_live_tex_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "live_tex_first.png".to_owned(),
+                "live_tex_last.png".to_owned(),
+            ]),
+            counter_eq("live_tex_frames", 6),
+            counter_eq("live_tex_thread_counts", 3),
+            counter_eq("live_tex_failure_paths", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.live_tex",
+            vec![
+                FieldPred::u64_eq("frames", 6),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("failure_paths", 2),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_surface_mesh.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -5322,6 +5375,17 @@ fn python_native_outputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_native_outputs.v1")
         .expect("Python native output scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Native live-number layout, animation, thread replay and failed publication.
+#[test]
+fn python_live_tex_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_live_tex.v1")
+        .expect("Python live equation scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

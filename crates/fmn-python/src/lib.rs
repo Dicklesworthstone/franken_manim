@@ -16,6 +16,8 @@
 mod corpus;
 mod crossing;
 mod ladder;
+#[cfg(any(test, feature = "gauntlet"))]
+mod live_tex;
 mod method_cache;
 pub mod perf_harness;
 mod portal_audio;
@@ -23,6 +25,9 @@ mod portal_playback;
 mod portal_studio;
 mod portal_video;
 mod report;
+
+#[cfg(feature = "gauntlet")]
+pub use live_tex::{PortalLiveTexReport, run_portal_gauntlet_live_tex};
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
