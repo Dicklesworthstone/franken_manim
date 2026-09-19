@@ -56,7 +56,7 @@ def install_interactive_editing(native: Any) -> None:
         gesture = scene.__dict__.get("_fmn_edit_gesture")
         if gesture is not None:
             visible = {id(member) for root in scene.mobjects for member in root.get_family()}
-            if (gesture.members != selected(scene) or not gesture.members
+            if (gesture.members != selected(scene)
                     or not set(gesture.members).issubset(visible)
                     or gesture.fixed != fixed_selection(scene)):
                 cancel(scene)
@@ -64,12 +64,14 @@ def install_interactive_editing(native: Any) -> None:
         return gesture if gesture is not None and gesture.kind == kind else None
 
     def prepare_grab(self):
-        if not len(self.selection):
-            cancel(self)
-            return
         old = self.__dict__.get("_fmn_edit_gesture")
         fixed = fixed_selection(self)
-        self.mouse_to_selection = pointer(self, self.mouse_point.get_center(), fixed) - self.selection.get_center()
+        selection_center = (
+            self.selection.get_center()
+            if len(self.selection) and len(self.selection.get_all_points()) > 0
+            else np.zeros(3)
+        )
+        self.mouse_to_selection = pointer(self, self.mouse_point.get_center(), fixed) - selection_center
         self._fmn_edit_gesture = SimpleNamespace(
             kind="grab", members=selected(self), saved=bool(old and old.saved),
             key=None, axis=None, fixed=fixed,
@@ -78,7 +80,7 @@ def install_interactive_editing(native: Any) -> None:
 
     def handle_grabbing(self, point):
         gesture = current(self, "grab")
-        if gesture is None:
+        if gesture is None or not len(self.selection):
             return
         desired = pointer(self, point, gesture.fixed) - self.mouse_to_selection
         delta = desired - self.selection.get_center()
@@ -149,14 +151,16 @@ def install_interactive_editing(native: Any) -> None:
             gesture.scales = target
 
     def edit_motion(self, point):
-        self.crosshair.move_to(self.frame.to_fixed_frame_point(point))
+        crosshair = getattr(self, "crosshair", None)
+        if crosshair is not None:
+            crosshair.move_to(self.frame.to_fixed_frame_point(point))
         gesture = self.__dict__.get("_fmn_edit_gesture")
         if gesture is not None:
             if gesture.kind == "grab":
                 self.handle_grabbing(point)
             else:
                 self.handle_resizing(point)
-        elif self.is_selecting:
+        elif getattr(self, "is_selecting", False):
             if input_modifiers(self) & shift:
                 self._fmn_selection_swept = True
                 self.handle_sweeping_selection(point)
@@ -171,11 +175,13 @@ def install_interactive_editing(native: Any) -> None:
         # Preserve ordinary camera drag when no editing gesture owns it.
         # Listeners already had their chance to consume the event in the
         # scene input gateway; editing never dispatches them a second time.
-        if self.__dict__.get("_fmn_edit_gesture") is not None or self.is_selecting:
+        if self.__dict__.get("_fmn_edit_gesture") is not None or getattr(self, "is_selecting", False):
             edit_motion(self, point)
         else:
             Scene.on_mouse_drag(self, point, d_point, buttons, modifiers)
-            self.crosshair.move_to(self.frame.to_fixed_frame_point(point))
+            crosshair = getattr(self, "crosshair", None)
+            if crosshair is not None:
+                crosshair.move_to(self.frame.to_fixed_frame_point(point))
 
     def projected_bounds(scene, mob):
         # Transform ALL eight native bounding-box corners. Transforming only
@@ -253,6 +259,7 @@ def install_interactive_editing(native: Any) -> None:
         if self.color_palette in self.mobjects:
             self.remove(self.color_palette)
         else:
+            self.save_state()
             self.add(self.color_palette)
 
     def on_key_press(self, symbol, modifiers):
@@ -279,8 +286,8 @@ def install_interactive_editing(native: Any) -> None:
                     gesture.axis = None if char == k.grab else grabs.index(char) - 1
         elif char == k.resize and not ctrl:
             gesture = current(self, "resize")
-            if gesture is None:
-                self.prepare_resizing(about_corner=bool(modifiers & shift))
+            if gesture is None and (modifiers & shift):
+                self.prepare_resizing(about_corner=True)
         elif char == k.select and not ctrl:
             if not self.is_selecting:
                 cancel(self)
@@ -332,6 +339,8 @@ def install_interactive_editing(native: Any) -> None:
                 self.remove(self.crosshair)
             else:
                 self.add(self.crosshair)
+        if (char in grabs or char == k.resize) and not ctrl:
+            self.save_state()
 
     def on_key_release(self, symbol, modifiers):
         Scene.on_key_release(self, symbol, modifiers)
