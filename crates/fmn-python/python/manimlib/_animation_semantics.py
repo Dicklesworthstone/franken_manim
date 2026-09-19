@@ -44,8 +44,9 @@ def install(native):
         # The callback segment now releases the Stage around every Python
         # hook. Keep scalar arc factories on Choreo's native path, but do not
         # reject an authored point-array map that this boundary can execute.
-        # Target-less Swap/CyclicReplace still require their native lowering.
-        if python_path and self._target_attr is None:
+        # Target-less Swap/CyclicReplace and Restore still require their native lowering.
+        Restore = g.get("Restore")
+        if python_path and (self._target_attr is None or (Restore is not None and isinstance(self, Restore))):
             refuse_unrouted(type(self).__name__ + "()", [("path_func", True)])
         original_transform_init(
             self,

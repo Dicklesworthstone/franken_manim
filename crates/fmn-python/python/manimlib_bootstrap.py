@@ -2784,6 +2784,16 @@ class Mobject(_BridgeMobject):
         receiver_family = self.get_family()
         source_family = mobject.get_family()
         self._become(mobject, match_updaters)
+        if not self._is_bound():
+            for receiver, source in zip(receiver_family[1:], source_family[1:]):
+                receiver._become(source, match_updaters)
+        for receiver, source in zip(receiver_family, source_family):
+            if "_data_defaults" in source.__dict__:
+                receiver.__dict__["_data_defaults"] = _np.copy(
+                    source.__dict__["_data_defaults"]
+                )
+            elif "_data_defaults" in receiver.__dict__:
+                receiver.__dict__.pop("_data_defaults", None)
         if match_updaters:
             # Reference become (mobject.py:742) also copies the host-side
             # updater list onto the aligned root; the native call above only
@@ -3791,6 +3801,7 @@ class VMobject(Mobject):
     def set_flat_stroke(self, flat_stroke=True, recurse=True):
         for mob in _family_preorder(self) if recurse else [self]:
             mob.uniforms["flat_stroke"] = bool(flat_stroke)
+            mob.flat_stroke = bool(flat_stroke)
         return self
 
     def get_flat_stroke(self):
@@ -4206,6 +4217,11 @@ class DashedVMobject(VMobject):
                 *(vmobject.get_subcurve(start, end) for start, end in intervals)
             )
         self.match_style(vmobject, recurse=False)
+        if "stroke_behind" in kwargs:
+            self.set_stroke(behind=kwargs["stroke_behind"], recurse=False)
+        if "flat_stroke" in kwargs:
+            self.set_flat_stroke(kwargs["flat_stroke"], recurse=False)
+            self.flat_stroke = bool(kwargs["flat_stroke"])
 
 
 class VHighlight(VGroup):
