@@ -29,7 +29,12 @@ def install_fading(native: Any) -> None:
 
     def fade_init(self, mobject, target_mobject, stretch=True, dim_to_match=1, **kwargs):
         if not isinstance(mobject, Mobject) or not isinstance(target_mobject, Mobject):
-            raise TypeError("FadeTransform requires source and target Mobjects")
+            raise TypeError(
+                "FadeTransform requires a source Mobject and a target Mobject; got "
+                + type(mobject).__name__
+                + " and "
+                + type(target_mobject).__name__
+            )
         dimension = index(dim_to_match)
         if dimension not in (0, 1, 2):
             raise ValueError("FadeTransform dim_to_match must be 0, 1, or 2")
@@ -176,7 +181,17 @@ def install_fading(native: Any) -> None:
             scene.add(self.to_add_on_completion)
         self._fade_cleaned = True
 
+    _refuse = g.get("_refuse_unrouted")
+
     def pieces_init(self, mobject, target_mobject, **kwargs):
+        if _refuse is not None:
+            _refuse(
+                "FadeTransformPieces()",
+                [
+                    ("stretch", kwargs.get("stretch", True) is not True),
+                    ("dim_to_match", kwargs.get("dim_to_match", 1) != 1),
+                ],
+            )
         for role, value in (("source", mobject), ("target", target_mobject)):
             if not isinstance(value, VMobject):
                 raise TypeError(

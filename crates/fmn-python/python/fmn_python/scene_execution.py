@@ -262,9 +262,18 @@ def install_scene_execution(native: Any) -> None:
             raise TypeError("Scene.play unexpected keyword(s): " + ", ".join(sorted(unknown)))
         if not animations:
             return animations, kwargs, False
-        # This is the Reference's prepare -> update_rate_info -> pre_play
-        # order. Build each authored builder once, before a hook can inspect
-        # or edit the completed animation objects. No geometry is adopted here.
+        for item in animations:
+            if isinstance(item, g["_AnimationBuilder"]):
+                for key in item.anim_args:
+                    if key not in ("run_time", "rate_func", "lag_ratio", "path_arc", "path_arc_axis"):
+                        raise NotImplementedError(
+                            "anim arg `" + key + "` is not yet routed to the engine play"
+                        )
+            elif not isinstance(item, g["Animation"]):
+                raise NotImplementedError(
+                    "Scene.play accepts mobject.animate builders and the bound Animation classes; got "
+                    + type(item).__name__
+                )
         prepared = tuple(g["prepare_animation"](item) for item in animations)
         if not all(isinstance(item, g["Animation"]) for item in prepared):
             raise TypeError("prepare_animation must return an Animation")
