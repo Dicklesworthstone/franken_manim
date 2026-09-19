@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import wraps
 import math
 import operator
+import sys
 from typing import Any
 
 _MISSING = object()
@@ -281,7 +282,16 @@ def _install_lifecycle(g):
             self._text_reveal_states = []
         return initialize
 
-    for cls in (g["AddTextWordByWord"], g["AddTextLetterByLetter"]):
+    # The schema deliberately omits non-wildcard exports from the root.
+    # AddTextLetterByLetter remains available on its qualified module; patch
+    # that same class without inventing another root export or class identity.
+    letter = g.get("AddTextLetterByLetter")
+    if letter is None:
+        creation = sys.modules.get("manimlib.animation.creation")
+        letter = getattr(creation, "AddTextLetterByLetter", None)
+    if not isinstance(letter, type) or not issubclass(letter, Animation):
+        raise ImportError("missing authored manimlib.animation.creation.AddTextLetterByLetter")
+    for cls in (g["AddTextWordByWord"], letter):
         cls.__init__ = initializer(cls.__init__)
         cls.begin, cls.finish, cls.abort = begin, finish, abort
         cls.interpolate_mobject = interpolate_mobject

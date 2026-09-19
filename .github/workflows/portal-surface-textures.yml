@@ -61,8 +61,10 @@ jobs:
         run: |
           set -euo pipefail
           rustfmt --edition 2024 --config skip_children=true crates/fmn-render/src/retained.rs crates/fmn-render/src/retained_texture_tests.rs crates/fmn-library/src/solids.rs crates/fmn-library/tests/textured_mesh_records.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_texture.rs crates/fmn-conformance/tests/e2e_scenarios.rs
+          python -m unittest discover -s crates/fmn-python/tests -p 'test_text_reveal*protocol.py' 2>&1 | tee /tmp/texture-portal-initialization.log
           cargo test --locked -p fmn-library --test textured_mesh_records 2>&1 | tee /tmp/texture-portal-mesh.log
           cargo test --locked -p fmn-render retained::texture_tests 2>&1 | tee /tmp/texture-portal-render.log
+          python -m maturin build --locked --interpreter python --profile dev --out target/texture-wheel 2>&1 | tee /tmp/texture-portal-build.log
           PYTHONPATH="$PWD/crates/fmn-python/python" cargo test --locked -p fmn-python native_textured_surface_and_mesh_acceptance -- --nocapture 2>&1 | tee /tmp/texture-portal-native.log
           grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/texture-portal-native.log
           PYTHONPATH="$PWD/crates/fmn-python/python" cargo test --locked -p fmn-conformance --test e2e_scenarios python_textured_surfaces_scenario_passes -- --nocapture 2>&1 | tee /tmp/texture-portal-gauntlet.log
@@ -70,7 +72,6 @@ jobs:
       - name: Verify a fresh installed wheel
         run: |
           set -euo pipefail
-          python -m maturin build --locked --interpreter python --profile dev --out target/texture-wheel
           python -m venv target/texture-venv
           target/texture-venv/bin/python -m pip install 'numpy==2.5.2' target/texture-wheel/*.whl
           target/texture-venv/bin/python -I crates/fmn-python/tests/textured_surfaces.py 2>&1 | tee /tmp/texture-portal-wheel.log
