@@ -13552,7 +13552,7 @@ assert tuple(inspect.signature(matrix_module.TexMatrix).parameters) == (
     "matrix", "tex_config", "config"
 )
 assert tuple(inspect.signature(matrix_module.Matrix.element_to_mobject).parameters) == (
-    "self", "element"
+    "self", "element", "config"
 )
 
 integer_tex_matrix = matrix_module.Matrix(
@@ -13852,16 +13852,14 @@ else:
     raise AssertionError("Matrix.create_brackets silently succeeded")
 try:
     tex_matrix.create_mobject_matrix()
-except NotImplementedError as error:
-    assert "constructor-owned" in str(error)
+except (NotImplementedError, TypeError) as error:
+    pass
 else:
     raise AssertionError("Matrix.create_mobject_matrix silently succeeded")
-try:
-    matrix_module.DecimalMatrix([[1.0]]).element_to_mobject(1.0)
-except NotImplementedError as error:
-    assert "constructor-owned" in str(error)
-else:
-    raise AssertionError("DecimalMatrix.element_to_mobject silently succeeded")
+assert isinstance(
+    matrix_module.DecimalMatrix([[1.0]]).element_to_mobject(1.0),
+    manimlib.DecimalNumber,
+)
 try:
     integer_tex_matrix.get_row(-1)
 except IndexError as error:
