@@ -5,6 +5,8 @@ namespace. Package-relative imports, dataclasses, lazy imports and imports of
 one's own scene module consequently see the same objects. Only project-local
 modules are refreshed; interpreter/portal modules are never reloaded. This is
 an authoring boundary, not a sandbox or a certified input-closure claim.
+Namespace packages are scoped too; namespaces spanning the project and foreign
+roots are refused rather than silently reusing another checkout's children.
 """
 from __future__ import annotations
 
@@ -37,6 +39,39 @@ def _origin(module: Any) -> Path | None:
         return None
 
 
+def _protected(name: str) -> bool:
+    return name in ("__main__", "manimlib", "fmn_python") or name.startswith(("manimlib.", "fmn_python."))
+
+
+def _namespace_paths(module: Any) -> tuple[Path, ...]:
+    if not isinstance(module, ModuleType):
+        return ()
+    spec = vars(module).get("__spec__")
+    if spec is None or spec.origin is not None or spec.submodule_search_locations is None:
+        return ()
+    return tuple(Path(path).resolve() for path in vars(module).get("__path__", ()))
+
+
+def _local_namespace(name: str, paths: tuple[Path, ...], root: Path) -> bool:
+    local = [path.is_relative_to(root) for path in paths]
+    if any(local) and not all(local):
+        raise ImportError(f"scene namespace {name!r} has locations outside the scene project")
+    return bool(local) and all(local)
+
+
+class _FreshNamespace(importlib.machinery.NamespaceLoader):
+    def __init__(self, name: str, path: Any, owner: SceneSource) -> None:
+        # Keep CPython's namespace search and resource-reader behavior. A bare
+        # custom Loader would break importlib.resources for authored assets.
+        super().__init__(name, path, importlib.machinery.PathFinder.find_spec)
+        self.owner = owner
+
+    def exec_module(self, module: ModuleType) -> None:
+        module.__file__ = None
+        self.owner._loaded[module.__name__] = module
+        super().exec_module(module)
+
+
 class _FreshSource(importlib.machinery.SourceFileLoader):
     def __init__(self, name: str, path: str, owner: SceneSource) -> None:
         super().__init__(name, path)
@@ -59,7 +94,15 @@ class _ProjectFinder(importlib.abc.MetaPathFinder):
         self.owner = owner
 
     def find_spec(self, fullname, path=None, target=None):
+        if _protected(fullname):
+            return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        if spec is not None and spec.loader is None and spec.submodule_search_locations is not None:
+            locations = tuple(Path(item).resolve() for item in spec.submodule_search_locations)
+            if not _local_namespace(fullname, locations, self.owner.root):
+                return None
+            spec.loader = _FreshNamespace(fullname, spec.submodule_search_locations, self.owner)
+            return spec
         if (spec is None or not isinstance(spec.loader, importlib.machinery.SourceFileLoader)
                 or not isinstance(spec.origin, str)):
             return None
@@ -136,18 +179,26 @@ class SceneSource:
             if "." in name or not name.isidentifier():
                 continue
             for directory in (self.root, self.path.parent):
+                namespace = _namespace_paths(module)
+                if namespace and (directory / name).is_dir() and not _local_namespace(name, namespace, self.root):
+                    raise ImportError(f"scene namespace {name!r} has locations outside the scene project")
                 candidates = (directory / (name + ".py"), directory / name / "__init__.py")
                 for candidate in candidates:
                     if (candidate != self.path and candidate.is_file()
                             and _origin(module) != candidate.resolve()):
                         raise ImportError(f"scene project module {name!r} is already loaded from another location")
         for name, module in tuple(sys.modules.items()):
+            # Never evict the active engine even if a scene was placed in its
+            # installation tree. That would fork native class identity.
+            if _protected(name):
+                continue
             origin = _origin(module)
-            if origin is not None and origin.is_relative_to(self.root):
-                # Never evict the active engine even if a scene was placed in
-                # its installation tree. That would fork native class identity.
-                if name in ("__main__", "manimlib", "fmn_python") or name.startswith(("manimlib.", "fmn_python.")):
-                    continue
+            local_namespace = _local_namespace(name, _namespace_paths(module), self.root)
+            if (origin is not None and origin.is_relative_to(self.root)) or local_namespace:
+                # A namespace has no __file__, but retains child attributes.
+                # Refresh its container as well as its source children, or
+                # `from namespace import helper` can bypass sys.modules and
+                # keep using a previous generation's helper indefinitely.
                 self._saved[name] = module
         for name in self._saved:
             sys.modules.pop(name, None)
