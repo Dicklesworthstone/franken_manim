@@ -5582,12 +5582,9 @@ assert np.array_equal(_textured_live.get_points(), textured_uv.get_points())
 assert np.allclose(_textured_live.get_opacities(), .75)
 assert np.allclose(_textured_live.data["im_coords"][[0, -1]], [[0, 1], [1, 0]])
 assert _textured_live.copy()._image_dimensions() == (1, 1)
-try:
-    surface_types.TexturedSurface(textured_uv, _texture_path, _texture_dark)
-except bridge_errors.CapabilityError as error:
-    assert "distinct light/dark images require a durable texture-pair resource" in str(error)
-else:
-    raise AssertionError("TexturedSurface silently substituted a dark texture")
+paired = surface_types.TexturedSurface(textured_uv, _texture_path, _texture_dark)
+assert paired.num_textures == 2
+assert paired.dark_image_file == str(_texture_dark.resolve())
 try:
     surface_types.TexturedSurface(manimlib.Square(), _texture_path)
 except TypeError as error:
