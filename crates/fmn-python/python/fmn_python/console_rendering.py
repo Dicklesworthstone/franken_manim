@@ -260,7 +260,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     resolution=(width, height), fps=fps, threads=threads,
                     animation_range=selection,
                     reproducible=bool(options.get("reproducible")),
-                    sources=loaded.sources,
+                    sources=(lambda: loaded.sources) if options.get("reproducible") else None,
                     runtime_identities=_runtime_identities(native),
                     _native=native,
                 )
@@ -285,7 +285,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        source=source, scene=selected, phase=phase,
                                        destination=None if destination is None else str(destination),
                                        notes=list(_error_notes(error)),
-                                       artifact_published=session is not None and session.result is not None)
+                                       artifact_published=session is not None and session.artifact_published)
     except Exception as error:
         partial = getattr(error, "render_batch_result", None)
         if phase == "batch" and isinstance(partial, BatchRenderResult):
@@ -311,7 +311,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        source=source, scene=selected, phase=phase,
                                        destination=None if destination is None else str(destination),
                                        notes=list(_error_notes(error)),
-                                       artifact_published=session is not None and session.result is not None)
+                                       artifact_published=session is not None and session.artifact_published)
     if batch:
         return _emit_result(native, report, robot, source, destination)
     return _single_result(native, session.result, robot, source, selected)

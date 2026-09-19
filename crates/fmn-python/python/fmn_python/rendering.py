@@ -8,13 +8,15 @@ frame budgets, codecs, and ffmpeg remain native responsibilities.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 import copy
+import hashlib
 import importlib
 import operator
 import os
 import sys
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,60 @@ from .render_selection import animation_range as _animation_range, apply_animati
 
 _FORMATS = frozenset({"png", "png_sequence", "gif", "y4m", "wav", "svg", "mp4", "mov"})
 _VIDEO_FORMATS = frozenset({"mp4", "mov"})
+SourceInputs = Mapping[str, bytes] | Callable[[], Mapping[str, bytes]]
+_MAX_PROVENANCE_INPUTS = 4096
+_MAX_PROVENANCE_BYTES = 64 * 1024 * 1024
+
+
+def _source_snapshot(values: Mapping[str, bytes]) -> dict[str, bytes]:
+    """Freeze a bounded source-only table before native artifact publication."""
+    if not isinstance(values, Mapping) or not 1 <= len(values) <= _MAX_PROVENANCE_INPUTS:
+        raise ValueError("reproducible rendering requires a nonempty, bounded source mapping")
+    result, size = {}, 0
+    for name, data in values.items():
+        if (not isinstance(name, str) or not name or "\\" in name or ":" in name
+                or any(ord(char) < 32 or ord(char) == 127 for char in name)
+                or any(part in ("", ".", "..") for part in name.split("/"))):
+            raise ValueError("source names must be normalized relative virtual paths")
+        if not isinstance(data, bytes):
+            raise TypeError("source values must be immutable compilation bytes")
+        size += len(data)
+        if len(result) >= _MAX_PROVENANCE_INPUTS or size > _MAX_PROVENANCE_BYTES:
+            raise ValueError("source snapshot exceeds its count or byte budget")
+        result[name] = data
+    return result
+
+
+def _cue_assets(inputs: Any) -> list[tuple[str, bytes]] | None:
+    """Revalidate audio bytes against the native decoder's actual input digest.
+
+    Native mixing happens during finish. A missing or changed file afterward
+    must never be silently omitted or represented by its replacement bytes.
+    Content-addressed virtual names avoid same-basename cue collisions.
+    """
+    if not inputs:
+        return None
+    assets, size = {}, 0
+    for entry in inputs:
+        path = Path(entry["path"])
+        digest = entry["source_sha256"]
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError("audio input requires its native source_sha256 receipt")
+        name = "audio/" + digest + "/" + path.name
+        if name in assets:
+            continue
+        if len(assets) >= _MAX_PROVENANCE_INPUTS:
+            raise ValueError("audio provenance exceeds its input budget")
+        with path.open("rb") as stream:
+            data = stream.read(_MAX_PROVENANCE_BYTES - size + 1)
+        size += len(data)
+        if size > _MAX_PROVENANCE_BYTES:
+            raise ValueError("audio provenance exceeds its byte budget")
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise RuntimeError(f"audio input changed after native decoding: {path}")
+        assets[name] = data
+    return sorted(assets.items())
 
 
 def _positive_integer(value: Any, name: str, maximum: int = (1 << 32) - 1) -> int:
@@ -122,11 +178,18 @@ def _runtime_identities(native: Any = None) -> dict[str, str]:
 
 
 class RenderSession:
-    """One explicitly owned, standard-mode native render generation.
+    """One explicitly owned native render generation.
 
-    ``result`` is set only after the native sink finishes successfully. All
-    exceptions, including KeyboardInterrupt, cancel an owned live generation.
+    ``result`` exists only after artifact, provenance, and receipt completion.
+    Failures cancel a still-live generation; failures after publication retain
+    ``artifact_published=True`` without pretending the full render succeeded.
     Failure to open a generation never cancels an existing external owner.
+
+    For reproducible output, ``sources`` is a frozen source mapping or a
+    zero-argument provider evaluated after scene execution and before native
+    publication. Use ``lambda: loaded.sources`` with SceneSource to include
+    imports made during construct/tear_down. Source capture alone does not
+    certify arbitrary Python host effects or other undeclared inputs.
     """
 
     def __init__(
@@ -135,7 +198,7 @@ class RenderSession:
         fps: int | None = None, threads: int | None = None,
         animation_range: tuple[int, int | None] | None = None,
         reproducible: bool = False,
-        sources: dict[str, bytes] | None = None,
+        sources: SourceInputs | None = None,
         runtime_identities: dict[str, str] | None = None,
         _native: Any = None,
     ) -> None:
@@ -183,15 +246,26 @@ class RenderSession:
         self.seed = _seed(scene.random_seed)
         self.animation_range = _animation_range(animation_range)
         self.reproducible = reproducible
-        self.sources = sources
-        self.runtime_identities = runtime_identities
+        self.sources = (
+            _source_snapshot(sources)
+            if reproducible and sources is not None and not callable(sources) else sources
+        )
+        self.runtime_identities = None if runtime_identities is None else dict(runtime_identities)
         self.scene = scene
         self.destination = path
         self.format = format
         self.result: RenderResult | None = None
         self._state = "new"
+        self._finishing = False
+        self._artifact_published = False
+        self._publish_manifest = None
         self._owner_thread = threading.get_ident()
         self._native = native
+
+    @property
+    def artifact_published(self) -> bool:
+        """Whether native finish returned, independently of manifest success."""
+        return self._artifact_published
 
     def _check_owner(self) -> None:
         if threading.get_ident() != self._owner_thread:
@@ -205,6 +279,21 @@ class RenderSession:
         if getattr(scene, "_fmn_owned_render_session", None) is not None:
             raise RuntimeError("this Scene already has an owned render generation")
         if self.reproducible:
+            publisher = getattr(self._native, "_portal_publish_manifest", None)
+            if not callable(publisher):
+                error_type = getattr(self._native, "_CapabilityError", RuntimeError)
+                raise error_type(
+                    "CAPABILITY: certified portal rendering awaits the complete "
+                    "content-hashed input closure and provenance sidecar"
+                )
+            if self.sources is None:
+                raise ValueError("reproducible rendering requires executed sources or a source provider")
+            # Freeze the runtime and publisher before authored scene callbacks.
+            self._publish_manifest = publisher
+            self.runtime_identities = dict(
+                _runtime_identities(self._native)
+                if self.runtime_identities is None else self.runtime_identities
+            )
             sidecar = self.destination.parent / (self.destination.name + ".manifest")
             if os.path.lexists(sidecar):
                 raise FileExistsError(
@@ -256,88 +345,72 @@ class RenderSession:
         self._check_owner()
         if self._state == "finished":
             return self.result
+        if self._finishing:
+            raise RuntimeError("render finalization is already in progress")
         if self._state != "active":
             raise RuntimeError("only an active render generation can finish")
+        self._finishing = True
+        published_path = self.destination
         try:
-            # Native finish synchronizes the live camera/background/light,
-            # supplies the static-scene final capture, joins ordered output,
-            # and publishes atomically. No Python encoding or file copying.
-            path, count, size, digest, engine, threads = self.scene._finish_render()
-        except BaseException as error:
-            self._cancel_preserving(error)
-            raise
-        self._state = "finished"
-        self._release()
-        manifest_path = None
-        closure_digest = None
-        if self.reproducible:
-            publish_fn = getattr(self._native, "_portal_publish_manifest", None)
-            if publish_fn is None:
-                error_type = getattr(self._native, "_CapabilityError", RuntimeError)
-                raise error_type(
-                    "CAPABILITY: certified portal rendering awaits the complete "
-                    "content-hashed input closure and provenance sidecar"
+            sources = None
+            if self.reproducible:
+                # Run the provider after construct/tear_down, while the loader
+                # still owns lazy imports, but before the no-clobber publish.
+                sources = _source_snapshot(
+                    self.sources() if callable(self.sources) else self.sources
                 )
-            artifact_report = {
-                "path": str(path),
-                "digest": digest,
-            }
-            identities = self.runtime_identities or _runtime_identities(self._native)
-            sources = self.sources or {}
-            cue_assets = None
-            audio_inputs = getattr(self.scene, "_render_audio_inputs", None)
-            if audio_inputs:
-                cue_assets = []
-                for entry in audio_inputs:
-                    cpath = entry.get("path")
-                    if cpath:
-                        p = Path(cpath)
-                        try:
-                            cue_assets.append((p.name, p.read_bytes()))
-                        except OSError:
-                            pass
-            try:
-                manifest_file_str, closure_digest_hex = publish_fn(
-                    Path(self.destination),
-                    self.format,
-                    self.resolution,
-                    self.fps,
-                    self.threads,
-                    self.seed,
-                    artifact_report,
-                    sources,
-                    identities,
-                    cue_assets,
+                if self._state != "active":
+                    raise RuntimeError("render generation was cancelled by its source provider")
+            # Native finish synchronizes the live camera/background/light,
+            # captures a static final frame, joins output, and publishes.
+            # Mark publication before unpacking so receipt failures cannot
+            # cancel an already-published generation or masquerade as success.
+            receipt = self.scene._finish_render()
+            self._artifact_published = True
+            self._state = "published"
+            path, count, size, digest, engine, threads = receipt
+            published_path = path
+            invocations, audio_inputs = (), ()
+            if self.format in _VIDEO_FORMATS or self.format == "wav":
+                invocations = tuple(copy.deepcopy(self.scene._render_invocations))
+                audio_inputs = tuple(copy.deepcopy(self.scene._render_audio_inputs))
+            manifest_path, closure_digest = None, None
+            if self.reproducible:
+                cues = audio_inputs or getattr(self.scene, "_render_audio_inputs", ())
+                manifest_file_str, closure_digest = self._publish_manifest(
+                    Path(self.destination), self.format, self.resolution,
+                    self.fps, self.threads, self.seed,
+                    {"path": str(path), "digest": digest},
+                    sources, self.runtime_identities, _cue_assets(cues),
                 )
                 manifest_path = Path(manifest_file_str)
-                closure_digest = closure_digest_hex
-            except BaseException as error:
+            result = RenderResult(
+                destination=Path(path), format=self.format, resolution=self.resolution,
+                fps=self.fps, threads=int(threads), engine=engine, bytes=int(size),
+                digest=digest, frame_count=None if self.format == "wav" else int(count),
+                sample_frames=int(count) if self.format == "wav" else None,
+                seed=self.seed, animation_range=self.animation_range,
+                certified=self.reproducible, manifest=manifest_path,
+                closure_digest=closure_digest, ffmpeg_invocations=invocations,
+                audio_inputs=audio_inputs,
+            )
+            self.result = result
+            self._state = "finished"
+            return result
+        except BaseException as error:
+            if self._artifact_published:
+                self._state = "failed"
                 error.add_note(
-                    f"native artifact is already published at {path}; provenance manifest could not be written"
+                    f"native artifact is already published at {published_path}; "
+                    "provenance or render receipt could not be completed"
                 )
-                raise
-
-        self.result = RenderResult(
-            destination=Path(path), format=self.format, resolution=self.resolution,
-            fps=self.fps, threads=int(threads), engine=engine, bytes=int(size),
-            digest=digest, frame_count=None if self.format == "wav" else int(count),
-            sample_frames=int(count) if self.format == "wav" else None,
-            seed=self.seed, animation_range=self.animation_range,
-            certified=self.reproducible,
-            manifest=manifest_path,
-            closure_digest=closure_digest,
-        )
-        if self.format in _VIDEO_FORMATS or self.format == "wav":
-            try:
-                self.result = replace(
-                    self.result,
-                    ffmpeg_invocations=tuple(copy.deepcopy(self.scene._render_invocations)),
-                    audio_inputs=tuple(copy.deepcopy(self.scene._render_audio_inputs)),
-                )
-            except BaseException as error:
-                error.add_note(f"native artifact is already published at {path}; media provenance could not be read")
-                raise
-        return self.result
+            else:
+                self._cancel_preserving(error)
+            raise
+        finally:
+            self._finishing = False
+            if self._artifact_published:
+                self._release()
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
         if exc_value is not None:
@@ -353,7 +426,7 @@ def render_session(
     threads: int | None = None,
     animation_range: tuple[int, int | None] | None = None,
     reproducible: bool = False,
-    sources: dict[str, bytes] | None = None,
+    sources: SourceInputs | None = None,
     runtime_identities: dict[str, str] | None = None,
 ) -> RenderSession:
     """Record imperative scene operations without a CLI or temporary script."""
@@ -369,7 +442,7 @@ def render_scene(
     threads: int | None = None, scene_kwargs: dict[str, Any] | None = None,
     animation_range: tuple[int, int | None] | None = None,
     reproducible: bool = False,
-    sources: dict[str, bytes] | None = None,
+    sources: SourceInputs | None = None,
     runtime_identities: dict[str, str] | None = None,
     _output_options: dict[str, Any] | None = None,
 ) -> RenderResult:
@@ -377,9 +450,10 @@ def render_scene(
 
     A class is constructed once with ``scene_kwargs``. An existing instance
     must still be pristine when rendering starts. ``EndScene`` is normal
-    early completion; all other failures cancel without publishing a partial
-    artifact. The host interpreter executes source directly, never a child
-    Python process or a subprocess wrapper around the command-line program.
+    early completion. Execution failures cancel the live generation; receipt
+    or manifest failures after native finish report the published artifact.
+    The host interpreter executes source directly, never a child Python process
+    or a subprocess wrapper around the command-line program.
     """
     animation_range = _animation_range(animation_range)
     native = importlib.import_module("manimlib")
