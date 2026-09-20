@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .batch_provenance import validate_batch_mode
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_fields, render_scenes
 from .rendering import _positive_integer
 from .scene_loading import SceneSource
@@ -18,7 +19,7 @@ _BATCH_HELP = """Multi-scene output:
   fmn-python [--robot] SOURCE.py --write_all [--keep-going]
              [--format png|png_sequence|gif|y4m|wav|svg|mp4|mov]
              [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
-             [--video_dir DIRECTORY]
+             [--video_dir DIRECTORY] [--reproducible]
 
 --write_all renders locally declared scenes in sorted name order. DIRECTORY
 is the batch root, not a single output file. --keep-going continues after
@@ -26,7 +27,11 @@ ordinary scene failures; any failed scene still makes the command exit 5.
 Completed artifacts are retained. Ctrl-C stops with exit 130 and progress.
 Robot stdout contains one aggregate receipt; ordinary scene print output and
 per-scene progress go to stderr. Scenes run sequentially; --threads controls
-each native renderer, not Python scene concurrency. Output is uncertified.
+each native renderer, not Python scene concurrency. Output is uncertified by
+default. --reproducible supports PNG stills/sequences and WAV with independent
+per-scene native manifests, source providers and a fixed runtime generation.
+The aggregate remains uncertified; all_scenes_certified summarizes completed
+per-scene receipts. Checkpoint/resume is excluded from this mode.
 """
 
 
@@ -114,8 +119,7 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
             raise ValueError("batch output directory must be nonempty and contain no NUL")
         # Source module code, not just constructors, may change cwd.
         directory = Path(directory).resolve()
-        if options.get("reproducible"):
-            raise RuntimeError("CAPABILITY: batch rendering does not participate in certified reproducibility")
+        validate_batch_mode(native, options["format"], bool(options.get("reproducible")))
     except RuntimeError as error:
         message = _error_fields(error)[1]
         if message.startswith("CAPABILITY: "):
@@ -143,6 +147,8 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
                 format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                 continue_on_error=bool(flags["--keep-going"]), on_result=progress,
                 **({} if selection is None else {"animation_range": selection}),
+                **({"reproducible": True, "sources": lambda: loaded.sources}
+                   if options.get("reproducible") else {}),
             )
     except BatchRenderError as error:
         return _emit_result(native, error.result, robot, source, directory)
@@ -163,6 +169,8 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
         # failures have no successful scene to imply or fabricate.
         if phase == "load":
             code, identity, kind = 5, "scene", "scene-load-failed"
+        elif _error_fields(error)[1].startswith("CAPABILITY: "):
+            code, identity, kind = 4, "capability", "render-capability-unavailable"
         elif isinstance(error, OSError):
             code, identity, kind = 6, "render", "render-start-failed"
         else:

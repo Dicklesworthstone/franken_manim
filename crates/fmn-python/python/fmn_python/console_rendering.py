@@ -13,6 +13,7 @@ import sys
 from typing import Any
 
 from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result
+from .batch_provenance import validate_batch_mode
 from .checkpoint_cli import CHECKPOINT_HELP, CHECKPOINT_VALUES, take_checkpoint_options
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
@@ -180,8 +181,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         # Freeze both paths before module code or a constructor changes cwd.
         destination = None if supplied is None else Path(supplied).resolve()
         default_root = (Path("media") / "videos" / source_path.stem).resolve()
-        if batch and options.get("reproducible"):
-            raise RuntimeError("CAPABILITY: batch rendering does not participate in certified reproducibility")
+        if batch:
+            validate_batch_mode(native, options["format"], bool(options.get("reproducible")),
+                                recovery.get("checkpoint"))
         if options.get("reproducible"):
             if getattr(native, "_portal_publish_manifest", None) is None:
                 raise RuntimeError(
@@ -192,7 +194,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 raise RuntimeError(
                     f"CAPABILITY: portal input closure cannot be established: scene source does not exist: {source_path}"
                 )
-            if destination is not None:
+            if destination is not None and not batch:
                 sidecar = destination.parent / (destination.name + ".manifest")
                 if os.path.lexists(sidecar):
                     raise FileExistsError(
@@ -228,6 +230,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
                     **({} if selection is None else {"animation_range": selection}),
                     **({} if not output_options else {"_output_options": output_options}),
+                    **({"reproducible": True, "sources": lambda: loaded.sources}
+                       if options.get("reproducible") else {}),
                     **recovery,
                     on_result=lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
@@ -292,7 +296,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             return native._portal_cli_emit(6, "render", "render-batch-reporting-failed", _message(error), robot,
                                            source=source, destination=str(destination), batch=partial.as_dict())
         capability = getattr(native, "_CapabilityError", ())
-        if phase == "start" and isinstance(error, capability):
+        if phase in {"start", "batch"} and (isinstance(error, capability)
+                or _error_fields(error)[1].startswith("CAPABILITY: ")):
             code, identity, kind = 4, "capability", "render-capability-unavailable"
         elif phase in {"load", "construct"}:
             code, identity, kind = 5, "scene", "scene-load-failed"
