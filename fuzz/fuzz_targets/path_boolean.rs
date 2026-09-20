@@ -60,4 +60,5 @@ fuzz_target!(|data: &[u8]| {
     let _ = union(&mobs);
     let _ = union_with_options(&mobs, options);
     let _ = difference(&mobs[0], &mobs[1]);
+    let _ = difference_with_options(&mobs[0], &mobs[1], options);
 });
