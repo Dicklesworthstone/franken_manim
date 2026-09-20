@@ -284,17 +284,30 @@ def install_matching_strings(native: Any) -> None:
             raise TypeError("matching string keys must be strings")
         self.matched_pairs, self.matched_keys, self.key_map = explicit, keys, mapping
         sources, targets = span_pieces(self, source, target)
-        _validate_members(explicit, sources, targets)
         _validate_owners((source, target))
         claimed = [set(), set()]
         for pair in explicit:
             for side, member in enumerate(pair):
                 ids = {id(piece) for piece in _pieces(member)}
-                if not ids:
-                    raise ValueError("matched_pairs member is not a live span-map part")
                 if ids & claimed[side]:
                     raise ValueError("matched_pairs claims the same part twice")
                 claimed[side].update(ids)
+        allowed = [{id(member) for member in pieces} for pieces in (sources, targets)]
+        has_foreign = any(
+            not _pieces(member) or any(id(piece) not in allowed[side] for piece in _pieces(member))
+            for pair in explicit
+            for side, member in enumerate(pair)
+        )
+        if has_foreign:
+            self.source = source
+            self.target = target
+            self.target_mobject = target
+            self.mobject = source
+            self.animations = []
+            self._has_foreign = True
+            super(Parts, self).__init__(run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+            self._matching_finished = self._matching_cleanup_started = False
+            return
         blocks = _pairs(self.matching_blocks(source, target, keys, mapping), Mobject, "matching_blocks")
         _validate_members(blocks, sources, targets)
         super(Strings, self).__init__(source, target, matched_pairs=explicit + blocks,
@@ -304,8 +317,15 @@ def install_matching_strings(native: Any) -> None:
         # claims; conflating the two breaks native source_keys/target_keys.
         self.matched_pairs = explicit
 
+    def strings_begin(self):
+        if getattr(self, "_has_foreign", False):
+            self._native_params()
+        return super(Strings, self).begin()
+
     Strings.__bases__ = (Parts,)
     _bind(Strings, "__init__", strings_init)
+    _bind(Strings, "begin", strings_begin)
     # The shared initializer already installs matching_blocks and the D-09
     # no-shape-fallback rule. Reuse both, including all authored overrides.
     g["_FMN_MATCHING_STRINGS_INSTALLED"] = True
+

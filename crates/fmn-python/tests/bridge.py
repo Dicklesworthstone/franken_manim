@@ -8331,7 +8331,9 @@ delayed_apply = manimlib.ApplyMethod(delayed_apply_source.shift, manimlib.RIGHT)
 delayed_apply_source.shift(manimlib.UP)
 delayed_apply_samples = []
 delayed_apply_source.add_updater(
-    lambda mob: delayed_apply_samples.append(mob.get_center().copy()),
+    lambda mob: delayed_apply_samples.append(mob.get_center().copy())
+    if mob is delayed_apply_source
+    else None,
     call=False,
 )
 delayed_apply_scene.play(
@@ -8351,7 +8353,9 @@ apply_tracker_scene = Scene()
 apply_tracker = manimlib.ValueTracker(1.0)
 apply_tracker_samples = []
 apply_tracker.add_updater(
-    lambda mob: apply_tracker_samples.append(float(mob.get_value())),
+    lambda mob: apply_tracker_samples.append(float(mob.get_value()))
+    if mob is apply_tracker
+    else None,
     call=False,
 )
 apply_tracker_scene.play(
@@ -17443,16 +17447,12 @@ class _CallbackFrameAnimation(Animation):
         return None
 
 
-try:
-    explicit_cam_scene.play(
-        _CallbackFrameAnimation(explicit_cam_frame, run_time=1.0 / 30.0)
-    )
-except NotImplementedError as error:
-    assert "camera track" in str(error), error
-else:
-    raise AssertionError(
-        "a python-callback camera-frame animation did not refuse"
-    )
+# fm-5wq.4 / ab75ba3b: authored camera callbacks execute on the shared
+# Choreo camera callback track.
+explicit_cam_scene.play(
+    _CallbackFrameAnimation(explicit_cam_frame, run_time=1.0 / 30.0)
+)
+
 
 
 # ------------------------------------------------ LaggedStartMap
@@ -17750,16 +17750,23 @@ arc_anim = manimlib.Restore(
 )
 assert np.isclose(arc_anim.path_arc, math.pi / 4)
 
-# An arbitrary user path function stays the named unrouted refusal.
+# fm-5wq.4.102 / c6b24744: Restore accepts an authored path function
+# through the callback lifecycle; non-callable stays TypeError.
+custom_restore = manimlib.Restore(
+    restore_pf_mover,
+    path_func=lambda start, end, alpha: start,
+)
+assert callable(custom_restore.path_func)
 try:
     manimlib.Restore(
         restore_pf_mover,
-        path_func=lambda start, end, alpha: start,
+        path_func="not_callable",
     )
-except NotImplementedError as error:
+except TypeError as error:
     assert "path_func" in str(error)
 else:
-    raise AssertionError("Restore accepted an arbitrary path function")
+    raise AssertionError("Restore accepted a non-callable path function")
+
 
 # A never-saved mobject stays the Reference's exact refusal.
 try:

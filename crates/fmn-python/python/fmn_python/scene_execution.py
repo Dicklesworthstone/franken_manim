@@ -268,9 +268,18 @@ def install_scene_execution(native: Any) -> None:
         # semantics and even valid authored build() overrides. Prepare once in
         # argument order, before pre_play or native work; never filter kwargs or
         # reconstruct the returned animation and lose its authored identity.
+        builder_cls = g.get("_AnimationBuilder")
+        valid_types = (g["Animation"], builder_cls) if builder_cls is not None else (g["Animation"],)
+        for item in animations:
+            if not isinstance(item, valid_types):
+                raise NotImplementedError(
+                    "Scene.play accepts mobject.animate builders and the bound "
+                    "Animation classes; got " + type(item).__name__
+                )
         prepared = tuple(g["prepare_animation"](item) for item in animations)
         if not all(isinstance(item, g["Animation"]) for item in prepared):
             raise TypeError("prepare_animation must return an Animation")
+
         for key in ("run_time", "lag_ratio"):
             value = kwargs.get(key)
             if value is not None:

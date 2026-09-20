@@ -18663,7 +18663,26 @@ class MoveToTarget(Transform):
 class _MethodAnimation(MoveToTarget):
     def __init__(self, mobject, methods, **kwargs):
         self.methods = methods
+        for key in sorted(kwargs):
+            if key not in (
+                "run_time",
+                "rate_func",
+                "lag_ratio",
+                "path_arc",
+                "path_arc_axis",
+                "path_func",
+                "time_span",
+                "final_alpha_value",
+                "suspend_mobject_updating",
+                "name",
+                "remover",
+            ):
+
+                raise NotImplementedError(
+                    "anim arg `" + key + "` is not yet routed to the engine play"
+                )
         super().__init__(mobject, **kwargs)
+
 
 
 def prepare_animation(anim):
