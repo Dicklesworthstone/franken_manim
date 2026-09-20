@@ -334,20 +334,22 @@ class LifecycleTests(unittest.TestCase):
 class NativeSpeedTests(unittest.TestCase):
     def test_native_transform_and_clock(self):
         import manimlib as m
+        from manimlib.animation.speed import ChangeSpeed
         scene, dot = m.Scene(), m.Dot()
         scene.add(dot)
         start = scene.time()
-        scene.play(m.ChangeSpeed(dot.animate(run_time=2, rate_func=m.linear).shift(m.RIGHT * 2),
-                                 {0: 2, 1: 2}))
+        scene.play(ChangeSpeed(dot.animate(run_time=2, rate_func=m.linear).shift(m.RIGHT * 2),
+                               {0: 2, 1: 2}))
         self.assertAlmostEqual(scene.time() - start, 1.0, places=6)
         self.assertAlmostEqual(float(dot.get_center()[0]), 2.0, places=5)
 
     def test_native_nested_group_and_remover(self):
         import manimlib as m
+        from manimlib.animation.speed import ChangeSpeed
         scene, left, right = m.Scene(), m.Dot(), m.Dot()
         scene.add(left, right)
         group = m.AnimationGroup(left.animate.shift(m.RIGHT), m.FadeOut(right), run_time=1)
-        scene.play(m.ChangeSpeed(group, {0: 1, 1: 2}))
+        scene.play(ChangeSpeed(group, {0: 1, 1: 2}))
         self.assertAlmostEqual(float(left.get_center()[0]), 1.0, places=5)
         self.assertNotIn(right, scene.mobjects)
 

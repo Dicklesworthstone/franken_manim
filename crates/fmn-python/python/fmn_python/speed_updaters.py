@@ -43,7 +43,12 @@ def install_speed_updaters(native):
         return
     if not g.get("_FMN_SPEED_INSTALLED", False):
         raise ImportError("speed updater installation requires ChangeSpeed execution")
-    ChangeSpeed, Mobject = g["ChangeSpeed"], g["Mobject"]
+    import sys
+    speed_mod = sys.modules.get("manimlib.animation.speed")
+    ChangeSpeed = g.get("ChangeSpeed") or (getattr(speed_mod, "ChangeSpeed", None) if speed_mod else None)
+    if ChangeSpeed is None:
+        raise KeyError("ChangeSpeed")
+    Mobject = g["Mobject"]
     previous = {name: getattr(ChangeSpeed, name) for name in (
         "__init__", "begin", "interpolate", "update_mobjects", "finish", "abort",
         "clean_up_from_scene",

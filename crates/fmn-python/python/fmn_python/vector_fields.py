@@ -22,7 +22,7 @@ def _rows(np, values, context, *, columns=None, count=None):
     if not isinstance(values, (np.ndarray, list, tuple)):
         values = list(itertools.islice(iter(values), _MAX_SAMPLES + 1))
     if len(values) > _MAX_SAMPLES:
-        raise ValueError(context + " exceeds the 65536-sample budget")
+        raise ValueError(context + " exceeds the 65536-point resource budget")
     array = np.asarray(values)
     if array.dtype.kind == "c":
         raise TypeError(context + " requires real coordinates")
@@ -33,7 +33,7 @@ def _rows(np, values, context, *, columns=None, count=None):
     if columns is not None and array.shape[1] != columns:
         raise ValueError(context + f" must have {columns} columns")
     if count is not None and len(array) != count:
-        raise ValueError(context + " must return one row per sample")
+        raise ValueError(context + " must return one vector per sample")
     array = np.array(array, dtype=float, copy=True)
     if not np.isfinite(array).all():
         raise ValueError(context + " must be finite")

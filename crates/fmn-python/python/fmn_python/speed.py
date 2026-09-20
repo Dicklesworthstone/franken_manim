@@ -123,7 +123,12 @@ def install_speed(native: Any) -> None:
     g = vars(native)
     if g.get("_FMN_SPEED_INSTALLED", False):
         return
-    ChangeSpeed, Group = g["ChangeSpeed"], g["AnimationGroup"]
+    import sys
+    speed_mod = sys.modules.get("manimlib.animation.speed")
+    ChangeSpeed = g.get("ChangeSpeed") or (getattr(speed_mod, "ChangeSpeed", None) if speed_mod else None)
+    if ChangeSpeed is None:
+        raise KeyError("ChangeSpeed")
+    Group = g["AnimationGroup"]
 
     def restore(self):
         previous = self.__dict__.pop("_speed_previous_rate", _MISSING)

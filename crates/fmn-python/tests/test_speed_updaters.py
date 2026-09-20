@@ -241,11 +241,12 @@ class ScopeTests(unittest.TestCase):
 class NativeSpeedUpdaterTests(unittest.TestCase):
     def test_native_child_clock_drives_updater_and_then_restores_dt(self):
         import manimlib as m
+        from manimlib.animation.speed import ChangeSpeed
         scene, anchor, following = m.Scene(), m.Dot(), m.Dot()
         scene.add(anchor, following)
         values = []
-        m.ChangeSpeed.add_updater(following, lambda mob, dt: values.append(dt))
-        scene.play(m.ChangeSpeed(m.Animation(anchor, run_time=2), {0: 2, 1: 2}))
+        ChangeSpeed.add_updater(following, lambda mob, dt: values.append(dt))
+        scene.play(ChangeSpeed(m.Animation(anchor, run_time=2), {0: 2, 1: 2}))
         self.assertAlmostEqual(sum(values), 2.0, places=6)
         self.assertNotIn(adapter._KEY, vars(scene))
         before = sum(values)
@@ -254,19 +255,20 @@ class NativeSpeedUpdaterTests(unittest.TestCase):
 
     def test_native_updater_failure_does_not_poison_next_play(self):
         import manimlib as m
+        from manimlib.animation.speed import ChangeSpeed
         scene, anchor = m.Scene(), m.Dot()
         scene.add(anchor)
         failure = RuntimeError("authored speed updater")
         def failing(mob, dt):
             if dt:
                 raise failure
-        m.ChangeSpeed.add_updater(anchor, failing)
+        ChangeSpeed.add_updater(anchor, failing)
         with self.assertRaises(RuntimeError) as caught:
-            scene.play(m.ChangeSpeed(m.Animation(anchor), {0: 2, 1: 2}))
+            scene.play(ChangeSpeed(m.Animation(anchor), {0: 2, 1: 2}))
         self.assertIs(caught.exception, failure)
         self.assertNotIn(adapter._KEY, vars(scene))
         anchor.clear_updaters()
-        scene.play(m.ChangeSpeed(m.Animation(anchor), {0: 2, 1: 2}))
+        scene.play(ChangeSpeed(m.Animation(anchor), {0: 2, 1: 2}))
 
 
 if __name__ == "__main__":
