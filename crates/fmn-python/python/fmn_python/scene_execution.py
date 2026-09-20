@@ -262,18 +262,12 @@ def install_scene_execution(native: Any) -> None:
             raise TypeError("Scene.play unexpected keyword(s): " + ", ".join(sorted(unknown)))
         if not animations:
             return animations, kwargs, False
-        for item in animations:
-            if isinstance(item, g["_AnimationBuilder"]):
-                for key in item.anim_args:
-                    if key not in ("run_time", "rate_func", "lag_ratio", "path_arc", "path_arc_axis"):
-                        raise NotImplementedError(
-                            "anim arg `" + key + "` is not yet routed to the engine play"
-                        )
-            elif not isinstance(item, g["Animation"]):
-                raise NotImplementedError(
-                    "Scene.play accepts mobject.animate builders and the bound Animation classes; got "
-                    + type(item).__name__
-                )
+        # Builders produce real Animations now, not a restricted native spec.
+        # Let the selected constructor validate its options: a static allowlist
+        # here rejected live paths, time windows, suspension, remover/final-alpha
+        # semantics and even valid authored build() overrides. Prepare once in
+        # argument order, before pre_play or native work; never filter kwargs or
+        # reconstruct the returned animation and lose its authored identity.
         prepared = tuple(g["prepare_animation"](item) for item in animations)
         if not all(isinstance(item, g["Animation"]) for item in prepared):
             raise TypeError("prepare_animation must return an Animation")

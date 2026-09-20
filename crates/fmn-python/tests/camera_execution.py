@@ -1,5 +1,7 @@
 """Real native playback failure recovery for mixed camera/drawable scenes."""
 import math
+from pathlib import Path
+import tempfile
 
 import numpy as np
 import manimlib as m
@@ -9,8 +11,6 @@ _MISSING = object()
 
 
 class Probe(m.Animation):
-    _fmn_allow_camera_callback = True
-
     def __init__(self, mob, phase=None, broken_abort=False, **kwargs):
         self.phase, self.broken_abort = phase, broken_abort
         self.error = LookupError("camera callback failed")
@@ -189,9 +189,115 @@ def renderer_state_progress_is_not_rolled_back_on_error():
     assert not frame._is_updating_suspended() and not getattr(frame, "_is_animating", False)
 
 
+def public_camera_callbacks_follow_current_drawable_state():
+    scene = m.Scene()
+    square = m.Square().shift(2 * m.LEFT)
+    scene.add(square)
+    seen = []
+    scene.frame.add_updater(
+        lambda frame, dt: seen.append((frame.get_center().copy(), square.get_center().copy()))
+        if frame is scene.frame and dt > 0 else None, call=False,
+    )
+    animation = m.UpdateFromFunc(scene.frame, lambda frame: frame.move_to(square))
+    scene.play(square.animate(rate_func=m.linear).shift(4 * m.RIGHT), animation, run_time=.125)
+    assert len(seen) == 4, seen
+    for actual, expected in seen:
+        np.testing.assert_allclose(actual, expected)
+    np.testing.assert_allclose(scene.frame.get_center(), square.get_center())
+    assert scene.mobjects == [square] and not scene.frame._is_bound()
+    assert "_fmn_allow_camera_callback" not in vars(animation)
+
+
+def nested_alpha_callbacks_keep_live_rates_and_native_camera_identity():
+    scene, alphas = m.Scene(), []
+    frame, core = scene.frame, scene.frame._core
+    def update(camera, alpha):
+        assert camera is frame
+        alphas.append(alpha)
+        camera.move_to((4 * alpha, 0, 0))
+    animation = m.UpdateFromAlphaFunc(frame, update, run_time=1.,
+                                      rate_func=lambda alpha: alpha * alpha,
+                                      time_span=(.25, .75), final_alpha_value=.5)
+    scene.play(m.AnimationGroup(m.AnimationGroup(animation)))
+    assert any(0 < alpha < 1 for alpha in alphas)
+    assert alphas[0] == 0 and alphas[-1] == .25
+    np.testing.assert_allclose(frame.get_center(), m.RIGHT)
+    assert frame._core is core and frame is scene.camera.frame
+    assert not frame._is_bound() and scene.mobjects == [] and scene.num_plays == 1
+    assert "_fmn_allow_camera_callback" not in vars(animation)
+
+
+def method_builders_keep_paths_windows_suspension_and_cleanup():
+    scene, samples = m.Scene(), []
+    frame = scene.frame
+    def path(start, target, alpha):
+        samples.append(alpha)
+        return (1 - alpha) * start + alpha * target + (0, 4 * alpha * (1 - alpha), 0)
+    scene.play(frame.animate(path_func=path, time_span=(.25, .75),
+                             suspend_mobject_updating=True, final_alpha_value=.5,
+                             name="camera arc", rate_func=m.linear).shift(4 * m.RIGHT),
+               run_time=1.)
+    np.testing.assert_allclose(frame.get_center(), (2., 1., 0.))
+    assert any(0 < alpha < 1 for alpha in samples)
+    assert not frame._is_updating_suspended() and not frame._is_bound()
+    square = m.Square()
+    scene.add(square)
+    scene.play(square.animate(remover=True, final_alpha_value=.5,
+                              rate_func=m.linear).shift(4 * m.RIGHT), run_time=.125)
+    np.testing.assert_allclose(square.get_center(), 2 * m.RIGHT)
+    assert scene.mobjects == []
+
+
+def camera_callbacks_and_builders_agree_with_direct_native_pixels():
+    class Image(m.Scene):
+        mode = "motion"
+        def construct(self):
+            self.add(m.Rectangle(width=1, height=2, fill_color=m.RED,
+                                 fill_opacity=1, stroke_width=0).shift(m.RIGHT))
+            if self.mode == "reference":
+                self.frame.set_width(6).move_to(3 * m.RIGHT)
+            elif self.mode == "motion":
+                width = self.frame.get_width()
+                self.play(m.UpdateFromAlphaFunc(
+                    self.frame,
+                    lambda frame, alpha: frame.set_width((1 - alpha) * width + 6 * alpha)
+                                               .move_to(2 * alpha * m.RIGHT),
+                    rate_func=m.linear, run_time=.5,
+                ))
+                self.play(self.frame.animate(path_func=m.straight_path,
+                                              time_span=(.125, .375),
+                                              suspend_mobject_updating=True,
+                                              final_alpha_value=.5,
+                                              rate_func=m.linear).move_to(4 * m.RIGHT),
+                          run_time=.5)
+    images = []
+    with tempfile.TemporaryDirectory(prefix="fmn-camera-callbacks-") as directory:
+        for label, mode, threads in (("motion-1", "motion", 1), ("motion-4", "motion", 4),
+                                      ("reference", "reference", 1), ("untouched", "untouched", 1)):
+            scene = Image()
+            scene.mode = mode
+            output = Path(directory) / (label + ".png")
+            scene._begin_png(str(output), 96, 64, 8, threads, 0)
+            try:
+                scene.run()
+                scene._finish_render(scene.frame._core, scene.camera.light_source.get_center())
+            except BaseException:
+                scene._abort_render()
+                raise
+            images.append(output.read_bytes())
+    assert images[0][:8] == b"\x89PNG\r\n\x1a\n"
+    assert images[0] == images[1] == images[2], "callbacks/builders disagree with the native camera pose"
+    assert images[0] != images[3], "camera motion did not change native pixels"
+
+
 _count = all_callback_phases_restore_real_roots()
-for _case in (later_begin_failure_never_begins_future_animations,
-              stock_camera_abort_does_not_invoke_an_extra_updater,
-              renderer_state_progress_is_not_rolled_back_on_error):
+_CASES = (later_begin_failure_never_begins_future_animations,
+          stock_camera_abort_does_not_invoke_an_extra_updater,
+          renderer_state_progress_is_not_rolled_back_on_error,
+          public_camera_callbacks_follow_current_drawable_state,
+          nested_alpha_callbacks_keep_live_rates_and_native_camera_identity,
+          method_builders_keep_paths_windows_suspension_and_cleanup,
+          camera_callbacks_and_builders_agree_with_direct_native_pixels)
+for _case in _CASES:
     _case()
-print(f"camera execution acceptance: {_count} phase/ownership combinations and 3 recovery cases passed")
+print(f"camera execution acceptance: {_count} phase/ownership combinations and {len(_CASES)} recovery/authoring/pixel cases passed")
