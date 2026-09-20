@@ -33,6 +33,7 @@ _STEPS = (
     ("control_events", "install_control_events"),
     ("color_sliders", "install_color_sliders"),
     ("scene_execution", "install_scene_execution"),
+    ("matching", "install_matching"),
     ("speed", "install_speed"),
     ("speed_updaters", "install_speed_updaters"),
     ("embedded_shell", "install_embedded_shell"),
