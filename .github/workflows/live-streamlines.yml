@@ -6,6 +6,7 @@ on:
       - '.github/workflows/live-streamlines.yml'
       - 'scripts/patches/live-streamlines.patch'
       - 'crates/fmn-python/src/portal_streamlines.rs'
+      - 'crates/fmn-library/tests/live_streamlines.rs'
       - 'crates/fmn-python/python/fmn_python/streamlines.py'
       - 'crates/fmn-python/tests/live_streamlines.py'
   workflow_dispatch:
@@ -44,6 +45,21 @@ jobs:
             git apply --check scripts/patches/live-streamlines.patch
             git apply scripts/patches/live-streamlines.patch
           fi
+          # Activate only in this tested candidate, alongside its native ABI.
+          # The verified-source commit publishes both together, not a wheel
+          # that fails import while waiting for its binding to land.
+          python - <<'PYCODE'
+          from pathlib import Path
+          adapter = Path("crates/fmn-python/python/fmn_python/streamlines.py")
+          if adapter.exists():
+              path = adapter.with_name("initialization.py")
+              text = path.read_text()
+              anchor = '    ("streamline_rebuild", "install_streamline_rebuild"),'
+              addition = '    ("streamlines", "install_streamlines"),'
+              if addition not in text:
+                  assert text.count(anchor) == 1
+                  path.write_text(text.replace(anchor, anchor + "\n" + addition))
+          PYCODE
           rustup show active-toolchain
           rustfmt --edition 2024 --config skip_children=true crates/fmn-library/src/fields.rs crates/fmn-library/tests/live_streamlines.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_streamlines.rs
           git diff --check
@@ -62,11 +78,13 @@ jobs:
           if test -f crates/fmn-python/tests/live_streamlines.py; then
             target/streamlines-venv/bin/python -I crates/fmn-python/tests/live_streamlines.py 2>&1 | tee /tmp/live-streamlines-acceptance.log
           fi
+          target/streamlines-venv/bin/python -I crates/fmn-python/tests/streamline_rebuild.py 2>&1 | tee /tmp/live-streamlines-rebuild.log
+          target/streamlines-venv/bin/python -I crates/fmn-python/tests/streamline_authoring.py 2>&1 | tee /tmp/live-streamlines-style.log
           target/streamlines-venv/bin/python -I crates/fmn-python/tests/live_vector_fields.py 2>&1 | tee /tmp/live-streamlines-fields.log
       - name: Land verified native sources on main
         run: |
           set -euo pipefail
-          git add crates/fmn-library/src/fields.rs crates/fmn-library/tests/live_streamlines.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_streamlines.rs
+          git add crates/fmn-library/src/fields.rs crates/fmn-library/tests/live_streamlines.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_streamlines.rs crates/fmn-python/python/fmn_python/initialization.py
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'

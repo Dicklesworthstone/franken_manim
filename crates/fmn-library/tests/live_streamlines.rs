@@ -36,7 +36,8 @@ fn explicit_seeds_are_ordered_and_consume_no_jitter() {
     for (child, seed) in built.vmob().children().iter().zip(seeds) {
         let points = child.points();
         assert_eq!(points[0], seed);
-        assert!((points.last().unwrap()[0] - seed[0] - 0.5).abs() < 1e-9);
+        // Native dense samples use [0, solution_time), with dt = 0.125.
+        assert!((points.last().unwrap()[0] - seed[0] - 0.375).abs() < 1e-9);
     }
 }
 

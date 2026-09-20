@@ -44,10 +44,14 @@ def install_streamline_rebuild(native):
             for name in ("color_by_magnitude", "taper_stroke_width"):
                 controls[name] = bool(controls[name])
             # Never reconstruct self: native builders are detached-only and
-            # reset live state. Reuse the canonical native constructor/style
-            # path on a scratch instance, not a second solver or copied kernel.
-            candidate = Lines.__new__(Lines)
-            initialize(candidate, **controls)
+            # reset live state. The seed adapter, when installed, supplies the
+            # candidate through the same native solver and live style planner.
+            builder = g.get("_fmn_streamline_candidate")
+            if builder is None:
+                candidate = Lines.__new__(Lines)
+                initialize(candidate, **controls)
+            else:
+                candidate = builder(self, controls)
             idle()
             if tuple(self.submobjects) != members or any(
                 not np.array_equal(member.data, record)
