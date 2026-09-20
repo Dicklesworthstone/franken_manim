@@ -100,6 +100,8 @@
 //! baseline reproducible so a future SoA layout or wider retained tile can
 //! reopen the decision with evidence rather than folklore.
 
+mod color_field;
+
 use crate::bin::ScreenMap;
 use crate::plan::{GeometryIdentity, RenderPlan};
 use crate::table::{Instance, Segment};
@@ -2675,6 +2677,9 @@ impl<'a> GradientField<'a> {
 /// not in an encoded space.
 #[must_use]
 pub fn fill_rgba_at(style: &crate::table::Style, t: f64) -> [f32; 4] {
+    if let Some(profile) = &style.fill_profile {
+        return profile.rgba_at(t);
+    }
     let t = t.clamp(0.0, 1.0) as f32;
     let mut out = [0.0f32; 4];
     for (k, o) in out.iter_mut().enumerate() {
@@ -2715,6 +2720,17 @@ pub fn nearest_boundary(
     translate: [f64; 2],
     p: [f64; 2],
 ) -> Option<(f64, f64)> {
+    nearest_boundary_location(segments, map, translate, p).map(|(d, s, _)| (d, s))
+}
+
+// Preserve the side of a coincident arc station at a disconnected contour.
+// A bare scalar station cannot distinguish its outgoing and incoming colors.
+fn nearest_boundary_location(
+    segments: &[crate::table::Segment],
+    map: ScreenMap,
+    translate: [f64; 2],
+    p: [f64; 2],
+) -> Option<(f64, f64, bool)> {
     let scale = map.scale;
     if scale == 0.0 || segments.is_empty() {
         return None;
@@ -2726,6 +2742,7 @@ pub fn nearest_boundary(
     ];
     let mut best_d = f64::INFINITY;
     let mut best_s = 0.0;
+    let mut at_end = false;
     for g in segments {
         let near = fmn_geom::distance::nearest_on_quadratic(g.p0, g.p1, g.p2, obj);
         if near.distance >= best_d {
@@ -2744,9 +2761,10 @@ pub fn nearest_boundary(
             0.0
         };
         best_s = g.s0 + (g.s1 - g.s0) * frac;
+        at_end = near.t == 1.0;
     }
     if best_d.is_finite() {
-        Some((best_d * scale.abs(), best_s.clamp(0.0, 1.0)))
+        Some((best_d * scale.abs(), best_s.clamp(0.0, 1.0), at_end))
     } else {
         None
     }
@@ -2821,21 +2839,24 @@ pub fn fill_rgba_with_border(
     translate: [f64; 2],
     p: [f64; 2],
 ) -> [f32; 4] {
-    let interior = fill_rgba_at(style, field.param_at(p, translate));
+    let interior = style.fill_profile.as_ref().map_or_else(
+        || fill_rgba_at(style, field.param_at(p, translate)),
+        |profile| field.rgba_at(profile, p, translate),
+    );
     // Both fast paths are exact, not approximations of the general case: a flat
     // fill has no crisp colour to reveal, and a zero-width band has no points.
     if fill_is_flat(style) || style.fill_border_width <= 0.0 {
         return interior;
     }
     let width = border_width_px(style.fill_border_width, map);
-    let Some((distance, s)) = nearest_boundary(segments, map, translate, p) else {
+    let Some((distance, s, at_end)) = nearest_boundary_location(segments, map, translate, p) else {
         return interior;
     };
     let coverage = border_coverage(distance, width, f64::from(style.anti_alias_width));
     if coverage <= 0.0 {
         return interior;
     }
-    let edge = fill_rgba_at(style, s);
+    let edge = fill_rgba_at(style, style.fill_endpoint_parameter(s, at_end));
     let k = coverage as f32;
     let mut out = [0.0f32; 4];
     for (o, (a, b)) in out.iter_mut().zip(interior.iter().zip(edge.iter())) {
@@ -2852,6 +2873,9 @@ pub fn fill_rgba_with_border(
 /// test that keeps a 64-station interpolant off their hot path entirely.
 #[must_use]
 pub fn fill_is_flat(style: &crate::table::Style) -> bool {
+    if let Some(profile) = &style.fill_profile {
+        return profile.is_flat();
+    }
     style
         .fill_rgba
         .iter()

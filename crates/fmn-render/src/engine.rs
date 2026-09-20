@@ -1596,7 +1596,7 @@ impl<'a> FrameJob<'a> {
                 None
             };
 
-            let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
+            let draws_fill = style.draws_fill();
             let draws_stroke = style.draws_stroke();
             if !draws_fill && !draws_stroke {
                 // An instance with no visible pass composites as the identity, so
@@ -1651,15 +1651,28 @@ impl<'a> FrameJob<'a> {
                 let params_start = arena.gradient_params.len();
                 let next_start = arena.gradient_next.len();
                 let edge_params_start = arena.gradient_edge_params.len();
-                GradientField::build_contours_into(
-                    &mut arena.gradient_points,
-                    &mut arena.gradient_params,
-                    &mut arena.gradient_next,
-                    &mut arena.gradient_edge_params,
-                    effective_segments,
-                    &shape.subpath_starts,
-                    map,
-                );
+                if let Some(profile) = &style.fill_profile {
+                    GradientField::build_profile_into(
+                        &mut arena.gradient_points,
+                        &mut arena.gradient_params,
+                        &mut arena.gradient_next,
+                        &mut arena.gradient_edge_params,
+                        effective_segments,
+                        &shape.subpath_starts,
+                        map,
+                        profile,
+                    );
+                } else {
+                    GradientField::build_contours_into(
+                        &mut arena.gradient_points,
+                        &mut arena.gradient_params,
+                        &mut arena.gradient_next,
+                        &mut arena.gradient_edge_params,
+                        effective_segments,
+                        &shape.subpath_starts,
+                        map,
+                    );
+                }
                 Some(FieldRef {
                     points: arena
                         .gradient_points

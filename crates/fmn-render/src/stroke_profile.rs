@@ -236,7 +236,6 @@ pub(crate) fn from_records(
     decode: impl Fn([f32; 4]) -> [f32; 4],
 ) -> Result<Option<StrokeProfile>, crate::plan::SyncError> {
     use crate::plan::SyncError;
-    use fmn_geom::{arclength::ArcLengthTable, quadpath::QuadPath};
     let Some(entry) = stage.get(mob) else {
         return Ok(None);
     };
@@ -267,8 +266,37 @@ pub(crate) fn from_records(
             limit: MAX_STROKE_PROFILE_KNOTS as u64,
         });
     }
-    let Some(points) = stage.get_object_points(mob) else {
+    let stations = record_stations(stage, mob)?;
+    if stations.is_empty() {
         return Ok(None);
+    }
+    let mut knots = Vec::new();
+    for (index, s) in stations {
+        let (width, rgba) = paint(index);
+        let knot = StrokeKnot {
+            s,
+            width,
+            rgba: decode(rgba),
+        };
+        if knots.last() != Some(&knot) {
+            knots.push(knot);
+        }
+    }
+    StrokeProfile::new(knots)
+        .map(Some)
+        .map_err(|source| SyncError::InvalidStrokeProfile { mob, source })
+}
+
+/// Geometry-only station derivation shared by fill and stroke profiles.
+/// Shared anchors occur once; subpath breaks retain their two source indices.
+pub(crate) fn record_stations(
+    stage: &fmn_mobject::Stage,
+    mob: fmn_mobject::Mob,
+) -> Result<Vec<(usize, f64)>, crate::plan::SyncError> {
+    use crate::plan::SyncError;
+    use fmn_geom::{arclength::ArcLengthTable, quadpath::QuadPath};
+    let Some(points) = stage.get_object_points(mob) else {
+        return Ok(Vec::new());
     };
     let origin = points.first().copied().unwrap_or([0.0; 3]);
     let local: Vec<_> = points
@@ -280,7 +308,7 @@ pub(crate) fn from_records(
     let original = ArcLengthTable::for_path(&path);
     let breaks = path.subpath_end_indices();
     let Some(placement) = stage.placement(mob) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let unchanged = crate::table::retains_normalized_arc_length(placement);
     let mut curves = Vec::new();
@@ -309,29 +337,23 @@ pub(crate) fn from_records(
         });
     }
     if total <= 0.0 {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let mut knots = Vec::new();
+    let mut stations = Vec::new();
     let mut distance = 0.0;
     for (index, length) in curves {
         for (offset, fraction) in [(0, 0.0), (1, 0.5), (2, 1.0)] {
-            let (width, rgba) = paint(2 * index + offset);
-            let knot = StrokeKnot {
-                s: ((distance + fraction * length) / total).clamp(0.0, 1.0),
-                width,
-                rgba: decode(rgba),
-            };
-            // Shared anchors are one record; discontinuous subpaths keep both
-            // one-sided values at their coincident station.
-            if knots.last() != Some(&knot) {
-                knots.push(knot);
+            let station = (
+                2 * index + offset,
+                ((distance + fraction * length) / total).clamp(0.0, 1.0),
+            );
+            if stations.last() != Some(&station) {
+                stations.push(station);
             }
         }
         distance += length;
     }
-    StrokeProfile::new(knots)
-        .map(Some)
-        .map_err(|source| SyncError::InvalidStrokeProfile { mob, source })
+    Ok(stations)
 }
 
 #[cfg(test)]

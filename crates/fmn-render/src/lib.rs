@@ -33,6 +33,7 @@ pub mod cache;
 pub mod camera;
 pub mod engine;
 pub mod fill;
+pub mod fill_profile;
 pub mod hint;
 #[cfg(feature = "metal")]
 pub mod metal;
@@ -41,6 +42,7 @@ pub mod retained;
 pub mod revision;
 pub mod snapshot;
 pub mod stroke;
+pub use fill_profile::{FillKnot, FillProfile, FillProfileError};
 pub mod stroke_profile;
 pub use stroke_profile::{StrokeKnot, StrokeProfile, StrokeProfileError};
 pub mod table;

@@ -1219,7 +1219,7 @@ fn covers_convex(
 fn is_opaque_fill(plan: &RenderPlan, inst: &Instance) -> bool {
     plan.styles()
         .get(inst.style)
-        .is_some_and(|s| s.fill_rgba[3] == 1.0 && s.fill_rgba_end[3] == 1.0)
+        .is_some_and(|s| s.has_opaque_fill())
 }
 
 #[cfg(test)]

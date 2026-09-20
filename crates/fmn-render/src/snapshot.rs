@@ -51,6 +51,9 @@ pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 3);
 /// plans continue to encode the exact version-1.3 bytes and existing goldens.
 pub const PROFILE_SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 4);
 
+/// Complete boundary-fill extension; older plans keep their exact bytes.
+pub const FILL_PROFILE_SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 5);
+
 /// Append one primitive hint with every payload field its kernel consumes.
 ///
 /// The diagnostic name alone is not an identity: two circle hints may name
@@ -141,7 +144,14 @@ pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
         .rows()
         .iter()
         .any(|row| row.stroke_profile.is_some());
-    let mut w = Writer::new(if profiled {
+    let fill_profiled = plan
+        .styles()
+        .rows()
+        .iter()
+        .any(|row| row.fill_profile.is_some());
+    let mut w = Writer::new(if fill_profiled {
+        FILL_PROFILE_SNAPSHOT_SCHEMA
+    } else if profiled {
         PROFILE_SNAPSHOT_SCHEMA
     } else {
         SNAPSHOT_SCHEMA
@@ -211,7 +221,7 @@ pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
         w.put_bool(i.hint_unsafe);
     }
 
-    if profiled {
+    if profiled || fill_profiled {
         let profiles: Vec<_> = styles
             .iter()
             .enumerate()
@@ -224,6 +234,24 @@ pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
             for knot in profile.knots() {
                 w.put_f64(knot.s);
                 w.put_f64(f64::from(knot.width));
+                for value in knot.rgba {
+                    w.put_f64(f64::from(value));
+                }
+            }
+        }
+    }
+    if fill_profiled {
+        let profiles: Vec<_> = styles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| row.fill_profile.as_ref().map(|p| (i, p)))
+            .collect();
+        w.put_u64(profiles.len() as u64);
+        for (index, profile) in profiles {
+            w.put_u64(index as u64);
+            w.put_u64(profile.knots().len() as u64);
+            for knot in profile.knots() {
+                w.put_f64(knot.s);
                 for value in knot.rgba {
                     w.put_f64(f64::from(value));
                 }
@@ -302,6 +330,11 @@ pub fn describe(plan: &RenderPlan) -> String {
     for (index, style) in plan.styles().rows().iter().enumerate() {
         if let Some(profile) = &style.stroke_profile {
             let _ = writeln!(out, "  profile {index}: {:?}", profile.knots());
+        }
+    }
+    for (index, style) in plan.styles().rows().iter().enumerate() {
+        if let Some(profile) = &style.fill_profile {
+            let _ = writeln!(out, "  fill profile {index}: {:?}", profile.knots());
         }
     }
     for inst in plan.shapes().instances() {

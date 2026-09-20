@@ -1567,7 +1567,7 @@ fn compile_vector<'a>(
         segment.p2 = add(segment.p2, translation);
     }
 
-    let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
+    let draws_fill = style.draws_fill();
     let draws_stroke = style.draws_stroke();
     let mut fill_pieces = Vec::new();
     let mut curves = Vec::new();
@@ -1768,9 +1768,13 @@ fn compile_vector<'a>(
     }
     let field = if draws_fill && !fill::fill_is_flat(&style) {
         match fill_plane {
-            Some(plane) => {
-                PlanarGradientField::build(&world_segments, &shape.subpath_starts, plane, budget)?
-            }
+            Some(plane) => PlanarGradientField::build(
+                &world_segments,
+                &shape.subpath_starts,
+                plane,
+                budget,
+                style.fill_profile.as_deref(),
+            )?,
             None => None,
         }
     } else {
@@ -2032,6 +2036,7 @@ impl PlanarGradientField {
         subpath_starts: &[u32],
         plane: [f64; 4],
         budget: &mut PreparationBudget,
+        profile: Option<&crate::FillProfile>,
     ) -> Result<Option<Self>, ThreeDError> {
         let normal = [plane[0], plane[1], plane[2]];
         let absolute = [normal[0].abs(), normal[1].abs(), normal[2].abs()];
@@ -2076,23 +2081,39 @@ impl PlanarGradientField {
         let stations = if planar_segments.is_empty() {
             0
         } else {
-            GradientField::station_capacity(subpath_starts.len())
+            profile.map_or_else(
+                || GradientField::station_capacity(subpath_starts.len()),
+                |p| GradientField::profile_station_capacity(subpath_starts.len(), p.knots().len()),
+            )
         };
         budget.reserve_retained(&mut points, "gradient station points", stations)?;
         budget.reserve_retained(&mut params, "gradient station parameters", stations)?;
-        if subpath_starts.len() > 1 {
+        if subpath_starts.len() > 1 || profile.is_some() {
             budget.reserve_retained(&mut next, "gradient station edges", stations)?;
             budget.reserve_retained(&mut edge_params, "gradient edge parameters", stations)?;
         }
-        GradientField::build_contours_into(
-            &mut points,
-            &mut params,
-            &mut next,
-            &mut edge_params,
-            &planar_segments,
-            subpath_starts,
-            unit_screen_map(),
-        );
+        if let Some(profile) = profile {
+            GradientField::build_profile_into(
+                &mut points,
+                &mut params,
+                &mut next,
+                &mut edge_params,
+                &planar_segments,
+                subpath_starts,
+                unit_screen_map(),
+                profile,
+            );
+        } else {
+            GradientField::build_contours_into(
+                &mut points,
+                &mut params,
+                &mut next,
+                &mut edge_params,
+                &planar_segments,
+                subpath_starts,
+                unit_screen_map(),
+            );
+        }
         Ok(Some(Self {
             points,
             params,
@@ -2112,6 +2133,17 @@ impl PlanarGradientField {
         } else {
             GradientField::from_contours(&self.points, &self.params, &self.next, &self.edge_params)
                 .param_at(point, [0.0; 2])
+        }
+    }
+
+    fn rgba_at(&self, profile: &crate::FillProfile, world: Vec3) -> [f32; 4] {
+        let relative = sub(world, self.origin);
+        let point = [dot(relative, self.u), dot(relative, self.v)];
+        if self.next.is_empty() {
+            GradientField::from_parts(&self.points, &self.params).rgba_at(profile, point, [0.; 2])
+        } else {
+            GradientField::from_contours(&self.points, &self.params, &self.next, &self.edge_params)
+                .rgba_at(profile, point, [0.; 2])
         }
     }
 }
@@ -3187,7 +3219,17 @@ fn shade_vector(
             .as_ref()
             .zip(fill_world)
             .map_or(0.0, |(field, world)| field.param_at(world));
-        let mut color = rgba_from_array(fill::fill_rgba_at(&vector.style, parameter));
+        let rgba = vector
+            .style
+            .fill_profile
+            .as_ref()
+            .zip(vector.field.as_ref())
+            .zip(fill_world)
+            .map_or_else(
+                || fill::fill_rgba_at(&vector.style, parameter),
+                |((profile, field), world)| field.rgba_at(profile, world),
+            );
+        let mut color = rgba_from_array(rgba);
         if !fill::fill_is_flat(&vector.style)
             && vector.style.fill_border_width > 0.0
             && let Some(nearest) = vector_nearest(camera, vector, point)
@@ -3215,7 +3257,12 @@ fn shade_vector(
                 f64::from(vector.style.anti_alias_width),
             );
             if border > 0.0 {
-                let edge = rgba_from_array(fill::fill_rgba_at(&vector.style, nearest.s));
+                let edge = rgba_from_array(fill::fill_rgba_at(
+                    &vector.style,
+                    vector
+                        .style
+                        .fill_endpoint_parameter(nearest.s, nearest.t == 1.0),
+                ));
                 color = mix_color(color, edge, border);
             }
         }
@@ -4010,11 +4057,14 @@ mod tests {
                 "point",
                 &[point[0] as f32, point[1] as f32, point[2] as f32],
             );
-            let fill = if index + 1 == points.len() {
-                fill_end
-            } else {
-                fill_start
-            };
+            // Author the complete record ramp. Changing only the last row
+            // describes an endpoint color peak, not a ramp once all records
+            // reach the renderer. Keep the clipping test's interior-color
+            // threshold and exact clipped/unclipped pixel comparison intact.
+            let alpha = index as f32 / points.len().saturating_sub(1).max(1) as f32;
+            let fill: [f32; 4] = std::array::from_fn(|lane| {
+                fill_start[lane] + (fill_end[lane] - fill_start[lane]) * alpha
+            });
             buffer.write(index, "fill_rgba", &fill);
             buffer.write(index, "stroke_rgba", &[0.0; 4]);
             buffer.write(index, "stroke_width", &[0.0]);

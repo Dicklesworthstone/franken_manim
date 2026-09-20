@@ -182,6 +182,13 @@ pub enum SyncError {
         /// The invalid station or paint contract.
         source: crate::StrokeProfileError,
     },
+    /// A varying fill record could not be retained safely.
+    InvalidFillProfile {
+        /// Renderable whose profile was rejected.
+        mob: Mob,
+        /// Precise station or paint contract.
+        source: crate::FillProfileError,
+    },
     /// A declared retained-plan count exceeded its caller-selected ceiling.
     LimitExceeded {
         /// The table or work axis being bounded.
@@ -210,6 +217,9 @@ impl std::fmt::Display for SyncError {
         match self {
             Self::InvalidGeometry { mob, source } => {
                 write!(f, "cannot compile geometry for {mob:?}: {source}")
+            }
+            Self::InvalidFillProfile { mob, source } => {
+                write!(f, "cannot compile fill profile for {mob:?}: {source}")
             }
             Self::InvalidStrokeProfile { mob, source } => {
                 write!(f, "cannot compile stroke profile for {mob:?}: {source}")
@@ -243,6 +253,7 @@ impl std::error::Error for SyncError {
             Self::InvalidGeometry { source, .. } => Some(source),
             Self::Table(source) => Some(source),
             Self::InvalidStrokeProfile { source, .. } => Some(source),
+            Self::InvalidFillProfile { source, .. } => Some(source),
             Self::LimitExceeded { .. } | Self::AllocationFailed { .. } | Self::EpochExhausted => {
                 None
             }
@@ -348,6 +359,7 @@ impl Reachability {
             | SyncError::Table(TableError::ImageTextureInvalid)
             | SyncError::InvalidGeometry { .. }
             | SyncError::InvalidStrokeProfile { .. }
+            | SyncError::InvalidFillProfile { .. }
             | SyncError::EpochExhausted => return false,
         };
         match resource {
@@ -968,7 +980,9 @@ impl RenderPlan {
                             .find(|(i, _)| *i == old.style)
                             .map(|(_, s)| s)
                     })
-                    .is_some_and(|style| style.stroke_profile.is_some())
+                    .is_some_and(|style| {
+                        style.stroke_profile.is_some() || style.fill_profile.is_some()
+                    })
             });
             let style_unsafe = style_unsafe || (previous_profiled && hint_unsafe);
             let style = match &previous {
@@ -981,6 +995,8 @@ impl RenderPlan {
                     row.stroke_profile =
                         crate::stroke_profile::from_records(stage, mob, decode_rgba)?
                             .map(std::sync::Arc::new);
+                    row.fill_profile = crate::fill_profile::from_records(stage, mob, decode_rgba)?
+                        .map(std::sync::Arc::new);
                     let key = row.bits();
                     if let Some(index) = self.styles.index_of(&row) {
                         index
@@ -1013,7 +1029,7 @@ impl RenderPlan {
                                 requested: count_u64(pending_style_indices.len()).saturating_add(1),
                             }
                         })?;
-                        let knots = row.stroke_profile.as_ref().map_or(0, |p| p.knots().len());
+                        let knots = row.profile_knots();
                         pending_profile_knots =
                             checked_add_count("profile knots", pending_profile_knots, knots)?;
                         let retained_knots = checked_add_count(
@@ -1060,7 +1076,7 @@ impl RenderPlan {
                         .find(|(i, _)| *i == style)
                         .map(|(_, s)| s)
                 })
-                .is_some_and(|row| row.stroke_profile.is_some());
+                .is_some_and(|row| row.stroke_profile.is_some() || row.fill_profile.is_some());
             next_retained.insert(
                 mob,
                 Retained {
@@ -1278,6 +1294,31 @@ impl RenderPlan {
                 for knot in profile.knots() {
                     hash.f64(knot.s);
                     hash.f32(knot.width);
+                    for component in knot.rgba {
+                        hash.f32(component);
+                    }
+                }
+            }
+        }
+        let fills: Vec<_> = instances
+            .iter()
+            .enumerate()
+            .filter_map(|(i, instance)| {
+                self.styles
+                    .get(instance.style)?
+                    .fill_profile
+                    .as_ref()
+                    .map(|p| (i, p))
+            })
+            .collect();
+        if !fills.is_empty() {
+            hash.bytes(b"fmn-render/fill-profiles/v1");
+            hash.u64(fills.len() as u64);
+            for (index, profile) in fills {
+                hash.u64(index as u64);
+                hash.u64(profile.knots().len() as u64);
+                for knot in profile.knots() {
+                    hash.f64(knot.s);
                     for component in knot.rgba {
                         hash.f32(component);
                     }

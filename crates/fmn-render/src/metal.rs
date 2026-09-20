@@ -152,6 +152,8 @@ pub enum MetalError {
     /// Full record stroke profiles require the CPU renderer until the Metal
     /// annex carries an equivalent station table. Never flatten them silently.
     UnsupportedStrokeProfile,
+    /// Full fill boundary colors currently require the analytic CPU field.
+    UnsupportedFillProfile,
     /// The prepared 3D painter sequence contains a primitive not yet mapped by
     /// this annex pipeline.
     UnsupportedThreeDPrimitive {
@@ -202,6 +204,9 @@ impl fmt::Display for MetalError {
                 "{kernel} completed {completed} of {expected} threadgroups"
             ),
             Self::Layout(message) => write!(f, "Metal derived-layout mismatch: {message}"),
+            Self::UnsupportedFillProfile => {
+                f.write_str("Metal does not support retained fill profiles")
+            }
             Self::UnsupportedStrokeProfile => {
                 f.write_str("Metal does not support retained stroke profiles")
             }
@@ -224,7 +229,8 @@ impl std::error::Error for MetalError {
             | Self::IncompleteDispatch { .. }
             | Self::Layout(_)
             | Self::UnsupportedThreeDPrimitive { .. }
-            | Self::UnsupportedStrokeProfile => None,
+            | Self::UnsupportedStrokeProfile
+            | Self::UnsupportedFillProfile => None,
         }
     }
 }
@@ -354,7 +360,8 @@ impl NativePreviewError {
             }
             Self::Render(
                 error @ (MetalError::UnsupportedThreeDPrimitive { .. }
-                | MetalError::UnsupportedStrokeProfile),
+                | MetalError::UnsupportedStrokeProfile
+                | MetalError::UnsupportedFillProfile),
             ) => Some(PreviewFallback::Unsupported(error.to_string())),
             Self::Render(error) if error.permits_preview_fallback() => {
                 Some(PreviewFallback::BackendFailure(error.to_string()))
@@ -398,6 +405,7 @@ impl NativePreviewError {
             Self::Render(
                 MetalError::UnsupportedThreeDPrimitive { .. }
                     | MetalError::UnsupportedStrokeProfile
+                    | MetalError::UnsupportedFillProfile
             )
         )
     }
@@ -568,7 +576,10 @@ impl PreviewRenderer {
                         metal: Some(report),
                     });
                 }
-                Err(error @ MetalError::UnsupportedStrokeProfile) => {
+                Err(
+                    error @ (MetalError::UnsupportedStrokeProfile
+                    | MetalError::UnsupportedFillProfile),
+                ) => {
                     transient = true;
                     PreviewFallback::Unsupported(error.to_string())
                 }
@@ -613,7 +624,8 @@ impl PreviewRenderer {
                 }
                 Err(
                     error @ (MetalError::UnsupportedThreeDPrimitive { .. }
-                    | MetalError::UnsupportedStrokeProfile),
+                    | MetalError::UnsupportedStrokeProfile
+                    | MetalError::UnsupportedFillProfile),
                 ) => {
                     let reason = PreviewFallback::Unsupported(error.to_string());
                     transient = Some(reason.clone());
@@ -1651,6 +1663,9 @@ impl FlatFrame {
     }
 
     fn push_draw(&mut self, job: &FrameJob<'_>, draw: &Draw) -> Result<(), MetalError> {
+        if draw.style.fill_profile.is_some() {
+            return Err(MetalError::UnsupportedFillProfile);
+        }
         if draw.style.stroke_profile.is_some() {
             return Err(MetalError::UnsupportedStrokeProfile);
         }

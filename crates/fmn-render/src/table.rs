@@ -279,6 +279,8 @@ pub struct Style {
     pub fill_rgba: [f32; 4],
     /// Fill colour at the ramp's end.
     pub fill_rgba_end: [f32; 4],
+    /// Optional immutable per-record boundary fill; overrides the endpoint ramp.
+    pub fill_profile: Option<std::sync::Arc<crate::FillProfile>>,
     /// §10.2's principled inner border stroke.
     pub fill_border_width: f32,
     /// The AA band, from the object's uniforms.
@@ -347,6 +349,14 @@ impl Style {
                 b.extend(knot.rgba.map(|value| u64::from(value.to_bits())));
             }
         }
+        if let Some(profile) = &self.fill_profile {
+            b.push(u64::MAX);
+            b.push(profile.knots().len() as u64);
+            for knot in profile.knots() {
+                b.push(knot.s.to_bits());
+                b.extend(knot.rgba.map(|value| u64::from(value.to_bits())));
+            }
+        }
         b
     }
 
@@ -377,6 +387,7 @@ impl Default for Style {
             stroke_profile: None,
             fill_rgba: [0.0; 4],
             fill_rgba_end: [0.0; 4],
+            fill_profile: None,
             fill_border_width: 0.0,
             anti_alias_width: u.anti_alias_width as f32,
             joint_type: u.joint_type,
@@ -419,7 +430,7 @@ impl StyleTable {
         self.index
             .try_reserve(1)
             .map_err(|_| allocation_failed("style index", self.index.len(), 1))?;
-        let knots = style.stroke_profile.as_ref().map_or(0, |p| p.knots().len());
+        let knots = style.profile_knots();
         self.profile_knots =
             self.profile_knots
                 .checked_add(knots)
@@ -461,7 +472,7 @@ impl StyleTable {
         debug_assert!(!self.index.contains_key(&key));
         self.profile_knots = self
             .profile_knots
-            .checked_add(style.stroke_profile.as_ref().map_or(0, |p| p.knots().len()))
+            .checked_add(style.profile_knots())
             .expect("profile knot admission precedes publication");
         self.rows.push(style);
         self.index.insert(key, index);
