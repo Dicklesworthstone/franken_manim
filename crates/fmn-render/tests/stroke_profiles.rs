@@ -3,8 +3,8 @@ use fmn_core::color::LinearRgba;
 use fmn_mobject::{Mob, Mobject, Placement, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
     Camera, CameraConfig, EngineIdentity, FrameConfig, RenderPlan, RenderPlanLimits,
-    RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap, StrokeKnot, StrokeProfile,
-    Style, StyleTable, Tiling, Viewport,
+    RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap, StrokeKnot, StrokeProfile, Style,
+    StyleTable, Tiling, Viewport,
 };
 
 fn object(points: &[[f32; 3]], widths: &[f32]) -> Mobject {
@@ -70,7 +70,9 @@ fn renderer(threads: usize) -> (RetainedFrameRenderer, Camera) {
 fn blue(frame: &fmn_frame::FrameBuffer) -> f64 {
     frame
         .plane(0)
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|p| fmn_frame::half::f16_to_f64(u16::from_le_bytes([p[4], p[5]])))
         .sum()
 }

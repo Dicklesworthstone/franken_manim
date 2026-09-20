@@ -384,11 +384,13 @@ mod conditioning_tests {
     fn f32_retracing_curve_has_finite_true_length() {
         let [a, h, b] = retrace(15);
         let ratio = 2.0f64.powi(-15);
-        let expected = space_ops::get_norm(h)
-            * (1.0 + (1.0 - ratio) * (1.0 - ratio))
-            / (2.0 - ratio);
+        let expected =
+            space_ops::get_norm(h) * (1.0 + (1.0 - ratio) * (1.0 - ratio)) / (2.0 - ratio);
         let actual = quadratic_arc_length(a, h, b);
-        assert!(actual.is_finite(), "finite record geometry produced {actual}");
+        assert!(
+            actual.is_finite(),
+            "finite record geometry produced {actual}"
+        );
         assert!((actual - expected).abs() <= 2e-14 * expected);
     }
 
@@ -433,8 +435,14 @@ mod conditioning_tests {
 
     #[test]
     fn ordinary_line_point_and_exact_cusp_keep_their_lengths() {
-        assert_eq!(quadratic_arc_length([0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]), 2.0);
+        assert_eq!(
+            quadratic_arc_length([0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
+            2.0
+        );
         assert_eq!(quadratic_arc_length([0.0; 3], [0.0; 3], [0.0; 3]), 0.0);
-        assert_eq!(quadratic_arc_length([0.0; 3], [1.0, 0.0, 0.0], [0.0; 3]), 1.0);
+        assert_eq!(
+            quadratic_arc_length([0.0; 3], [1.0, 0.0, 0.0], [0.0; 3]),
+            1.0
+        );
     }
 }

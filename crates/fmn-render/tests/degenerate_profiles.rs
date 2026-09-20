@@ -14,6 +14,14 @@ const POINTS: [[f32; 3]; 3] = [
     [0.000014956778, 0.000049446026, 0.00005739808],
 ];
 
+// A separate f32 reproducer in the XY plane: the no-camera route must not
+// silently flatten 3D records. Its old closed-form length also becomes NaN.
+const FLAT_POINTS: [[f32; 3]; 3] = [
+    [0.0; 3],
+    [0.76765776, 1.4143994, 0.0],
+    [2.3427056e-5, 4.3164044e-5, 0.0],
+];
+
 fn fixture() -> (Stage, Mob) {
     let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), POINTS.len()).unwrap();
     for (index, point) in POINTS.iter().enumerate() {
@@ -70,7 +78,11 @@ fn renderer(threads: usize) -> (RetainedFrameRenderer, Camera) {
     (renderer, camera)
 }
 
-fn capture(renderer: &mut RetainedFrameRenderer, camera: Option<&Camera>, stage: &Stage) -> Vec<u8> {
+fn capture(
+    renderer: &mut RetainedFrameRenderer,
+    camera: Option<&Camera>,
+    stage: &Stage,
+) -> Vec<u8> {
     if let Some(camera) = camera {
         renderer.render_with_camera(stage, camera).unwrap();
     } else {
@@ -85,7 +97,11 @@ fn real_record_profiles_keep_finite_ordered_stations_during_retracing() {
     let mut plan = RenderPlan::default();
     for exponent in 1..=30 {
         let endpoint = POINTS[1].map(|x| x * 2.0f32.powi(-exponent));
-        stage.get_mut(mob).unwrap().buffer.write(2, "point", &endpoint);
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .write(2, "point", &endpoint);
         plan.sync(&stage, 0).unwrap();
         let instance = &plan.shapes().instances()[0];
         let style = plan.styles().get(instance.style).unwrap();
@@ -113,12 +129,17 @@ fn collapse_and_recovery_match_fresh_frames_across_cameras_and_threads() {
         let (mut one, camera) = renderer(1);
         let (mut four, _) = renderer(4);
         let camera = camera_path.then_some(&camera);
+        let points = if camera_path { &POINTS } else { &FLAT_POINTS };
         let mut first = None;
         let mut collapsed = None;
         for scale in [1.0f32, 0.125, 0.0, 2.0, 1.0] {
-            for (index, point) in POINTS.iter().enumerate() {
+            for (index, point) in points.iter().enumerate() {
                 let point = point.map(|x| x * scale);
-                stage.get_mut(mob).unwrap().buffer.write(index, "point", &point);
+                stage
+                    .get_mut(mob)
+                    .unwrap()
+                    .buffer
+                    .write(index, "point", &point);
             }
             let actual = capture(&mut one, camera, &stage);
             assert_eq!(actual, capture(&mut four, camera, &stage));
@@ -135,7 +156,10 @@ fn collapse_and_recovery_match_fresh_frames_across_cameras_and_threads() {
                 }
             }
         }
-        assert_ne!(first, collapsed, "visible stroke disappeared before collapse");
+        assert_ne!(
+            first, collapsed,
+            "visible stroke disappeared before collapse"
+        );
     }
 }
 
@@ -147,13 +171,25 @@ fn invalid_live_records_still_refuse_atomically_and_can_recover() {
     let good = fmn_render::snapshot::encode(&plan).unwrap();
     for (field, invalid, restored) in [
         ("point", vec![f32::NAN, 0.0, 0.0], POINTS[1].to_vec()),
-        ("fill_rgba", vec![0.0, f32::INFINITY, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]),
-        ("stroke_rgba", vec![0.0, 0.0, f32::NAN, 1.0], vec![0.0, 0.0, 1.0, 1.0]),
+        (
+            "fill_rgba",
+            vec![0.0, f32::INFINITY, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        ),
+        (
+            "stroke_rgba",
+            vec![0.0, 0.0, f32::NAN, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        ),
     ] {
         stage.get_mut(mob).unwrap().buffer.write(1, field, &invalid);
         assert!(plan.sync(&stage, 0).is_err(), "accepted invalid {field}");
         assert_eq!(fmn_render::snapshot::encode(&plan).unwrap(), good);
-        stage.get_mut(mob).unwrap().buffer.write(1, field, &restored);
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .write(1, field, &restored);
         plan.sync(&stage, 0).unwrap();
         assert_eq!(fmn_render::snapshot::encode(&plan).unwrap(), good);
     }
