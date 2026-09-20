@@ -200,6 +200,15 @@ pub fn get_sample_coords(
         let step = step / density;
         axes.push(arange("sample grid axis", min, max + step, step, budget)?);
     }
+    // An empty axis has an empty Cartesian product, not an index-zero row.
+    if axes.is_empty() || axes.len() > 3 {
+        return Err(FieldError::NonFiniteControl {
+            context: "sample grid dimension",
+        });
+    }
+    if axes.iter().any(Vec::is_empty) {
+        return Ok(Vec::new());
+    }
     let total = axes
         .iter()
         .try_fold(1usize, |acc, axis| acc.checked_mul(axis.len()))
@@ -1278,6 +1287,7 @@ pub struct StreamLines {
     func: Box<FieldFn>,
     cs: Box<dyn CoordinateSystem>,
     substream: Substream,
+    sample_coords: Option<Vec<[f64; 3]>>,
     density: f64,
     n_repeats: usize,
     noise_factor: Option<f64>,
@@ -1316,6 +1326,7 @@ impl StreamLines {
             func: Box::new(func),
             cs: Box::new(coordinate_system),
             substream: rng.substream(STREAM_LINES_SUBSTREAM),
+            sample_coords: None,
             density: STREAM_DENSITY,
             n_repeats: 1,
             noise_factor: None,
@@ -1329,6 +1340,14 @@ impl StreamLines {
             style: StreamLineStyle::default(),
             budget: SamplingBudget::DEFAULT,
         }
+    }
+
+    /// Explicit coordinate seeds, in caller order. No jitter draws are consumed.
+    /// Input is validated against the builder's budget before any field call.
+    #[must_use]
+    pub fn with_sample_coords(mut self, coords: Vec<[f64; 3]>) -> Self {
+        self.sample_coords = Some(coords);
+        self
     }
 
     /// `density` (Reference default 1.0).
@@ -1437,7 +1456,19 @@ impl StreamLines {
     /// on the class): the density grid, `n_repeats` copies (repeats
     /// outermost), each jittered by `noise_factor · U[0,1)` per component
     /// from the named substream. Also returns the draw count consumed.
-    fn seed_coords(&self) -> Result<(Vec<[f64; 3]>, u64), FieldError> {
+    ///
+    /// # Errors
+    /// Refuses nonfinite seeds, invalid grid controls, and exceeded budgets.
+    pub fn sample_coords(&self) -> Result<(Vec<[f64; 3]>, u64), FieldError> {
+        if let Some(seeds) = &self.sample_coords {
+            self.budget.ensure_total("stream seeds", seeds.len())?;
+            for seed in seeds {
+                for &value in seed {
+                    ensure_finite("stream seed", value)?;
+                }
+            }
+            return Ok((seeds.clone(), 0));
+        }
         ensure_positive("stream density", self.density)?;
         let grid = get_sample_coords(&*self.cs, self.density, self.budget)?;
         let dim = self.cs.dimension().clamp(1, 3);
@@ -1448,6 +1479,7 @@ impl StreamLines {
             }
             None => (x_unit_size(&*self.cs) / self.density) * 0.5,
         };
+        ensure_finite("noise_factor", noise_factor)?;
         let total = grid
             .len()
             .checked_mul(self.n_repeats)
@@ -1463,6 +1495,7 @@ impl StreamLines {
                 let mut seed = *coords;
                 for c in seed.iter_mut().take(dim) {
                     *c += noise_factor * rng_gen.next_f64();
+                    ensure_finite("jittered stream seed", *c)?;
                     draws += 1;
                 }
                 seeds.push(seed);
@@ -1483,7 +1516,7 @@ impl StreamLines {
             return Err(FieldError::NonFiniteControl { context: "arc_len" });
         }
         ensure_positive("cutoff_norm", self.cutoff_norm)?;
-        let (seeds, draws) = self.seed_coords()?;
+        let (seeds, draws) = self.sample_coords()?;
         let dim = self.cs.dimension().clamp(1, 3);
 
         let mut children = Vec::with_capacity(seeds.len());

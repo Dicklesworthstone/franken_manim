@@ -30,6 +30,7 @@ _STEPS = (
     ("scene_state", "install_scene_state"),
     ("streamline_authoring", "install_streamline_authoring"),
     ("streamline_rebuild", "install_streamline_rebuild"),
+    ("streamlines", "install_streamlines"),
     ("streamline_animation", "install_streamline_animation"),
     ("traced_path", "install_traced_path"),
     ("interactive_editing", "install_interactive_editing"),

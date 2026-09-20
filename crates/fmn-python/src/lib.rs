@@ -28,6 +28,7 @@ pub use portal_console::run_portal_gauntlet_console;
 mod portal_playback;
 mod portal_readback;
 mod portal_recording;
+mod portal_streamlines;
 mod portal_studio;
 mod portal_svg;
 mod portal_texture;
@@ -5652,6 +5653,10 @@ impl BridgeMobject {
     /// Returns `(shell_specs, virtual_times)` — one virtual time per line,
     /// which `AnimatedStreamLines` paces its flash windows by.
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (factory, func, c2p, p2c, ranges, dimension, seed, density,
+        n_repeats, noise_factor, solution_time, dt, arc_len, max_time_steps,
+        n_samples_per_line, cutoff_norm, stroke_width, stroke_color, stroke_opacity,
+        color_by_magnitude, magnitude_range, taper_stroke_width, sample_coords=None))]
     fn _build_stream_lines<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
@@ -5676,6 +5681,7 @@ impl BridgeMobject {
         color_by_magnitude: bool,
         magnitude_range: (f64, f64),
         taper_stroke_width: bool,
+        sample_coords: Option<Vec<[f64; 3]>>,
     ) -> PyResult<(Bound<'py, PyList>, Vec<f64>, u64)> {
         let py = slf.py();
         let callback_error: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
@@ -5689,6 +5695,9 @@ impl BridgeMobject {
         }
         impl fmn_library::coords::CoordinateSystem for PyCoordinateSystem {
             fn c2p(&self, coords: &[f64]) -> fmn_core::types::Vec3 {
+                if self.error.lock().unwrap().is_some() {
+                    return [0.0; 3];
+                }
                 Python::attach(|py| {
                     match self
                         .c2p
@@ -5705,6 +5714,9 @@ impl BridgeMobject {
                 })
             }
             fn p2c(&self, point: fmn_core::types::Vec3) -> [f64; 3] {
+                if self.error.lock().unwrap().is_some() {
+                    return [0.0; 3];
+                }
                 Python::attach(|py| {
                     match self
                         .p2c
@@ -5737,6 +5749,9 @@ impl BridgeMobject {
         };
         let field_error = Arc::clone(&callback_error);
         let field = move |rows: &[[f64; 3]]| -> Vec<[f64; 3]> {
+            if field_error.lock().unwrap().is_some() {
+                return vec![[0.0; 3]; rows.len()];
+            }
             Python::attach(|py| {
                 match func
                     .bind(py)
@@ -5789,6 +5804,9 @@ impl BridgeMobject {
             .with_style_config(style);
         if let Some(noise) = noise_factor {
             builder = builder.with_noise_factor(noise);
+        }
+        if let Some(coords) = sample_coords {
+            builder = builder.with_sample_coords(coords);
         }
         // VERBATIM refusal doctrine: the field error, if any, outranks the
         // build result — a poisoned integration must never look successful.
@@ -10828,6 +10846,14 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_reset, module)?)?;
     module.add_function(wrap_pyfunction!(report::_crossing_report, module)?)?;
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        portal_streamlines::_stream_line_samples,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        portal_streamlines::_stream_line_widths,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(
         portal_provenance::_portal_publish_manifest,
         module
