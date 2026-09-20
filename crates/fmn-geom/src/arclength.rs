@@ -95,6 +95,16 @@ pub fn quadratic_arc_length(a0: Vec3, h: Vec3, a1: Vec3) -> f64 {
         return a.sqrt() * integral;
     }
 
+    // The discriminant subtracts almost equal products near a retracing
+    // curve. Roundoff can make an exactly collinear curve look curved, then
+    // the logarithm's negative-projection argument cancels to zero. Preserve
+    // the established arithmetic for well-conditioned curves, but evaluate
+    // this roundoff-sized band in an orthogonal derivative frame instead.
+    // This is still the true closed-form integral, not a chord substitute.
+    if disc.is_finite() && disc <= 64.0 * f64::EPSILON * a * c {
+        return near_collinear_length(u, v, a, b);
+    }
+
     let sqrt_a = a.sqrt();
     let speed_at = |t: f64| -> f64 { (a * t * t + b * t + c).sqrt() };
     let antiderivative = |t: f64| -> f64 {
@@ -102,6 +112,47 @@ pub fn quadratic_arc_length(a0: Vec3, h: Vec3, a1: Vec3) -> f64 {
             + disc / (8.0 * a * sqrt_a) * scalar::ln(2.0 * sqrt_a * speed_at(t) + 2.0 * a * t + b)
     };
     antiderivative(1.0) - antiderivative(0.0)
+}
+
+// Write the derivative as (x, r) in a frame parallel to u. Its speed is
+// sqrt(x*x + r*r), x advances by |u|, and r is obtained from a cross product
+// rather than the cancellation-prone 4ac-b*b. Splitting at x=0 makes the
+// retracing integral a sum of positive quantities; the same-sign branch
+// factors its difference of products. Logs always receive positive inputs.
+fn near_collinear_length(u: Vec3, v: Vec3, a: f64, b: f64) -> f64 {
+    let q = a.sqrt();
+    let x0 = b / (2.0 * q);
+    let x1 = x0 + q;
+    let cross = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let r2 = space_ops::dot(cross, cross) / a;
+    if x0 <= 0.0 && x1 >= 0.0 {
+        let primitive = |x: f64| {
+            let x = x.abs();
+            let speed = (x * x + r2).sqrt();
+            let logarithmic = if r2 == 0.0 {
+                0.0
+            } else {
+                r2 * (scalar::ln(x + speed) - 0.5 * scalar::ln(r2))
+            };
+            x * speed + logarithmic
+        };
+        return (primitive(x0) + primitive(x1)) / (2.0 * q);
+    }
+    let lo = x0.abs().min(x1.abs());
+    let hi = x0.abs().max(x1.abs());
+    let s0 = (lo * lo + r2).sqrt();
+    let s1 = (hi * hi + r2).sqrt();
+    let algebraic = s1 + lo * (hi + lo) / (s0 + s1);
+    let logarithmic = if r2 == 0.0 {
+        0.0
+    } else {
+        r2 / q * scalar::ln((hi + s1) / (lo + s0))
+    };
+    0.5 * (algebraic + logarithmic)
 }
 
 /// Per-curve and cumulative true lengths of a path — the retained
@@ -314,5 +365,76 @@ impl QuadPath {
         }
         let (n, residue) = bezier::integer_interpolate(0, num_curves as i64, alpha).ok()?;
         self.nth_curve_point(n.max(0) as usize, residue)
+    }
+}
+
+#[cfg(test)]
+mod conditioning_tests {
+    use super::*;
+
+    // Exact f32 record values: the old discriminant is positive by roundoff,
+    // despite the endpoint being an exact power-of-two multiple of the handle.
+    const HANDLE: Vec3 = [0.49010369181632996, 1.6202473640441895, 1.8808202743530273];
+
+    fn retrace(exponent: i32) -> [Vec3; 3] {
+        [[0.0; 3], HANDLE, HANDLE.map(|x| x * 2.0f64.powi(-exponent))]
+    }
+
+    #[test]
+    fn f32_retracing_curve_has_finite_true_length() {
+        let [a, h, b] = retrace(15);
+        let ratio = 2.0f64.powi(-15);
+        let expected = space_ops::get_norm(h)
+            * (1.0 + (1.0 - ratio) * (1.0 - ratio))
+            / (2.0 - ratio);
+        let actual = quadratic_arc_length(a, h, b);
+        assert!(actual.is_finite(), "finite record geometry produced {actual}");
+        assert!((actual - expected).abs() <= 2e-14 * expected);
+    }
+
+    #[test]
+    fn collapsing_retraces_remain_finite_in_both_directions() {
+        for exponent in 1..=40 {
+            let [a, h, b] = retrace(exponent);
+            let forward = quadratic_arc_length(a, h, b);
+            let reverse = quadratic_arc_length(b, h, a);
+            assert!(forward.is_finite() && forward > 0.0);
+            assert!(reverse.is_finite() && reverse > 0.0);
+            assert!((forward - reverse).abs() <= 2e-13 * forward);
+        }
+    }
+
+    #[test]
+    fn conditioned_integral_retains_nonzero_transverse_derivative() {
+        // Integral of sqrt((2-4t)^2 + (2e-7*t)^2), evaluated independently
+        // at 80 decimal digits. The curve is genuinely noncollinear.
+        let actual = quadratic_arc_length([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1e-7, 0.0]);
+        assert!(actual.is_finite() && actual > 1.0 + 4e-14);
+        assert!((actual - 1.0000000000000462).abs() < 1e-15);
+    }
+
+    #[test]
+    fn retained_table_and_arc_inverse_accept_transient_retraces() {
+        let points = retrace(15);
+        let path = QuadPath::from_points(points.to_vec()).unwrap();
+        let table = ArcLengthTable::for_path(&path);
+        assert!(table.total().is_finite() && table.total() > 0.0);
+        let mut previous = 0.0;
+        for step in 0..=32 {
+            let alpha = f64::from(step) / 32.0;
+            let (index, t) = table.curve_and_t_at(&path, alpha).unwrap();
+            assert_eq!(index, 0);
+            assert!(t.is_finite() && (previous..=1.0).contains(&t));
+            let point = path.point_from_proportion_with(&table, alpha).unwrap();
+            assert!(point.iter().all(|value| value.is_finite()));
+            previous = t;
+        }
+    }
+
+    #[test]
+    fn ordinary_line_point_and_exact_cusp_keep_their_lengths() {
+        assert_eq!(quadratic_arc_length([0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]), 2.0);
+        assert_eq!(quadratic_arc_length([0.0; 3], [0.0; 3], [0.0; 3]), 0.0);
+        assert_eq!(quadratic_arc_length([0.0; 3], [1.0, 0.0, 0.0], [0.0; 3]), 1.0);
     }
 }
