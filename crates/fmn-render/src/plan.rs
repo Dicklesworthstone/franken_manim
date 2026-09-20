@@ -971,29 +971,21 @@ impl RenderPlan {
                 }
             };
 
-            let previous_profiled = previous.is_some_and(|old| {
-                self.styles
-                    .get(old.style)
-                    .or_else(|| {
-                        pending_styles
-                            .iter()
-                            .find(|(i, _)| *i == old.style)
-                            .map(|(_, s)| s)
-                    })
-                    .is_some_and(|style| {
-                        style.stroke_profile.is_some() || style.fill_profile.is_some()
-                    })
-            });
-            let has_varying_paint = crate::stroke_profile::has_varying_paint(stage, mob)
-                || crate::fill_profile::has_varying_paint(stage, mob);
-            let style_unsafe =
-                style_unsafe || ((previous_profiled || has_varying_paint) && hint_unsafe);
-            let style = match &previous {
+            // The dependency describes authored paint, not just a currently
+            // measurable profile. Collapse removes stations, not dependency on
+            // geometry. Reuse this per-object metadata without reading paint on
+            // unchanged frames, including when style rows are shared.
+            let previous_profiled =
+                previous.is_some_and(|old| old.style_dep.axes().contains(&Axis::Geometry));
+            let style_unsafe = style_unsafe || (previous_profiled && hint_unsafe);
+            let (style, profiled) = match &previous {
                 Some(retained) if !style_unsafe && !retained.style_dep.is_stale(&now) => {
-                    retained.style
+                    (retained.style, previous_profiled)
                 }
                 _ => {
                     stats.styles_rebuilt += 1;
+                    let has_varying_paint = crate::stroke_profile::has_varying_paint(stage, mob)
+                        || crate::fill_profile::has_varying_paint(stage, mob);
                     let mut row = read_style(stage, mob);
                     row.stroke_profile =
                         crate::stroke_profile::from_records(stage, mob, decode_rgba)?
@@ -1001,7 +993,7 @@ impl RenderPlan {
                     row.fill_profile = crate::fill_profile::from_records(stage, mob, decode_rgba)?
                         .map(std::sync::Arc::new);
                     let key = row.bits();
-                    if let Some(index) = self.styles.index_of(&row) {
+                    let style = if let Some(index) = self.styles.index_of(&row) {
                         index
                     } else if let Some(&index) = pending_style_indices.get(&key) {
                         index
@@ -1048,7 +1040,8 @@ impl RenderPlan {
                         pending_style_indices.insert(key, index);
                         pending_styles.push((index, row));
                         index
-                    }
+                    };
+                    (style, has_varying_paint)
                 }
             };
 
@@ -1071,24 +1064,13 @@ impl RenderPlan {
                 hint_unsafe,
             });
 
-            let profiled = self
-                .styles
-                .get(style)
-                .or_else(|| {
-                    pending_styles
-                        .iter()
-                        .find(|(i, _)| *i == style)
-                        .map(|(_, s)| s)
-                })
-                .is_some_and(|row| row.stroke_profile.is_some() || row.fill_profile.is_some());
-            let profile_dependent = profiled || has_varying_paint;
             next_retained.insert(
                 mob,
                 Retained {
                     shape_dep: Dependency::new(now, &SHAPE_AXES),
                     style_dep: Dependency::new(
                         now,
-                        if profile_dependent {
+                        if profiled {
                             &PROFILE_STYLE_AXES
                         } else {
                             &STYLE_AXES

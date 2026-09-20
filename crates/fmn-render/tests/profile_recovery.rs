@@ -24,12 +24,18 @@ fn fixture(field: &str) -> (Stage, Mob) {
 }
 
 fn style(plan: &RenderPlan) -> &Style {
-    plan.styles().get(plan.shapes().instances()[0].style).unwrap()
+    plan.styles()
+        .get(plan.shapes().instances()[0].style)
+        .unwrap()
 }
 
 fn geometry(stage: &mut Stage, mob: Mob, scale: f32) {
     for (i, point) in POINTS.iter().enumerate() {
-        stage.get_mut(mob).unwrap().buffer.write(i, "point", &point.map(|x| x * scale));
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .write(i, "point", &point.map(|x| x * scale));
     }
 }
 
@@ -49,7 +55,11 @@ fn initially_collapsed_record_profiles_recover_without_making_flat_paint_geometr
 
         for scale in [1.0, 0.0, 2.0, 0.0, 1.0] {
             geometry(&mut stage, mob, scale);
-            assert_eq!(plan.sync(&stage, 0).unwrap().styles_rebuilt, 1, "lost dependency for {field}");
+            assert_eq!(
+                plan.sync(&stage, 0).unwrap().styles_rebuilt,
+                1,
+                "lost dependency for {field}"
+            );
             if scale == 0.0 {
                 no_profile(&plan);
             } else {
@@ -83,14 +93,19 @@ fn singular_placement_can_recover_profiles_without_touching_point_records() {
         let (mut stage, mob) = fixture(field);
         geometry(&mut stage, mob, 1.0);
         let revision = stage.get(mob).unwrap().buffer.field_revision("point");
-        stage.set_placement(mob, Placement::new([[0.0; 3]; 3], [0.0; 3])).unwrap();
+        stage
+            .set_placement(mob, Placement::new([[0.0; 3]; 3], [0.0; 3]))
+            .unwrap();
         let mut plan = RenderPlan::default();
         plan.sync(&stage, 0).unwrap();
         no_profile(&plan);
         assert_eq!(plan.sync(&stage, 0).unwrap().styles_rebuilt, 0);
         stage.set_placement(mob, Placement::IDENTITY).unwrap();
         assert_eq!(plan.sync(&stage, 0).unwrap().styles_rebuilt, 1);
-        assert_eq!(stage.get(mob).unwrap().buffer.field_revision("point"), revision);
+        assert_eq!(
+            stage.get(mob).unwrap().buffer.field_revision("point"),
+            revision
+        );
         assert_eq!(style(&plan).fill_profile.is_some(), field == "fill_rgba");
         assert_eq!(style(&plan).stroke_profile.is_some(), field != "fill_rgba");
         let mut fresh = RenderPlan::default();
