@@ -5,7 +5,7 @@
 
 use fmn_cache::{NamespacePolicy, Store, StoreConfig};
 use fmn_platform::clock::FakeClock;
-use fmn_platform::fs::{Fs, VirtualFs};
+use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_tex::{MacroSet, Mode, Style, TYPESET_FORMAT_VERSION, TexEngine};
 use std::path::Path;
 use std::sync::Arc;
