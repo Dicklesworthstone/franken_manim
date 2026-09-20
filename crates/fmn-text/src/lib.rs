@@ -46,11 +46,14 @@ pub use maps::StyleMaps;
 
 use fmn_core::types::Vec3;
 use fmn_geom::QuadPath;
+use font::OutlineCommand;
 
 /// The outline of a placed glyph as a positioned [`QuadPath`], in the
 /// layout's em coordinates: one subpath per contour, scaled by the
 /// glyph's size and translated to its position — 1:1 transcription of the
-/// decoded quadratic segments.
+/// decoded quadratic segments. Font-unit outline commands are shared through
+/// the loaded face's bounded cache; placement, scale, and the returned mutable
+/// path remain private to this glyph. Source spans never enter the cache.
 ///
 /// # Errors
 ///
@@ -58,35 +61,30 @@ use fmn_geom::QuadPath;
 /// [`TextError::Outline`] on a decode failure.
 pub fn glyph_quadpath(book: &FontBook, glyph: &PlacedTextGlyph) -> Result<QuadPath, TextError> {
     let family = book.family(&glyph.face.family)?;
-    let font = &family.face(glyph.face.key).font;
-    let outline = font
-        .glyph_outline(glyph.gid)
-        .map_err(|e| TextError::Outline {
-            ch: glyph.ch,
-            what: format!("{e:?}"),
-        })?;
-    let upm = f64::from(font.units_per_em.max(1));
+    let face = family.face(glyph.face.key);
+    let commands = face.glyph_commands(glyph.gid, glyph.ch)?;
+    let upm = f64::from(face.font.units_per_em.max(1));
     let s = glyph.size / upm;
     let v = |x: f64, y: f64| -> Vec3 { [glyph.x + x * s, glyph.y + y * s, 0.0] };
     let mut path = QuadPath::new();
-    for contour in &outline.contours {
-        path.start_new_path(v(contour.start.x, contour.start.y));
-        for seg in &contour.segments {
-            match seg {
-                fmd_font::outline::Segment::Line { to } => {
-                    path.add_line_to(v(to.x, to.y), true)
-                        .map_err(|e| TextError::Outline {
-                            ch: glyph.ch,
-                            what: format!("{e:?}"),
-                        })?;
-                }
-                fmd_font::outline::Segment::Quad { ctrl, to } => {
-                    path.add_quadratic_bezier_curve_to(v(ctrl.x, ctrl.y), v(to.x, to.y), true)
-                        .map_err(|e| TextError::Outline {
-                            ch: glyph.ch,
-                            what: format!("{e:?}"),
-                        })?;
-                }
+    for command in commands.iter() {
+        match *command {
+            OutlineCommand::Move([x, y]) => {
+                path.start_new_path(v(x, y));
+            }
+            OutlineCommand::Line([x, y]) => {
+                path.add_line_to(v(x, y), true)
+                    .map_err(|e| TextError::Outline {
+                        ch: glyph.ch,
+                        what: format!("{e:?}"),
+                    })?;
+            }
+            OutlineCommand::Quad([cx, cy], [x, y]) => {
+                path.add_quadratic_bezier_curve_to(v(cx, cy), v(x, y), true)
+                    .map_err(|e| TextError::Outline {
+                        ch: glyph.ch,
+                        what: format!("{e:?}"),
+                    })?;
             }
         }
     }

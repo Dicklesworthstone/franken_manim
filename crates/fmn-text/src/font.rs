@@ -5,6 +5,68 @@
 //! [`TextError::FontUnavailable`]).
 
 use crate::error::TextError;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, PoisonError};
+
+/// Maximum retained glyphs per loaded face. The independent command budget
+/// also bounds fonts whose individual glyphs have unusually large outlines.
+pub const GLYPH_CACHE_MAX_ENTRIES: usize = 512;
+/// Maximum retained outline commands per loaded face.
+pub const GLYPH_CACHE_MAX_COMMANDS: usize = 32_768;
+
+/// Work and resident storage in a face's outline cache. These are diagnostics,
+/// never scene state: eviction and scheduling cannot change geometry or spans.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GlyphCacheStats {
+    /// Requests served without decoding the font's outline tables.
+    pub hits: u64,
+    /// Outline decode attempts (failed and deliberately uncacheable included).
+    pub decodes: u64,
+    /// Currently retained glyphs.
+    pub entries: usize,
+    /// Currently retained outline commands.
+    pub commands: usize,
+}
+
+// Cache font-unit commands, not positioned paths. In particular, the midpoint
+// of a line must still be computed *after* placement by QuadPath::add_line_to,
+// exactly as on the uncached path. Translating a cached positioned QuadPath
+// would change floating-point association and break certified output.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OutlineCommand {
+    Move([f64; 2]),
+    Line([f64; 2]),
+    Quad([f64; 2], [f64; 2]),
+}
+
+#[derive(Default)]
+struct GlyphCache {
+    glyphs: BTreeMap<u16, Arc<[OutlineCommand]>>,
+    order: VecDeque<u16>,
+    stats: GlyphCacheStats,
+}
+
+impl GlyphCache {
+    fn insert(&mut self, gid: u16, commands: Arc<[OutlineCommand]>) {
+        if commands.len() > GLYPH_CACHE_MAX_COMMANDS {
+            return;
+        }
+        while self.glyphs.len() >= GLYPH_CACHE_MAX_ENTRIES
+            || self.stats.commands + commands.len() > GLYPH_CACHE_MAX_COMMANDS
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(old) = self.glyphs.remove(&oldest) {
+                self.stats.commands -= old.len();
+            }
+        }
+        self.stats.commands += commands.len();
+        self.glyphs.insert(gid, commands);
+        self.order.push_back(gid);
+        self.stats.entries = self.glyphs.len();
+    }
+}
 
 /// A face variant within a family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -21,12 +83,67 @@ pub struct Face {
     /// The parsed font.
     pub font: fmd_font::Font,
     gpos: fmd_font::Kerning,
+    // Identity is the actual loaded face, not a family alias, requested
+    // variant, character, or gid shared across different fonts. FontBook only
+    // publishes immutable face references; adding a family gets a new cache.
+    outlines: Mutex<GlyphCache>,
 }
 
 impl Face {
     fn new(font: fmd_font::Font) -> Self {
         let gpos = font.gpos_kerning();
-        Self { font, gpos }
+        Self {
+            font,
+            gpos,
+            outlines: Mutex::new(GlyphCache::default()),
+        }
+    }
+
+    /// Diagnostic reuse counters for this actual face (aliases and variant
+    /// fallbacks resolve to the same cache).
+    #[must_use]
+    pub fn glyph_cache_stats(&self) -> GlyphCacheStats {
+        self.outlines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stats
+    }
+
+    pub(crate) fn glyph_commands(
+        &self,
+        gid: u16,
+        ch: char,
+    ) -> Result<Arc<[OutlineCommand]>, TextError> {
+        let mut cache = self.outlines.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(hit) = cache.glyphs.get(&gid).cloned() {
+            cache.stats.hits = cache.stats.hits.saturating_add(1);
+            return Ok(hit);
+        }
+        // Keep the lock through this face's decode: concurrent requests for a
+        // cold glyph decode once. Other faces remain independently usable.
+        cache.stats.decodes = cache.stats.decodes.saturating_add(1);
+        let outline = self
+            .font
+            .glyph_outline(gid)
+            .map_err(|error| TextError::Outline {
+                ch,
+                what: format!("{error:?}"),
+            })?;
+        let mut commands = Vec::new();
+        for contour in &outline.contours {
+            commands.push(OutlineCommand::Move([contour.start.x, contour.start.y]));
+            for segment in &contour.segments {
+                commands.push(match segment {
+                    fmd_font::outline::Segment::Line { to } => OutlineCommand::Line([to.x, to.y]),
+                    fmd_font::outline::Segment::Quad { ctrl, to } => {
+                        OutlineCommand::Quad([ctrl.x, ctrl.y], [to.x, to.y])
+                    }
+                });
+            }
+        }
+        let commands: Arc<[OutlineCommand]> = commands.into();
+        cache.insert(gid, Arc::clone(&commands));
+        Ok(commands)
     }
 
     /// Kerning between two glyphs, font units: legacy `kern` table plus
@@ -280,7 +397,36 @@ fn aliases(canonical: &str) -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUNDLED_FONT_FAMILIES, bundled_font_inventory, is_bundled_text_family};
+    use super::{
+        BUNDLED_FONT_FAMILIES, GLYPH_CACHE_MAX_COMMANDS, GLYPH_CACHE_MAX_ENTRIES, GlyphCache,
+        OutlineCommand, bundled_font_inventory, is_bundled_text_family,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn glyph_cache_evicts_by_both_budgets_and_keeps_borrowed_outlines_alive() {
+        let mut cache = GlyphCache::default();
+        let small: Arc<[OutlineCommand]> = vec![OutlineCommand::Move([0.0, 0.0])].into();
+        for gid in 0..=GLYPH_CACHE_MAX_ENTRIES {
+            cache.insert(u16::try_from(gid).unwrap(), Arc::clone(&small));
+        }
+        assert_eq!(cache.stats.entries, GLYPH_CACHE_MAX_ENTRIES);
+        assert_eq!(cache.stats.commands, GLYPH_CACHE_MAX_ENTRIES);
+        assert!(!cache.glyphs.contains_key(&0));
+        let retained = Arc::clone(cache.glyphs.get(&1).unwrap());
+        let large: Arc<[OutlineCommand]> =
+            vec![OutlineCommand::Move([1.0, 2.0]); GLYPH_CACHE_MAX_COMMANDS].into();
+        cache.insert(1000, large);
+        assert_eq!(cache.stats.entries, 1);
+        assert_eq!(cache.stats.commands, GLYPH_CACHE_MAX_COMMANDS);
+        assert_eq!(retained.len(), 1);
+        let oversized: Arc<[OutlineCommand]> =
+            vec![OutlineCommand::Move([1.0, 2.0]); GLYPH_CACHE_MAX_COMMANDS + 1].into();
+        cache.insert(1001, oversized);
+        assert!(!cache.glyphs.contains_key(&1001));
+        assert_eq!(cache.stats.entries, 1);
+        assert_eq!(cache.stats.commands, GLYPH_CACHE_MAX_COMMANDS);
+    }
 
     #[test]
     fn bundled_inventory_verifies_text_and_math_families() -> Result<(), crate::TextError> {
