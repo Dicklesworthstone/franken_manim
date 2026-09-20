@@ -69,7 +69,7 @@ fn _build_styled_text<'py>(
     if text.len() > MAX_BYTES { return Err(PyValueError::new_err("Text source exceeds 262144 bytes")); }
     for key in options.keys().iter() {
         let key = key.extract::<String>()?;
-        if !["font_size", "font", "bold", "italic", "alignment", "line_spacing", "line_width", "justify", "indent", "disable_ligatures", "t2f", "t2s", "t2w", "t2g"].contains(&key.as_str()) {
+        if !["font_size", "font", "bold", "italic", "alignment", "line_spacing", "line_width", "justify", "indent", "disable_ligatures", "t2f", "t2s", "t2w", "t2g", "code_language", "code_style"].contains(&key.as_str()) {
             return Err(PyTypeError::new_err(format!("unknown native Text option: {key}")));
         }
     }
@@ -92,13 +92,33 @@ fn _build_styled_text<'py>(
     let slant_refs: Vec<(&str, bool)> = slants.iter().map(|(k,v)| (k.as_str(),*v)).collect();
     let weight_refs: Vec<(&str, bool)> = weights.iter().map(|(k,v)| (k.as_str(),*v)).collect();
     let gradient_refs: Vec<(&str, &[Srgb])> = gradients.iter().map(|(k,v)| (k.as_str(),v.as_slice())).collect();
+    // Highlight by original byte position, never substring/color replacement.
+    // The public Code class selects its default bundled family separately so
+    // explicit fonts and local face maps retain the ordinary text semantics.
+    let code_styles = if options.contains("code_language")? {
+        if markup { return Err(PyValueError::new_err("Code source must be literal, not markup")); }
+        let language = string(options, "code_language", "")?;
+        let style = string(options, "code_style", "monokai")?;
+        if language.len() > 1024 || style.len() > 1024 {
+            return Err(PyValueError::new_err("Code language/style names exceed 1024 bytes"));
+        }
+        let theme = fmn_library::CodeTheme::from_pygments_name(&style)
+            .ok_or_else(|| PyValueError::new_err(format!("unsupported native Code theme: {style}")))?;
+        let mut overrides = fmn_library::Code::new(text).language(&language).theme(theme).character_overrides();
+        for entry in &mut overrides { entry.family = None; }
+        overrides
+    } else {
+        if options.contains("code_style")? { return Err(PyValueError::new_err("Code theme requires a language declaration")); }
+        Vec::new()
+    };
     let mut builder = if markup { fmn_library::Text::markup(text) } else { fmn_library::Text::new(text) }
         .font_size(number(options, "font_size", 48., true)?)
         .font(&font).bold(flag(options, "bold", false)?).italic(flag(options, "italic", false)?)
         .align(align).line_spacing(number(options, "line_spacing", 1., true)?)
         .justify(flag(options, "justify", false)?).indent(number(options, "indent", 0., false)?)
         .ligatures(!flag(options, "disable_ligatures", true)?)
-        .t2f(&family_refs).t2s(&slant_refs).t2w(&weight_refs).t2g(&gradient_refs);
+        .t2f(&family_refs).t2s(&slant_refs).t2w(&weight_refs).t2g(&gradient_refs)
+        .char_overrides(&code_styles);
     if options.contains("line_width")? { builder = builder.width(number(options, "line_width", 1., true)?); }
     let built = with_font_book(|book| {
         for (_, family) in &families { book.family(family).map_err(native_error)?; }

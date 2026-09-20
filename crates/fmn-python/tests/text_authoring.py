@@ -112,6 +112,29 @@ class TextAuthoringTests(unittest.TestCase):
         self.assertEqual(calls, [text])
         self.assertIsInstance(text, QualifiedText)
 
+    def test_inner_monospace_tag_overrides_inherited_family_without_rewriting_source(self):
+        source = "<tt>A</tt>"
+        actual = m.MarkupText(source, font="IBM Plex Sans")
+        expected = m.Text("A", font="CM Typewriter")
+        np.testing.assert_array_equal(points(actual), points(expected))
+        self.assertEqual(actual._string_sub_spans, [(4, 5)])
+        self.assertEqual(actual.get_string(), source)
+
+    def test_resource_bounds_and_nonfinite_paint_are_refused(self):
+        import itertools
+        cases = (("A" * 262_145, {}),
+                 ("A", {"t2w": {str(i): "BOLD" for i in range(4097)}}),
+                 ("A", {"gradient": itertools.repeat(m.RED)}),
+                 ("A", {"gradient": [[float("nan"), 0, 0]]}),
+                 ("A", {"gradient": m.RED}),
+                 ("A", {"font_size": float("inf")}),
+                 ("A", {"height": 0}))
+        for source, options in cases:
+            with self.subTest(options=tuple(options)), self.assertRaises((ValueError, TypeError)):
+                m.Text(source, **options)
+        with self.assertRaisesRegex(NotImplementedError, "Pango attributes"):
+            m.Text("A", global_config={"letter_spacing": 10})
+
     def test_native_frames_match_thread_counts_and_differ_from_plain_text(self):
         def render(output, threads, styled):
             scene = m.Scene()
@@ -130,7 +153,7 @@ class TextAuthoringTests(unittest.TestCase):
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(TextAuthoringTests)
-assert suite.countTestCases() == 12
+assert suite.countTestCases() == 14
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 gc.collect()
 if not result.wasSuccessful():

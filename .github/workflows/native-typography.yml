@@ -6,10 +6,13 @@ on:
     paths:
       - '.github/workflows/native-typography.yml'
       - 'scripts/patches/native-typography.patch'
+      - 'scripts/patches/native-code-authoring.patch'
       - 'crates/fmn-python/src/portal_typography.rs'
       - 'crates/fmn-python/python/fmn_python/text_authoring.py'
       - 'crates/fmn-python/tests/text_authoring.py'
       - 'crates/fmn-library/tests/text_authoring.rs'
+      - 'crates/fmn-python/tests/code_authoring.py'
+      - 'crates/fmn-python/python/fmn_python/matrix.py'
 permissions:
   contents: write
 concurrency:
@@ -45,14 +48,19 @@ jobs:
             git apply --check scripts/patches/native-typography.patch
             git apply scripts/patches/native-typography.patch
           fi
+          if ! grep -q 'pub fn character_overrides' crates/fmn-library/src/code.rs; then
+            git apply --check scripts/patches/native-code-authoring.patch
+            git apply scripts/patches/native-code-authoring.patch
+          fi
           rustup show active-toolchain
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-text/src/markup.rs crates/fmn-text/src/layout.rs crates/fmn-library/src/text.rs crates/fmn-library/tests/text_authoring.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_typography.rs
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-text/src/markup.rs crates/fmn-text/src/layout.rs crates/fmn-library/src/text.rs crates/fmn-library/src/code.rs crates/fmn-library/tests/text_authoring.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_typography.rs
           git diff --check
       - name: Native typography contracts and core regression
         run: |
           set -euo pipefail
-          cargo test --locked -p fmn-text --lib 2>&1 | tee /tmp/typography-text.log
+          cargo test --locked -p fmn-text 2>&1 | tee /tmp/typography-text.log
           cargo test --locked -p fmn-library --test text_authoring 2>&1 | tee /tmp/typography-library.log
+          cargo test --locked -p fmn-library --lib code::tests 2>&1 | tee /tmp/typography-code-core.log
       - name: Build and exercise the clean installed wheel
         run: |
           set -euo pipefail
@@ -60,17 +68,17 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/typography-wheel 2>&1 | tee /tmp/typography-build.log
           python -m venv target/typography-venv
           target/typography-venv/bin/python -m pip install 'numpy==2.5.2' target/typography-wheel/*.whl
-          for suite in text_authoring text_reveal matching_authoring live_tex_render matrix_authoring; do
+          for suite in text_authoring code_authoring text_reveal matching_authoring live_tex_render matrix_authoring; do
             target/typography-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/typography-$suite.log
           done
       - name: Publish verified source directly on main
         run: |
           set -euo pipefail
-          git add crates/fmn-text/src/markup.rs crates/fmn-text/src/layout.rs crates/fmn-library/src/text.rs crates/fmn-library/tests/text_authoring.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_typography.rs crates/fmn-python/python/fmn_python/initialization.py
+          git add crates/fmn-text/src/markup.rs crates/fmn-text/src/layout.rs crates/fmn-library/src/text.rs crates/fmn-library/src/code.rs crates/fmn-library/tests/text_authoring.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_typography.rs crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/python/fmn_python/matrix.py crates/fmn-python/tests/bridge.py scripts/check_portal_runtime.sh
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(text): activate native fonts, face maps, gradients and paragraph typography'
+            git commit -m 'feat(text): activate rich native typography and syntax-highlighted Code'
             git fetch origin main
             git rebase origin/main
             git push origin HEAD:main

@@ -52,3 +52,24 @@ fn explicit_default_preserves_existing_geometry() {
     let new = Text::new("Text A").font("").bold(false).italic(false).build(&book).unwrap();
     assert_eq!(old.layout.glyphs, new.layout.glyphs);
 }
+
+#[test]
+fn inherited_family_does_not_mask_an_inner_monospace_tag() {
+    let book = FontBook::bundled().unwrap();
+    let source = "<tt>A</tt>B";
+    let built = Text::markup(source).font("IBM Plex Sans").build(&book).unwrap();
+    assert_eq!(built.layout.glyphs[0].face.family, "CM Typewriter");
+    assert_eq!(built.layout.glyphs[0].span, (4, 5));
+    assert_eq!(built.layout.glyphs[1].face.family, "IBM Plex Sans");
+}
+
+#[test]
+fn native_highlighter_exposes_positional_styles_without_source_rewriting() {
+    use fmn_library::{Code, CodeTheme};
+    use fmn_core::color::Srgb;
+    let styles = Code::new("fn fnord").language("rust").theme(CodeTheme::dark()).character_overrides();
+    assert_eq!(styles.len(), 8);
+    assert_eq!(styles[0].color, Some(Srgb::from_rgb8(104, 194, 70)));
+    assert!(styles[3..].iter().all(|style| style.color != styles[0].color));
+    assert!(styles.iter().all(|style| style.family == Some("CM Typewriter")));
+}

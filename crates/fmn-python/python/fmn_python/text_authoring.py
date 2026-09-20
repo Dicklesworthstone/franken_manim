@@ -104,6 +104,9 @@ def install_text_authoring(native):
                        t2s=[(key, _style_flag(value, "t2s", "ITALIC")) for key, value in maps["t2s"].items()],
                        t2w=[(key, _style_flag(value, "t2w", "BOLD")) for key, value in maps["t2w"].items()],
                        t2g=gradients)
+        code_options = vars(self).get("_fmn_code_layout")
+        if isinstance(self, g["Code"]) and code_options is not None:
+            options["code_language"], options["code_style"] = code_options
         if p["line_width"] is not None:
             options["line_width"] = _number(p["line_width"], "Text line_width", positive=True)
         height = None if p["height"] is None else _number(p["height"], "Text height", positive=True)
@@ -139,4 +142,56 @@ def install_text_authoring(native):
             self.set_height(height)
 
     Markup.__init__ = initialize
+    _install_code(g)
     g["_FMN_TEXT_AUTHORING_INSTALLED"] = True
+
+
+def _install_code(g):
+    Code = g["Code"]
+    previous = Code.__init__
+    missing = object()
+
+    @wraps(previous)
+    def initialize(self, code, font="Consolas", font_size=24, lsh=1.0,
+                   fill_color=None, stroke_color=None, language="python",
+                   code_style="monokai", **kwargs):
+        if not isinstance(font, str):
+            raise TypeError("Code font must be a family name")
+        if not isinstance(language, str) or not isinstance(code_style, str):
+            raise TypeError("Code language and code_style must be strings")
+        if len(language.encode("utf-8")) > 1024 or len(code_style.encode("utf-8")) > 1024:
+            raise ValueError("Code language/style names exceed 1024 bytes")
+        # The legacy default name is an explicit Code-only compatibility
+        # policy, not OS font discovery. Record the real bundled family.
+        native_font = "CM Typewriter" if font in ("", "Consolas") else font
+        source = str(code)
+        if fill_color is not None:
+            kwargs["fill_color"] = fill_color
+        if stroke_color is not None:
+            kwargs["stroke_color"] = stroke_color
+        attrs = vars(self)
+        old = attrs.get("_fmn_code_layout", missing)
+        attrs["_fmn_code_layout"] = (language, code_style)
+        try:
+            super(Code, self).__init__(source, font=native_font, font_size=font_size,
+                                      lsh=lsh, **kwargs)
+        finally:
+            if old is missing:
+                attrs.pop("_fmn_code_layout", None)
+            else:
+                attrs["_fmn_code_layout"] = old
+        self.code, self.font, self.native_font = source, font, native_font
+        self.language, self.code_style = language, code_style
+
+    # Code is a StringMobject with one live family of glyphs. The earlier
+    # scaffold duplicated all child records into the parent, double-rendering
+    # translucent ink and leaving stale copies after selector-based edits.
+    Code._hoist_descendant_records = False
+    Code.__init__ = initialize
+    Code.__doc__ = (
+        "Syntax-highlighted literal source over native Scribe glyphs. "
+        "The existing native highlighter supplies positional token colors; "
+        "Code's legacy Consolas default selects the bundled CM Typewriter. "
+        "native_font records that actual choice. Unknown languages use plain "
+        "native text, and unsupported theme/font names refuse."
+    )
