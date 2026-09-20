@@ -116,9 +116,16 @@ fn disk_hits_promote_to_memory_and_attaching_a_store_populates_it() {
     let expected = e.typeset(MATH, source).unwrap().to_bytes().unwrap();
     let e = e.with_cache(&store).unwrap();
     assert_eq!(e.memory_cache_stats().entries, 0);
-    assert_eq!(e.typeset(MATH, source).unwrap().to_bytes().unwrap(), expected);
+    assert_eq!(
+        e.typeset(MATH, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
     let ns = store
-        .namespace("typeset", TYPESET_FORMAT_VERSION, NamespacePolicy::default())
+        .namespace(
+            "typeset",
+            TYPESET_FORMAT_VERSION,
+            NamespacePolicy::default(),
+        )
         .unwrap();
     let key = e.cache_key(MATH, source).unwrap();
     assert_eq!(ns.get(&key).unwrap().unwrap(), expected);
@@ -145,7 +152,11 @@ fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
     let store = store();
     let e = engine().with_cache(&store).unwrap();
     let ns = store
-        .namespace("typeset", TYPESET_FORMAT_VERSION, NamespacePolicy::default())
+        .namespace(
+            "typeset",
+            TYPESET_FORMAT_VERSION,
+            NamespacePolicy::default(),
+        )
         .unwrap();
     let x_key = e.cache_key(MATH, "x").unwrap();
     let y_key = e.cache_key(MATH, "y").unwrap();
@@ -158,7 +169,10 @@ fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
         assert_eq!(result.layout.glyphs.len(), 1);
         assert_eq!(result.layout.glyphs[0].ch.to_string(), source);
         let expected = result.to_bytes().unwrap();
-        assert_eq!(e.typeset(MATH, source).unwrap().to_bytes().unwrap(), expected);
+        assert_eq!(
+            e.typeset(MATH, source).unwrap().to_bytes().unwrap(),
+            expected
+        );
     }
     let stats = e.memory_cache_stats();
     assert_eq!((stats.hits, stats.misses, stats.entries), (2, 2, 2));
@@ -183,6 +197,9 @@ fn concurrent_requests_publish_one_payload_without_span_or_accounting_drift() {
     assert_eq!(stats.entries, 1);
     assert_eq!(stats.bytes, expected.len());
     assert_eq!(stats.hits + stats.misses, 8);
-    assert_eq!(e.typeset(MATH, source).unwrap().to_bytes().unwrap(), expected);
+    assert_eq!(
+        e.typeset(MATH, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
     assert_eq!(e.memory_cache_stats().hits, stats.hits + 1);
 }

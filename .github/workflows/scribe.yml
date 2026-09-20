@@ -6,6 +6,9 @@ on:
     paths:
       - 'crates/fmn-text/**'
       - 'crates/fmn-tex/**'
+      - 'crates/fmn-library/src/text.rs'
+      - 'crates/fmn-library/src/tex.rs'
+      - 'crates/fmn-library/tests/scribe_cache.rs'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/scribe.yml'
@@ -13,6 +16,9 @@ on:
     paths:
       - 'crates/fmn-text/**'
       - 'crates/fmn-tex/**'
+      - 'crates/fmn-library/src/text.rs'
+      - 'crates/fmn-library/src/tex.rs'
+      - 'crates/fmn-library/tests/scribe_cache.rs'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/scribe.yml'
@@ -47,5 +53,7 @@ jobs:
         run: cargo test --locked -p fmn-text -p fmn-tex --all-targets
       - name: Scribe clippy
         run: cargo clippy --locked -p fmn-text -p fmn-tex --all-targets -- -D warnings
+      - name: Production Scribe builders
+        run: cargo test --locked -p fmn-library --test scribe_cache
       - name: Formatting
         run: cargo fmt --all -- --check
