@@ -68,7 +68,9 @@ fn renderer(threads: usize) -> (RetainedFrameRenderer, Camera) {
 fn channel(frame: &fmn_frame::FrameBuffer, channel: usize) -> f64 {
     frame
         .plane(0)
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|p| {
             fmn_frame::half::f16_to_f64(u16::from_le_bytes([p[channel * 2], p[channel * 2 + 1]]))
         })
