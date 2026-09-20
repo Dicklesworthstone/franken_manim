@@ -55,14 +55,29 @@ types, `AnimBuilder`, and `BuiltAnimate` — nothing else — so the invalid
 call does not compile. fmn-python restores the Reference's runtime
 `TypeError` at the bridge, where arbitrary Python objects can still arrive.
 
-## Staging boundaries (not divergences)
+## 4. Three-dimensional arc paths preserve axial motion
 
-Two precise, named errors mark where the Transform family (fm-cye) takes
-over from the fm-67a carrier; both disappear as capabilities when it lands:
+The native `PathFunc::Arc` uses full Rodrigues rotation perpendicular to its
+axis and linearly interpolates displacement along that axis. Different axial
+coordinates therefore follow a helix with exact start/end values rather than
+the old two-term rotation, which could miss its requested endpoint. Finite
+nonzero axes are normalized without overflow or underflow; a zero axis still
+means OUT. The existing small-angle straight-path threshold is unchanged.
 
-- `AnimError::PathArcUnsupported` — a recorded `path_arc` on a built
-  `.animate` chain (arcs are Transform's `path_func` mechanism). Never a
-  silent straight line.
-- `AnimError::UnalignedFamilies` — a source/target pair that structurally
-  diverged between build and play (alignment of heterogeneous pairs is
-  `align_data`). Never a partial lerp.
+Non-finite arc angles and axes are refused as `AnimError::InvalidPath` before
+Transform alignment or snapshot allocation. The affine lift interpolates its
+linear columns separately from translation, so a large world origin cannot
+round away local shape through translated-basis subtraction.
+
+**Migration:** spatial arc motion with displacement parallel to the axis now
+has a linear axial component. Planar arcs keep their circular geometry. Code
+must not rely on malformed non-finite arc parameters reaching interpolation.
+
+## Complete native method transforms
+
+Native `.animate` recordings use the same Transform implementation as explicit
+transforms: family/record alignment, `path_arc` and `path_arc_axis`, matching
+field locks, tracker/uniform interpolation, and host-view materialization.
+The former staging refusals `PathArcUnsupported` and `UnalignedFamilies` remain
+as enum variants for source compatibility, but the method carrier no longer
+emits them. A diverged target is aligned privately rather than mutated.

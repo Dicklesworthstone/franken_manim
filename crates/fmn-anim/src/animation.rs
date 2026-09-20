@@ -390,6 +390,8 @@ pub enum AnimError {
     /// matching preparation. This names a front-end driver bug rather than
     /// allowing the clock and capture stream to drift apart.
     InvalidFramePhase(&'static str),
+    /// A non-finite point-path parameter, rejected before Stage mutation.
+    InvalidPath(&'static str),
 }
 
 impl std::fmt::Display for AnimError {
@@ -444,6 +446,7 @@ impl std::fmt::Display for AnimError {
                     "seek to frame {frame} outside the schedule's 1..={total}"
                 )
             }
+            Self::InvalidPath(message) => write!(f, "invalid animation path: {message}"),
             Self::InvalidFramePhase(message) => {
                 write!(f, "invalid resumable frame phase: {message}")
             }

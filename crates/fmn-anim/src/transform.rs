@@ -2,11 +2,10 @@
 //! alignment + field lerp through a path function, ported from the pinned
 //! Reference (transform.py, utils/paths.py, mobject.py:1810).
 //!
-//! - [`PathFunc`] carries the exact path formulas: `straight_path` is the
-//!   plain lerp; `path_along_arc` rotates the start radius about the
-//!   computed arc center (`center + cos(αθ)·r + sin(αθ)·(axis×r)`), and a
-//!   scalar `|arc_angle| <` [`STRAIGHT_PATH_THRESHOLD`] collapses to
-//!   straight, exactly as the Reference's early return.
+//! - [`PathFunc`] carries the shared path law: straight lerp or rotation
+//!   about the computed arc center with linear axial motion (a helix in
+//!   3D; BN-12). A scalar `|arc_angle| <` [`STRAIGHT_PATH_THRESHOLD`]
+//!   collapses to straight, as in the Reference's early return.
 //! - The lerp core routes **only pointlike record fields through the path
 //!   function**; every other field lerps linearly, locked fields are
 //!   skipped entirely, numeric uniforms lerp linearly, and Marionette's
@@ -34,130 +33,12 @@ use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, interpolate_linear_column,
 };
 
-/// `STRAIGHT_PATH_THRESHOLD` (utils/paths.py): scalar arc angles below
-/// this collapse to the straight path.
-pub const STRAIGHT_PATH_THRESHOLD: f64 = 0.01;
-
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn norm(v: Vec3) -> f64 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
-}
-
-/// NumPy `nan_to_num`: NaN → 0, ±∞ → ±`f64::MAX` — the Reference guards
-/// the arc-center division with it.
-fn nan_to_num(v: f64) -> f64 {
-    if v.is_nan() {
-        0.0
-    } else if v == f64::INFINITY {
-        f64::MAX
-    } else if v == f64::NEG_INFINITY {
-        f64::MIN
-    } else {
-        v
-    }
-}
-
-/// A path function as composable data (journal-able, like `RateFunc`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PathFunc {
-    /// `straight_path`: `(1-α)·start + α·end`.
-    Straight,
-    /// `path_along_arc(arc_angle, axis)`.
-    Arc {
-        /// Signed arc angle in radians.
-        angle: f64,
-        /// Rotation axis (unit-normalized at eval; zero norm → OUT).
-        axis: Vec3,
-    },
-}
-
-impl PathFunc {
-    /// The Reference's `init_path_func` rule: `path_arc == 0` (below the
-    /// threshold) is the straight path, anything else arcs about `axis`.
-    #[must_use]
-    pub fn from_path_arc(angle: f64, axis: Vec3) -> Self {
-        if angle.abs() < STRAIGHT_PATH_THRESHOLD {
-            Self::Straight
-        } else {
-            Self::Arc { angle, axis }
-        }
-    }
-
-    /// Evaluate the path point-for-point (utils/paths.py exactly).
-    #[must_use]
-    pub fn eval(&self, start: Vec3, end: Vec3, alpha: f64) -> Vec3 {
-        match *self {
-            Self::Straight => [
-                (1.0 - alpha) * start[0] + alpha * end[0],
-                (1.0 - alpha) * start[1] + alpha * end[1],
-                (1.0 - alpha) * start[2] + alpha * end[2],
-            ],
-            Self::Arc { angle, axis } => {
-                if angle.abs() < STRAIGHT_PATH_THRESHOLD {
-                    return Self::Straight.eval(start, end, alpha);
-                }
-                let n = norm(axis);
-                let unit: Vec3 = if n == 0.0 {
-                    [0.0, 0.0, 1.0] // OUT
-                } else {
-                    [axis[0] / n, axis[1] / n, axis[2] / n]
-                };
-                let half: Vec3 = [
-                    (end[0] - start[0]) / 2.0,
-                    (end[1] - start[1]) / 2.0,
-                    (end[2] - start[2]) / 2.0,
-                ];
-                let tan_half = fmn_dmath::tan(angle / 2.0);
-                let c = cross(unit, half);
-                let adjustment: Vec3 = [
-                    nan_to_num(c[0] / tan_half),
-                    nan_to_num(c[1] / tan_half),
-                    nan_to_num(c[2] / tan_half),
-                ];
-                let center: Vec3 = [
-                    start[0] + half[0] + adjustment[0],
-                    start[1] + half[1] + adjustment[1],
-                    start[2] + half[2] + adjustment[2],
-                ];
-                let c_to_start: Vec3 = [
-                    start[0] - center[0],
-                    start[1] - center[1],
-                    start[2] - center[2],
-                ];
-                let c_to_perp = cross(unit, c_to_start);
-                let (sin_a, cos_a) = (fmn_dmath::sin(alpha * angle), fmn_dmath::cos(alpha * angle));
-                [
-                    center[0] + cos_a * c_to_start[0] + sin_a * c_to_perp[0],
-                    center[1] + cos_a * c_to_start[1] + sin_a * c_to_perp[1],
-                    center[2] + cos_a * c_to_start[2] + sin_a * c_to_perp[2],
-                ]
-            }
-        }
-    }
-}
+#[path = "motion_path.rs"]
+mod motion_path;
+use motion_path::interpolate_placement;
+pub use motion_path::{PathFunc, STRAIGHT_PATH_THRESHOLD};
 
 // ------------------------------------------------------------- lerp core
-
-fn interpolate_placement(from: Placement, to: Placement, alpha: f64, path: PathFunc) -> Placement {
-    let origin = path.eval(from.apply_point([0.0; 3]), to.apply_point([0.0; 3]), alpha);
-    let mut linear = [[0.0; 3]; 3];
-    for axis in 0..3 {
-        let mut basis = [0.0; 3];
-        basis[axis] = 1.0;
-        let placed = path.eval(from.apply_point(basis), to.apply_point(basis), alpha);
-        for row in 0..3 {
-            linear[row][axis] = placed[row] - origin[row];
-        }
-    }
-    Placement::new(linear, origin)
-}
 
 /// The Reference's `Mobject.interpolate` (mobject.py:1810) over one
 /// zipped submobject triple: pointlike fields route through `path`, every
@@ -527,6 +408,7 @@ impl Animation for Transform {
     /// transform.py:54 — target copy (shared when already aligned), then
     /// `align_data_and_family`, all before the starting copy is taken.
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        self.path.validate()?;
         let mobject = self.state.mobject();
         if !stage.contains(mobject) {
             return Err(AnimError::StaleHandle(mobject));
