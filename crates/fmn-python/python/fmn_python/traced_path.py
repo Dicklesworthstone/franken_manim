@@ -178,6 +178,7 @@ def install_traced_path(native: Any) -> None:
             if (
                 isinstance(mobject_or_func, g["Mobject"])
                 and hasattr(self, "_init_native_tracer")
+                and mobject_or_func._is_bound()
                 and original_tail_init is not None
             ):
                 return original_tail_init(
@@ -190,6 +191,9 @@ def install_traced_path(native: Any) -> None:
                     time_per_anchor=anchor_dt,
                     **kwargs,
                 )
+            # A detached source has no Stage handle for the optimized native
+            # tracer. Normalize it to the already-supported live point callback;
+            # do not adopt it early or capture a frozen construction-time center.
             source = mobject_or_func.get_center if isinstance(mobject_or_func, g["Mobject"]) else mobject_or_func
             # A tail has a finite duration; an unbounded trace is TracedPath.
             window, spacing = _parameters(time_traced, anchor_dt)
