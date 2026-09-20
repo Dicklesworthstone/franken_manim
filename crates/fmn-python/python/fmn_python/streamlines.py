@@ -127,7 +127,21 @@ def install_streamlines(native):
         controls.pop("self")
         extras = controls.pop("kwargs")
         if not callable(controls["func"]):
-            raise TypeError("StreamLines func must be callable")
+            raise TypeError(
+                "StreamLines func must be a callable vector field; got "
+                + type(controls["func"]).__name__
+            )
+        coordinates = controls["coordinate_system"]
+        if not (
+            hasattr(coordinates, "c2p")
+            and hasattr(coordinates, "p2c")
+            and hasattr(coordinates, "get_all_ranges")
+        ):
+            raise TypeError(
+                "StreamLines requires a coordinate system with "
+                "c2p/p2c/get_all_ranges; got "
+                + type(coordinates).__name__
+            )
         g["_preflight_vmobject_style_kwargs"](dict(extras))
         g["_install_live_state"](self)
         # The staged solver initializes its candidate, not this public root.
@@ -167,7 +181,20 @@ def install_streamlines(native):
         _style_plan(g, SimpleNamespace(**dict(controls, submobjects=[])))
         function, coordinates = controls["func"], controls["coordinate_system"]
         if not callable(function):
-            raise TypeError("StreamLines func must be callable")
+            raise TypeError(
+                "StreamLines func must be a callable vector field; got "
+                + type(function).__name__
+            )
+        if not (
+            hasattr(coordinates, "c2p")
+            and hasattr(coordinates, "p2c")
+            and hasattr(coordinates, "get_all_ranges")
+        ):
+            raise TypeError(
+                "StreamLines requires a coordinate system with "
+                "c2p/p2c/get_all_ranges; got "
+                + type(coordinates).__name__
+            )
         dimension, ranges = _dimension(coordinates), _ranges(coordinates)
         previous_count = vars(self).get(_DRAW_COUNT, _MISSING)
         vars(self)[_DRAW_COUNT] = 0

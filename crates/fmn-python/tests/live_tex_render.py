@@ -105,6 +105,7 @@ def render_live_tex(destination, seed=0):
         assert payloads[0] != payloads[-1], "live values must change actual pixels"
         assert len(set(payloads[:5])) == 5, "live values must interpolate, not jump to the final value"
         sequences.append(payloads)
+    del scene
     assert sequences[0] == sequences[1] == sequences[2], "thread scheduling changed a live equation"
     images = [_pixels(payload) for payload in sequences[0]]
     for pixels in images:
@@ -129,14 +130,19 @@ def render_live_tex(destination, seed=0):
         assert error is sentinel
     else:
         raise AssertionError("authored failure published an incomplete equation")
+    finally:
+        sentinel.__traceback__ = None
+        del sentinel
+    del BrokenEquation
     assert not failed.exists(), "failed render generation escaped native cancellation"
 
     # A real existing destination remains byte-identical on refusal.
     before = {path.name: path.read_bytes() for path in (root / "threads-1").iterdir() if path.is_file()}
     try:
         LiveEquations(random_seed=seed).render(root / "threads-1", threads=1)
-    except (RuntimeError, ValueError, OSError):
-        pass
+    except (RuntimeError, ValueError, OSError) as err:
+        err.__traceback__ = None
+        del err
     else:
         raise AssertionError("live-equation render clobbered an existing generation")
     assert before == {path.name: path.read_bytes() for path in (root / "threads-1").iterdir() if path.is_file()}

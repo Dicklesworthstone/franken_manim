@@ -56,7 +56,9 @@ pub struct CharStyle {
 }
 
 impl CharStyle {
-    fn base() -> Self {
+    /// An unstyled character at the base font size.
+    #[must_use]
+    pub fn base() -> Self {
         Self {
             size_factor: 1.0,
             ..Self::default()
@@ -81,6 +83,12 @@ pub struct StyledChar {
 /// No tags, no entities — what manim's `Text` does.
 #[must_use]
 pub fn plain_chars(source: &str) -> Vec<StyledChar> {
+    plain_chars_with_style(source, &CharStyle::base())
+}
+
+/// Decode plain text with an explicit inherited base style, preserving source spans.
+#[must_use]
+pub fn plain_chars_with_style(source: &str, base: &CharStyle) -> Vec<StyledChar> {
     source
         .char_indices()
         .enumerate()
@@ -88,7 +96,7 @@ pub fn plain_chars(source: &str) -> Vec<StyledChar> {
             ch,
             span: (start, start + ch.len_utf8()),
             char_index,
-            style: CharStyle::base(),
+            style: base.clone(),
         })
         .collect()
 }
@@ -103,9 +111,21 @@ pub fn plain_chars(source: &str) -> Vec<StyledChar> {
 /// tags, oversized attributes, bad entities, depth beyond
 /// [`MAX_TAG_DEPTH`].
 pub fn parse_markup(source: &str) -> Result<Vec<StyledChar>, TextError> {
+    parse_markup_with_style(source, &CharStyle::base())
+}
+
+/// Parse markup over an inherited style without inserting synthetic source bytes.
+/// Inner tags override the inherited style and closing tags restore it.
+///
+/// # Errors
+/// The same bounded markup diagnostics as [`parse_markup`].
+pub fn parse_markup_with_style(
+    source: &str,
+    base: &CharStyle,
+) -> Result<Vec<StyledChar>, TextError> {
     let mut out = Vec::new();
     let mut stack: Vec<(String, CharStyle)> = Vec::new();
-    let mut style = CharStyle::base();
+    let mut style = base.clone();
     let bytes = source.as_bytes();
     let mut i = 0;
     let mut char_index = 0;
@@ -190,7 +210,10 @@ fn apply_tag(
         "i" => style.italic = true,
         "u" => style.underline = true,
         "s" => style.strike = true,
-        "tt" => style.mono = true,
+        "tt" => {
+            style.mono = true;
+            style.family = None;
+        }
         "big" => style.size_factor *= 1.2,
         "small" => style.size_factor *= 5.0 / 6.0,
         "sub" => {

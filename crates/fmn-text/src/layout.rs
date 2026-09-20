@@ -211,10 +211,23 @@ impl TextLayout {
 /// Markup diagnostics, font-policy errors, and unmapped characters — all
 /// named ([`TextError`]).
 pub fn layout_text(book: &FontBook, req: &TextRequest<'_>) -> Result<TextLayout, TextError> {
+    layout_text_with_style(book, req, &crate::markup::CharStyle::base())
+}
+
+/// Lay out text with a base style inherited by markup and overridden by maps.
+/// Source bytes, glyph ordinals and the existing shaping/layout kernel are unchanged.
+///
+/// # Errors
+/// Propagates the same font, markup and shaping errors as [`layout_text`].
+pub fn layout_text_with_style(
+    book: &FontBook,
+    req: &TextRequest<'_>,
+    base: &crate::markup::CharStyle,
+) -> Result<TextLayout, TextError> {
     let mut chars = if req.markup {
-        crate::markup::parse_markup(req.text)?
+        crate::markup::parse_markup_with_style(req.text, base)?
     } else {
-        crate::markup::plain_chars(req.text)
+        crate::markup::plain_chars_with_style(req.text, base)
     };
     crate::maps::apply_maps(&mut chars, req.text, &req.maps);
     crate::maps::apply_overrides(&mut chars, req.overrides);

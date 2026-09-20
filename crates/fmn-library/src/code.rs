@@ -163,7 +163,11 @@ impl<'a> Code<'a> {
 
     /// Translate fmd's byte-span tiling into per-character overrides with
     /// the typewriter family on every char.
-    fn overrides(&self) -> Vec<CharOverride<'static>> {
+    /// Positional styles from the native highlighter, retaining original source
+    /// byte-token boundaries. Consumers may override the typewriter family while
+    /// reusing the token fills in the ordinary Scribe text pipeline.
+    #[must_use]
+    pub fn character_overrides(&self) -> Vec<CharOverride<'static>> {
         let spans = highlight::highlight(self.language, self.code);
         let mut out = Vec::with_capacity(self.code.chars().count());
         let mut spans_iter = spans.iter();
@@ -195,7 +199,7 @@ impl<'a> Code<'a> {
     /// # Errors
     /// Whatever [`Text::build`] hits — font policy and shaping are shared.
     pub fn build(&self, book: &fmn_text::FontBook) -> Result<TextMobject, TextMobjectError> {
-        let overrides = self.overrides();
+        let overrides = self.character_overrides();
         let body = Text::new(self.code)
             .char_overrides(&overrides)
             .font_size(self.font_size)

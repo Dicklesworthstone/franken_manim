@@ -164,7 +164,20 @@ def install_streamline_authoring(native):
         extras = controls.pop("kwargs")
         function, coordinates = controls["func"], controls["coordinate_system"]
         if not callable(function):
-            raise TypeError("StreamLines func must be callable")
+            raise TypeError(
+                "StreamLines func must be a callable vector field; got "
+                + type(function).__name__
+            )
+        if not (
+            hasattr(coordinates, "c2p")
+            and hasattr(coordinates, "p2c")
+            and hasattr(coordinates, "get_all_ranges")
+        ):
+            raise TypeError(
+                "StreamLines requires a coordinate system with "
+                "c2p/p2c/get_all_ranges; got "
+                + type(coordinates).__name__
+            )
         dimension = _dimension(coordinates)
         for name in ("n_repeats", "max_time_steps", "n_samples_per_line"):
             controls[name] = operator.index(controls[name])

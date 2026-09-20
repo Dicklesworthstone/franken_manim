@@ -134,7 +134,13 @@ def install_matrix(native: Any) -> None:
         for entry, dots in replacements:
             self.swap_entry_for_dots(entry, dots)
         if row_index is not None and col_index is not None:
-            rows[row_index][col_index].rotate(-45 * native.DEG)
+            entry = rows[row_index][col_index]
+            center = entry.get_center().copy()
+            entry.rotate(-45 * native.DEG)
+            # Native glyph contours need not have rotationally symmetric
+            # bounds. Keep the matrix cell's layout anchor after rotation;
+            # rotating about that anchor alone does not preserve its bbox.
+            entry.move_to(center)
         return self
 
     def set_column_colors(self, *colors):

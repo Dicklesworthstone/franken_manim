@@ -11988,20 +11988,22 @@ assert native_code.font_size == 24
 assert native_code.lsh == 1.0
 assert native_code.language == "python"
 assert native_code.code_style == "monokai"
-assert native_code.get_num_points() > 0
+assert native_code.get_num_points() == 0  # One live glyph family, no duplicate root ink.
+assert len(native_code.get_all_points()) > 0
+assert native_code.native_font == "CM Typewriter"
+rust_code = text_module.Code("fn", language="rust")
+assert all(part.get_fill_color() == "#68C246" for part in rust_code.family_members_with_points())
 colored_code = text_module.Code("y", fill_color=manimlib.GREEN)
 assert colored_code.get_fill_color() == manimlib.GREEN
 code_scene = Scene().add(native_code)
 assert native_code._is_bound()
 failed_code = text_module.Code.__new__(text_module.Code)
 try:
-    text_module.Code.__init__(failed_code, "x", language="rust")
-except NotImplementedError as error:
-    assert str(error) == (
-        "Code() keyword(s) not yet routed to the native builder: language"
-    )
+    text_module.Code.__init__(failed_code, "x", language=object())
+except TypeError as error:
+    assert str(error) == "Code language and code_style must be strings"
 else:
-    raise AssertionError("Code silently accepted an unrouted language")
+    raise AssertionError("Code silently accepted an invalid language declaration")
 assert not hasattr(failed_code, "submobjects")
 
 tex = manimlib.Tex("E = mc^2", isolate=["mc"])
@@ -16792,7 +16794,7 @@ assert any(
 try:
     vector_field_module.StreamLines(None, stream_plane)
 except TypeError as error:
-    assert "StreamLines func must be a callable" in str(error), error
+    assert "StreamLines func must be" in str(error) and "callable" in str(error), error
 else:
     raise AssertionError("StreamLines accepted a non-callable field")
 

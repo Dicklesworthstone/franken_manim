@@ -28,9 +28,12 @@ use fmn_geom::QuadPath;
 use fmn_mobject::Mobject;
 use fmn_text::maps::CharOverrides;
 use fmn_text::{
-    Align, Decoration, FontBook, LineBreaker, PlacedTextGlyph, StyleMaps, TextError, TextLayout,
+    Decoration, FontBook, LineBreaker, PlacedTextGlyph, StyleMaps, TextError, TextLayout,
     TextRequest, glyph_quadpath, layout_text,
 };
+
+pub use fmn_text::Align;
+use fmn_text::markup::CharStyle;
 
 use crate::spans::{SpanKindU8, SpanMapData, SpanMapEntry};
 use crate::style::Style;
@@ -237,6 +240,7 @@ pub struct Text<'a> {
     line_spacing: f64,
     maps: StyleMaps<'a>,
     overrides: CharOverrides<'a>,
+    base_style: CharStyle,
     font_size: f64,
     font_size_for_unit_height: f64,
     style: Style,
@@ -260,6 +264,7 @@ impl<'a> Text<'a> {
             line_spacing: 1.0,
             maps: StyleMaps::default(),
             overrides: &[],
+            base_style: CharStyle::base(),
             font_size: DEFAULT_FONT_SIZE,
             font_size_for_unit_height: DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
             style: text_style(),
@@ -273,6 +278,31 @@ impl<'a> Text<'a> {
             markup: true,
             ..Self::new(text)
         }
+    }
+
+    /// Inherited font family; markup and substring maps may override it.
+    #[must_use]
+    pub fn font(mut self, family: &str) -> Self {
+        self.base_style.family = if family.is_empty() {
+            None
+        } else {
+            Some(family.to_owned())
+        };
+        self
+    }
+
+    /// Inherited bold face selection, retaining inner markup overrides.
+    #[must_use]
+    pub fn bold(mut self, bold: bool) -> Self {
+        self.base_style.bold = bold;
+        self
+    }
+
+    /// Inherited italic face selection, retaining inner markup overrides.
+    #[must_use]
+    pub fn italic(mut self, italic: bool) -> Self {
+        self.base_style.italic = italic;
+        self
     }
 
     /// The `font_size=` surface.
@@ -423,7 +453,10 @@ impl<'a> Text<'a> {
             maps: self.maps.clone(),
             overrides: self.overrides,
         };
-        let layout = layout_text(book, &req)?;
+        if let Some(family) = &self.base_style.family {
+            book.family(family)?;
+        }
+        let layout = fmn_text::layout::layout_text_with_style(book, &req, &self.base_style)?;
         let scale = calibrate(book, self.font_size, self.font_size_for_unit_height)?;
         let mut children = Vec::with_capacity(layout.glyphs.len() + layout.decorations.len());
         for glyph in &layout.glyphs {

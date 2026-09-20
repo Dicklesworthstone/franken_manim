@@ -3,8 +3,8 @@ use fmn_core::color::LinearRgba;
 use fmn_mobject::{Mob, Mobject, Placement, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
     Camera, CameraConfig, EngineIdentity, FrameConfig, RenderPlan, RenderPlanLimits,
-    RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap, StrokeKnot, StrokeProfile, Style,
-    StyleTable, Tiling, Viewport,
+    RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap, StrokeKnot, StrokeProfile,
+    Style, StyleTable, Tiling, Viewport,
 };
 
 fn object(points: &[[f32; 3]], widths: &[f32]) -> Mobject {

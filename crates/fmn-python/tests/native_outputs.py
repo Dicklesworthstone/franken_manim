@@ -624,39 +624,58 @@ if ffmpeg:
     assert correlation > 0.95, "late scene cue lost its sample-clock position"
 
     # Certified portal reproducibility and provenance manifest verification (§16.7, docs/INPUT_CLOSURE.md)
-    for cert_format in ("png", "wav"):
-        cert_dest = output_root / f"certified_scene.{cert_format}"
-        scene_name = "Soundtrack" if cert_format == "wav" else "MovingWhiteSquare"
-        cert_args = (
-            str(source), scene_name, "--format", cert_format,
-            "--reproducible", "--video_dir", str(cert_dest),
-        )
-        code, cert_report = console(*cert_args)
-        assert code == 0, cert_report
-        assert cert_report.get("manifest") is not None, cert_report
-        assert cert_report.get("closure_digest") is not None, cert_report
-        manifest_dir = cert_dest.parent / (cert_dest.name + ".manifest")
-        assert manifest_dir.is_dir(), manifest_dir
-        manifest_fmnp = manifest_dir / "manifest.fmnp"
-        manifest_txt = manifest_dir / "manifest.txt"
-        assert manifest_fmnp.is_file(), manifest_fmnp
-        assert manifest_txt.is_file(), manifest_txt
-        txt_content = manifest_txt.read_text()
-        assert cert_report["closure_digest"] in txt_content
+    native = getattr(manimlib, "_native", manimlib)
+    extension = getattr(native, "__file__", None)
+    has_installed_wheel = bool(
+        extension and any(str(extension).endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)
+    )
+    if has_installed_wheel:
+        for cert_format in ("png", "wav"):
+            cert_dest = output_root / f"certified_scene.{cert_format}"
+            scene_name = "Soundtrack" if cert_format == "wav" else "MovingWhiteSquare"
+            cert_args = (
+                str(source), scene_name, "--format", cert_format,
+                "--reproducible", "--video_dir", str(cert_dest),
+            )
+            code, cert_report = console(*cert_args)
+            assert code == 0, cert_report
+            assert cert_report.get("manifest") is not None, cert_report
+            assert cert_report.get("closure_digest") is not None, cert_report
+            manifest_dir = cert_dest.parent / (cert_dest.name + ".manifest")
+            assert manifest_dir.is_dir(), manifest_dir
+            manifest_fmnp = manifest_dir / "manifest.fmnp"
+            manifest_txt = manifest_dir / "manifest.txt"
+            assert manifest_fmnp.is_file(), manifest_fmnp
+            assert manifest_txt.is_file(), manifest_txt
+            txt_content = manifest_txt.read_text()
+            assert cert_report["closure_digest"] in txt_content
 
-        # Second run to a different destination with same source produces bit-identical output
-        cert_dest2 = output_root / f"certified_scene_2.{cert_format}"
-        code2, cert_report2 = console(
-            str(source), scene_name, "--format", cert_format,
-            "--reproducible", "--video_dir", str(cert_dest2),
-        )
-        assert code2 == 0, cert_report2
-        assert cert_dest.read_bytes() == cert_dest2.read_bytes(), f"certified {cert_format} output drifted across runs"
-        assert cert_report["closure_digest"] == cert_report2["closure_digest"], "closure digest drifted"
+            # Second run to a different destination with same source produces bit-identical output
+            cert_dest2 = output_root / f"certified_scene_2.{cert_format}"
+            code2, cert_report2 = console(
+                str(source), scene_name, "--format", cert_format,
+                "--reproducible", "--video_dir", str(cert_dest2),
+            )
+            assert code2 == 0, cert_report2
+            assert cert_dest.read_bytes() == cert_dest2.read_bytes(), f"certified {cert_format} output drifted across runs"
+            assert cert_report["closure_digest"] == cert_report2["closure_digest"], "closure digest drifted"
 
-        # Preflight no-clobber refusal if manifest destination exists
-        code3, err_report3 = console(*cert_args)
-        assert code3 in (2, 4), err_report3
+            # Preflight no-clobber refusal if manifest destination exists
+            code3, err_report3 = console(*cert_args)
+            assert code3 in (2, 4), err_report3
+    else:
+        # Without an installed wheel payload, certified portal runs must fail closed
+        # with capability code 4 rather than certifying synthetic or unhashed binaries.
+        for cert_format in ("png", "wav"):
+            cert_dest = output_root / f"certified_scene.{cert_format}"
+            scene_name = "Soundtrack" if cert_format == "wav" else "MovingWhiteSquare"
+            code, cert_report = console(
+                str(source), scene_name, "--format", cert_format,
+                "--reproducible", "--video_dir", str(cert_dest),
+            )
+            assert code == 4, cert_report
+            assert cert_report["kind"] == "render-capability-unavailable", cert_report
+            assert "portal runtime input closure unavailable" in cert_report["message"], cert_report
 
     # Capability refusal: video format with --reproducible must fail closed
     bad_video_dest = output_root / "bad_cert.mp4"
