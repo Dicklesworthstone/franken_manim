@@ -254,16 +254,16 @@ pub(crate) fn retains_normalized_arc_length(placement: Placement) -> bool {
 
 /// The style a compiled path draws under.
 ///
-/// **Per-path constants only.** The Reference stores `stroke_rgba`,
+/// **Retained stroke profiles and per-path constants.** The Reference stores `stroke_rgba`,
 /// `stroke_width`, `fill_rgba` and `fill_border_width` *per point*, which is how
-/// a gradient along a path is expressed, and this row carries the two endpoints
-/// of that ramp rather than materializing per-sample colors. The analytic fill
+/// a gradient along a path is expressed, and this row retains an immutable true-arc station table when those columns
+/// vary. Manually constructed styles can still use the legacy two-end ramp. The analytic fill
 /// field and true-distance stroke kernels consume these endpoints with their
 /// shared arc-length parameterization. This table owns the *interning*, dedup
 /// index, and per-stage derivation; camera projection remains a derived
 /// [`crate::three_d::ThreeDJob`] concern and never rewrites this object-space
 /// row.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Style {
     /// Stroke colour at arc-length 0, linear light, straight alpha.
     pub stroke_rgba: [f32; 4],
@@ -273,6 +273,8 @@ pub struct Style {
     pub stroke_width: f32,
     /// Stroke width at arc-length 1.
     pub stroke_width_end: f32,
+    /// Optional immutable per-record stroke paint; overrides the endpoint ramp.
+    pub stroke_profile: Option<std::sync::Arc<crate::StrokeProfile>>,
     /// Fill colour at the ramp's start.
     pub fill_rgba: [f32; 4],
     /// Fill colour at the ramp's end.
@@ -306,8 +308,8 @@ impl Style {
     /// Bitwise, matching `BatchKey`. The array width is asserted by
     /// construction: adding a field without widening it fails every test here
     /// rather than silently merging two distinct styles.
-    pub(crate) fn bits(&self) -> [u64; 45] {
-        let mut b = [0u64; 45];
+    pub(crate) fn bits(&self) -> Vec<u64> {
+        let mut b = vec![0u64; 45];
         let scalars = [
             self.stroke_width,
             self.stroke_width_end,
@@ -337,6 +339,14 @@ impl Style {
         b[42] = u64::from(self.flat_stroke);
         b[43] = u64::from(self.scale_stroke_with_zoom);
         b[44] = u64::from(self.depth_test);
+        if let Some(profile) = &self.stroke_profile {
+            b.push(profile.knots().len() as u64);
+            for knot in profile.knots() {
+                b.push(knot.s.to_bits());
+                b.push(u64::from(knot.width.to_bits()));
+                b.extend(knot.rgba.map(|value| u64::from(value.to_bits())));
+            }
+        }
         b
     }
 
@@ -364,6 +374,7 @@ impl Default for Style {
             stroke_rgba_end: [0.0; 4],
             stroke_width: 0.0,
             stroke_width_end: 0.0,
+            stroke_profile: None,
             fill_rgba: [0.0; 4],
             fill_rgba_end: [0.0; 4],
             fill_border_width: 0.0,
@@ -384,7 +395,8 @@ impl Default for Style {
 #[derive(Debug, Clone, Default)]
 pub struct StyleTable {
     rows: Vec<Style>,
-    index: HashMap<[u64; 45], u32>,
+    index: HashMap<Vec<u64>, u32>,
+    profile_knots: usize,
 }
 
 impl StyleTable {
@@ -407,6 +419,14 @@ impl StyleTable {
         self.index
             .try_reserve(1)
             .map_err(|_| allocation_failed("style index", self.index.len(), 1))?;
+        let knots = style.stroke_profile.as_ref().map_or(0, |p| p.knots().len());
+        self.profile_knots =
+            self.profile_knots
+                .checked_add(knots)
+                .ok_or(TableError::IndexCapacityExceeded {
+                    resource: "profile knots",
+                    requested: u64::MAX,
+                })?;
         self.rows.push(style);
         self.index.insert(key, i);
         Ok(i)
@@ -439,8 +459,18 @@ impl StyleTable {
         debug_assert_eq!(usize::try_from(index).ok(), Some(self.rows.len()));
         let key = style.bits();
         debug_assert!(!self.index.contains_key(&key));
+        self.profile_knots = self
+            .profile_knots
+            .checked_add(style.stroke_profile.as_ref().map_or(0, |p| p.knots().len()))
+            .expect("profile knot admission precedes publication");
         self.rows.push(style);
         self.index.insert(key, index);
+    }
+
+    /// Total retained profile knots, counted per interned style row.
+    #[must_use]
+    pub fn profile_knots(&self) -> usize {
+        self.profile_knots
     }
 
     /// The interned rows, in insertion order.
@@ -471,6 +501,7 @@ impl StyleTable {
     pub fn clear(&mut self) {
         self.rows.clear();
         self.index.clear();
+        self.profile_knots = 0;
     }
 }
 
@@ -1354,67 +1385,67 @@ mod tests {
         let variants: Vec<Style> = vec![
             Style {
                 stroke_rgba: [1.0, 0.0, 0.0, 1.0],
-                ..base
+                ..base.clone()
             },
             Style {
                 stroke_rgba_end: [1.0, 0.0, 0.0, 1.0],
-                ..base
+                ..base.clone()
             },
             Style {
                 stroke_width: 1.0,
-                ..base
+                ..base.clone()
             },
             Style {
                 stroke_width_end: 1.0,
-                ..base
+                ..base.clone()
             },
             Style {
                 fill_rgba: [0.0, 1.0, 0.0, 1.0],
-                ..base
+                ..base.clone()
             },
             Style {
                 fill_rgba_end: [0.0, 1.0, 0.0, 1.0],
-                ..base
+                ..base.clone()
             },
             Style {
                 fill_border_width: 1.0,
-                ..base
+                ..base.clone()
             },
             Style {
                 anti_alias_width: 2.0,
-                ..base
+                ..base.clone()
             },
             Style {
                 joint_type: JointType::Miter,
-                ..base
+                ..base.clone()
             },
             Style {
                 is_fixed_in_frame: 0.5,
-                ..base
+                ..base.clone()
             },
             Style {
                 shading: [0.1, 0.2, 0.3],
-                ..base
+                ..base.clone()
             },
             Style {
                 clip_planes: [[1.0, 0.0, 0.0, -1.0], [0.0; 4], [0.0; 4], [0.0; 4]],
-                ..base
+                ..base.clone()
             },
             Style {
                 flat_stroke: true,
-                ..base
+                ..base.clone()
             },
             Style {
                 scale_stroke_with_zoom: true,
-                ..base
+                ..base.clone()
             },
             Style {
                 stroke_behind: true,
-                ..base
+                ..base.clone()
             },
             Style {
                 depth_test: true,
-                ..base
+                ..base.clone()
             },
         ];
 
@@ -1422,7 +1453,7 @@ mod tests {
         let baseline = t.intern(base).expect("baseline style row");
         for (i, v) in variants.iter().enumerate() {
             assert_ne!(
-                t.intern(*v).expect("variant style row"),
+                t.intern(v.clone()).expect("variant style row"),
                 baseline,
                 "variant {i} interned as the default style — a field is missing from the key"
             );

@@ -1509,7 +1509,7 @@ impl<'a> FrameJob<'a> {
                 arena.draws.put(None);
                 continue;
             };
-            let Some(style) = plan.styles().get(inst.style).copied() else {
+            let Some(style) = plan.styles().get(inst.style).cloned() else {
                 arena.draws.put(None);
                 continue;
             };
@@ -1597,8 +1597,7 @@ impl<'a> FrameJob<'a> {
             };
 
             let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
-            let draws_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
-                && (style.stroke_rgba[3] > 0.0 || style.stroke_rgba_end[3] > 0.0);
+            let draws_stroke = style.draws_stroke();
             if !draws_fill && !draws_stroke {
                 // An instance with no visible pass composites as the identity, so
                 // skipping its work cannot change a byte — but it still holds its
@@ -1688,7 +1687,7 @@ impl<'a> FrameJob<'a> {
                 transformed_pieces,
                 #[cfg(feature = "metal")]
                 straight_segments,
-                style,
+                style: style.clone(),
                 kernel,
                 joins,
                 stroke,
@@ -2459,7 +2458,7 @@ impl<'a> FrameJob<'a> {
         // a probe, so ramped strokes retain the probes.
         let aa_band = effective_aa_band(&rec.style);
         let centre_is_saturated = centre_coverage <= 0.0 || centre_coverage >= 1.0;
-        let constant_width = rec.style.stroke_width == rec.style.stroke_width_end;
+        let constant_width = rec.style.has_constant_stroke_width();
         if constant_width && centre_is_saturated && aa_band > std::f64::consts::FRAC_1_SQRT_2 {
             return false;
         }

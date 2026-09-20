@@ -47,6 +47,10 @@ use fmn_hash::{Digest, Schema, Writer};
 /// the golden it moves is adjudicated rather than re-blessed.
 pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 3);
 
+/// Compatible extension carrying complete retained stroke profiles. Endpoint-only
+/// plans continue to encode the exact version-1.3 bytes and existing goldens.
+pub const PROFILE_SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 1, 4);
+
 /// Append one primitive hint with every payload field its kernel consumes.
 ///
 /// The diagnostic name alone is not an identity: two circle hints may name
@@ -132,7 +136,16 @@ fn put_shape(w: &mut Writer, shape: &crate::table::Shape) {
 /// declared limits is the only realistic one, and it is a real failure rather
 /// than something to swallow.
 pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
-    let mut w = Writer::new(SNAPSHOT_SCHEMA);
+    let profiled = plan
+        .styles()
+        .rows()
+        .iter()
+        .any(|row| row.stroke_profile.is_some());
+    let mut w = Writer::new(if profiled {
+        PROFILE_SNAPSHOT_SCHEMA
+    } else {
+        SNAPSHOT_SCHEMA
+    });
 
     let segments = plan.segments();
     w.put_u64(segments.len() as u64);
@@ -198,6 +211,25 @@ pub fn encode(plan: &RenderPlan) -> Result<Vec<u8>, fmn_hash::SerialError> {
         w.put_bool(i.hint_unsafe);
     }
 
+    if profiled {
+        let profiles: Vec<_> = styles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| row.stroke_profile.as_ref().map(|p| (i, p)))
+            .collect();
+        w.put_u64(profiles.len() as u64);
+        for (index, profile) in profiles {
+            w.put_u64(index as u64);
+            w.put_u64(profile.knots().len() as u64);
+            for knot in profile.knots() {
+                w.put_f64(knot.s);
+                w.put_f64(f64::from(knot.width));
+                for value in knot.rgba {
+                    w.put_f64(f64::from(value));
+                }
+            }
+        }
+    }
     w.finish()
 }
 
@@ -266,6 +298,11 @@ pub fn describe(plan: &RenderPlan) -> String {
             st.stroke_behind,
             st.depth_test,
         );
+    }
+    for (index, style) in plan.styles().rows().iter().enumerate() {
+        if let Some(profile) = &style.stroke_profile {
+            let _ = writeln!(out, "  profile {index}: {:?}", profile.knots());
+        }
     }
     for inst in plan.shapes().instances() {
         let placement = inst.placement.coefficients();

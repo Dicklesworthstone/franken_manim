@@ -1516,7 +1516,7 @@ fn compile_vector<'a>(
         .plan
         .styles()
         .get(instance.style)
-        .copied()
+        .cloned()
         .ok_or(ThreeDError::InvalidVectorInstance)?;
     if !style.is_fixed_in_frame.is_finite()
         || !finite3(style.shading)
@@ -1568,8 +1568,7 @@ fn compile_vector<'a>(
     }
 
     let draws_fill = style.fill_rgba[3] > 0.0 || style.fill_rgba_end[3] > 0.0;
-    let draws_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
-        && (style.stroke_rgba[3] > 0.0 || style.stroke_rgba_end[3] > 0.0);
+    let draws_stroke = style.draws_stroke();
     let mut fill_pieces = Vec::new();
     let mut curves = Vec::new();
     let mut curve_starts = Vec::new();
@@ -1783,7 +1782,7 @@ fn compile_vector<'a>(
         curves,
         joins,
         field,
-        style,
+        style: style.clone(),
         normal,
         fill_plane,
         draws_fill,
@@ -2146,8 +2145,7 @@ fn vector_bounds(
             bounds[3] = bounds[3].max(point[1]);
         }
     }
-    let visible_stroke = (style.stroke_width > 0.0 || style.stroke_width_end > 0.0)
-        && (style.stroke_rgba[3] > 0.0 || style.stroke_rgba_end[3] > 0.0);
+    let visible_stroke = style.draws_stroke();
     if visible_stroke {
         let mut bounded = true;
         for curve in curves {
@@ -2199,7 +2197,7 @@ fn vector_bounds(
 fn perspective_stroke_reach_px(camera: &Camera, style: &Style, world: [Vec3; 3]) -> Option<f64> {
     const ROUNDING_MARGIN: f64 = 256.0 * f64::EPSILON;
 
-    let widest = f64::from(style.stroke_width.max(style.stroke_width_end).max(0.0));
+    let widest = f64::from(style.maximum_stroke_width());
     let half_world = stroke_half_world(camera, style, widest);
     if half_world == 0.0 {
         return Some(0.0);
@@ -2806,8 +2804,7 @@ fn projected_half_widths(
     t: f64,
     s: f64,
 ) -> [f64; 2] {
-    let s = s.clamp(0.0, 1.0) as f32;
-    let width = style.stroke_width + (style.stroke_width_end - style.stroke_width) * s;
+    let width = style.stroke_width_at(s);
     projected_half_widths_for(camera, style, flat_normal, world, t, f64::from(width))
 }
 
@@ -2898,10 +2895,7 @@ fn projected_width_toward(
     point: [f64; 2],
     width_units: Option<f64>,
 ) -> f64 {
-    let width_units = width_units.unwrap_or_else(|| {
-        let s = position.s.clamp(0.0, 1.0) as f32;
-        f64::from(style.stroke_width + (style.stroke_width_end - style.stroke_width) * s)
-    });
+    let width_units = width_units.unwrap_or_else(|| f64::from(style.stroke_width_at(position.s)));
     if width_units <= 0.0 {
         return 0.0;
     }
@@ -3036,7 +3030,10 @@ fn vector_stroke_sample(
     }
     let mut best: Option<(f64, VectorNearest)> = None;
     for curve_index in 0..vector.curves.len() {
-        let nearest = nearest_on_vector_curve(camera, vector, curve_index, point);
+        let mut nearest = nearest_on_vector_curve(camera, vector, curve_index, point);
+        nearest.s = vector
+            .style
+            .stroke_endpoint_parameter(nearest.s, nearest.t == 1.0);
         let curve = &vector.curves[curve_index];
         let half_width = projected_width_toward(
             camera,

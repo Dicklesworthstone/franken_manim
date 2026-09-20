@@ -48,6 +48,10 @@ pub const SHAPE_AXES: [Axis; 2] = [Axis::Topology, Axis::Geometry];
 /// The axes a style row depends on.
 pub const STYLE_AXES: [Axis; 1] = [Axis::Style];
 
+// Profile stations follow true arc lengths after an affine placement.
+const PROFILE_STYLE_AXES: [Axis; 4] =
+    [Axis::Topology, Axis::Geometry, Axis::Transform, Axis::Style];
+
 /// Record fields the compiled outline actually observes today.
 ///
 /// Keep this consumption list exact: a field-scoped view of user metadata must
@@ -82,6 +86,8 @@ pub struct RenderPlanLimits {
     pub max_retained_shapes: u64,
     /// Maximum distinct retained style rows.
     pub max_retained_styles: u64,
+    /// Maximum per-record stroke knots retained across distinct styles.
+    pub max_retained_profile_knots: u64,
     /// Maximum compiled segment rows no live retained entry references.
     ///
     /// Exceeding this budget schedules a deterministic rebuild at the next sync
@@ -101,6 +107,7 @@ impl Default for RenderPlanLimits {
             max_retained_segments: 1 << 20,
             max_retained_shapes: 1 << 20,
             max_retained_styles: 1 << 20,
+            max_retained_profile_knots: 1 << 20,
             max_unreachable_segments: 1 << 16,
             max_unreachable_shapes: 1 << 12,
             max_unreachable_styles: 1 << 12,
@@ -168,6 +175,13 @@ pub enum SyncError {
         /// Chisel's precise representation error.
         source: GeomError,
     },
+    /// A varying record stroke could not be represented safely.
+    InvalidStrokeProfile {
+        /// Renderable whose profile was rejected.
+        mob: Mob,
+        /// The invalid station or paint contract.
+        source: crate::StrokeProfileError,
+    },
     /// A declared retained-plan count exceeded its caller-selected ceiling.
     LimitExceeded {
         /// The table or work axis being bounded.
@@ -197,6 +211,9 @@ impl std::fmt::Display for SyncError {
             Self::InvalidGeometry { mob, source } => {
                 write!(f, "cannot compile geometry for {mob:?}: {source}")
             }
+            Self::InvalidStrokeProfile { mob, source } => {
+                write!(f, "cannot compile stroke profile for {mob:?}: {source}")
+            }
             Self::LimitExceeded {
                 resource,
                 requested,
@@ -225,6 +242,7 @@ impl std::error::Error for SyncError {
         match self {
             Self::InvalidGeometry { source, .. } => Some(source),
             Self::Table(source) => Some(source),
+            Self::InvalidStrokeProfile { source, .. } => Some(source),
             Self::LimitExceeded { .. } | Self::AllocationFailed { .. } | Self::EpochExhausted => {
                 None
             }
@@ -329,12 +347,15 @@ impl Reachability {
             SyncError::Table(TableError::ShapeIdentityMismatch { .. })
             | SyncError::Table(TableError::ImageTextureInvalid)
             | SyncError::InvalidGeometry { .. }
+            | SyncError::InvalidStrokeProfile { .. }
             | SyncError::EpochExhausted => return false,
         };
         match resource {
             "retained segments" | "segment rows" => self.unreachable_segments > 0,
             "retained shapes" | "shape rows" | "shape index" => self.unreachable_shapes > 0,
-            "retained styles" | "style rows" | "style index" => self.unreachable_styles > 0,
+            "retained styles" | "style rows" | "style index" | "retained profile knots" => {
+                self.unreachable_styles > 0
+            }
             _ => false,
         }
     }
@@ -718,6 +739,12 @@ impl RenderPlan {
             limits.max_retained_styles,
         )?;
 
+        check_limit(
+            "retained profile knots",
+            count_u64(self.styles.profile_knots()),
+            limits.max_retained_profile_knots,
+        )?;
+
         // Chisel's whole-run invariant is available from record metadata. Check
         // it before materializing any changed point column so one malformed
         // renderable cannot make earlier valid outlines pay compilation work
@@ -764,8 +791,9 @@ impl RenderPlan {
         let mut pending_shapes: Vec<(u32, Shape, Vec<Segment>)> = Vec::new();
         let mut pending_shape_indices: HashMap<Digest, u32> = HashMap::new();
         let mut pending_styles: Vec<(u32, Style)> = Vec::new();
-        let mut pending_style_indices: HashMap<[u64; 45], u32> = HashMap::new();
+        let mut pending_style_indices: HashMap<Vec<u64>, u32> = HashMap::new();
         let mut pending_segments = 0usize;
+        let mut pending_profile_knots = 0usize;
         let mut input_curves = 0u64;
         let mut stats = SyncStats::default();
 
@@ -931,13 +959,28 @@ impl RenderPlan {
                 }
             };
 
+            let previous_profiled = previous.is_some_and(|old| {
+                self.styles
+                    .get(old.style)
+                    .or_else(|| {
+                        pending_styles
+                            .iter()
+                            .find(|(i, _)| *i == old.style)
+                            .map(|(_, s)| s)
+                    })
+                    .is_some_and(|style| style.stroke_profile.is_some())
+            });
+            let style_unsafe = style_unsafe || (previous_profiled && hint_unsafe);
             let style = match &previous {
                 Some(retained) if !style_unsafe && !retained.style_dep.is_stale(&now) => {
                     retained.style
                 }
                 _ => {
                     stats.styles_rebuilt += 1;
-                    let row = read_style(stage, mob);
+                    let mut row = read_style(stage, mob);
+                    row.stroke_profile =
+                        crate::stroke_profile::from_records(stage, mob, decode_rgba)?
+                            .map(std::sync::Arc::new);
                     let key = row.bits();
                     if let Some(index) = self.styles.index_of(&row) {
                         index
@@ -970,6 +1013,19 @@ impl RenderPlan {
                                 requested: count_u64(pending_style_indices.len()).saturating_add(1),
                             }
                         })?;
+                        let knots = row.stroke_profile.as_ref().map_or(0, |p| p.knots().len());
+                        pending_profile_knots =
+                            checked_add_count("profile knots", pending_profile_knots, knots)?;
+                        let retained_knots = checked_add_count(
+                            "profile knots",
+                            self.styles.profile_knots(),
+                            pending_profile_knots,
+                        )?;
+                        check_limit(
+                            "retained profile knots",
+                            count_u64(retained_knots),
+                            limits.max_retained_profile_knots,
+                        )?;
                         pending_style_indices.insert(key, index);
                         pending_styles.push((index, row));
                         index
@@ -995,11 +1051,28 @@ impl RenderPlan {
                 volatile,
                 hint_unsafe,
             });
+            let profiled = self
+                .styles
+                .get(style)
+                .or_else(|| {
+                    pending_styles
+                        .iter()
+                        .find(|(i, _)| *i == style)
+                        .map(|(_, s)| s)
+                })
+                .is_some_and(|row| row.stroke_profile.is_some());
             next_retained.insert(
                 mob,
                 Retained {
                     shape_dep: Dependency::new(now, &SHAPE_AXES),
-                    style_dep: Dependency::new(now, &STYLE_AXES),
+                    style_dep: Dependency::new(
+                        now,
+                        if profiled {
+                            &PROFILE_STYLE_AXES
+                        } else {
+                            &STYLE_AXES
+                        },
+                    ),
                     shape,
                     style,
                     local_origin,
@@ -1184,6 +1257,33 @@ impl RenderPlan {
             hash.bool(instance.hint_unsafe);
         }
 
+        // Preserve the legacy identity domain for endpoint-only plans.
+        let profiles: Vec<_> = instances
+            .iter()
+            .enumerate()
+            .filter_map(|(i, instance)| {
+                self.styles
+                    .get(instance.style)?
+                    .stroke_profile
+                    .as_ref()
+                    .map(|p| (i, p))
+            })
+            .collect();
+        if !profiles.is_empty() {
+            hash.bytes(b"fmn-render/stroke-profiles/v1");
+            hash.u64(profiles.len() as u64);
+            for (index, profile) in profiles {
+                hash.u64(index as u64);
+                hash.u64(profile.knots().len() as u64);
+                for knot in profile.knots() {
+                    hash.f64(knot.s);
+                    hash.f32(knot.width);
+                    for component in knot.rgba {
+                        hash.f32(component);
+                    }
+                }
+            }
+        }
         PlanIdentity(hash.finish())
     }
 }

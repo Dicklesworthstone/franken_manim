@@ -1062,7 +1062,7 @@ fn stroke_expansion(plan: &RenderPlan, inst: &Instance, map: ScreenMap) -> f64 {
     let Some(style) = plan.styles().get(inst.style) else {
         return 0.0;
     };
-    if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
+    if style.maximum_stroke_width() <= 0.0 {
         return 0.0;
     }
     crate::stroke::max_stroke_reach_px(style, map)

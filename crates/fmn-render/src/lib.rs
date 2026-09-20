@@ -41,6 +41,8 @@ pub mod retained;
 pub mod revision;
 pub mod snapshot;
 pub mod stroke;
+pub mod stroke_profile;
+pub use stroke_profile::{StrokeKnot, StrokeProfile, StrokeProfileError};
 pub mod table;
 pub mod texture;
 pub mod three_d;

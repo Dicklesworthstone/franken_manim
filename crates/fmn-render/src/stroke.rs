@@ -133,8 +133,7 @@ pub fn aa_coverage(excess_px: f64, aa_width_px: f64) -> f64 {
 /// is the order the Reference uses.
 #[must_use]
 pub fn half_width_px(style: &Style, map: ScreenMap, s: f64) -> f64 {
-    let s = s.clamp(0.0, 1.0) as f32;
-    let w = style.stroke_width + (style.stroke_width_end - style.stroke_width) * s;
+    let w = style.stroke_width_at(s);
     0.5 * width_px(w, map)
 }
 
@@ -145,14 +144,7 @@ pub fn half_width_px(style: &Style, map: ScreenMap, s: f64) -> f64 {
 /// defined, not in an encoded space.
 #[must_use]
 pub fn stroke_rgba_at(style: &Style, s: f64) -> [f32; 4] {
-    let s = s.clamp(0.0, 1.0) as f32;
-    let mut out = [0.0f32; 4];
-    for (k, o) in out.iter_mut().enumerate() {
-        let a = style.stroke_rgba[k];
-        let b = style.stroke_rgba_end[k];
-        *o = a + (b - a) * s;
-    }
-    out
+    style.stroke_color_at(s)
 }
 
 /// One segment's conservative screen-space slab: the curve's hull, grown by the
@@ -192,10 +184,7 @@ pub fn segment_slab(seg: &Segment, style: &Style, map: ScreenMap, translate: [f6
 /// pixel. The antialiasing band is added in either case.
 #[must_use]
 pub fn max_stroke_reach_px(style: &Style, map: ScreenMap) -> f64 {
-    let widest = 0.5
-        * width_px(style.stroke_width, map)
-            .max(width_px(style.stroke_width_end, map))
-            .max(0.0);
+    let widest = 0.5 * width_px(style.maximum_stroke_width(), map).max(0.0);
     let geometric = if style.joint_type == fmn_mobject::JointType::Miter {
         MITER_LIMIT * widest
     } else {
@@ -331,7 +320,7 @@ impl<'a> PreparedStroke<'a> {
         translate: [f64; 2],
         p: [f64; 2],
     ) -> (f64, f64) {
-        if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
+        if style.maximum_stroke_width() <= 0.0 {
             return (0.0, 0.0);
         }
         match self.nearest(segments, style, map, translate, p) {
@@ -410,6 +399,7 @@ fn line_segment_excess_and_s(
         delta[2] - chord[2] * t,
     ];
     let s = segment.s0 + (segment.s1 - segment.s0) * t;
+    let s = style.stroke_endpoint_parameter(s, t == 1.0);
     let distance = dot3(nearest_delta, nearest_delta).sqrt();
     (distance * map.scale.abs() - half_width_px(style, map, s), s)
 }
@@ -514,6 +504,7 @@ fn segment_excess_and_s(
         0.0
     };
     let s = segment.s0 + (segment.s1 - segment.s0) * frac;
+    let s = style.stroke_endpoint_parameter(s, near.t == 1.0);
     let excess = near.distance * map.scale.abs() - half_width_px(style, map, s);
     (excess, s)
 }
@@ -534,7 +525,7 @@ pub fn stroke_shade(
     translate: [f64; 2],
     p: [f64; 2],
 ) -> (f64, f64) {
-    if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
+    if style.maximum_stroke_width() <= 0.0 {
         return (0.0, 0.0);
     }
     match stroke_nearest(segments, style, map, translate, p) {
@@ -565,7 +556,7 @@ pub fn stroke_coverage(
     // A zero-width ramp draws nothing, and it is worth short-circuiting rather
     // than letting the AA band paint a hairline where the author asked for
     // nothing at all.
-    if style.stroke_width <= 0.0 && style.stroke_width_end <= 0.0 {
+    if style.maximum_stroke_width() <= 0.0 {
         return 0.0;
     }
     match stroke_excess_px(segments, style, map, translate, p) {
