@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/fill-profiles.yml'
       - 'scripts/patches/fill-profiles.patch.gz'
+      - 'scripts/patches/fill-profile-boundaries.patch'
   workflow_dispatch:
 permissions:
   contents: write
@@ -42,6 +43,10 @@ jobs:
           if ! grep -q '^pub mod fill_profile;' crates/fmn-render/src/lib.rs; then
             git apply --check /tmp/fill-profiles.patch
             git apply /tmp/fill-profiles.patch
+          fi
+          if ! grep -q '^fn nearest_boundary_location(' crates/fmn-render/src/fill.rs; then
+            git apply --check scripts/patches/fill-profile-boundaries.patch
+            git apply scripts/patches/fill-profile-boundaries.patch
           fi
           rustup show active-toolchain
           rustfmt --edition 2024 --config skip_children=true crates/fmn-render/src/{bin,engine,fill,fill_profile,lib,metal,plan,snapshot,stroke_profile,table,three_d}.rs crates/fmn-render/src/fill/color_field.rs crates/fmn-render/tests/fill_profiles.rs
