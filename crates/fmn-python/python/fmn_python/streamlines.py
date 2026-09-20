@@ -130,6 +130,10 @@ def install_streamlines(native):
             raise TypeError("StreamLines func must be callable")
         g["_preflight_vmobject_style_kwargs"](dict(extras))
         g["_install_live_state"](self)
+        # The staged solver initializes its candidate, not this public root.
+        # Give the root the ordinary empty native record buffer before the
+        # first validated family replacement; do not adopt it into a Scene.
+        self._engine_init()
         for name, value in controls.items():
             setattr(self, name, value)
         self._stream_virtual_times, self._stream_rng_draws = [], 0
