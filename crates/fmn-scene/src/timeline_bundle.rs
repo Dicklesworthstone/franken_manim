@@ -21,15 +21,18 @@
 //! the snapshots round-tripped through their canonical bytes, so the proof
 //! sees exactly what a player will decode — and requires bit-identity with
 //! the engine's own emitted frame over everything interpolation can write
-//! (record columns, placements, numeric uniforms), compared after the
+//! (record columns, placements, typed trackers, numeric uniforms), compared after the
 //! container's float canonicalization. The contract demands one
 //! mid-segment frame; proving every frame is strictly stronger and costs
 //! only export time. Any mismatch, and the segment falls back to kind 1.
 //! Never guessed.
 //!
 //! **Engine identity.** The recorded `engine_version` is
-//! [`EngineIdentity::certified`]'s closure string — the same identity the
-//! certified input closure journals. The bundle's content is front-end
+//! [`EngineIdentity::certified`]'s closure string followed by the shared
+//! animation reconstruction-law version. A rasterizer version alone cannot
+//! identify changes to parameter interpolation or affine motion. Legacy
+//! renderer-only identities are refused: re-export their source timelines.
+//! The bundle's content is front-end
 //! state, and the front end's arithmetic IS the certified scalar
 //! definition on every build tier (the SIMD lerp kernels are lane-for-lane
 //! identical to it, by test), so the certified identity is the one string
@@ -95,11 +98,15 @@ impl Default for BundleExportLimits {
 }
 
 /// The engine identity string recorded as the bundle's `engine_version`:
-/// [`EngineIdentity::certified`]'s canonical closure string (see the
-/// module docs for why the certified identity, not the build's fast tier).
+/// [`EngineIdentity::certified`]'s canonical closure string plus the
+/// shared animation reconstruction-law version (see the module docs).
 #[must_use]
 pub fn bundle_engine_version() -> String {
-    EngineIdentity::certified().closure_string()
+    format!(
+        "{}:fmtl-law:{}",
+        EngineIdentity::certified().closure_string(),
+        fmn_anim::bundle::RECONSTRUCTION_LAW_VERSION,
+    )
 }
 
 /// A decoded FMTL segment's storage/reconstruction kind.

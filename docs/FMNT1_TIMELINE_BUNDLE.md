@@ -18,8 +18,16 @@ little-endian; floats are IEEE-754 bits; strings are length-prefixed UTF-8;
 
 ## Fields (in order)
 
-1. `engine_version: string` — the engine identity string the player refuses
-   on mismatch (the same identity the certified input closure records).
+1. `engine_version: string` — the certified renderer closure followed by
+   `:fmtl-law:<version>`, where the version is
+   `fmn_anim::bundle::RECONSTRUCTION_LAW_VERSION`. The player refuses either
+   component's mismatch before interpreting any later field. Renderer-only
+   identities predate law version 2 and are deliberately refused: re-export
+   the source timeline with the matching engine. Version 2 includes typed
+   tracker payloads and stable translation-independent affine interpolation;
+   an older player cannot safely reconstruct these merely because its
+   rasterizer version matches. The field's wire type and FMTL/1 framing do
+   not change.
 2. `fps: u32` — the schedule's frame rate (MUST equal the nested plan's fps).
 3. `plan: bytes` — the nested `TimelinePlan::to_bytes()` document (FMNA/5).
 4. `segments: u32` — MUST equal `plan.segments().len()`.
@@ -36,7 +44,9 @@ little-endian; floats are IEEE-754 bits; strings are length-prefixed UTF-8;
         `a = rate(alpha)` and record-interpolates begin→end exactly as
         `fmn_anim::transform::interpolate_fields` does — pointlike fields
         through `path`, every other field linear, locked fields skipped,
-        computed in f64 and stored at record precision. **Export rule: the
+        computed in f64 and stored at record precision. Typed tracker lanes
+        also interpolate in f64: scalar/logarithmic/complex encodings retain
+        their native meaning. **Export rule: the
         writer PROVES reconstructibility before marking a segment kind 0 —
         it computes every emitted frame through the engine and through
         record-lerp, and requires bit-identity; any segment failing the proof

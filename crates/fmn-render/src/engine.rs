@@ -618,8 +618,8 @@ impl EngineIdentity {
     /// The canonical one-string form of the identity the certified input
     /// closure journals field-wise (`journal` writes engine name, tier
     /// name, and renderer version): `<engine>:<tier>:<renderer_version>`.
-    /// FMTL/1 records this as its `engine_version` (fm-oee); the timeline
-    /// player refuses a bundle whose recorded string differs from its own.
+    /// FMTL/1 combines this with Choreo's reconstruction-law version in
+    /// its `engine_version`; its player refuses either identity mismatch.
     #[must_use]
     pub fn closure_string(&self) -> String {
         format!(

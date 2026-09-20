@@ -21,6 +21,13 @@ use fmn_mobject::{Snapshot, Stage};
 use crate::animation::{RateFunc, clip};
 use crate::transform::{PathFunc, interpolate_fields};
 
+/// Version of the shared frame reconstruction semantics, independent of the
+/// rasterizer. Version 1 was implicit in renderer-only FMTL identities. Version
+/// 2 includes typed tracker payloads in interpolation and uses the stable
+/// translation-independent affine lift. Bump on any replay-law change that can
+/// alter state or bits, not on bit-preserving implementation refactors.
+pub const RECONSTRUCTION_LAW_VERSION: u32 = 2;
+
 /// The `path` tag of [`PathFunc::Straight`] — catalog entry 0.
 pub const PATH_STRAIGHT_TAG: u8 = 0;
 
@@ -75,7 +82,7 @@ pub fn bundle_sub_alpha(alpha: f64, rate: &RateFunc) -> f64 {
 
 /// Whether two stage entries agree on everything interpolation could
 /// write: record columns, object→world placement, and the numeric
-/// uniforms. Compared on plain values — both sides are expected to come
+/// uniforms and typed tracker payloads. Compared on plain values — both sides are expected to come
 /// from the canonical container (the player decodes it; the writer
 /// round-trips through it before proving), where `-0.0`/NaN payloads are
 /// already canonicalized, so value equality is bit equality.
