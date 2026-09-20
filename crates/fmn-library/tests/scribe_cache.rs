@@ -51,7 +51,7 @@ fn repeated_text_builders_reuse_outlines_without_reusing_color_or_span_state() {
 #[test]
 fn repeated_tex_builders_keep_exact_geometry_and_independent_matching_colors() {
     let engine = TexEngine::new("fmd-math/pack/default", None).unwrap();
-    let source = r"\frac{x}{y} + \begin{pmatrix} x & 1 \\ 0 & y \end{pmatrix}";
+    let source = r"\frac{u}{v} + \begin{pmatrix} u & 1 \\ 0 & v \end{pmatrix}";
     let cold = Tex::new(source).build(&engine).unwrap();
     let before = engine.memory_cache_stats();
     assert_eq!(before.entries, 2, "formula and calibration probe");
@@ -61,16 +61,19 @@ fn repeated_tex_builders_keep_exact_geometry_and_independent_matching_colors() {
         cold.typeset.to_bytes().unwrap(),
         warm.typeset.to_bytes().unwrap()
     );
-    assert_eq!(cold.occurrences("x"), warm.occurrences("x"));
+    assert_eq!(cold.occurrences("u"), warm.occurrences("u"));
     assert_eq!(engine.memory_cache_stats().misses, before.misses);
     assert_eq!(engine.memory_cache_stats().hits, before.hits + 2);
 
-    let colors = [("x", RED), ("y", BLUE)];
+    // u/v do not also occur inside control-word or environment names.
+    let colors = [("u", RED), ("v", BLUE)];
     let colored = Tex::new(source).t2c(&colors).build(&engine).unwrap();
     assert_eq!(geometry(&cold.vmob), geometry(&colored.vmob));
     for (needle, color) in colors {
-        for occurrence in colored.occurrences(needle) {
-            assert!(!occurrence.is_empty());
+        let occurrences = colored.occurrences(needle);
+        assert_eq!(occurrences.len(), 2, "one fraction and one matrix glyph");
+        for occurrence in occurrences {
+            assert_eq!(occurrence.len(), 1);
             for ordinal in occurrence {
                 assert_eq!(colored.vmob.children()[ordinal].style().fill_color, color);
                 assert_eq!(cold.vmob.children()[ordinal].style().fill_color, WHITE);
