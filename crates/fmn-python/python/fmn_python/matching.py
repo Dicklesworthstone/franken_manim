@@ -198,7 +198,13 @@ def install_matching(native: Any) -> None:
         self._matching_cleanup_started = True
         try:
             super(Parts, self).clean_up_from_scene(scene)
-            scene.remove(self.mobject, self.source)
+            # Playing a matching animation adopts its point-bearing pieces,
+            # not necessarily the original Text/Tex/group wrapper. A wrapper
+            # never added to a Scene has no native handle to remove. Do not
+            # turn successful implicit adoption into a stale-handle failure;
+            # bound (including foreign/stale) sources still use strict remove.
+            roots = (self.mobject, self.source) if self.source._is_bound() else (self.mobject,)
+            scene.remove(*roots)
             scene.add(self.target)
         finally:
             self._composition_driver = None

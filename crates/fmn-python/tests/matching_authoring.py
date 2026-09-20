@@ -116,10 +116,73 @@ def test_matching_callback_failure_keeps_source_and_allows_next_play():
     np.testing.assert_allclose(source.get_center(), [0, 1, 0], atol=1e-6)
 
 
+def test_matching_implicitly_adopts_unadded_text_tex_and_group_pieces():
+    factories = (
+        (lambda: (ml.Text("move"), ml.Text("more").shift(ml.RIGHT)), ml.TransformMatchingStrings),
+        (lambda: (ml.Tex("x + y"), ml.Tex("z - x").shift(ml.RIGHT)), ml.TransformMatchingTex),
+        (lambda: (ml.Square(), ml.Square().shift(ml.RIGHT)), ml.TransformMatchingShapes),
+        (lambda: (ml.VGroup(ml.Square(), ml.VGroup(ml.Circle().shift(ml.LEFT))),
+                  ml.VGroup(ml.Square().shift(ml.UP), ml.VGroup(ml.Circle().shift(ml.RIGHT)))),
+         ml.TransformMatchingParts),
+    )
+    for create, animation_type in factories:
+        source, target = create()
+        scene, unrelated = ml.Scene(), ml.Dot().shift(3 * ml.UP)
+        scene.add(unrelated)
+        assert not source._is_bound() and not target._is_bound()
+        animation = animation_type(source, target, run_time=.125)
+        scene.play(animation)
+        assert scene.mobjects == [unrelated, target]
+        assert animation._composition_driver is None
+        scene.wait(.125)
+
+
+def test_bound_source_removal_failure_is_not_treated_as_detached():
+    source, target = ml.Text("same"), ml.Text("same").shift(ml.RIGHT)
+    failure, removals = RuntimeError("bound source removal refused"), []
+    class RefusingScene(ml.Scene):
+        def remove(self, *objects):
+            if any(obj is source for obj in objects):
+                removals.append(objects)
+                raise failure
+            return super().remove(*objects)
+    scene = RefusingScene()
+    scene.add(source)
+    animation = ml.TransformMatchingStrings(source, target, run_time=.125)
+    try:
+        scene.play(animation)
+    except RuntimeError as error:
+        assert error is failure
+    else:
+        raise AssertionError("bound source failure was silently ignored")
+    assert len(removals) == 1 and target not in scene.mobjects
+    displayed = [member for root in scene.mobjects for member in root.get_family()]
+    assert all(any(member is piece for member in displayed)
+               for piece in source.family_members_with_points())
+    assert animation._composition_driver is None
+    animation.clean_up_from_scene(scene)
+    assert len(removals) == 1, "failed authored cleanup was retried"
+
+
+def test_foreign_bound_source_still_refuses_before_publication():
+    from manimlib.exceptions import ForeignStageError
+    source, target = ml.Tex("x"), ml.Tex("y")
+    owner, scene = ml.Scene(), ml.Scene()
+    owner.add(source)
+    animation = ml.TransformMatchingTex(source, target, run_time=.125)
+    try:
+        scene.play(animation)
+    except ForeignStageError:
+        pass
+    else:
+        raise AssertionError("matching crossed Scene ownership")
+    assert target not in scene.mobjects and source in owner.mobjects
+
+
 assert getattr(ml, "__franken_manim__", False), "requires the real native FrankenManim portal"
 _cases = sorted((name, case) for name, case in globals().items()
                 if name.startswith("test_") and callable(case))
-assert len(_cases) == 4, "matching native authoring acceptance inventory changed"
+assert len(_cases) == 7, "matching native authoring acceptance inventory changed"
 for _name, _case in _cases:
     _case()
     print("matching authoring acceptance passed:", _name)

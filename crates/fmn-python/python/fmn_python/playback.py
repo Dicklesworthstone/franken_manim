@@ -111,13 +111,23 @@ def _install_restore_playback(g: dict[str, Any]) -> None:
             raise Exception("Trying to restore without having saved")
         if not isinstance(saved, Mobject):
             raise TypeError("Restore saved_state must be a Mobject")
+        if path_func is not None and not callable(path_func):
+            raise TypeError("Restore path_func must be callable")
+        callback_path = (path_func is not None
+                         and getattr(path_func, "_fmn_path_arc", None) is None)
         # Capture the saved object by reference at construction, as the
         # Reference does. Rebinding mobject.saved_state later must not change
         # this animation's destination; edits to the saved object remain live.
         super(Restore, self).__init__(
             mobject, saved, path_arc=path_arc, path_arc_axis=path_arc_axis,
-            path_func=path_func, **kwargs,
+            path_func=None if callback_path else path_func, **kwargs,
         )
+        # Shared initialization still guards the old native-only Restore
+        # class. This installer has made it a real Transform: install the
+        # validated authored path after ordinary endpoint initialization so
+        # live-path dispatch uses the existing callback/camera driver.
+        if callback_path:
+            self.path_func = path_func
 
     # Keep every qualified import and existing subclass attached to the same
     # public class object. Native Transform owns ordinary restoration; the

@@ -28,6 +28,8 @@ def namespace():
             return [member.shape for member in self.family_members_with_points()] == [member.shape for member in other.family_members_with_points()]
         def get_center(self):
             return (1., 2., 3.)
+        def _is_bound(self):
+            return self._scene is not None
 
     class Animation:
         _native_kind = "transform"
@@ -270,12 +272,26 @@ class CleanupTests(unittest.TestCase):
         events = []
         scene = SimpleNamespace(remove=lambda *objects: events.append(("remove", objects)),
                                 add=lambda *objects: events.append(("add", objects)))
+        self.source._scene = scene
         animation.animations[0].clean_up_from_scene = lambda scene: events.append(("child",))
         animation.begin()
         animation.finish()
         animation.clean_up_from_scene(scene)
         animation.clean_up_from_scene(scene)
         self.assertEqual(events, [("child",), ("remove", (animation.mobject, self.source)), ("add", (self.target,))])
+
+    def test_detached_wrapper_has_no_native_handle_to_remove(self):
+        source = self.g.Mobject(None, [self.source])
+        animation = self.g.TransformMatchingParts(source, self.target)
+        events = []
+        scene = SimpleNamespace(remove=lambda *objects: events.append(("remove", objects)),
+                                add=lambda *objects: events.append(("add", objects)))
+        self.source._scene = scene  # Native leaf adoption does not bind its parent wrapper.
+        animation.begin()
+        animation.finish()
+        animation.clean_up_from_scene(scene)
+        self.assertEqual(events, [("remove", (animation.mobject,)), ("add", (self.target,))])
+        self.assertFalse(source._is_bound())
 
     def test_failed_child_cleanup_never_publishes_target(self):
         animation = self.g.TransformMatchingParts(self.source, self.target)
