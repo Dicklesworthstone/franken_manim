@@ -28,6 +28,7 @@ _STEPS = (
     ("playback", "install_scene_playback"),
     ("camera_callbacks", "install_camera_callbacks"),
     ("scene_state", "install_scene_state"),
+    ("streamline_authoring", "install_streamline_authoring"),
     ("streamline_animation", "install_streamline_animation"),
     ("traced_path", "install_traced_path"),
     ("interactive_editing", "install_interactive_editing"),
