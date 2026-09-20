@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from .batch_checkpoint import BatchCheckpoint
+from .batch_provenance import BatchProvenance, has_provenance, validate_batch_mode
 from .render_selection import animation_range as _animation_range
-from .rendering import RenderResult, _FORMATS, _positive_integer, render_scene
+from .rendering import RenderResult, SourceInputs, _FORMATS, _positive_integer, render_scene
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,11 @@ class BatchRenderResult:
     """Ordered receipts, errors, and unattempted jobs; never all-or-nothing."""
 
     outcomes: tuple[SceneRenderOutcome, ...]
+    reproducible: bool = False
+
+    @property
+    def all_scenes_certified(self) -> bool:
+        return self.reproducible and self.ok and all(has_provenance(item.result) for item in self.outcomes)
 
     @property
     def ok(self) -> bool:
@@ -71,6 +77,8 @@ class BatchRenderResult:
         return {
             "schema": "fmn-python.render-batch", "version": 1,
             "ok": self.ok, "execution": "sequential", "certified": False,
+            "reproducible_requested": self.reproducible,
+            "all_scenes_certified": self.all_scenes_certified,
             "counts": self.counts,
             "outcomes": [item.as_dict() for item in self.outcomes],
         }
@@ -175,11 +183,11 @@ def _error_notes(error: BaseException) -> tuple[str, ...]:
     return tuple(note[:1024] for note in notes[:8] if isinstance(note, str))
 
 
-def _attach_result(error: BaseException, outcomes: list[SceneRenderOutcome]) -> None:
+def _attach_result(error: BaseException, outcomes: list[SceneRenderOutcome], *, reproducible: bool = False) -> None:
     # Preserve KeyboardInterrupt/SystemExit and authored observer exceptions
     # rather than translating cancellation into an ordinary failed scene.
     try:
-        error.render_batch_result = BatchRenderResult(tuple(outcomes))
+        error.render_batch_result = BatchRenderResult(tuple(outcomes), reproducible=reproducible)
     except BaseException:
         pass
 
@@ -195,6 +203,9 @@ def render_scenes(
     checkpoint: os.PathLike[str] | str | None = None,
     resume: bool = False, resume_key: str | None = None,
     _output_options: dict[str, Any] | None = None,
+    reproducible: bool = False,
+    sources: SourceInputs | None = None,
+    runtime_identities: dict[str, str] | None = None,
 ) -> BatchRenderResult:
     """Render named scenes in input order using independent native sessions.
 
@@ -219,6 +230,15 @@ def render_scenes(
     change resume_key when inputs for completed scenes change. A crash between
     publication and checkpointing leaves an unrecorded artifact which fails
     no-clobber preflight; it is never silently reused, deleted, or overwritten.
+
+    reproducible uses the existing certified session for each scene, with a
+    separate native manifest. Supply shared compilation bytes in sources, or
+    a provider such as lambda: loaded.sources evaluated after each scene runs.
+    Runtime identity is held fixed across the batch. All artifacts/sidecars are
+    preflighted before construction; successful scenes survive later failures.
+    Checkpoint/resume is excluded because its receipts verify artifacts only.
+    The aggregate is not itself a certified artifact; all_scenes_certified
+    reports whether every selected scene returned a complete certified receipt.
     """
     if not isinstance(format, str) or format not in _FORMATS:
         raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
@@ -241,6 +261,7 @@ def render_scenes(
     fps = None if fps is None else _positive_integer(fps, "fps")
     threads = None if threads is None else _positive_integer(threads, "threads")
     native = importlib.import_module("manimlib")
+    validate_batch_mode(native, format, reproducible, checkpoint)
     owner = nullcontext(None) if checkpoint is None else BatchCheckpoint(checkpoint, resume=resume, key=resume_key)
     jobs, destinations = _plan(scenes, directory, format, native, maximum, None)
     if checkpoint is not None:
@@ -250,6 +271,8 @@ def render_scenes(
         for destination in destinations:
             if os.path.lexists(destination) and destination not in existing:
                 raise FileExistsError(f"render destination already exists: {destination}")
+        provenance = (BatchProvenance(native, format, sources, runtime_identities, destinations)
+                      if reproducible else None)
         outcomes = [SceneRenderOutcome(job.name, path, "not_run") for job, path in zip(jobs, destinations)]
         completed = {}
         if journal is not None:
@@ -267,10 +290,14 @@ def render_scenes(
             failure = None
             if job.name not in completed:
                 try:
+                    provenance_options = {} if provenance is None else provenance.options(path)
                     receipt = render_scene(job.scene, path, format=format, resolution=resolution,
                                            fps=fps, threads=threads, scene_kwargs=job.scene_kwargs,
+                                           **provenance_options,
                                            **({} if not _output_options else {"_output_options": _output_options}),
                                            **({} if selection is None else {"animation_range": selection}))
+                    if provenance is not None:
+                        provenance.accept(receipt, path)
                 except Exception as error:
                     failure = error
                     kind, message = _error_fields(error)
@@ -278,7 +305,7 @@ def render_scenes(
                 except BaseException as error:
                     kind, message = _error_fields(error)
                     outcomes[index] = SceneRenderOutcome(job.name, path, "cancelled", error_type=kind, message=message, notes=_error_notes(error))
-                    _attach_result(error, outcomes)
+                    _attach_result(error, outcomes, reproducible=reproducible)
                     try:
                         _record_checkpoint(journal, outcomes)
                     except BaseException as reporting_error:
@@ -291,11 +318,11 @@ def render_scenes(
                 try:
                     on_result(outcomes[index])
                 except BaseException as error:
-                    _attach_result(error, outcomes)
+                    _attach_result(error, outcomes, reproducible=reproducible)
                     raise
             if failure is not None and not continue_on_error:
-                raise BatchRenderError(BatchRenderResult(tuple(outcomes))) from failure
-        return BatchRenderResult(tuple(outcomes))
+                raise BatchRenderError(BatchRenderResult(tuple(outcomes), reproducible=reproducible)) from failure
+        return BatchRenderResult(tuple(outcomes), reproducible=reproducible)
 
 
 def _record_checkpoint(journal, outcomes):
