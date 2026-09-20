@@ -1731,11 +1731,9 @@ mod tests {
         assert_eq!(opening_a, opening_b);
         assert_eq!(
             sha256(&opening_a).to_string(),
-            // Re-pinned for fm-5wq.4 (commit 76f2cbf): shape hints no longer
-            // serialize the process-local RecordBuffer revision — decode
-            // rebinds liveness to the reconstructed buffer, so durable bytes
-            // carry semantic state only.
-            "ed12fc15473669b403b8d1f0e85032483bae4f2e5661534f7d54f015acda3108"
+            // Re-pinned for rich native typography & syntax-highlighted Code:
+            // Text layout uses layout_text_with_style.
+            "9c6bc3dac43062931426b0f7ed5da08bcc6e58f96659be9fbb1e8d41670d92ed"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);
