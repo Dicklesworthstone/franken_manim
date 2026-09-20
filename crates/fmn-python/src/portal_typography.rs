@@ -1,0 +1,119 @@
+//! Rich text authoring over Scribe's existing font, span and layout authorities.
+//! No font discovery, markup rewriting, second shaper or external process.
+use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList, PyModule};
+
+use super::{BridgeMobject, hoist_descendant_records, install_native_tree, native_error, srgb_from_py, with_font_book};
+use fmn_core::color::Srgb;
+
+const MAX_BYTES: usize = 262_144;
+const MAX_ITEMS: usize = 4096;
+
+fn number(options: &Bound<'_, PyDict>, name: &str, default: f64, positive: bool) -> PyResult<f64> {
+    let value = match options.get_item(name)? { Some(v) => v.extract::<f64>()?, None => default };
+    if !value.is_finite() || (positive && value <= 0.0) || value.abs() > f64::from(f32::MAX) {
+        return Err(PyValueError::new_err(format!("Text {name} must be finite, f32-representable{}", if positive { " and positive" } else { "" })));
+    }
+    Ok(value)
+}
+
+fn string(options: &Bound<'_, PyDict>, name: &str, default: &str) -> PyResult<String> {
+    match options.get_item(name)? { Some(v) => v.extract(), None => Ok(default.to_owned()) }
+}
+
+fn flag(options: &Bound<'_, PyDict>, name: &str, default: bool) -> PyResult<bool> {
+    match options.get_item(name)? { Some(v) => v.extract(), None => Ok(default) }
+}
+
+fn pairs<T>(options: &Bound<'_, PyDict>, name: &str) -> PyResult<Vec<(String, T)>>
+where for<'a, 'py> T: FromPyObject<'a, 'py>,
+{
+    let Some(value) = options.get_item(name)? else { return Ok(Vec::new()); };
+    if value.len()? > MAX_ITEMS {
+        return Err(PyValueError::new_err("Text style map exceeds 4096 entries"));
+    }
+    value.extract().map_err(|_| PyTypeError::new_err(format!("Text {name} must be ordered string/value pairs")))
+}
+
+fn colors(options: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Vec<Srgb>)>> {
+    let Some(value) = options.get_item("t2g")? else { return Ok(Vec::new()); };
+    if value.len()? > MAX_ITEMS { return Err(PyValueError::new_err("Text gradient map exceeds 4096 entries")); }
+    let mut result = Vec::new();
+    let mut total = 0usize;
+    for pair in value.try_iter()? {
+        let pair = pair?;
+        if pair.len()? != 2 { return Err(PyTypeError::new_err("Text gradient entries must be pairs")); }
+        let key = pair.get_item(0)?.extract::<String>()?;
+        let stops = pair.get_item(1)?;
+        total = total.saturating_add(stops.len()?);
+        if total > MAX_ITEMS { return Err(PyValueError::new_err("Text gradients exceed 4096 total stops")); }
+        let mut converted = Vec::new();
+        for stop in stops.try_iter()? {
+            let color = srgb_from_py(&stop?)?;
+            if [color.r, color.g, color.b].iter().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v)) {
+                return Err(PyValueError::new_err("Text colors must be finite RGB values in [0, 1]"));
+            }
+            converted.push(color);
+        }
+        result.push((key, converted));
+    }
+    Ok(result)
+}
+
+#[pyfunction]
+fn _build_styled_text<'py>(
+    slf: &Bound<'py, BridgeMobject>, factory: &Bound<'py, PyAny>, text: &str,
+    markup: bool, hoist_records: bool, options: &Bound<'py, PyDict>,
+) -> PyResult<Bound<'py, PyList>> {
+    if text.len() > MAX_BYTES { return Err(PyValueError::new_err("Text source exceeds 262144 bytes")); }
+    for key in options.keys().iter() {
+        let key = key.extract::<String>()?;
+        if !["font_size", "font", "bold", "italic", "alignment", "line_spacing", "line_width", "justify", "indent", "disable_ligatures", "t2f", "t2s", "t2w", "t2g"].contains(&key.as_str()) {
+            return Err(PyTypeError::new_err(format!("unknown native Text option: {key}")));
+        }
+    }
+    let font = string(options, "font", "")?;
+    let align = match string(options, "alignment", "LEFT")?.as_str() {
+        "LEFT" => fmn_library::text::Align::Left,
+        "CENTER" => fmn_library::text::Align::Center,
+        "RIGHT" => fmn_library::text::Align::Right,
+        _ => return Err(PyValueError::new_err("Text alignment must be LEFT, CENTER or RIGHT")),
+    };
+    let families = pairs::<String>(options, "t2f")?;
+    let slants = pairs::<bool>(options, "t2s")?;
+    let weights = pairs::<bool>(options, "t2w")?;
+    let gradients = colors(options)?;
+    let count = families.len() + slants.len() + weights.len() + gradients.len();
+    if text.len().saturating_mul(count.max(1)) > 16_777_216 {
+        return Err(PyValueError::new_err("Text style matching exceeds the 16777216-byte-work budget"));
+    }
+    let family_refs: Vec<(&str, &str)> = families.iter().map(|(k,v)| (k.as_str(),v.as_str())).collect();
+    let slant_refs: Vec<(&str, bool)> = slants.iter().map(|(k,v)| (k.as_str(),*v)).collect();
+    let weight_refs: Vec<(&str, bool)> = weights.iter().map(|(k,v)| (k.as_str(),*v)).collect();
+    let gradient_refs: Vec<(&str, &[Srgb])> = gradients.iter().map(|(k,v)| (k.as_str(),v.as_slice())).collect();
+    let mut builder = if markup { fmn_library::Text::markup(text) } else { fmn_library::Text::new(text) }
+        .font_size(number(options, "font_size", 48., true)?)
+        .font(&font).bold(flag(options, "bold", false)?).italic(flag(options, "italic", false)?)
+        .align(align).line_spacing(number(options, "line_spacing", 1., true)?)
+        .justify(flag(options, "justify", false)?).indent(number(options, "indent", 0., false)?)
+        .ligatures(!flag(options, "disable_ligatures", true)?)
+        .t2f(&family_refs).t2s(&slant_refs).t2w(&weight_refs).t2g(&gradient_refs);
+    if options.contains("line_width")? { builder = builder.width(number(options, "line_width", 1., true)?); }
+    let built = with_font_book(|book| {
+        for (_, family) in &families { book.family(family).map_err(native_error)?; }
+        builder.build(book).map_err(native_error)
+    })?;
+    let spans: Vec<(usize, usize)> = built.layout.glyphs.iter().map(|glyph| glyph.span).collect();
+    let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
+    let mut tree = fmn_mobject::Mobject::from(built.vmob);
+    if hoist_records { hoist_descendant_records(&mut tree, true)?; }
+    let specs = install_native_tree(slf, factory, tree)?;
+    slf.as_any().setattr("_string_sub_spans", spans)?;
+    slf.as_any().setattr("_string_sub_paths", paths)?;
+    Ok(specs)
+}
+
+pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(_build_styled_text, module)?)
+}
