@@ -984,7 +984,10 @@ impl RenderPlan {
                         style.stroke_profile.is_some() || style.fill_profile.is_some()
                     })
             });
-            let style_unsafe = style_unsafe || (previous_profiled && hint_unsafe);
+            let has_varying_paint = crate::stroke_profile::has_varying_paint(stage, mob)
+                || crate::fill_profile::has_varying_paint(stage, mob);
+            let style_unsafe =
+                style_unsafe || ((previous_profiled || has_varying_paint) && hint_unsafe);
             let style = match &previous {
                 Some(retained) if !style_unsafe && !retained.style_dep.is_stale(&now) => {
                     retained.style
@@ -1067,6 +1070,7 @@ impl RenderPlan {
                 volatile,
                 hint_unsafe,
             });
+
             let profiled = self
                 .styles
                 .get(style)
@@ -1077,13 +1081,14 @@ impl RenderPlan {
                         .map(|(_, s)| s)
                 })
                 .is_some_and(|row| row.stroke_profile.is_some() || row.fill_profile.is_some());
+            let profile_dependent = profiled || has_varying_paint;
             next_retained.insert(
                 mob,
                 Retained {
                     shape_dep: Dependency::new(now, &SHAPE_AXES),
                     style_dep: Dependency::new(
                         now,
-                        if profiled {
+                        if profile_dependent {
                             &PROFILE_STYLE_AXES
                         } else {
                             &STYLE_AXES

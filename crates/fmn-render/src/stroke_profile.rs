@@ -228,6 +228,31 @@ impl crate::Style {
     }
 }
 
+/// Whether any record's stroke paint differs from the first.
+pub(crate) fn has_varying_paint(stage: &fmn_mobject::Stage, mob: fmn_mobject::Mob) -> bool {
+    let Some(entry) = stage.get(mob) else {
+        return false;
+    };
+    let buffer = &entry.buffer;
+    let count = buffer.len();
+    if count == 0 {
+        return false;
+    }
+    let paint = |index: usize| {
+        let width = buffer
+            .read(index, "stroke_width")
+            .and_then(|v| v.first().copied())
+            .unwrap_or(0.0);
+        let color = buffer
+            .read(index, "stroke_rgba")
+            .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
+            .unwrap_or([0.0; 4]);
+        (width, color)
+    };
+    let first = paint(0);
+    (1..count).any(|i| paint(i) != first)
+}
+
 /// Derive record knots through Chisel's path layout and true arc lengths.
 /// Uniform columns deliberately do not read/measure geometry.
 pub(crate) fn from_records(

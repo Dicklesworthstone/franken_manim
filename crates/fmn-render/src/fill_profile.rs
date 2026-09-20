@@ -173,6 +173,26 @@ impl crate::Style {
     }
 }
 
+/// Whether any record's fill paint differs from the first.
+pub(crate) fn has_varying_paint(stage: &fmn_mobject::Stage, mob: fmn_mobject::Mob) -> bool {
+    let Some(entry) = stage.get(mob) else {
+        return false;
+    };
+    let count = entry.buffer.len();
+    if count == 0 {
+        return false;
+    }
+    let paint = |i| {
+        entry
+            .buffer
+            .read(i, "fill_rgba")
+            .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
+            .unwrap_or([0.0; 4])
+    };
+    let first = paint(0);
+    (1..count).any(|i| paint(i) != first)
+}
+
 pub(crate) fn from_records(
     stage: &fmn_mobject::Stage,
     mob: fmn_mobject::Mob,
