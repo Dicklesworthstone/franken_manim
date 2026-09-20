@@ -13,10 +13,12 @@ def test_string_hook_renders_translated_text_at_actual_sample_points():
     def render(destination, threads):
         calls, samples = [], []
         class RecordedTransform(ml.Transform):
-            def interpolate_submobject(self, current, start, target, alpha):
-                result = super().interpolate_submobject(current, start, target, alpha)
-                if current is self.mobject:
-                    samples.append((float(alpha), current.get_center().copy()))
+            def interpolate_mobject(self, alpha):
+                result = super().interpolate_mobject(alpha)
+                # Empty group parents precede their glyph children in the
+                # family walk. Observe the complete frame, not the parent's
+                # submobject hook before the descendants have interpolated.
+                samples.append((float(alpha), self.mobject.get_center().copy()))
                 return result
         class AuthoredStrings(ml.TransformMatchingStrings):
             def matching_blocks(self, source, target, matched_keys, key_map):

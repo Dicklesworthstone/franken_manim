@@ -195,6 +195,21 @@ def _install_cyclic_replace(g: dict[str, Any]) -> None:
 
 def _install_deferred_transforms(g: dict[str, Any]) -> None:
     """Evaluate authored target functions at begin, not during spec planning."""
+    deferred = tuple(g[name] for name in (
+        "ApplyMethod", "ApplyFunction", "ApplyPointwiseFunctionToCenter",
+    ) if name in g)
+    if deferred:
+        previous_requires = g["_requires_python_animation"]
+
+        def requires(animation):
+            # Native specs capture their target while the entire composition
+            # is lowered. These families instead construct it from live state
+            # in Transform.begin, after preceding Succession leaves finish.
+            # Do not inspect target_mobject: a reused animation retains its
+            # previous target but must still sample again at the next begin.
+            return isinstance(animation, deferred) or previous_requires(animation)
+
+        g["_requires_python_animation"] = requires
     Complex = g.get("ApplyComplexFunction")
     if Complex is not None:
         np = g["_np"]
@@ -211,5 +226,3 @@ def _install_deferred_transforms(g: dict[str, Any]) -> None:
         init_path_func.__qualname__ = Complex.__qualname__ + ".init_path_func"
         init_path_func.__module__ = Complex.__module__
         Complex.init_path_func = init_path_func
-
-
