@@ -1,0 +1,51 @@
+name: Scribe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fmn-text/**'
+      - 'crates/fmn-tex/**'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/scribe.yml'
+  pull_request:
+    paths:
+      - 'crates/fmn-text/**'
+      - 'crates/fmn-tex/**'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/scribe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TARGET_DIR: target/scribe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/scribe
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-scribe-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      # Independent of the Python portal gate: a failure in that unrelated
+      # surface must not prevent the native Scribe regression suites running.
+      - name: Native text and TeX regression suites
+        run: cargo test --locked -p fmn-text -p fmn-tex --all-targets
+      - name: Scribe clippy
+        run: cargo clippy --locked -p fmn-text -p fmn-tex --all-targets -- -D warnings
+      - name: Formatting
+        run: cargo fmt --all -- --check

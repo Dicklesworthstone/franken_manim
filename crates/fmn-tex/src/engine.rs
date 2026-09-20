@@ -31,6 +31,7 @@
 //! construction time).
 
 use crate::error::{PreflightError, TexError};
+use crate::memory_cache::{MemoryCache, TypesetCacheStats};
 use crate::typeset::{Prim, TYPESET_FORMAT_VERSION, Typeset};
 use fmd_math::{Layout, MacroSet, PathContour, Style};
 use fmn_cache::{CacheKey, KeyBuilder, Namespace};
@@ -86,6 +87,7 @@ pub struct TexEngine {
     /// bytes plus the macro table — the cache key's engine component.
     fingerprint: CacheKey,
     cache: Option<Namespace>,
+    memory_cache: Mutex<MemoryCache>,
 }
 
 impl core::fmt::Debug for TexEngine {
@@ -127,6 +129,7 @@ impl TexEngine {
             pack_content_id,
             fingerprint,
             cache: None,
+            memory_cache: Mutex::new(MemoryCache::default()),
         })
     }
 
@@ -147,7 +150,8 @@ impl TexEngine {
     /// Attach a cache namespace. The namespace version is the typeset
     /// serialization format's ([`TYPESET_FORMAT_VERSION`]); engine
     /// semantics live in the key's fingerprint instead, so a pin bump
-    /// cold-starts without a namespace bump.
+    /// cold-starts without a namespace bump. Attaching a store resets the
+    /// memory front so already-warm strings populate the newly attached store.
     ///
     /// # Errors
     ///
@@ -163,6 +167,7 @@ impl TexEngine {
                 what: e.to_string(),
             })?;
         self.cache = Some(ns);
+        self.memory_cache = Mutex::new(MemoryCache::default());
         Ok(self)
     }
 
@@ -202,31 +207,66 @@ impl TexEngine {
             .ok()
     }
 
-    /// Typeset through the cache: a verified hit returns paths + span map
-    /// without re-layout (PG-7's <100 µs path); a miss lays out and stores
-    /// best-effort. Cache trouble degrades to computing — never fatal,
-    /// never wrong.
+    /// Diagnostics for the bounded engine-local cache. This layer is always
+    /// available, including without a disk store or filesystem capability.
+    #[must_use]
+    pub fn memory_cache_stats(&self) -> TypesetCacheStats {
+        self.memory_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stats()
+    }
+
+    /// Typeset through the memory cache, then the optional disk cache. A
+    /// verified hit reconstructs the layout and spans without re-layout;
+    /// callers always receive independently mutable data. Preflight warms
+    /// both layers. Oversized documents remain usable but bypass retention.
+    /// Cache trouble degrades to computing, never to a blank render.
     ///
     /// # Errors
     ///
     /// [`TexError::Math`]: the precise, named, tier-tagged construct
     /// errors surface at construction time — never a blank render.
     pub fn typeset(&self, mode: Mode, source: &str) -> Result<Typeset, TexError> {
-        if let Some(ns) = &self.cache
-            && let Some(key) = self.cache_key(mode, source)
+        let Some(key) = self.cache_key(mode, source) else {
+            return self.layout(mode, source);
+        };
+        // Release the lock before decoding, disk I/O, or layout. Distinct
+        // preflight jobs remain parallel; only cache metadata is serialized.
+        let resident = self
+            .memory_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key);
+        if let Some(bytes) = resident
+            && let Ok(hit) = Typeset::from_bytes(&bytes)
+            && hit.source == source
         {
-            if let Ok(Some(bytes)) = ns.get(&key)
-                && let Ok(hit) = Typeset::from_bytes(&bytes)
-            {
-                return Ok(hit);
-            }
-            let fresh = self.layout(mode, source)?;
-            if let Ok(bytes) = fresh.to_bytes() {
+            return Ok(hit);
+        }
+        if let Some(ns) = &self.cache
+            && let Ok(Some(bytes)) = ns.get(&key)
+            && let Ok(hit) = Typeset::from_bytes(&bytes)
+            && hit.source == source
+        {
+            self.remember(key, bytes);
+            return Ok(hit);
+        }
+        let fresh = self.layout(mode, source)?;
+        if let Ok(bytes) = fresh.to_bytes() {
+            if let Some(ns) = &self.cache {
                 let _ = ns.put(&key, &bytes);
             }
-            return Ok(fresh);
+            self.remember(key, bytes);
         }
-        self.layout(mode, source)
+        Ok(fresh)
+    }
+
+    fn remember(&self, key: CacheKey, bytes: Vec<u8>) {
+        self.memory_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, bytes);
     }
 
     fn layout(&self, mode: Mode, source: &str) -> Result<Typeset, TexError> {

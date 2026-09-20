@@ -46,11 +46,7 @@ fn cached_paths_match_the_uncached_arithmetic_at_every_placement() {
     let book = FontBook::bundled().unwrap();
     let layout = layout_text(&book, &TextRequest::plain("AoB8gjfi")).unwrap();
     for glyph in &layout.glyphs {
-        for (x, y, size) in [
-            (0.0, 0.0, 1.0),
-            (1.0 / 3.0, -7.1, 0.375),
-            (1e7, -1e6, 13.7),
-        ] {
+        for (x, y, size) in [(0.0, 0.0, 1.0), (1.0 / 3.0, -7.1, 0.375), (1e7, -1e6, 13.7)] {
             let mut glyph = glyph.clone();
             glyph.x = x;
             glyph.y = y;
@@ -93,7 +89,10 @@ fn repeated_glyphs_keep_independent_spans_styles_and_mutable_paths() {
     let mut alias = layout.glyphs[0].clone();
     alias.face.family = "CMU Serif".to_owned();
     alias.span = (200, 204);
-    assert_eq!(bits(&glyph_quadpath(&book, &alias).unwrap()), bits(&paths[0]));
+    assert_eq!(
+        bits(&glyph_quadpath(&book, &alias).unwrap()),
+        bits(&paths[0])
+    );
     assert_eq!(alias.span, (200, 204));
     let stats = book
         .family("CMU Serif")
@@ -115,7 +114,10 @@ fn actual_faces_not_requested_variants_or_glyph_ids_own_the_cache() {
         bold: true,
         italic: false,
     };
-    let bold = book.family(&other.face.family).unwrap().face(other.face.key);
+    let bold = book
+        .family(&other.face.family)
+        .unwrap()
+        .face(other.face.key);
     other.gid = bold.font.glyph_index(other.ch);
     assert_eq!(bold.glyph_cache_stats().decodes, 0);
     assert_eq!(
