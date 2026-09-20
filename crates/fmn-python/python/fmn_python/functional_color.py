@@ -30,8 +30,8 @@ def _colors(np, value, count, channels):
     array = np.asarray(value)
     if array.dtype.kind not in "biuf":
         raise TypeError("callable color fields must return real numeric colors")
-    if array.shape == (channels,):
-        array = np.broadcast_to(array, (count, channels))
+    if array.shape in ((channels,), (1, channels)):
+        array = np.broadcast_to(array.reshape((1, channels)), (count, channels))
     if array.shape != (count, channels):
         raise ValueError(f"callable color field must return ({count}, {channels}) colors")
     if not np.isfinite(array).all() or np.any(np.abs(array) > np.finfo(np.float32).max):
@@ -96,10 +96,12 @@ def install_functional_color(native):
                     # Preserve authored setter dispatch. Point/surface classes
                     # retain the legacy one-argument call; vector schemas name
                     # the two real paint columns rather than inventing `rgba`.
+                    # A public setter may mutate its input. Each field owns
+                    # a copy so the fill setter cannot corrupt the stroke plan.
                     if name == "rgba":
-                        mob.set_rgba_array(rgba)
+                        mob.set_rgba_array(rgba.copy())
                     else:
-                        mob.set_rgba_array(rgba, name=name)
+                        mob.set_rgba_array(rgba.copy(), name=name)
         return self
 
     def set_color_by_rgba_func(self, func, recurse=True):
