@@ -199,6 +199,22 @@ impl Stage {
         self.set_tracker_value(mob, current + d_value)
     }
 
+    /// Increment a complex tracker's decoded real and imaginary components.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] for a dead or non-complex tracker.
+    pub fn increment_tracker_complex_value(
+        &mut self,
+        mob: Mob,
+        real: f64,
+        imaginary: f64,
+    ) -> Result<(), StageError> {
+        let (re, im) = self
+            .tracker_complex_value(mob)
+            .ok_or(StageError::StaleHandle)?;
+        self.set_tracker_complex_value(mob, re + real, im + imaginary)
+    }
+
     // ---------------------------------------------- closure-clock binding
 
     /// `always_redraw`: build a mobject from `f` now, and rebuild it on

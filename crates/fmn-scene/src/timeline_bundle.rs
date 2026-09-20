@@ -713,6 +713,19 @@ fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
             else {
                 return false;
             };
+            // Invisible ValueTrackers still carry observable scene state.
+            // Omitting them lets an out-and-back parameter animation pass a
+            // false pure proof and disappear from the exported timeline.
+            match (left.tracker(left_mob), right.tracker(right_mob)) {
+                (None, None) => {}
+                (Some(a), Some(b))
+                    if a.kind == b.kind
+                        && a.lanes
+                            .into_iter()
+                            .zip(b.lanes)
+                            .all(|(a, b)| canonical_f64_equal(a, b)) => {}
+                _ => return false,
+            }
             let left_fields = left_entry.buffer.schema().fields();
             let right_fields = right_entry.buffer.schema().fields();
             if left_fields.len() != right_fields.len() {

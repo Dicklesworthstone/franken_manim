@@ -90,6 +90,9 @@ fn interpolation_identical(stage: &Stage, end_stage: &Stage, mob: fmn_mobject::M
     if a.placement().coefficients() != b.placement().coefficients() {
         return false;
     }
+    if stage.tracker(mob) != end_stage.tracker(mob) {
+        return false;
+    }
     if a.uniforms() != b.uniforms() {
         return false;
     }

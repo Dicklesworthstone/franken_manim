@@ -103,6 +103,14 @@ pub enum AnimateCommand {
     SetWidth(f64, bool),
     /// `set_height(height, stretch)`.
     SetHeight(f64, bool),
+    /// Set a scalar tracker (plain or exponential) through its encoding.
+    SetValue(f64),
+    /// Increment a scalar tracker's decoded value at build time.
+    IncrementValue(f64),
+    /// Set both lanes of a complex tracker.
+    SetComplexValue(f64, f64),
+    /// Increment a complex tracker's real and imaginary components.
+    IncrementComplexValue(f64, f64),
 }
 
 /// Marker for a W7 `override_animate` animation: the builder enforces the
@@ -124,6 +132,13 @@ pub enum AnimateError {
     OverrideNotChainable,
     /// A handle (the source, or a command's Mob target) is dead at build.
     StaleHandle(Mob),
+    /// A live source lacks the tracker encoding required by a command.
+    TrackerKindMismatch {
+        /// The live, but incompatible, source.
+        source: Mob,
+        /// The required decoded value type (scalar or complex).
+        expected: &'static str,
+    },
 }
 
 impl std::fmt::Display for AnimateError {
@@ -139,6 +154,9 @@ impl std::fmt::Display for AnimateError {
                 "method chaining is not supported for overridden animations"
             ),
             Self::StaleHandle(_) => write!(f, "animate target handle is stale"),
+            Self::TrackerKindMismatch { expected, .. } => {
+                write!(f, "animate command requires a {expected} value tracker")
+            }
         }
     }
 }
@@ -354,6 +372,41 @@ impl AnimBuilder {
         self.push(AnimateCommand::SetHeight(height, stretch))
     }
 
+    /// Record `set_value` for a plain or exponential ValueTracker.
+    /// The source is untouched; the target receives the decoded value at build.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override. The tracker
+    /// kind is validated when the recording is built, before Stage mutation.
+    pub fn set_value(self, value: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetValue(value))
+    }
+
+    /// Record a scalar increment, resolved against the target's decoded value
+    /// at build time rather than the source's value when this call is recorded.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn increment_value(self, delta: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::IncrementValue(delta))
+    }
+
+    /// Record `set_value` for a complex tracker, as real and imaginary lanes.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_complex_value(self, real: f64, imaginary: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetComplexValue(real, imaginary))
+    }
+
+    /// Record an increment of a complex tracker's decoded components.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn increment_complex_value(self, real: f64, imaginary: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::IncrementComplexValue(real, imaginary))
+    }
+
     /// Realize the recording: generate the target copy NOW (dynamic target
     /// lookup at build time), apply every command to it, and hand back the
     /// [`BuiltAnimate`] Choreo interpolates. The target is arena-allocated
@@ -361,13 +414,34 @@ impl AnimBuilder {
     ///
     /// # Errors
     /// [`AnimateError::StaleHandle`] for a dead source or a dead Mob target
-    /// inside a command.
+    /// inside a command; [`AnimateError::TrackerKindMismatch`] for a scalar
+    /// command on a non-scalar source or a complex command on a non-complex one.
     pub fn build(self, stage: &mut Stage) -> Result<BuiltAnimate, AnimateError> {
         // Validate every Mob reference before mutating anything.
         if !stage.contains(self.source) {
             return Err(AnimateError::StaleHandle(self.source));
         }
         for command in &self.commands {
+            let expected = match command {
+                AnimateCommand::SetValue(_) | AnimateCommand::IncrementValue(_)
+                    if stage.tracker_value(self.source).is_none() =>
+                {
+                    Some("scalar")
+                }
+                AnimateCommand::SetComplexValue(_, _)
+                | AnimateCommand::IncrementComplexValue(_, _)
+                    if stage.tracker_complex_value(self.source).is_none() =>
+                {
+                    Some("complex")
+                }
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                return Err(AnimateError::TrackerKindMismatch {
+                    source: self.source,
+                    expected,
+                });
+            }
             if let AnimateCommand::MoveTo(PosTarget::Mob(m), _)
             | AnimateCommand::NextTo(PosTarget::Mob(m), _, _, _)
             | AnimateCommand::AlignTo(PosTarget::Mob(m), _) = command
@@ -380,7 +454,7 @@ impl AnimBuilder {
             .copy_family(self.source)
             .map_err(|_| AnimateError::StaleHandle(self.source))?;
         for command in &self.commands {
-            apply(stage, target, *command);
+            apply(stage, target, *command)?;
         }
         Ok(BuiltAnimate {
             source: self.source,
@@ -391,7 +465,7 @@ impl AnimBuilder {
     }
 }
 
-fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) {
+fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), AnimateError> {
     match command {
         AnimateCommand::Shift(v) => {
             stage.shift(target, v);
@@ -432,7 +506,28 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) {
         AnimateCommand::SetHeight(h, s) => {
             stage.set_height(target, h, s);
         }
+        AnimateCommand::SetValue(value) => {
+            stage
+                .set_tracker_value(target, value)
+                .map_err(|_| AnimateError::StaleHandle(target))?;
+        }
+        AnimateCommand::IncrementValue(delta) => {
+            stage
+                .increment_tracker_value(target, delta)
+                .map_err(|_| AnimateError::StaleHandle(target))?;
+        }
+        AnimateCommand::SetComplexValue(real, imaginary) => {
+            stage
+                .set_tracker_complex_value(target, real, imaginary)
+                .map_err(|_| AnimateError::StaleHandle(target))?;
+        }
+        AnimateCommand::IncrementComplexValue(real, imaginary) => {
+            stage
+                .increment_tracker_complex_value(target, real, imaginary)
+                .map_err(|_| AnimateError::StaleHandle(target))?;
+        }
     }
+    Ok(())
 }
 
 /// The `prepare_animation` contract (§9.1, shared with fmn-anim): a play
