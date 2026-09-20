@@ -276,8 +276,10 @@ class DistributionTests(unittest.TestCase):
             identity._module_paths((module.__name__,))
 
     def test_static_python_library_and_missing_shared_library(self):
-        with patch.object(identity.sysconfig, "get_config_var", return_value=None):
+        with patch.object(identity.sysconfig, "get_config_var", side_effect=lambda key: 0 if key == "Py_ENABLE_SHARED" else None):
             self.assertEqual(identity._python_library(), [])
+        with patch.object(identity.sysconfig, "get_config_var", return_value=None), self.assertRaisesRegex(identity.RuntimeIdentityError, "configuration"):
+            identity._python_library()
         with patch.object(identity.sysconfig, "get_config_var", side_effect=lambda key: 1 if key == "Py_ENABLE_SHARED" else None), self.assertRaisesRegex(identity.RuntimeIdentityError, "shared CPython"):
             identity._python_library()
 

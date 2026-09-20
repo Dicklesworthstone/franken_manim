@@ -193,8 +193,10 @@ def _module_paths(prefixes):
 def _python_library():
     shared = sysconfig.get_config_var("Py_ENABLE_SHARED")
     framework = sysconfig.get_config_var("PYTHONFRAMEWORK")
-    if not shared and not framework:
+    if shared == 0 and not framework:
         return []
+    if shared not in (0, 1) and not framework:
+        raise RuntimeIdentityError("the CPython shared-library configuration is unavailable")
     candidates = []
     filename = sysconfig.get_config_var("LDLIBRARY")
     if filename:

@@ -41,6 +41,7 @@ _STEPS = (
     ("embedded_shell", "install_embedded_shell"),
     ("source_autoreload", "install_source_autoreload"),
     ("project_editor", "install_scene_project_editor"),
+    ("runtime_provenance", "install_runtime_provenance"),
 )
 _STATE = "_FMN_PORTAL_RUNTIME_STATE"
 

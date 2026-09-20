@@ -11,7 +11,7 @@ if not path:
 print(f"auditing imported manimlib: {path}")
 PY
 
-for suite in textured_surfaces portal_initialization persistent_recovery fading_family bridge animation_semantics matching_transform_semantics matching_authoring composition_lifecycle camera_animation_semantics camera_motion camera_execution updater_family drawing_runtime creation_semantics subset_reveal text_reveal native_outputs programmatic_rendering batch_rendering builder_playback restore_playback cyclic_replace deferred_transform_playback fading_semantics movement_semantics rotation_semantics indication_semantics composite_effects tracker_interpolation live_tex live_tex_render live_rates animation_updaters native_animation_updaters deferred_animation_updaters console_rendering scene_state temporal_visualization control_interaction color_sliders scene_execution matrix_authoring source_autoreload scene_project scene_project_editor live_graphing live_vector_fields; do
+for suite in textured_surfaces portal_initialization persistent_recovery fading_family bridge animation_semantics matching_transform_semantics matching_authoring composition_lifecycle camera_animation_semantics camera_motion camera_execution updater_family drawing_runtime creation_semantics subset_reveal text_reveal native_outputs programmatic_rendering runtime_provenance batch_rendering builder_playback restore_playback cyclic_replace deferred_transform_playback fading_semantics movement_semantics rotation_semantics indication_semantics composite_effects tracker_interpolation live_tex live_tex_render live_rates animation_updaters native_animation_updaters deferred_animation_updaters console_rendering scene_state temporal_visualization control_interaction color_sliders scene_execution matrix_authoring source_autoreload scene_project scene_project_editor live_graphing live_vector_fields; do
     python3 - "$suite" <<'PY'
 import pathlib
 import runpy
@@ -25,6 +25,10 @@ runpy.run_path(str(suite), init_globals={"_expected_package_version": version})
 print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
+
+# Runtime inventories exercise real files; protocol sinks are explicitly doubled.
+python3 crates/fmn-python/tests/test_runtime_identity.py
+python3 crates/fmn-python/tests/test_runtime_provenance_protocol.py
 
 # These unittest suites include native geometry/clock and failure-recovery cases.
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed.py
