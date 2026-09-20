@@ -13,7 +13,7 @@ either authority changes, forcing this audit to be re-run instead of leaving a
 plausible but stale “current pins” claim behind.
 
 - `SUITE.lock` SHA-256: `d38bb18884f060d3867dfbb26b1c985e90ddf8ce716589dd13d2e68aa404b3d3`
-- `Cargo.lock` SHA-256: `5b752767e3636d9edf829e753b41ff4edb9ce07bd3275e82d6d6f2be5ac9c6c3`
+- `Cargo.lock` SHA-256: `02c1d8223ae3dc8c096806ef455f8175a4f8fc7a9d89474414aeb79c5e902a88`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `01f3e42a699383d33b42379bab14661069b40496b869cfbbd7d35b7e58fde53b`
 
 Method labels are deliberately narrow:
