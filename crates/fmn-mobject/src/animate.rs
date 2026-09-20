@@ -50,6 +50,8 @@ pub struct AnimateArgs {
     pub lag_ratio: Option<f64>,
     /// Arc angle for the transform path.
     pub path_arc: Option<f64>,
+    /// Axis for the arc path; defaults to OUT. A zero vector also means OUT.
+    pub path_arc_axis: Option<Vec3>,
     /// `(start, end)` within the play window.
     pub time_span: Option<(f64, f64)>,
 }
@@ -61,6 +63,7 @@ impl PartialEq for AnimateArgs {
         self.run_time == other.run_time
             && self.lag_ratio == other.lag_ratio
             && self.path_arc == other.path_arc
+            && self.path_arc_axis == other.path_arc_axis
             && self.time_span == other.time_span
             && match (self.rate_func, other.rate_func) {
                 (None, None) => true,

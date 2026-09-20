@@ -36,12 +36,10 @@
 //!   of the same rejection (one recording mechanism serves both front
 //!   doors, per fm-yra's `IntoAnimate` seam).
 //! - [`MethodAnimation`] is the concrete carrier for built `.animate`
-//!   chains (the Reference's `_MethodAnimation`): source → target record
-//!   lerp over families that are structurally aligned *by construction*
-//!   (the target is a build-time copy of the source). Heterogeneous-pair
-//!   alignment (`align_data`) and `path_arc` arcs are the Transform
-//!   family's, arriving with fm-cye; until then a path-arc request or a
-//!   structurally diverged pair is a precise, named error — never garbage.
+//!   chains (the Reference's `_MethodAnimation`), delegated to the same
+//!   Transform mechanism as explicit transforms: heterogeneous family
+//!   alignment, curved point paths, numeric uniforms, matching-data locks,
+//!   and host-view materialization all have one implementation.
 //!
 //! Deliberate divergences (D5): the Reference's `update_rate_info` uses
 //! Python `or`, so an explicit `run_time=0` or `lag_ratio=0` is silently
@@ -52,7 +50,7 @@
 
 use fmn_core::rate;
 use fmn_mobject::animate::{AnimateArgs, AnimateError, IntoAnimate};
-use fmn_mobject::{AnimBuilder, BuiltAnimate, Mob, Placement, Stage, StageError};
+use fmn_mobject::{AnimBuilder, BuiltAnimate, Mob, Stage, StageError};
 
 /// The Reference's `DEFAULT_ANIMATION_RUN_TIME`.
 pub const DEFAULT_ANIMATION_RUN_TIME: f64 = 1.0;
@@ -339,14 +337,11 @@ pub enum AnimError {
         /// The requested span end.
         end: f64,
     },
-    /// A `.animate` pair whose source and target have structurally
-    /// diverged since build (family shape or record length). Alignment of
-    /// heterogeneous pairs is `align_data` — the Transform family's
-    /// mechanism, arriving with fm-cye.
+    /// Legacy alignment refusal retained for source compatibility.
+    /// Method animations now use Transform's heterogeneous alignment.
     UnalignedFamilies,
-    /// `path_arc` was recorded on the chain: arc paths are the Transform
-    /// family's `path_func` mechanism, arriving with fm-cye. Named, never
-    /// silently a straight line.
+    /// Legacy arc-path refusal retained for source compatibility.
+    /// Method animations now support Transform's native arc paths.
     PathArcUnsupported,
     /// The `.animate` build failed (stale handle, chaining-rule violation).
     Builder(AnimateError),
@@ -527,8 +522,8 @@ impl Default for AnimConfig {
 impl AnimConfig {
     /// Map a built `.animate` chain's [`AnimateArgs`] onto the constructor
     /// surface (unset fields take the Reference defaults). `path_arc` is
-    /// not part of this surface — [`MethodAnimation::new`] rejects it by
-    /// name until fm-cye.
+    /// not part of this surface — [`MethodAnimation::new`] passes it to
+    /// the shared Transform path mechanism, together with its axis.
     #[must_use]
     pub fn from_animate_args(args: &AnimateArgs) -> Self {
         Self {
@@ -948,209 +943,9 @@ pub(crate) fn validate_begin_state(
 
 // ------------------------------------------------------- MethodAnimation
 
-/// The concrete animation a built `.animate` chain becomes (the
-/// Reference's `_MethodAnimation`, which is Transform-family): source →
-/// target field lerp over families aligned by construction. `align_data`
-/// for heterogeneous pairs and `path_arc` arcs arrive with fm-cye's
-/// Transform; this carrier refuses both by name.
-#[derive(Debug, Clone)]
-pub struct MethodAnimation {
-    state: AnimState,
-    target: Mob,
-}
-
-impl MethodAnimation {
-    /// Wrap a built recording. Fails on a recorded `path_arc`
-    /// ([`AnimError::PathArcUnsupported`]) — never a silent straight line.
-    pub fn new(built: BuiltAnimate) -> Result<Self, AnimError> {
-        if built.args.path_arc.is_some_and(|arc| arc != 0.0) {
-            return Err(AnimError::PathArcUnsupported);
-        }
-        let mut config = AnimConfig::from_animate_args(&built.args);
-        if config.name.is_empty() {
-            config.name = "MethodAnimation".to_owned();
-        }
-        Ok(Self {
-            state: AnimState::new(built.source, config),
-            target: built.target,
-        })
-    }
-
-    /// The build-time target copy the play interpolates toward.
-    #[must_use]
-    pub fn target(&self) -> Mob {
-        self.target
-    }
-}
-
-impl Animation for MethodAnimation {
-    fn state(&self) -> &AnimState {
-        &self.state
-    }
-
-    fn state_mut(&mut self) -> &mut AnimState {
-        &mut self.state
-    }
-
-    /// Allowlist member: the interpolation below writes records as a pure
-    /// function of the frozen start/target pair and alpha.
-    fn effect_signature(&self) -> AnimationSignature {
-        AnimationSignature::Pure
-    }
-
-    /// Verify the by-construction alignment still holds (family shape and
-    /// per-pair record length); a diverged pair is the fm-cye boundary,
-    /// reported by name.
-    fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
-        let source = self.state.mobject();
-        if !stage.contains(source) {
-            return Err(AnimError::StaleHandle(source));
-        }
-        if !stage.contains(self.target) {
-            return Err(AnimError::StaleHandle(self.target));
-        }
-        let source_family = stage.family(source);
-        let target_family = stage.family(self.target);
-        if source_family.len() != target_family.len() {
-            return Err(AnimError::UnalignedFamilies);
-        }
-        for (&s, &t) in source_family.iter().zip(&target_family) {
-            let (Some(se), Some(te)) = (stage.get(s), stage.get(t)) else {
-                return Err(AnimError::UnalignedFamilies);
-            };
-            if se.buffer.len() != te.buffer.len() {
-                return Err(AnimError::UnalignedFamilies);
-            }
-        }
-        Ok(())
-    }
-
-    /// Transform-family ordering: `(mobject, starting_mobject, target)` —
-    /// the argument order the family rows arrive in.
-    fn all_mobjects(&self) -> Vec<Mob> {
-        let mut mobs = vec![self.state.mobject()];
-        if let Some(starting) = self.state.starting_mobject() {
-            mobs.push(starting);
-        }
-        mobs.push(self.target);
-        mobs
-    }
-
-    fn preflight_mobjects(&self) -> Vec<Mob> {
-        vec![self.state.mobject(), self.target]
-    }
-
-    /// Straight field and affine-placement lerp `start → target` written into
-    /// the live submobject, computed in f64 and stored back at record precision
-    /// (§6.1's mixed-precision doctrine). Identical object-space columns are
-    /// left untouched, so `.animate.shift(...)` advances Transform without
-    /// masquerading as a Geometry edit (fm-7if). Uniforms are untouched: no
-    /// [`fmn_mobject::animate::AnimateCommand`] records a uniform write, so both
-    /// endpoints agree by construction (full uniform interpolation is
-    /// Transform's, fm-cye).
-    fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], sub_alpha: f64) {
-        let [submob, starting, target] = *mobs else {
-            return; // rows are triples by all_mobjects; anything else is pre-begin
-        };
-        let endpoint_placements = stage.placement(starting).zip(stage.placement(target));
-        let sync_live_points = stage.get(submob).is_some_and(|entry| {
-            entry.buffer.live_view_count() > 0
-                && !entry.buffer.is_empty()
-                && entry.buffer.schema().offset("point").is_some()
-        });
-        let placement = endpoint_placements.map(|(from, to)| {
-            let from = from.coefficients();
-            let to = to.coefficients();
-            let mut out = [0.0; 12];
-            for index in 0..12 {
-                out[index] = (1.0 - sub_alpha) * from[index] + sub_alpha * to[index];
-            }
-            Placement::new(
-                [
-                    [out[0], out[1], out[2]],
-                    [out[4], out[5], out[6]],
-                    [out[8], out[9], out[10]],
-                ],
-                [out[3], out[7], out[11]],
-            )
-        });
-        let fields: Vec<String> = match stage.get(submob) {
-            Some(entry) => entry
-                .buffer
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name.clone())
-                .collect(),
-            None => return,
-        };
-        for field in fields {
-            let (Some(from), Some(to)) = (
-                stage
-                    .get(starting)
-                    .and_then(|e| e.buffer.read_column(&field)),
-                stage.get(target).and_then(|e| e.buffer.read_column(&field)),
-            ) else {
-                continue;
-            };
-            debug_assert_eq!(
-                from.len(),
-                to.len(),
-                "setup verified pair alignment; structural mutation mid-play \
-                 is unreachable through the frame model"
-            );
-            if from.len() != to.len() {
-                continue;
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            let lerped = if sync_live_points && field == "point" {
-                let Some((from_placement, to_placement)) = endpoint_placements else {
-                    continue;
-                };
-                let (from_points, from_remainder) = from.as_chunks::<3>();
-                let (to_points, to_remainder) = to.as_chunks::<3>();
-                debug_assert!(
-                    from_remainder.is_empty() && to_remainder.is_empty(),
-                    "point fields are 3-lane"
-                );
-                from_points
-                    .iter()
-                    .zip(to_points)
-                    .flat_map(|(a, b)| {
-                        let a = from_placement.apply_point([
-                            f64::from(a[0]),
-                            f64::from(a[1]),
-                            f64::from(a[2]),
-                        ]);
-                        let b = to_placement.apply_point([
-                            f64::from(b[0]),
-                            f64::from(b[1]),
-                            f64::from(b[2]),
-                        ]);
-                        let point = [
-                            (1.0 - sub_alpha) * a[0] + sub_alpha * b[0],
-                            (1.0 - sub_alpha) * a[1] + sub_alpha * b[1],
-                            (1.0 - sub_alpha) * a[2] + sub_alpha * b[2],
-                        ];
-                        [point[0] as f32, point[1] as f32, point[2] as f32]
-                    })
-                    .collect()
-            } else {
-                interpolate_linear_column(&from, &to, sub_alpha)
-            };
-            if let Some(entry) = stage.get_mut(submob)
-                && entry.buffer.read_column(&field).as_deref() != Some(lerped.as_slice())
-            {
-                entry.buffer.write_range(&field, 0, &lerped);
-            }
-        }
-        if sync_live_points {
-            let _ = stage.set_placement(submob, Placement::IDENTITY);
-        } else if let Some(placement) = placement {
-            let _ = stage.set_placement(submob, placement);
-        }
-    }
-}
+#[path = "method_animation.rs"]
+mod method_animation;
+pub use method_animation::MethodAnimation;
 
 // ----------------------------------------------------- prepare_animation
 

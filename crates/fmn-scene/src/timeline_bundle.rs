@@ -650,10 +650,10 @@ enum SegmentEntry {
 /// interpolation can represent — no `time_span`, zero lag, every member's
 /// own run time equal to the group's (so the player's `k/fps · 1/run_time`
 /// is the engine's per-animation divisor, bit for bit), and one shared
-/// catalog rate function. The path is nominated [`PathFunc::Straight`]:
-/// every `.animate` method animation is straight by construction
-/// (`path_arc` is a named refusal there), and anything that is secretly
-/// not straight fails the proof and falls back to kind 1.
+/// catalog rate function. The path is nominated [`PathFunc::Straight`].
+/// Curved method animations are pure for native reconstruction, but only
+/// qualify for this serialized law when the frame-by-frame proof succeeds;
+/// otherwise their actual captured frames are preserved as kind 1.
 fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, RateFunc)> {
     if !report.purity.is_pure() {
         return None;

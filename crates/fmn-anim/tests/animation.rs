@@ -706,26 +706,31 @@ fn prepare_animations_keeps_tuple_members_in_one_play_list() {
 }
 
 #[test]
-fn path_arc_on_a_built_chain_is_a_named_error() {
+fn path_arc_on_a_built_chain_uses_transform_motion() {
     let mut stage = Stage::new();
     let mob = square(&mut stage);
     let built = mob
         .animate()
         .set_anim_args(AnimateArgs {
-            path_arc: Some(0.5),
+            path_arc: Some(std::f64::consts::PI),
+            rate_func: Some(rate::linear),
             ..AnimateArgs::default()
         })
-        .and_then(|b| b.shift([1.0, 0.0, 0.0]))
+        .and_then(|b| b.shift([2.0, 0.0, 0.0]))
         .and_then(|b| b.build(&mut stage))
         .expect("builds");
-    assert_eq!(
-        MethodAnimation::new(built).err(),
-        Some(AnimError::PathArcUnsupported)
-    );
+    let mut anim = MethodAnimation::new(built).expect("wraps");
+    anim.begin(&mut stage).expect("begin");
+    anim.interpolate(&mut stage, 0.5);
+    let center = stage.get_center(mob);
+    assert!((center[0] - 1.0).abs() < 1e-9);
+    assert!((center[1] + 1.0).abs() < 1e-9);
+    anim.finish(&mut stage);
+    assert!((stage.get_center(mob)[0] - 2.0).abs() < 1e-9);
 }
 
 #[test]
-fn structurally_diverged_pair_is_a_named_error() {
+fn structurally_diverged_pair_is_aligned_without_mutating_the_target() {
     let mut stage = Stage::new();
     let mob = square(&mut stage);
     let built = mob
@@ -733,12 +738,18 @@ fn structurally_diverged_pair_is_a_named_error() {
         .shift([1.0, 0.0, 0.0])
         .and_then(|b| b.build(&mut stage))
         .expect("builds");
-    // Mutate the source's family after build: alignment is fm-cye's.
+    let target = built.target;
+    let target_points = stage.get_points(target).expect("points");
     let extra = square(&mut stage);
     stage.attach(mob, extra).expect("attach");
 
     let mut anim = MethodAnimation::new(built).expect("wraps");
-    assert_eq!(anim.begin(&mut stage), Err(AnimError::UnalignedFamilies));
+    anim.begin(&mut stage).expect("heterogeneous alignment");
+    assert_eq!(stage.family(target), vec![target]);
+    assert_eq!(stage.get_points(target).unwrap(), target_points);
+    anim.finish(&mut stage);
+    assert_eq!(stage.get_points(mob).unwrap(), target_points);
+    assert_eq!(stage.family(mob).len(), 2);
 }
 
 #[test]
