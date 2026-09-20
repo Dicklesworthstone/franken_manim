@@ -70,6 +70,48 @@ differences.
   users who want perceptually uniform ramps. It is opt-in, never a silent
   replacement; the default remains the Reference formula.
 
+## Native pointwise callback colors
+
+`set_color_by_rgb_func` and `set_color_by_rgba_func` accept vectorized Python
+callbacks over live `(N, 3)` point tables. They write the native object's actual
+paint fields: both `fill_rgba` and `stroke_rgba` for a `VMobject` (as `set_color`
+does), and `rgba` for ordinary point/point-cloud/surface objects. Vector objects
+have no generic `rgba` field; targeting it previously raised before any paint
+could reach the renderer. Arbitrary GLSL injection remains excluded.
+
+An `(N, 3)` RGB or `(N, 4)` RGBA result supplies per-record colors. A single color
+vector or a `(1, 3)` / `(1, 4)` row also broadcasts to the current records. Components stay in the public encoded
+color space; the existing render boundary, not this adapter, decodes them. Complex,
+nonfinite, malformed and f32-unrepresentable outputs refuse before writing either
+of the current vector object's paint lanes. Invalid RGB opacity refuses before
+calling the function. Each invocation has a 1,048,576-point processing budget.
+
+The canonical `functional_color` adapter keeps deterministic family order, live
+point inputs and ordinary setter overrides. Shared descendants are evaluated once;
+empty containers skip callback evaluation. Every callback result is frozen and
+validated before any paint is published, so a late callback failure leaves the
+entire family's earlier paint intact. Reentrant calls and callback-induced
+family/geometry changes reject the obsolete paint plan. Authored side effects
+are not rolled back. Each setter receives an independent copy: mutating the fill
+setter's input cannot alter the later stroke write. Arbitrary setter failures are
+not rollback-safe. See [the callable-field contract](BN-04-functional-color-fields.md)
+for the full family and ownership semantics.
+
+**Migration:** use the same public callback methods on vector shapes, text glyphs,
+point clouds and surfaces. A callback need not fabricate a nonexistent `rgba`
+field. This does not change the interpolation field or grant shader execution.
+
+## Pointwise acceptance
+
+`crates/fmn-python/tests/pointwise_color.py` exercises the actual native records,
+live geometry, public callback/setter order, copies, mixed families, animation
+builders and point-dependent stroke pixels. The complementary
+`pointwise_paint_integration.py` requires complete native fill profiles and covers
+interior-only color changes, opaque-endpoint/transparent-interior compositing,
+real text and mathematics glyphs, and byte-identical PNG sequences at one and
+four render threads. `demo/python/pointwise_paint.py` uses one live color field
+for native strokes and fills on the shared scene clock.
+
 ## Evidence
 
 - `crates/fmn-render/src/engine.rs` — the compositor this note was waiting for
