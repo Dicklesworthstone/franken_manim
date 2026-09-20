@@ -8,6 +8,8 @@ metadata remains inspectable, but playback must execute the authored plan.
 from __future__ import annotations
 
 from itertools import islice
+import inspect
+import types
 from typing import Any
 
 _MAX_PARTS = 65_536
@@ -71,6 +73,29 @@ def _bind(cls, name, function):
     function.__qualname__ = cls.__qualname__ + "." + name
     function.__module__ = cls.__module__
     setattr(cls, name, function)
+
+
+def _implementation(obj, name):
+    value = inspect.getattr_static(obj, name, None)
+    if isinstance(value, (staticmethod, classmethod, types.MethodType)):
+        return value.__func__
+    return value
+
+
+def _changed_protocol(obj, protocols):
+    nearest = True
+    for cls in type(obj).__mro__:
+        baseline = protocols.get(cls)
+        if baseline is None:
+            continue
+        if nearest:
+            nearest = False
+            if any(_implementation(obj, name) is not expected for name, expected in baseline.items()):
+                return True
+        # An unchanged shipped override can still delegate to a patched base.
+        if any(_implementation(cls, name) is not expected for name, expected in baseline.items()):
+            return True
+    return False
 
 
 def install_matching(native: Any) -> None:
@@ -186,12 +211,95 @@ def install_matching(native: Any) -> None:
         "clean_up_from_scene": clean_up_from_scene,
     }.items():
         _bind(Parts, name, function)
+    hooks = (
+        "begin", "finish", "interpolate", "interpolate_mobject", "interpolate_submobject",
+        "update_mobjects", "clean_up_from_scene", "create_target", "create_starting_mobject",
+        "init_path_func", "check_target_mobject_validity", "get_all_mobjects",
+        "get_all_families_zipped", "get_all_mobjects_to_update", "get_sub_alpha",
+        "time_spanned_alpha", "_ensure_runtime_defaults", "__getattribute__", "__getattr__",
+    )
+    classes = {base for cls in tuple(g.values())
+               if isinstance(cls, type) and issubclass(cls, Transform)
+               for base in cls.__mro__ if issubclass(base, Animation)}
+    protocols = {cls: {name: _implementation(cls, name) for name in hooks} for cls in classes}
     previous_requires = g["_requires_python_animation"]
 
     def requires(animation):
         # Keep legacy _native_params inspection, but never lower away public
         # planning hooks or rebuild a different native matching plan at play.
-        return isinstance(animation, Parts) or previous_requires(animation)
+        if isinstance(animation, Parts):
+            return True
+        # A custom matching factory may return a Transform subclass whose only
+        # override is interpolation or finish. Older classifiers only compare
+        # target/path hooks and otherwise choose the stock native kernel.
+        # Static identity checks preserve these hooks without probing callbacks
+        # or demoting unchanged built-in specializations.
+        if isinstance(animation, Transform) and _changed_protocol(animation, protocols):
+            return True
+        return previous_requires(animation)
 
     g["_requires_python_animation"] = requires
     g["_FMN_MATCHING_INSTALLED"] = True
+
+
+def install_matching_strings(native: Any) -> None:
+    """Invoke the existing native-span block planner through the public hook."""
+    from collections.abc import Mapping
+
+    g = vars(native)
+    if g.get("_FMN_MATCHING_STRINGS_INSTALLED", False):
+        return
+    if not g.get("_FMN_MATCHING_INSTALLED", False):
+        raise ImportError("string matching requires the matching composition lifecycle")
+    Parts, Strings = g["TransformMatchingParts"], g["TransformMatchingStrings"]
+    Mobject, StringMobject = g["Mobject"], g["StringMobject"]
+
+    def span_pieces(self, source, target):
+        result = []
+        for obj in (source, target):
+            # Validate UTF-8 and live native span-map parts even when an
+            # authored matching_blocks implementation never calls super().
+            keys = _bounded(self._native_span_keys(obj), "native span map")
+            result.append(_unique(_bounded((piece for part, _ in keys for piece in _pieces(part)), "native span family")))
+        return result
+
+    def strings_init(self, source, target, matched_keys=(), key_map=None, matched_pairs=(),
+                     run_time=2, lag_ratio=0, **kwargs):
+        if not isinstance(source, StringMobject) or not isinstance(target, StringMobject):
+            raise TypeError(type(self).__name__ + " expects two StringMobject instances")
+        if not source._string_sub_spans or not target._string_sub_spans:
+            raise g["_TexError"](type(self).__name__ + " requires non-empty native span maps")
+        explicit = _pairs(matched_pairs, Mobject, type(self).__name__ + " matched_pairs")
+        keys = tuple(_bounded(matched_keys, "matched_keys"))
+        if key_map is not None and not isinstance(key_map, Mapping):
+            raise TypeError("key_map must be a mapping of strings")
+        mapping = {} if key_map is None else dict(_bounded(key_map.items(), "key_map"))
+        if not all(isinstance(key, str) for key in (*keys, *mapping, *mapping.values())):
+            raise TypeError("matching string keys must be strings")
+        self.matched_pairs, self.matched_keys, self.key_map = explicit, keys, mapping
+        sources, targets = span_pieces(self, source, target)
+        _validate_members(explicit, sources, targets)
+        _validate_owners((source, target))
+        claimed = [set(), set()]
+        for pair in explicit:
+            for side, member in enumerate(pair):
+                ids = {id(piece) for piece in _pieces(member)}
+                if not ids:
+                    raise ValueError("matched_pairs member is not a live span-map part")
+                if ids & claimed[side]:
+                    raise ValueError("matched_pairs claims the same part twice")
+                claimed[side].update(ids)
+        blocks = _pairs(self.matching_blocks(source, target, keys, mapping), Mobject, "matching_blocks")
+        _validate_members(blocks, sources, targets)
+        super(Strings, self).__init__(source, target, matched_pairs=explicit + blocks,
+                                      run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+        # Preserve the public explicit-pair inventory and old _native_params
+        # inspection. Inferred groups are execution-plan children, not user
+        # claims; conflating the two breaks native source_keys/target_keys.
+        self.matched_pairs = explicit
+
+    Strings.__bases__ = (Parts,)
+    _bind(Strings, "__init__", strings_init)
+    # The shared initializer already installs matching_blocks and the D-09
+    # no-shape-fallback rule. Reuse both, including all authored overrides.
+    g["_FMN_MATCHING_STRINGS_INSTALLED"] = True

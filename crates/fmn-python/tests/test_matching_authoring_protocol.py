@@ -126,6 +126,37 @@ class PlanningTests(unittest.TestCase):
         self.assertTrue(self.g._requires_python_animation(animation))
         self.assertFalse(self.g._requires_python_animation(self.g.Transform(self.source, self.target)))
 
+    def test_custom_transform_interpolation_is_not_lowered_away(self):
+        class Authored(self.g.Transform):
+            def interpolate_submobject(self, *args):
+                raise AssertionError("classification must not probe a callback")
+        animation = self.g.TransformMatchingParts(self.source, self.target, match_animation=Authored)
+        self.assertTrue(self.g._requires_python_animation(animation.animations[0]))
+
+    def test_instance_override_and_changed_base_dispatch(self):
+        child = self.g.Transform(self.source, self.target)
+        child.finish = lambda: None
+        self.assertTrue(self.g._requires_python_animation(child))
+        other = self.g.Transform(self.source, self.target)
+        self.g.Animation.begin = lambda self: None
+        self.assertTrue(self.g._requires_python_animation(other))
+
+    def test_unchanged_native_specialization_stays_native(self):
+        g = namespace()
+        class Shipped(g.Transform):
+            def interpolate_submobject(self, *args):
+                pass
+        g.Shipped = Shipped
+        matching.install_matching(g)
+        self.assertFalse(g._requires_python_animation(Shipped(g.Mobject(), g.Mobject())))
+
+    def test_descriptor_is_not_executed_during_dispatch(self):
+        class Authored(self.g.Transform):
+            @property
+            def finish(self):
+                raise AssertionError("classification evaluated an authored descriptor")
+        self.assertTrue(self.g._requires_python_animation(Authored(self.source, self.target)))
+
     def test_explicit_claim_precedes_matcher_and_keeps_metadata(self):
         calls = []
         class Custom(self.g.TransformMatchingParts):
