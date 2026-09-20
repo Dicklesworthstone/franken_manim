@@ -136,6 +136,7 @@ EXPECTED: dict[str, set[str]] = {
     # standalone CLI from consuming or launching this host-CPython front door.
     "fmn-python": {
         "fmn-core",
+        "fmn-hash",
         "fmn-config",
         "fmn-platform",
         "fmn-frame",
