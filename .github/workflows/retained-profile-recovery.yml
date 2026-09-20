@@ -37,10 +37,11 @@ jobs:
             cargo-${{ runner.os }}-${{ runner.arch }}-native-replay-
             cargo-${{ runner.os }}-${{ runner.arch }}-native-motion-
             cargo-${{ runner.os }}-${{ runner.arch }}-scribe-
+            cargo-${{ runner.os }}-${{ runner.arch }}-
       - name: Repair variable-paint dependencies and reproduce the recovery cases
         run: |
           set -euo pipefail
-          if ! grep -Fq 'stroke_depends_on_geometry' crates/fmn-render/src/plan.rs; then
+          if ! grep -Fq 'let (style, profiled) = match &previous' crates/fmn-render/src/plan.rs; then
             python3 scripts/repair_profile_recovery.py
           fi
           rustfmt --edition 2024 --config skip_children=true crates/fmn-render/src/plan.rs \
@@ -57,7 +58,7 @@ jobs:
           git add crates/fmn-render/src/plan.rs crates/fmn-render/src/fill_profile.rs \
             crates/fmn-render/src/stroke_profile.rs crates/fmn-render/tests/profile_recovery.rs
           if ! git diff --cached --quiet; then
-            git commit -m 'fix(render): preserve variable-paint dependencies through collapsed geometry'
+            git commit -m 'fix(render): retain profile dependencies without rescanning unchanged paint'
           fi
           published=0
           for attempt in 1 2 3 4; do
