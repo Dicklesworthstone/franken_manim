@@ -97,6 +97,10 @@ def install_scene_playback(native: Any) -> None:
         from fmn_python.animation_updaters import install_animation_updaters
 
         install_animation_updaters(native)
+    # Freeze the completed shipped protocols, after the family installers
+    # above have supplied their own lifecycle methods. Authored subclasses
+    # and later monkeypatches must not disappear into a native endpoint lerp.
+    _install_transform_dispatch(g)
     g["_FMN_SCENE_PLAYBACK_INSTALLED"] = True
 
 
@@ -236,3 +240,34 @@ def _install_deferred_transforms(g: dict[str, Any]) -> None:
         init_path_func.__qualname__ = Complex.__qualname__ + ".init_path_func"
         init_path_func.__module__ = Complex.__module__
         Complex.init_path_func = init_path_func
+
+
+def _install_transform_dispatch(g: dict[str, Any]) -> None:
+    """Preserve authored Transform lifecycle hooks on the callback boundary.
+
+    The shared classifier's helper-only fast path returns before consulting
+    its older lifecycle checker. Compare the completed shipped protocols here,
+    including changed bases reached through super(), without running authored
+    descriptors while deciding which execution route is valid.
+    """
+    from fmn_python.movement import _changed, _protocols
+
+    Transform = g["Transform"]
+    hooks = (
+        "begin", "finish", "update_mobjects", "interpolate",
+        "interpolate_mobject", "interpolate_submobject", "clean_up_from_scene",
+        "create_target", "create_starting_mobject", "init_path_func",
+        "check_target_mobject_validity", "get_all_mobjects",
+        "get_all_families_zipped", "get_all_mobjects_to_update",
+        "get_sub_alpha", "time_spanned_alpha",
+        "__getattribute__", "__getattr__",
+    )
+    protocols = _protocols(g, Transform, hooks)
+    previous_requires = g["_requires_python_animation"]
+
+    def requires(animation):
+        if isinstance(animation, Transform) and _changed(animation, protocols):
+            return True
+        return previous_requires(animation)
+
+    g["_requires_python_animation"] = requires
