@@ -218,8 +218,8 @@ class FrontdoorTests(unittest.TestCase):
 
     def test_cli_invalid_combinations_do_not_import_scene(self):
         source = self.source('raise AssertionError("source must not be imported")')
-        for extra in (("--subdivide",), ("-s",), ("--format", "mp4"),
-                      ("--format", "png_sequence", "--reproducible"), ("Other",)):
+        for extra in (("--subdivide",), ("-s",), ("--format", "svg"),
+                      ("--format", "png_sequence", "--reproducible"), ("--resume",)):
             with self.subTest(extra=extra):
                 code, report, stderr = self.invoke(source, *extra)
                 self.assertIn(code, (2, 4), report)

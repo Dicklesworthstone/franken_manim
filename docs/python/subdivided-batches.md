@@ -66,3 +66,26 @@ Ordinary `render_scenes` behavior is unchanged when `subdivide=False`.
 thread-count equivalence, selection, constructor/lifecycle order, partial
 output, fail-fast/keep-going, interrupts, observers, admission and directory
 collision refusals, and unchanged ordinary batch output.
+
+## Console selection
+
+```sh
+fmn-python --robot lesson.py Intro Detail --subdivide --format y4m \
+  --resolution 1280x720 --fps 30 --threads 4 --video_dir media/lesson
+
+fmn-python --robot lesson.py --write_all --keep-going --subdivide \
+  --format gif --video_dir media/all-scenes -n 1,5
+```
+
+Explicit names retain command-line order; write-all selects locally declared
+classes in sorted order. The output root may already exist, but every selected
+scene's `clips` directory must be new. All names and collection destinations
+are preflighted before any scene is constructed. Source-range selection applies
+to every job. `--keep-going` cannot suppress Ctrl-C; its ordinary failures
+still produce a nonzero exit status.
+
+The existing `render-batch` robot envelope carries collection receipts inside
+each outcome's `result`. Failed and cancelled scene results can be partial
+collections. Single-scene commands retain `kind="render-subdivided"` and the
+existing direct `subdivision` field. The console does not invent another
+parser, loader, batch scheduler, or publication protocol.

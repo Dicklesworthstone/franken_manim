@@ -112,10 +112,13 @@ def take_subdivision_option(options: list[str], value_flags) -> tuple[list[str],
 SUBDIVISION_HELP = """Per-call clip output:
   --subdivide             One native clip for each selected play() or wait().
 
-Use one named scene with --format gif, y4m, or png_sequence. --video_dir is a
-new collection directory, not an output filename. Source ranges retain original
-segment indices; nested AnimationGroups remain one clip. --skip_animations,
-write-all/multiple scenes, checkpoint recovery and certified output are not
-combined with subdivision. Completed clips survive later execution failure.
-The terminal robot receipt includes subdivision.segments and partial outputs.
+Use one or more named scenes, or --write_all, with a supported clip format.
+--video_dir is a fresh collection directory for one scene; for batches it is
+an output root containing <Scene>/clips/. Source ranges retain original call
+indices and apply to each scene; nested AnimationGroups remain one clip.
+--keep-going preserves partial clips and proceeds after ordinary scene failures.
+--skip_animations, checkpoint recovery and certified output are not combined
+with subdivision. Audio-bearing formats require the matching native capability.
+Completed clips survive later failures. Robot output includes per-scene
+completed/partial collection receipts; interruptions preserve batch progress.
 """

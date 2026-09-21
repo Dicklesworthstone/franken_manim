@@ -108,56 +108,6 @@
          )
          self._current = recording
          try:
---- a/crates/fmn-python/python/fmn_python/console_rendering.py
-+++ b/crates/fmn-python/python/fmn_python/console_rendering.py
-@@ -114,12 +114,14 @@
- 
- def _single_result(native, result, robot, source, selected):
-     if isinstance(result, SubdividedRenderResult):
-+        count = result.sample_frames if result.sample_frames is not None else result.frame_count
-+        unit = "sample frames" if result.sample_frames is not None else "frames"
-         return native._portal_cli_emit(
-             0, "success", "render-subdivided",
--            f"rendered {len(result.segments)} clips ({result.frame_count} frames) to {result.destination}",
-+            f"rendered {len(result.segments)} clips ({count} {unit}) to {result.destination}",
-             robot, source=source, scene=selected, rendered=True,
-             destination=str(result.destination), frame_count=result.frame_count,
--            subdivision=result.as_dict(),
-+            sample_frames=result.sample_frames, subdivision=result.as_dict(),
-         )
-     details = result.as_dict()
-     # Preserve the established CLI frame_count field for WAV consumers while
-@@ -176,10 +178,13 @@
-         if subdivide:
-             if batch or recovery:
-                 raise ValueError("--subdivide currently requires one scene without batch/checkpoint recovery")
--            if still or options["format"] not in {"gif", "y4m", "png_sequence"}:
--                raise ValueError("--subdivide requires gif, y4m, or png_sequence without --skip_animations")
-+            if still or options["format"] not in {"gif", "y4m", "png_sequence", "wav", "mp4", "mov"}:
-+                raise ValueError("--subdivide requires gif, y4m, png_sequence, wav, mp4, or mov without --skip_animations")
-             if options.get("reproducible"):
-                 raise RuntimeError("CAPABILITY: subdivided Python recordings do not certify arbitrary host history")
-+            if options["format"] in {"wav", "mp4", "mov"} and not callable(
-+                    getattr(native, "_portal_begin_audio_clip", None)):
-+                raise RuntimeError("CAPABILITY: audio subdivision requires a matching native wheel")
-             if not callable(getattr(native, "_portal_prepare_recording_scene", None)):
-                 raise RuntimeError("CAPABILITY: --subdivide requires a matching native wheel")
-         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
---- a/crates/fmn-python/python/fmn_python/subdivision_rendering.py
-+++ b/crates/fmn-python/python/fmn_python/subdivision_rendering.py
-@@ -81,10 +81,11 @@
- SUBDIVISION_HELP = """Per-call clip output:
-   --subdivide             One native clip for each selected play() or wait().
- 
--Use one named scene with --format gif, y4m, or png_sequence. --video_dir is a
-+Use one named scene with --format gif, y4m, png_sequence, wav, mp4, or mov. --video_dir is a
- new collection directory, not an output filename. Source ranges retain original
- segment indices; nested AnimationGroups remain one clip. --skip_animations,
- write-all/multiple scenes, checkpoint recovery and certified output are not
- combined with subdivision. Completed clips survive later execution failure.
-+WAV and video clips preserve overlapping cues using native sample-exact windows.
- The terminal robot receipt includes subdivision.segments and partial outputs.
- """
 --- a/crates/fmn-python/tests/subdivided_recording.py
 +++ b/crates/fmn-python/tests/subdivided_recording.py
 @@ -268,7 +268,7 @@
@@ -169,35 +119,23 @@
                          {"max_segments": 0}, {"max_segments": True}, {"threads": 0}):
              with self.subTest(options=options):
                  with self.assertRaises((ValueError, TypeError)):
---- a/crates/fmn-python/tests/subdivided_rendering.py
-+++ b/crates/fmn-python/tests/subdivided_rendering.py
-@@ -218,7 +218,7 @@
- 
-     def test_cli_invalid_combinations_do_not_import_scene(self):
-         source = self.source('raise AssertionError("source must not be imported")')
--        for extra in (("--subdivide",), ("-s",), ("--format", "mp4"),
-+        for extra in (("--subdivide",), ("-s",), ("--format", "svg"),
-                       ("--format", "png_sequence", "--reproducible"), ("Other",)):
-             with self.subTest(extra=extra):
-                 code, report, stderr = self.invoke(source, *extra)
 --- a/docs/python/subdivided-recording.md
 +++ b/docs/python/subdivided-recording.md
-@@ -32,9 +32,11 @@
+@@ -32,9 +32,10 @@
  clip. A selected zero-duration call uses the existing recording contract of
  capturing one final frame without advancing time.
  
 -Supported formats are **GIF, y4m, and PNG sequences**. These are silent outputs.
 -WAV and MP4/MOV soundtrack subdivision and automatic prerun are not provided.
--CLI subdivision currently selects one scene, not a batch or checkpoint run. Ordinary whole-scene and
+-CLI subdivision supports one scene or named/write-all batches, but not checkpoint recovery.
 +Supported formats are **GIF, y4m, PNG sequences, WAV, MP4, and MOV**. GIF, y4m,
 +and PNG sequences are silent. WAV uses the native mixer/codec; MP4 and MOV
 +use the existing governed ffmpeg encoder and audio muxer. Automatic prerun is
-+not provided. CLI subdivision selects one scene, not a batch or checkpoint run.
-+Ordinary whole-scene and
++not provided. CLI subdivision supports one scene or named/write-all batches, but not checkpoint recovery.
+ Ordinary whole-scene and
  live single-clip recording remain available through the existing APIs. FPS
  must match the live rational clock; changing `camera.fps` is not resampling.
- 
-@@ -98,3 +100,53 @@
+@@ -101,3 +102,53 @@
  pristine-scene clock configuration boundary. It never opens and cancels a
  dummy output just to configure FPS. `subdivided_rendering.py` adds real native
  acceptance for that boundary and the public console entrypoint.

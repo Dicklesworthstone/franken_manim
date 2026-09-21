@@ -27,7 +27,7 @@ from .render_selection import PLAYBACK_HELP, take_playback_options, select_still
 
 from .subdivision import SubdividedRenderResult
 from .subdivision_rendering import (
-    SUBDIVISION_HELP, subdivided_render_session, take_subdivision_option,
+    SUBDIVISION_HELP, subdivided_render_session, take_subdivision_option, validate_subdivided_mode,
 )
 
 _VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES
@@ -114,12 +114,15 @@ def _message(error):
 
 def _single_result(native, result, robot, source, selected):
     if isinstance(result, SubdividedRenderResult):
+        samples = getattr(result, "sample_frames", None)
+        count = samples if samples is not None else result.frame_count
+        unit = "sample frames" if samples is not None else "frames"
         return native._portal_cli_emit(
             0, "success", "render-subdivided",
-            f"rendered {len(result.segments)} clips ({result.frame_count} frames) to {result.destination}",
+            f"rendered {len(result.segments)} clips ({count} {unit}) to {result.destination}",
             robot, source=source, scene=selected, rendered=True,
             destination=str(result.destination), frame_count=result.frame_count,
-            subdivision=result.as_dict(),
+            sample_frames=samples, subdivision=result.as_dict(),
         )
     details = result.as_dict()
     # Preserve the established CLI frame_count field for WAV consumers while
@@ -174,14 +177,12 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         options = select_still_format(options, native_options, still)
         output_options = _output_overrides(options)
         if subdivide:
-            if batch or recovery:
-                raise ValueError("--subdivide currently requires one scene without batch/checkpoint recovery")
-            if still or options["format"] not in {"gif", "y4m", "png_sequence"}:
-                raise ValueError("--subdivide requires gif, y4m, or png_sequence without --skip_animations")
-            if options.get("reproducible"):
-                raise RuntimeError("CAPABILITY: subdivided Python recordings do not certify arbitrary host history")
-            if not callable(getattr(native, "_portal_prepare_recording_scene", None)):
-                raise RuntimeError("CAPABILITY: --subdivide requires a matching native wheel")
+            if recovery:
+                raise ValueError("--subdivide cannot reuse single-artifact checkpoint receipts")
+            if still:
+                raise ValueError("--subdivide cannot be combined with --skip_animations")
+            validate_subdivided_mode(native, options["format"],
+                                    reproducible=bool(options.get("reproducible")))
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
             _positive_integer(value, name)
         source = positionals[0]
@@ -204,7 +205,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         # Freeze both paths before module code or a constructor changes cwd.
         destination = None if supplied is None else Path(supplied).resolve()
         default_root = (Path("media") / "videos" / source_path.stem).resolve()
-        if subdivide and destination is not None and os.path.lexists(destination):
+        if subdivide and not batch and destination is not None and os.path.lexists(destination):
             raise FileExistsError(f"subdivision destination already exists: {destination}")
         if batch:
             validate_batch_mode(native, options["format"], bool(options.get("reproducible")),
@@ -253,6 +254,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     {name: scenes[name] for name in requested}, destination,
                     format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
+                    **({"subdivide": True} if subdivide else {}),
                     **({} if selection is None else {"animation_range": selection}),
                     **({} if not output_options else {"_output_options": output_options}),
                     **({"reproducible": True, "sources": lambda: loaded.sources}

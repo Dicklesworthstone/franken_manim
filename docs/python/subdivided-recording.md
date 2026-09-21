@@ -34,7 +34,8 @@ capturing one final frame without advancing time.
 
 Supported formats are **GIF, y4m, and PNG sequences**. These are silent outputs.
 WAV and MP4/MOV soundtrack subdivision and automatic prerun are not provided.
-CLI subdivision currently selects one scene, not a batch or checkpoint run. Ordinary whole-scene and
+CLI subdivision supports one scene or named/write-all batches, but not checkpoint recovery.
+Ordinary whole-scene and
 live single-clip recording remain available through the existing APIs. FPS
 must match the live rational clock; changing `camera.fps` is not resampling.
 
@@ -87,8 +88,10 @@ fmn-python --robot source.py Motion --subdivide --format gif \
 `media/videos/<source-stem>/<Scene>/clips/`. Native format, dimension, FPS,
 thread and profile parsing remains shared with ordinary renders. The
 `--subdivide` lexer does not consume tokens belonging to other option values.
-Multiple scenes, write-all, checkpoint recovery, final-state still selection,
-and certified output are explicitly rejected before importing scene source.
+Checkpoint recovery, final-state still selection, and certified output are
+explicitly rejected before importing scene source. Multiple named scenes and
+`--write_all` use the existing batch API with one `<Scene>/clips/` collection
+per job; `--keep-going` retains partial clips while continuing later scenes.
 The one terminal robot record has `kind="render-subdivided"` and a
 `subdivision` collection receipt. On failure or interruption it includes the
 partial collection, its published clip paths and `artifact_published` rather
