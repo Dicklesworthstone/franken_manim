@@ -1,8 +1,8 @@
 # Complex-valued live readouts
 
 The Python portal's `DecimalNumber` accepts finite real and complex values,
-including NumPy complex scalars. Each real/imaginary component is formatted and
-typeset by the existing Rust number shelf; the portal composes native mobjects.
+including NumPy complex scalars. Stock real/imaginary components use the existing
+Rust number shelf; authored formatters and fonts use native Scribe glyph mobjects.
 No additional font, TeX process, renderer, or animation clock is involved.
 
 ```python
@@ -73,3 +73,47 @@ The native PNG integration test is
 `crates/fmn-python/tests/complex_readouts_render.py`. It checks visible changes
 in both a live formula and a matrix across six frames, thread-count equality,
 and cancellation of a generation whose readout update fails.
+
+## Authored formatters, glyphs, and fonts
+
+`DecimalNumber`, `Integer`, and numeric matrix entries support native typography
+through `text_config`, including bundled font families, bold/italic faces and
+the native Text style maps. Pass the overall `font_size` to the readout itself,
+not inside `text_config`. Unsupported font names and Pango-only settings remain
+explicit errors; there is no system-font or external-typesetter fallback.
+
+```python
+value = DecimalNumber(
+    1 + 2j, font_size=36,
+    text_config={"font": "IBM Plex Sans", "weight": "BOLD"},
+)
+
+class ScientificReadout(DecimalNumber):
+    def get_formatter(self, **kwargs):
+        return "{:.2e}"
+```
+
+The actual glyphs follow `get_num_string`, `get_formatter`, and
+`get_complex_formatter` overrides, rather than drawing an unrelated scalar
+while reporting the custom string. Subclass methods, instance overrides and
+later class replacements all remain live. A `char_to_mob` override receives
+each character and must return a `VMobject`; templates are copied before layout,
+so sharing a cached template or returning another scene's mobject does not move
+the original. A template with no `font_size` attribute uses 48 as its nominal
+size. The native number builder remains the unchanged path for stock readouts.
+
+The readout's default `char_to_mob` uses native **literal** Text, including for
+the imaginary unit and backslashes. BN-08's raised-unit marker and one-child
+U+2026 ellipsis are preserved. The separately exported `char_to_cahced_mob`
+utility retains its existing Reference-compatible cached Text/Tex dispatch.
+
+Public precision, minimum width, sign, comma, spacing, ellipsis, unit and
+background attributes share the native constructor's parameter storage. Edits
+take effect at the next `set_value`/rebuild. Scaled font size, fixed-edge
+placement and live glyph paint survive that rebuild, including when a glyph is
+a nested Text/VGroup rather than one record-bearing leaf.
+
+Custom strings use the same combined 4,096-character limit. Formatting,
+conversion and styling finish on detached geometry before replacing the live
+readout. A failed glyph callback leaves its prior value and geometry intact;
+arbitrary side effects inside authored callbacks are not transactional.

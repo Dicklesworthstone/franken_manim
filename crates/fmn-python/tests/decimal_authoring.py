@@ -1,7 +1,10 @@
 """Native-backed complex readouts, exact family replacement and failed updates."""
 import copy
 import importlib
+from pathlib import Path
 import pickle
+import tempfile
+from types import MethodType
 import unittest
 
 import manimlib as m
@@ -170,6 +173,192 @@ class DecimalAuthoringTests(unittest.TestCase):
         self.assertEqual(mob.get_value(), 5)
         self.assertEqual(mob.get_tex(), "5.00")
         self.assertEqual(list(scene.mobjects), [parent])
+
+    def test_authored_string_and_scalar_formatter_control_actual_glyphs(self):
+        calls = []
+        class Label(m.DecimalNumber):
+            def get_num_string(self, value):
+                calls.append(value)
+                return "ready" if value == 7 else "go"
+        label = Label(7)
+        self.assertEqual((label.get_tex(), len(label)), ("ready", 5))
+        label.set_value(8)
+        self.assertEqual((label.get_tex(), len(label)), ("go", 2))
+        self.assertEqual(calls, [7, 8])
+
+        class Scientific(m.DecimalNumber):
+            def get_formatter(self, **kwargs):
+                return "{:.1e}"
+        number = Scientific(1200)
+        self.assertEqual(number.get_tex(), "1.2e+03")
+        self.assertEqual(len(number), 7)
+        for char, child in zip(number.get_tex(), number):
+            np.testing.assert_allclose(child.copy().center().get_all_points(),
+                                       m.Text(char).get_all_points(), atol=1e-6)
+
+    def test_authored_complex_formatter_and_live_format_parameters(self):
+        class Cartesian(m.DecimalNumber):
+            def get_complex_formatter(self, **kwargs):
+                return "{0.real:.1f}|{0.imag:.1f}"
+        number = Cartesian(1 + 2j)
+        self.assertEqual((number.get_tex(), len(number)), ("1.0|2.0", 7))
+        number.set_value(2 - 3j)
+        self.assertEqual(number.get_tex(), "2.0|–3.0")
+
+        number = m.DecimalNumber(1234.5)
+        self.assertEqual(number.num_decimal_places, 2)
+        self.assertTrue(number.group_with_commas)
+        number.num_decimal_places = 0
+        number.group_with_commas = False
+        number.include_sign = True
+        number.min_total_width = 6
+        number.show_ellipsis = True
+        number.unit = "^°"
+        number.include_background_rectangle = True
+        number.set_value(12.9)
+        self.assertEqual(number.get_tex(), "+00012")
+        self.assertEqual(len(number), 8)
+        self.assertTrue(number.has_points())
+        self.assertEqual(number._formatter_config()["num_decimal_places"], 0)
+
+    def test_glyph_hooks_copy_shared_and_scene_owned_templates(self):
+        template = m.Square().shift(2 * m.UP)
+        owner = m.Scene()
+        owner.add(template)
+        before = template.get_points().copy()
+        calls = []
+        class Shapes(m.DecimalNumber):
+            def char_to_mob(self, char):
+                calls.append(char)
+                return template
+        number = Shapes(12, font_size=24)
+        self.assertEqual(calls, list("12.00"))
+        self.assertEqual(len(set(map(id, number.submobjects))), 5)
+        self.assertTrue(all(child is not template for child in number))
+        self.assertTrue(all(abs(child.get_width() - 1) < 1e-6 for child in number))
+        np.testing.assert_array_equal(template.get_points(), before)
+        self.assertEqual(list(owner.mobjects), [template])
+        number.set_value(3)
+        self.assertEqual(calls, list("12.003.00"))
+        np.testing.assert_array_equal(template.get_points(), before)
+        destination = m.Scene()
+        destination.add(number)
+        self.assertEqual(list(destination.mobjects), [number])
+        self.assertEqual(list(owner.mobjects), [template])
+
+    def test_formatter_configuration_hook_controls_native_text(self):
+        class Precision(m.DecimalNumber):
+            def _formatter_config(self):
+                return dict(super()._formatter_config(), num_decimal_places=3)
+        number = Precision(1.25)
+        self.assertEqual((number.get_tex(), len(number)), ("1.250", 5))
+        np.testing.assert_allclose(number[-1].copy().center().get_all_points(),
+                                   m.Text("0").get_all_points(), atol=1e-6)
+
+    def test_instance_and_late_class_hooks_are_not_lowered_to_scalar(self):
+        number = m.DecimalNumber(12)
+        number.get_num_string = MethodType(lambda self, value: "changed", number)
+        number.set_value(3)
+        self.assertEqual((number.get_tex(), len(number)), ("changed", 7))
+        original = m.DecimalNumber.char_to_mob
+        seen = []
+        try:
+            def glyph(self, char):
+                seen.append(char)
+                return m.Triangle()
+            m.DecimalNumber.char_to_mob = glyph
+            stock = m.DecimalNumber(12)
+            self.assertEqual(seen, list("12.00"))
+            self.assertTrue(all(len(child.get_points()) == len(m.Triangle().get_points())
+                                for child in stock))
+        finally:
+            m.DecimalNumber.char_to_mob = original
+
+    def test_native_fonts_and_faces_are_available_to_live_counters(self):
+        for value in (12.5, 1 + 2j, -3j):
+            plain = m.DecimalNumber(value)
+            styled = m.DecimalNumber(value, text_config={"font": "IBM Plex Sans", "weight": "BOLD"})
+            self.assertEqual(styled.get_tex(), plain.get_tex())
+            self.assertEqual(len(styled), len(plain))
+            self.assertFalse(np.array_equal(styled.get_all_points(), plain.get_all_points()))
+            for char, child in zip(styled.get_tex(), styled):
+                expected = m.Text(char, font="IBM Plex Sans", weight="BOLD")
+                np.testing.assert_allclose(child.copy().center().get_all_points(),
+                                           expected.get_all_points(), atol=1e-6)
+
+    def test_styled_rebuild_preserves_paint_anchor_copy_and_font_size(self):
+        config = {"font": "CM Typewriter"}
+        number = m.DecimalNumber(123 + 4j, text_config=config,
+                                 include_background_rectangle=True, edge_to_fix=m.RIGHT)
+        config["font"] = "not-a-font"
+        number.set_color(m.BLUE).scale(1.5).shift(m.UP)
+        edge, size = number.get_right().copy(), number.get_font_size()
+        for value in (1j, 7, 8 + 9j):
+            number.set_value(value)
+            np.testing.assert_allclose(number.get_right(), edge, atol=2e-6)
+            self.assertEqual(number.get_font_size(), size)
+            self.assertTrue(all(part.get_fill_color() == m.BLUE
+                                for child in number for part in child.family_members_with_points()))
+            np.testing.assert_array_equal(number.data["fill_rgba"][:, :3], 0)
+        for clone in (number.copy(), copy.deepcopy(number), pickle.loads(pickle.dumps(number))):
+            clone.set_value(-2j)
+            self.assertEqual(clone.get_tex(), "–2.00i")
+            self.assertEqual(clone.text_config, {"font": "CM Typewriter"})
+            self.assertEqual(number.get_value(), 8 + 9j)
+
+    def test_authored_failure_and_resource_errors_do_not_publish_partial_digits(self):
+        class Fragile(m.DecimalNumber):
+            fail = False
+            def char_to_mob(self, char):
+                if self.fail and char == "9":
+                    raise ValueError("authored missing glyph")
+                return super().char_to_mob(char)
+        number = Fragile(123)
+        scene = m.Scene()
+        parent = m.VGroup(number)
+        scene.add(parent)
+        before = snapshot(number)
+        number.fail = True
+        with self.assertRaisesRegex(ValueError, "authored missing glyph"):
+            number.set_value(129)
+        self.assertEqual(snapshot(number), before)
+        self.assertEqual(list(scene.mobjects), [parent])
+        for result in ("x" * 4097, 123):
+            number.get_num_string = MethodType(lambda self, value, result=result: result, number)
+            with self.assertRaises((ValueError, TypeError)):
+                number.set_value(8)
+            self.assertEqual(snapshot(number), before)
+        del number.get_num_string
+        number.char_to_mob = MethodType(lambda self, char: object(), number)
+        with self.assertRaisesRegex(TypeError, "must return a VMobject"):
+            number.set_value(8)
+        self.assertEqual(snapshot(number), before)
+
+    def test_text_configuration_rejects_unsupported_native_options(self):
+        for config in ([], {"font_size": 24}, {"font": "not-a-font"},
+                       {"weight": "HEAVY"}, {"global_config": {"letter_spacing": 10}}):
+            with self.subTest(config=config), self.assertRaises((ValueError, TypeError, NotImplementedError)):
+                m.DecimalNumber(1, text_config=config)
+
+    def test_styled_counter_animation_uses_real_native_frames(self):
+        class Counters(m.Scene):
+            def construct(self):
+                number = m.DecimalNumber(1 + 2j, text_config={"font": "IBM Plex Sans", "weight": "BOLD"})
+                number.scale(3)
+                self.add(number)
+                self.play(m.ChangeDecimalToValue(number, 7 - 3j), run_time=.5)
+                self.asserted_value = number.get_value()
+        root = Path(tempfile.mkdtemp(prefix="fmn-styled-counters-"))
+        sequences = []
+        for threads in (1, 4):
+            scene = Counters()
+            receipt = scene.render(root / str(threads), resolution=(192, 108), fps=8, threads=threads)
+            self.assertEqual(scene.asserted_value, 7 - 3j)
+            self.assertEqual(receipt.frame_count, 4)
+            frames = [path.read_bytes() for path in sorted(receipt.destination.glob("*.png"))]
+            self.assertEqual(len(set(frames)), 4)
+            sequences.append(frames)
+        self.assertEqual(*sequences)
 
 
 if __name__ in ("__main__", "<run_path>"):

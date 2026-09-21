@@ -15,6 +15,23 @@ def _decode(payload):
     return helpers["_pixels"](payload)
 
 
+class AuthoredCoefficient(m.DecimalNumber):
+    def get_formatter(self, **kwargs):
+        kwargs.setdefault("num_decimal_places", 1)
+        return super().get_formatter(**kwargs)
+
+    def char_to_mob(self, char):
+        if char == "i":
+            options = dict(self.text_config, slant="ITALIC")
+            return m.Text(char, **options)
+        return super().char_to_mob(char)
+
+
+class CoefficientMatrix(m.DecimalMatrix):
+    def element_to_mobject(self, element, **config):
+        return AuthoredCoefficient(element, **config)
+
+
 class ComplexReadouts(m.Scene):
     default_camera_config = dict(resolution=(192, 108), fps=8)
 
@@ -22,8 +39,11 @@ class ComplexReadouts(m.Scene):
         self.formula = m.Tex("z = 1.00", color=m.RED).scale(2.5).shift(1.7 * m.UP)
         self.readout = self.formula.make_number_changeable("1.00")
         self.readout.set_value(1 + 2j)
-        self.matrix = m.DecimalMatrix([[1 + 2j, -3j], [4 + 0j, 5 - 6j]],
-                                     decimal_config=dict(color=m.BLUE)).scale(1.7).shift(m.DOWN)
+        self.matrix = CoefficientMatrix(
+            [[1 + 2j, -3j], [4 + 0j, 5 - 6j]],
+            decimal_config=dict(color=m.BLUE,
+                                text_config={"font": "IBM Plex Sans", "weight": "BOLD"}),
+        ).scale(1.7).shift(m.DOWN)
         self.add(self.formula, self.matrix)
         self.wait(1 / 8)
         entries = list(self.matrix.elements)
@@ -37,6 +57,7 @@ class ComplexReadouts(m.Scene):
         assert self.formula.get_part_by_tex(r"\decimalmob")[0] is self.readout
         assert list(self.matrix.elements) == entries
         assert all(len(entry) == len(entry.num_string) for entry in entries)
+        assert [entry.get_tex() for entry in entries] == ["2.0–1.0i", "4.0", "5.0i", "0.0"]
 
 
 def render_complex_readouts(destination, seed=0):
