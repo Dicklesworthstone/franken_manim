@@ -334,6 +334,27 @@ def install_scene_execution(native: Any) -> None:
             }, True
         return execute(self, original_wait, (), kwargs, prepare_wait)
 
+    # The stock writer's partial-movie hooks used to refuse unconditionally.
+    # An acquired native subdivision now owns exactly those boundaries. Keep
+    # authored overrides and all ordinary writer paths on their original route;
+    # never suppress a hook merely because subdivide_output was requested.
+    writer_type = g.get("SceneFileWriter")
+    if writer_type is not None:
+        def owned_writer_hook(original):
+            @wraps(original)
+            def hook(writer):
+                if writer.subdivide_output and writer.write_to_movie:
+                    namespace = vars(writer.scene)
+                    collection = namespace.get("_fmn_subdivision_session")
+                    recording = getattr(collection, "_current", None)
+                    if (recording is not None
+                            and namespace.get("_fmn_owned_render_session") is recording):
+                        return None
+                return original(writer)
+            return hook
+        for name in ("begin_animation", "end_animation"):
+            setattr(writer_type, name, owned_writer_hook(getattr(writer_type, name)))
+
     Scene._play_animations = core
     Scene.play, Scene.wait = play, wait
     g["_FMN_SCENE_EXECUTION_INSTALLED"] = True

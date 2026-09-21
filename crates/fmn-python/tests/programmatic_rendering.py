@@ -176,7 +176,7 @@ assert existing.read_bytes() == b"preexisting-destination"
 
 class Early(MovingSquare):
     def construct(self):
-        self.add(m.Square(fill_opacity=1))
+        self.add(m.Square(fill_color=m.WHITE, fill_opacity=1))
         raise m.EndScene("normal stop")
 
 

@@ -332,6 +332,37 @@ class SubdivisionTests(unittest.TestCase):
             self.fail("primary exception replaced")
         self.assert_released(scene)
 
+    def test_legacy_partial_movie_flags_delegate_only_to_an_owned_native_clip(self):
+        scene = m.Scene(file_writer_config={"subdivide_output": True, "write_to_movie": True})
+        writer = scene.file_writer
+        with self.assertRaises(NotImplementedError):
+            writer.begin_animation()
+        with self.session(scene) as run:
+            scene.wait(.125)
+            scene.wait(.125)
+        self.assertEqual([s.render.frame_count for s in run.segments], [4, 4])
+        self.assertTrue(writer.subdivide_output and writer.write_to_movie)
+        with self.assertRaises(NotImplementedError):
+            writer.end_animation()
+        self.assert_released(scene)
+
+    def test_authored_writer_overrides_keep_one_begin_and_end_per_clip(self):
+        calls = []
+        class Writer(m.SceneFileWriter):
+            def begin_animation(self):
+                calls.append("begin")
+                return super().begin_animation()
+            def end_animation(self):
+                calls.append("end")
+                return super().end_animation()
+        scene = m.Scene()
+        scene.file_writer = Writer(scene, subdivide_output=True, write_to_movie=True)
+        with self.session(scene) as run:
+            scene.wait(.125)
+            scene.wait(.125)
+        self.assertEqual(calls, ["begin", "end", "begin", "end"])
+        self.assertEqual(run.result.frame_count, 8)
+
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(SubdivisionTests)
 result = unittest.TextTestRunner(verbosity=2).run(suite)
