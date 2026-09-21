@@ -35,11 +35,7 @@ fn _portal_prepare_recording_scene(
     fps: u32,
     seed: u64,
 ) -> PyResult<()> {
-    if width == 0
-        || height == 0
-        || fps == 0
-        || u64::from(width) * u64::from(height) > 16_777_216
-    {
+    if width == 0 || height == 0 || fps == 0 || u64::from(width) * u64::from(height) > 16_777_216 {
         return Err(PyValueError::new_err(
             "fresh recording requires positive dimensions and FPS, and at most 16777216 pixels",
         ));
