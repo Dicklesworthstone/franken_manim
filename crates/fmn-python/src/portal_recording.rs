@@ -17,6 +17,61 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "_portal_scene_clock",
         wrap_pyfunction!(_portal_scene_clock, module)?,
     )?;
+    module.setattr(
+        "_portal_prepare_recording_scene",
+        wrap_pyfunction!(_portal_prepare_recording_scene, module)?,
+    )?;
+    Ok(())
+}
+
+/// Configure a pristine Scene without acquiring or discarding an output sink.
+/// Live recording must never use this boundary: only a fresh full-scene run
+/// may replace its empty arena to select the native rational clock and seed.
+#[pyfunction]
+fn _portal_prepare_recording_scene(
+    scene: &Bound<'_, PyScene>,
+    width: u32,
+    height: u32,
+    fps: u32,
+    seed: u64,
+) -> PyResult<()> {
+    if width == 0
+        || height == 0
+        || fps == 0
+        || u64::from(width) * u64::from(height) > 16_777_216
+    {
+        return Err(PyValueError::new_err(
+            "fresh recording requires positive dimensions and FPS, and at most 16777216 pixels",
+        ));
+    }
+    check_available(scene)?;
+    portal_video::check_scene_ownership(scene)?;
+    let namespace = scene.getattr("__dict__")?;
+    let namespace = namespace.cast::<PyDict>()?;
+    for key in ["_fmn_owned_render_session", "_fmn_subdivision_session"] {
+        if namespace
+            .get_item(key)?
+            .is_some_and(|owner| !owner.is_none())
+        {
+            return Err(PyRuntimeError::new_err(
+                "this Scene already has an output owner",
+            ));
+        }
+    }
+    let mut config = fmn_config::Config::resolve(&[], None)
+        .map_err(native_error)?
+        .config;
+    config.camera.resolution = (width, height);
+    config.camera.fps = fps;
+    config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
+    let replacement =
+        Scene::new(RuntimeConfig::from_config(&config), seed).map_err(native_error)?;
+    // No Python descriptors or callbacks run while the new engine is installed.
+    // The same ownership check as ordinary rendering protects every live proxy.
+    let mut owner = scene.try_borrow_mut()?;
+    owner.engine = Rc::new(EngineState::new(replacement));
+    owner.render_invocations.clear();
+    owner.render_audio_inputs.clear();
     Ok(())
 }
 

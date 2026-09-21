@@ -33,8 +33,8 @@ clip. A selected zero-duration call uses the existing recording contract of
 capturing one final frame without advancing time.
 
 Supported formats are **GIF, y4m, and PNG sequences**. These are silent outputs.
-WAV and MP4/MOV soundtrack subdivision, CLI `--subdivide` routing, and automatic
-prerun are not provided by this live-recording API. Ordinary whole-scene and
+WAV and MP4/MOV soundtrack subdivision and automatic prerun are not provided.
+CLI subdivision currently selects one scene, not a batch or checkpoint run. Ordinary whole-scene and
 live single-clip recording remain available through the existing APIs. FPS
 must match the live rational clock; changing `camera.fps` is not resampling.
 
@@ -66,3 +66,35 @@ source ranges, nested groups, all three formats, cancellation, primary-error
 preservation, ownership refusals, publication races and partial receipts.
 `.github/workflows/subdivided-recording.yml` builds the exact committed source
 and runs the installed-wheel tests without source activation patches.
+
+## Fresh scenes and the console
+
+`render_subdivided_scene(SceneClass, "clips", format="gif", fps=24)` runs the
+constructor and lifecycle once and returns the collection receipt. It accepts
+`scene_kwargs`, `resolution`, `threads`, `animation_range=(start, exclusive_end)`
+and `max_segments`. `subdivided_render_session(scene, "clips", fps=24)` provides
+the same configured native clock for imperative add/play/wait authoring.
+Both require a pristine scene; neither silently discards populated geometry,
+live views, prior time, or an active output. Use `record_subdivided_scene` for an
+existing live scene instead.
+
+```sh
+fmn-python --robot source.py Motion --subdivide --format gif \
+  --resolution 640x360 --fps 24 --threads 4 --video_dir clips -n 2,5
+```
+
+`--video_dir` names a fresh collection directory. Without it, the default is
+`media/videos/<source-stem>/<Scene>/clips/`. Native format, dimension, FPS,
+thread and profile parsing remains shared with ordinary renders. The
+`--subdivide` lexer does not consume tokens belonging to other option values.
+Multiple scenes, write-all, checkpoint recovery, final-state still selection,
+and certified output are explicitly rejected before importing scene source.
+The one terminal robot record has `kind="render-subdivided"` and a
+`subdivision` collection receipt. On failure or interruption it includes the
+partial collection, its published clip paths and `artifact_published` rather
+than claiming rollback or losing successful earlier outputs.
+
+The fresh-scene path needs the matching native wheel, including the native
+pristine-scene clock configuration boundary. It never opens and cancels a
+dummy output just to configure FPS. `subdivided_rendering.py` adds real native
+acceptance for that boundary and the public console entrypoint.

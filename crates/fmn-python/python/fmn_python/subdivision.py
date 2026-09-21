@@ -16,7 +16,8 @@ from typing import Any
 
 from .recording import RecordingSession
 from .scene_execution import _note
-from .rendering import RenderResult, _positive_integer
+from .rendering import RenderResult, RenderSession, _positive_integer
+from .render_selection import apply_animation_range
 
 _OWNER = "_fmn_subdivision_session"
 _FORMATS = frozenset({"png_sequence", "gif", "y4m"})
@@ -99,6 +100,7 @@ class SubdividedRecordingSession:
         format: str = "gif", resolution: tuple[int, int] | None = None,
         fps: int | None = None, threads: int | None = None,
         max_segments: int = 10_000, _native: Any = None,
+        _prepare: bool = False, _selection=None,
     ) -> None:
         native = importlib.import_module("manimlib") if _native is None else _native
         text = os.fspath(destination)
@@ -112,10 +114,18 @@ class SubdividedRecordingSession:
         self.max_segments = _positive_integer(max_segments, "max_segments", 100_000)
         # Reuse all camera/writer/native clock validation, without acquiring a
         # sink or touching the filesystem. This is not an entered recording.
-        self._configuration = RecordingSession(
+        configuration = RenderSession if _prepare else RecordingSession
+        self._configuration = configuration(
             scene, self.destination, format=format, resolution=resolution,
             fps=fps, threads=threads, _native=native, _allow_subdivide=True,
         )
+        width, height = self._configuration.resolution
+        if width * height > 16_777_216 or self._configuration.threads > 96:
+            raise ValueError("subdivision requires at most 16777216 pixels and 1..96 threads")
+        self._prepare, self._selection = _prepare, _selection
+        if _prepare and not callable(getattr(native, "_portal_prepare_recording_scene", None)):
+            error_type = getattr(native, "_CapabilityError", RuntimeError)
+            raise error_type("fresh-scene subdivision requires a matching native wheel; live recording remains available")
         self.scene, self._native = scene, native
         self._state = "new"
         self._segments: list[RenderSegment] = []
@@ -149,6 +159,17 @@ class SubdividedRecordingSession:
             raise RuntimeError("this Scene already has an output owner")
         if namespace.get("_fmn_scene_execution") is not None:
             raise RuntimeError("subdivision must start between play/wait calls")
+        if self._prepare:
+            if os.path.lexists(self.destination):
+                raise FileExistsError(f"subdivision destination already exists: {self.destination}")
+            config = self._configuration
+            self._native._portal_prepare_recording_scene(
+                self.scene, *config.resolution, config.fps, config.seed,
+            )
+            self.scene.camera._core.set_pixel_shape(*config.resolution)
+            self.scene.camera.fps = config.fps
+            if self._selection is not None:
+                apply_animation_range(self.scene, self._selection)
         _, self._last_frame = self._native._portal_scene_clock(self.scene)
         # Claim a fresh namespace before any authored scene execution. Each
         # child is still published atomically/no-clobber by its native sink.

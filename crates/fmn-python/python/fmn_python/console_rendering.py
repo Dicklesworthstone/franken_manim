@@ -25,6 +25,11 @@ from .rendering import (
 from .scene_loading import SceneSource
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
+from .subdivision import SubdividedRenderResult
+from .subdivision_rendering import (
+    SUBDIVISION_HELP, subdivided_render_session, take_subdivision_option,
+)
+
 _VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
@@ -108,6 +113,14 @@ def _message(error):
 
 
 def _single_result(native, result, robot, source, selected):
+    if isinstance(result, SubdividedRenderResult):
+        return native._portal_cli_emit(
+            0, "success", "render-subdivided",
+            f"rendered {len(result.segments)} clips ({result.frame_count} frames) to {result.destination}",
+            robot, source=source, scene=selected, rendered=True,
+            destination=str(result.destination), frame_count=result.frame_count,
+            subdivision=result.as_dict(),
+        )
     details = result.as_dict()
     # Preserve the established CLI frame_count field for WAV consumers while
     # also exposing the unambiguous native sample-frame count.
@@ -141,13 +154,14 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             "Certified output, opener flags, and Studio",
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
-        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
+        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
     batch = bool(write_all or len(raw_positionals) > 2)
     try:
+        native_options, subdivide = take_subdivision_option(native_options, _VALUE_FLAGS)
         native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
         if recovery and not batch:
             raise ValueError("checkpoint recovery requires multiple scene names or --write_all")
@@ -159,6 +173,15 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(parser_args)
         options = select_still_format(options, native_options, still)
         output_options = _output_overrides(options)
+        if subdivide:
+            if batch or recovery:
+                raise ValueError("--subdivide currently requires one scene without batch/checkpoint recovery")
+            if still or options["format"] not in {"gif", "y4m", "png_sequence"}:
+                raise ValueError("--subdivide requires gif, y4m, or png_sequence without --skip_animations")
+            if options.get("reproducible"):
+                raise RuntimeError("CAPABILITY: subdivided Python recordings do not certify arbitrary host history")
+            if not callable(getattr(native, "_portal_prepare_recording_scene", None)):
+                raise RuntimeError("CAPABILITY: --subdivide requires a matching native wheel")
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
             _positive_integer(value, name)
         source = positionals[0]
@@ -181,6 +204,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         # Freeze both paths before module code or a constructor changes cwd.
         destination = None if supplied is None else Path(supplied).resolve()
         default_root = (Path("media") / "videos" / source_path.stem).resolve()
+        if subdivide and destination is not None and os.path.lexists(destination):
+            raise FileExistsError(f"subdivision destination already exists: {destination}")
         if batch:
             validate_batch_mode(native, options["format"], bool(options.get("reproducible")),
                                 recovery.get("checkpoint"))
@@ -247,7 +272,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     raise ValueError(f"scene {selected!r} was not declared by {source}; discovered: "
                                      + (", ".join(names) or "none"))
                 if destination is None:
-                    destination = (default_root / selected / "frames" if options["format"] == "png_sequence"
+                    destination = (default_root / selected / "clips" if subdivide else
+                                   default_root / selected / "frames" if options["format"] == "png_sequence"
                                    else default_root / (selected + "." + options["format"]))
                 if options.get("reproducible"):
                     sidecar = destination.parent / (destination.name + ".manifest")
@@ -259,15 +285,22 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 scene = scenes[selected]()
                 phase = "start"
                 _apply_output_options(scene, output_options)
-                session = RenderSession(
-                    scene, destination, format=options["format"],
-                    resolution=(width, height), fps=fps, threads=threads,
-                    animation_range=selection,
-                    reproducible=bool(options.get("reproducible")),
-                    sources=(lambda: loaded.sources) if options.get("reproducible") else None,
-                    runtime_identities=_runtime_identities(native),
-                    _native=native,
-                )
+                if subdivide:
+                    session = subdivided_render_session(
+                        scene, destination, format=options["format"],
+                        resolution=(width, height), fps=fps, threads=threads,
+                        animation_range=selection, _native=native,
+                    )
+                else:
+                    session = RenderSession(
+                        scene, destination, format=options["format"],
+                        resolution=(width, height), fps=fps, threads=threads,
+                        animation_range=selection,
+                        reproducible=bool(options.get("reproducible")),
+                        sources=(lambda: loaded.sources) if options.get("reproducible") else None,
+                        runtime_identities=_runtime_identities(native),
+                        _native=native,
+                    )
                 with session:
                     phase = "execute"
                     try:
@@ -289,7 +322,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        source=source, scene=selected, phase=phase,
                                        destination=None if destination is None else str(destination),
                                        notes=list(_error_notes(error)),
-                                       artifact_published=session is not None and session.artifact_published)
+                                       artifact_published=session is not None and session.artifact_published,
+                                       **({"subdivision": session.partial_result.as_dict()}
+                                          if subdivide and session is not None else {}))
     except Exception as error:
         partial = getattr(error, "render_batch_result", None)
         if phase == "batch" and isinstance(partial, BatchRenderResult):
@@ -316,7 +351,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        source=source, scene=selected, phase=phase,
                                        destination=None if destination is None else str(destination),
                                        notes=list(_error_notes(error)),
-                                       artifact_published=session is not None and session.artifact_published)
+                                       artifact_published=session is not None and session.artifact_published,
+                                       **({"subdivision": session.partial_result.as_dict()}
+                                          if subdivide and session is not None else {}))
     if batch:
         return _emit_result(native, report, robot, source, destination)
     return _single_result(native, session.result, robot, source, selected)

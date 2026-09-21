@@ -71,6 +71,10 @@ def __getattr__(name):
         from . import subdivision
 
         return getattr(subdivision, name)
+    if name in {"subdivided_render_session", "render_subdivided_scene"}:
+        from . import subdivision_rendering
+
+        return getattr(subdivision_rendering, name)
     if name == "embed_scene":
         from .embedded_shell import embed_scene
 
