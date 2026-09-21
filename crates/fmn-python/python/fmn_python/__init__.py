@@ -66,6 +66,11 @@ def __getattr__(name):
         from . import recording
 
         return getattr(recording, name)
+    if name in {"RenderSegment", "SubdividedRenderResult", "SubdividedRecordingSession",
+                "record_subdivided_scene"}:
+        from . import subdivision
+
+        return getattr(subdivision, name)
     if name == "embed_scene":
         from .embedded_shell import embed_scene
 

@@ -35,6 +35,7 @@ class RecordingSession(RenderSession):
         self, scene: Any, destination: os.PathLike[str] | str, *,
         format: str | None = None, resolution: tuple[int, int] | None = None,
         fps: int | None = None, threads: int | None = None, _native: Any = None,
+        _allow_subdivide: bool = False,
     ) -> None:
         native = importlib.import_module("manimlib") if _native is None else _native
         if not isinstance(scene, native.Scene):
@@ -56,7 +57,8 @@ class RecordingSession(RenderSession):
                 raise error_type("the native portal does not provide live recording; rebuild the matching wheel")
         clock_fps, _ = native._portal_scene_clock(scene)
         super().__init__(scene, path, format=format, resolution=resolution,
-                         fps=clock_fps if fps is None else fps, threads=threads, _native=native)
+                         fps=clock_fps if fps is None else fps, threads=threads, _native=native,
+                         _allow_subdivide=_allow_subdivide)
         if self.fps != clock_fps:
             raise ValueError("recording FPS must equal the live Scene clock; recording cannot resample it")
         self.start_frame: int | None = None

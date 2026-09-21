@@ -201,6 +201,7 @@ class RenderSession:
         sources: SourceInputs | None = None,
         runtime_identities: dict[str, str] | None = None,
         _native: Any = None,
+        _allow_subdivide: bool = False,
     ) -> None:
         native = importlib.import_module("manimlib") if _native is None else _native
         if not isinstance(reproducible, bool):
@@ -230,7 +231,7 @@ class RenderSession:
                     "CAPABILITY: windows-x86-64 is excluded from certified "
                     "reproducibility by ADR-0019"
                 )
-        _validate_writer_options(scene, format, native)
+        _validate_writer_options(scene, format, native, allow_subdivide=_allow_subdivide)
         camera = scene.camera
         dimensions = camera.get_pixel_shape() if resolution is None else resolution
         try:
@@ -490,13 +491,14 @@ def _apply_output_options(scene: Any, options: dict[str, Any]) -> None:
         scene.camera.background_rgba[3] = 0.0
 
 
-def _validate_writer_options(scene: Any, format: str, native: Any) -> None:
+def _validate_writer_options(scene: Any, format: str, native: Any, *,
+                             allow_subdivide: bool = False) -> None:
     writer = getattr(scene, "file_writer", None)
     if writer is None:
         return
     unsupported = []
     for name in ("subdivide_output", "open_file_upon_completion", "show_file_location_upon_completion"):
-        if getattr(writer, name, False):
+        if getattr(writer, name, False) and not (allow_subdivide and name == "subdivide_output"):
             unsupported.append(name)
     if format != "wav":
         for name in ("saturation", "gamma"):

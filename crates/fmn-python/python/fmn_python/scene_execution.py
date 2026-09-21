@@ -6,6 +6,8 @@ it neither rewinds geometry/clock/output nor implements another frame loop.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from functools import wraps
 import math
 from typing import Any
@@ -234,27 +236,41 @@ def install_scene_execution(native: Any) -> None:
                 leave(self, owner)
 
     def execute(scene, operation, args, kwargs, prepare):
-        owner = enter(scene)
-        try:
-            args, kwargs, hooks = prepare(scene, args, kwargs)
-            if hooks:
-                scene.pre_play()
-            result = operation(scene, *args, **kwargs)
-            if hooks:
-                scene.post_play()
-            return result
-        except BaseException as error:
-            # An older animation-specific wrapper may throw while unwinding.
-            # Keep the execution failure, not that secondary cleanup failure.
-            primary = owner.primary if owner.primary is not None else error
-            if primary is not error:
-                _note(primary, "outer animation cleanup also failed: " + type(error).__name__)
-            owner.unwind(primary)
-            if primary is error:
-                raise
-            raise primary from None
-        finally:
-            leave(scene, owner)
+        # Acquire a clip before entering the execution boundary, and finish it
+        # only after all animation locks have been released. The same native
+        # recording generation handles frames; this is not another scheduler.
+        if vars(scene).get(_OWNER_KEY) is not None:
+            raise RuntimeError("cannot start another play/wait while this Scene is executing one")
+        subdivision = vars(scene).get("_fmn_subdivision_session")
+        capture = (nullcontext(None) if subdivision is None else
+                   subdivision._segment("wait" if operation is original_wait else "play"))
+        with capture as segment:
+            owner = enter(scene)
+            try:
+                args, kwargs, hooks = prepare(scene, args, kwargs)
+                if hooks:
+                    scene.pre_play()
+                if segment is not None:
+                    # Range selection belongs to pre_play. In particular, do
+                    # not publish an endpoint still for skipped preroll or an
+                    # empty play(), and do not run authored pre_play twice.
+                    segment.select(hooks and not scene.skip_animations)
+                result = operation(scene, *args, **kwargs)
+                if hooks:
+                    scene.post_play()
+                return result
+            except BaseException as error:
+                # An older animation-specific wrapper may throw while unwinding.
+                # Keep the execution failure, not that secondary cleanup failure.
+                primary = owner.primary if owner.primary is not None else error
+                if primary is not error:
+                    _note(primary, "outer animation cleanup also failed: " + type(error).__name__)
+                owner.unwind(primary)
+                if primary is error:
+                    raise
+                raise primary from None
+            finally:
+                leave(scene, owner)
 
     def prepare_play(scene, animations, kwargs):
         unknown = set(kwargs) - {"run_time", "rate_func", "lag_ratio"}
