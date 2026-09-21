@@ -9,6 +9,22 @@ import numpy as np
 
 
 class ComplexMatrixTests(unittest.TestCase):
+    def test_bound_cells_become_one_live_matrix_without_duplicate_roots(self):
+        scene = m.Scene(camera_config=dict(resolution=(96, 54), fps=4))
+        circle, square = m.Circle(radius=.2), m.Square(side_length=.3)
+        scene.add(circle, square)
+        matrix = m.Matrix([[circle, square]])
+        self.assertIs(matrix.elements[0], circle)
+        self.assertIs(matrix.elements[1], square)
+        scene.add(matrix)
+        self.assertEqual(list(scene.mobjects), [matrix])
+        before = circle.get_center().copy()
+        scene.play(circle.animate.shift(m.UP), run_time=.25)
+        np.testing.assert_allclose(circle.get_center(), before + m.UP, atol=1e-6)
+        self.assertEqual(list(scene.mobjects), [matrix])
+        self.assertIs(matrix.get_row(0)[0], circle)
+        self.assertIs(matrix.get_column(0)[0], circle)
+
     def test_default_matrix_preserves_authored_native_cells_and_grid_aliases(self):
         for container in ("list", "array", "iterators"):
             with self.subTest(container=container):
