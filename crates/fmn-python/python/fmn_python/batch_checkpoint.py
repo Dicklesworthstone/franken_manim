@@ -15,6 +15,7 @@ import tempfile
 from typing import Any
 
 _SCHEMA = "fmn-python.batch-checkpoint"
+_VERSION = 2
 _MAX_BYTES = 32 * 1024 * 1024
 _MAX_FILES = 200000
 
@@ -22,6 +23,16 @@ _MAX_FILES = 200000
 def _json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=True, allow_nan=False,
                       sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _scene_identity(scene):
+    cls = scene if isinstance(scene, type) else type(scene)
+    identity = {"module": cls.__module__, "qualname": cls.__qualname__}
+    if any(not isinstance(value, str) or not value for value in identity.values()):
+        raise ValueError("checkpoint scene identity requires a module and qualified class name")
+    # Separate fields avoid collisions between module a.b / class C and
+    # module a / nested class b.C. Source/asset versions remain resume_key's job.
+    return identity
 
 
 def _signature(info):
@@ -154,7 +165,8 @@ class BatchCheckpoint:
                 raise ValueError("checkpoint cannot be a symlink")
             if self.resume:
                 document = _read_document(self.path)
-                if not isinstance(document, dict) or document.get("schema") != _SCHEMA or document.get("version") != 1:
+                if (not isinstance(document, dict) or document.get("schema") != _SCHEMA
+                        or type(document.get("version")) is not int or document["version"] != _VERSION):
                     raise ValueError("unsupported batch checkpoint schema/version")
                 if document.get("key") != self.key:
                     raise ValueError("checkpoint resume_key does not match")
@@ -194,13 +206,16 @@ class BatchCheckpoint:
         # constructor parameters JSON-only when checkpointing so changes are
         # rejected rather than silently reusing another invocation's outputs.
         plan = {"jobs": [{"name": job.name, "destination": str(path),
-                          "scene": (job.scene if isinstance(job.scene, type) else type(job.scene)).__qualname__,
+                          "scene": _scene_identity(job.scene),
                           "scene_kwargs": dict(job.scene_kwargs or {})}
                          for job, path in zip(jobs, destinations)], "options": options}
         self.plan = json.loads(_json(plan))
         if self.document is None:
             return
-        if self.document.get("plan") != self.plan:
+        # Python container equality conflates True, 1 and 1.0 (and +/-0.0).
+        # Their constructor behavior can differ, even with an unchanged key.
+        # Canonical JSON retains those distinctions but ignores mapping order.
+        if _json(self.document.get("plan")) != _json(self.plan):
             raise ValueError("checkpoint scene plan or render options do not match")
         rows = self.document.get("outcomes")
         if not isinstance(rows, list) or len(rows) != len(jobs):
@@ -237,7 +252,7 @@ class BatchCheckpoint:
                 if receipt.format != "png_sequence" and (len(files) != 1 or files[0]["bytes"] != receipt.bytes or files[0]["sha256"] != receipt.digest):
                     raise ValueError("published artifact does not match its native receipt")
                 self.artifacts[outcome.name] = files
-        payload = _json({"schema": _SCHEMA, "version": 1, "key": self.key,
+        payload = _json({"schema": _SCHEMA, "version": _VERSION, "key": self.key,
                          "plan": self.plan, "outcomes": rows, "artifacts": self.artifacts})
         if len(payload) > _MAX_BYTES:
             raise ValueError("checkpoint exceeds its byte budget")
