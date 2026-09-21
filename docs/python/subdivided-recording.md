@@ -32,9 +32,10 @@ the native scene semantics, but omitted segments do not publish clips. An empty
 clip. A selected zero-duration call uses the existing recording contract of
 capturing one final frame without advancing time.
 
-Supported formats are **GIF, y4m, and PNG sequences**. These are silent outputs.
-WAV and MP4/MOV soundtrack subdivision and automatic prerun are not provided.
-CLI subdivision supports one scene or named/write-all batches, but not checkpoint recovery.
+Supported formats are **GIF, y4m, PNG sequences, WAV, MP4, and MOV**. GIF, y4m,
+and PNG sequences are silent. WAV uses the native mixer/codec; MP4 and MOV
+use the existing governed ffmpeg encoder and audio muxer. Automatic prerun is
+not provided. CLI subdivision supports one scene or named/write-all batches, but not checkpoint recovery.
 Ordinary whole-scene and
 live single-clip recording remain available through the existing APIs. FPS
 must match the live rational clock; changing `camera.fps` is not resampling.
@@ -101,3 +102,53 @@ The fresh-scene path needs the matching native wheel, including the native
 pristine-scene clock configuration boundary. It never opens and cancels a
 dummy output just to configure FPS. `subdivided_rendering.py` adds real native
 acceptance for that boundary and the public console entrypoint.
+
+## Audio-bearing clips
+
+```python
+from fmn_python import render_subdivided_scene
+
+result = render_subdivided_scene(Motion, "clips", format="mp4", fps=30)
+```
+
+The live `record_subdivided_scene` API and console `--subdivide` accept the same
+formats. Existing `--vcodec`, `--pix_fmt`, `--ffmpeg_bin`, and transparent MOV
+options use the native negotiation and sandboxed publication path unchanged.
+A missing encoder is a capability refusal, not a silent format substitution.
+
+Each audio clip uses all cues authored by that clip's completion, including
+background cues added before the collection or in an earlier segment. Mixing
+keeps absolute scene placement, resampling phase, channel conversion, gain and
+ducking. The half-open interval is bounded by independently rounded rational
+scene-to-sample endpoints, so adjacent WAV windows neither lose nor repeat a
+sample, even at frame rates such as 29 FPS. Long cue tails cannot extend a
+clip; absent cues produce exact-duration silence. Skipped calls publish
+nothing; the next selected clip samples the background at its later scene
+position instead of restarting it. A discontinuous skip inside a single
+audio-bearing call is refused rather than flattened into different audio.
+
+A zero-duration WAV clip has zero sample frames. A zero-duration MP4/MOV call
+uses the established one-final-video-frame rule and the corresponding bounded
+audio interval. AAC encoding may pad decoded output; encoded video is not a
+bit-certified artifact. Native WAV samples are the exact mixing boundary.
+
+Streaming publication is deliberate: a later cue with a negative offset cannot
+rewrite an already published earlier clip. Sound source bytes are re-read at
+clip completion, and each receipt records the actual input content hashes.
+Changing an input file affects later publications, not earlier ones. Whole-mix
+versus concatenated-WAV equivalence requires the same cue set and source bytes
+to be available for every compared interval. Automatic offline prerun that
+discovers future authored effects is not implied.
+
+Ordinary `record_scene` is unchanged: a single live insert includes only cues
+added during that recording and retains its existing extend-to-cue-end rule.
+Subdivision explicitly selects a separate bounded scene-audio mode instead of
+silently changing the established recording contract.
+
+`SubdividedRenderResult.sample_frames` and the robot receipt's `sample_frames`
+report WAV sample-frame totals separately from video frame counts. Per-clip
+receipts include input/PCM hashes and governed encoder/decoder/mux invocation
+facts. Failed mixing or muxing cancels that clip without deleting previous
+publications. Tests in `subdivided_audio.py` compare real native WAV samples
+against the ordinary whole-scene mixer and independently decode motion, alpha
+and audio from the MP4/MOV clips.

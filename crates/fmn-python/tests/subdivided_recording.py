@@ -268,7 +268,7 @@ class SubdivisionTests(unittest.TestCase):
 
     def test_resource_and_format_admission_precedes_filesystem(self):
         scene = m.Scene()
-        for options in ({"fps": 12}, {"format": "mp4"}, {"format": "wav"},
+        for options in ({"fps": 12}, {"format": "png"}, {"format": "svg"},
                         {"max_segments": 0}, {"max_segments": True}, {"threads": 0}):
             with self.subTest(options=options):
                 with self.assertRaises((ValueError, TypeError)):

@@ -14,6 +14,10 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(_portal_begin_recording, module)?,
     )?;
     module.setattr(
+        "_portal_begin_audio_clip",
+        wrap_pyfunction!(_portal_begin_audio_clip, module)?,
+    )?;
+    module.setattr(
         "_portal_scene_clock",
         wrap_pyfunction!(_portal_scene_clock, module)?,
     )?;
@@ -131,6 +135,57 @@ fn _portal_begin_recording(
     fps: u32,
     threads: usize,
 ) -> PyResult<i64> {
+    begin_recording(
+        scene,
+        destination,
+        format,
+        width,
+        height,
+        fps,
+        threads,
+        false,
+    )
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn _portal_begin_audio_clip(
+    scene: &Bound<'_, PyScene>,
+    destination: String,
+    format: &str,
+    width: u32,
+    height: u32,
+    fps: u32,
+    threads: usize,
+) -> PyResult<i64> {
+    if !matches!(format, "wav" | "mp4" | "mov") {
+        return Err(PyValueError::new_err(
+            "audio clips require wav, mp4, or mov",
+        ));
+    }
+    begin_recording(
+        scene,
+        destination,
+        format,
+        width,
+        height,
+        fps,
+        threads,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn begin_recording(
+    scene: &Bound<'_, PyScene>,
+    destination: String,
+    format: &str,
+    width: u32,
+    height: u32,
+    fps: u32,
+    threads: usize,
+    scene_audio: bool,
+) -> PyResult<i64> {
     if destination.is_empty() || destination.contains('\0') {
         return Err(PyValueError::new_err(
             "recording destination must be nonempty and contain no NUL",
@@ -192,7 +247,11 @@ fn _portal_begin_recording(
             "recording cannot start at a negative scene frame",
         ));
     }
-    audio.begin_at_request(first_cue);
+    if scene_audio {
+        audio.use_scene_window();
+    } else {
+        audio.begin_at_request(first_cue);
+    }
     let (mut session, _unused_runtime_config) = PortalRenderSession::new(
         destination,
         width,

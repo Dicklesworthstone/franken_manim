@@ -20,7 +20,8 @@ from .rendering import RenderResult, RenderSession, _positive_integer
 from .render_selection import apply_animation_range
 
 _OWNER = "_fmn_subdivision_session"
-_FORMATS = frozenset({"png_sequence", "gif", "y4m"})
+_AUDIO_FORMATS = frozenset({"wav", "mp4", "mov"})
+_FORMATS = frozenset({"png_sequence", "gif", "y4m"}) | _AUDIO_FORMATS
 
 
 @dataclass(frozen=True)
@@ -53,13 +54,19 @@ class SubdividedRenderResult:
         return sum(segment.render.frame_count or 0 for segment in self.segments)
 
     @property
+    def sample_frames(self) -> int | None:
+        counts = [segment.render.sample_frames for segment in self.segments
+                  if segment.render.sample_frames is not None]
+        return sum(counts) if counts else None
+
+    @property
     def bytes(self) -> int:
         return sum(segment.render.bytes for segment in self.segments)
 
     def as_dict(self) -> dict[str, Any]:
         return {"schema": "fmn.subdivided-render", "version": 1,
                 "destination": str(self.destination), "completed": self.completed,
-                "frame_count": self.frame_count, "bytes": self.bytes,
+                "frame_count": self.frame_count, "sample_frames": self.sample_frames, "bytes": self.bytes,
                 "segments": [segment.as_dict() for segment in self.segments],
                 "unreceipted_artifacts": [str(path) for path in self.unreceipted_artifacts]}
 
@@ -85,8 +92,11 @@ class SubdividedRecordingSession:
 
     Existing mobjects, live array views, updaters, RNG and rational time retain
     their native owners. Resolution may differ from the scene camera; FPS must
-    equal the existing native clock. PNG sequences, GIF and y4m are supported;
-    these are silent formats. Video/WAV soundtrack subdivision is not implied.
+    equal the existing native clock. PNG sequences, GIF and y4m are silent.
+    WAV, MP4 and MOV use native sample-exact scene-audio windows: overlapping
+    cues retain their original phase, gain and ducking without extending clips.
+    Cues are those authored by clip completion; already published clips are
+    immutable, not retroactively rewritten by later cues or source-file edits.
 
     Names retain the zero-based Scene.num_plays index: ``segment-000003.gif``
     or ``segment-000003/`` for a PNG sequence. Skipped segments and empty
@@ -112,15 +122,20 @@ class SubdividedRecordingSession:
         if not text or "\0" in text:
             raise ValueError("subdivision destination must be nonempty and contain no NUL")
         if not isinstance(format, str) or format not in _FORMATS:
-            raise ValueError("subdivision requires png_sequence, gif, or y4m")
+            raise ValueError("subdivision requires png_sequence, gif, y4m, wav, mp4, or mov")
         self.destination = Path(os.path.abspath(text))
         self.max_segments = _positive_integer(max_segments, "max_segments", 100_000)
         # Reuse all camera/writer/native clock validation, without acquiring a
         # sink or touching the filesystem. This is not an entered recording.
+        audio_clip = format in _AUDIO_FORMATS
+        if audio_clip and not callable(getattr(native, "_portal_begin_audio_clip", None)):
+            error_type = getattr(native, "_CapabilityError", RuntimeError)
+            raise error_type("audio subdivision requires a matching native wheel")
         configuration = RenderSession if _prepare else RecordingSession
         self._configuration = configuration(
             scene, self.destination, format=format, resolution=resolution,
             fps=fps, threads=threads, _native=native, _allow_subdivide=True,
+            **({} if _prepare else {"_scene_audio": audio_clip}),
         )
         width, height = self._configuration.resolution
         if width * height > 16_777_216 or self._configuration.threads > 96:
@@ -221,7 +236,7 @@ class SubdividedRecordingSession:
         recording = RecordingSession(
             self.scene, path, format=config.format, resolution=config.resolution,
             fps=config.fps, threads=config.threads, _native=self._native,
-            _allow_subdivide=True,
+            _allow_subdivide=True, _scene_audio=config.format in _AUDIO_FORMATS,
         )
         self._current = recording
         try:

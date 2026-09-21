@@ -18,6 +18,8 @@ pub(crate) struct PortalAudioInput {
 pub(crate) struct PortalAudio {
     decoder: AudioDecoder,
     first_request: usize,
+    scene_window: bool,
+    minimum_window_frames: i64,
     pub(crate) inputs: Vec<PortalAudioInput>,
 }
 
@@ -53,6 +55,8 @@ impl PortalAudio {
         Ok(Box::new(Self {
             decoder,
             first_request: 0,
+            scene_window: false,
+            minimum_window_frames: i64::from(video.is_some()),
             inputs: Vec::new(),
         }))
     }
@@ -60,6 +64,14 @@ impl PortalAudio {
     /// A live recording includes only cues authored after it acquired output.
     pub(crate) fn begin_at_request(&mut self, first_request: usize) {
         self.first_request = first_request;
+    }
+
+    /// Subdivided clips hear all currently authored cues, cropped on the
+    /// absolute scene-sample timeline. This is distinct from live inserts,
+    /// which intentionally include only cues added after recording starts.
+    pub(crate) fn use_scene_window(&mut self) {
+        self.first_request = 0;
+        self.scene_window = true;
     }
 
     pub(crate) fn mix(
@@ -76,11 +88,31 @@ impl PortalAudio {
                     "recording sound history was truncated; cancel before restoring scene state",
                 )
             })?;
-        if requests.is_empty() {
+        if requests.is_empty() && !self.scene_window {
             return Ok(None);
         }
         let config = fmn_output::MixerConfig::default();
         let time = scene.time();
+        let window = if self.scene_window {
+            let (start, end) = timeline.scene_window()?;
+            let end = end.max(
+                start
+                    .checked_add(self.minimum_window_frames)
+                    .ok_or_else(|| PyOverflowError::new_err("audio window overflow"))?,
+            );
+            let start = fmn_output::frames_to_samples(start, time.fps(), config.sample_rate)
+                .map_err(native_error)?;
+            let end = fmn_output::frames_to_samples(end, time.fps(), config.sample_rate)
+                .map_err(native_error)?;
+            if end < start || end as u64 > config.max_output_frames {
+                return Err(PyValueError::new_err(
+                    "audio window exceeds the native timeline budget",
+                ));
+            }
+            Some((start as u64, (end - start) as u64))
+        } else {
+            None
+        };
         let timeline_frames = fmn_output::frames_to_samples(
             timeline.output_frame(time.frames())?,
             time.fps(),
@@ -119,7 +151,11 @@ impl PortalAudio {
             mixer
                 .add(fmn_output::SoundCue {
                     audio: decoded.audio,
-                    frame: timeline.output_frame(request.time.frames())?,
+                    frame: if window.is_some() {
+                        request.time.frames()
+                    } else {
+                        timeline.output_frame(request.time.frames())?
+                    },
                     fps: request.time.fps(),
                     time_offset: request.time_offset,
                     gain: request.gain,
@@ -128,7 +164,12 @@ impl PortalAudio {
                 .map_err(native_error)?;
             self.inputs.push(input);
         }
-        mixer.mix(threads).map(Some).map_err(native_error)
+        match window {
+            Some((start, frames)) => mixer.mix_window(start, frames, threads),
+            None => mixer.mix(threads),
+        }
+        .map(Some)
+        .map_err(native_error)
     }
 
     pub(crate) fn invocations(&self) -> Vec<fmn_output::InvocationReport> {

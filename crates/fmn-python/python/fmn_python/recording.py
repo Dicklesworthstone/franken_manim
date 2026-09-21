@@ -36,6 +36,7 @@ class RecordingSession(RenderSession):
         format: str | None = None, resolution: tuple[int, int] | None = None,
         fps: int | None = None, threads: int | None = None, _native: Any = None,
         _allow_subdivide: bool = False,
+        _scene_audio: bool = False,
     ) -> None:
         native = importlib.import_module("manimlib") if _native is None else _native
         if not isinstance(scene, native.Scene):
@@ -61,6 +62,10 @@ class RecordingSession(RenderSession):
                          _allow_subdivide=_allow_subdivide)
         if self.fps != clock_fps:
             raise ValueError("recording FPS must equal the live Scene clock; recording cannot resample it")
+        self._scene_audio = _scene_audio
+        if _scene_audio and not callable(getattr(native, "_portal_begin_audio_clip", None)):
+            error_type = getattr(native, "_CapabilityError", RuntimeError)
+            raise error_type("audio subdivision requires a matching native wheel")
         self.start_frame: int | None = None
         self.end_frame: int | None = None
 
@@ -76,7 +81,9 @@ class RecordingSession(RenderSession):
         self._check_output_owner()
         # A refusal must not abort someone else's live generation. Native code
         # rechecks ownership after getters and enforces the live FPS again.
-        start = self._native._portal_begin_recording(
+        begin = (self._native._portal_begin_audio_clip if self._scene_audio else
+                 self._native._portal_begin_recording)
+        start = begin(
             self.scene, str(self.destination), self.format, *self.resolution,
             self.fps, self.threads,
         )

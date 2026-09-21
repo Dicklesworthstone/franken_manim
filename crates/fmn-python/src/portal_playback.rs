@@ -60,6 +60,18 @@ impl OutputTimeline {
         Ok(())
     }
 
+    /// Absolute scene interval for one selected per-call audio clip. A
+    /// mid-call cut is not a contiguous interval and must never be flattened
+    /// silently into different audio. Ordinary subdivision selects at pre_play.
+    pub(super) fn scene_window(&self) -> PyResult<(i64, i64)> {
+        if !self.omitted.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "audio subdivision cannot contain skipped intervals inside one clip",
+            ));
+        }
+        Ok((self.origin_frame, self.last_frame))
+    }
+
     pub(super) fn output_frame(&self, frame: i64) -> PyResult<i64> {
         if frame < self.origin_frame || frame > self.last_frame {
             return Err(PyRuntimeError::new_err(
