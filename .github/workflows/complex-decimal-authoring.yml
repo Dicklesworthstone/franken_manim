@@ -7,6 +7,9 @@ on:
       - 'scripts/patches/complex-decimal-activation.patch'
       - 'crates/fmn-python/python/fmn_python/decimal_authoring.py'
       - 'crates/fmn-python/tests/decimal_authoring.py'
+      - 'crates/fmn-python/python/fmn_python/matrix.py'
+      - 'crates/fmn-python/tests/complex_matrix.py'
+      - 'crates/fmn-python/tests/complex_readouts_render.py'
   workflow_dispatch:
 permissions:
   contents: write
@@ -25,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
+          ref: main
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.13'
@@ -39,10 +42,28 @@ jobs:
       - name: Activate readouts and replace obsolete refusal expectations
         run: |
           set -euo pipefail
-          if ! grep -q '"install_decimal_authoring"' crates/fmn-python/python/fmn_python/initialization.py; then
-            git apply --check scripts/patches/complex-decimal-activation.patch
-            git apply scripts/patches/complex-decimal-activation.patch
-          fi
+          patch=scripts/patches/complex-decimal-activation.patch
+          for path in crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/tests/bridge.py; do
+            if git apply --check --include="$path" "$patch"; then
+              git apply --include="$path" "$patch"
+            else
+              git apply --reverse --check --include="$path" "$patch"
+            fi
+          done
+          python - <<'PYCODE'
+          from pathlib import Path
+          path = Path("scripts/check_portal_runtime.sh")
+          text = path.read_text()
+          marker = "for suite in "
+          required = ("decimal_authoring", "complex_matrix", "complex_readouts_render")
+          start = text.index(marker) + len(marker)
+          end = text.index("; do", start)
+          current = text[start:end].split()
+          missing = [suite for suite in required if suite not in current]
+          if missing:
+              text = text[:start] + " ".join(missing + current) + text[end:]
+              path.write_text(text)
+          PYCODE
           git diff --check
           rustup show active-toolchain
       - name: Build the current native wheel and run readout regressions
@@ -52,7 +73,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/complex-decimal-wheel 2>&1 | tee /tmp/complex-decimal-build.log
           python -m venv target/complex-decimal-venv
           target/complex-decimal-venv/bin/python -m pip install 'numpy==2.5.2' target/complex-decimal-wheel/*.whl
-          for suite in decimal_authoring matrix_authoring live_tex live_tex_render; do
+          for suite in decimal_authoring complex_matrix matrix_authoring live_tex live_tex_render complex_readouts_render; do
             target/complex-decimal-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/complex-decimal-$suite.log
           done
       - name: Publish verified activation directly to main

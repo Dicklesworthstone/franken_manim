@@ -46,3 +46,30 @@ accepts `f64`; Rust callers compose scalar readouts for complex values. The nati
 real-number builder remains unchanged.
 
 Acceptance coverage: `crates/fmn-python/tests/decimal_authoring.py`.
+
+## Complex matrix cells and live equations
+
+`Matrix`, `DecimalMatrix`, `IntegerMatrix` and `TexMatrix` accept complex
+entries from lists, NumPy arrays or row iterators. Numeric cells are live
+`DecimalNumber` objects, not a typeset Python representation of a complex
+number. `IntegerMatrix` truncates each displayed component while retaining the
+original complex value. Existing real-only native constructor paths are unchanged.
+
+```python
+class ComplexCells(Scene):
+    def construct(self):
+        matrix = DecimalMatrix([[1 + 2j, -3j], [4, 5 - 6j]])
+        self.add(matrix)
+        self.play(ChangeDecimalToValue(matrix.get_entries()[0], -2j))
+```
+
+A readout returned by `Tex.make_number_changeable` supports the same complex
+updates and remains addressable through its live TeX span. Numeric animations
+keep matrix entries, row/column aliases, brackets and top-level scene roots
+intact. Matrix layout is established at construction; changing a cell does not
+automatically reflow other cells or resize brackets.
+
+The native PNG integration test is
+`crates/fmn-python/tests/complex_readouts_render.py`. It checks visible changes
+in both a live formula and a matrix across six frames, thread-count equality,
+and cancellation of a generation whose readout update fails.

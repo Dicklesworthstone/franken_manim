@@ -128,10 +128,15 @@ verified against live Python for the whole corpus). `Integer.value()`
 rounds half-to-even (`np.round` semantics); its *display* truncates, as
 the Reference's does.
 
-Two honest scope lines: the complex formatter
-(`hide_zero_components_on_complex`) is not ported, and `unit` is plain
-text — a leading `^` is an alignment marker, never a TeX command; write
-the glyph itself (`°`), which the bundled faces map.
+The native Rust scalar readout accepts `f64`. The Python portal composes
+those same native readouts for general complex values, including
+`hide_zero_components_on_complex`, signed imaginary components, and live
+transitions between real, imaginary and full-complex displays. Matrix
+constructors route complex cells through that composition rather than
+float-coercing or stringifying them. No Python glyph engine is involved.
+`unit` remains plain text — a leading `^` is an alignment marker, never a
+TeX command; write the glyph itself (`°`), which the bundled faces map.
+See [complex-valued live readouts](../python/complex-readouts.md).
 
 Native layout work is explicitly bounded. `DecimalNumber` admits 4,096
 display characters by default, covering numeric glyphs, ellipsis, and unit;
@@ -176,8 +181,8 @@ mouse/keyboard wiring is Proscenium's (W9), not the library's.
   rendering. `pifont` is gone; so is every other TeX package.
 - **`DecimalNumber.unit` is text.** A scene passing `unit="^\\circ"` gets
   the alignment marker and then literal characters — write `unit="°"`
-  instead. Complex numbers need a scene-side pair of `DecimalNumber`s for
-  now.
+  instead (or `unit="^°"` for raised alignment). Python callers can pass a
+  complex value directly; native Rust callers compose scalar readouts.
 - **Rust-side typing is explicit.** The Reference's runtime dispatch in
   `Matrix` (float → `DecimalNumber`, str → `Tex`) is a constructor choice
   here: `DecimalMatrix`/`IntegerMatrix`/`TexMatrix`/`MobjectMatrix` own the
@@ -214,3 +219,10 @@ mouse/keyboard wiring is Proscenium's (W9), not the library's.
 - `crates/fmn-library/src/controls.rs` — the control compositions and the
   tracker binding (`add_scalar_control`), with the W9-deferred event hooks
   named in the module documentation.
+
+- `crates/fmn-python/tests/decimal_authoring.py` and `complex_matrix.py` —
+  complex formatting, mode changes, anchors/styles, copy identity, combined
+  resource limits and failure-atomic native cell construction.
+- `crates/fmn-python/tests/complex_readouts_render.py` — live TeX readouts and
+  matrix cells in six native PNG frames, byte-equal at 1/4/16 threads, with
+  failed-generation publication cancelled.
