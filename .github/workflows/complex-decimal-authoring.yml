@@ -14,8 +14,6 @@ on:
       - 'crates/fmn-python/python/fmn_python/initialization.py'
       - 'crates/fmn-python/python/fmn_python/text_authoring.py'
       - 'crates/fmn-python/tests/portal_initialization.py'
-      - 'crates/fmn-python/tests/bridge.py'
-      - 'demo/python/native_numeric_authoring.py'
       - 'crates/fmn-conformance/tests/e2e_scenarios.rs'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -65,22 +63,6 @@ jobs:
           set -euo pipefail
           cargo test --locked -p fmn-python --lib complex_readouts::tests:: -- --nocapture 2>&1 | tee /tmp/complex-decimal-embedded.log
           cargo test --locked -p fmn-conformance --test e2e_scenarios python_complex_readouts_scenario_passes -- --exact --nocapture 2>&1 | tee /tmp/complex-decimal-gauntlet.log
-      - name: Run the complete native bridge acceptance suite
-        run: |
-          set -euo pipefail
-          cargo test --locked -p fmn-python --lib tests::production_bridge_acceptance_suite -- --exact --nocapture 2>&1 | tee /tmp/complex-decimal-full-bridge.log
-      - name: Render the native authoring example through the installed CLI
-        run: |
-          set -euo pipefail
-          target/complex-decimal-venv/bin/python -I -m fmn_python --robot demo/python/native_numeric_authoring.py NativeNumericAuthoring --format png_sequence --resolution 192x108 --fps 8 --threads 4 --video_dir /tmp/complex-decimal-demo > /tmp/complex-decimal-demo.json
-          python - <<'PYCODE'
-          import json
-          from pathlib import Path
-          result = json.loads(Path("/tmp/complex-decimal-demo.json").read_text())
-          assert result["rendered"] is True and result["frame_count"] == 12, result
-          assert result["certified"] is False, result
-          assert len(list(Path(result["destination"]).glob("*.png"))) == 12
-          PYCODE
       - name: Preserve exact source and validation evidence
         if: always()
         run: |

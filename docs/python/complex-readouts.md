@@ -55,12 +55,6 @@ entries from lists, NumPy arrays or row iterators. Numeric cells are live
 number. `IntegerMatrix` truncates each displayed component while retaining the
 original complex value. Existing real-only native constructor paths are unchanged.
 
-The base `Matrix` also accepts already-built `VMobject` cells without requiring
-an `element_config` workaround: `Matrix([[Circle(), Square()], [Tex("x"), 1.25]])`
-preserves each supplied mobject and its row/column aliases. Geometry is arranged
-through the existing native composition path, not stringified or rebuilt as
-scalar text. Cross-scene entries are still rejected before layout moves them.
-
 ```python
 class ComplexCells(Scene):
     def construct(self):
@@ -123,20 +117,3 @@ Custom strings use the same combined 4,096-character limit. Formatting,
 conversion and styling finish on detached geometry before replacing the live
 readout. A failed glyph callback leaves its prior value and geometry intact;
 arbitrary side effects inside authored callbacks are not transactional.
-
-## Runnable native scene
-
-`demo/python/native_numeric_authoring.py` combines a live TeX readout, a bold
-complex coefficient, a scientific-notation subclass and already-live geometric
-matrix cells. It uses only the production portal, Scribe typography and native
-scene/render/output pipeline:
-
-```sh
-fmn-python demo/python/native_numeric_authoring.py NativeNumericAuthoring \
-    --format png_sequence --video_dir out/native-numeric-authoring
-```
-
-Use a fresh output directory: publication remains no-clobber. Native acceptance
-covers frame-by-frame motion, installed CLI output, bound-cell adoption and
-unchanged cell aliases. The example is a standard render, not a claim of
-certified output from arbitrary Python callbacks.
