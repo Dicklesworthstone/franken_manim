@@ -13668,14 +13668,12 @@ assert all(
     member.get_fill_color() == manimlib.BLUE
     for member in mapped_complex_entry.family_members_with_points()
 )
-# A general complex entry inherits BN-08's named refusal from
-# DecimalNumber itself — no silent rendering.
-try:
-    integer_tex_matrix.element_to_mobject(1 + 2j)
-except NotImplementedError as error:
-    assert "BN-08" in str(error), error
-else:
-    raise AssertionError("a general complex entry was rendered silently")
+# General complex entries compose native numeric components, not Tex(str(...)).
+general_complex_entry = integer_tex_matrix.element_to_mobject(1 + 2j)
+assert isinstance(general_complex_entry, manimlib.DecimalNumber)
+assert general_complex_entry.get_value() == 1 + 2j
+assert general_complex_entry.get_tex() == "1.00+2.00i"
+assert general_complex_entry.family_members_with_points()
 try:
     matrix_module.Matrix.element_to_mobject(object(), 0)
 except TypeError as error:
@@ -16860,9 +16858,8 @@ else:
 
 
 # ------------------------------------------ DecimalNumber complex values
-# fm-5wq.4.80: the Reference's hide_zero_components_on_complex reductions
-# ride the native f64 formatter exactly; the general complex formatter is
-# BN-08's deliberate native exclusion and refuses by that name.
+# Real and imaginary components use the native f64 number shelf. The portal
+# composes both components and allows live transitions between display modes.
 
 # A zero-real complex renders natively as the imaginary component + "i".
 imag_number = manimlib.DecimalNumber(complex(0, 2))
@@ -16882,21 +16879,17 @@ assert any(child.has_points() for child in real_ish.submobjects)
 real_ish.set_value(4.0)
 assert real_ish.get_value() == 4.0
 
-# The general complex formatter is the named BN-08 refusal.
-try:
-    manimlib.DecimalNumber(complex(1, 2))
-except NotImplementedError as error:
-    assert "BN-08" in str(error)
-else:
-    raise AssertionError("DecimalNumber accepted a general complex value")
+general_complex_number = manimlib.DecimalNumber(complex(1, 2))
+assert general_complex_number.get_value() == 1 + 2j
+assert general_complex_number.get_tex() == "1.00+2.00i"
+assert len(general_complex_number) == len(general_complex_number.num_string)
 
-# Mode switches refuse by name rather than rendering a wrong display.
-try:
-    imag_number.set_value(1.0)
-except NotImplementedError as error:
-    assert "imaginary display" in str(error)
-else:
-    raise AssertionError("an imaginary DecimalNumber switched to real")
+imag_number.set_value(1.0)
+assert imag_number.get_value() == 1.0
+assert imag_number.get_tex() == "1.00"
+imag_number.set_value(2j)
+assert imag_number.get_value() == 2j
+assert imag_number.get_tex() == "2.00i"
 
 # Named errors for non-finite and non-numeric values.
 try:

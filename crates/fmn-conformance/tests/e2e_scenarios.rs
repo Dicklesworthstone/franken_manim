@@ -2050,6 +2050,35 @@ fn python_live_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_artifact("live_tex_last.png", report.last_png))
 }
 
+/// Complex coefficients and matrix entries through actual native animation/output.
+fn python_complex_readouts_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_complex_readouts")?;
+    let report = manimlib::run_portal_gauntlet_complex_readouts(&root, ctx.seed)
+        .map_err(|error| fail(format!("Python complex readouts: {error}")))?;
+    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode first complex readout: {error}")))?;
+    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode last complex readout: {error}")))?;
+    if (first.width, first.height) != (192, 108)
+        || (last.width, last.height) != (192, 108)
+        || first.rgba == last.rgba
+    {
+        return Err(fail("complex readouts did not animate native 192x108 pixels"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.complex_readouts")
+            .field("frames", report.frame_count)
+            .field("thread_counts", report.thread_counts)
+            .field("failure_paths", report.failure_paths),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("complex_readouts_frames", report.frame_count)
+        .with_counter("complex_readouts_thread_counts", report.thread_counts)
+        .with_counter("complex_readouts_failure_paths", report.failure_paths)
+        .with_artifact("complex_readouts_first.png", report.first_png)
+        .with_artifact("complex_readouts_last.png", report.last_png))
+}
+
 fn python_textured_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let (first, last) = manimlib::run_portal_gauntlet_textures()
         .map_err(|error| fail(format!("textured surfaces: {error}")))?;
@@ -4693,6 +4722,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_complex_readouts.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_complex_readouts_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "complex_readouts_first.png".to_owned(),
+                "complex_readouts_last.png".to_owned(),
+            ]),
+            counter_eq("complex_readouts_frames", 6),
+            counter_eq("complex_readouts_thread_counts", 3),
+            counter_eq("complex_readouts_failure_paths", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.complex_readouts",
+            vec![
+                FieldPred::u64_eq("frames", 6),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("failure_paths", 1),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_textured_surfaces.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -5483,6 +5536,17 @@ fn python_live_tex_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_live_tex.v1")
         .expect("Python live equation scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Native complex-number layout, animation, thread replay and failed publication.
+#[test]
+fn python_complex_readouts_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_complex_readouts.v1")
+        .expect("Python complex readout scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

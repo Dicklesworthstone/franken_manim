@@ -42,6 +42,10 @@ mod report;
 #[cfg(feature = "gauntlet")]
 pub use live_tex::{PortalLiveTexReport, run_portal_gauntlet_live_tex};
 
+mod complex_readouts;
+#[cfg(feature = "gauntlet")]
+pub use complex_readouts::run_portal_gauntlet_complex_readouts;
+
 #[cfg(feature = "gauntlet")]
 pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
 
