@@ -47,6 +47,7 @@ expect_failure() {
 
 bash -n scripts/install.sh
 bash scripts/install.sh --help >"$TEST_ROOT/help.txt"
+grep -q -- '--tier TIER' "$TEST_ROOT/help.txt" || fail "help omits tier mode"
 grep -q -- '--offline ARCHIVE' "$TEST_ROOT/help.txt" || fail "help omits offline mode"
 grep -q -- '--checksum HASH|FILE' "$TEST_ROOT/help.txt" || fail "help omits checksum mode"
 grep -q -- '--features cli,batch' "$TEST_ROOT/help.txt" \
@@ -67,6 +68,42 @@ FMN_INSTALL_KEEP_STATE=1 bash scripts/install.sh --quiet --no-gum \
 [[ -x "$success_dir/fmn" ]] || fail "offline install did not publish fmn"
 [[ "$("$success_dir"/fmn --version)" == "fmn 9.8.7" ]] \
     || fail "installed binary reports the wrong version"
+
+tier_auto_dir="$TEST_ROOT/tier-auto/bin"
+FMN_INSTALL_KEEP_STATE=1 bash scripts/install.sh --quiet --no-gum \
+    --tier auto --version 9.8.7 --install-dir "$tier_auto_dir" \
+    --offline "$archive" --checksum "$checksum"
+[[ -x "$tier_auto_dir/fmn" ]] || fail "--tier auto install did not publish fmn"
+
+tier_portable_dir="$TEST_ROOT/tier-portable/bin"
+FMN_INSTALL_KEEP_STATE=1 bash scripts/install.sh --quiet --no-gum \
+    --tier portable --version 9.8.7 --install-dir "$tier_portable_dir" \
+    --offline "$archive" --checksum "$checksum"
+[[ -x "$tier_portable_dir/fmn" ]] || fail "--tier portable install did not publish fmn"
+
+tier_v3_dir="$TEST_ROOT/tier-v3/bin"
+FMN_INSTALL_KEEP_STATE=1 bash scripts/install.sh --quiet --no-gum \
+    --tier x86-64-v3 --version 9.8.7 --install-dir "$tier_v3_dir" \
+    --offline "$archive" --checksum "$checksum"
+[[ -x "$tier_v3_dir/fmn" ]] || fail "--tier x86-64-v3 install did not publish fmn"
+
+tier_invalid_dir="$TEST_ROOT/tier-invalid/bin"
+expect_failure tier-invalid env FMN_INSTALL_KEEP_STATE=1 \
+    bash scripts/install.sh --quiet --no-gum --tier invalid-tier \
+    --version 9.8.7 --install-dir "$tier_invalid_dir" \
+    --offline "$archive" --checksum "$checksum"
+[[ ! -e "$tier_invalid_dir/fmn" ]] || fail "invalid tier published a binary"
+grep -q 'unknown or unsupported SIMD tier' "$TEST_ROOT/tier-invalid.stderr" \
+    || fail "invalid tier refusal was not precise"
+
+tier_incompatible_dir="$TEST_ROOT/tier-incompatible/bin"
+expect_failure tier-incompatible env FMN_INSTALL_KEEP_STATE=1 \
+    bash scripts/install.sh --quiet --no-gum --tier aarch64-neon \
+    --version 9.8.7 --install-dir "$tier_incompatible_dir" \
+    --offline "$archive" --checksum "$checksum"
+[[ ! -e "$tier_incompatible_dir/fmn" ]] || fail "incompatible tier published a binary"
+grep -q 'is not supported for' "$TEST_ROOT/tier-incompatible.stderr" \
+    || fail "incompatible tier refusal was not precise"
 
 checksum_dir="$TEST_ROOT/checksum-failure/bin"
 expect_failure checksum-mismatch env FMN_INSTALL_KEEP_STATE=1 \
@@ -101,4 +138,4 @@ expect_failure concurrent env FMN_INSTALL_KEEP_STATE=1 \
 grep -q 'another install may be active' "$TEST_ROOT/concurrent.stderr" \
     || fail "concurrent-install refusal was not precise"
 
-printf 'installer smoke: success, checksum refusal, archive refusal, and lock refusal passed\n'
+printf 'installer smoke: success, tier selection, tier refusal, checksum refusal, archive refusal, and lock refusal passed\n'

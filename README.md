@@ -239,6 +239,9 @@ fmn --format video --transparent --resolution 640x360 @builtin circle_shift.v1
 fmn --reproducible --format png_sequence @builtin circle_shift.v1
 
 # Compiled FMTL/1 scenes use the same Lumen/Reel render path and fixed artifact fps
+# (Note: demo/wasm/bundle.fmtl tracks active development schema minor 7; the published
+# v0.4.0 binary enforces reader minor 6 under strict policy. Use a version-matched
+# minor-6 bundle with v0.4.0 or compile fmn from current checkout source)
 fmn --format png_sequence demo/wasm/bundle.fmtl DemoTimeline
 
 # Batch farms under asupersync, with budgets and per-scene manifests

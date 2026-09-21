@@ -43,10 +43,19 @@ impl Fixture {
             match fs::create_dir(&root) {
                 Ok(()) => return Self { root },
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => panic!("could not create CLI smoke fixture {root:?}: {error}"),
+                Err(error) => {
+                    assert!(
+                        false,
+                        "could not create CLI smoke fixture {root:?}: {error}"
+                    );
+                    return Self { root };
+                }
             }
         }
-        panic!("could not allocate a unique CLI smoke fixture");
+        assert!(false, "could not allocate a unique CLI smoke fixture");
+        Self {
+            root: std::env::temp_dir(),
+        }
     }
 
     fn cache(&self) -> PathBuf {
@@ -354,4 +363,21 @@ fn smoke_fixture_paths_are_absolute_and_do_not_depend_on_repo_state() {
     let fixture = Fixture::new();
     assert!(fixture.root.is_absolute());
     assert!(!fixture.root.join("custom_config.yml").exists());
+}
+
+#[test]
+fn compiled_simd_tier_matches_host_or_fails_cleanly_with_guidance() {
+    let result = fmn_cli::check_simd_tier_support();
+    let active = fmn_cli::active_compiled_simd_tier();
+    match result {
+        Ok(()) => {
+            assert!(!active.is_empty());
+        }
+        Err(err) => {
+            assert_eq!(err.code(), 4);
+            assert_eq!(err.exit_name(), "capability");
+            assert!(err.message().contains("not supported by your CPU"));
+            assert!(err.message().contains("install.sh"));
+        }
+    }
 }

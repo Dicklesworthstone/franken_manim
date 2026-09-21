@@ -2093,6 +2093,44 @@ const fn active_compiled_tier() -> &'static str {
     }
 }
 
+/// The SIMD tier compiled into this binary.
+#[must_use]
+pub const fn active_compiled_simd_tier() -> &'static str {
+    active_compiled_tier()
+}
+
+/// Verify that the host CPU provides all SIMD features required by the compiled binary tier.
+///
+/// Under §17.3 and §20.2 W11, wrong-tier launches must fail cleanly with guidance and exit code 4
+/// (capability), never crashing or causing a SIGILL illegal-instruction signal.
+///
+/// # Errors
+/// Returns a capability `CliError` if the host CPU lacks required vector features.
+pub fn check_simd_tier_support() -> Result<(), CliError> {
+    let active = active_compiled_tier();
+    let supported = fmn_platform::topology::detect_simd_tier();
+    let compatible = match active {
+        "x86-64-v4" => matches!(supported, fmn_platform::topology::SimdTier::X86_64V4),
+        "x86-64-v3" => matches!(
+            supported,
+            fmn_platform::topology::SimdTier::X86_64V3 | fmn_platform::topology::SimdTier::X86_64V4
+        ),
+        "aarch64+neon" => matches!(supported, fmn_platform::topology::SimdTier::Aarch64Neon),
+        _ => true,
+    };
+    if compatible {
+        Ok(())
+    } else {
+        Err(CliError::new(
+            "capability",
+            format!(
+                "this binary was compiled for SIMD tier '{active}', which is not supported by your CPU (hardware supported tier: '{}'); please use the 'portable' binary or the tier recommended by install.sh",
+                supported.name()
+            ),
+        ))
+    }
+}
+
 fn certification_report() -> CertificationReport {
     let platform = platform_name(std::env::consts::OS, std::env::consts::ARCH);
     let (supported, detail) = match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -6936,47 +6974,53 @@ where
         } else {
             format!("fmn {}\n", env!("CARGO_PKG_VERSION"))
         }),
-        Invocation::Doctor(command) => match collect_doctor_snapshot(
-            fs.as_ref(),
-            runner.as_ref(),
-            locator,
-            &command,
-        ) {
-            Ok(snapshot) => {
-                let stdout = if command.common.robot {
-                    match snapshot.to_ndjson() {
-                        Ok(stdout) => stdout,
-                        Err(error) => return error_output(true, &error),
-                    }
-                } else {
-                    snapshot.to_human()
-                };
-                if command.require_ffmpeg && !snapshot.ffmpeg.is_available() {
-                    let error = CliError::new(
-                        "capability",
-                        "ffmpeg was required but is unavailable; native PNG-sequence, GIF, and y4m outputs remain available",
-                    );
-                    let mut output = error_output(command.common.robot, &error);
-                    if command.common.robot {
-                        output.stdout = format!("{stdout}{}", output.stdout);
+        Invocation::Doctor(command) => {
+            match collect_doctor_snapshot(fs.as_ref(), runner.as_ref(), locator, &command) {
+                Ok(snapshot) => {
+                    let stdout = if command.common.robot {
+                        match snapshot.to_ndjson() {
+                            Ok(stdout) => stdout,
+                            Err(error) => return error_output(true, &error),
+                        }
                     } else {
-                        output.stdout = stdout;
+                        snapshot.to_human()
+                    };
+                    if command.require_ffmpeg && !snapshot.ffmpeg.is_available() {
+                        let error = CliError::new(
+                            "capability",
+                            "ffmpeg was required but is unavailable; native PNG-sequence, GIF, and y4m outputs remain available",
+                        );
+                        let mut output = error_output(command.common.robot, &error);
+                        if command.common.robot {
+                            output.stdout = format!("{stdout}{}", output.stdout);
+                        } else {
+                            output.stdout = stdout;
+                        }
+                        output
+                    } else {
+                        RunOutput::success(stdout)
                     }
-                    output
-                } else {
-                    RunOutput::success(stdout)
                 }
-            }
-            Err(error) => error_output(command.common.robot, &error),
-        },
-        Invocation::ClearCache { common } => clear_cache(fs.as_ref(), &common),
-        Invocation::Render(command) => python_source_refusal(&command).unwrap_or_else(|| {
-            match execute_native_render(Arc::clone(&fs), Arc::clone(&runner), locator, &command) {
-                Ok(reports) => successful_render_output(&command, reports),
                 Err(error) => error_output(command.common.robot, &error),
             }
-        }),
+        }
+        Invocation::ClearCache { common } => clear_cache(fs.as_ref(), &common),
+        Invocation::Render(command) => {
+            if let Err(error) = check_simd_tier_support() {
+                return error_output(command.common.robot, &error);
+            }
+            python_source_refusal(&command).unwrap_or_else(|| {
+                match execute_native_render(Arc::clone(&fs), Arc::clone(&runner), locator, &command)
+                {
+                    Ok(reports) => successful_render_output(&command, reports),
+                    Err(error) => error_output(command.common.robot, &error),
+                }
+            })
+        }
         Invocation::Batch(command) => {
+            if let Err(error) = check_simd_tier_support() {
+                return error_output(command.render.common.robot, &error);
+            }
             if let Some(output) = python_source_refusal(&command.render) {
                 return output;
             }
@@ -6995,15 +7039,20 @@ where
                 )
             }
         }
-        Invocation::Studio(command) => python_source_refusal(&command.render).unwrap_or_else(|| {
-            error_output(
-                command.render.common.robot,
-                &CliError::new(
-                    "capability",
-                    "Studio composition is unavailable: no concrete WorkerService or audited host-entropy capability is registered",
-                ),
-            )
-        }),
+        Invocation::Studio(command) => {
+            if let Err(error) = check_simd_tier_support() {
+                return error_output(command.render.common.robot, &error);
+            }
+            python_source_refusal(&command.render).unwrap_or_else(|| {
+                error_output(
+                    command.render.common.robot,
+                    &CliError::new(
+                        "capability",
+                        "Studio composition is unavailable: no concrete WorkerService or audited host-entropy capability is registered",
+                    ),
+                )
+            })
+        }
     }
 }
 
@@ -7158,6 +7207,9 @@ pub fn run_internal_studio_worker_os(args: &[OsString]) -> RunOutput {
         Ok(_) => return internal_worker_failure("worker argv is not a Studio invocation"),
         Err(error) => return internal_worker_failure(error),
     };
+    if let Err(error) = check_simd_tier_support() {
+        return internal_worker_failure(error);
+    }
     if command.render.scene_source_kind() == Some(SceneSourceKind::Python) {
         return internal_worker_failure(PYTHON_SOURCE_PORTAL_MESSAGE);
     }
@@ -7540,6 +7592,9 @@ pub fn run_studio_os(
             &internal("run_studio_os received a non-Studio invocation"),
         );
     };
+    if let Err(error) = check_simd_tier_support() {
+        return error_output(requested_robot, &error);
+    }
     if let Some(output) = python_source_refusal(&command.render) {
         return output;
     }
@@ -7593,7 +7648,9 @@ where
     run(utf8)
 }
 
-fn error_output(robot: bool, error: &CliError) -> RunOutput {
+/// Render a typed `CliError` as human or robot `RunOutput`.
+#[must_use]
+pub fn error_output(robot: bool, error: &CliError) -> RunOutput {
     if robot {
         RunOutput {
             code: error.code(),

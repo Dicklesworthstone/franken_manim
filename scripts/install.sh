@@ -17,6 +17,9 @@ QUIET=0
 NO_GUM=0
 FORCE=0
 REQUESTED_VERSION=""
+REQUESTED_TIER="auto"
+HOST_TIER=""
+SELECTED_TIER=""
 INSTALL_DIR="${FMN_INSTALL_DIR:-${HOME}/.local/bin}"
 OFFLINE_ARCHIVE=""
 OFFLINE_CHECKSUM=""
@@ -28,6 +31,9 @@ TMP_BASE="${TMPDIR:-/tmp}"
 TMP_BASE="${TMP_BASE%/}"
 OS=""
 ARCH=""
+TARGET_TRIPLE=""
+ARCHIVE_EXT=""
+FALLBACK_ARTIFACT=""
 ARTIFACT=""
 BINARY_NAME="fmn"
 ARCHIVE_KIND=""
@@ -45,7 +51,7 @@ plain_output() {
 info() {
     [[ "$QUIET" -eq 1 ]] && return 0
     if [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; then
-        gum style --foreground 39 "-> $*"
+        gum style --foreground 39 -- "-> $*"
     elif plain_output; then
         printf '%s\n' "-> $*"
     else
@@ -56,7 +62,7 @@ info() {
 ok() {
     [[ "$QUIET" -eq 1 ]] && return 0
     if [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; then
-        gum style --foreground 42 "✓ $*"
+        gum style --foreground 42 -- "✓ $*"
     elif plain_output; then
         printf '%s\n' "OK: $*"
     else
@@ -67,7 +73,7 @@ ok() {
 warn() {
     [[ "$QUIET" -eq 1 ]] && return 0
     if [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; then
-        gum style --foreground 214 "! $*"
+        gum style --foreground 214 -- "! $*"
     elif plain_output; then
         printf '%s\n' "WARNING: $*"
     else
@@ -77,7 +83,7 @@ warn() {
 
 err() {
     if [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; then
-        gum style --foreground 196 "X $*" >&2
+        gum style --foreground 196 -- "X $*" >&2
     elif [[ ! -t 2 || "${NO_COLOR:-}" == "1" ]]; then
         printf '%s\n' "ERROR: $*" >&2
     else
@@ -137,6 +143,8 @@ Every archive is SHA-256 verified before extraction.
 
 Options:
   --version VERSION     Install an exact release (for example 0.4.0 or v0.4.0)
+  --tier TIER           SIMD build tier: auto (default), portable, x86-64-v3,
+                        x86-64-v4, aarch64-neon
   --install-dir DIR     Destination directory (default: $HOME/.local/bin)
   --offline ARCHIVE     Install a local release archive without network access
   --checksum HASH|FILE  Required with --offline: 64-hex SHA-256 or checksum file
@@ -146,9 +154,9 @@ Options:
   -h, --help            Show this help
 
 Supported release archives:
-  Linux x86-64   fmn-x86_64-unknown-linux-gnu.tar.xz
-  macOS arm64    fmn-aarch64-apple-darwin.tar.xz
-  Windows x86-64 fmn-x86_64-pc-windows-msvc.zip (MSYS2/Git Bash/Cygwin)
+  Linux x86-64   fmn-x86_64-unknown-linux-gnu[-<tier>].tar.xz (portable, x86-64-v3, x86-64-v4)
+  macOS arm64    fmn-aarch64-apple-darwin.tar.xz (aarch64-neon / portable)
+  Windows x86-64 fmn-x86_64-pc-windows-msvc[-<tier>].zip (portable, x86-64-v3)
 
 Linux arm64 and macOS x86-64 have no published native artifact yet. Build from
 the exact source tag instead:
@@ -193,6 +201,11 @@ parse_args() {
             --version)
                 (($# >= 2)) || die "--version requires a value"
                 REQUESTED_VERSION=$2
+                shift 2
+                ;;
+            --tier)
+                (($# >= 2)) || die "--tier requires a value"
+                REQUESTED_TIER=$2
                 shift 2
                 ;;
             --install-dir)
@@ -242,6 +255,107 @@ setup_proxy() {
     fi
 }
 
+detect_host_simd_tier() {
+    case "$ARCH" in
+        aarch64)
+            printf '%s\n' "aarch64-neon"
+            ;;
+        x86_64)
+            if [[ "$OS" == "linux" && -r /proc/cpuinfo ]]; then
+                local flags
+                flags=$(grep -m 1 '^flags' /proc/cpuinfo 2>/dev/null || true)
+                if [[ " $flags " == *" avx512f "* && " $flags " == *" avx512bw "* \
+                      && " $flags " == *" avx512vl "* && " $flags " == *" avx512dq "* ]]; then
+                    printf '%s\n' "x86-64-v4"
+                    return 0
+                fi
+                if [[ " $flags " == *" avx2 "* && " $flags " == *" fma "* && " $flags " == *" bmi2 "* ]]; then
+                    printf '%s\n' "x86-64-v3"
+                    return 0
+                fi
+            elif [[ "$OS" == "darwin" ]]; then
+                local features leaf7
+                features=$(sysctl -n machdep.cpu.features 2>/dev/null || true)
+                leaf7=$(sysctl -n machdep.cpu.leaf7_features 2>/dev/null || true)
+                if [[ " $leaf7 " == *" AVX512F "* && " $leaf7 " == *" AVX512BW "* \
+                      && " $leaf7 " == *" AVX512VL "* && " $leaf7 " == *" AVX512DQ "* ]]; then
+                    printf '%s\n' "x86-64-v4"
+                    return 0
+                fi
+                if [[ " $leaf7 " == *" AVX2 "* && " $leaf7 " == *" BMI2 "* && " $features " == *" FMA "* ]]; then
+                    printf '%s\n' "x86-64-v3"
+                    return 0
+                fi
+            fi
+            printf '%s\n' "portable"
+            ;;
+        *)
+            printf '%s\n' "portable"
+            ;;
+    esac
+}
+
+select_simd_tier() {
+    HOST_TIER=$(detect_host_simd_tier)
+    case "$REQUESTED_TIER" in
+        auto)
+            SELECTED_TIER="$HOST_TIER"
+            case "$OS/$ARCH" in
+                windows/x86_64)
+                    if [[ "$SELECTED_TIER" == "x86-64-v4" ]]; then
+                        SELECTED_TIER="x86-64-v3"
+                    fi
+                    ;;
+                darwin/aarch64|linux/aarch64)
+                    SELECTED_TIER="aarch64-neon"
+                    ;;
+            esac
+            ;;
+        portable)
+            SELECTED_TIER="portable"
+            ;;
+        x86-64-v3)
+            case "$OS/$ARCH" in
+                linux/x86_64|windows/x86_64)
+                    SELECTED_TIER="x86-64-v3"
+                    ;;
+                *)
+                    die "SIMD tier 'x86-64-v3' is not supported for $OS/$ARCH (only x86-64 targets)"
+                    ;;
+            esac
+            if [[ "$HOST_TIER" != "x86-64-v3" && "$HOST_TIER" != "x86-64-v4" ]]; then
+                warn "requested SIMD tier 'x86-64-v3' exceeds host CPU capability (hardware supports: '$HOST_TIER'); running this binary will fail with capability exit 4"
+            fi
+            ;;
+        x86-64-v4)
+            case "$OS/$ARCH" in
+                linux/x86_64)
+                    SELECTED_TIER="x86-64-v4"
+                    ;;
+                *)
+                    die "SIMD tier 'x86-64-v4' is not supported for $OS/$ARCH (only Linux x86-64 targets)"
+                    ;;
+            esac
+            if [[ "$HOST_TIER" != "x86-64-v4" ]]; then
+                warn "requested SIMD tier 'x86-64-v4' exceeds host CPU capability (hardware supports: '$HOST_TIER'); running this binary will fail with capability exit 4"
+            fi
+            ;;
+        aarch64-neon|aarch64+neon)
+            case "$ARCH" in
+                aarch64)
+                    SELECTED_TIER="aarch64-neon"
+                    ;;
+                *)
+                    die "SIMD tier 'aarch64-neon' is not supported for $OS/$ARCH (only aarch64 targets)"
+                    ;;
+            esac
+            ;;
+        *)
+            die "unknown or unsupported SIMD tier: $REQUESTED_TIER (valid: auto, portable, x86-64-v3, x86-64-v4, aarch64-neon)"
+            ;;
+    esac
+}
+
 detect_platform() {
     local uname_os uname_arch
     uname_os=$(uname -s)
@@ -260,17 +374,20 @@ detect_platform() {
 
     case "$OS/$ARCH" in
         linux/x86_64)
-            ARTIFACT="fmn-x86_64-unknown-linux-gnu.tar.xz"
+            TARGET_TRIPLE="x86_64-unknown-linux-gnu"
             ARCHIVE_KIND="tar.xz"
+            ARCHIVE_EXT="tar.xz"
             ;;
         darwin/aarch64)
-            ARTIFACT="fmn-aarch64-apple-darwin.tar.xz"
+            TARGET_TRIPLE="aarch64-apple-darwin"
             ARCHIVE_KIND="tar.xz"
+            ARCHIVE_EXT="tar.xz"
             ;;
         windows/x86_64)
-            ARTIFACT="fmn-x86_64-pc-windows-msvc.zip"
+            TARGET_TRIPLE="x86_64-pc-windows-msvc"
             BINARY_NAME="fmn.exe"
             ARCHIVE_KIND="zip"
+            ARCHIVE_EXT="zip"
             ;;
         linux/aarch64)
             die "no native Linux arm64 release exists yet; use the exact-tag source-build commands shown by --help"
@@ -279,6 +396,24 @@ detect_platform() {
             die "no native macOS x86-64 release exists; use the exact-tag source-build commands shown by --help"
             ;;
         *) die "no native release exists for $OS/$ARCH" ;;
+    esac
+
+    FALLBACK_ARTIFACT="fmn-${TARGET_TRIPLE}.${ARCHIVE_EXT}"
+    select_simd_tier
+
+    case "$SELECTED_TIER" in
+        portable|aarch64-neon)
+            ARTIFACT="$FALLBACK_ARTIFACT"
+            ;;
+        x86-64-v3)
+            ARTIFACT="fmn-${TARGET_TRIPLE}-x86-64-v3.${ARCHIVE_EXT}"
+            ;;
+        x86-64-v4)
+            ARTIFACT="fmn-${TARGET_TRIPLE}-x86-64-v4.${ARCHIVE_EXT}"
+            ;;
+        *)
+            ARTIFACT="$FALLBACK_ARTIFACT"
+            ;;
     esac
 
     if [[ "$OS" == "linux" && -r /proc/version ]] \
@@ -465,16 +600,28 @@ already_installed() {
 }
 
 download_release() {
-    local version=$1 archive_path=$2 checksum_path=$3 base
+    local version=$1 temp_dir=$2 checksum_path=$3 base
     base="https://github.com/${REPOSITORY}/releases/download/v${version}"
-    info "Downloading $ARTIFACT"
-    curl_download "$base/$ARTIFACT" "$archive_path"
-    [[ "$(wc -c < "$archive_path")" -le 67108864 ]] \
-        || die "downloaded archive exceeds the 64 MiB installer limit"
     info "Downloading SHA256SUMS"
     curl_download "$base/SHA256SUMS" "$checksum_path"
     [[ "$(wc -c < "$checksum_path")" -le 1048576 ]] \
         || die "SHA256SUMS exceeds the 1 MiB installer limit"
+
+    if ! grep -q "[[:space:]]\*\{0,1\}${ARTIFACT}\$" "$checksum_path"; then
+        if [[ "$ARTIFACT" != "$FALLBACK_ARTIFACT" ]] && grep -q "[[:space:]]\*\{0,1\}${FALLBACK_ARTIFACT}\$" "$checksum_path"; then
+            info "Release v${version} does not provide dedicated tier '${SELECTED_TIER}' artifact '${ARTIFACT}'; falling back to portable artifact '${FALLBACK_ARTIFACT}'"
+            ARTIFACT="$FALLBACK_ARTIFACT"
+            SELECTED_TIER="portable"
+        else
+            die "artifact '$ARTIFACT' not found in SHA256SUMS for release v${version}"
+        fi
+    fi
+
+    local archive_path="$temp_dir/$ARTIFACT"
+    info "Downloading $ARTIFACT"
+    curl_download "$base/$ARTIFACT" "$archive_path"
+    [[ "$(wc -c < "$archive_path")" -le 67108864 ]] \
+        || die "downloaded archive exceeds the 64 MiB installer limit"
 }
 
 install_binary() {
@@ -494,6 +641,7 @@ main() {
     setup_proxy
     show_header
     detect_platform
+    info "Platform: $OS/$ARCH (hardware SIMD: $HOST_TIER, selected tier: $SELECTED_TIER)"
     local version destination archive_path checksum_path checksum_value extract_dir source_binary
     version=$(resolve_version)
     destination="$INSTALL_DIR/$BINARY_NAME"
@@ -501,7 +649,7 @@ main() {
     acquire_lock
 
     if [[ "$FORCE" -eq 0 ]] && already_installed "$destination" "$version"; then
-        ok "fmn $version is already installed at $destination"
+        ok "fmn $version ($SELECTED_TIER) is already installed at $destination"
         info "Use --force to reinstall it"
         return 0
     fi
@@ -515,8 +663,8 @@ main() {
         checksum_value=$(expected_checksum "$archive_path" "$OFFLINE_CHECKSUM" \
             "$(basename "$archive_path")")
     else
+        download_release "$version" "$TEMP_DIR" "$checksum_path"
         archive_path="$TEMP_DIR/$ARTIFACT"
-        download_release "$version" "$archive_path" "$checksum_path"
         checksum_value=$(checksum_from_file "$checksum_path" "$ARTIFACT")
     fi
 
@@ -535,7 +683,7 @@ main() {
     if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
         warn "$INSTALL_DIR is not on PATH; add it to your shell configuration"
     fi
-    draw_box "Installed fmn $version" "$destination" \
+    draw_box "Installed fmn $version ($SELECTED_TIER)" "$destination" \
         "Uninstall: rm \"$destination\""
 }
 
