@@ -8,7 +8,7 @@ from fmn_python import initialization
 
 native = getattr(m, "_native", m)
 assert vars(native).get("_FMN_PORTAL_RUNTIME_STATE") == "ready"
-flags = ("FUNCTIONAL_COLOR", "SCENE_RENDERING", "FADING", "SCENE_PLAYBACK", "SCENE_STATE",
+flags = ("FUNCTIONAL_COLOR", "DECIMAL_AUTHORING", "SCENE_RENDERING", "FADING", "SCENE_PLAYBACK", "SCENE_STATE",
          "STREAMLINE_ANIMATION", "TRACED_PATH", "INTERACTIVE_EDITING",
          "INTERACTION", "CONTROL_EVENTS", "COLOR_SLIDERS", "SCENE_EXECUTION",
          "ANIMATION_UPDATERS", "MOVEMENT", "ROTATION", "EMBEDDED_SHELL")
@@ -16,6 +16,7 @@ for flag in flags:
     assert vars(native).get("_FMN_" + flag + "_INSTALLED"), flag
 
 identities = (m.Scene.play, m.Scene.wait, m.Scene.render, m.Mobject.remove_updater,
+              m.DecimalNumber.__init__, m.DecimalNumber.set_submobjects_from_number,
               m.Mobject.set_color_by_rgb_func, m.Mobject.set_color_by_rgba_func,
               m.FadeTransform.begin, m.Animation.begin, m.Transform.begin,
               m.turn_animation_into_updater, m.InteractiveScene.on_key_press,
@@ -23,7 +24,8 @@ identities = (m.Scene.play, m.Scene.wait, m.Scene.render, m.Mobject.remove_updat
 for _ in range(3):
     assert initialization.initialize(native) is native
     assert identities == (m.Scene.play, m.Scene.wait, m.Scene.render, m.Mobject.remove_updater,
-              m.Mobject.set_color_by_rgb_func, m.Mobject.set_color_by_rgba_func,
+                          m.DecimalNumber.__init__, m.DecimalNumber.set_submobjects_from_number,
+                          m.Mobject.set_color_by_rgb_func, m.Mobject.set_color_by_rgba_func,
                           m.FadeTransform.begin, m.Animation.begin, m.Transform.begin,
                           m.turn_animation_into_updater, m.InteractiveScene.on_key_press,
                           m.InteractiveScene.embed, m.InteractiveScene.checkpoint_paste)

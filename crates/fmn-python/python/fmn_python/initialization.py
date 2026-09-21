@@ -20,6 +20,7 @@ _STEPS = (
     ("camera_capture", "install_camera_capture"),
     ("surface_textures", "install_surface_textures"),
     ("text_authoring", "install_text_authoring"),
+    ("decimal_authoring", "install_decimal_authoring"),
     ("live_tex", "install_live_tex"),
     ("matrix", "install_matrix"),
     ("graphing", "install_graphing"),

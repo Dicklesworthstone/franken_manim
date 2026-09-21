@@ -53,6 +53,7 @@ def render_complex_readouts(destination, seed=0):
         sequence = [path.read_bytes() for path in paths]
         assert len(set(sequence[:5])) == 5, "complex readouts jumped instead of animating"
         sequences.append(sequence)
+    del scene
     assert sequences[0] == sequences[1] == sequences[2], "thread count changed complex readout pixels"
     images = [_decode(payload) for payload in sequences[0]]
     for image in images:
@@ -80,7 +81,14 @@ def render_complex_readouts(destination, seed=0):
     else:
         raise AssertionError("invalid complex render published output")
     finally:
+        # `raise sentinel from None` suppresses display, not ownership of the
+        # original exception. Its traceback owns the failed Scene and every
+        # native proxy in it. Break both traceback edges on the owner thread;
+        # do not weaken the embedding host's native-proxy teardown assertion.
         sentinel.__traceback__ = None
+        sentinel.__context__ = None
+        del sentinel
+    del BrokenReadout
     assert not failed.exists()
     return sequences[0][0], sequences[0][-1], 6, 3, 1
 
