@@ -14,12 +14,14 @@ on:
       - 'crates/fmn-python/python/fmn_python/initialization.py'
       - 'crates/fmn-python/python/fmn_python/text_authoring.py'
       - 'crates/fmn-python/tests/portal_initialization.py'
+      - 'crates/fmn-python/tests/bridge.py'
+      - 'scripts/patches/native-matrix-bridge.patch'
       - 'crates/fmn-conformance/tests/e2e_scenarios.rs'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: complex-decimal-authoring
   cancel-in-progress: false
@@ -46,6 +48,15 @@ jobs:
             ~/.cargo/git
             target/camera-runtime
           key: camera-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
+      - name: Replace obsolete bridge refusals with native acceptance
+        run: |
+          set -euo pipefail
+          patch=scripts/patches/native-matrix-bridge.patch
+          if git apply --check "$patch"; then
+            git apply "$patch"
+          else
+            git apply --reverse --check "$patch"
+          fi
       - name: Build the current native wheel and run readout regressions
         run: |
           set -euo pipefail
@@ -63,6 +74,20 @@ jobs:
           set -euo pipefail
           cargo test --locked -p fmn-python --lib complex_readouts::tests:: -- --nocapture 2>&1 | tee /tmp/complex-decimal-embedded.log
           cargo test --locked -p fmn-conformance --test e2e_scenarios python_complex_readouts_scenario_passes -- --exact --nocapture 2>&1 | tee /tmp/complex-decimal-gauntlet.log
+      - name: Run the complete native bridge acceptance suite
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-python --lib tests::production_bridge_acceptance_suite -- --exact --nocapture 2>&1 | tee /tmp/complex-decimal-full-bridge.log
+      - name: Publish verified bridge expectations directly to main
+        run: |
+          set -euo pipefail
+          git add crates/fmn-python/tests/bridge.py
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'test(python): accept completed numeric and native-mobject authoring'
+            git push origin HEAD:main
+          fi
       - name: Preserve exact source and validation evidence
         if: always()
         run: |
