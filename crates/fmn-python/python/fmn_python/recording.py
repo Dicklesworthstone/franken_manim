@@ -73,8 +73,7 @@ class RecordingSession(RenderSession):
         if self._state != "new":
             raise RuntimeError("a RecordingSession can be entered only once")
         self._between_segments()
-        if vars(self.scene).get("_fmn_owned_render_session") is not None:
-            raise RuntimeError("this Scene already has an owned render generation")
+        self._check_output_owner()
         # A refusal must not abort someone else's live generation. Native code
         # rechecks ownership after getters and enforces the live FPS again.
         start = self._native._portal_begin_recording(

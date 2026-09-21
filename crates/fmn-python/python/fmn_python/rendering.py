@@ -272,13 +272,21 @@ class RenderSession:
         if threading.get_ident() != self._owner_thread:
             raise RuntimeError("a RenderSession is confined to its creating thread")
 
+    def _check_output_owner(self) -> None:
+        namespace = vars(self.scene)
+        if namespace.get("_fmn_owned_render_session") is not None:
+            raise RuntimeError("this Scene already has an owned render generation")
+        subdivision = namespace.get("_fmn_subdivision_session")
+        if (subdivision is not None
+                and getattr(subdivision, "_current", None) is not self):
+            raise RuntimeError("this Scene already has a subdivision output owner")
+
     def __enter__(self) -> RenderSession:
         self._check_owner()
         if self._state != "new":
             raise RuntimeError("a RenderSession can be entered only once")
         scene = self.scene
-        if getattr(scene, "_fmn_owned_render_session", None) is not None:
-            raise RuntimeError("this Scene already has an owned render generation")
+        self._check_output_owner()
         if self.reproducible:
             publisher = getattr(self._native, "_portal_publish_manifest", None)
             if not callable(publisher):

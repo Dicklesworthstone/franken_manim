@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 import manimlib as m
-from fmn_python import record_scene, record_subdivided_scene
+from fmn_python import record_scene, record_subdivided_scene, render_session
 
 
 def payloads(path):
@@ -362,6 +362,51 @@ class SubdivisionTests(unittest.TestCase):
             scene.wait(.125)
         self.assertEqual(calls, ["begin", "end", "begin", "end"])
         self.assertEqual(run.result.frame_count, 8)
+
+
+    def test_completed_clip_budget_allows_empty_and_skipped_calls(self):
+        scene = m.Scene()
+        with self.session(scene, max_segments=1) as run:
+            scene.wait(.125)
+            scene.play()
+            with scene.temp_skip():
+                scene.wait(.125)
+        self.assertTrue(run.result.completed)
+        self.assertEqual(run.result.frame_count, 4)
+        self.assertEqual([s.play_index for s in run.segments], [0])
+        self.assertEqual(m._portal_scene_clock(scene), (30, 8))
+        self.assert_released(scene)
+
+    def test_budget_does_not_hide_exclusive_source_range_completion(self):
+        class Motion(m.Scene):
+            def construct(self):
+                self.wait(.125)
+                self.wait(.125)
+                self.tail = True
+        scene = Motion(start_at_animation_number=0, end_at_animation_number=1)
+        with self.session(scene, max_segments=1) as run:
+            try:
+                scene.run()
+            except m.EndScene:
+                pass
+        self.assertTrue(run.result.completed)
+        self.assertEqual(run.result.frame_count, 4)
+        self.assertFalse(hasattr(scene, "tail"))
+        self.assert_released(scene)
+
+    def test_idle_collection_refuses_live_and_fresh_output_owners(self):
+        scene = m.Scene()
+        with self.session(scene) as run:
+            for factory in (record_scene, render_session):
+                destination = self.root / (factory.__name__ + ".y4m")
+                with self.assertRaisesRegex(RuntimeError, "subdivision output owner"):
+                    with factory(scene, destination, resolution=(96, 54), threads=1):
+                        self.fail("another output owner entered an idle collection")
+                self.assertFalse(destination.exists())
+                self.assertEqual(m._portal_scene_clock(scene), (30, 0))
+            scene.wait(.125)
+        self.assertEqual(run.result.frame_count, 4)
+        self.assert_released(scene)
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(SubdivisionTests)

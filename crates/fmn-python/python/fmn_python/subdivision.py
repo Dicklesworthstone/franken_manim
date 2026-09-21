@@ -65,12 +65,15 @@ class SubdividedRenderResult:
 
 
 class _Segment:
-    def __init__(self, recording: RecordingSession) -> None:
+    def __init__(self, recording: RecordingSession, within_budget: bool) -> None:
         self.recording = recording
+        self.within_budget = within_budget
         self.selected = False
 
     def select(self, selected: bool) -> None:
         self.selected = bool(selected)
+        if self.selected and not self.within_budget:
+            raise ValueError("subdivision segment budget exhausted")
         if not self.selected:
             # This runs after range/pre_play hooks but before native playback.
             # Abort has no final capture and never resets the populated Stage.
@@ -206,8 +209,6 @@ class SubdividedRecordingSession:
             raise RuntimeError("subdivision is no longer active")
         if self._current is not None:
             raise RuntimeError("cannot nest a clip inside another clip")
-        if len(self._segments) >= self.max_segments:
-            raise ValueError("subdivision segment budget exhausted")
         config = self._configuration
         fps, start = self._native._portal_scene_clock(self.scene)
         if fps != config.fps or start < self._last_frame:
@@ -225,7 +226,10 @@ class SubdividedRecordingSession:
         self._current = recording
         try:
             with recording:
-                segment = _Segment(recording)
+                # pre_play owns selection and EndScene range termination.
+                # A full publication budget must not reject skipped calls,
+                # empty plays or the exclusive range boundary before that hook.
+                segment = _Segment(recording, len(self._segments) < self.max_segments)
                 yield segment
             if recording.result is not None:
                 self._segments.append(RenderSegment(
