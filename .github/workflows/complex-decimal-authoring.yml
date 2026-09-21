@@ -10,6 +10,8 @@ on:
       - 'crates/fmn-python/python/fmn_python/matrix.py'
       - 'crates/fmn-python/tests/complex_matrix.py'
       - 'crates/fmn-python/tests/complex_readouts_render.py'
+      - 'crates/fmn-python/src/complex_readouts.rs'
+      - 'scripts/patches/complex-readouts-gauntlet.patch'
   workflow_dispatch:
 permissions:
   contents: write
@@ -50,6 +52,12 @@ jobs:
               git apply --reverse --check --include="$path" "$patch"
             fi
           done
+          patch=scripts/patches/complex-readouts-gauntlet.patch
+          if git apply --check "$patch"; then
+            git apply "$patch"
+          else
+            git apply --reverse --check "$patch"
+          fi
           python - <<'PYCODE'
           from pathlib import Path
           path = Path("scripts/check_portal_runtime.sh")
@@ -76,10 +84,15 @@ jobs:
           for suite in decimal_authoring complex_matrix matrix_authoring live_tex live_tex_render complex_readouts_render; do
             target/complex-decimal-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/complex-decimal-$suite.log
           done
+      - name: Exercise the embedded native front door and registered Gauntlet scenario
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-python --lib complex_readouts::tests:: -- --nocapture 2>&1 | tee /tmp/complex-decimal-embedded.log
+          cargo test --locked -p fmn-conformance --test e2e_scenarios python_complex_readouts_scenario_passes -- --exact --nocapture 2>&1 | tee /tmp/complex-decimal-gauntlet.log
       - name: Publish verified activation directly to main
         run: |
           set -euo pipefail
-          git add crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/tests/bridge.py scripts/check_portal_runtime.sh
+          git add crates/fmn-python/python/fmn_python/initialization.py crates/fmn-python/tests/bridge.py scripts/check_portal_runtime.sh crates/fmn-python/src/lib.rs crates/fmn-conformance/tests/e2e_scenarios.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
