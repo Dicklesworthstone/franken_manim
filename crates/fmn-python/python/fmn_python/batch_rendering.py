@@ -19,6 +19,8 @@ from .batch_checkpoint import BatchCheckpoint
 from .batch_provenance import BatchProvenance, has_provenance, validate_batch_mode
 from .render_selection import animation_range as _animation_range
 from .rendering import RenderResult, SourceInputs, _FORMATS, _positive_integer, render_scene
+from .subdivision import SubdividedRenderResult
+from .subdivision_rendering import render_subdivided_scene, validate_subdivided_mode
 
 
 @dataclass(frozen=True)
@@ -37,7 +39,7 @@ class SceneRenderOutcome:
     name: str
     destination: Path
     status: str
-    result: RenderResult | None = None
+    result: RenderResult | SubdividedRenderResult | None = None
     error_type: str | None = None
     message: str | None = None
     notes: tuple[str, ...] = ()
@@ -106,7 +108,7 @@ def _name_key(name: Any) -> str:
     return key
 
 
-def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int, existing=frozenset()):
+def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int, existing=frozenset(), *, subdivide=False):
     text = os.fspath(directory)
     if not isinstance(text, str):
         raise TypeError("batch output directory must be a text path")
@@ -148,7 +150,8 @@ def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int, e
             if not isinstance(kwargs, Mapping) or any(not isinstance(key, str) for key in kwargs):
                 raise TypeError("scene_kwargs must be a mapping with string keys")
             kwargs = dict(kwargs)
-        destination = root / job.name / "frames" if format == "png_sequence" else root / (job.name + "." + format)
+        destination = (root / job.name / "clips" if subdivide else
+                       root / job.name / "frames" if format == "png_sequence" else root / (job.name + "." + format))
         # This is an early diagnostic, not a replacement for Reel's atomic
         # no-clobber check (another process may create a destination later).
         if existing is not None and os.path.lexists(destination) and destination not in existing:
@@ -199,6 +202,7 @@ def render_scenes(
     continue_on_error: bool = False,
     on_result: Callable[[SceneRenderOutcome], Any] | None = None,
     max_jobs: int = 1024,
+    subdivide: bool = False, max_segments: int = 10_000,
     animation_range: tuple[int, int | None] | None = None,
     checkpoint: os.PathLike[str] | str | None = None,
     resume: bool = False, resume_key: str | None = None,
@@ -213,6 +217,14 @@ def render_scenes(
     or RenderJob(name, scene, scene_kwargs). All jobs and common options are
     validated before constructing a scene. Native publication remains atomic
     per artifact, NOT for the batch. Completed artifacts are never rolled back.
+
+    subdivide=True emits each selected play/wait into directory/name/clips
+    through the same native per-call recording owner. max_segments is the
+    completed-clip budget per scene. Successful outcomes carry collection
+    receipts; failed/cancelled outcomes retain partial collection receipts in
+    result, without claiming whole-scene success. This mode does not accept
+    still output, reproducibility, or single-artifact checkpoint/resume. All
+    selection, name/collision and mode checks precede scene construction.
 
     By default the first ordinary failure raises BatchRenderError with partial
     receipts and the original cause. continue_on_error returns a report with
@@ -242,6 +254,12 @@ def render_scenes(
     """
     if not isinstance(format, str) or format not in _FORMATS:
         raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
+    if not isinstance(subdivide, bool):
+        raise TypeError("subdivide must be bool")
+    if subdivide:
+        max_segments = _positive_integer(max_segments, "max_segments", 100_000)
+    elif max_segments != 10_000:
+        raise ValueError("max_segments requires subdivide=True")
     if not isinstance(resume, bool):
         raise TypeError("resume must be bool")
     if checkpoint is None and (resume or resume_key is not None):
@@ -261,9 +279,14 @@ def render_scenes(
     fps = None if fps is None else _positive_integer(fps, "fps")
     threads = None if threads is None else _positive_integer(threads, "threads")
     native = importlib.import_module("manimlib")
+    if subdivide and ((resolution is not None and resolution[0] * resolution[1] > 16_777_216)
+                      or (threads is not None and threads > 96)):
+        raise ValueError("subdivision requires at most 16777216 pixels and 1..96 threads")
+    if subdivide:
+        validate_subdivided_mode(native, format, reproducible=reproducible, checkpoint=checkpoint)
     validate_batch_mode(native, format, reproducible, checkpoint)
     owner = nullcontext(None) if checkpoint is None else BatchCheckpoint(checkpoint, resume=resume, key=resume_key)
-    jobs, destinations = _plan(scenes, directory, format, native, maximum, None)
+    jobs, destinations = _plan(scenes, directory, format, native, maximum, None, subdivide=subdivide)
     if checkpoint is not None:
         owner.validate_destinations(destinations)
     with owner as journal:
@@ -291,9 +314,11 @@ def render_scenes(
             if job.name not in completed:
                 try:
                     provenance_options = {} if provenance is None else provenance.options(path)
-                    receipt = render_scene(job.scene, path, format=format, resolution=resolution,
+                    render = render_subdivided_scene if subdivide else render_scene
+                    receipt = render(job.scene, path, format=format, resolution=resolution,
                                            fps=fps, threads=threads, scene_kwargs=job.scene_kwargs,
                                            **provenance_options,
+                                           **({"max_segments": max_segments} if subdivide else {}),
                                            **({} if not _output_options else {"_output_options": _output_options}),
                                            **({} if selection is None else {"animation_range": selection}))
                     if provenance is not None:
@@ -301,10 +326,14 @@ def render_scenes(
                 except Exception as error:
                     failure = error
                     kind, message = _error_fields(error)
-                    outcomes[index] = SceneRenderOutcome(job.name, path, "failed", error_type=kind, message=message, notes=_error_notes(error))
+                    outcomes[index] = SceneRenderOutcome(job.name, path, "failed", error_type=kind, message=message,
+                                                        notes=_error_notes(error),
+                                                        result=_partial_subdivision(error, path) if subdivide else None)
                 except BaseException as error:
                     kind, message = _error_fields(error)
-                    outcomes[index] = SceneRenderOutcome(job.name, path, "cancelled", error_type=kind, message=message, notes=_error_notes(error))
+                    outcomes[index] = SceneRenderOutcome(job.name, path, "cancelled", error_type=kind, message=message,
+                                                        notes=_error_notes(error),
+                                                        result=_partial_subdivision(error, path) if subdivide else None)
                     _attach_result(error, outcomes, reproducible=reproducible)
                     try:
                         _record_checkpoint(journal, outcomes)
@@ -323,6 +352,18 @@ def render_scenes(
             if failure is not None and not continue_on_error:
                 raise BatchRenderError(BatchRenderResult(tuple(outcomes), reproducible=reproducible)) from failure
         return BatchRenderResult(tuple(outcomes), reproducible=reproducible)
+
+
+def _partial_subdivision(error, destination):
+    """Accept only a collection receipt for this job, not a live session owner."""
+    try:
+        result = vars(error).get("render_subdivision_result")
+        if (isinstance(result, SubdividedRenderResult)
+                and result.destination == destination and not result.completed):
+            return result
+    except BaseException:
+        pass
+    return None
 
 
 def _record_checkpoint(journal, outcomes):

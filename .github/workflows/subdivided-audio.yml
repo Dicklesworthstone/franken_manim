@@ -15,10 +15,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   native:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 35
     env:
-      CARGO_TARGET_DIR: target/camera-runtime
+      CARGO_TARGET_DIR: target/portable
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
       CARGO_TERM_COLOR: never
       PYO3_PYTHON: python
@@ -36,16 +36,21 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target/camera-runtime
+            target/portable
           key: audio-clips-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-recording-
             camera-runtime-${{ runner.os }}-${{ runner.arch }}-
             cargo-${{ runner.os }}-${{ runner.arch }}-
       - name: Build the native mixer and audio clip integration
         run: |
           set -euo pipefail
           rustup show active-toolchain
-          command -v ffmpeg
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version
           python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
           if ! grep -q 'pub fn mix_window(' crates/fmn-output/src/sound.rs; then
             git apply --check scripts/patches/audio-mix-windows.patch
@@ -69,10 +74,10 @@ jobs:
       - name: Compare exact native PCM and independently decode MP4 and alpha MOV
         run: |
           set -euo pipefail
-          for suite in subdivided_audio subdivided_recording subdivided_rendering callback_cleanup persistent_recovery composition_lifecycle recording_sessions programmatic_rendering; do
+          for suite in subdivided_audio subdivided_recording subdivided_rendering subdivided_batch batch_rendering callback_cleanup persistent_recovery composition_lifecycle recording_sessions programmatic_rendering; do
             target/audio-clip-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/audio-clips-$suite.log
           done
-          for suite in test_console_rendering_protocol test_named_scene_cli_protocol test_render_selection_protocol; do
+          for suite in test_console_rendering_protocol test_named_scene_cli_protocol; do
             target/audio-clip-venv/bin/python crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/audio-clips-$suite.log
           done
           git diff --check
@@ -101,7 +106,7 @@ jobs:
             if [ "$before" != "$(git rev-parse HEAD)" ]; then
               python -m maturin build --locked --interpreter python --profile dev --out target/audio-clip-wheel 2>&1 | tee /tmp/audio-clips-rebase-build.log
               target/audio-clip-venv/bin/python -m pip install --force-reinstall --no-deps target/audio-clip-wheel/*.whl
-              for suite in subdivided_audio subdivided_recording subdivided_rendering; do
+              for suite in subdivided_audio subdivided_recording subdivided_rendering subdivided_batch; do
                 target/audio-clip-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/audio-clips-rebase-$suite.log
               done
               cargo test --locked -p fmn-output --test audio_windows

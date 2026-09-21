@@ -6,7 +6,22 @@ import os
 from typing import Any
 
 from .render_selection import animation_range as _animation_range
-from .subdivision import SubdividedRecordingSession, SubdividedRenderResult
+from .subdivision import SubdividedRecordingSession, SubdividedRenderResult, _FORMATS as _CLIP_FORMATS
+from .rendering import _apply_output_options
+
+
+def validate_subdivided_mode(native, format, *, reproducible=False, checkpoint=None):
+    """Reject unsupported output modes before any Scene constructor executes."""
+    if not isinstance(format, str) or format not in _CLIP_FORMATS:
+        raise ValueError("subdivision requires an animated clip format or WAV, not a final-state still")
+    if reproducible:
+        raise RuntimeError("CAPABILITY: subdivided Python recordings do not certify arbitrary host history")
+    if checkpoint is not None:
+        raise ValueError("subdivided collections cannot reuse single-artifact checkpoint receipts")
+    if not callable(getattr(native, "_portal_prepare_recording_scene", None)):
+        raise RuntimeError("CAPABILITY: fresh-scene subdivision requires a matching native wheel")
+    if format in {"wav", "mp4", "mov"} and not callable(getattr(native, "_portal_begin_audio_clip", None)):
+        raise RuntimeError("CAPABILITY: audio subdivision requires a matching native wheel")
 
 
 def subdivided_render_session(
@@ -32,32 +47,48 @@ def render_subdivided_scene(
     resolution: tuple[int, int] | None = None, fps: int | None = None,
     threads: int | None = None, scene_kwargs: dict[str, Any] | None = None,
     animation_range=None, max_segments: int = 10_000,
+    _output_options: dict[str, Any] | None = None,
 ) -> SubdividedRenderResult:
     """Run one Scene lifecycle, emitting a native clip for each selected call.
 
     Constructor, setup, construct and tear_down run only once. EndScene is
     successful range termination, not an output failure. Earlier clips remain
     published after execution failure; no scene or filesystem rollback occurs.
+    The original exception carries render_subdivision_result with partial
+    receipts whenever a collection was created. Constructor failures precede
+    collection ownership and therefore do not carry a collection receipt.
     """
     selection = _animation_range(animation_range)
     native = importlib.import_module("manimlib")
+    validate_subdivided_mode(native, format)
     if isinstance(scene, type) and issubclass(scene, native.Scene):
         scene = scene(**({} if scene_kwargs is None else dict(scene_kwargs)))
     elif scene_kwargs is not None:
         raise TypeError("scene_kwargs is valid only when rendering a Scene class")
+    if _output_options:
+        _apply_output_options(scene, _output_options)
     session = subdivided_render_session(
         scene, destination, format=format, resolution=resolution, fps=fps,
         threads=threads, animation_range=selection, max_segments=max_segments,
         _native=native,
     )
-    with session:
+    try:
+        with session:
+            try:
+                scene.run()
+            except native.EndScene:
+                pass
+        if session.result is None:
+            raise RuntimeError("scene execution ended without completing its subdivided generation")
+        return session.result
+    except BaseException as error:
+        # Keep the exact authored exception (including Ctrl-C) and attach only
+        # immutable publication receipts, never the live Scene or its proxies.
         try:
-            scene.run()
-        except native.EndScene:
+            error.render_subdivision_result = session.partial_result
+        except BaseException:
             pass
-    if session.result is None:
-        raise RuntimeError("scene execution ended without completing its subdivided generation")
-    return session.result
+        raise
 
 
 def take_subdivision_option(options: list[str], value_flags) -> tuple[list[str], bool]:
