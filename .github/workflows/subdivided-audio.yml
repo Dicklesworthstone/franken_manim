@@ -74,10 +74,10 @@ jobs:
       - name: Compare exact native PCM and independently decode MP4 and alpha MOV
         run: |
           set -euo pipefail
-          for suite in subdivided_audio subdivided_recording subdivided_rendering subdivided_batch subdivided_batch_cli batch_rendering callback_cleanup persistent_recovery composition_lifecycle recording_sessions programmatic_rendering; do
+          for suite in subdivided_audio subdivided_recording subdivided_rendering subdivided_batch subdivided_batch_cli configured_subdivision batch_rendering callback_cleanup persistent_recovery composition_lifecycle recording_sessions programmatic_rendering; do
             target/audio-clip-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/audio-clips-$suite.log
           done
-          for suite in test_console_rendering_protocol test_named_scene_cli_protocol; do
+          for suite in test_console_rendering_protocol test_named_scene_cli_protocol test_runtime_provenance_protocol; do
             target/audio-clip-venv/bin/python crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/audio-clips-$suite.log
           done
           git diff --check
@@ -106,7 +106,7 @@ jobs:
             if [ "$before" != "$(git rev-parse HEAD)" ]; then
               python -m maturin build --locked --interpreter python --profile dev --out target/audio-clip-wheel 2>&1 | tee /tmp/audio-clips-rebase-build.log
               target/audio-clip-venv/bin/python -m pip install --force-reinstall --no-deps target/audio-clip-wheel/*.whl
-              for suite in subdivided_audio subdivided_recording subdivided_rendering subdivided_batch subdivided_batch_cli; do
+              for suite in subdivided_audio subdivided_recording subdivided_rendering subdivided_batch subdivided_batch_cli configured_subdivision; do
                 target/audio-clip-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/audio-clips-rebase-$suite.log
               done
               cargo test --locked -p fmn-output --test audio_windows

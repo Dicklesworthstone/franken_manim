@@ -42,9 +42,10 @@ _LEGACY = {"cpython": "CPython 3.13", "abi": "cpython-3.13-full-abi", "wheel": "
 def production_session():
     source = ast.parse((_ROOT / "rendering.py").read_text())
     nodes = [node for node in source.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))
-             and node.name in {"RenderSession", "_source_snapshot"}]
-    if len(nodes) != 2:
-        raise AssertionError("expected the production RenderSession and source freezer")
+             and node.name in {"RenderSession", "_source_snapshot",
+                               "_configured_scene_session", "_run_owned_scene_render"}]
+    if len(nodes) != 4:
+        raise AssertionError("expected the production session, freezer and Scene routing helpers")
     module = types.ModuleType(_PACKAGE + ".rendering")
     module.__dict__.update(
         Mapping=Mapping, Path=Path, os=os, sys=sys, threading=threading, copy=copy,
@@ -52,7 +53,7 @@ def production_session():
         _FORMATS={"png", "png_sequence", "gif", "mp4", "wav"}, _VIDEO_FORMATS={"mp4", "mov"},
         _positive_integer=lambda value, name: value, _seed=lambda value: value,
         _animation_range=lambda value: value, apply_animation_range=lambda *args: None,
-        _validate_writer_options=lambda *args: None, _cue_assets=lambda values: None,
+        _validate_writer_options=lambda *args, **kwargs: None, _cue_assets=lambda values: None,
         _runtime_identities=lambda native: dict(_LEGACY), RenderResult=types.SimpleNamespace,
         _configured_destination=lambda scene, destination, format, native: (destination, format),
     )
@@ -118,6 +119,15 @@ class RuntimeGuardTests(unittest.TestCase):
         options = {"format": "png", "reproducible": True, "sources": {"scene.py": b"pass"}}
         options.update(kwargs)
         return self.rendering.RenderSession(self.scene, self.root / "output.png", _native=self.native, **options)
+
+    def test_configured_subdivision_cannot_bypass_certified_runtime_admission(self):
+        self.scene.file_writer = types.SimpleNamespace(subdivide_output=True)
+        with self.assertRaisesRegex(RuntimeError, "subdivided.*certify"):
+            self.scene.render_session(self.root / "clips", format="gif", reproducible=True,
+                                      sources={"scene.py": b"pass"})
+        self.assertEqual(self.capture_count, 0)
+        self.assertEqual(self.events, [])
+        self.assertFalse((self.root / "clips").exists())
 
     def test_standard_render_has_no_hash_cost_or_runtime_requirement(self):
         with self.session(reproducible=False) as session:

@@ -555,6 +555,86 @@ def _configured_destination(scene: Any, destination: Any, format: str | None, na
     return str(root) + "." + format, format
 
 
+
+def _configured_scene_session(scene, destination, format, resolution, fps, threads,
+                              animation_range, native, *, reproducible=False,
+                              sources=None, runtime_identities=None):
+    """Choose one native owner from the existing SceneFileWriter preference.
+
+    The collection owns the stock writer's partial-animation hooks; an ordinary
+    RenderSession must not ignore that preference or silently flatten clips.
+    Top-level render_scene/render_session remain explicit single-artifact APIs.
+    """
+    if not isinstance(reproducible, bool):
+        raise TypeError("reproducible must be bool")
+    writer = getattr(scene, "file_writer", None)
+    if writer is not None and getattr(writer, "subdivide_output", False):
+        if reproducible:
+            error_type = getattr(native, "_CapabilityError", RuntimeError)
+            raise error_type(
+                "CAPABILITY: subdivided Python recordings do not certify arbitrary host history"
+            )
+        from .subdivision_rendering import subdivided_render_session
+
+        if format is None:
+            # With an explicit recognized suffix, preserve the familiar output
+            # format selection. The destination itself is now a collection
+            # directory, never a single movie pretending to be subdivided.
+            text = None if destination is None else os.fspath(destination)
+            suffix = Path(text).suffix.lower().lstrip(".") if isinstance(text, str) else ""
+            if suffix in _FORMATS:
+                format = suffix
+            elif writer.write_to_movie:
+                if writer.save_last_frame:
+                    error_type = getattr(native, "_CapabilityError", RuntimeError)
+                    raise error_type(
+                        "Scene.render cannot publish subdivided movies and a last-frame PNG "
+                        "in one generation; select a clip format explicitly"
+                    )
+                format = Path(writer.get_movie_file_path()).suffix.lower().lstrip(".")
+            elif writer.save_last_frame:
+                error_type = getattr(native, "_CapabilityError", RuntimeError)
+                raise error_type(
+                    "subdivide_output requires clips, not save_last_frame; "
+                    "select gif, y4m, png_sequence, wav, mp4, or mov explicitly"
+                )
+            else:
+                format = "png_sequence"
+        if destination is None:
+            destination = Path(writer.get_output_file_rootname()) / "clips"
+        return subdivided_render_session(
+            scene, destination, format=format, resolution=resolution, fps=fps,
+            threads=threads, animation_range=animation_range, _native=native,
+        )
+    destination, format = _configured_destination(scene, destination, format, native)
+    return RenderSession(scene, destination, format=format, resolution=resolution,
+                         fps=fps, threads=threads, animation_range=animation_range, _native=native,
+                         reproducible=reproducible, sources=sources,
+                         runtime_identities=runtime_identities)
+
+
+def _run_owned_scene_render(scene, session, native):
+    """Run the lifecycle once, preserving partial collections on any failure."""
+    try:
+        with session:
+            try:
+                scene.run()
+            except native.EndScene:
+                pass
+        if session.result is None:
+            raise RuntimeError("scene execution ended without publishing its render generation")
+    except BaseException as error:
+        try:
+            partial = getattr(session, "partial_result", None)
+            if partial is not None:
+                error.render_subdivision_result = partial
+        except BaseException:
+            pass
+        raise
+    scene.render_result = session.result
+    return session.result
+
+
 def install_scene_rendering(native: Any) -> None:
     """Bind the wheel's explicit output front door without changing Scene.run.
 
@@ -563,6 +643,8 @@ def install_scene_rendering(native: Any) -> None:
     same run hook. ``render_session`` exposes the same generation for imperative
     scenes without calling ``run`` or reconstructing the scene. Both bindings
     capture their owning native module, including in embedded interpreters.
+    With SceneFileWriter.subdivide_output enabled, both use the existing native
+    collection owner and return its collection receipt rather than a flat file.
     """
     if vars(native).get("_FMN_SCENE_RENDERING_INSTALLED", False):
         return
@@ -572,18 +654,10 @@ def install_scene_rendering(native: Any) -> None:
         self, destination=None, *, format=None, resolution=None, fps=None, threads=None,
         animation_range=None,
     ):
-        destination, format = _configured_destination(self, destination, format, native)
-        session = RenderSession(self, destination, format=format, resolution=resolution,
-                                fps=fps, threads=threads, animation_range=animation_range, _native=native)
-        with session:
-            try:
-                self.run()
-            except native.EndScene:
-                pass
-        if session.result is None:
-            raise RuntimeError("scene execution ended without publishing its render generation")
-        self.render_result = session.result
-        return session.result
+        session = _configured_scene_session(
+            self, destination, format, resolution, fps, threads, animation_range, native,
+        )
+        return _run_owned_scene_render(self, session, native)
 
     def scene_render_session(
         self, destination=None, *, format=None, resolution=None, fps=None, threads=None,
@@ -594,10 +668,13 @@ def install_scene_rendering(native: Any) -> None:
         Construction is side-effect free: the returned context acquires its
         generation only on entry. Read ``session.result`` after successful exit.
         Exceptions cancel the owned generation without publishing an artifact.
+        With subdivide_output, each selected play/wait is an independent clip;
+        completed clips survive a later failure and session.partial_result
+        identifies them. Neither mode replays the scene lifecycle.
         """
-        destination, format = _configured_destination(self, destination, format, native)
-        return RenderSession(self, destination, format=format, resolution=resolution,
-                             fps=fps, threads=threads, animation_range=animation_range, _native=native)
+        return _configured_scene_session(
+            self, destination, format, resolution, fps, threads, animation_range, native,
+        )
 
     scene_render_session.__name__ = "render_session"
     scene_render_session.__qualname__ = Scene.__qualname__ + ".render_session"

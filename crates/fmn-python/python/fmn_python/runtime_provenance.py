@@ -97,11 +97,9 @@ def install_runtime_provenance(native):
     def scene_render_session(self, destination=None, *, format=None, resolution=None,
                              fps=None, threads=None, animation_range=None,
                              reproducible=False, sources=None, runtime_identities=None):
-        destination, format = rendering._configured_destination(self, destination, format, native)
-        return rendering.RenderSession(
-            self, destination, format=format, resolution=resolution, fps=fps,
-            threads=threads, animation_range=animation_range, reproducible=reproducible,
-            sources=sources, runtime_identities=runtime_identities, _native=native,
+        return rendering._configured_scene_session(
+            self, destination, format, resolution, fps, threads, animation_range, native,
+            reproducible=reproducible, sources=sources, runtime_identities=runtime_identities,
         )
 
     def render(self, destination=None, *, format=None, resolution=None, fps=None,
@@ -112,15 +110,7 @@ def install_runtime_provenance(native):
             threads=threads, animation_range=animation_range, reproducible=reproducible,
             sources=sources, runtime_identities=runtime_identities,
         )
-        with session:
-            try:
-                self.run()
-            except native.EndScene:
-                pass
-        if session.result is None:
-            raise RuntimeError("scene execution ended without publishing its render generation")
-        self.render_result = session.result
-        return session.result
+        return rendering._run_owned_scene_render(self, session, native)
 
     for name, function in (("render", render), ("render_session", scene_render_session)):
         function.__name__ = name
