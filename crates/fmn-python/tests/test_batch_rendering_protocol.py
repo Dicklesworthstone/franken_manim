@@ -68,7 +68,9 @@ class Scene:
         self.events.append("finish")
         if self.finish_error:
             raise self.finish_error
-        path, format, width, height, fps, threads, seed = self.request
+        path, format, width, height, fps, threads, seed, reproducible = self.request
+        if reproducible is not False:
+            raise AssertionError("the uncertified protocol double cannot certify a render")
         destination = pathlib.Path(path)
         payload = f"test-native-boundary:{seed}:{format}:{width}x{height}".encode()
         destination.parent.mkdir(parents=True, exist_ok=True)

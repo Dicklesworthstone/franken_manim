@@ -237,8 +237,9 @@ def render_scenes(
     before observers run. Supply a nonempty resume_key identifying scene/asset
     inputs. With resume=True, matching completed artifacts are hash-verified
     and reused; failed, cancelled and unattempted jobs run afresh. Reused scenes
-    are not constructed. Constructor kwargs must be JSON-compatible when using
-    a checkpoint. Reuse is explicit, uncertified, and not a source-code cache:
+    are not constructed. Checkpoint constructor kwargs must be plain JSON
+    values; each job receives an independent copy of its admitted inputs. Reuse
+    is explicit, uncertified, and not a source-code cache:
     change resume_key when inputs for completed scenes change. A crash between
     publication and checkpointing leaves an unrecorded artifact which fails
     no-clobber preflight; it is never silently reused, deleted, or overwritten.
@@ -315,8 +316,11 @@ def render_scenes(
                 try:
                     provenance_options = {} if provenance is None else provenance.options(path)
                     render = render_subdivided_scene if subdivide else render_scene
+                    kwargs = job.scene_kwargs
+                    if journal is not None and kwargs is not None:
+                        kwargs = journal.constructor_kwargs(index)
                     receipt = render(job.scene, path, format=format, resolution=resolution,
-                                           fps=fps, threads=threads, scene_kwargs=job.scene_kwargs,
+                                           fps=fps, threads=threads, scene_kwargs=kwargs,
                                            **provenance_options,
                                            **({"max_segments": max_segments} if subdivide else {}),
                                            **({} if not _output_options else {"_output_options": _output_options}),

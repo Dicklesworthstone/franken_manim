@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from pathlib import Path
 import tempfile
@@ -27,6 +28,18 @@ class ParameterScene(m.Scene):
                or (type(value) is float and math.copysign(1.0, value) > 0))
         self.add(m.Square(fill_opacity=1, stroke_width=0,
                           fill_color=m.RED if red else m.BLUE))
+
+
+class PaletteScene(m.Scene):
+    def __init__(self, palette, mutate=False, **kwargs):
+        CALLS.append(palette["colors"][0])
+        super().__init__(**kwargs)
+        self.color = m.RED if palette["colors"][0] == "red" else m.BLUE
+        if mutate:
+            palette["colors"][0] = "blue"
+
+    def construct(self):
+        self.add(m.Square(fill_opacity=1, stroke_width=0, fill_color=self.color))
 
 
 def inventory(directory):
@@ -83,6 +96,41 @@ class NativeCheckpointIdentityTests(unittest.TestCase):
         self.assertEqual(first.as_dict(), resumed.as_dict())
         self.assertEqual(CALLS, [])
         self.assertEqual(inventory(self.root / "output"), before)
+
+    def test_observer_mutation_cannot_change_later_native_pixels(self):
+        palette = {"colors": ["red"]}
+        jobs = [RenderJob(name, PaletteScene, {"palette": palette}) for name in ("first", "second")]
+        def observer(outcome):
+            if outcome.name == "first":
+                palette["colors"][0] = "blue"
+        result = render_scenes(jobs, self.root / "output", on_result=observer, **self.options)
+        self.assertEqual(CALLS, ["red", "red"])
+        self.assertEqual(result.outcomes[0].result.digest, result.outcomes[1].result.digest)
+        document = json.loads(self.options["checkpoint"].read_text())
+        self.assertTrue(all(job["scene_kwargs"] == {"palette": {"colors": ["red"]}}
+                            for job in document["plan"]["jobs"]))
+        palette["colors"][0] = "red"
+        CALLS.clear()
+        resumed = render_scenes(jobs, self.root / "output", resume=True, **self.options)
+        self.assertEqual(resumed.as_dict(), result.as_dict())
+        self.assertEqual(CALLS, [])
+
+    def test_native_constructor_mutation_does_not_escape_its_job(self):
+        palette = {"colors": ["red"]}
+        jobs = [RenderJob(name, PaletteScene, {"palette": palette, "mutate": True})
+                for name in ("first", "second")]
+        result = render_scenes(jobs, self.root / "output", **self.options)
+        self.assertEqual(CALLS, ["red", "red"])
+        self.assertEqual(result.outcomes[0].result.digest, result.outcomes[1].result.digest)
+        self.assertEqual(palette, {"colors": ["red"]})
+
+    def test_non_json_constructor_values_fail_before_native_execution(self):
+        jobs = [RenderJob("first", PaletteScene, {"palette": {"colors": ("red",)}})]
+        with self.assertRaisesRegex(TypeError, "checkpoint.*JSON"):
+            render_scenes(jobs, self.root / "output", **self.options)
+        self.assertEqual(CALLS, [])
+        self.assertFalse((self.root / "output").exists())
+        self.assertFalse(self.options["checkpoint"].exists())
 
 
 if __name__ in ("__main__", "<run_path>"):

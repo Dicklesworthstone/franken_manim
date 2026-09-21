@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -23,6 +24,44 @@ _MAX_FILES = 200000
 def _json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=True, allow_nan=False,
                       sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _constructor_values(value: Any) -> Any:
+    """Copy JSON values without losing Python type information to serialization.
+
+    JSON would silently turn tuples into lists and non-string mapping keys into
+    strings. Refuse those inputs (and custom subclasses), rather than record a
+    different constructor invocation. Aliases have JSON value semantics: each
+    occurrence owns a copy, so one scene cannot change a later admitted job.
+    """
+    active: set[int] = set()
+
+    def visit(item):
+        kind = type(item)
+        if item is None or kind in (bool, int, str):
+            return item
+        if kind is float:
+            if not math.isfinite(item):
+                raise ValueError("checkpoint constructor inputs require finite JSON numbers")
+            return item
+        if kind not in (list, dict):
+            raise TypeError("checkpoint constructor inputs require plain JSON values")
+        if id(item) in active:
+            raise ValueError("checkpoint constructor inputs cannot contain circular JSON values")
+        active.add(id(item))
+        try:
+            if kind is list:
+                return [visit(child) for child in item]
+            if any(type(key) is not str for key in item):
+                raise TypeError("checkpoint constructor inputs require JSON string keys")
+            return {key: visit(child) for key, child in item.items()}
+        finally:
+            active.remove(id(item))
+
+    try:
+        return visit(value)
+    except RecursionError as error:
+        raise ValueError("checkpoint constructor inputs exceed JSON nesting depth") from error
 
 
 def _scene_identity(scene):
@@ -205,9 +244,10 @@ class BatchCheckpoint:
         # resume_key is an explicit caller assertion about source/assets. Keep
         # constructor parameters JSON-only when checkpointing so changes are
         # rejected rather than silently reusing another invocation's outputs.
-        plan = {"jobs": [{"name": job.name, "destination": str(path),
+        plan = {"constructor_inputs": "json-values-v1",
+                "jobs": [{"name": job.name, "destination": str(path),
                           "scene": _scene_identity(job.scene),
-                          "scene_kwargs": dict(job.scene_kwargs or {})}
+                          "scene_kwargs": _constructor_values(dict(job.scene_kwargs or {}))}
                          for job, path in zip(jobs, destinations)], "options": options}
         self.plan = json.loads(_json(plan))
         if self.document is None:
@@ -240,6 +280,12 @@ class BatchCheckpoint:
                     raise ValueError("checkpoint artifact does not match its native receipt")
                 self.artifacts[job.name] = actual
                 self.completed[job.name] = row
+
+    def constructor_kwargs(self, index: int) -> dict[str, Any]:
+        """Return an isolated invocation of the already admitted constructor."""
+        if self.plan is None:
+            raise RuntimeError("checkpoint must be prepared before retrieving inputs")
+        return json.loads(_json(self.plan["jobs"][index]["scene_kwargs"]))
 
     def record(self, outcomes):
         if self.lock is None or self.plan is None:
