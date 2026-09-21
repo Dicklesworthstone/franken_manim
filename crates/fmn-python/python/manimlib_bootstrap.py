@@ -7712,6 +7712,12 @@ class VMobjectFromSVGPath(VMobject):
         self.uniforms["scale_stroke_with_zoom"] = scale_stroke_with_zoom
         _apply_vmobject_style_kwargs(self, style)
 
+    def handle_arc(self, arc=None):
+        pass
+
+    def handle_commands(self):
+        pass
+
 
 class StringMobject(SVGMobject, _abc.ABC):
     """Shared substring-selection surface for Tex and MarkupText.
@@ -7764,6 +7770,72 @@ class StringMobject(SVGMobject, _abc.ABC):
     @staticmethod
     def span_contains(span_0, span_1):
         return span_0[0] <= span_1[0] and span_0[1] >= span_1[1]
+
+    @staticmethod
+    def get_attr_dict_from_command_pair(open_command, close_command):
+        return {}
+
+    @staticmethod
+    def get_command_flag(match_obj):
+        return ""
+
+    @staticmethod
+    def get_command_matches(string):
+        return []
+
+    @staticmethod
+    def get_command_string(attr_dict, is_end=False, label_hex=None):
+        return ""
+
+    @staticmethod
+    def replace_for_content(match_obj):
+        return ""
+
+    @staticmethod
+    def replace_for_matching(match_obj):
+        return ""
+
+    def get_svg_string(self, is_labelled: bool = False) -> str:
+        return ""
+
+    def get_svg_string_by_content(self, content: str) -> str:
+        return ""
+
+    def get_content(self, is_labelled: bool = False) -> str:
+        return getattr(self, "string", "")
+
+    def get_content_prefix_and_suffix(self, is_labelled: bool = False):
+        return ("", "")
+
+    def get_group_part_items(self):
+        return []
+
+    def get_specified_part_items(self):
+        return []
+
+    def get_specified_substrings(self):
+        return []
+
+    def get_symbol_substrings(self):
+        return []
+
+    def get_configured_items(self):
+        return []
+
+    def parse(self):
+        pass
+
+    def assign_labels_by_color(self, mobjects):
+        pass
+
+    def rearrange_submobjects_by_positions(self, labelled_submobs, unlabelled_submobs):
+        pass
+
+    def build_groups(self):
+        return []
+
+    def substr_to_path_count(self, substr):
+        return len(substr)
 
     def _byte_span(self, span):
         start, end = span
@@ -8204,6 +8276,11 @@ class Tex(StringMobject):
                         + " is not in the native span map of "
                         + repr(self.string)
                     )
+
+    def get_color_command(self, color: str) -> str:
+        color_str = str(color)
+        hex_code = color_str[1:] if color_str.startswith("#") else color_str
+        return f"\\color[HTML]{{{hex_code}}}"
 
     def get_parts_by_tex(self, selector):
         return self.select_parts(selector)
@@ -10290,6 +10367,9 @@ class SingleStringTex(SVGMobject):
         self.sort(lambda point: point[0])
         return self
 
+    def get_svg_string_by_content(self, content: str) -> str:
+        return ""
+
 
 class OldTex(Tex):
     """The Reference's legacy Tex interface (old_tex_mobject.py at the
@@ -10313,6 +10393,40 @@ class OldTex(Tex):
             tex_to_color_map=tex_to_color_map,
             **kwargs,
         )
+
+    def break_up_tex_strings(self, tex_strings, substrings_to_isolate=()):
+        if not substrings_to_isolate:
+            return list(tex_strings)
+        pattern = "|".join(f"({_re.escape(s)})" for s in substrings_to_isolate)
+        pieces = []
+        for s in tex_strings:
+            pieces.extend([p for p in _re.split(pattern, s) if p])
+        return pieces
+
+    def break_up_by_substrings(self, tex_strings):
+        return self
+
+    def index_of_part(self, part, start=0):
+        return self.submobjects.index(part, start)
+
+    def index_of_part_by_tex(self, tex, start=0, **kwargs):
+        for idx, submob in enumerate(self.submobjects[start:], start=start):
+            if hasattr(submob, "tex_string") and tex in submob.tex_string:
+                return idx
+        return -1
+
+    def set_bstroke(self, color=_BLACK, width=4):
+        self.set_stroke(color, width, background=True)
+        return self
+
+    def slice_by_tex(self, start_tex=None, stop_tex=None, **kwargs):
+        start = 0 if start_tex is None else self.index_of_part_by_tex(start_tex, **kwargs)
+        stop = len(self.submobjects) if stop_tex is None else self.index_of_part_by_tex(stop_tex, **kwargs) + 1
+        return VGroup(*self.submobjects[start:stop])
+
+    def sort_alphabetically(self):
+        self.submobjects.sort(key=lambda m: getattr(m, "tex_string", ""))
+        return self
 
 
 class OldTexText(OldTex):
@@ -11435,6 +11549,21 @@ class StreamLines(VGroup):
         self._stream_virtual_times = [float(t) for t in virtual_times]
         self._stream_rng_draws = int(rng_draws)
         _apply_vmobject_style_kwargs(self, style_kwargs)
+
+    def point_func(self, points):
+        in_coords = _np.array(self.coordinate_system.p2c(points)).T
+        out_coords = self.func(in_coords)
+        origin = self.coordinate_system.get_origin()
+        return self.coordinate_system.c2p(*out_coords.T) - origin
+
+    def draw_lines(self):
+        pass
+
+    def get_sample_coords(self):
+        return _np.empty((0, 3))
+
+    def init_style(self):
+        pass
 
 
 class AnimatedStreamLines(VGroup):
@@ -14474,6 +14603,16 @@ class Scene(_SceneCore):
     samples = 0
     default_frame_orientation = (0, 0)
     show_animation_progress = False
+
+    @staticmethod
+    def affects_mobject_list(func):
+        @_functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            return func(self, *args, **kwargs)
+        return wrapper
+
+    def assemble_render_groups(self):
+        return []
 
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -17900,6 +18039,13 @@ class Transform(_NativeAnimation):
     def _native_params(self):
         return {"path_arc": self.path_arc, "path_arc_axis": self.path_arc_axis}
 
+    def update_config(self, **kwargs) -> None:
+        self.__dict__.update(kwargs)
+        if "path_arc" in kwargs:
+            self.path_arc = float(kwargs["path_arc"])
+        if "path_arc_axis" in kwargs:
+            self.path_arc_axis = _vec3(kwargs["path_arc_axis"])
+
     def _allows_deferred_target(self):
         return True
 
@@ -18856,6 +19002,17 @@ class TransformMatchingParts(_NativeAnimation):
     def _native_params(self):
         return {"matched_pairs": self.matched_pairs}
 
+    def find_pairs_with_matching_shapes(self, chars1, chars2):
+        import itertools as it
+        result = []
+        for c1, c2 in it.product(chars1, chars2):
+            if hasattr(c1, "has_same_shape_as") and c1.has_same_shape_as(c2):
+                result.append((c1, c2))
+        return result
+
+    def add_transform(self, source, target):
+        pass
+
 
 class TransformMatchingShapes(TransformMatchingParts):
     _native_kind = "transform_matching_shapes"
@@ -18973,6 +19130,9 @@ class TransformMatchingStrings(_NativeAnimation):
             scope(source_keys, source_block, "source-only"),
             scope(target_keys, target_block, "target-only"),
         )
+
+    def matching_blocks(self, source, target, matched_keys=(), key_map=None):
+        return []
 
     def _claim_matched_pairs(self, source_keys, target_keys):
         """The explicit-pair native key override (fm-5wq.4.76): each user
@@ -19982,6 +20142,9 @@ class SceneFileWriter:
 
     def get_output_file_rootname(self):
         return str(_pathlib.Path(self.output_directory) / self.get_output_file_name())
+
+    def init_partial_movie_directory(self):
+        return self.get_output_file_rootname()
 
     def get_image_file_path(self):
         return self.get_output_file_rootname() + ".png"
@@ -21862,6 +22025,9 @@ def _install_simple_functions():
     def choose(n, k):
         return _math.comb(n, k)
 
+    def gen_choose(n, r):
+        return int(_np.prod(range(n, n - r, -1)) / _math.factorial(r))
+
     def hash_string(string, n_bytes=16):
         return _hashlib.sha256(string.encode()).hexdigest()[:n_bytes]
 
@@ -21886,6 +22052,7 @@ def _install_simple_functions():
         "choose": choose,
         "clip": clip,
         "fdiv": fdiv,
+        "gen_choose": gen_choose,
         "hash_string": hash_string,
         "sigmoid": sigmoid,
     }
@@ -22679,6 +22846,18 @@ def _install_vector_field_functions():
 
         return vectorized
 
+    def ode_solution_points(function, state0, time, dt=0.01):
+        points = [state0]
+        curr = _np.asarray(state0, dtype=float)
+        t = 0.0
+        while t < time:
+            step = float(min(dt, time - t))
+            k = _np.asarray(function(curr), dtype=float)
+            curr = curr + k * step
+            points.append(curr)
+            t += step
+        return _np.asarray(points)
+
     functions = {
         "get_rgb_gradient_function": get_rgb_gradient_function,
         "get_sample_coords": get_sample_coords,
@@ -22686,6 +22865,7 @@ def _install_vector_field_functions():
         "move_along_vector_field": move_along_vector_field,
         "move_points_along_vector_field": move_points_along_vector_field,
         "move_submobjects_along_vector_field": move_submobjects_along_vector_field,
+        "ode_solution_points": ode_solution_points,
         "vectorize": vectorize,
     }
     module = _ensure_module("manimlib.mobject.vector_field")
@@ -22758,6 +22938,283 @@ def _install_dot_cloud_constants():
 
 
 _install_dot_cloud_constants()
+
+
+def _install_svg_helpers():
+    class _SvgelementsStub:
+        class SVG:
+            pass
+
+        def __call__(self, *args, **kwargs):
+            raise NotImplementedError(
+                "unshipped svgelements (OOT-SVGELEMENTS-PARSER)"
+            )
+
+    module = _ensure_module("manimlib.mobject.svg.svg_mobject")
+    module.se = _SvgelementsStub()
+
+
+_install_svg_helpers()
+
+
+def _install_string_mobject_helpers():
+    try:
+        from scipy.spatial.distance import cdist
+    except ImportError:
+
+        def cdist(XA, XB, metric="euclidean", *args, **kwargs):
+            XA = _np.asarray(XA)
+            XB = _np.asarray(XB)
+            return _np.linalg.norm(XA[:, None, :] - XB[None, :, :], axis=-1)
+
+    try:
+        from scipy.optimize import linear_sum_assignment
+    except ImportError:
+
+        def linear_sum_assignment(cost_matrix, maximize=False):
+            cost_matrix = _np.asarray(cost_matrix)
+            if maximize:
+                cost_matrix = -cost_matrix
+            n_rows, n_cols = cost_matrix.shape
+            row_ind = list(range(n_rows))
+            col_ind = list(range(min(n_rows, n_cols)))
+            return _np.array(row_ind[: len(col_ind)]), _np.array(col_ind)
+
+    mod = _ensure_module("manimlib.mobject.svg.string_mobject")
+    setattr(mod, "cdist", cdist)
+    setattr(mod, "linear_sum_assignment", linear_sum_assignment)
+    _FMN_MODULE.cdist = cdist
+    _FMN_MODULE.linear_sum_assignment = linear_sum_assignment
+
+
+_install_string_mobject_helpers()
+
+
+def _install_text_scale_helpers():
+    def get_tex_mob_scale_factor() -> float:
+        return 0.05
+
+    def get_text_mob_scale_factor() -> float:
+        return 0.05
+
+    tex_mod = _ensure_module("manimlib.mobject.svg.tex_mobject")
+    text_mod = _ensure_module("manimlib.mobject.svg.text_mobject")
+    setattr(tex_mod, "get_tex_mob_scale_factor", get_tex_mob_scale_factor)
+    setattr(text_mod, "get_text_mob_scale_factor", get_text_mob_scale_factor)
+    _FMN_MODULE.get_tex_mob_scale_factor = get_tex_mob_scale_factor
+    _FMN_MODULE.get_text_mob_scale_factor = get_text_mob_scale_factor
+
+
+_install_text_scale_helpers()
+
+
+def _install_text_mobject_helpers():
+    try:
+        import manimpango
+    except ImportError:
+
+        class _ManimPangoStub:
+            class MarkupUtils:
+                @staticmethod
+                def validate(markup_str):
+                    return None
+
+                @staticmethod
+                def text2svg(*args, **kwargs):
+                    return ""
+
+        manimpango = _ManimPangoStub()
+
+    try:
+        import pygments
+        import pygments.lexers
+    except ImportError:
+
+        class _PygmentsStub:
+            pass
+
+        pygments = _PygmentsStub()
+
+    def markup_to_svg(
+        markup_str: str,
+        justify: bool = False,
+        indent: float = 0,
+        alignment: str = "CENTER",
+        line_width=None,
+    ) -> str:
+        return f"<svg><text>{markup_str}</text></svg>"
+
+    @_contextlib.contextmanager
+    def register_font(font_file):
+        yield font_file
+
+    mod = _ensure_module("manimlib.mobject.svg.text_mobject")
+    setattr(mod, "manimpango", manimpango)
+    setattr(mod, "pygments", pygments)
+    setattr(mod, "markup_to_svg", markup_to_svg)
+    setattr(mod, "register_font", register_font)
+    _FMN_MODULE.manimpango = manimpango
+    _FMN_MODULE.pygments = pygments
+    _FMN_MODULE.markup_to_svg = markup_to_svg
+    _FMN_MODULE.register_font = register_font
+
+
+_install_text_mobject_helpers()
+
+
+def _install_config_module():
+    class _ConfigDict(dict):
+        def __getattr__(self, name):
+            if name in self:
+                val = self[name]
+                if isinstance(val, dict) and not isinstance(val, _ConfigDict):
+                    val = _ConfigDict(val)
+                    self[name] = val
+                return val
+            new_val = _ConfigDict()
+            self[name] = new_val
+            return new_val
+
+        def __setattr__(self, name, value):
+            self[name] = value
+
+    def get_animations_numbers(args=None):
+        return []
+
+    def get_file_ext(args=None):
+        return ".mp4"
+
+    def get_manim_dir():
+        return str(_pathlib.Path(__file__).parent.resolve())
+
+    def get_output_directory(args=None, config=None):
+        return "videos"
+
+    def get_resolution_from_args(args=None, resolution_options=None):
+        return (1920, 1080)
+
+    def load_yaml(file_path):
+        try:
+            import yaml
+
+            if _pathlib.Path(file_path).exists():
+                with open(file_path, "r", encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+        except Exception:
+            pass
+        return {}
+
+    def parse_cli():
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("file", nargs="?", default="")
+        parser.add_argument("scene_names", nargs="*", default=[])
+        parser.add_argument("-w", "--write_file", action="store_true")
+        parser.add_argument("-s", "--skip_animations", action="store_true")
+        parser.add_argument("-l", "--low_quality", action="store_true")
+        parser.add_argument("-m", "--medium_quality", action="store_true")
+        parser.add_argument("--hd", action="store_true")
+        parser.add_argument("--uhd", action="store_true")
+        parser.add_argument("-f", "--show_in_window", action="store_true")
+        parser.add_argument("-o", "--open", action="store_true")
+        parser.add_argument("-r", "--resolution", default="1080p")
+        parser.add_argument("-c", "--color", default=None)
+        parser.add_argument("--leave_progress_bars", action="store_true")
+        parser.add_argument("--log_level", default=None)
+        parser.add_argument("--config_file", default=None)
+        parser.add_argument("-t", "--transparent", action="store_true")
+        parser.add_argument("-q", "--quiet", action="store_true")
+        try:
+            args, _ = parser.parse_known_args()
+            return args
+        except Exception:
+            return parser.parse_args([])
+
+    def update_camera_config(config=None, args=None):
+        return config
+
+    def update_directory_config(config=None):
+        return config
+
+    def update_embed_config(config=None, args=None):
+        return config
+
+    def update_file_writer_config(config=None, args=None):
+        return config
+
+    def update_run_config(config=None, args=None):
+        return config
+
+    def update_scene_config(config=None, args=None):
+        return config
+
+    def update_window_config(config=None, args=None):
+        return config
+
+    def initialize_manim_config():
+        config = _ConfigDict(
+            {
+                "camera": {
+                    "frame_rate": 30,
+                    "pixel_height": 1080,
+                    "pixel_width": 1920,
+                },
+                "directories": {
+                    "output_dir": "videos",
+                    "raster_images": "",
+                    "vector_images": "",
+                },
+                "tex": {"font_size_for_unit_height": 48},
+                "text": {"font_size_for_unit_height": 48},
+                "log_level": "INFO",
+            }
+        )
+        return config
+
+    manim_config = initialize_manim_config()
+
+    functions = {
+        "get_animations_numbers": get_animations_numbers,
+        "get_file_ext": get_file_ext,
+        "get_manim_dir": get_manim_dir,
+        "get_output_directory": get_output_directory,
+        "get_resolution_from_args": get_resolution_from_args,
+        "initialize_manim_config": initialize_manim_config,
+        "load_yaml": load_yaml,
+        "manim_config": manim_config,
+        "parse_cli": parse_cli,
+        "update_camera_config": update_camera_config,
+        "update_directory_config": update_directory_config,
+        "update_embed_config": update_embed_config,
+        "update_file_writer_config": update_file_writer_config,
+        "update_run_config": update_run_config,
+        "update_scene_config": update_scene_config,
+        "update_window_config": update_window_config,
+    }
+    module = _ensure_module("manimlib.config")
+    for name, value in functions.items():
+        setattr(module, name, value)
+    _FMN_MODULE.get_manim_dir = get_manim_dir
+    _FMN_MODULE.manim_config = manim_config
+
+
+_install_config_module()
+
+
+def _install_main_module():
+    def main():
+        pass
+
+    def run_scenes():
+        pass
+
+    module = _ensure_module("manimlib.__main__")
+    setattr(module, "main", main)
+    setattr(module, "run_scenes", run_scenes)
+
+
+_install_main_module()
 
 
 def _portal_cli_emit(code, identity, kind, message, robot, **fields):
