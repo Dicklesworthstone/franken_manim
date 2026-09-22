@@ -3,7 +3,13 @@ use fmn_mobject::{Mob, Mobject, Placement, RecordBuffer, RecordSchema, Stage};
 
 fn surface(stage: &mut Stage) -> Mob {
     let schema = RecordSchema::new(
-        &[("point", 3), ("d_normal_point", 3), ("anchor", 3), ("rgba", 4), ("uv", 2)],
+        &[
+            ("point", 3),
+            ("d_normal_point", 3),
+            ("anchor", 3),
+            ("rgba", 4),
+            ("uv", 2),
+        ],
         &["point"],
         &["point", "d_normal_point", "anchor", "d_normal_point"],
     )
@@ -34,9 +40,18 @@ fn retained_placement_bakes_all_pointlikes_once_and_no_style_fields() {
     // The no-view fast path is still retained, not eagerly rewritten.
     assert_eq!(stage.get(mob).unwrap().buffer.revision(), revision);
     assert!(stage.bake_placement(mob).unwrap());
-    assert_eq!(column(&stage, mob, "point"), [3.0, -1.0, 5.0, 5.0, -1.0, 5.0]);
-    assert_eq!(column(&stage, mob, "d_normal_point"), [3.0, -1.0, 5.25, 5.0, -1.0, 5.25]);
-    assert_eq!(column(&stage, mob, "anchor"), [3.0, 0.0, 5.0, 5.0, 0.0, 5.0]);
+    assert_eq!(
+        column(&stage, mob, "point"),
+        [3.0, -1.0, 5.0, 5.0, -1.0, 5.0]
+    );
+    assert_eq!(
+        column(&stage, mob, "d_normal_point"),
+        [3.0, -1.0, 5.25, 5.0, -1.0, 5.25]
+    );
+    assert_eq!(
+        column(&stage, mob, "anchor"),
+        [3.0, 0.0, 5.0, 5.0, 0.0, 5.0]
+    );
     assert_eq!(column(&stage, mob, "rgba"), rgba);
     assert_eq!(column(&stage, mob, "uv"), uv);
     let revision = stage.get(mob).unwrap().buffer.revision();
@@ -49,14 +64,31 @@ fn pinned_field_views_observe_every_affine_geometry_channel() {
     let mut stage = Stage::new();
     let mob = surface(&mut stage);
     stage.shift(mob, [1.0, 0.0, 0.0]);
-    let normal_view = stage.get_mut(mob).unwrap().buffer.export_field_view("d_normal_point", true).unwrap();
-    let affine = Placement::about([[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 4.0]], [1.0, 1.0, 1.0]);
+    let normal_view = stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .export_field_view("d_normal_point", true)
+        .unwrap();
+    let affine = Placement::about(
+        [[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 4.0]],
+        [1.0, 1.0, 1.0],
+    );
     stage.apply_affine(mob, affine);
     assert_eq!(stage.placement(mob), Some(Placement::IDENTITY));
     assert!(normal_view.is_attached_to(&stage.get(mob).unwrap().buffer));
-    assert_eq!(normal_view.read(0, "d_normal_point").unwrap(), [1.0, 1.0, -2.0]);
-    assert_eq!(column(&stage, mob, "point"), [1.0, 1.0, -3.0, 5.0, 1.0, -3.0]);
-    assert_eq!(column(&stage, mob, "anchor"), [1.0, 4.0, -3.0, 5.0, 4.0, -3.0]);
+    assert_eq!(
+        normal_view.read(0, "d_normal_point").unwrap(),
+        [1.0, 1.0, -2.0]
+    );
+    assert_eq!(
+        column(&stage, mob, "point"),
+        [1.0, 1.0, -3.0, 5.0, 1.0, -3.0]
+    );
+    assert_eq!(
+        column(&stage, mob, "anchor"),
+        [1.0, 4.0, -3.0, 5.0, 4.0, -3.0]
+    );
 }
 
 #[test]
@@ -64,10 +96,21 @@ fn pointwise_maps_transform_control_points_in_world_space_about_one_pivot() {
     let mut stage = Stage::new();
     let mob = surface(&mut stage);
     stage.shift(mob, [1.0, 2.0, 0.0]);
-    stage.apply_points_function(mob, |p| [p[0], p[1], p[2] + p[0] * p[1]], Some([1.0, 1.0, 0.0]), None);
+    stage.apply_points_function(
+        mob,
+        |p| [p[0], p[1], p[2] + p[0] * p[1]],
+        Some([1.0, 1.0, 0.0]),
+        None,
+    );
     assert_eq!(column(&stage, mob, "point"), [1.0, 3.0, 0.0, 3.0, 3.0, 4.0]);
-    assert_eq!(column(&stage, mob, "d_normal_point"), [1.0, 3.0, 0.25, 3.0, 3.0, 4.25]);
-    assert_eq!(column(&stage, mob, "anchor"), [1.0, 4.0, 0.0, 3.0, 4.0, 6.0]);
+    assert_eq!(
+        column(&stage, mob, "d_normal_point"),
+        [1.0, 3.0, 0.25, 3.0, 3.0, 4.25]
+    );
+    assert_eq!(
+        column(&stage, mob, "anchor"),
+        [1.0, 4.0, 0.0, 3.0, 4.0, 6.0]
+    );
 }
 
 #[test]

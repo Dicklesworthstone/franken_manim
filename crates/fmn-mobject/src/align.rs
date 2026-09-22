@@ -273,9 +273,13 @@ impl Stage {
         b: Mob,
         tolerance: f64,
     ) -> Result<(), StageError> {
-        if matches!(self.try_get(a)?.render_primitive(), crate::RenderPrimitive::SurfaceGrid { .. })
-            || matches!(self.try_get(b)?.render_primitive(), crate::RenderPrimitive::SurfaceGrid { .. })
-        {
+        if matches!(
+            self.try_get(a)?.render_primitive(),
+            crate::RenderPrimitive::SurfaceGrid { .. }
+        ) || matches!(
+            self.try_get(b)?.render_primitive(),
+            crate::RenderPrimitive::SurfaceGrid { .. }
+        ) {
             return self.align_surface_points(a, b);
         }
         match (is_vmobject_schema(self, a)?, is_vmobject_schema(self, b)?) {
