@@ -31,6 +31,7 @@ python3 crates/fmn-python/tests/calculus_area.py
 python3 crates/fmn-python/tests/surface_plotting.py
 python3 crates/fmn-python/tests/surface_admission.py
 python3 crates/fmn-python/tests/graph_admission.py
+python3 crates/fmn-python/tests/coordinate_mapping.py
 
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
 python3 crates/fmn-python/tests/test_paired_output_protocol.py

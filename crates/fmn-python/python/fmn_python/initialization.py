@@ -24,6 +24,7 @@ _STEPS = (
     ("obj_models", "install_obj_models"),
     ("surface_admission", "install_surface_admission"),
     ("graph_admission", "install_graph_admission"),
+    ("coordinate_mapping", "install_coordinate_mapping"),
     ("surface_geometry", "install_surface_geometry"),
     ("surface_mesh", "install_surface_mesh"),
     ("surface_plotting", "install_surface_plotting"),
