@@ -136,12 +136,20 @@ def environment(install=True):
                 stop_condition()
             if self.native_failure:
                 raise self.native_failure
+    class _AnimationBuilder:
+        def __init__(self, mobject):
+            self.mobject = mobject
+        def build(self):
+            return Animation(self.mobject)
     def prepare_animation(item):
+        if isinstance(item, _AnimationBuilder):
+            return item.build()
         if not isinstance(item, Animation):
             raise TypeError("expected Animation")
         return item
     g = types.SimpleNamespace(Scene=Scene, Mobject=Mob, Animation=Animation,
-                              AnimationGroup=AnimationGroup, prepare_animation=prepare_animation)
+                              AnimationGroup=AnimationGroup, _AnimationBuilder=_AnimationBuilder,
+                              prepare_animation=prepare_animation)
     if install:
         execution.install_scene_execution(g)
     return g

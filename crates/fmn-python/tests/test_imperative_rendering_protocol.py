@@ -63,7 +63,7 @@ class ImperativeRenderingTests(unittest.TestCase):
         self.scene.random_seed = 41
         frame = self.scene.camera.frame
         with self.scene.render_session("animation.y4m", resolution=(128, 72), fps=12, threads=3) as session:
-            self.assertEqual(self.scene.request, ("animation.y4m", "y4m", 128, 72, 12, 3, 41))
+            self.assertEqual(self.scene.request, ("animation.y4m", "y4m", 128, 72, 12, 3, 41, False))
             self.assertIs(self.scene.camera.frame, frame)
         self.assertEqual(session.result.seed, 41)
         self.assertEqual(session.result.threads, 3)

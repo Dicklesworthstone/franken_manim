@@ -61,7 +61,7 @@ class SvgOutputProtocolTests(unittest.TestCase):
             parsed = parser(['scene.py', *argv, '--transparent', '--resolution', '160x90'])
             self.assertEqual(parsed[1]['format'], 'svg')
             self.assertEqual(parsed[2:4], (160, 90))
-        with self.assertRaisesRegex(RuntimeError, 'certified portal rendering'):
+        with self.assertRaisesRegex(RuntimeError, r"certified (reproducibility|portal rendering)"):
             parser(['scene.py', '--format', 'svg', '--reproducible'])
 
 

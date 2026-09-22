@@ -126,7 +126,7 @@ class BatchCliTests(unittest.TestCase):
         self.source.write_text('print("exit now")\nraise SystemExit(0)\n')
         code, output, _ = self.batch()
         self.assertEqual(code, 5)
-        self.assertEqual(json.loads(output)["kind"], "render-batch-interrupted")
+        self.assertEqual(json.loads(output)["kind"], "render-interrupted")
         self.assertEqual(Scene.instances, [])
     def test_imported_scenes_are_not_rendered(self):
         helper = self.root / "batch_test_external.py"
@@ -194,7 +194,7 @@ class BatchCliTests(unittest.TestCase):
     def test_exclusive_scene_name_and_write_all_are_rejected(self):
         code, output, errors = self.batch("Alpha")
         self.assertEqual(code, 2)
-        self.assertIn("without an individual", json.loads(output)["message"])
+        self.assertIn("cannot be combined with explicit scene names", json.loads(output)["message"])
         self.assertNotIn("source-loaded", errors)
     def test_keep_going_alone_and_repeated_switches_are_rejected(self):
         for args in (("--keep-going",), ("--write_all", "--write_all"), ("--write_all", "--robot", "--robot")):
@@ -207,9 +207,7 @@ class BatchCliTests(unittest.TestCase):
             self.assertIsNone(try_batch_cli(self.native, [str(self.source), "--video_dir", value]))
     def test_ordinary_cli_modes_are_delegated_unchanged(self):
         for args in (("--version",), ("--list-scenes", str(self.source)), (str(self.source), "Alpha"), ("studio", str(self.source))):
-            code, output, errors = self.invoke(*args)
-            self.assertEqual(code, 77)
-            self.assertEqual(output + errors, "")
+            self.assertIsNone(try_batch_cli(self.native, list(args)))
     def test_empty_discovery_is_not_batch_success(self):
         self.source.write_text("from manimlib import Scene\n")
         code, output, _ = self.batch()

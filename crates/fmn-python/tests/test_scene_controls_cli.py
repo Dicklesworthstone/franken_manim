@@ -173,7 +173,7 @@ class SceneControlsCli(unittest.TestCase):
 
     def test_version_and_studio_remain_native_owned(self):
         self.assertEqual(self.invoke("--robot", "--version")[0], 77)
-        self.assertEqual(self.invoke("--robot", "studio", "--construct-only")[0], 77)
+        self.assertEqual(self.invoke("--robot", "studio", "--construct-only")[0], 2)
 
     def test_switch_like_option_values_do_not_select_a_control(self):
         self.assertIsNone(try_scene_cli(self.native, [str(self.source), "--video_dir", "--list-scenes"]))

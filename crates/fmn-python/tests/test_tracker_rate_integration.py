@@ -68,7 +68,8 @@ class TrackerRateIntegrationTests(unittest.TestCase):
 
     def test_catalog_default_does_not_force_native_tracker_into_callback(self):
         n = environment()
-        animation = tracker_transform(n, 0, 1, n.linear)
+        animation = n.Transform(rate_func=n.linear)
+        animation.mobject, animation.target_mobject = n.ValueTracker(0), n.ValueTracker(1)
         scene = n.Scene()
         scene.lower_only = True
         scene.play(animation)

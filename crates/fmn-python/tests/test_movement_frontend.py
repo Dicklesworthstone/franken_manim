@@ -101,7 +101,8 @@ class MovementFrontendTests(unittest.TestCase):
         animation=self.n.MoveAlongPath(self.mob,Path(points=[(0.,0.,0.)]),
                                         rate_func=self.n._linear_rate,remover=True,final_alpha_value=.5)
         self.scene.play(animation)
-        self.assertTrue(self.scene.specs[0][6]["remover"])
+        # Python callback lifecycle owns cleanup (cfff2662); native placeholder remover is disabled
+        self.assertFalse(self.scene.specs[0][6]["remover"])
         np.testing.assert_allclose(self.mob.points,[[.5,1.,0.]])
         self.assertNotIn(self.mob,self.scene.roots)
     def test_play_override_is_not_lost_for_native_sibling(self):

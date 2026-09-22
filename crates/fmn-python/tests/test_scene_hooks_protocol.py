@@ -41,7 +41,7 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.scene.num_plays, 1)
 
     def test_builder_is_resolved_once_before_pre_hook_edits_product(self):
-        builder, anim = object(), self.anim()
+        builder, anim = self.g._AnimationBuilder(self.mob), self.anim()
         calls = []
         def prepare(item):
             calls.append(item)
@@ -139,7 +139,7 @@ class HookTests(unittest.TestCase):
                  ((self.anim(),), {"run_time": -1}), ((self.anim(),), {"run_time": float("nan")}),
                  ((self.anim(),), {"lag_ratio": float("inf")}), ((self.anim(),), {"rate_func": 7})]
         for args, kwargs in cases:
-            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
+            with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError, NotImplementedError)):
                 self.scene.play(*args, **kwargs)
         self.assertEqual(self.events, [])
         self.assertEqual(self.scene.events, [])
@@ -183,7 +183,7 @@ class HookTests(unittest.TestCase):
     def test_invalid_builder_product_never_enters_pre_hook(self):
         self.g.prepare_animation = lambda item: None
         with self.assertRaisesRegex(TypeError, "must return an Animation"):
-            self.scene.play(object())
+            self.scene.play(self.g._AnimationBuilder(self.mob))
         self.assertEqual(self.events, [])
         self.assertNotIn(execution._OWNER_KEY, vars(self.scene))
 

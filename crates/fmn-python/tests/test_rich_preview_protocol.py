@@ -2,7 +2,12 @@
 import threading
 import unittest
 
-from IPython.core.formatters import DisplayFormatter
+try:
+    from IPython.core.formatters import DisplayFormatter
+    HAVE_IPYTHON = True
+except ImportError:
+    HAVE_IPYTHON = False
+
 import test_camera_capture_protocol as camera_fixture
 from test_scene_console_protocol import Scene, NATIVE
 from fmn_python import SceneConsole
@@ -31,6 +36,7 @@ class RichCameraProtocol(unittest.TestCase):
             self.assertEqual(self.camera._repr_png_(), b"native png fixture")
         self.assertEqual(before, (len(self.calls), self.camera.refreshes))
 
+    @unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
     def test_real_ipython_png_formatter_uses_native_snapshot_protocol(self):
         snapshot = self.camera.capture_snapshot()
         formatter = DisplayFormatter()
@@ -79,6 +85,7 @@ class RichConsoleProtocol(unittest.TestCase):
         self.assertIs(self.console.preview(), self.snapshot)
         self.assertEqual(self.scene.trace, [])
 
+    @unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
     def test_display_does_not_acquire_console_or_refresh_scene(self):
         formatter = DisplayFormatter()
         data, _ = formatter.format(self.console, include=["image/png"])

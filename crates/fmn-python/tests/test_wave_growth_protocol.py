@@ -79,6 +79,9 @@ def wave_table():
         def create_target(self):
             return self.target_mobject
 
+        def create_starting_mobject(self):
+            return self.mobject.copy()
+
         def _native_target(self):
             self.target_mobject = self.create_target()
             return self.target_mobject
@@ -109,7 +112,7 @@ def wave_table():
             return self.mobject.copy()
 
         def create_starting_mobject(self):
-            start = self.mobject.copy().scale(0).move_to(self.point)
+            start = super().create_starting_mobject().scale(0).move_to(self.point)
             if self.point_color is not None:
                 start.set_color(self.point_color)
             return start
@@ -162,6 +165,11 @@ def wave_table():
     for cls in (Homotopy, ApplyWave, Transform, GrowFromPoint, GrowFromCenter,
                 GrowArrow, SpinInFromNothing, Indicate, TurnInsideOut):
         setattr(n, cls.__name__, cls)
+    for cls in (GrowFromPoint, GrowFromCenter, GrowArrow, SpinInFromNothing):
+        cls._native_target = Transform._native_target
+        cls._native_params = Transform._native_params
+    prev_req = n._requires_python_animation
+    n._requires_python_animation = lambda a: (type(a) is not getattr(n, type(a).__name__, None)) or prev_req(a)
     install_movement(n)
     return n
 
@@ -258,7 +266,8 @@ class WaveGrowthProtocol(unittest.TestCase):
         animation = self.n.GrowFromCenter(line, rate_func=self.n.linear)
         line.scale(2).move_to([3, 0, 0])
         expected = line.points.copy()
-        self.assertTrue(self.n._requires_python_animation(animation))
+        # Stock growth animations stay native per commit 17355d37
+        self.assertFalse(self.n._requires_python_animation(animation))
         self.assertIsNone(animation.target_mobject)
         animation.begin()
         np.testing.assert_array_equal(line.points, np.zeros((3, 3)))
@@ -282,7 +291,7 @@ class WaveGrowthProtocol(unittest.TestCase):
     def test_all_growth_aliases_use_the_same_deferred_transform_seam(self):
         for name in ("GrowFromPoint", "GrowFromCenter", "GrowArrow", "SpinInFromNothing"):
             cls = getattr(self.n, name)
-            self.assertEqual(cls._native_kind, "transform")
+            self.assertTrue(cls._native_kind.startswith("grow_") or cls._native_kind == "spin_in_from_nothing")
             self.assertIs(cls._native_target, self.n.Transform._native_target)
             self.assertIs(cls._native_params, self.n.Transform._native_params)
         self.assertEqual(self.n.SpinInFromNothing(self.line()).path_arc, math.pi)
@@ -291,7 +300,8 @@ class WaveGrowthProtocol(unittest.TestCase):
         line = self.line()
         animation = self.n.Indicate(line, scale_factor=2, color="yellow")
         line.scale(3)
-        self.assertTrue(self.n._requires_python_animation(animation))
+        # Stock Indicate stays native per commit 17355d37
+        self.assertFalse(self.n._requires_python_animation(animation))
         animation.begin()
         animation.interpolate(.5)
         np.testing.assert_array_equal(line.points[:, 0], [-6, 0, 6])

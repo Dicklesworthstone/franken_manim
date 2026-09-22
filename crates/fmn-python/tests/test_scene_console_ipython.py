@@ -3,11 +3,17 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import unittest
 
-from IPython.core.interactiveshell import InteractiveShell
+try:
+    from IPython.core.interactiveshell import InteractiveShell
+    HAVE_IPYTHON = True
+except ImportError:
+    HAVE_IPYTHON = False
+
 from test_scene_console_protocol import Scene, NATIVE
 from fmn_python import SceneConsole
 
 
+@unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
 class IPythonConsoleTests(unittest.TestCase):
     def setUp(self):
         self.scene = Scene()

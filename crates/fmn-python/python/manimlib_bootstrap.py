@@ -18225,7 +18225,7 @@ class GrowFromPoint(Transform):
         return self.mobject.copy()
 
     def create_starting_mobject(self):
-        start = self.mobject.copy()
+        start = super().create_starting_mobject()
         start.scale(0)
         start.move_to(self.point)
         if self.point_color is not None:
@@ -23292,6 +23292,7 @@ def _portal_cli_render_arguments(arguments):
     """Parse the deliberately narrow, actually shipped portal render surface."""
 
     import os as _os
+    import sys as _sys
 
     values = {
         "format": "png_sequence",

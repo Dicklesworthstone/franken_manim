@@ -17,12 +17,18 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from IPython.core.interactiveshell import InteractiveShell
+try:
+    from IPython.core.interactiveshell import InteractiveShell
+    HAVE_IPYTHON = True
+except ImportError:
+    HAVE_IPYTHON = False
+
 from fmn_python.scene_loading import SceneSource
 from fmn_python.source_autoreload import SourceNamespace, install_source_autoreload, _STATE
 from fmn_python.source_reload import active_source
 
 
+@unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
 class SourceAutoreloadTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="fmn-autoreload-")

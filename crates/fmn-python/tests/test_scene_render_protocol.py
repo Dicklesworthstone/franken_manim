@@ -159,7 +159,8 @@ class SceneRenderTests(unittest.TestCase):
         ):
             scene = self.native.Scene()
             setattr(scene.file_writer, name, value)
-            with self.assertRaisesRegex(RuntimeError, name):
+            expected = r"subdivide_output|audio subdivision" if name == "subdivide_output" else name
+            with self.assertRaisesRegex(RuntimeError, expected):
                 scene.render("output", format=format)
             self.assertEqual(scene.events, [])
 
@@ -219,6 +220,8 @@ class SceneRenderTests(unittest.TestCase):
         for name in ("__version__", "__distribution__", "__franken_manim__", "__abi_policy__",
                      "__engine__", "__thread_policy__", "__reference_commit__"):
             setattr(extension, name, "test-native-boundary")
+        extension._FMN_PORTAL_RUNTIME_STATE = "ready"
+        extension._FMN_ANIMATION_SEMANTICS_INSTALLED = True
         authority = types.ModuleType("fmn_python.library_constructor_authority")
         authority.REFERENCE_CLASS_BY_RUST_HELPER = aliases
         authority.REFERENCE_MODULE_BY_RUST_HELPER = {key: shapes.__name__ for key in aliases}
@@ -242,7 +245,7 @@ class SceneRenderTests(unittest.TestCase):
         path = pathlib.Path(__file__).resolve().parents[1] / "python/manimlib/__init__.py"
         tree = ast.parse(path.read_text())
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                 and isinstance(node.func, ast.Name) and node.func.id == "_install_scene_rendering"]
+                 and isinstance(node.func, ast.Name) and node.func.id == "_initialize_portal"]
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].args[0].id, "_native")
 

@@ -65,7 +65,7 @@ class Scene:
         if self.finish_error is not None:
             raise self.finish_error
         self.active = False
-        path, format, width, height, fps, threads, seed = self.request
+        path, format, width, height, fps, threads, seed, *rest = self.request
         return (path, 4800 if format == "wav" else 4, 1234, "a" * 64, "native-test-boundary", threads)
 
     def run(self):
