@@ -1,0 +1,89 @@
+"""Owned ndarray attributes over Marionette's existing family-copy operation.
+
+The native copier remains the owner of records, arena membership, shared family
+identity and updater lists. This adapter completes plan section 8.3: ordinary
+copying must also detach authored ndarray attributes before a generated target
+can mutate them. Plain Python containers retain ordinary shallow-copy semantics.
+"""
+from __future__ import annotations
+
+from functools import wraps
+
+_INTERNAL = frozenset({
+    "data", "submobjects", "uniforms", "updaters", "parents", "_scene",
+    "target", "saved_state",
+})
+
+
+def _array_copies(np, projections, family_map):
+    """One memo keeps repeated array identities coherent across the family.
+
+    Object slots which name family members point at their corresponding native
+    copies. Other Python payloads remain shallow references; this is not a new
+    deep-copy policy for lists, callbacks, resources, or external mobjects.
+    Structured object fields and array-to-array cycles use the same rule.
+    """
+    arrays, pending = {}, []
+
+    def clone(value):
+        key = id(value)
+        if key in arrays:
+            return arrays[key]
+        result = np.array(value, copy=True, order="K", subok=False)
+        arrays[key] = result
+        if value.dtype.hasobject:
+            pending.append((value, result))
+        return result
+
+    prepared = [(namespace, name, clone(value)) for namespace, name, value in projections]
+    # A work list, not Python recursion: an array may contain another array,
+    # itself, or a shared chain much deeper than the host recursion limit.
+    while pending:
+        source, target = pending.pop()
+        if source.dtype.names:
+            for name in source.dtype.names:
+                if source.dtype[name].hasobject:
+                    pending.append((source[name], target[name]))
+        elif source.dtype.kind == "O":
+            for index in np.ndindex(source.shape):
+                item = source[index]
+                if isinstance(item, np.ndarray):
+                    target[index] = clone(item)
+                else:
+                    target[index] = family_map.get(id(item), item)
+    return prepared
+
+
+def install_mobject_copying(native):
+    """Complete the common copier without replacing public classes or methods."""
+    g = vars(native)
+    if g.get("_FMN_MOBJECT_COPYING_INSTALLED", False):
+        return
+    original, family, np = g["_copy_mobject_graph"], g["_family_preorder"], g["_np"]
+
+    @wraps(original)
+    def copy_graph(root, deep, memo=None, detach_bound=False):
+        memo = {} if memo is None else memo
+        if deep or id(root) in memo:
+            # The existing deep path already copies arrays through its global
+            # deepcopy memo and owns authored __deepcopy__ dispatch. Never copy
+            # those results a second time or override a caller's memo identity.
+            return original(root, deep, memo, detach_bound=detach_bound)
+        members = family(root)
+        # Freeze attribute references, not native record views. Existing members
+        # already in the caller's memo must not have their copies overwritten.
+        attributes = [(member, tuple((name, value) for name, value in vars(member).items()
+                                     if name not in _INTERNAL and isinstance(value, np.ndarray)))
+                      for member in members if id(member) not in memo]
+        result = original(root, deep, memo, detach_bound=detach_bound)
+        family_map = {id(member): memo[id(member)] for member in members}
+        projections = [(vars(family_map[id(member)]), name, value)
+                       for member, values in attributes for name, value in values]
+        # Finish every array before publishing attributes onto the copy. The
+        # source dictionaries are never cleared, stashed or temporarily edited.
+        for namespace, name, value in _array_copies(np, projections, family_map):
+            namespace[name] = value
+        return result
+
+    g["_copy_mobject_graph"] = copy_graph
+    g["_FMN_MOBJECT_COPYING_INSTALLED"] = True
