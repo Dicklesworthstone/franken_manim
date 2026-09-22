@@ -11,6 +11,8 @@ from functools import wraps
 import operator
 from typing import Any
 
+from fmn_python import scene_attributes
+
 
 def _method(cls, name, function):
     function.__name__ = name
@@ -161,6 +163,12 @@ def install_scene_state(native: Any) -> None:
         all_roots = tuple(scene.mobjects)
         roots = tuple(root for root in all_roots if id(root) not in ignored)
         members = _family(roots)
+        frame = scene.frame
+        attribute_members = list(members)
+        if id(frame) not in ignored and all(frame is not member for member in members):
+            attribute_members.append(frame)
+        self._attribute_members = tuple(attribute_members)
+        self._attributes = scene_attributes.capture(attribute_members, np)
         self._scene, self.time, self.num_plays = scene, scene.get_time(), int(scene.num_plays)
         self._root_topologies = {
             id(root): tuple((id(member), tuple(id(child) for child in member.submobjects))
@@ -175,6 +183,7 @@ def install_scene_state(native: Any) -> None:
             prior = last.get(root)
             if (prior is not None
                     and self._root_topologies[id(root)] == old_topologies.get(id(root))
+                    and attributes_match(self, previous, id(root))
                     and bool(prior.looks_identical(root))
                     and _same_mobject(np, root, prior)):
                 saved = prior
@@ -201,7 +210,6 @@ def install_scene_state(native: Any) -> None:
                     "locked_data_keys", "const_data_keys", "locked_uniform_keys",
                 )),
             ))
-        frame = scene.frame
         self._camera_snapshot = None if id(frame) in ignored else (
             frame, _camera_values(frame._core), tuple(frame.updaters),
         )
@@ -211,13 +219,23 @@ def install_scene_state(native: Any) -> None:
         self._checkpoint = (bytes(scene._checkpoint_bytes())
                             if len(roots) == len(all_roots) else None)
 
+    def attributes_match(self, other, root_id):
+        ids = [row[0] for row in self._root_topologies[root_id]]
+        other_values = getattr(other, "_attributes", {})
+        return (all(key in other_values for key in ids)
+                and scene_attributes.same(np,
+                    {key: self._attributes[key] for key in ids},
+                    {key: other_values[key] for key in ids}))
+
     def camera_matches(self, other):
         a, b = self._camera_snapshot, other._camera_snapshot
         if a is None or b is None:
             return a is b
         return (a[0] is b[0] and _same_value(np, a[1], b[1])
                 and len(a[2]) == len(b[2])
-                and all(x is y for x, y in zip(a[2], b[2])))
+                and all(x is y for x, y in zip(a[2], b[2]))
+                and scene_attributes.same(np, self._attributes[id(a[0])],
+                                           other._attributes[id(b[0])]))
 
     def mobjects_match(self, state):
         if not isinstance(state, State):
@@ -228,6 +246,7 @@ def install_scene_state(native: Any) -> None:
                 and self._root_topologies == state._root_topologies
                 and all(a is b and _same_mobject(np, ac, bc)
                         for (a, ac), (b, bc) in zip(left.items(), right.items()))
+                and scene_attributes.same(np, self._attributes, state._attributes)
                 and camera_matches(self, state))
 
     def equals(self, state):
@@ -240,15 +259,30 @@ def install_scene_state(native: Any) -> None:
         if not isinstance(state, State):
             raise TypeError("n_changes expects a SceneState")
         if self is state:
-            return sum(not _same_mobject(np, mob, saved)
-                       for mob, saved in self.mobjects_to_copies.items())
+            live = scene_attributes.capture(self._attribute_members, np)
+            count = sum(not _same_mobject(np, mob, saved) or not scene_attributes.same(
+                np, {key: self._attributes[key] for key, _ in self._root_topologies[id(mob)]},
+                {key: live[key] for key, _ in self._root_topologies[id(mob)]})
+                for mob, saved in self.mobjects_to_copies.items())
+            if self._camera_snapshot is not None:
+                frame, values, callbacks = self._camera_snapshot
+                count += int(not _same_value(np, values, _camera_values(frame._core))
+                             or len(callbacks) != len(frame.updaters)
+                             or any(a is not b for a, b in zip(callbacks, frame.updaters))
+                             or not scene_attributes.same(np, self._attributes[id(frame)],
+                                                          live[id(frame)]))
+            return count or int(not scene_attributes.same(np, self._attributes, live))
         other = state.mobjects_to_copies
         # Compare two captured states, not a source object edited afterward.
         count = sum(mob not in other
                     or self._root_topologies[id(mob)] != state._root_topologies.get(id(mob))
+                    or not attributes_match(self, state, id(mob))
                     or not _same_mobject(np, saved, other[mob])
                     for mob, saved in self.mobjects_to_copies.items())
-        return count + int(not camera_matches(self, state))
+        count += int(not camera_matches(self, state))
+        # Cross-root container aliasing can change while each root still has
+        # equal values in isolation. It must still register as a state edit.
+        return count or int(not scene_attributes.same(np, self._attributes, state._attributes))
 
     @wraps(original_restore)
     def restore(self, scene):
@@ -257,6 +291,9 @@ def install_scene_state(native: Any) -> None:
         if scene is not self._scene:
             error = g.get("_ForeignStageError", ValueError)
             raise error("SceneState belongs to another Scene; copy its mobjects instead")
+        # Allocate and validate the complete Python projection first. A
+        # refusal must not leave restored geometry with newer authored data.
+        prepared = scene_attributes.prepare_restore(self._attributes, np, self._attribute_members)
         original_restore(self, scene)
         if self._checkpoint is not None:
             # Native restore has already restored all graph edges and records.
@@ -272,6 +309,7 @@ def install_scene_state(native: Any) -> None:
             # Rehydrate native-only roots and refresh back-edges before a caller
             # reads a retained child reference without first reading mobjects.
             _ = scene.mobjects
+        scene_attributes.restore(self._attribute_members, prepared)
         if self._camera_snapshot is not None:
             frame, values, updaters = self._camera_snapshot
             scene.frame = frame
@@ -279,10 +317,11 @@ def install_scene_state(native: Any) -> None:
             frame.updaters[:] = updaters
 
     for name, function in {
-        "__init__": initialize, "mobjects_match": mobjects_match,
+        "__init__": initialize, "__eq__": equals, "mobjects_match": mobjects_match,
         "n_changes": n_changes, "restore_scene": restore,
     }.items():
         _method(State, name, function)
+    State.__hash__ = None
     _install_history(Scene)
     g["_FMN_SCENE_STATE_INSTALLED"] = True
 
@@ -313,6 +352,9 @@ def _install_history(Scene):
             return self
         state = self.get_state()
         self.redo_stack.clear()
+        if self.undo_stack and state == self.undo_stack[-1]:
+            trim(self.undo_stack, maximum)
+            return self
         self.undo_stack.append(state)
         trim(self.undo_stack, maximum)
         return self

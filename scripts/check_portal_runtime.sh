@@ -27,6 +27,7 @@ PY
 done
 
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
+python3 crates/fmn-python/tests/test_scene_attributes.py
 python3 crates/fmn-python/tests/test_batch_checkpoint_identity.py
 python3 crates/fmn-python/tests/test_batch_checkpoint_inputs.py
 python3 crates/fmn-python/tests/test_runtime_identity.py

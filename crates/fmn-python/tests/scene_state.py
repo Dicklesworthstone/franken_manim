@@ -275,14 +275,222 @@ def rendered_restore():
     print("scene snapshot rendering artifacts:", directory)
 
 
+def numeric_history_restores_values_and_rendered_glyphs():
+    scene = m.Scene()
+    scene.camera.reset_pixel_shape(160, 90)
+    number = m.DecimalNumber(1.25)
+    scene.add(number)
+    def pixels():
+        return bytes(scene.camera.capture_snapshot(*scene.mobjects).pixels())
+    original = pixels()
+    scene.save_state()
+    number.set_value(99)
+    edited = pixels()
+    assert original != edited
+    for _ in range(2):
+        scene.undo()
+        close(number.get_value(), 1.25)
+        assert number.num_string == "1.25" and pixels() == original
+        scene.redo()
+        close(number.get_value(), 99)
+        assert number.num_string == "99.00" and pixels() == edited
+    scene.undo()
+    number.increment_value(.75)
+    close(number.get_value(), 2.)
+    assert number.num_string == "2.00" and pixels() != original
+
+
+def live_tex_source_maps_remain_editable_after_undo():
+    scene, formula = m.Scene(), m.Tex("x=2")
+    scene.add(formula)
+    spans = copy.deepcopy(formula._string_sub_spans)
+    paths = copy.deepcopy(formula._string_sub_paths)
+    children = tuple(formula.submobjects)
+    scene.save_state()
+    number = formula.make_number_changeable(2)
+    number.set_value(19)
+    assert formula.string == r"x=\decimalmob"
+    scene.undo()
+    assert formula.string == formula.tex_string == "x=2"
+    assert formula.tex_strings == ["x=2"]
+    assert formula._string_sub_spans == spans and formula._string_sub_paths == paths
+    assert all(a is b for a, b in zip(formula.submobjects, children))
+    # The source selector must still target the restored glyph family, not
+    # dangling paths from the newer decimal splice.
+    replacement = formula.make_number_changeable(2)
+    assert isinstance(replacement, m.DecimalNumber)
+    replacement.set_value(17)
+    close(replacement.get_value(), 17)
+    assert formula.string == r"x=\decimalmob"
+
+
+def matrix_entry_tables_and_live_values_restore_together():
+    scene, matrix = m.Scene(), m.DecimalMatrix([[1., 2.], [3., 4.]])
+    scene.add(matrix)
+    entries = tuple(matrix.elements)
+    matrix.array_aliases = np.empty((2, 2), dtype=object)
+    for index, entry in enumerate(entries):
+        matrix.array_aliases.flat[index] = entry
+    state = scene.get_state()
+    matrix.float_matrix[0][0] = 99
+    entries[0].set_value(99)
+    matrix.mob_matrix[0][0] = entries[-1]
+    matrix.array_aliases[0, 0] = entries[-1]
+    matrix.elements.reverse()
+    matrix.ellipses.append(entries[-1])
+    state.restore_scene(scene)
+    assert matrix.float_matrix == [[1., 2.], [3., 4.]]
+    assert not matrix.ellipses
+    assert all(a is b for a, b in zip(matrix.elements, entries))
+    assert matrix.mob_matrix[0][0] is entries[0]
+    assert matrix.array_aliases[0, 0] is entries[0]
+    close(entries[0].get_value(), 1.)
+    # The restored indexes drive the next actual authoring operation.
+    matrix.swap_entries_for_ellipses(row_index=0)
+    assert matrix.ellipses and len(matrix.elements) < len(entries)
+
+
+def shared_owned_data_cycles_and_camera_attributes_roundtrip():
+    scene, left, right = m.Scene(), m.Square(), m.Circle()
+    scene.add(left, right)
+    shared = {"values": [1, 2]}
+    shared["self"] = shared
+    left.model = right.model = scene.frame.model = shared
+    left.partner, right.partner = right, left
+    left.lookup = np.empty(2, dtype=object)
+    left.lookup[0], left.lookup[1] = right, shared
+    state = scene.get_state()
+    shared["values"][:] = [99]
+    left.partner = left
+    right.new_attribute = "after snapshot"
+    scene.frame.model = None
+    for _ in range(2):
+        state.restore_scene(scene)
+        assert left.model is right.model is scene.frame.model
+        assert left.model["self"] is left.model
+        assert left.model["values"] == [1, 2]
+        assert left.partner is right and right.partner is left
+        assert left.lookup[0] is right and left.lookup[1] is left.model
+        assert not hasattr(right, "new_attribute")
+        left.model["values"].append(3)
+
+
+def attribute_only_edits_are_real_history_entries():
+    scene, square = m.Scene(), m.Square()
+    scene.add(square)
+    square.payload = {"value": 1}
+    scene.save_state()
+    scene.save_state()
+    assert len(scene.undo_stack) == 1
+    first = scene.undo_stack[-1]
+    square.payload["value"] = 2
+    scene.save_state()
+    assert len(scene.undo_stack) == 2
+    second = scene.undo_stack[-1]
+    assert first != second and first.n_changes(second) == 1
+    # Captures remain immutable despite later edits to the live source.
+    square.payload["value"] = 3
+    assert first.n_changes(second) == 1
+    scene.undo(); assert square.payload["value"] == 2
+    scene.undo(); assert square.payload["value"] == 1
+    scene.redo(); assert square.payload["value"] == 2
+    scene.redo(); assert square.payload["value"] == 3
+
+
+def undo_restores_inputs_seen_by_the_next_scene_updater():
+    scene, square, observed = m.Scene(), m.Square(), []
+    square.motion = {"speed": 1.}
+    def update(obj, dt):
+        observed.append(obj.motion["speed"])
+        obj.shift(obj.motion["speed"] * dt * m.RIGHT)
+    square.add_updater(update, call=False)
+    scene.add(square)
+    state = scene.get_state()
+    square.motion["speed"] = 20.
+    scene.update(.25)
+    close(square.get_x(), 5.)
+    state.restore_scene(scene)
+    assert square.updaters[0] is update
+    scene.update(.25)
+    close(square.get_x(), .25)
+    assert observed[-1] == 1.
+    # The Python closure itself is deliberately not rolled back.
+    assert 20. in observed
+
+
+def malformed_python_projection_refuses_before_geometry_restore():
+    scene, square = m.Scene(), m.Square()
+    scene.add(square)
+    square.value = [1]
+    scene.save_state()
+    state = scene.undo_stack[-1]
+    square.shift(m.RIGHT)
+    square.value[:] = [2]
+    del state._attributes[id(square)]
+    undo, redo = tuple(scene.undo_stack), tuple(scene.redo_stack)
+    try:
+        scene.undo()
+    except ValueError as error:
+        assert "captured family" in str(error)
+    else:
+        raise AssertionError("incomplete Python projection must fail before native mutation")
+    close(square.get_center(), m.RIGHT)
+    assert square.value == [2]
+    assert all(a is b for a, b in zip(undo, scene.undo_stack))
+    assert tuple(scene.redo_stack) == redo
+
+
+def capture_refusal_preserves_history_and_native_arena():
+    from unittest.mock import patch
+    from fmn_python import scene_attributes
+    scene, square = m.Scene(), m.Square()
+    scene.add(square)
+    square.payload = np.arange(4)
+    scene.save_state()
+    square.shift(m.RIGHT)
+    before = bytes(scene._checkpoint_bytes())
+    undo, redo = tuple(scene.undo_stack), tuple(scene.redo_stack)
+    with patch.object(scene_attributes, "_MAX_BYTES", 1):
+        try:
+            scene.save_state()
+        except ValueError as error:
+            assert "budget" in str(error)
+        else:
+            raise AssertionError("oversized owned state must be rejected before copying native objects")
+    assert bytes(scene._checkpoint_bytes()) == before
+    assert all(a is b for a, b in zip(undo, scene.undo_stack))
+    assert tuple(scene.redo_stack) == redo
+
+
+def ignored_camera_keeps_its_authored_attributes():
+    scene, square = m.Scene(), m.Square()
+    scene.add(square)
+    scene.frame.label = [1]
+    square.label = [1]
+    state = m.SceneState(scene, ignore=[scene.frame])
+    scene.frame.label[:] = [2]
+    square.label[:] = [2]
+    state.restore_scene(scene)
+    assert scene.frame.label == [2] and square.label == [1]
+
+
 CASES = (
     captured_families_styles_and_arrays, shared_child_identity, updater_restoration,
     ordered_roots, camera_pose_and_callbacks, native_clock_and_bytes,
     repeated_history, history_branch_and_limit, rejected_checkpoint_preserves_history,
     foreign_owner_refusal, ignored_camera, rendered_restore,
+    numeric_history_restores_values_and_rendered_glyphs,
+    live_tex_source_maps_remain_editable_after_undo,
+    matrix_entry_tables_and_live_values_restore_together,
+    shared_owned_data_cycles_and_camera_attributes_roundtrip,
+    attribute_only_edits_are_real_history_entries,
+    undo_restores_inputs_seen_by_the_next_scene_updater,
+    malformed_python_projection_refuses_before_geometry_restore,
+    capture_refusal_preserves_history_and_native_arena,
+    ignored_camera_keeps_its_authored_attributes,
 )
-assert len(CASES) == 12
+assert len(CASES) == 21
 for case in CASES:
     case()
     print("scene snapshot acceptance:", case.__name__)
-print("scene snapshot acceptance: 12 cases passed")
+print(f"scene snapshot acceptance: {len(CASES)} cases passed")
