@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 import itertools
 import math
+import operator
 from typing import Any
 
 _MAX_SAMPLES = 65_536
@@ -237,6 +238,80 @@ def install_graphing(native):
     _bind_method(Coordinates, "unbind_graph_from_func", unbind)
     _install_graph_queries(native)
     g["_FMN_GRAPHING_INSTALLED"] = True
+
+
+def install_implicit_regeneration(native):
+    """Resample an implicit recipe without replacing its native object owner."""
+    g = vars(native)
+    if g.get("_FMN_IMPLICIT_REGENERATION_INSTALLED", False):
+        return
+    Implicit, np = g["ImplicitFunction"], g["_np"]
+
+    def controls(obj):
+        from .graph_admission import _numbers
+        return (_numbers(obj.x_range, "implicit x_range", 2, 2),
+                _numbers(obj.y_range, "implicit y_range", 2, 2),
+                operator.index(obj.min_depth), operator.index(obj.max_quads),
+                bool(obj.use_smoothing))
+
+    def identity(function):
+        return (getattr(function, "__func__", function),
+                getattr(function, "__self__", None))
+
+    def idle(obj):
+        if vars(obj).get("_is_animating", False) or getattr(obj, "locked_data_keys", ()):
+            raise RuntimeError("release the implicit graph's active animation before regenerating it")
+
+    def init_points(self):
+        """Rebuild the current zero set using the native contour and path owners.
+
+        Designed for explicit refreshes and ValueTracker-driven updaters. Geometry
+        is regenerated in the recipe's scene-coordinate domain; previous affine
+        edits are not reapplied. Topology may change or vanish. Object identity,
+        styles, children, saved states and updaters keep their existing owners.
+        """
+        if vars(self).get(_BUSY, False):
+            raise RuntimeError("implicit graph regeneration cannot reenter itself")
+        idle(self)
+        if tuple(self.pointlike_data_keys) != ("point",):
+            raise TypeError("implicit regeneration requires the VMobject pointlike schema")
+        vars(self)[_BUSY] = True
+        try:
+            options = controls(self)
+            function = self.func
+            function_identity = identity(function)
+            if not callable(function):
+                raise TypeError("implicit func must be callable")
+            # Read current world records before authored sampling. Refuse to
+            # overwrite edits made by that callback; do not roll them back.
+            self.get_points()
+            before = self.data.copy()
+            owner, bound = vars(self).get("_scene"), self._is_bound()
+            family = tuple(self.get_family())
+            candidate = Implicit(function, x_range=options[0], y_range=options[1],
+                                 min_depth=options[2], max_quads=options[3],
+                                 use_smoothing=options[4])
+            idle(self)
+            current_identity = identity(self.func)
+            if (current_identity[0] is not function_identity[0]
+                    or current_identity[1] is not function_identity[1]
+                    or controls(self) != options
+                    or vars(self).get("_scene") is not owner or self._is_bound() != bound
+                    or tuple(self.get_family()) != family
+                    or not np.array_equal(self.data, before)):
+                raise RuntimeError("implicit graph changed during sampling; candidate was not published")
+            points = candidate.get_points()
+            if not np.isfinite(points).all():
+                raise ValueError("native implicit extraction produced nonfinite records")
+            # The existing set_points protocol preserves record styles and
+            # generation semantics, including empty-to-visible recovery.
+            self.set_points(points)
+        finally:
+            vars(self).pop(_BUSY, None)
+        return None
+
+    _bind_method(Implicit, "init_points", init_points)
+    g["_FMN_IMPLICIT_REGENERATION_INSTALLED"] = True
 
 
 def _graph_range(values, density):
