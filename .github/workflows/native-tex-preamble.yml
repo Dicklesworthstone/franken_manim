@@ -4,7 +4,6 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/native-tex-preamble.yml'
-      - 'scripts/patches/native-preamble-frontdoor.patch'
       - 'crates/fmn-tex/**'
       - 'crates/fmn-library/src/tex.rs'
       - 'crates/fmn-library/tests/tex_preamble.rs'
@@ -19,7 +18,7 @@ on:
       - 'rust-toolchain.toml'
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: native-tex-preamble
   cancel-in-progress: false
@@ -46,17 +45,11 @@ jobs:
             ~/.cargo/git
             target/camera-runtime
           key: camera-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
-      - name: Integrate native constructors and registered acceptance
+      - name: Check the published sources without mutation
         run: |
           set -euo pipefail
-          patch=scripts/patches/native-preamble-frontdoor.patch
-          if git apply --exclude=crates/fmn-library/src/tex.rs --check "$patch"; then
-            git apply --exclude=crates/fmn-library/src/tex.rs "$patch"
-          else
-            git apply --exclude=crates/fmn-library/src/tex.rs --reverse --check "$patch"
-          fi
           rustup show active-toolchain
-          rustfmt --edition 2024 crates/fmn-tex/src/preamble.rs crates/fmn-tex/tests/preamble.rs crates/fmn-library/tests/tex_preamble.rs crates/fmn-python/src/tex_preamble.rs
+          rustfmt --check --edition 2024 crates/fmn-tex/src/preamble.rs crates/fmn-tex/tests/preamble.rs crates/fmn-library/tests/tex_preamble.rs crates/fmn-python/src/tex_preamble.rs
           git diff --check
       - name: Native cache, span, declaration and builder regression suites
         run: |
@@ -92,16 +85,6 @@ jobs:
           assert result["certified"] is False, result
           assert len(list(Path(result["destination"]).glob("*.png"))) == 12
           PYCODE
-      - name: Publish verified constructor integration directly to main
-        run: |
-          set -euo pipefail
-          git add crates/fmn-library/src/tex.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_typography.rs crates/fmn-python/python/manimlib_bootstrap.py crates/fmn-python/tests/bridge.py crates/fmn-conformance/tests/e2e_scenarios.rs scripts/check_portal_runtime.sh crates/fmn-tex/src/preamble.rs crates/fmn-tex/tests/preamble.rs crates/fmn-library/tests/tex_preamble.rs crates/fmn-python/src/tex_preamble.rs UPSTREAM_LEDGER.md
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(python): activate verified native preambles and template packs'
-            git push origin HEAD:main
-          fi
       - name: Preserve source and test evidence
         if: always()
         run: |
