@@ -9,6 +9,9 @@ use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler, RenderPrimitive}
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
+#[path = "portal_raster_transition.rs"]
+mod transition;
+
 const MAX_PIXELS: u64 = 16_777_216;
 const MAX_ENCODED_BYTES: usize = 64 * 1024 * 1024;
 
@@ -212,6 +215,7 @@ fn _raster_images_equal(
 
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<RasterImage>()?;
+    transition::install(module)?;
     module.add_function(wrap_pyfunction!(_raster_images_equal, module)?)?;
     module.add_function(wrap_pyfunction!(_build_raster_image, module)?)?;
     module.add_function(wrap_pyfunction!(_read_raster_image, module)?)?;
