@@ -42,7 +42,7 @@ def install_dispatch(g):
     g["_requires_python_animation"] = g["requires_python_animation"]
 
 
-def fixture():
+def fixture(setup=None):
     g = environment()
     Transform = g["Transform"]
     def helper(self, *args):
@@ -59,6 +59,8 @@ def fixture():
         def interpolate_submobject(self, *args):
             pass
     g["Specialized"] = Specialized
+    if setup is not None:
+        setup(g)
     install_dispatch(g)
     _install_transform_dispatch(g)
     return g
@@ -187,6 +189,145 @@ class TransformDispatchTests(unittest.TestCase):
         self.assertEqual(mob.x, 11.)
         self.assertTrue(leaf.events)
         self.assertFalse(mob.animating)
+
+
+def mobject_fixture():
+    def setup(g):
+        Mobject, Transform = g["Mobject"], g["Transform"]
+        # Model _install_live_state's instance attribute. It is not a class
+        # property: class-method snapshots must not compare this list value.
+        original_init = Mobject.__init__
+        def init(self, *children):
+            original_init(self, *children)
+            self.submobjects = self.children
+        Mobject.__init__ = init
+        Mobject.interpolate = lambda self, start, end, alpha, path=None: self
+        installer = next(node for node in ast.parse(SOURCE.read_text()).body
+                         if isinstance(node, ast.FunctionDef) and node.name == "install")
+        method = next(node for node in installer.body
+                      if isinstance(node, ast.FunctionDef) and node.name == "transform_submobject")
+        exec(compile(ast.Module([method], []), str(SOURCE), "exec"), g)
+        Transform.interpolate_submobject = g["transform_submobject"]
+
+        def interpolate(self, alpha):
+            # Modeled storage, but real production dispatch into each object.
+            for member in self.mobject.get_family():
+                self.interpolate_submobject(member, member, self.target_mobject, alpha)
+
+        Transform.interpolate = interpolate
+
+    return fixture(setup)
+
+
+class TransformMobjectDispatchTests(unittest.TestCase):
+    def test_source_and_nested_source_interpolators_select_callbacks(self):
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                g = mobject_fixture()
+                class Authored(g["Mobject"]):
+                    def interpolate(self, *args):
+                        raise AssertionError("admission must not interpolate")
+                child = Authored()
+                root = g["Mobject"](child) if nested else child
+                self.assertTrue(g["_requires_python_animation"](g["Transform"](root)))
+
+    def test_target_family_overrides_select_callbacks(self):
+        g = mobject_fixture()
+        class Authored(g["Mobject"]):
+            def get_family(self):
+                raise AssertionError("admission must not evaluate authored family traversal")
+        animation = g["Transform"](g["Mobject"](), g["Mobject"](Authored()))
+        self.assertTrue(g["_requires_python_animation"](animation))
+
+    def test_instance_and_later_base_patches_are_live(self):
+        for instance in (True, False):
+            with self.subTest(instance=instance):
+                g = mobject_fixture()
+                child = g["Mobject"]()
+                animation = g["Transform"](g["Mobject"](child))
+                self.assertFalse(g["_requires_python_animation"](animation))
+                hook = lambda self, *args: None
+                if instance:
+                    child.interpolate = MethodType(hook, child)
+                else:
+                    g["Mobject"].interpolate = hook
+                self.assertTrue(g["_requires_python_animation"](animation))
+
+    def test_family_mutations_are_rechecked_between_plays(self):
+        g = mobject_fixture()
+        class Authored(g["Mobject"]):
+            def interpolate(self, *args):
+                return self
+        root = g["Mobject"]()
+        animation = g["Transform"](root)
+        self.assertFalse(g["_requires_python_animation"](animation))
+        root.children.append(Authored())
+        self.assertTrue(g["_requires_python_animation"](animation))
+        root.children.clear()
+        self.assertFalse(g["_requires_python_animation"](animation))
+
+    def test_authored_descriptors_are_not_evaluated_during_admission(self):
+        for name in ("interpolate", "get_family", "submobjects"):
+            with self.subTest(attribute=name):
+                g = mobject_fixture()
+                def fail(self):
+                    raise AssertionError("admission evaluated an authored descriptor")
+                descriptor = property(fail, lambda self, value: None)
+                cls = type("Authored", (g["Mobject"],), {name: descriptor})
+                self.assertTrue(g["_requires_python_animation"](g["Transform"](cls())))
+
+    def test_authored_attribute_lookup_is_not_evaluated_during_admission(self):
+        g = mobject_fixture()
+        class Authored(g["Mobject"]):
+            def __getattribute__(self, name):
+                if name == "submobjects":
+                    raise AssertionError("admission evaluated authored attribute lookup")
+                return super().__getattribute__(name)
+        self.assertTrue(g["_requires_python_animation"](g["Transform"](Authored())))
+
+    def test_stock_families_and_unmodified_subclasses_remain_native(self):
+        g = mobject_fixture()
+        class Unchanged(g["Mobject"]):
+            pass
+        shared = Unchanged()
+        root = g["Mobject"](g["Mobject"](shared), Unchanged(shared))
+        self.assertFalse(g["_requires_python_animation"](g["Transform"](root)))
+
+    def test_authored_child_iterators_are_not_consumed_during_admission(self):
+        g = mobject_fixture()
+        class AuthoredChildren(list):
+            def __iter__(self):
+                raise AssertionError("admission consumed an authored child iterator")
+        root = g["Mobject"]()
+        root.submobjects = AuthoredChildren()
+        self.assertTrue(g["_requires_python_animation"](g["Transform"](root)))
+
+    def test_deep_and_shared_families_do_not_recurse_or_expand_every_path(self):
+        g = mobject_fixture()
+        root = g["Mobject"]()
+        # Only 1101 identities, but 2**1100 paths. Admission inspects behavior
+        # once per identity; interpolation retains its own family semantics.
+        for _ in range(1100):
+            root = g["Mobject"](root, root)
+        self.assertFalse(g["_requires_python_animation"](g["Transform"](root)))
+
+    def test_scene_play_preserves_custom_object_inside_stock_transform(self):
+        for grouped in (False, True):
+            with self.subTest(composition=grouped):
+                g = mobject_fixture()
+                class Authored(g["Mobject"]):
+                    def interpolate(self, start, end, alpha, path=None):
+                        self.x = 100. + alpha
+                        return self
+                child = Authored()
+                animation = g["Transform"](g["Mobject"](child))
+                animation.path_func = None
+                entry = g["AnimationGroup"](animation) if grouped else animation
+                scene = g["Scene"]()
+                scene.play(entry)
+                self.assertEqual(child.x, 101.)
+                self.assertTrue(animation.events)
+                self.assertFalse(animation.mobject.animating)
 
 
 if __name__ == "__main__":

@@ -97,7 +97,81 @@ def mixed_camera_builder():
     assert scene.frame is frame and frame._core is core
 
 
+def authored_transform_lifecycle():
+    # The endpoints deliberately differ, but authored interpolate is a no-op.
+    # A native endpoint lerp would visibly move the square and skip the hooks.
+    scene, square, events = m.Scene(), m.Square(), []
+    scene.add(square)
+    before = square.get_points().copy()
+
+    class StationaryTransform(m.Transform):
+        def begin(self):
+            events.append("begin")
+            super().begin()
+
+        def interpolate(self, alpha):
+            events.append(("interpolate", float(alpha)))
+
+        def update_mobjects(self, dt):
+            events.append(("update", float(dt)))
+            super().update_mobjects(dt)
+
+        def finish(self):
+            events.append("finish")
+            super().finish()
+
+        def clean_up_from_scene(self, owner):
+            events.append("cleanup")
+            super().clean_up_from_scene(owner)
+
+    animation = StationaryTransform(square, square.copy().shift(2 * m.RIGHT),
+                                    run_time=.25, rate_func=m.linear)
+    scene.play(animation)
+    assert np.array_equal(square.get_points(), before)
+    assert events[0] == "begin" and events[-1] == "cleanup", events
+    assert "finish" in events
+    assert any(isinstance(event, tuple) and event[0] == "update" and event[1] > 0
+               for event in events), events
+    assert any(isinstance(event, tuple) and event[0] == "interpolate" and 0 < event[1] < 1
+               for event in events), events
+    assert not square._is_updating_suspended()
+
+
+def authored_mobject_inside_stock_transform():
+    for grouped in (False, True):
+        samples = []
+
+        class ArchedSquare(m.Square):
+            def interpolate(self, start, end, alpha, path_func=None):
+                result = super().interpolate(start, end, alpha, path_func)
+                self.shift(4 * alpha * (1 - alpha) * m.UP)
+                samples.append((float(alpha), tuple(self.get_center())))
+                return result
+
+        scene, square, circle = m.Scene(), ArchedSquare(), m.Circle().shift(3 * m.RIGHT)
+        root = m.VGroup(square, circle)
+        scene.add(root)
+        animation = m.Transform(root, root.copy().shift(2 * m.RIGHT),
+                                run_time=.25, rate_func=m.linear)
+        entry = m.AnimationGroup(animation) if grouped else animation
+        scene.play(entry)
+        close(square.get_center(), 2 * m.RIGHT)
+        close(circle.get_center(), 5 * m.RIGHT)
+        assert samples and max(center[1] for _, center in samples) > .5, samples
+        assert any(0 < alpha < 1 for alpha, _ in samples), samples
+        assert not square._is_updating_suspended()
+
+
+def stock_transform_keeps_native_admission():
+    native = getattr(m, "_native", m)
+    root = m.VGroup(m.Square(), m.Circle().shift(3 * m.RIGHT))
+    animation = m.Transform(root, root.copy().shift(m.RIGHT))
+    assert not native._requires_python_animation(animation)
+
+
 for case in (authored_path, final_alpha, removal, timed_window_and_suspension,
-             nested_builder, build_override, explicit_transform_endpoint, mixed_camera_builder):
+             nested_builder, build_override, explicit_transform_endpoint, mixed_camera_builder,
+             authored_transform_lifecycle, authored_mobject_inside_stock_transform,
+             stock_transform_keeps_native_admission):
     case()
     print("builder playback acceptance:", case.__name__)

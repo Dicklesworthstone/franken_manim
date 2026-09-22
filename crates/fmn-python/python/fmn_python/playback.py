@@ -250,7 +250,7 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
     including changed bases reached through super(), without running authored
     descriptors while deciding which execution route is valid.
     """
-    from fmn_python.movement import _changed, _protocols
+    from fmn_python.movement import _changed, _implementation, _protocols
 
     Transform = g["Transform"]
     hooks = (
@@ -263,11 +263,58 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         "__getattribute__", "__getattr__",
     )
     protocols = _protocols(g, Transform, hooks)
+    # A stock Transform is not necessarily a stock interpolation: its source
+    # can be an authored Mobject, including a child deep inside a stock Group.
+    # Freeze after tracker/camera interpolation has been installed so those
+    # shipping implementations keep their native route.
+    Mobject = g["Mobject"]
+    mobject_protocols = _protocols(g, Mobject, (
+        "interpolate", "get_family", "__getattribute__", "__getattr__",
+    ))
+    # submobjects is normally a per-instance _LiveSubmobjects, not a method.
+    # Compare only its class descriptor; comparing its value to a class-level
+    # baseline would incorrectly send every ordinary Mobject to callbacks.
+    child_descriptors = {cls: _implementation(cls, "submobjects")
+                         for cls in mobject_protocols}
+    child_types = (list, tuple, g.get("_LiveSubmobjects"))
     previous_requires = g["_requires_python_animation"]
 
+    def authored_family(root):
+        # This is behavior admission, not interpolation's path-wise family
+        # traversal. Deduplicate identities to bound deep/shared DAGs, and
+        # inspect each member before reading its child-list descriptor. Never
+        # call an authored get_family merely to decide how to execute it.
+        stack, seen = [root], set()
+        while stack:
+            member = stack.pop()
+            marker = id(member)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            if not isinstance(member, Mobject) or _changed(member, mobject_protocols):
+                return True
+            expected = next(child_descriptors[cls] for cls in type(member).__mro__
+                            if cls in child_descriptors)
+            if _implementation(type(member), "submobjects") is not expected:
+                return True
+            children = getattr(member, "submobjects", ())
+            if type(children) not in child_types:
+                # Do not invoke an authored iterable twice (once here and
+                # once at begin) or consume a one-shot traversal at admission.
+                return True
+            stack.extend(children)
+        return False
+
     def requires(animation):
-        if isinstance(animation, Transform) and _changed(animation, protocols):
-            return True
+        if isinstance(animation, Transform):
+            if _changed(animation, protocols):
+                return True
+            # Inspect current endpoints on every lowering; families and
+            # instance methods may change between plays of the same object.
+            for name in ("mobject", "target_mobject"):
+                root = getattr(animation, name, None)
+                if isinstance(root, Mobject) and authored_family(root):
+                    return True
         return previous_requires(animation)
 
     g["_requires_python_animation"] = requires
