@@ -41,6 +41,11 @@ pub enum TexError {
     /// unmapped character. The Display text is the ratchet's stable
     /// format, surfaced verbatim.
     Math(fmd_math::MathError),
+    /// Invalid additional preamble, or ink produced before the formula.
+    Preamble {
+        /// Native parser diagnostic or admission failure.
+        what: String,
+    },
     /// The `tex.template` config value refused to resolve (an out-of-tier
     /// or unknown Reference template — the registry's named refusal).
     Pack(fmn_config::PackError),
@@ -77,6 +82,7 @@ impl fmt::Display for TexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Math(e) => e.fmt(f),
+            Self::Preamble { what } => write!(f, "additional_preamble: {what}"),
             Self::Pack(e) => e.fmt(f),
             Self::BadPrim { what } => write!(f, "submobject primitive out of range: {what}"),
             Self::UnknownPack { content_id } => write!(
