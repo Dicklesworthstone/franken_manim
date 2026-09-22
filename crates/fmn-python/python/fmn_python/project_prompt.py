@@ -105,7 +105,7 @@ class _PromptRebuild:
                                       + ": " + message, file=sys.stderr)
                     else:
                         self.reported = None
-                        if changed:
+                        if changed and self.current():
                             project = self.watch.project
                             print(f"Rebuilt {project.scene_name} (generation {project.generation}).")
                     # Rate-limit across input-hook invocations and slow builds.

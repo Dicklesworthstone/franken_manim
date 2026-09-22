@@ -18,15 +18,19 @@ from .source_autoreload import _SHELL_NAMES, _STATE as _AUTO_STATE, _exports
 _MISSING = object()
 _FIELDS = ("scene", "checkpoint_manager", "_fmn_console", "_fmn_namespace")
 _HELP = """Rebuildable host scene editor:
-  fmn-python edit [--watch] SOURCE.py SCENE
+  fmn-python edit [--watch [--kitty | --sixel]] SOURCE.py SCENE
 
 Run the selected scene and enter its host IPython editor. An authored embed()
 ends construction and exposes its local names; no nested terminal is opened.
 At the prompt: reload() reconstructs the scene from current files; preview()
 returns a native image; reload_source()/auto_reload() refresh definitions only.
 --watch enables full-scene rebuilding from the first prompt. At the prompt,
-auto_rebuild() reconstructs changed sources before the next cell;
-stop_auto_rebuild() disables it. Asset paths and debounce seconds are optional.
+auto_rebuild() reconstructs saved changes while the terminal prompt is idle,
+or before the next cell in simple-prompt/GUI fallback mode. stop_auto_rebuild()
+disables it. Asset paths, debounce, idle and poll_interval options are available.
+--kitty/--sixel require --watch and a compatible terminal; each successful build
+shows its native snapshot immediately. preview(protocol="kitty") displays the
+current frame explicitly. No terminal protocol is guessed or silently changed.
 The two automatic reload modes are mutually exclusive; no background thread
 executes a scene. Unchanged sources preserve interactive edits and checkpoints.
 A successful rebuild resets scene state and checkpoints. Failed imports,
@@ -203,14 +207,20 @@ def _reload_editor(embedded, project, *, if_changed=False):
     return project.scene
 
 
-def edit_project(project: SceneProject, *, clipboard=None, auto_rebuild=False, debounce=0.0, paths=()):
+def edit_project(project: SceneProject, *, clipboard=None, auto_rebuild=False, debounce=0.0, paths=(),
+                 idle=None, poll_interval=0.25, preview_protocol=None):
     project._check()
     if type(auto_rebuild) is not bool:
         raise TypeError("auto_rebuild must be bool")
     from .project_autorebuild import _watch_options
-    options = _watch_options(debounce=debounce, paths=paths)
-    if not auto_rebuild and (options["debounce"] != 0 or options["paths"]):
-        raise ValueError("debounce and paths require auto_rebuild=True")
+    options = _watch_options(debounce=debounce, paths=paths, idle=idle,
+                             poll_interval=poll_interval, preview_protocol=preview_protocol)
+    if not auto_rebuild and (options["debounce"] != 0 or options["paths"] or idle is not None
+                             or poll_interval != 0.25 or preview_protocol is not None):
+        raise ValueError("watch options require auto_rebuild=True")
+    if preview_protocol is not None:
+        from .terminal_preview import _validate_project_preview
+        _validate_project_preview(project, preview_protocol)
     if project._editor is not None:
         raise RuntimeError("this scene project already has an editor")
     if clipboard is not None and not callable(clipboard):
@@ -243,6 +253,7 @@ def install_scene_project_editor(native):
     original_launch, original_reload = Embedded.launch, Embedded.reload_scene
     original_shortcuts = Embedded.get_shortcuts
     original_update = Embedded.ensure_frame_update_post_cell
+    original_scene_embed = getattr(native.Scene, "embed", None)
 
     def launch(self):
         building = _BUILDING.get()
@@ -257,6 +268,17 @@ def install_scene_project_editor(native):
             # and owns teardown. Never run an IPython terminal inside a build.
             raise native.EndScene()
         return original_launch(self)
+
+    def scene_embed(self, close_scene_on_exit=True, show_animation_progress=False):
+        # Reference Scene.embed is a headless no-op outside an owned authoring
+        # project. Inside one, the ordinary spelling must mark the construction
+        # checkpoint and expose the caller's locals just like InteractiveScene.
+        # Reuse Embedded.launch's build guard: never launch a terminal in run().
+        if _BUILDING.get() is None:
+            return original_scene_embed(self, close_scene_on_exit, show_animation_progress)
+        embedded = Embedded(self)
+        embedded._fmn_namespace = _caller_namespace()
+        return embedded.launch()
 
     def ensure_update(self):
         result = original_update(self)
@@ -283,11 +305,20 @@ def install_scene_project_editor(native):
         finally:
             vars(self).pop("_fmn_project_reloading", None)
 
-    def preview(self):
+    def preview(self, *, protocol=None):
         project = vars(self).get(_PROJECT)
         if project is None:
             raise native._CapabilityError("project preview requires an active SceneProject editor")
-        return _check_editor(self, project).preview()
+        console = _check_editor(self, project)
+        if protocol is not None:
+            from .terminal_preview import _protocol, _snapshot, _stream, _show_snapshot
+            _protocol(protocol)
+            _stream(None)
+            _snapshot(project._native, project.preview)
+        snapshot = console.preview()
+        if protocol is not None:
+            _show_snapshot(snapshot, protocol, None, 16_777_216, project._native)
+        return snapshot
 
     def shortcuts(self):
         result = dict(original_shortcuts(self))
@@ -300,6 +331,8 @@ def install_scene_project_editor(native):
                            ("ensure_frame_update_post_cell", ensure_update),
                            ("get_shortcuts", shortcuts), ("_project_preview", preview)):
         _method(Embedded, name, function)
+    if original_scene_embed is not None:
+        _method(native.Scene, "embed", scene_embed)
     from .project_autorebuild import install_project_autorebuild
     install_project_autorebuild(native)
     native._FMN_SCENE_PROJECT_EDITOR_INSTALLED = True
@@ -311,6 +344,11 @@ def try_edit_cli(native, arguments):
     if not tokens or tokens[0] != "edit":
         return None
     robot = "--robot" in arguments
+    preview_flags = [arg for arg in tokens[1:] if arg in ("--kitty", "--sixel")]
+    if len(preview_flags) > 1:
+        return native._portal_cli_emit(2, "usage", "usage-error", "choose at most one of --kitty or --sixel", robot)
+    preview_protocol = preview_flags[0][2:] if preview_flags else None
+    tokens = [tokens[0], *(arg for arg in tokens[1:] if arg not in ("--kitty", "--sixel"))]
     watch = "--watch" in tokens[1:]
     if tokens[1:].count("--watch") > 1:
         return native._portal_cli_emit(2, "usage", "usage-error", "--watch may be supplied only once", robot)
@@ -320,11 +358,20 @@ def try_edit_cli(native, arguments):
             return native._portal_cli_emit(0, "success", "help", "fmn-python edit usage", True, help=_HELP)
         print(_HELP)
         return 0
+    if preview_protocol is not None and not watch:
+        return native._portal_cli_emit(2, "usage", "usage-error", "--kitty/--sixel require --watch", robot)
     if len(tokens) != 3 or any(arg.startswith("-") for arg in tokens[1:]):
         return native._portal_cli_emit(2, "usage", "usage-error", "expected: fmn-python edit [--watch] SOURCE.py SCENE", robot)
     if robot or not getattr(sys.stdin, "isatty", lambda: False)():
         return native._portal_cli_emit(4, "capability", "edit-capability-unavailable",
                                        "edit requires an interactive terminal; use SceneProject for host-controlled builds", robot)
+    if preview_protocol is not None:
+        from .terminal_preview import _encoding_type, _stream
+        try:
+            _encoding_type(native)
+            _stream(None)
+        except Exception as error:
+            return native._portal_cli_emit(4, "capability", "edit-capability-unavailable", str(error), False)
     try:
         importlib.import_module("IPython.terminal.embed")
     except ImportError:
@@ -333,7 +380,10 @@ def try_edit_cli(native, arguments):
     try:
         with SceneProject(tokens[1], tokens[2], _native=native) as project:
             if watch:
-                project.edit(auto_rebuild=True)
+                if preview_protocol is None:
+                    project.edit(auto_rebuild=True)
+                else:
+                    project.edit(auto_rebuild=True, preview_protocol=preview_protocol)
             else:
                 project.edit()
             generations = project.generation

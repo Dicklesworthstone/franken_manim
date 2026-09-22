@@ -250,19 +250,29 @@ class SceneProject:
                              stop=stop, on_error=on_error, paths=paths)
 
     def edit(self, *, clipboard=None, auto_rebuild: bool = False,
-             debounce: float = 0.0, paths: Iterable[str | Path] = ()):
-        """Edit in one host IPython shell, optionally rebuilding before cells.
+             debounce: float = 0.0, paths: Iterable[str | Path] = (),
+             idle: bool | None = None, poll_interval: float = 0.25,
+             preview_protocol: str | None = None):
+        """Edit in one IPython shell with optional live rebuilding and preview.
 
-        With ``auto_rebuild=True``, source/helper and explicit asset ``paths``
-        changes reconstruct the full scene at the next eligible cell boundary.
-        Nothing runs while the prompt is idle. ``debounce`` requires content to
-        remain stable across observations; zero rebuilds on the next cell.
-        Failed candidates retain the previous generation, and unchanged files
-        preserve interactive edits. This does not enable definition autoreload.
+        With ``auto_rebuild=True``, changed sources and explicit asset ``paths``
+        reconstruct the full scene on its owning thread. ``idle=None`` enables
+        idle polling on a compatible terminal prompt, retaining pre-cell
+        rebuilding for simple prompts or existing GUI/asyncio integrations.
+        ``idle=True`` requires that capability; ``idle=False`` is pre-cell only.
+        ``poll_interval`` is 0.01..60 seconds; ``debounce`` coalesces saved edits.
+
+        Select ``preview_protocol="kitty"`` or ``"sixel"`` to display the initial
+        and rebuilt native snapshots in a compatible terminal. No protocol is
+        guessed. Failed builds retain the working generation; a terminal write
+        failure after a successful build does not undo that new generation.
+        Unchanged files preserve interactive edits. Watch options require
+        ``auto_rebuild=True`` and do not enable definition-only autoreload.
         """
         from .project_editor import edit_project
         return edit_project(self, clipboard=clipboard, auto_rebuild=auto_rebuild,
-                            debounce=debounce, paths=paths)
+                            debounce=debounce, paths=paths, idle=idle,
+                            poll_interval=poll_interval, preview_protocol=preview_protocol)
 
     def close(self):
         self._check_thread()

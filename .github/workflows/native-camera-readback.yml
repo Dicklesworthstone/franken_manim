@@ -58,7 +58,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/camera-wheel 2>&1 | tee /tmp/camera-build.log
           python -m venv target/camera-venv
           target/camera-venv/bin/python -m pip install 'numpy==2.5.2' 'IPython==9.14.0' target/camera-wheel/*.whl
-          for suite in camera_readback camera_snapshot terminal_preview; do
+          for suite in camera_readback camera_snapshot terminal_preview terminal_editor; do
             target/camera-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/camera-$suite.log"
           done
       - name: Preserve exact native validation and source

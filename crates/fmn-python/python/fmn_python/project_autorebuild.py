@@ -17,9 +17,12 @@ _STATE = "_fmn_project_autorebuild"
 _MISSING = object()
 
 
-def _watch_options(*, debounce=0.0, paths=(), idle=None, poll_interval=0.25):
+def _watch_options(*, debounce=0.0, paths=(), idle=None, poll_interval=0.25, preview_protocol=None):
     """Freeze and validate options before acquiring host editor resources."""
     debounce = _timing(debounce, "debounce", positive=False)
+    if preview_protocol is not None:
+        from .terminal_preview import _protocol
+        _protocol(preview_protocol)
     if idle is not None and type(idle) is not bool:
         raise TypeError("idle must be bool or None")
     poll_interval = _timing(poll_interval, "poll_interval", positive=True)
@@ -33,17 +36,19 @@ def _watch_options(*, debounce=0.0, paths=(), idle=None, poll_interval=0.25):
         if len(extras) > _MAX_FILES:
             raise ValueError("scene watch exceeds its file count budget")
     return {"debounce": debounce, "paths": tuple(extras),
-            "idle": idle, "poll_interval": poll_interval}
+            "idle": idle, "poll_interval": poll_interval, "preview_protocol": preview_protocol}
 
 
 class _RebuildWatch:
     """One attempted reconstruction per stable content generation."""
 
     def __init__(self, project, check, rebuild, *, debounce=0.0, paths=(),
-                 idle=None, poll_interval=0.25):
-        options = _watch_options(debounce=debounce, paths=paths, idle=idle, poll_interval=poll_interval)
+                 idle=None, poll_interval=0.25, preview_protocol=None):
+        options = _watch_options(debounce=debounce, paths=paths, idle=idle,
+                                 poll_interval=poll_interval, preview_protocol=preview_protocol)
         self.debounce, self.paths = options["debounce"], options["paths"]
         self.idle_mode, self.poll_interval = options["idle"], options["poll_interval"]
+        self.preview_protocol = options["preview_protocol"]
         self.prompt = None
         self.project, self.check, self.rebuild = project, check, rebuild
         self.observed = self.attempted = _MISSING
@@ -96,11 +101,20 @@ class _RebuildWatch:
             # perform its import/construction effects on every entered cell.
             self.attempted = current
             conditional, self.initial = self.initial, False
-            generation = self.project.generation
+            project = self.project
+            generation = project.generation
             self.rebuild(if_changed=conditional)
             # Do not rescan here: edits made DURING construction remain pending
             # and must be observed at the next safe cell boundary.
-            return self.project.generation != generation
+            changed = project.generation != generation
+            if changed and not self.closed and self.preview_protocol is not None:
+                from .terminal_preview import _show_snapshot
+                try:
+                    _show_snapshot(project.preview, self.preview_protocol, None, 16_777_216, project._native)
+                except BaseException as error:
+                    BaseException.add_note(error, "new scene generation is active; terminal display failed after rebuild")
+                    raise
+            return changed
         finally:
             self.busy = False
 
@@ -150,7 +164,7 @@ def install_project_autorebuild(native):
         state.close()  # Retained callbacks are inert before unregistering.
         remove_hook(self, state.callback)
 
-    def auto_rebuild(self, *, debounce=0.0, paths=(), idle=None, poll_interval=0.25):
+    def auto_rebuild(self, *, debounce=0.0, paths=(), idle=None, poll_interval=0.25, preview_protocol=None):
         project = vars(self).get(_PROJECT)
         if project is None:
             raise native._CapabilityError("auto_rebuild requires an active SceneProject editor")
@@ -170,7 +184,7 @@ def install_project_autorebuild(native):
             return embedded.reload_scene(if_changed=if_changed)
 
         state = _RebuildWatch(project, check, rebuild, debounce=debounce, paths=paths,
-                              idle=idle, poll_interval=poll_interval)
+                              idle=idle, poll_interval=poll_interval, preview_protocol=preview_protocol)
 
         def before_cell(*_args, **_kwargs):
             embedded = owner()
@@ -190,6 +204,9 @@ def install_project_autorebuild(native):
                     and vars(embedded).get(_STATE) is state and not state.closed)
 
         try:
+            if preview_protocol is not None:
+                from .terminal_preview import _validate_project_preview
+                _validate_project_preview(project, preview_protocol)
             state.arm()
             state.prompt = prepare_prompt(self.shell, state, active,
                                           replacing=None if previous is None else previous.prompt)
@@ -212,6 +229,9 @@ def install_project_autorebuild(native):
         try:
             if state.prompt is not None:
                 state.prompt.install()
+            if preview_protocol is not None:
+                from .terminal_preview import _show_snapshot
+                _show_snapshot(project.preview, preview_protocol, None, 16_777_216, project._native)
         except BaseException:
             release(self, state)
             raise
