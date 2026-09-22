@@ -45,8 +45,15 @@ fn same_pointlike_geometry(stage: &Stage, from: Mob, to: Mob) -> bool {
     let (Some(a), Some(b)) = (stage.get(from), stage.get(to)) else {
         return false;
     };
-    a.buffer.schema().fields().iter()
-        .filter(|field| field.width == 3 && (field.name == "point" || a.buffer.schema().pointlike_keys().contains(&field.name)))
+    a.buffer
+        .schema()
+        .fields()
+        .iter()
+        .filter(|field| {
+            field.width == 3
+                && (field.name == "point"
+                    || a.buffer.schema().pointlike_keys().contains(&field.name))
+        })
         .all(|field| a.buffer.column_eq(&b.buffer, &field.name))
 }
 
@@ -67,21 +74,27 @@ pub fn interpolate_fields(
     let Some(entry) = stage.get(submob) else {
         return;
     };
-    let Some((from_placement, to_placement)) = stage.placement(from).zip(stage.placement(to)) else {
+    let Some((from_placement, to_placement)) = stage.placement(from).zip(stage.placement(to))
+    else {
         return;
     };
     let schema = entry.buffer.schema();
     let pointlike: Vec<String> = schema
         .fields()
         .iter()
-        .filter(|field| field.width == 3 && (field.name == "point" || schema.pointlike_keys().contains(&field.name)))
+        .filter(|field| {
+            field.width == 3
+                && (field.name == "point" || schema.pointlike_keys().contains(&field.name))
+        })
         .map(|field| field.name.clone())
         .collect();
     // A host read can bake all geometric fields into this buffer, including
     // while no view remains live. Return to the frozen endpoints rather than
     // compounding that intermediate representation on the next sample.
     let representation_drifted = stage.get(from).is_some_and(|starting| {
-        pointlike.iter().any(|key| !entry.buffer.column_eq(&starting.buffer, key))
+        pointlike
+            .iter()
+            .any(|key| !entry.buffer.column_eq(&starting.buffer, key))
     });
     let sync_world = !entry.buffer.is_empty()
         && !pointlike.is_empty()
@@ -92,7 +105,9 @@ pub fn interpolate_fields(
         let valid = pointlike.iter().all(|key| {
             let expected = entry.buffer.len().checked_mul(3);
             [from, to].into_iter().all(|mob| {
-                stage.get(mob).and_then(|endpoint| endpoint.buffer.read_column(key))
+                stage
+                    .get(mob)
+                    .and_then(|endpoint| endpoint.buffer.read_column(key))
                     .is_some_and(|column| Some(column.len()) == expected)
             })
         });
@@ -105,7 +120,9 @@ pub fn interpolate_fields(
         .iter()
         // Equal object-space normals are normally locked. They still need a
         // world-space write whenever vertices are materialized for a live view.
-        .filter(|field| (sync_world && pointlike.contains(&field.name)) || !entry.buffer.is_locked(&field.name))
+        .filter(|field| {
+            (sync_world && pointlike.contains(&field.name)) || !entry.buffer.is_locked(&field.name)
+        })
         .map(|field| field.name.clone())
         .collect();
     for field in fields {
@@ -125,16 +142,23 @@ pub fn interpolate_fields(
             if !ra.is_empty() || !rb.is_empty() {
                 continue;
             }
-            pa.iter().zip(pb).flat_map(|(ca, cb)| {
-                let a = ca.map(f64::from);
-                let b = cb.map(f64::from);
-                let point = if sync_world {
-                    path.eval(from_placement.apply_point(a), to_placement.apply_point(b), alpha)
-                } else {
-                    path.eval(a, b, alpha)
-                };
-                point.map(|value| value as f32)
-            }).collect()
+            pa.iter()
+                .zip(pb)
+                .flat_map(|(ca, cb)| {
+                    let a = ca.map(f64::from);
+                    let b = cb.map(f64::from);
+                    let point = if sync_world {
+                        path.eval(
+                            from_placement.apply_point(a),
+                            to_placement.apply_point(b),
+                            alpha,
+                        )
+                    } else {
+                        path.eval(a, b, alpha)
+                    };
+                    point.map(|value| value as f32)
+                })
+                .collect()
         } else {
             interpolate_linear_column(&a, &b, alpha)
         };
@@ -426,7 +450,9 @@ impl Animation for Transform {
         // translate/rotate/scale transforms (fm-7if).
         let source_family = stage.family(mobject);
         let target_family = stage.family(target_copy);
-        let needs_geometry_bake = source_family.iter().zip(&target_family)
+        let needs_geometry_bake = source_family
+            .iter()
+            .zip(&target_family)
             .any(|(&source, &target)| !same_pointlike_geometry(stage, source, target));
         // An already aligned target is normally safe to share. Baking is the
         // exception because it changes stored coordinates; preserve the user's
