@@ -27,8 +27,16 @@ def install_surface_alignment(native):
             raise TypeError("surface alignment requires two native UV-grid surfaces")
         return a, b
 
+    def empty_pair(left, right):
+        # SGroup is a Surface by MRO, but its root owns no UV grid. Likewise,
+        # a Group may wrap the same surface family. Only their drawable leaves
+        # need UV alignment; never invent a grid for empty container records.
+        return isinstance(right, Mobject) and not left.has_points() and not right.has_points()
+
     def align_points(self, other):
         if not isinstance(self, Surface) and not isinstance(other, Surface):
+            return original_align(self, other)
+        if empty_pair(self, other):
             return original_align(self, other)
         if not isinstance(self, Surface) or not isinstance(other, Surface):
             raise TypeError("a UV-grid surface cannot align with an unstructured mobject")
@@ -53,6 +61,8 @@ def install_surface_alignment(native):
 
     def is_aligned_with(self, other):
         if isinstance(self, Surface) or isinstance(other, Surface):
+            if empty_pair(self, other):
+                return original_aligned(self, other)
             if not isinstance(self, Surface) or not isinstance(other, Surface):
                 return False
             a, b = pair_shapes(self, other)

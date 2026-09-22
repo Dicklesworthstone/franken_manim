@@ -46,6 +46,46 @@ class SurfaceAlignmentTests(unittest.TestCase):
         self.assertEqual(int(np.max(triangles)), obj.get_num_points() - 1)
         self.assertEqual(obj.get_uv_grid().shape, (*shape, 2))
 
+    def test_surface_group_empty_roots_align_their_drawable_leaves(self):
+        for left_type, right_type in ((m.SGroup, m.SGroup), (m.SGroup, m.Group),
+                                      (m.Group, m.SGroup)):
+            with self.subTest(left=left_type.__name__, right=right_type.__name__):
+                a, b = surface((2, 3)), surface((3, 2), 2)
+                left, right = left_type(a), right_type(b)
+                target = b.data.copy()
+                self.assertFalse(left.is_aligned_with(right))
+                scene = m.Scene()
+                scene.add(left)
+                scene.play(m.Transform(left, right), run_time=.125, rate_func=m.linear)
+                self.assertEqual(left.get_num_points(), 0)
+                self.assertIsNone(m._surface_grid_resolution(left))
+                self.assertIs(left.submobjects[0], a)
+                self.assert_topology(a, (3, 3))
+                np.testing.assert_allclose(a.get_points(), grid((3, 3), 2), atol=2e-6)
+                np.testing.assert_array_equal(b.data, target)
+
+    def test_empty_surface_group_can_align_and_transform_without_a_fake_grid(self):
+        left, right = m.SGroup(), m.SGroup()
+        self.assertTrue(left.is_aligned_with(right))
+        self.assertIs(left.align_points(right), left)
+        scene = m.Scene()
+        scene.add(left)
+        scene.play(m.Transform(left, right), run_time=.125)
+        self.assertEqual(left.get_num_points(), 0)
+        self.assertIsNone(m._surface_grid_resolution(left))
+
+    def test_surface_group_builder_and_saved_state_remain_usable(self):
+        obj = surface((2, 3))
+        group = m.SGroup(obj)
+        group.save_state()
+        scene = m.Scene()
+        scene.add(group)
+        scene.play(group.animate.shift((0, 0, 2)), run_time=.125, rate_func=m.linear)
+        np.testing.assert_allclose(obj.get_points(), grid((2, 3), 2), atol=2e-6)
+        scene.play(m.Restore(group), run_time=.125, rate_func=m.linear)
+        np.testing.assert_allclose(obj.get_points(), grid((2, 3)), atol=2e-6)
+        self.assert_topology(obj, (2, 3))
+
     def test_direct_alignment_uses_both_uv_dimensions(self):
         left, right = surface((2, 3)), surface((4, 2), 2)
         self.assertIs(left.align_points(right), left)

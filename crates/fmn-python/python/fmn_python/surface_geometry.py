@@ -112,8 +112,12 @@ def install_surface_geometry(native):
             # Source records are retained before callbacks; a callback that edits
             # the destination must not have its changes overwritten by this build.
             before = self.data.copy()
-            owner = self._scene
+            owner = vars(self).get("_scene")
+            bound = self._is_bound()
             family = tuple(self.get_family())
+            uv_method = self.uv_func
+            uv_identity = (getattr(uv_method, "__func__", uv_method),
+                           getattr(uv_method, "__self__", None))
             solid = None if isinstance(self, Textured) else _solid_recipe(g, self, controls)
             recipe = getattr(self, "passed_uv_func", None)
             if solid is not None:
@@ -161,7 +165,14 @@ def install_surface_geometry(native):
                 raise RuntimeError("surface shape parameters changed during regeneration")
             if not isinstance(self, Textured) and getattr(self, "passed_uv_func", None) is not recipe:
                 raise RuntimeError("surface UV function changed during regeneration")
-            if (self._scene is not owner or tuple(self.get_family()) != family
+            current_uv = self.uv_func
+            if (getattr(current_uv, "__func__", current_uv) is not uv_identity[0]
+                    or getattr(current_uv, "__self__", None) is not uv_identity[1]):
+                raise RuntimeError("surface UV function changed during regeneration")
+            # Detached proxies have no _scene attribute. Check native admission
+            # as well as its host mirror: a callback may bind this very object.
+            if (vars(self).get("_scene") is not owner or self._is_bound() != bound
+                    or tuple(self.get_family()) != family
                     or _controls(self) != controls or resolution(self) != controls[0]
                     or not np.array_equal(self.data, before)):
                 raise RuntimeError("surface changed during regeneration; sampled geometry was not published")

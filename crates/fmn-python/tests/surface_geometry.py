@@ -13,6 +13,62 @@ class SurfaceGeometryTests(unittest.TestCase):
         return m.ParametricSurface(lambda u, v: (u, v, controls[0] * u * v),
                                    u_range=(-1, 1), v_range=(-1, 1), resolution=(5, 7))
 
+    def test_detached_rebuild_does_not_invent_scene_membership(self):
+        surface = self.make()
+        self.assertNotIn("_scene", vars(surface))
+        surface.passed_uv_func = lambda u, v: (u, v, 3)
+        surface.init_points()
+        self.assertNotIn("_scene", vars(surface))
+        self.assertFalse(surface._is_bound())
+        np.testing.assert_array_equal(surface.get_points()[:, 2], 3)
+
+    def test_callback_adoption_refuses_publication_but_preserves_authored_effect(self):
+        surface, scene = self.make(), m.Scene()
+        before = surface.data.copy()
+        def sample(u, v):
+            if not surface._is_bound():
+                scene.add(surface)
+            return u, v, 4
+        surface.passed_uv_func = sample
+        with self.assertRaisesRegex(RuntimeError, 'changed during regeneration'):
+            surface.init_points()
+        self.assertEqual(tuple(scene.mobjects), (surface,))
+        self.assertIs(surface._scene, scene)
+        np.testing.assert_array_equal(surface.data, before)
+        surface.passed_uv_func = lambda u, v: (u, v, 4)
+        surface.init_points()
+        np.testing.assert_array_equal(surface.get_points()[:, 2], 4)
+
+    def test_replacing_the_dispatched_uv_method_is_detected(self):
+        surface = self.make()
+        before = surface.data.copy()
+        replacement = lambda u, v: (u, v, 9)
+        def sample(u, v):
+            surface.uv_func = replacement
+            return u, v, 2
+        surface.passed_uv_func = sample
+        with self.assertRaisesRegex(RuntimeError, 'UV function changed'):
+            surface.init_points()
+        self.assertIs(surface.uv_func, replacement)
+        np.testing.assert_array_equal(surface.data, before)
+        surface.init_points()
+        np.testing.assert_array_equal(surface.get_points()[:, 2], 9)
+
+    def test_new_animation_lock_during_callback_is_not_overwritten(self):
+        surface = self.make()
+        before = surface.data.copy()
+        def sample(u, v):
+            surface.lock_data(["point"])
+            return u, v, 2
+        surface.passed_uv_func = sample
+        with self.assertRaisesRegex(RuntimeError, 'active animation'):
+            surface.init_points()
+        np.testing.assert_array_equal(surface.data, before)
+        surface.unlock_data()
+        surface.passed_uv_func = lambda u, v: (u, v, 2)
+        surface.init_points()
+        np.testing.assert_array_equal(surface.get_points()[:, 2], 2)
+
     def test_native_regeneration_updates_positions_and_normals(self):
         controls = [0.0]
         surface = self.make(controls)
