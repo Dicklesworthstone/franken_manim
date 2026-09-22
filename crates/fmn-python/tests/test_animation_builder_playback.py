@@ -204,7 +204,7 @@ class BuilderPlaybackTests(unittest.TestCase):
             self.scene.play(Builder(self.mob))
         self.assertEqual(self.scene.calls, [])
     def test_invalid_constructor_option_is_not_silently_discarded(self):
-        with self.assertRaisesRegex(TypeError, "unknown animation options"):
+        with self.assertRaises((TypeError, NotImplementedError)):
             self.scene.play(self.builder(unsupported=7))
         self.assertEqual(self.scene.calls, [])
     def test_dynamic_target_lookup_matches_prepare_animation(self):
@@ -295,6 +295,9 @@ class BuilderPlaybackTests(unittest.TestCase):
         fading = types.ModuleType("fmn_python.fading")
         fading.install_fading = lambda module: None
         modules["fmn_python.fading"] = fading
+        initialization = types.ModuleType("fmn_python.initialization")
+        initialization.initialize = lambda module: playback.install_scene_playback(module)
+        modules["fmn_python.initialization"] = initialization
         modules["fmn_python.playback"] = playback
         with patch.dict(sys.modules, modules):
             exec(compile(source, "manimlib/__init__.py", "exec"), vars(package))

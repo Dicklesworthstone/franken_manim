@@ -12,7 +12,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "python/fmn_python/animation_updaters.py"
-SPEC = importlib.util.spec_from_file_location("fmn_animation_updaters_tested", PATH)
+SPEC = importlib.util.spec_from_file_location("fmn_python.animation_updaters", PATH)
 adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(adapter)
 
