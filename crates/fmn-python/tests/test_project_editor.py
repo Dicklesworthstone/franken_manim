@@ -14,7 +14,12 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from IPython.terminal.embed import InteractiveShellEmbed
+try:
+    from IPython.terminal.embed import InteractiveShellEmbed
+    HAVE_IPYTHON = True
+except ImportError:
+    InteractiveShellEmbed = None
+    HAVE_IPYTHON = False
 
 import test_scene_project as fixtures
 from fmn_python.scene_project import SceneProject
@@ -57,6 +62,7 @@ def editor_fixture():
     return native
 
 
+@unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
 class ProjectEditorTests(unittest.TestCase):
     setUp = fixtures.SceneProjectTests.setUp
     write = fixtures.SceneProjectTests.write
