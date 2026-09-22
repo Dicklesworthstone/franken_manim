@@ -98,6 +98,7 @@ perf.data.old
 # Remote compilation helper target trees (worker-local cargo target, gigabytes).
 .rch-target/
 .rch-target-*/
+.rch-results/
 
 # Environment / local settings
 .env
