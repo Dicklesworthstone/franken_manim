@@ -1544,9 +1544,13 @@ assert configured_scene.window is host_window
 assert configured_scene.pan_sensitivity == 0.25
 assert configured_scene.scroll_sensitivity == 10.0
 assert configured_scene.drag_to_pan is False
+configured_scene_dot = manimlib.Dot()
+configured_scene.add(configured_scene_dot)
 configured_scene.save_state()
 oldest_state = configured_scene.undo_stack[0]
+configured_scene_dot.shift(manimlib.RIGHT)
 configured_scene.save_state()
+configured_scene_dot.shift(manimlib.UP)
 configured_scene.save_state()
 assert len(configured_scene.undo_stack) == 2
 assert oldest_state not in configured_scene.undo_stack
@@ -4127,7 +4131,7 @@ assert resize_key_scene.on_key_press(ord("t"), 0) is None
 assert len(resize_key_scene.undo_stack) == 1
 assert not hasattr(resize_key_scene, "scale_about_point")
 assert resize_key_scene.on_key_press(ord("t"), 1) is None  # pyglet MOD_SHIFT
-assert len(resize_key_scene.undo_stack) == 2
+assert len(resize_key_scene.undo_stack) == 1
 assert hasattr(resize_key_scene, "scale_about_point")
 color_key_scene = InteractiveScene()
 color_key_scene.setup()
@@ -21331,8 +21335,12 @@ except TypeError:
 _check("state machinery types refuse by name",
        _bad_target and _bad_source)
 _capped = manimlib.Scene(max_num_saved_states=2)
+_c_dot = manimlib.Dot()
+_capped.add(_c_dot)
 _capped.save_state()
+_c_dot.shift(manimlib.RIGHT)
 _capped.save_state()
+_c_dot.shift(manimlib.UP)
 _capped.save_state()
 _check("history respects the cap",
        len(_capped.undo_stack) <= _capped.max_num_saved_states)
