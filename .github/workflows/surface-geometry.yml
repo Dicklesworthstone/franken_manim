@@ -10,6 +10,7 @@ on:
       - 'crates/fmn-mobject/tests/surface_grid.rs'
       - 'crates/fmn-anim/src/transform.rs'
       - 'crates/fmn-anim/tests/surface_transforms.rs'
+      - 'crates/fmn-anim/tests/surface_grid_alignment.rs'
       - 'crates/fmn-python/src/portal_surface.rs'
       - 'crates/fmn-python/src/portal_texture.rs'
       - 'crates/fmn-python/python/fmn_python/surface_geometry.py'

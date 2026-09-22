@@ -82,6 +82,8 @@ pub enum StageError {
     /// `become` between records of different schemas — the Reference's
     /// `set_data` asserts dtype equality; this is the typed refusal.
     SchemaMismatch,
+    /// A sampled surface has invalid topology, records, or an excessive UV grid.
+    SurfaceGrid(&'static str),
     /// The geometry kernel refused a point run or bounded operation during
     /// alignment (alignment reads point runs as [`fmn_geom::QuadPath`]s).
     Geometry(fmn_geom::GeomError),
@@ -136,6 +138,7 @@ impl std::fmt::Display for StageError {
             Self::SchemaMismatch => {
                 write!(f, "become between records of different schemas")
             }
+            Self::SurfaceGrid(reason) => write!(f, "surface grid alignment refused: {reason}"),
             Self::Geometry(err) => {
                 write!(f, "geometry operation refused during alignment: {err}")
             }

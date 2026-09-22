@@ -1904,3 +1904,7 @@ impl Stage {
         self.next_updater_id = snapshot.next_updater_id;
     }
 }
+
+#[path = "surface_grid.rs"]
+mod surface_grid;
+pub use surface_grid::{MAX_SURFACE_GRID_POINTS, SurfaceGridUpdate, prepare_surface_grid_alignment};
