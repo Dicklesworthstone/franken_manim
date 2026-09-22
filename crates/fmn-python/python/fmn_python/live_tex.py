@@ -140,6 +140,16 @@ def install_live_tex(native: Any) -> None:
         if any(len(span) != 2 or span[0] not in boundaries or span[1] not in boundaries
                or span[0] > span[1] for span in spans):
             raise ValueError("Tex source spans must be valid UTF-8 byte intervals")
+        for _, ordinals in selected:
+            selected_spans = [spans[ordinal] for ordinal in ordinals]
+            if len(set(selected_spans)) != len(selected_spans):
+                # A macro may materialize one argument in several positions.
+                # One DecimalNumber cannot replace those independent copies:
+                # merging their bounding boxes silently deletes mathematics.
+                raise ValueError(
+                    "numeric TeX source expands into multiple native occurrences; "
+                    "use separately authored numeric spans for independent live readouts"
+                )
         claimed = [ordinal for _, ordinals in selected for ordinal in ordinals]
         if len(set(claimed)) != len(claimed):
             raise ValueError("numeric TeX selections share a native source primitive")

@@ -17,8 +17,18 @@ The `template` names `default`, `basic`, and `empty` select the existing native
 preamble packs. The empty template name retains the default. Native primitives
 are available in every pack; `default` additionally defines `\minus`. Inline
 `\newcommand` refuses to shadow an existing definition, while `\renewcommand`
-requires one. Macros may call other macros; direct and indirect recursion is
-refused, as is expansion that exceeds fmd-math's token/depth limits.
+requires one. Calls can be nested in the expression, such as `\half{\sq{x}}`;
+recursion is refused, as is expansion that exceeds fmd-math's token/depth limits.
+The native symbol vocabulary includes `\minus` even in the bare packs; the
+default pack additionally defines it as a macro, affecting shadowing rules.
+
+**Pinned-engine limitation:** a macro calling another macro from its definition
+body can produce invalid spans or fail to substitute forwarded arguments in the
+pinned fmd-math version. Those preamble requests are rejected with an explicit
+span-provenance error, not rendered with clamped positions or literal `#1`
+tokens. Use source-nested calls or define the compound body directly from native
+primitives. The upstream correction is tracked in `UPSTREAM_LEDGER.md` row 13;
+this change does not silently replace the governed dependency pin.
 
 A preamble must parse independently without producing ink or layout spacing.
 It is not a full LaTeX document preamble: package loading, file inclusion,
@@ -34,7 +44,16 @@ replacement continue to address the **original expression**. Macro-generated
 ink belongs to its call site; argument glyphs retain their argument spans.
 Preamble bytes never become selectable formula characters. Formula diagnostics
 report offsets relative to that expression. Preamble failures are explicitly
-labelled `additional_preamble`.
+labelled `additional_preamble`. Selection uses containment: select `\half{x}`
+to include whole-call generated ink, or `x` for its literal argument. The bare
+command name `\half` alone does not contain the full expansion-site span.
+
+A single-use numeric macro argument can become a live readout without removing
+generated ink around it. When one argument is expanded into multiple displayed
+copies, `make_number_changeable` refuses rather than collapsing those copies
+into one number. Author separate numeric source occurrences when each copy
+must have a live readout. Ordinary selection and rendering of repeated macro
+arguments remain supported.
 
 Cache lookup includes the complete effective source and the native pack's
 fingerprint. Different definitions cannot reuse each other's expansion, and

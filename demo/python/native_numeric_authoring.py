@@ -18,7 +18,12 @@ class NativeNumericAuthoring(Scene):
     def construct(self):
         title = Text("Native numeric authoring", font="IBM Plex Sans", font_size=32)
         title.to_edge(UP)
-        formula = Tex("z = 1.00", color=RED).scale(1.7).shift(1.3 * UP)
+        # Native preamble expansion keeps the original argument's span: a live
+        # readout can replace 1.00 without touching the generated z and equals.
+        formula = Tex(
+            r"\coefficient{1.00}", color=RED, template="empty",
+            additional_preamble=r"\newcommand{\coefficient}[1]{z = #1}",
+        ).scale(1.7).shift(1.3 * UP)
         value = formula.make_number_changeable("1.00")
         value.set_value(1 + 2j)
         coefficient = DecimalNumber(

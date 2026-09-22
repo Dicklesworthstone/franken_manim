@@ -82,7 +82,10 @@ impl TexEngine {
                     *span = Span::new(start, end);
                     Ok(())
                 }
-                _ => Err(invalid("native expansion produced a span outside the formula")),
+                _ => Err(invalid(
+                    "native expansion produced a span outside the formula; \
+                     see UPSTREAM_LEDGER.md #13 for definition-nested macros",
+                )),
             }
         };
         for glyph in &mut layout.glyphs {

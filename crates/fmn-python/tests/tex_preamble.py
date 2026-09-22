@@ -35,7 +35,7 @@ class TexPreambleTests(unittest.TestCase):
         for start, end in mob._string_sub_spans:
             self.assertTrue(0 <= start <= end <= len(source.encode()))
         self.assertTrue(mob.get_part_by_tex(r"\half{x}").family_members_with_points())
-        self.assertFalse(mob.get_part_by_tex("newcommand").family_members_with_points())
+        self.assertFalse(mob.get_parts_by_tex("newcommand").family_members_with_points())
 
     def test_text_mainland_unicode_and_macro_math_islands(self):
         source = "é area $\\sq{x}$"
@@ -71,10 +71,14 @@ class TexPreambleTests(unittest.TestCase):
             self.assertGeometryEqual(m.Tex("x", template=template), plain)
         self.assertGeometryEqual(m.Tex(r"x\minus y", template="default"), m.Tex("x-y"))
         for template in ("basic", "empty"):
-            with self.assertRaises(ValueError):
-                m.Tex(r"x\minus y", template=template)
+            # The symbol vocabulary also includes minus. Pack identity is
+            # observable through macro shadowing, not by denying that symbol.
+            self.assertGeometryEqual(m.Tex(r"x\minus y", template=template), m.Tex("x-y"))
             self.assertGeometryEqual(m.Tex(r"\minus", template=template,
                 additional_preamble=r"\newcommand{\minus}{+}"), m.Tex("+"))
+            with self.assertRaisesRegex(ValueError, "not defined"):
+                m.Tex(r"\minus", template=template,
+                      additional_preamble=r"\renewcommand{\minus}{+}")
         with self.assertRaises(ValueError):
             m.Tex("x", template="default", additional_preamble=r"\newcommand{\minus}{+}")
         self.assertGeometryEqual(m.Tex(r"\minus", additional_preamble=r"\renewcommand{\minus}{+}"), m.Tex("+"))
@@ -131,11 +135,68 @@ class TexPreambleTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(TypeError):
                 m.Tex("x", **options)
 
-    def test_comments_nested_macros_and_recursion_use_the_native_expander(self):
-        preamble = r"\newcommand{\sq}[1]{#1^2}\newcommand{\nested}[1]{\sq{#1}}" + "% end"
-        self.assertGeometryEqual(m.Tex(r"\nested{x}", additional_preamble=preamble), m.Tex("x^2"))
+    def test_comments_source_nested_calls_and_recursion_use_the_native_expander(self):
+        preamble = PREAMBLE + "% end"
+        self.assertGeometryEqual(m.Tex(r"\half{\sq{x}}", additional_preamble=preamble), m.Tex(r"\frac{x^2}{2}"))
         with self.assertRaisesRegex(ValueError, "loop"):
             m.Tex(r"\loop", additional_preamble=r"\newcommand{\loop}{\loop}")
+
+    def test_definition_nested_macros_refuse_bad_upstream_provenance(self):
+        # UPSTREAM_LEDGER #13: never repair escaped definition spans by
+        # clamping them into the formula, or draw an unexpanded #1 token.
+        for preamble, source in (
+            (r"\newcommand{\inner}{x}\newcommand{\outer}{\inner}", r"\outer"),
+            (r"\newcommand{\sq}[1]{#1^2}\newcommand{\outer}[1]{\sq{#1}}", r"\outer{x}"),
+        ):
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "span outside the formula"):
+                m.Tex(source, additional_preamble=preamble)
+
+    def test_live_number_inside_macro_argument_preserves_generated_ink(self):
+        for preamble, source in (
+            (r"\newcommand{\coefficient}[1]{z = #1}", r"\coefficient{1.00}"),
+            (r"\newcommand{\half}[1]{\frac{#1}{2}}", r"\half{1.00}"),
+        ):
+            with self.subTest(source=source):
+                formula = m.Tex(source, additional_preamble=preamble)
+                # Whole-call generated ink (z, =, denominator and rule) must
+                # survive replacing only the literal numeric argument.
+                generated = []
+                for span, path in zip(formula._string_sub_spans, formula._string_sub_paths):
+                    if span == (0, len(source)):
+                        part = formula
+                        for index in path:
+                            part = part.submobjects[index]
+                        generated.append(part)
+                self.assertTrue(generated)
+                before = [part.data.copy() for part in generated]
+                number = formula.make_number_changeable("1.00")
+                number.set_value(2.5)
+                self.assertEqual(number.get_value(), 2.5)
+                self.assertIs(formula.get_part_by_tex(r"\decimalmob")[0], number)
+                for part, data in zip(generated, before):
+                    self.assertIn(part, formula.get_family())
+                    np.testing.assert_array_equal(part.data, data)
+
+    def test_repeated_macro_argument_refuses_numeric_collapse_without_mutation(self):
+        preamble = r"\newcommand{\twice}[1]{#1+#1}"
+        for inline in (False, True):
+            with self.subTest(inline=inline):
+                source = r"\twice{1.00}"
+                formula = (m.Tex(preamble + source) if inline else
+                           m.Tex(source, additional_preamble=preamble))
+                self.assertEqual(len(formula.get_part_by_tex("1.00")), 8)
+                scene = m.Scene()
+                scene.add(formula)
+                def snapshot():
+                    return (formula.string, tuple(formula._string_sub_spans),
+                            tuple(map(tuple, formula._string_sub_paths)),
+                            tuple((id(part), part.data.tobytes()) for part in formula.get_family()))
+                before = snapshot()
+                for replace_all in (False, True):
+                    with self.assertRaisesRegex(ValueError, "multiple native occurrences"):
+                        formula.make_number_changeable("1.00", replace_all=replace_all)
+                    self.assertEqual(snapshot(), before)
+                    self.assertEqual(list(scene.mobjects), [formula])
 
 
 if __name__ in ("__main__", "<run_path>"):
