@@ -195,10 +195,14 @@ fn _replace_raster_image(
 /// Compare complete immutable descriptors as well as pixels, including the
 /// dark side. Checkpoints must not reuse a mirror after an image-only edit.
 #[pyfunction]
-fn _raster_images_equal(left: &Bound<'_, BridgeMobject>, right: &Bound<'_, BridgeMobject>) -> PyResult<bool> {
+fn _raster_images_equal(
+    left: &Bound<'_, BridgeMobject>,
+    right: &Bound<'_, BridgeMobject>,
+) -> PyResult<bool> {
     let read = |object: &Bound<'_, BridgeMobject>| -> PyResult<Option<ImageResource>> {
         with_stage(object, |stage, mob| {
-            stage.get(mob)
+            stage
+                .get(mob)
                 .map(|entry| entry.image_resource().cloned())
                 .ok_or_else(|| StaleHandleError::new_err("raster comparison target is stale"))
         })?
@@ -220,10 +224,14 @@ mod tests {
     #[test]
     fn production_raster_frame_and_texture_acceptance() {
         crate::with_python_test_module("raster frames and textures", |py, _module, globals| {
-            for text in [include_str!("../tests/raster_textures.py"), include_str!("../tests/raster_frames.py")] {
+            for text in [
+                include_str!("../tests/raster_textures.py"),
+                include_str!("../tests/raster_frames.py"),
+            ] {
                 let source = std::ffi::CString::new(text).unwrap();
                 py.run(source.as_c_str(), Some(globals), Some(globals))
-                    .inspect_err(|error| error.print(py)).expect("native live texture frames and history");
+                    .inspect_err(|error| error.print(py))
+                    .expect("native live texture frames and history");
             }
         });
     }

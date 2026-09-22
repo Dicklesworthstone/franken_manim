@@ -139,8 +139,8 @@ pub use data_mobjects::{BarChart, DataMobjectError, TableMobject};
 pub use fields::{
     AnimatedBoundary, AnimatedStreamLines, FieldError, IntegratorTune, STREAM_LINES_SUBSTREAM,
     StreamLineMeta, StreamLineStyle, StreamLines, StreamLinesMobject, StreamSolution,
-    StrokeProfile, TimeVaryingVectorField, VectorField, VectorFieldMobject,
-    TracedPath, TracingTail, VectorFieldStyle, VectorGeometry, colormap_gradient, colormap_gradient_at,
+    StrokeProfile, TimeVaryingVectorField, TracedPath, TracingTail, VectorField,
+    VectorFieldMobject, VectorFieldStyle, VectorGeometry, colormap_gradient, colormap_gradient_at,
     get_sample_coords, grid_sample_points, move_along_vector_field, move_points_along_vector_field,
     move_submobjects_along_vector_field, ode_solution_points, resample_even_arc,
     taper_by_true_length, vectorize,

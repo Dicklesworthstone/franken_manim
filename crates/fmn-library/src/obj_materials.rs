@@ -58,13 +58,20 @@ pub struct ObjAssetError {
 
 impl std::fmt::Display for ObjAssetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "OBJ material import, line {}: {}", self.line, self.reason)
+        write!(
+            f,
+            "OBJ material import, line {}: {}",
+            self.line, self.reason
+        )
     }
 }
 impl std::error::Error for ObjAssetError {}
 
 fn error(line: usize, reason: impl Into<String>) -> ObjAssetError {
-    ObjAssetError { line, reason: reason.into() }
+    ObjAssetError {
+        line,
+        reason: reason.into(),
+    }
 }
 
 fn text<'a>(bytes: &'a [u8], limits: &ObjAssetLimits) -> Result<&'a str, ObjAssetError> {
@@ -79,8 +86,17 @@ fn text<'a>(bytes: &'a [u8], limits: &ObjAssetLimits) -> Result<&'a str, ObjAsse
         if line.contains('\0') {
             return Err(error(i + 1, "NUL is not permitted in OBJ/MTL sources"));
         }
-        if line.split('#').next().unwrap_or("").trim_end().ends_with('\\') {
-            return Err(error(i + 1, "continued source lines are not supported; join the line explicitly"));
+        if line
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .ends_with('\\')
+        {
+            return Err(error(
+                i + 1,
+                "continued source lines are not supported; join the line explicitly",
+            ));
         }
     }
     Ok(value)
@@ -93,8 +109,14 @@ fn statement(line: &str) -> (&str, &str) {
 }
 
 fn name(value: &str, line: usize, limits: &ObjAssetLimits) -> Result<String, ObjAssetError> {
-    if value.is_empty() || value.len() > limits.max_name_bytes || value.chars().any(char::is_control) {
-        return Err(error(line, "empty, over-budget, or control-containing material name/path"));
+    if value.is_empty()
+        || value.len() > limits.max_name_bytes
+        || value.chars().any(char::is_control)
+    {
+        return Err(error(
+            line,
+            "empty, over-budget, or control-containing material name/path",
+        ));
     }
     Ok(value.to_owned())
 }
@@ -139,7 +161,9 @@ impl ObjDocument {
             let (key, rest) = statement(raw);
             match key {
                 "mtllib" => {
-                    if rest.is_empty() { return Err(error(line, "mtllib requires a library path")); }
+                    if rest.is_empty() {
+                        return Err(error(line, "mtllib requires a library path"));
+                    }
                     for path in rest.split_whitespace() {
                         if libraries.len() >= limits.max_materials {
                             return Err(error(line, "material library budget exceeded"));
@@ -148,20 +172,30 @@ impl ObjDocument {
                     }
                 }
                 "usemtl" => {
-                    current = if rest == "off" { None } else { Some(name(rest, line, limits)?) };
+                    current = if rest == "off" {
+                        None
+                    } else {
+                        Some(name(rest, line, limits)?)
+                    };
                 }
                 "f" => {
                     let count = rest.split_whitespace().count().saturating_sub(2);
-                    let end = cursor.checked_add(count)
+                    let end = cursor
+                        .checked_add(count)
                         .filter(|&end| end <= mesh.triangle_count())
-                        .ok_or_else(|| error(line, "material/geometry face accounting disagrees"))?;
+                        .ok_or_else(|| {
+                            error(line, "material/geometry face accounting disagrees")
+                        })?;
                     if let Some(last) = runs.last_mut().filter(|run| run.material == current) {
                         last.triangles.end = end;
                     } else {
                         if runs.len() >= limits.max_materials {
                             return Err(error(line, "material run budget exceeded"));
                         }
-                        runs.push(ObjMaterialRun { material: current.clone(), triangles: cursor..end });
+                        runs.push(ObjMaterialRun {
+                            material: current.clone(),
+                            triangles: cursor..end,
+                        });
                     }
                     cursor = end;
                 }
@@ -171,25 +205,38 @@ impl ObjDocument {
         if cursor != mesh.triangle_count() {
             return Err(error(0, "material/geometry triangle accounting disagrees"));
         }
-        Ok(Self { mesh, libraries, runs })
+        Ok(Self {
+            mesh,
+            libraries,
+            runs,
+        })
     }
 
     /// Parsed geometry, including per-corner texture/normal indices.
     #[must_use]
-    pub fn mesh(&self) -> &ObjMesh { &self.mesh }
+    pub fn mesh(&self) -> &ObjMesh {
+        &self.mesh
+    }
 
     /// Material libraries in OBJ declaration order, resolved only by the host.
     #[must_use]
-    pub fn libraries(&self) -> &[String] { &self.libraries }
+    pub fn libraries(&self) -> &[String] {
+        &self.libraries
+    }
 
     /// Painter-ordered contiguous material runs.
     #[must_use]
-    pub fn runs(&self) -> &[ObjMaterialRun] { &self.runs }
+    pub fn runs(&self) -> &[ObjMaterialRun] {
+        &self.runs
+    }
 
     /// Material names actually selected by at least one face.
     #[must_use]
     pub fn material_names(&self) -> BTreeSet<String> {
-        self.runs.iter().filter_map(|run| run.material.clone()).collect()
+        self.runs
+            .iter()
+            .filter_map(|run| run.material.clone())
+            .collect()
     }
 
     /// Compose a complete native model before publishing it into a Stage.
@@ -206,63 +253,104 @@ impl ObjDocument {
         images: &BTreeMap<String, ImageResource>,
     ) -> Result<Mobject, ObjAssetError> {
         if !height.is_finite() || height <= 0.0 || height > f64::from(f32::MAX) {
-            return Err(error(0, "model height must be positive, finite and f32-representable"));
+            return Err(error(
+                0,
+                "model height must be positive, finite and f32-representable",
+            ));
         }
         // Check all resources before building any records. An unresolved map
         // is never replaced with an untextured grey success-shaped model.
         for run in &self.runs {
             if let Some(key) = &run.material {
-                let material = materials.get(key).ok_or_else(|| error(0, format!("material {key:?} is not defined")))?;
+                let material = materials
+                    .get(key)
+                    .ok_or_else(|| error(0, format!("material {key:?} is not defined")))?;
                 material.validate()?;
                 if material.texture.is_some() {
-                    let image = images.get(key).ok_or_else(|| error(0, format!("texture for material {key:?} was not supplied")))?;
-                    if image.dark_image().is_some() { return Err(error(0, "OBJ diffuse maps require an unpaired raster")); }
-                    if self.mesh.triangles[run.triangles.clone()].iter().flatten().any(|corner| corner.tex_coord.is_none()) {
-                        return Err(error(0, format!("textured material {key:?} has a face corner without UV coordinates")));
+                    let image = images.get(key).ok_or_else(|| {
+                        error(0, format!("texture for material {key:?} was not supplied"))
+                    })?;
+                    if image.dark_image().is_some() {
+                        return Err(error(0, "OBJ diffuse maps require an unpaired raster"));
+                    }
+                    if self.mesh.triangles[run.triangles.clone()]
+                        .iter()
+                        .flatten()
+                        .any(|corner| corner.tex_coord.is_none())
+                    {
+                        return Err(error(
+                            0,
+                            format!(
+                                "textured material {key:?} has a face corner without UV coordinates"
+                            ),
+                        ));
                     }
                 }
             }
         }
         let (center, scale) = self.normalization(height)?;
         let mut children = Vec::new();
-        children.try_reserve_exact(self.runs.len()).map_err(|_| error(0, "model child allocation failed"))?;
+        children
+            .try_reserve_exact(self.runs.len())
+            .map_err(|_| error(0, "model child allocation failed"))?;
         for run in &self.runs {
             let material = run.material.as_ref().and_then(|key| materials.get(key));
             let image = run.material.as_ref().and_then(|key| {
-                material.filter(|value| value.texture.is_some()).and_then(|_| images.get(key))
+                material
+                    .filter(|value| value.texture.is_some())
+                    .and_then(|_| images.get(key))
             });
             let schema = if image.is_some() {
                 super::solids::textured_surface_schema()
             } else {
-                RecordSchema::new(&[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
-                                  &["point"], &["point", "d_normal_point"])
-                    .map_err(|cause| error(0, cause.to_string()))?
+                RecordSchema::new(
+                    &[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
+                    &["point"],
+                    &["point", "d_normal_point"],
+                )
+                .map_err(|cause| error(0, cause.to_string()))?
             };
-            let count = run.triangles.len().checked_mul(3).ok_or_else(|| error(0, "model record count overflow"))?;
-            let mut buffer = RecordBuffer::new(schema, count).map_err(|cause| error(0, cause.to_string()))?;
+            let count = run
+                .triangles
+                .len()
+                .checked_mul(3)
+                .ok_or_else(|| error(0, "model record count overflow"))?;
+            let mut buffer =
+                RecordBuffer::new(schema, count).map_err(|cause| error(0, cause.to_string()))?;
             let opacity = material.map_or(1.0, |value| value.opacity);
             let color = material.map_or(GREY, |value| value.diffuse);
             for (local, triangle) in run.triangles.clone().enumerate() {
                 for (k, corner) in self.mesh.triangles[triangle].iter().enumerate() {
                     let vertex = self.mesh.vertices[corner.vertex];
-                    let point = std::array::from_fn::<_, 3, _>(|dim| (vertex[dim] - center[dim]) * scale);
+                    let point =
+                        std::array::from_fn::<_, 3, _>(|dim| (vertex[dim] - center[dim]) * scale);
                     let normal = self.mesh.corner_normal(triangle, k);
-                    let normal_point = std::array::from_fn::<_, 3, _>(|dim| point[dim] + normal[dim]);
+                    let normal_point =
+                        std::array::from_fn::<_, 3, _>(|dim| point[dim] + normal[dim]);
                     let record = 3 * local + k;
                     buffer.write(record, "point", &narrow(point)?);
                     buffer.write(record, "d_normal_point", &narrow(normal_point)?);
                     if image.is_some() {
-                        let uv = self.mesh.tex_coords[corner.tex_coord.ok_or_else(|| error(0, "missing UV"))?];
+                        let uv = self.mesh.tex_coords
+                            [corner.tex_coord.ok_or_else(|| error(0, "missing UV"))?];
                         buffer.write(record, "im_coords", &narrow([uv[0], 1.0 - uv[1]])?);
                         buffer.write(record, "opacity", &narrow([opacity])?);
                     } else {
-                        buffer.write(record, "rgba", &narrow([color.r, color.g, color.b, opacity])?);
+                        buffer.write(
+                            record,
+                            "rgba",
+                            &narrow([color.r, color.g, color.b, opacity])?,
+                        );
                     }
                 }
             }
             let mut child = Mobject::from_buffer(buffer)
                 .with_render_primitive(RenderPrimitive::TriangleMesh)
-                .with_uniforms(Uniforms { shading: MODEL_SHADING, depth_test: true, ..Uniforms::default() });
+                .with_uniforms(Uniforms {
+                    shading: MODEL_SHADING,
+                    depth_test: true,
+                    ..Uniforms::default()
+                });
             child.image = image.cloned();
             children.push(child);
         }
@@ -270,23 +358,38 @@ impl ObjDocument {
     }
 
     fn normalization(&self, height: f64) -> Result<([f64; 3], f64), ObjAssetError> {
-        let Some(&first) = self.mesh.vertices.first() else { return Ok(([0.0; 3], 1.0)); };
+        let Some(&first) = self.mesh.vertices.first() else {
+            return Ok(([0.0; 3], 1.0));
+        };
         let (mut min, mut max) = (first, first);
         for point in &self.mesh.vertices {
-            for dim in 0..3 { min[dim] = min[dim].min(point[dim]); max[dim] = max[dim].max(point[dim]); }
+            for dim in 0..3 {
+                min[dim] = min[dim].min(point[dim]);
+                max[dim] = max[dim].max(point[dim]);
+            }
         }
         let center = std::array::from_fn(|dim| min[dim] * 0.5 + max[dim] * 0.5);
         let extent = max[1] - min[1];
-        if !extent.is_finite() { return Err(error(0, "model bounds overflow")); }
+        if !extent.is_finite() {
+            return Err(error(0, "model bounds overflow"));
+        }
         let scale = if extent > 0.0 { height / extent } else { 1.0 };
-        if !scale.is_finite() { return Err(error(0, "model normalization overflow")); }
+        if !scale.is_finite() {
+            return Err(error(0, "model normalization overflow"));
+        }
         Ok((center, scale))
     }
 }
 
 fn narrow<const N: usize>(values: [f64; N]) -> Result<[f32; N], ObjAssetError> {
-    if !values.iter().all(|value| value.is_finite() && value.abs() <= f64::from(f32::MAX)) {
-        return Err(error(0, "model coordinates must be finite and f32-representable"));
+    if !values
+        .iter()
+        .all(|value| value.is_finite() && value.abs() <= f64::from(f32::MAX))
+    {
+        return Err(error(
+            0,
+            "model coordinates must be finite and f32-representable",
+        ));
     }
     #[allow(clippy::cast_possible_truncation)]
     Ok(values.map(|value| value as f32))
@@ -306,15 +409,28 @@ pub struct ObjMaterial {
 
 impl Default for ObjMaterial {
     fn default() -> Self {
-        Self { diffuse: Srgb { r: 1.0, g: 1.0, b: 1.0 }, opacity: 1.0, texture: None }
+        Self {
+            diffuse: Srgb {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+            },
+            opacity: 1.0,
+            texture: None,
+        }
     }
 }
 
 impl ObjMaterial {
     fn validate(&self) -> Result<(), ObjAssetError> {
-        if ![self.diffuse.r, self.diffuse.g, self.diffuse.b, self.opacity].iter()
-            .all(|value| value.is_finite() && (0.0..=1.0).contains(value)) {
-            return Err(error(0, "material RGB and dissolve must be finite in 0..=1"));
+        if ![self.diffuse.r, self.diffuse.g, self.diffuse.b, self.opacity]
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            return Err(error(
+                0,
+                "material RGB and dissolve must be finite in 0..=1",
+            ));
         }
         Ok(())
     }
@@ -323,7 +439,10 @@ impl ObjMaterial {
 /// Parse native MTL newmtl/Kd/d/Tr/map_Kd/map_Ka under explicit limits.
 /// Unsupported diffuse map options and non-RGB Kd are refused rather than
 /// silently rendering a different material. No paths are opened here.
-pub fn parse_mtl(bytes: &[u8], limits: &ObjAssetLimits) -> Result<BTreeMap<String, ObjMaterial>, ObjAssetError> {
+pub fn parse_mtl(
+    bytes: &[u8],
+    limits: &ObjAssetLimits,
+) -> Result<BTreeMap<String, ObjMaterial>, ObjAssetError> {
     let source = text(bytes, limits)?;
     let mut materials = BTreeMap::new();
     let mut current = None;
@@ -341,32 +460,58 @@ pub fn parse_mtl(bytes: &[u8], limits: &ObjAssetLimits) -> Result<BTreeMap<Strin
             has_diffuse_map = false;
             continue;
         }
-        if !matches!(key, "Kd" | "d" | "Tr" | "map_Kd" | "map_Ka") { continue; }
-        let material = current.as_ref().and_then(|key| materials.get_mut(key))
+        if !matches!(key, "Kd" | "d" | "Tr" | "map_Kd" | "map_Ka") {
+            continue;
+        }
+        let material = current
+            .as_ref()
+            .and_then(|key| materials.get_mut(key))
             .ok_or_else(|| error(line, "material property appears before newmtl"))?;
         match key {
             "Kd" | "d" | "Tr" => {
                 let mut values = Vec::new();
                 for token in rest.split_whitespace() {
-                    let number: f64 = token.parse().map_err(|_| error(line, "expected numeric RGB/dissolve"))?;
+                    let number: f64 = token
+                        .parse()
+                        .map_err(|_| error(line, "expected numeric RGB/dissolve"))?;
                     if !number.is_finite() || !(0.0..=1.0).contains(&number) {
                         return Err(error(line, "material RGB/dissolve must be finite in 0..=1"));
                     }
                     values.push(number);
-                    if values.len() > 3 { return Err(error(line, "too many RGB/dissolve components")); }
+                    if values.len() > 3 {
+                        return Err(error(line, "too many RGB/dissolve components"));
+                    }
                 }
                 if key == "Kd" && values.len() == 3 {
-                    material.diffuse = Srgb { r: values[0], g: values[1], b: values[2] };
+                    material.diffuse = Srgb {
+                        r: values[0],
+                        g: values[1],
+                        b: values[2],
+                    };
                 } else if key != "Kd" && values.len() == 1 {
-                    material.opacity = if key == "Tr" { 1.0 - values[0] } else { values[0] };
-                } else { return Err(error(line, "expected three RGB components or one dissolve component")); }
+                    material.opacity = if key == "Tr" {
+                        1.0 - values[0]
+                    } else {
+                        values[0]
+                    };
+                } else {
+                    return Err(error(
+                        line,
+                        "expected three RGB components or one dissolve component",
+                    ));
+                }
             }
             "map_Kd" | "map_Ka" => {
                 if rest.starts_with('-') {
-                    return Err(error(line, "diffuse texture map options are unsupported; bake the map transform into UVs"));
+                    return Err(error(
+                        line,
+                        "diffuse texture map options are unsupported; bake the map transform into UVs",
+                    ));
                 }
                 let path = name(rest, line, limits)?;
-                if key == "map_Kd" || !has_diffuse_map { material.texture = Some(path); }
+                if key == "map_Kd" || !has_diffuse_map {
+                    material.texture = Some(path);
+                }
                 has_diffuse_map |= key == "map_Kd";
             }
             _ => unreachable!("matched material properties"),

@@ -324,13 +324,23 @@ mod tests {
     #[test]
     fn prepared_resource_reuses_pixels_and_refuses_surface_pairs() {
         let resource = ImageResource::rgba8(
-            2, 1, vec![255; 8], ImageColorSpace::Srgb, ImageSampler::default(),
-        ).unwrap();
+            2,
+            1,
+            vec![255; 8],
+            ImageColorSpace::Srgb,
+            ImageSampler::default(),
+        )
+        .unwrap();
         let pointer = resource.pixels().as_ptr();
-        let object: Mobject = ImageMobject::from_resource(resource.clone()).unwrap().into();
+        let object: Mobject = ImageMobject::from_resource(resource.clone())
+            .unwrap()
+            .into();
         assert_eq!(object.image.as_ref().unwrap().pixels().as_ptr(), pointer);
         let pair = resource.clone().with_dark_image(resource).unwrap();
-        assert_eq!(ImageMobject::from_resource(pair), Err(ImageError::PairedResource));
+        assert_eq!(
+            ImageMobject::from_resource(pair),
+            Err(ImageError::PairedResource)
+        );
     }
 
     #[test]

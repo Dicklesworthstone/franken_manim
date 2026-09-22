@@ -280,7 +280,9 @@ impl CameraCapture {
             return Err(PyValueError::new_err("max_bytes must be in 1..=134217728"));
         }
         if u64::from(self.width) * u64::from(self.height) > limits.max_pixels as u64 {
-            return Err(PyValueError::new_err("terminal preview exceeds the 3840x2160 pixel budget"));
+            return Err(PyValueError::new_err(
+                "terminal preview exceeds the 3840x2160 pixel budget",
+            ));
         }
         let limits = TuiLimits {
             max_encoded_bytes: max_bytes,
