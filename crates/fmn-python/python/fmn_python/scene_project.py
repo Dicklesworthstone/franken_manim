@@ -7,7 +7,7 @@ arbitrary import/constructor effects and already-published files are not undone.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 import importlib
@@ -225,6 +225,29 @@ class SceneProject:
         finally:
             _BUILDING.reset(token)
             self._busy = False
+
+    def watch(
+        self, *, poll_interval: float = 0.25, debounce: float = 0.1,
+        stop: threading.Event | None = None,
+        on_error: Callable[[Exception], Any] | None = None,
+        paths: Iterable[str | Path] = (),
+    ) -> Iterator[Any]:
+        """Yield the current scene and successful file-change rebuilds.
+
+        Advance the iterator inside this context, on its owning thread. Source
+        edits (including new local helpers) are content-hashed and debounced.
+        Add non-Python assets with ``paths``. Each new yield has a matching
+        ``preview`` and ``generation`` from the existing rebuild transaction.
+        Pass ``on_error`` to report a failed build and continue watching while
+        preserving the previous scene; by default failures propagate. Setting
+        the optional ``stop`` Event interrupts polling without another rebuild.
+        This host iterator neither starts a thread nor replaces Studio's worker
+        supervisor or an active IPython editor's reload shortcut.
+        """
+        self._check()
+        from .project_watch import watch_project
+        return watch_project(self, poll_interval=poll_interval, debounce=debounce,
+                             stop=stop, on_error=on_error, paths=paths)
 
     def edit(self, *, clipboard=None):
         """Open the host IPython editor; reload() reconstructs in the same shell."""
