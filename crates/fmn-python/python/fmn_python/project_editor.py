@@ -24,6 +24,10 @@ Run the selected scene and enter its host IPython editor. An authored embed()
 ends construction and exposes its local names; no nested terminal is opened.
 At the prompt: reload() reconstructs the scene from current files; preview()
 returns a native image; reload_source()/auto_reload() refresh definitions only.
+auto_rebuild() reconstructs changed sources before the next cell;
+stop_auto_rebuild() disables it. Asset paths and debounce seconds are optional.
+The two automatic reload modes are mutually exclusive; no background thread
+executes a scene. Unchanged sources preserve interactive edits and checkpoints.
 A successful rebuild resets scene state and checkpoints. Failed imports,
 construction or preview retain the last working generation. Existing aliases
 to old objects remain old aliases. No output file is opened by the editor.
@@ -84,7 +88,7 @@ def _check_editor(embedded, project):
     return console
 
 
-def _reload_editor(embedded, project):
+def _reload_editor(embedded, project, *, if_changed=False):
     old_console = _check_editor(embedded, project)
     shell, old_scene = embedded.shell, project.scene
     old_shortcuts = dict(embedded.get_shortcuts())
@@ -172,7 +176,7 @@ def _reload_editor(embedded, project):
                     bindings.module = candidate.module
 
     try:
-        project._rebuild(prepare=prepare)
+        project._rebuild(if_changed=if_changed, prepare=prepare)
     except BaseException as error:
         restore_editor()
         if new_console is not None:
@@ -184,6 +188,9 @@ def _reload_editor(embedded, project):
             except BaseException as cleanup_error:
                 _note(error, "candidate console cleanup also failed: " + type(cleanup_error).__name__)
         raise
+    if new_console is None:
+        # A conditional no-op must retain the live console and checkpoints.
+        return project.scene
     # Old checkpoints belong to the old arena. They are never applied to the
     # new scene. If cleanup fails after commit, report that fact without
     # rolling back the now-active scene/module/preview into a mixed generation.
@@ -248,9 +255,13 @@ def install_scene_project_editor(native):
             vars(self)["_fmn_project_shell"] = (self.shell, self.shell.user_module)
         return result
 
-    def reload_scene(self, embed_line=None):
+    def reload_scene(self, embed_line=None, *, if_changed=False):
+        if type(if_changed) is not bool:
+            raise TypeError("if_changed must be bool")
         project = vars(self).get(_PROJECT)
         if project is None:
+            if if_changed:
+                raise native._CapabilityError("conditional reload requires a SceneProject editor")
             return original_reload(self, embed_line)
         project._check_thread()
         if embed_line is not None:
@@ -259,7 +270,7 @@ def install_scene_project_editor(native):
             raise RuntimeError("project editor reconstruction is already in progress")
         vars(self)["_fmn_project_reloading"] = True
         try:
-            return _reload_editor(self, project)
+            return _reload_editor(self, project, if_changed=if_changed)
         finally:
             vars(self).pop("_fmn_project_reloading", None)
 
@@ -280,6 +291,8 @@ def install_scene_project_editor(native):
                            ("ensure_frame_update_post_cell", ensure_update),
                            ("get_shortcuts", shortcuts), ("_project_preview", preview)):
         _method(Embedded, name, function)
+    from .project_autorebuild import install_project_autorebuild
+    install_project_autorebuild(native)
     native._FMN_SCENE_PROJECT_EDITOR_INSTALLED = True
 
 
