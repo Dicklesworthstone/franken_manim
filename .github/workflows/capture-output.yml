@@ -11,6 +11,7 @@ on:
       - 'crates/fmn-python/python/fmn_python/rendering.py'
       - 'crates/fmn-python/tests/capture_output.py'
       - 'crates/fmn-python/tests/paired_output.py'
+      - 'crates/fmn-python/tests/test_paired_output_protocol.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -51,12 +52,10 @@ jobs:
       - name: Run native publication and existing output acceptance
         run: |
           set -euo pipefail
-          for suite in capture_output camera_snapshot camera_readback programmatic_rendering; do
+          for suite in capture_output paired_output camera_snapshot camera_readback programmatic_rendering portal_initialization; do
             target/capture-output-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/capture-output-$suite.log
           done
-          if test -f crates/fmn-python/tests/paired_output.py; then
-            target/capture-output-venv/bin/python -I crates/fmn-python/tests/paired_output.py 2>&1 | tee /tmp/capture-output-paired.log
-          fi
+          target/capture-output-venv/bin/python -I crates/fmn-python/tests/test_paired_output_protocol.py 2>&1 | tee /tmp/capture-output-protocol.log
           cargo test --locked -p fmn-python --lib portal_readback:: -- --nocapture 2>&1 | tee /tmp/capture-output-embedded.log
           cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/capture-output-clippy.log
       - name: Preserve exact source and test evidence

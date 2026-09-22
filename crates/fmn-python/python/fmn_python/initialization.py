@@ -51,6 +51,7 @@ _STEPS = (
     ("source_autoreload", "install_source_autoreload"),
     ("project_editor", "install_scene_project_editor"),
     ("runtime_provenance", "install_runtime_provenance"),
+    ("paired_output", "install_paired_output"),
 )
 _STATE = "_FMN_PORTAL_RUNTIME_STATE"
 

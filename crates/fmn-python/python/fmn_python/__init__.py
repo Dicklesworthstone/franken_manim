@@ -58,6 +58,10 @@ def _ensure_exclusive_manimlib_namespace():
 
 
 def __getattr__(name):
+    if name in {"PairedRenderSession", "PairedRenderResult", "paired_render_session", "render_scene_with_still"}:
+        from . import paired_output
+
+        return getattr(paired_output, name)
     if name == "SceneProject":
         from .scene_project import SceneProject
 

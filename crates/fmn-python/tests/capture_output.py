@@ -81,7 +81,7 @@ class CaptureOutput(unittest.TestCase):
     def test_snapshot_is_frozen_and_camera_save_does_not_recapture(self):
         before = self.snapshot.pixels()
         self.mob.shift(m.RIGHT)
-        self.mob.add_updater(lambda mob, dt: self.fail("saving must not run an updater"))
+        self.mob.add_updater(lambda mob, dt: self.fail("saving must not run an updater"), call=False)
         saved = self.verify(self.scene.camera.save_png(self.root / "last.png"))
         original = self.verify(self.snapshot.save_png(self.root / "frozen.png"))
         self.assertEqual(saved, original)
