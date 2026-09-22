@@ -167,4 +167,62 @@ def install_image_authoring(native):
         function.__qualname__ = Image.__qualname__ + "." + name
         function.__module__ = Image.__module__
         setattr(Image, name, classmethod(function))
+    original_identical = g["Mobject"].looks_identical
+
+    def looks_identical(self, mobject):
+        # Record/uniform equality alone says nothing about two images. Preserve
+        # the established geometric tolerance, then compare complete native
+        # materials (dimensions, transfer, sampler, light and dark pixels).
+        if not original_identical(self, mobject):
+            return False
+        left = self.family_members_with_points()
+        right = mobject.family_members_with_points()
+        return len(left) == len(right) and all(
+            g["_raster_images_equal"](a, b) for a, b in zip(left, right)
+        )
+
+    _method(g["Mobject"], "looks_identical", looks_identical)
+
+    def set_textures(self, image, dark_image=None):
+        """Prepare and replace a whole material atomically; None removes the pair.
+
+        Both images may be arrays, bounded PNG/JPEG bytes, or local paths.
+        No geometry, UV, opacity, lighting, child or updater state is rebuilt.
+        """
+        with _editing(self):
+            light, path = _source(g, image)
+            dark, dark_path = (None, path) if dark_image is None else _source(g, dark_image)
+            if path is not None and dark_path is not None:
+                if g["_pathlib"].Path(path).resolve() == g["_pathlib"].Path(dark_path).resolve():
+                    dark = None
+            g["_replace_raster_image"](self, light, dark)
+            vars(self).update(image_file=path, image_path=path, dark_image_file=dark_path,
+                              num_textures=1 if dark is None else 2)
+            if isinstance(self, g["TexturedGeometry"]):
+                self.texture_file = path
+        return self
+
+    def set_texture_pixels(self, pixels, dark_pixels=None):
+        """Replace a light/dark material from uint8 arrays without encoding files."""
+        with _editing(self):
+            light = g["_RasterImage"](*_pixels(np, pixels))
+            dark = None if dark_pixels is None else g["_RasterImage"](*_pixels(np, dark_pixels))
+            g["_replace_raster_image"](self, light, dark)
+            vars(self).update(image_file=None, image_path=None, dark_image_file=None,
+                              num_textures=1 if dark is None else 2)
+            if isinstance(self, g["TexturedGeometry"]):
+                self.texture_file = None
+        return self
+
+    def texture_pixels(self, *, dark=False):
+        """Return an owned copy of the selected side; absent dark sides refuse."""
+        if type(dark) is not bool:
+            raise TypeError("dark must be bool")
+        raster = g["_read_raster_image"](self, dark)
+        width, height = raster.size
+        return np.frombuffer(raster.pixels(), dtype=np.uint8).reshape(height, width, 4).copy()
+
+    for name, function in (("set_textures", set_textures), ("set_pixel_array", set_texture_pixels),
+                           ("get_pixel_array", texture_pixels)):
+        _method(g["TexturedSurface"], name, function)
     g["_FMN_IMAGE_AUTHORING_INSTALLED"] = True

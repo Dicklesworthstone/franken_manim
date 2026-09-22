@@ -9,21 +9,13 @@ mod surface;
 #[path = "portal_raster.rs"]
 mod raster;
 
-const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
-
-fn image(payload: &Bound<'_, PyBytes>) -> PyResult<fmn_mobject::ImageResource> {
-    if payload.as_bytes().len() > MAX_TEXTURE_BYTES {
-        return Err(PyValueError::new_err(
-            "texture input exceeds the 64 MiB encoded budget",
-        ));
+fn image(payload: &Bound<'_, PyAny>) -> PyResult<fmn_mobject::ImageResource> {
+    if let Ok(prepared) = payload.cast::<raster::RasterImage>() {
+        return Ok(prepared.try_borrow()?.resource.clone());
     }
-    let mut decoded: Mobject = fmn_library::ImageMobject::from_bytes(payload.as_bytes())
-        .map_err(|error| PyValueError::new_err(error.to_string()))?
-        .into();
-    decoded
-        .image
-        .take()
-        .ok_or_else(|| PyRuntimeError::new_err("native image decoder returned no resource"))
+    let bytes = payload.cast::<PyBytes>()?;
+    // Both file-backed and in-memory callers use the same bounded decoder.
+    Ok(raster::RasterImage::decode(payload.py(), bytes)?.resource)
 }
 
 fn detached(target: &Bound<'_, BridgeMobject>) -> PyResult<()> {
@@ -39,9 +31,9 @@ fn detached(target: &Bound<'_, BridgeMobject>) -> PyResult<()> {
 fn _build_textured_surface<'py>(
     target: &Bound<'py, BridgeMobject>,
     source: &Bound<'py, BridgeMobject>,
-    payload: &Bound<'py, PyBytes>,
+    payload: &Bound<'py, PyAny>,
     factory: &Bound<'py, PyAny>,
-    dark_payload: Option<&Bound<'py, PyBytes>>,
+    dark_payload: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyList>> {
     detached(target)?;
     if target.is(source) {
@@ -137,7 +129,7 @@ fn _build_textured_geometry<'py>(
     vertices: &Bound<'py, PyAny>,
     faces: &Bound<'py, PyAny>,
     uv: &Bound<'py, PyAny>,
-    payload: &Bound<'py, PyBytes>,
+    payload: &Bound<'py, PyAny>,
     factory: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyList>> {
     detached(target)?;

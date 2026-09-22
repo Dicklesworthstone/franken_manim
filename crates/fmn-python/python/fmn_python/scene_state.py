@@ -77,7 +77,7 @@ def _same_value(np, left, right, seen=None):
     return False
 
 
-def _same_mobject(np, left, right):
+def _same_mobject(np, left, right, resources_equal=None):
     """Compare complete ordered families, including point-free roots/aliasing."""
     pending, forward, backward = [(left, right)], {}, {}
     while pending:
@@ -90,6 +90,8 @@ def _same_mobject(np, left, right):
             return False
         forward[id(a)], backward[id(b)] = id(b), id(a)
         if a.data.dtype != b.data.dtype or not np.array_equal(a.data, b.data):
+            return False
+        if resources_equal is not None and not resources_equal(a, b):
             return False
         if not _same_value(np, dict(a.uniforms), dict(b.uniforms)):
             return False
@@ -185,7 +187,7 @@ def install_scene_state(native: Any) -> None:
                     and self._root_topologies[id(root)] == old_topologies.get(id(root))
                     and attributes_match(self, previous, id(root))
                     and bool(prior.looks_identical(root))
-                    and _same_mobject(np, root, prior)):
+                    and _same_mobject(np, root, prior, g["_raster_images_equal"])):
                 saved = prior
             else:
                 saved = root.copy()
@@ -244,7 +246,7 @@ def install_scene_state(native: Any) -> None:
         # A plain dict equality loses root order, which controls compositing.
         return (len(left) == len(right)
                 and self._root_topologies == state._root_topologies
-                and all(a is b and _same_mobject(np, ac, bc)
+                and all(a is b and _same_mobject(np, ac, bc, g["_raster_images_equal"])
                         for (a, ac), (b, bc) in zip(left.items(), right.items()))
                 and scene_attributes.same(np, self._attributes, state._attributes)
                 and camera_matches(self, state))
@@ -260,7 +262,7 @@ def install_scene_state(native: Any) -> None:
             raise TypeError("n_changes expects a SceneState")
         if self is state:
             live = scene_attributes.capture(self._attribute_members, np)
-            count = sum(not _same_mobject(np, mob, saved) or not scene_attributes.same(
+            count = sum(not _same_mobject(np, mob, saved, g["_raster_images_equal"]) or not scene_attributes.same(
                 np, {key: self._attributes[key] for key, _ in self._root_topologies[id(mob)]},
                 {key: live[key] for key, _ in self._root_topologies[id(mob)]})
                 for mob, saved in self.mobjects_to_copies.items())
@@ -277,7 +279,7 @@ def install_scene_state(native: Any) -> None:
         count = sum(mob not in other
                     or self._root_topologies[id(mob)] != state._root_topologies.get(id(mob))
                     or not attributes_match(self, state, id(mob))
-                    or not _same_mobject(np, saved, other[mob])
+                    or not _same_mobject(np, saved, other[mob], g["_raster_images_equal"])
                     for mob, saved in self.mobjects_to_copies.items())
         count += int(not camera_matches(self, state))
         # Cross-root container aliasing can change while each root still has

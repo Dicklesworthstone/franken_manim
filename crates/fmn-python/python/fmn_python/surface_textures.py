@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .image_authoring import _source, _editing
+
 _MAX_IMAGE_BYTES = 64 * 1024 * 1024
 
 
@@ -84,60 +86,68 @@ def install_surface_textures(native: Any) -> None:
     def surface_init(self, uv_surface, image_file, dark_image_file=None, **kwargs):
         if self._is_bound():
             raise RuntimeError("a texture constructor requires a detached target")
-        if not isinstance(uv_surface, Surface):
-            raise TypeError("TexturedSurface uv_surface must be a Surface")
-        values = options(kwargs)
-        path = g["_resolve_raster_image_path"](image_file).resolve()
-        dark = (path if dark_image_file is None else
-                g["_resolve_raster_image_path"](dark_image_file).resolve())
-        payload = _payload(path)
-        dark_payload = None if dark == path else _payload(dark)
-        metadata = {name: getattr(uv_surface, name) for name in (
-            "resolution", "u_range", "v_range", "preferred_creation_axis", "epsilon", "normal_nudge",
-        )}
-        g["_install_live_state"](self)
-        specs = g["_build_textured_surface"](self, uv_surface, payload, g["_native_surface_shell_factory"],
-                              dark_payload)
-        g["_hang_native_children"](self, specs)
-        self.__dict__.update(metadata)
-        self.uv_surface = uv_surface
-        self.image_file = self.image_path = str(path)
-        self.dark_image_file = str(dark)
-        self.num_textures = 1 if dark_payload is None else 2
-        self.compute_triangle_indices()
-        apply_options(self, values)
+        with _editing(self):
+            if not isinstance(uv_surface, Surface):
+                raise TypeError("TexturedSurface uv_surface must be a Surface")
+            values = options(kwargs)
+            payload, path = _source(g, image_file)
+            if path is not None:
+                path = str(g["_pathlib"].Path(path).resolve())
+            dark, dark_payload = path, None
+            if dark_image_file is not None:
+                dark_payload, dark = _source(g, dark_image_file)
+                if dark is not None:
+                    dark = str(g["_pathlib"].Path(dark).resolve())
+                if path is not None and path == dark:
+                    dark_payload = None
+            metadata = {name: getattr(uv_surface, name) for name in (
+                "resolution", "u_range", "v_range", "preferred_creation_axis", "epsilon", "normal_nudge",
+            )}
+            g["_install_live_state"](self)
+            specs = g["_build_textured_surface"](self, uv_surface, payload, g["_native_surface_shell_factory"],
+                                  dark_payload)
+            g["_hang_native_children"](self, specs)
+            self.__dict__.update(metadata)
+            self.uv_surface = uv_surface
+            self.image_file = self.image_path = path
+            self.dark_image_file = dark
+            self.num_textures = 1 if dark_payload is None else 2
+            self.compute_triangle_indices()
+            apply_options(self, values)
 
     def geometry_init(self, geometry, texture_file, **kwargs):
         if self._is_bound():
             raise RuntimeError("a texture constructor requires a detached target")
-        values = options(kwargs)
-        # Accept the Reference's geometry protocol without importing trimesh.
-        # The native mesh builder validates indices and constructs C-4 normals.
-        try:
-            vertices, faces, uv = geometry.vertices, geometry.faces, geometry.visual.uv
-        except AttributeError:
-            raise TypeError("TexturedGeometry requires vertices, triangle faces and visual.uv") from None
-        vertices, faces, uv = np.asarray(vertices), np.asarray(faces), np.asarray(uv)
-        if vertices.ndim != 2 or vertices.shape[1] != 3:
-            raise ValueError("textured geometry vertices must have shape (N, 3)")
-        if faces.ndim != 2 or faces.shape[1] != 3 or not len(faces):
-            raise ValueError("textured geometry faces must contain triangles with shape (M, 3)")
-        if uv.shape != (len(vertices), 2):
-            raise ValueError("textured geometry requires one UV pair per vertex")
-        if faces.dtype.kind not in "iu":
-            raise TypeError("textured geometry triangle indices must be integers")
-        path = g["_resolve_raster_image_path"](texture_file).resolve()
-        payload = _payload(path)
-        g["_install_live_state"](self)
-        specs = g["_build_textured_geometry"](self, vertices, faces.reshape(-1), uv, payload,
-                           g["_native_surface_shell_factory"])
-        g["_hang_native_children"](self, specs)
-        self.geometry = geometry
-        self.image_file = self.image_path = self.texture_file = str(path)
-        self.dark_image_file = str(path)
-        self.num_textures = 1
-        self.triangle_indices = np.arange(self.n_records(), dtype=int)
-        apply_options(self, values)
+        with _editing(self):
+            values = options(kwargs)
+            # Accept the Reference's geometry protocol without importing trimesh.
+            # The native mesh builder validates indices and constructs C-4 normals.
+            try:
+                vertices, faces, uv = geometry.vertices, geometry.faces, geometry.visual.uv
+            except AttributeError:
+                raise TypeError("TexturedGeometry requires vertices, triangle faces and visual.uv") from None
+            vertices, faces, uv = np.asarray(vertices), np.asarray(faces), np.asarray(uv)
+            if vertices.ndim != 2 or vertices.shape[1] != 3:
+                raise ValueError("textured geometry vertices must have shape (N, 3)")
+            if faces.ndim != 2 or faces.shape[1] != 3 or not len(faces):
+                raise ValueError("textured geometry faces must contain triangles with shape (M, 3)")
+            if uv.shape != (len(vertices), 2):
+                raise ValueError("textured geometry requires one UV pair per vertex")
+            if faces.dtype.kind not in "iu":
+                raise TypeError("textured geometry triangle indices must be integers")
+            payload, path = _source(g, texture_file)
+            if path is not None:
+                path = str(g["_pathlib"].Path(path).resolve())
+            g["_install_live_state"](self)
+            specs = g["_build_textured_geometry"](self, vertices, faces.reshape(-1), uv, payload,
+                               g["_native_surface_shell_factory"])
+            g["_hang_native_children"](self, specs)
+            self.geometry = geometry
+            self.image_file = self.image_path = self.texture_file = path
+            self.dark_image_file = path
+            self.num_textures = 1
+            self.triangle_indices = np.arange(self.n_records(), dtype=int)
+            apply_options(self, values)
 
     def get_opacities(self):
         return self.data["opacity"][:, 0]

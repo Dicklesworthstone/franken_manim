@@ -90,6 +90,7 @@ class RasterAuthoringTests(unittest.TestCase):
         before, identity, roots = live.copy(), image.note, list(scene.mobjects)
         count = []
         image.add_updater(lambda mob, dt: count.append(dt))
+        initial_ticks = list(count)
         updater = image.updaters[0]
         clock = scene.time()
         old_png = capture(image).png()
@@ -99,7 +100,7 @@ class RasterAuthoringTests(unittest.TestCase):
         self.assertIs(image.submobjects[0], marker)
         self.assertIs(image.note, identity)
         self.assertIs(image.updaters[0], updater)
-        self.assertEqual(count, [])
+        self.assertEqual(count, initial_ticks)
         self.assertEqual(scene.time(), clock)
         self.assertEqual(scene.mobjects, roots)
         self.assertEqual((image.pixel_width, image.pixel_height), (2, 7))
