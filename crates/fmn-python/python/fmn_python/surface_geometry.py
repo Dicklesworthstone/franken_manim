@@ -102,7 +102,6 @@ def install_surface_geometry(native):
         """
         if vars(self).get(_BUSY, False):
             raise RuntimeError("surface regeneration is already in progress")
-        idle(self)
         if isinstance(self, Geometry):
             raise TypeError("indexed TexturedGeometry is not a UV-grid surface")
         shape = tuple(operator.index(v) for v in itertools.islice(iter(self.resolution), 3))
@@ -112,6 +111,7 @@ def install_surface_geometry(native):
             if self.n_records():
                 raise ValueError("surface resolution no longer matches its native records")
             return None
+        idle(self)
         controls = _controls(self)
         if controls[0] != resolution(self):
             raise ValueError("surface resolution changed; construct a new surface and use become() for topology replacement")

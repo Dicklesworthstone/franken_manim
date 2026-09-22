@@ -13,15 +13,14 @@ def install_surface_alignment(native):
     g = vars(native)
     if g.get("_FMN_SURFACE_ALIGNMENT_INSTALLED", False):
         return
-    align = g.get("_align_surface_grids")
-    resolution = g.get("_surface_grid_resolution")
-    if not callable(align) or not callable(resolution):
+    if not callable(g.get("_align_surface_grids")) or not callable(g.get("_surface_grid_resolution")):
         raise ImportError("native UV-grid alignment seam is missing")
     Surface, Mobject, Transform = g["Surface"], g["Mobject"], g["Transform"]
     original_align, original_aligned = Mobject.align_points, Mobject.is_aligned_with
     triangles = Surface.compute_triangle_indices
 
     def pair_shapes(left, right):
+        resolution = g["_surface_grid_resolution"]
         a, b = resolution(left), resolution(right)
         if a is None or b is None:
             raise TypeError("surface alignment requires two native UV-grid surfaces")
@@ -54,7 +53,7 @@ def install_surface_alignment(native):
             else triangles(SimpleNamespace(resolution=shape))
             for member, old in ((self, a), (other, b))
         ]
-        align(self, other)
+        g["_align_surface_grids"](self, other)
         for member, data in zip((self, other), indices):
             vars(member).update(resolution=shape, triangle_indices=data)
         return self
@@ -85,7 +84,7 @@ def install_surface_alignment(native):
         # missing public index array lazily; retain authored face order when it
         # already exists. Alignment installs fresh arrays before any frame runs.
         if "triangle_indices" not in vars(self):
-            shape = resolution(self)
+            shape = g["_surface_grid_resolution"](self)
             if shape is not None:
                 vars(self)["triangle_indices"] = triangles(SimpleNamespace(resolution=shape))
         return original_indices(self)

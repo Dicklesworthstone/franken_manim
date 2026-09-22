@@ -11126,8 +11126,12 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
                 .try_iter()
                 .expect("iterate leaked module referrers")
                 .map(|item| {
-                    item.and_then(|value| value.get_type().name().map(|name| name.to_string()))
-                        .unwrap_or_else(|error| format!("<unreadable: {error}>"))
+                    item.and_then(|value| {
+                        let t = value.get_type().name()?.to_string();
+                        let r = value.repr()?.extract::<String>()?;
+                        Ok(format!("{t}: {r}"))
+                    })
+                    .unwrap_or_else(|error| format!("<unreadable: {error}>"))
                 })
                 .collect()
         };

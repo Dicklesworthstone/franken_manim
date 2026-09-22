@@ -111,7 +111,7 @@ def install_camera_capture(native: Any) -> None:
 
     def save_final_image(self, image):
         if not isinstance(image, Capture):
-            raise TypeError("save_final_image requires a native Camera.capture_snapshot image")
+            raise TypeError("save_final_image requires a native Lumen Camera.capture_snapshot image")
         if self.png_mode != "RGBA":
             raise ValueError("native final-image publication requires png_mode='RGBA'")
         return image.save_png(self.get_image_file_path())
