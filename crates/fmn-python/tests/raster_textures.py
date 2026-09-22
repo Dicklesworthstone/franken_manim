@@ -133,6 +133,48 @@ class RasterTextureTests(unittest.TestCase):
         np.testing.assert_array_equal(obj.get_pixel_array(),self.red)
         np.testing.assert_array_equal(obj.get_pixel_array(dark=True),self.blue)
 
+    def test_existing_file_backed_objects_accept_live_arrays_without_reinitializing(self):
+        encoded = capture(m.ImageMobject(self.red)).png()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'old-image.png'
+            path.write_bytes(encoded)
+            objects = (m.TexturedSurface(surface(), path, shading=(0, 0, 0)),
+                       m.TexturedGeometry(geometry(), path, shading=(0, 0, 0)))
+        for obj in objects:
+            original = capture(obj)
+            frozen = original.png()
+            records = obj.data.copy()
+            view = obj.data
+            # The original file no longer exists: replacement/readback/copy
+            # must use retained native resources, never reopen source paths.
+            obj.set_pixel_array(self.green, dark_pixels=self.blue)
+            np.testing.assert_array_equal(obj.data, records)
+            np.testing.assert_array_equal(view, records)
+            np.testing.assert_array_equal(obj.get_pixel_array(), self.green)
+            np.testing.assert_array_equal(obj.get_pixel_array(dark=True), self.blue)
+            self.assertEqual(obj.num_textures, 2)
+            self.assertEqual(original.png(), frozen)
+            self.assertNotEqual(capture(obj).png(), frozen)
+            obj.rotate(m.PI, axis=m.UP)
+            frame = np.frombuffer(capture(obj).pixels(), dtype=np.uint8).reshape(64, 80, 4)
+            self.assertGreater(frame[32, 40, 2], 240)
+            for method in ('set_textures', 'set_pixel_array'):
+                with self.assertRaisesRegex(m._CapabilityError, 'not interpolated'):
+                    getattr(obj.animate, method)(self.red)
+
+    def test_material_builder_refuses_instead_of_silently_dropping_target_pixels(self):
+        for obj in (m.TexturedSurface(surface(), self.red, self.blue),
+                    m.TexturedGeometry(geometry(), self.red)):
+            before = obj.data.copy(), obj.get_pixel_array().copy()
+            class Explodes:
+                def __array__(self, *args, **kwargs):
+                    raise AssertionError('unsupported animation must not convert input')
+            for method in ('set_textures', 'set_pixel_array'):
+                with self.assertRaisesRegex(m._CapabilityError, 'not interpolated'):
+                    getattr(obj.animate, method)(Explodes())
+            np.testing.assert_array_equal(obj.data, before[0])
+            np.testing.assert_array_equal(obj.get_pixel_array(), before[1])
+
     def test_reentrant_material_conversion_cannot_replace_either_side(self):
         obj=m.TexturedSurface(surface(),self.red,self.blue)
         class Reentrant:

@@ -35,7 +35,9 @@ RGBA8 copy; modifying it does not alter the object. Call `set_pixel_array()` to
 publish another immutable resource. Pixel dimensions may change, but replacing
 the raster does not resize the existing scene-space quad or reset its UVs,
 per-vertex opacity, lighting, placement, children or updaters. New constructors
-use the raster's aspect ratio and the requested height.
+use the raster's aspect ratio and the requested height. `pixel_width` and
+`pixel_height` read the native resource and are read-only, including after
+`become`, `restore` and pickle restoration; assigning them does not resize pixels.
 
 `ImageMobject.from_bytes(encoded)` accepts PNG/JPEG bytes without filesystem
 access. The ordinary constructor and `set_image(source)` accept those bytes,
@@ -73,6 +75,12 @@ image.add_updater(lambda mob: mob.set_pixel_array(make_current_pixels()))
 scene.add(image)
 scene.wait(1)
 ```
+
+Raster-to-raster morphing is not implemented by the generic record-field
+animation. `.animate.set_image(...)`, `.animate.set_pixel_array(...)` and
+`.animate.set_textures(...)` explicitly refuse instead of silently losing the
+new pixels. Ordinary image placement/opacity animations remain available.
+Use the normal updater path above to publish a sequence of generated rasters.
 
 The callback is ordinary authored Python. There is no image worker thread,
 independent clock or hidden video player. The immutable resource is frozen into

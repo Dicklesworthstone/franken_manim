@@ -153,6 +153,22 @@ def install_image_authoring(native):
             vars(self).update(image_path=None, pixel_width=width, pixel_height=height)
         return self
 
+    def init_points(self):
+        """Reapply configured height and the current raster's aspect ratio."""
+        width, pixel_height = self._image_dimensions()
+        height = float(self.height)
+        scene_width = height * width / pixel_height
+        if (not math.isfinite(height) or height <= 0
+                or not math.isfinite(scene_width)
+                or max(height, scene_width) > np.finfo(np.float32).max):
+            raise ValueError("image dimensions must produce positive finite f32-representable extents")
+        # The original width-then-height formula assumed an untouched 2x2
+        # constructor quad. Existing quads may already be sized/transformed.
+        # Native positional operations own both extents and the center.
+        self.set_height(height)
+        self.set_width(scene_width, stretch=True)
+        return self
+
     def get_pixel_array(self):
         """Return a writable, detached RGBA8 copy of the native image pixels."""
         raster = g["_read_raster_image"](self)
@@ -160,13 +176,41 @@ def install_image_authoring(native):
         return np.frombuffer(raster.pixels(), dtype=np.uint8).reshape(height, width, 4).copy()
 
     for name, function in (("__init__", initialize), ("set_image", set_image),
-                           ("set_pixel_array", set_pixel_array), ("get_pixel_array", get_pixel_array)):
+                           ("set_pixel_array", set_pixel_array), ("get_pixel_array", get_pixel_array),
+                           ("init_points", init_points)):
         _method(Image, name, function)
     for name, function in (("from_bytes", from_bytes), ("from_pixel_array", from_pixel_array)):
         function.__name__ = name
         function.__qualname__ = Image.__qualname__ + "." + name
         function.__module__ = Image.__module__
         setattr(Image, name, classmethod(function))
+    # The resource, not a cached Python attribute, owns its pixel shape.
+    # Native become/restore and checkpoint replay can replace a resource without
+    # running these setters. Reading dimensions must follow that actual image.
+    # Retained dictionary entries from earlier pickles are harmless projections.
+    def pixel_width(self):
+        return self._image_dimensions()[0]
+
+    def pixel_height(self):
+        return self._image_dimensions()[1]
+
+    Image.pixel_width = property(pixel_width, doc="Native raster width in pixels (read-only).")
+    Image.pixel_height = property(pixel_height, doc="Native raster height in pixels (read-only).")
+
+    def unsupported_raster_animation(self, *args, **kwargs):
+        del self, args, kwargs
+        raise g["_CapabilityError"](
+            "raster contents are not interpolated by .animate; "
+            "call set_image/set_pixel_array in an ordinary scene updater instead"
+        )
+
+    # These new data-publication methods are not record-field transformations.
+    # Without an override the generic builder mutates a target's resource, then
+    # silently drops it while interpolating only records/uniforms. Refuse before
+    # evaluating an authored array/path conversion rather than claim success.
+    set_image._override_animate = unsupported_raster_animation
+    set_pixel_array._override_animate = unsupported_raster_animation
+
     original_identical = g["Mobject"].looks_identical
 
     def looks_identical(self, mobject):
@@ -221,6 +265,9 @@ def install_image_authoring(native):
         raster = g["_read_raster_image"](self, dark)
         width, height = raster.size
         return np.frombuffer(raster.pixels(), dtype=np.uint8).reshape(height, width, 4).copy()
+
+    set_textures._override_animate = unsupported_raster_animation
+    set_texture_pixels._override_animate = unsupported_raster_animation
 
     for name, function in (("set_textures", set_textures), ("set_pixel_array", set_texture_pixels),
                            ("get_pixel_array", texture_pixels)):

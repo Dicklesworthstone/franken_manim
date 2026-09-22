@@ -187,6 +187,47 @@ class RasterAuthoringTests(unittest.TestCase):
         self.assertIsInstance(image, Annotated)
         self.assertEqual(image.note, 'authored')
 
+    def test_native_resource_dimensions_follow_restore_become_and_pickle(self):
+        image = m.ImageMobject(pixels(shape=(2, 3)))
+        image.save_state()
+        image.set_pixel_array(pixels(shape=(7, 1)))
+        self.assertEqual((image.pixel_width, image.pixel_height), (1, 7))
+        image.restore()
+        self.assertEqual((image.pixel_width, image.pixel_height), (3, 2))
+        image.become(m.ImageMobject(pixels(shape=(3, 6))))
+        self.assertEqual((image.pixel_width, image.pixel_height), (6, 3))
+        # init_points must use the restored/current native aspect, not stale
+        # constructor attributes. Other authored sizing controls stay unchanged.
+        image.init_points()
+        self.assertAlmostEqual(image.get_width() / image.get_height(), 2)
+        for other in (image.copy(), pickle.loads(pickle.dumps(image))):
+            self.assertEqual((other.pixel_width, other.pixel_height), (6, 3))
+        with self.assertRaises(AttributeError):
+            image.pixel_width = 99
+        self.assertEqual(image.pixel_width, 6)
+
+    def test_raster_builder_refuses_before_evaluating_input_or_advancing_scene(self):
+        image = m.ImageMobject(pixels())
+        scene = m.Scene()
+        scene.add(image)
+        before = scene.time(), image.data.copy(), capture(image).png()
+        class Explodes:
+            def __array__(self, *args, **kwargs):
+                raise AssertionError('raster animation must not evaluate pixel inputs')
+            def __fspath__(self):
+                raise AssertionError('raster animation must not evaluate path inputs')
+        for method in ('set_image', 'set_pixel_array'):
+            with self.assertRaisesRegex(m._CapabilityError, 'not interpolated'):
+                getattr(image.animate, method)(Explodes())
+        self.assertEqual(scene.time(), before[0])
+        np.testing.assert_array_equal(image.data, before[1])
+        self.assertEqual(capture(image).png(), before[2])
+        # Ordinary record/placement animation is still available for images.
+        center = image.get_center().copy()
+        scene.play(image.animate.shift((1, 0, 0)), run_time=.125, rate_func=m.linear)
+        np.testing.assert_allclose(image.get_center(), center + (1, 0, 0), atol=1e-6)
+        np.testing.assert_array_equal(image.get_pixel_array(), pixels())
+
     def test_reentrant_array_conversion_cannot_publish_inner_or_outer_pixels(self):
         image = m.ImageMobject(pixels())
         class Recursive:
