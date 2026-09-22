@@ -60,6 +60,7 @@ class _TransientState:
         self.suspended = mob._is_updating_suspended()
         attrs = vars(mob)
         self.animating = attrs.get("_is_animating", _MISSING)
+        self.raw_animating = attrs.get("animating", _MISSING)
         self.locks = {name: (attrs[name], set(attrs[name])) for name in _LOCKS if name in attrs}
         self.absent_locks = tuple(name for name in _LOCKS if name not in attrs)
 
@@ -83,6 +84,10 @@ class _TransientState:
                 attrs.pop("_is_animating", None)
             else:
                 attrs["_is_animating"] = self.animating
+            if self.raw_animating is _MISSING:
+                attrs.pop("animating", None)
+            else:
+                attrs["animating"] = self.raw_animating
             for name, (original, values) in self.locks.items():
                 original.clear()
                 original.update(values)

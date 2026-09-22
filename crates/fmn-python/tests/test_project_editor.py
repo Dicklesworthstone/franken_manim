@@ -533,6 +533,7 @@ class ProjectEditCliTests(unittest.TestCase):
             self.assertEqual(self.run_cli('edit', str(self.path), 'Demo'), 4)
         self.assertEqual(self.native.constructed, 0)
 
+    @unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
     def test_real_project_and_ipython_mainloop_run_through_cli(self):
         scenes = []
         def interact(shell, *args, **kwargs):
@@ -550,17 +551,20 @@ class ProjectEditCliTests(unittest.TestCase):
         self.assertIsNone(active_source())
         self.assertTrue(all(_OWNER not in vars(scene) for scene in scenes))
 
+    @unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
     def test_initial_scene_failure_returns_nonzero_with_import_cleanup(self):
         self.path.write_text(self.path.read_text().replace('self.add(1)', "raise ValueError('failed scene')"))
         self.assertEqual(self.run_cli('edit', str(self.path), 'Demo'), 5)
         self.assertIn('failed scene', self.reports[-1]['message'])
         self.assertIsNone(active_source())
 
+    @unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
     def test_keyboard_interrupt_is_not_success(self):
         with patch.object(SceneProject, 'edit', side_effect=KeyboardInterrupt()):
             self.assertEqual(self.run_cli('edit', str(self.path), 'Demo'), 130)
         self.assertIsNone(active_source())
 
+    @unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
     def test_authored_system_exit_zero_is_not_reported_as_editor_success(self):
         self.path.write_text('raise SystemExit(0)\n')
         self.assertEqual(self.run_cli('edit', str(self.path), 'Demo'), 5)

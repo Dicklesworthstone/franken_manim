@@ -35,7 +35,11 @@ pub(crate) fn prepare(
     }
     let path = std::path::absolute(destination).map_err(native_error)?;
     let fs: Arc<dyn FileSystem> = Arc::new(StdFs);
-    if fs.node_kind_no_follow(&path).map_err(native_error)?.is_some() {
+    if fs
+        .node_kind_no_follow(&path)
+        .map_err(native_error)?
+        .is_some()
+    {
         return Err(pyo3::exceptions::PyFileExistsError::new_err(format!(
             "PNG capture destination already exists: {}",
             path.display()
@@ -115,7 +119,8 @@ mod tests {
     #[test]
     fn production_capture_publication_acceptance() {
         crate::with_python_test_module("capture output", |py, _module, globals| {
-            let source = std::ffi::CString::new(include_str!("../tests/capture_output.py")).unwrap();
+            let source =
+                std::ffi::CString::new(include_str!("../tests/capture_output.py")).unwrap();
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("native prepared PNG publication and cancellation");
