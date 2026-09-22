@@ -42,7 +42,10 @@ fn parameters_call_sites_rules_and_drawn_paths_keep_original_formula_spans() {
     assert_eq!(actual.source, source);
     assert_eq!(actual.layout.rules.len(), 2);
     assert!(!actual.occurrences("x")[0].is_empty());
-    assert!(!actual.occurrences(r"\half")[0].is_empty());
+    // Selection is containment, not overlap: generated ink belongs to the
+    // complete call (including arguments), never to its command-name prefix.
+    assert!(actual.occurrences(r"\half")[0].is_empty());
+    assert!(!actual.occurrences(r"\half{x}")[0].is_empty());
     assert!(actual.subs.iter().any(|sub| sub.span == Span::new(6, 7)));
     assert!(actual.subs.iter().any(|sub| sub.span == Span::new(0, 8)));
     for sub in &actual.subs {
@@ -60,9 +63,10 @@ fn text_mainland_and_math_islands_keep_utf8_source_coordinates() {
     let source = "é area $\\sq{x}$";
     let actual = engine.typeset_with_preamble(Mode::Text, source, r"\newcommand{\sq}[1]{#1^2}").unwrap();
     assert_eq!(actual.source, source);
-    for token in ["é", "x", r"\sq"] {
+    for token in ["é", "x", r"\sq{x}"] {
         assert!(!actual.occurrences(token)[0].is_empty(), "{token}");
     }
+    assert!(actual.occurrences(r"\sq")[0].is_empty());
     for sub in &actual.subs {
         assert!(source.is_char_boundary(sub.span.start));
         assert!(source.is_char_boundary(sub.span.end));
@@ -98,6 +102,47 @@ fn different_definitions_cannot_reuse_another_cached_expansion() {
     assert_eq!(engine.typeset_with_preamble(MATH, source, x).unwrap().to_bytes().unwrap(), first);
     assert_eq!(engine.typeset_with_preamble(MATH, source, y).unwrap().to_bytes().unwrap(), second);
     assert!(engine.memory_cache_stats().hits >= 4);
+}
+
+#[test]
+fn disk_hits_project_once_without_corrupting_effective_source_documents() {
+    use fmn_cache::{NamespacePolicy, Store, StoreConfig};
+    use fmn_platform::clock::FakeClock;
+    use fmn_platform::fs::VirtualFs;
+    use std::sync::Arc;
+
+    let root = if cfg!(windows) { r"C:\preamble-cache" } else { "/preamble-cache" };
+    let store = Store::open(
+        Arc::new(VirtualFs::new()),
+        Arc::new(FakeClock::new()),
+        root,
+        StoreConfig::default(),
+    ).unwrap();
+    let writer = engine().with_cache(&store).unwrap();
+    let source = r"\sq{x}";
+    let preamble = r"\newcommand{\sq}[1]{#1^2}";
+    let expected = writer.typeset_with_preamble(MATH, source, preamble).unwrap();
+    let effective = format!("{preamble}\n{source}");
+    let namespace = store.namespace(
+        "typeset", fmn_tex::TYPESET_FORMAT_VERSION, NamespacePolicy::default(),
+    ).unwrap();
+    let key = writer.cache_key(MATH, &effective).unwrap();
+    let cached_bytes = namespace.get(&key).unwrap().unwrap();
+    let cached = fmn_tex::Typeset::from_bytes(&cached_bytes).unwrap();
+    assert_eq!(cached.source, effective);
+    assert!(cached.subs.iter().all(|sub| sub.span.start > preamble.len()));
+
+    // Fresh engines have no resident entries: each reader must project a disk
+    // result. A subsequent resident hit must not subtract the prefix twice.
+    for _ in 0..2 {
+        let reader = engine().with_cache(&store).unwrap();
+        for _ in 0..2 {
+            let result = reader.typeset_with_preamble(MATH, source, preamble).unwrap();
+            assert_eq!(result.to_bytes().unwrap(), expected.to_bytes().unwrap());
+            assert_eq!(result.occurrences("x"), expected.occurrences("x"));
+        }
+    }
+    assert_eq!(namespace.get(&key).unwrap().unwrap(), cached_bytes);
 }
 
 #[test]
