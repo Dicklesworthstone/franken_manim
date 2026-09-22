@@ -25,6 +25,7 @@ class ProjectEditorFacadeTests(unittest.TestCase):
         facade.__getattr__ = lambda name: getattr(native, name)
         return facade
 
+    @unittest.skipUnless(getattr(fixture, "HAVE_IPYTHON", False), "IPython is not installed")
     def test_public_package_enters_and_reloads_the_editor(self):
         path, facade = self.source(), self.facade()
         self.assertNotIn("_FMN_SCENE_PROJECT_EDITOR_INSTALLED", vars(facade))

@@ -277,7 +277,14 @@ impl CameraCapture {
         destination: PathBuf,
         threads: usize,
     ) -> PyResult<(PathBuf, u64, String)> {
-        output::save(py, &self.rgba, self.width, self.height, destination, threads)
+        output::save(
+            py,
+            &self.rgba,
+            self.width,
+            self.height,
+            destination,
+            threads,
+        )
     }
 
     /// IPython/Jupyter's image protocol without Pillow, files or a second

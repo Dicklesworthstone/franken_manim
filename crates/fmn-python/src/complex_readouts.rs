@@ -20,7 +20,10 @@ pub fn run_portal_gauntlet_complex_readouts(
         globals
             .set_item(
                 "__file__",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/complex_readouts_render.py"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/complex_readouts_render.py"
+                ),
             )
             .map_err(|error| error.to_string())?;
         let source = std::ffi::CString::new(include_str!("../tests/complex_readouts_render.py"))

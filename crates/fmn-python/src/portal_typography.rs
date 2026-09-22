@@ -26,11 +26,17 @@ pub(crate) fn with_tex_template<T>(
     operation: impl FnOnce(&fmn_library::TexEngine) -> PyResult<T>,
 ) -> PyResult<T> {
     if template.len() > 1024 {
-        return Err(PyValueError::new_err("Tex template exceeds 1024 UTF-8 bytes"));
+        return Err(PyValueError::new_err(
+            "Tex template exceeds 1024 UTF-8 bytes",
+        ));
     }
     let registry = fmn_config::PackRegistry::builtin();
     let pack = registry
-        .resolve_template(if template.is_empty() { "default" } else { template })
+        .resolve_template(if template.is_empty() {
+            "default"
+        } else {
+            template
+        })
         .map_err(super::tex_error)?;
     let cell = match pack.name {
         "default" => return super::with_tex_engine(operation),
@@ -40,8 +46,8 @@ pub(crate) fn with_tex_template<T>(
     };
     cell.with(|cell| {
         if cell.get().is_none() {
-            let engine = fmn_library::TexEngine::new(pack.content_id, None)
-                .map_err(super::tex_error)?;
+            let engine =
+                fmn_library::TexEngine::new(pack.content_id, None).map_err(super::tex_error)?;
             let _ = cell.set(engine);
         }
         operation(cell.get().expect("initialized above"))
@@ -56,7 +62,9 @@ fn _validate_tex_options(template: &str, preamble: &str, text_mode: bool) -> PyR
             return Ok(());
         }
         if text_mode {
-            fmn_library::TexText::new("").preamble(preamble).build(engine)
+            fmn_library::TexText::new("")
+                .preamble(preamble)
+                .build(engine)
         } else {
             fmn_library::Tex::new("").preamble(preamble).build(engine)
         }
