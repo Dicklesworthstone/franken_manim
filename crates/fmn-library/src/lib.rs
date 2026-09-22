@@ -169,6 +169,9 @@ pub use neural_network::{
     NeuralNetworkConfig, NeuralNetworkError, NeuralNetworkMobject,
 };
 pub use numbers::{DEFAULT_MAX_NUMBER_CHARACTERS, DecimalNumber, Integer};
+pub use obj_materials::{
+    ObjAssetError, ObjAssetLimits, ObjDocument, ObjMaterial, ObjMaterialRun, parse_mtl,
+};
 pub use obj_model::{
     DEFAULT_MODEL_HEIGHT, MODEL_SHADING, ObjCorner, ObjError, ObjLimits, ObjMesh, ThreeDModel,
 };
