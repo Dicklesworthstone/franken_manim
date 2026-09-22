@@ -57,7 +57,9 @@ impl TexEngine {
             || layout.height != 0.0
             || layout.depth != 0.0
         {
-            return Err(invalid("must contain declarations, not visible content or spacing"));
+            return Err(invalid(
+                "must contain declarations, not visible content or spacing",
+            ));
         }
         let mut effective = String::new();
         effective

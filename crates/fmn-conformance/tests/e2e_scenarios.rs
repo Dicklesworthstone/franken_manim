@@ -2079,6 +2079,35 @@ fn python_complex_readouts_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         .with_artifact("complex_readouts_last.png", report.last_png))
 }
 
+/// Native macros retain formula spans through matching and live-number edits.
+fn python_tex_preamble_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_tex_preamble")?;
+    let report = manimlib::run_portal_gauntlet_tex_preamble(&root, ctx.seed)
+        .map_err(|error| fail(format!("Python TeX preambles: {error}")))?;
+    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode first preamble frame: {error}")))?;
+    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode last preamble frame: {error}")))?;
+    if (first.width, first.height) != (192, 108)
+        || (last.width, last.height) != (192, 108)
+        || first.rgba == last.rgba
+    {
+        return Err(fail("TeX preambles did not animate native 192x108 pixels"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.tex_preamble")
+            .field("frames", report.frame_count)
+            .field("thread_counts", report.thread_counts)
+            .field("failure_paths", report.failure_paths),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_preamble_frames", report.frame_count)
+        .with_counter("tex_preamble_thread_counts", report.thread_counts)
+        .with_counter("tex_preamble_failure_paths", report.failure_paths)
+        .with_artifact("tex_preamble_first.png", report.first_png)
+        .with_artifact("tex_preamble_last.png", report.last_png))
+}
+
 fn python_textured_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let (first, last) = manimlib::run_portal_gauntlet_textures()
         .map_err(|error| fail(format!("textured surfaces: {error}")))?;
@@ -4746,6 +4775,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_tex_preamble.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_tex_preamble_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "tex_preamble_first.png".to_owned(),
+                "tex_preamble_last.png".to_owned(),
+            ]),
+            counter_eq("tex_preamble_frames", 8),
+            counter_eq("tex_preamble_thread_counts", 3),
+            counter_eq("tex_preamble_failure_paths", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.tex_preamble",
+            vec![
+                FieldPred::u64_eq("frames", 8),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("failure_paths", 1),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_textured_surfaces.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -5547,6 +5600,17 @@ fn python_complex_readouts_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_complex_readouts.v1")
         .expect("Python complex readout scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Native macro layout, matching, source spans and failed publication.
+#[test]
+fn python_tex_preamble_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_tex_preamble.v1")
+        .expect("Python TeX preamble scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

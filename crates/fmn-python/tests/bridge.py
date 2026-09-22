@@ -5880,11 +5880,9 @@ try:
         "x",
         template="external-latex-template",
     )
-except NotImplementedError as error:
-    assert str(error) == (
-        "SingleStringTex() keyword(s) not yet routed to the native builder: "
-        "template"
-    )
+except ValueError as error:
+    assert "unknown tex template" in str(error)
+    assert "available packs: default, basic, empty" in str(error)
 else:
     raise AssertionError("SingleStringTex accepted an external template")
 assert not hasattr(failed_single_tex, "submobjects")
@@ -12075,14 +12073,14 @@ assert all(
     for leaf in mapped_tex.get_part_by_tex("x")
 )
 
-for unsupported_tex_kwargs, named_knob in [
-    ({"alignment": r"\raggedright"}, "alignment"),
-    ({"template": "legacy"}, "template"),
-    ({"additional_preamble": r"\usepackage{foo}"}, "additional_preamble"),
+for unsupported_tex_kwargs, named_knob, error_type in [
+    ({"alignment": r"\raggedright"}, "alignment", NotImplementedError),
+    ({"template": "legacy"}, "template", ValueError),
+    ({"additional_preamble": r"\usepackage{foo}"}, "additional_preamble", ValueError),
 ]:
     try:
         manimlib.Tex("x", **unsupported_tex_kwargs)
-    except NotImplementedError as error:
+    except error_type as error:
         assert named_knob in str(error)
     else:
         raise AssertionError(f"unsupported Tex {named_knob} silently succeeded")
@@ -13836,7 +13834,7 @@ assert native_shape_matrix.get_row(0)[0] is native_shape_cell
 assert native_shape_matrix.get_column(0)[0] is native_shape_cell
 try:
     matrix_module.TexMatrix([["x"]], tex_config={"template": "legacy"})
-except NotImplementedError as error:
+except ValueError as error:
     assert "template" in str(error)
 else:
     raise AssertionError("TexMatrix silently discarded an unsupported entry option")

@@ -13,6 +13,58 @@ use fmn_core::color::Srgb;
 const MAX_BYTES: usize = 262_144;
 const MAX_ITEMS: usize = 4096;
 
+thread_local! {
+    static BASIC_TEX_ENGINE: std::cell::OnceCell<fmn_library::TexEngine> =
+        const { std::cell::OnceCell::new() };
+    static EMPTY_TEX_ENGINE: std::cell::OnceCell<fmn_library::TexEngine> =
+        const { std::cell::OnceCell::new() };
+}
+
+/// Reuse a bounded set of native engines; never share mutable macro state.
+pub(crate) fn with_tex_template<T>(
+    template: &str,
+    operation: impl FnOnce(&fmn_library::TexEngine) -> PyResult<T>,
+) -> PyResult<T> {
+    if template.len() > 1024 {
+        return Err(PyValueError::new_err("Tex template exceeds 1024 UTF-8 bytes"));
+    }
+    let registry = fmn_config::PackRegistry::builtin();
+    let pack = registry
+        .resolve_template(if template.is_empty() { "default" } else { template })
+        .map_err(super::tex_error)?;
+    let cell = match pack.name {
+        "default" => return super::with_tex_engine(operation),
+        "basic" => &BASIC_TEX_ENGINE,
+        "empty" => &EMPTY_TEX_ENGINE,
+        _ => return Err(super::tex_error("native Tex pack has no engine slot")),
+    };
+    cell.with(|cell| {
+        if cell.get().is_none() {
+            let engine = fmn_library::TexEngine::new(pack.content_id, None)
+                .map_err(super::tex_error)?;
+            let _ = cell.set(engine);
+        }
+        operation(cell.get().expect("initialized above"))
+    })
+}
+
+/// Admission happens before a Python constructor installs its live state.
+#[pyfunction]
+fn _validate_tex_options(template: &str, preamble: &str, text_mode: bool) -> PyResult<()> {
+    with_tex_template(template, |engine| {
+        if preamble.is_empty() {
+            return Ok(());
+        }
+        if text_mode {
+            fmn_library::TexText::new("").preamble(preamble).build(engine)
+        } else {
+            fmn_library::Tex::new("").preamble(preamble).build(engine)
+        }
+        .map(|_| ())
+        .map_err(super::tex_error)
+    })
+}
+
 fn number(options: &Bound<'_, PyDict>, name: &str, default: f64, positive: bool) -> PyResult<f64> {
     let value = match options.get_item(name)? {
         Some(v) => v.extract::<f64>()?,
@@ -244,5 +296,6 @@ fn _build_styled_text<'py>(
 }
 
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(_build_styled_text, module)?)
+    module.add_function(wrap_pyfunction!(_build_styled_text, module)?)?;
+    module.add_function(wrap_pyfunction!(_validate_tex_options, module)?)
 }

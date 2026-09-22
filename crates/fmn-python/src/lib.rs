@@ -46,6 +46,10 @@ mod complex_readouts;
 #[cfg(feature = "gauntlet")]
 pub use complex_readouts::run_portal_gauntlet_complex_readouts;
 
+mod tex_preamble;
+#[cfg(feature = "gauntlet")]
+pub use tex_preamble::run_portal_gauntlet_tex_preamble;
+
 #[cfg(feature = "gauntlet")]
 pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
 
@@ -6834,6 +6838,7 @@ impl BridgeMobject {
     /// span map, no heuristic splitting), matching the Reference's
     /// per-`SingleStringTex` submobject structure.
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (factory, parts, separator, text_mode, font_size, t2c, group_single_part, template="", preamble=""))]
     fn _build_tex<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
@@ -6843,6 +6848,8 @@ impl BridgeMobject {
         font_size: f64,
         t2c: Option<&Bound<'py, PyDict>>,
         group_single_part: bool,
+        template: &str,
+        preamble: &str,
     ) -> PyResult<Bound<'py, PyList>> {
         let source = parts.join(separator);
         let pairs = t2c_pairs(t2c)?;
@@ -6850,14 +6857,16 @@ impl BridgeMobject {
             .iter()
             .map(|(needle, color)| (needle.as_str(), *color))
             .collect();
-        let built = with_tex_engine(|engine| {
+        let built = portal_typography::with_tex_template(template, |engine| {
             if text_mode {
                 fmn_library::TexText::new(&source)
+                    .preamble(preamble)
                     .font_size(font_size)
                     .t2c(&refs)
                     .build(engine)
             } else {
                 fmn_library::Tex::new(&source)
+                    .preamble(preamble)
                     .font_size(font_size)
                     .t2c(&refs)
                     .build(engine)

@@ -8174,10 +8174,9 @@ class Tex(StringMobject):
             type(self).__name__ + "()",
             [
                 ("alignment", alignment != "\\centering"),
-                ("template", template != ""),
-                ("additional_preamble", additional_preamble != ""),
             ],
         )
+        _validate_tex_options(template, additional_preamble, bool(self._native_text_mode))
         color_map = dict(t2c or {})
         color_map.update(tex_to_color_map or {})
         isolate = [] if isolate is None else isolate
@@ -8220,6 +8219,8 @@ class Tex(StringMobject):
             self.font_size,
             native_t2c or None,
             bool(self._native_group_single_part),
+            template,
+            additional_preamble,
         )
         _hang_native_children(self, specs)
         self._validate_isolate_spans()
@@ -10256,10 +10257,9 @@ class SingleStringTex(SVGMobject):
             "SingleStringTex()",
             [
                 ("alignment", alignment != r"\centering"),
-                ("template", template != ""),
-                ("additional_preamble", additional_preamble != ""),
             ],
         )
+        _validate_tex_options(template, additional_preamble, bool(not math_mode))
         style = dict(kwargs)
         style.update(
             fill_color=fill_color,
@@ -10286,6 +10286,8 @@ class SingleStringTex(SVGMobject):
             float(font_size),
             None,
             False,
+            template,
+            additional_preamble,
         )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, style)
