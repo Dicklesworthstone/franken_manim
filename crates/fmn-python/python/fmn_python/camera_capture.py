@@ -105,6 +105,17 @@ def install_camera_capture(native: Any) -> None:
         """Return the last immutable capture as native-encoded PNG bytes."""
         return current(self).png()
 
+    def save_png(self, destination, *, threads=1):
+        """Publish the last immutable capture through Reel, never recapture it."""
+        return current(self).save_png(destination, threads=threads)
+
+    def save_final_image(self, image):
+        if not isinstance(image, Capture):
+            raise TypeError("save_final_image requires a native Camera.capture_snapshot image")
+        if self.png_mode != "RGBA":
+            raise ValueError("native final-image publication requires png_mode='RGBA'")
+        return image.save_png(self.get_image_file_path())
+
     def repr_png(self):
         # A representation observes the last frame. It must not run capture's
         # authored uniform hooks merely because a notebook redisplays it.
@@ -112,11 +123,15 @@ def install_camera_capture(native: Any) -> None:
 
     for name, method in {
         "capture": capture, "capture_snapshot": capture_snapshot,
-        "clear": clear, "get_pixel_array": pixels, "get_png": png,
+        "clear": clear, "get_pixel_array": pixels, "get_png": png, "save_png": save_png,
         "_repr_png_": repr_png,
     }.items():
         method.__name__ = name
         method.__qualname__ = Camera.__qualname__ + "." + name
         method.__module__ = Camera.__module__
         setattr(Camera, name, method)
+    Writer = g["SceneFileWriter"]
+    save_final_image.__qualname__ = Writer.__qualname__ + ".save_final_image"
+    save_final_image.__module__ = Writer.__module__
+    Writer.save_final_image = save_final_image
     g["_FMN_CAMERA_CAPTURE_INSTALLED"] = True

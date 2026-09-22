@@ -4,6 +4,10 @@
 //! entries are copied by value into a private Stage: capture never adopts a
 //! proxy, advances a clock, invokes an updater, or opens an output generation.
 
+#[path = "portal_capture_output.rs"]
+mod output;
+
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use fmn_core::color::Srgb;
@@ -252,6 +256,28 @@ impl CameraCapture {
             )
         });
         PyBytes::new(py, bytes)
+    }
+
+    /// Encode and prepare a native no-clobber PNG without publishing it yet.
+    #[pyo3(signature = (destination, threads=1))]
+    fn prepare_png(
+        &self,
+        py: Python<'_>,
+        destination: PathBuf,
+        threads: usize,
+    ) -> PyResult<output::PreparedPng> {
+        py.detach(|| output::prepare(&self.rgba, self.width, self.height, destination, threads))
+    }
+
+    /// Publish this frozen frame, without recapture or scene lifecycle effects.
+    #[pyo3(signature = (destination, threads=1))]
+    fn save_png(
+        &self,
+        py: Python<'_>,
+        destination: PathBuf,
+        threads: usize,
+    ) -> PyResult<(PathBuf, u64, String)> {
+        output::save(py, &self.rgba, self.width, self.height, destination, threads)
     }
 
     /// IPython/Jupyter's image protocol without Pillow, files or a second
