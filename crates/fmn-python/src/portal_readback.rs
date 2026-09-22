@@ -17,6 +17,7 @@ use fmn_render::{
     EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
     Tiling, Viewport,
 };
+use fmn_studio::{TerminalPreview, TerminalProtocol, TuiLimits};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
@@ -258,6 +259,57 @@ impl CameraCapture {
         PyBytes::new(py, bytes)
     }
 
+    /// Encode this frozen frame for an explicitly selected terminal protocol.
+    /// This returns bytes only: no ambient terminal, file, subprocess or scene
+    /// is accessed. Kitty carries the same lossless PNG as `png()`; sixel uses
+    /// the Studio encoder's documented 216-color/one-bit-alpha preview palette.
+    #[pyo3(signature = (protocol="kitty", *, max_bytes=16_777_216))]
+    fn terminal_bytes<'py>(
+        &self,
+        py: Python<'py>,
+        protocol: &str,
+        max_bytes: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let protocol = match protocol {
+            "kitty" => TerminalProtocol::Kitty,
+            "sixel" => TerminalProtocol::Sixel,
+            _ => return Err(PyValueError::new_err("protocol must be 'kitty' or 'sixel'")),
+        };
+        let limits = TuiLimits::default();
+        if max_bytes == 0 || max_bytes > limits.max_encoded_bytes {
+            return Err(PyValueError::new_err("max_bytes must be in 1..=134217728"));
+        }
+        if u64::from(self.width) * u64::from(self.height) > limits.max_pixels as u64 {
+            return Err(PyValueError::new_err("terminal preview exceeds the 3840x2160 pixel budget"));
+        }
+        let limits = TuiLimits {
+            max_encoded_bytes: max_bytes,
+            ..limits
+        };
+        let bytes = py.detach(|| -> PyResult<Vec<u8>> {
+            let encoder = TerminalPreview::new(protocol, limits).map_err(native_error)?;
+            let mut bytes = Vec::new();
+            match protocol {
+                TerminalProtocol::Kitty => {
+                    let png = self.png.get_or_init(|| {
+                        fmn_codec::png::encode_rgba8(
+                            self.width,
+                            self.height,
+                            self.rgba.as_bytes(),
+                            fmn_codec::deflate::CompressionLevel::Default,
+                        )
+                    });
+                    encoder.write_png(&mut bytes, png).map_err(native_error)?;
+                }
+                TerminalProtocol::Sixel => encoder
+                    .write_rgba8(&mut bytes, self.width, self.height, self.rgba.as_bytes())
+                    .map_err(native_error)?,
+            }
+            Ok(bytes)
+        })?;
+        Ok(PyBytes::new(py, &bytes))
+    }
+
     /// Encode and prepare a native no-clobber PNG without publishing it yet.
     #[pyo3(signature = (destination, threads=1))]
     fn prepare_png(
@@ -296,6 +348,17 @@ impl CameraCapture {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn production_terminal_preview_acceptance_suite() {
+        crate::with_python_test_module("terminal preview", |py, _module, globals| {
+            let source =
+                std::ffi::CString::new(include_str!("../tests/terminal_preview.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("native terminal snapshots preserve pixels and scene state");
+        });
+    }
+
     #[test]
     fn production_rich_preview_acceptance_suite() {
         crate::with_python_test_module("rich preview", |py, _module, globals| {
