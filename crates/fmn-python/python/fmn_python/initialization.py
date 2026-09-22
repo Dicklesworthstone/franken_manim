@@ -22,6 +22,7 @@ _STEPS = (
     ("surface_textures", "install_surface_textures"),
     ("surface_geometry", "install_surface_geometry"),
     ("surface_mesh", "install_surface_mesh"),
+    ("surface_plotting", "install_surface_plotting"),
     ("text_authoring", "install_text_authoring"),
     ("decimal_authoring", "install_decimal_authoring"),
     ("live_tex", "install_live_tex"),

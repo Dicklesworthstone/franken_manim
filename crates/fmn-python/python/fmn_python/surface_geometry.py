@@ -128,6 +128,7 @@ def install_surface_geometry(native):
                            getattr(uv_method, "__self__", None))
             solid = None if isinstance(self, Textured) else _solid_recipe(g, self, controls)
             recipe = getattr(self, "passed_uv_func", None)
+            verify_sampling = None
             if solid is not None:
                 cls, options = solid
                 candidate = cls(**options)
@@ -144,6 +145,9 @@ def install_surface_geometry(native):
                     function = recipe
                 if not callable(function):
                     raise TypeError("surface uv_func must be callable")
+                prepare = g.get("_fmn_prepare_surface_function")
+                if prepare is not None:
+                    function, verify_sampling = prepare(function)
                 failure = None
                 def sample(u, v):
                     nonlocal failure
@@ -168,6 +172,8 @@ def install_surface_geometry(native):
                 specs = candidate._build_parametric_surface(g["_native_surface_shell_factory"],
                             sample, u_range, v_range, shape, epsilon, nudge)
                 g["_hang_native_children"](candidate, specs)
+            if verify_sampling is not None:
+                verify_sampling()
             idle(self)
             if solid is not None and _solid_recipe(g, self, _controls(self)) != solid:
                 raise RuntimeError("surface shape parameters changed during regeneration")
