@@ -1,0 +1,74 @@
+name: Native surface admission
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/native-surface-admission.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-surface-admission
+  cancel-in-progress: false
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_TARGET_DIR: target/camera-runtime
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      PYO3_PYTHON: python
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - name: Recover retained implementation candidate
+        run: |
+          set -euo pipefail
+          git fetch origin 67b658a366e9828c3316eb6ed3890cde3ded29b7
+          git show 67b658a366e9828c3316eb6ed3890cde3ded29b7:native-surface-admission.patch.gz > /tmp/admission.patch.gz
+          test "$(git hash-object /tmp/admission.patch.gz)" = a9c59fb5bb37ab6eb981d185278504b8346cce59
+          gzip -dc /tmp/admission.patch.gz > /tmp/admission.patch
+          git apply --stat /tmp/admission.patch
+          git apply --check /tmp/admission.patch
+          git apply /tmp/admission.patch
+          git diff --check
+          git add crates/fmn-library crates/fmn-python
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Candidate: fallible bounded surface construction'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/camera-runtime
+          key: camera-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
+      - name: Native constructors and dependent geometry
+        run: |
+          set -euo pipefail
+          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
+          cargo test --locked -p fmn-library -p fmn-mobject -p fmn-anim 2>&1 | tee /tmp/admission-native.log
+          cargo clippy --locked -p fmn-library -p fmn-mobject -p fmn-anim --all-targets -- -D warnings 2>&1 | tee /tmp/admission-clippy.log
+      - name: Embedded native callback and rendering acceptance
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-python --lib surface -- --nocapture 2>&1 | tee /tmp/admission-embedded.log
+          cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/admission-portal-clippy.log
+          python -m maturin build --locked --interpreter python --profile dev --out target/admission-wheel 2>&1 | tee /tmp/admission-build.log
+      - name: Preserve candidate and evidence
+        if: always()
+        run: |
+          git rev-parse HEAD > /tmp/admission-source-sha.txt
+          git diff > /tmp/admission-working.patch
+          git archive --format=tar.gz HEAD > /tmp/admission-source.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-admission-${{ github.run_id }}
+          path: |
+            /tmp/admission*
+            target/admission-wheel/*.whl
+          retention-days: 3
