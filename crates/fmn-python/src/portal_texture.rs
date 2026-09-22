@@ -9,6 +9,9 @@ mod surface;
 #[path = "portal_raster.rs"]
 mod raster;
 
+#[path = "portal_obj.rs"]
+mod obj;
+
 fn image(payload: &Bound<'_, PyAny>) -> PyResult<fmn_mobject::ImageResource> {
     if let Ok(prepared) = payload.cast::<raster::RasterImage>() {
         return Ok(prepared.try_borrow()?.resource.clone());
@@ -166,6 +169,7 @@ fn _build_textured_geometry<'py>(
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     surface::install(module)?;
     raster::install(module)?;
+    obj::install(module)?;
     module.add_function(wrap_pyfunction!(_build_textured_surface, module)?)?;
     module.add_function(wrap_pyfunction!(_build_textured_geometry, module)?)?;
     Ok(())

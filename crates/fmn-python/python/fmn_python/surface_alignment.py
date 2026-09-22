@@ -22,7 +22,7 @@ def install_surface_alignment(native):
     def pair_shapes(left, right):
         resolution = g["_surface_grid_resolution"]
         a, b = resolution(left), resolution(right)
-        if a is None or b is None:
+        if (a is None) != (b is None):
             raise TypeError("surface alignment requires two native UV-grid surfaces")
         return a, b
 
@@ -40,6 +40,8 @@ def install_surface_alignment(native):
         if not isinstance(self, Surface) or not isinstance(other, Surface):
             raise TypeError("a UV-grid surface cannot align with an unstructured mobject")
         a, b = pair_shapes(self, other)
+        if a is None:  # Both are unstructured meshes, not sampled UV grids.
+            return original_align(self, other)
         shape = (max(a[0], b[0]), max(a[1], b[1]))
         if shape[0] * shape[1] > 65_536:
             raise ValueError("surface alignment exceeds its 65536-point UV-grid budget")
@@ -65,6 +67,8 @@ def install_surface_alignment(native):
             if not isinstance(self, Surface) or not isinstance(other, Surface):
                 return False
             a, b = pair_shapes(self, other)
+            if a is None:
+                return original_aligned(self, other)
             if a != b or self.data.dtype != other.data.dtype:
                 return False
         return original_aligned(self, other)

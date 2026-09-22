@@ -9,6 +9,8 @@ on:
       - 'crates/fmn-python/src/portal_obj.rs'
       - 'crates/fmn-python/python/fmn_python/obj_models.py'
       - 'crates/fmn-python/tests/obj_materials.py'
+      - 'crates/fmn-python/tests/test_obj_inputs.py'
+      - 'crates/fmn-python/python/fmn_python/surface_alignment.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,8 +33,10 @@ jobs:
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.13'
-      - name: Install pinned toolchain
-        run: rustup show active-toolchain
+      - name: Install pinned toolchain and host inputs
+        run: |
+          rustup show active-toolchain
+          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -43,9 +47,21 @@ jobs:
       - name: Native material and geometry acceptance
         run: |
           set -euo pipefail
+          python crates/fmn-python/tests/test_obj_inputs.py -v 2>&1 | tee /tmp/obj-materials-inputs.log
           cargo test --locked -p fmn-library --test obj_materials 2>&1 | tee /tmp/obj-materials-native.log
           cargo test --locked -p fmn-library --lib obj_model::tests 2>&1 | tee /tmp/obj-materials-geometry.log
           cargo clippy --locked -p fmn-library --all-targets -- -D warnings 2>&1 | tee /tmp/obj-materials-clippy.log
+      - name: Native portal and installed model acceptance
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-python --lib production_obj_material_acceptance -- --nocapture 2>&1 | tee /tmp/obj-materials-portal.log
+          cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/obj-materials-portal-clippy.log
+          python -m maturin build --locked --interpreter python --profile dev --out target/obj-wheel 2>&1 | tee /tmp/obj-materials-build.log
+          python -m venv target/obj-venv
+          target/obj-venv/bin/python -m pip install 'numpy==2.5.2' target/obj-wheel/*.whl
+          for suite in obj_materials surface_alignment; do
+            target/obj-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/obj-materials-$suite.log"
+          done
       - name: Preserve exact source and results
         if: always()
         run: |
@@ -58,5 +74,7 @@ jobs:
         if: always()
         with:
           name: native-obj-materials-${{ github.sha }}-${{ github.run_attempt }}
-          path: /tmp/obj-materials-*
+          path: |
+            /tmp/obj-materials-*
+            target/obj-wheel/*.whl
           retention-days: 3
