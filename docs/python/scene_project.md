@@ -63,6 +63,62 @@ The CLI refuses noninteractive stdin and robot editing before executing source;
 `fmn-python edit --help --robot` remains a structured help request. Headless
 hosts should control `SceneProject` directly, rather than synthesize a terminal.
 
+## Rebuild automatically when source or assets change
+
+Enable the full-scene watch when opening the editor:
+
+```bash
+fmn-python edit --watch demo/python/rebuild_scene.py RebuildScene
+```
+
+Save an edit, then enter a cell such as `preview()` or `square.get_center()`.
+Before that cell runs, the editor reconstructs the scene and its native preview
+from the changed source. It does not merely update Python definitions.
+
+The same mode is available at an existing project editor prompt:
+
+```python
+auto_rebuild()
+# Optionally include files read by the scene, such as JSON data or images:
+auto_rebuild(paths=["data/values.json", "assets/diagram.png"])
+stop_auto_rebuild()
+```
+
+Or configure the host API from the first prompt:
+
+```python
+with SceneProject("my_scene.py", "Demo") as project:
+    project.edit(auto_rebuild=True, paths=["data/values.json"], debounce=0.0)
+```
+
+The watch compares file **contents**, not modification times. It includes local
+Python additions and imported helpers; add non-Python assets explicitly with
+`paths`. Relative asset paths are fixed when the watch is enabled. No watcher
+thread executes Python and nothing rebuilds while the prompt is idle: source
+checks and reconstruction happen on the owning thread before entered cells.
+The default zero debounce rebuilds at the next cell. A positive `debounce`
+requires the same content to remain stable across observations at later cells;
+it does not delay or block the prompt.
+
+Unchanged files retain interactive geometry edits, the live clock, console and
+checkpoints. `reload(if_changed=True)` likewise retains them when observed
+source bytes and the source generation are unchanged. Ordinary `reload()`
+forces a fresh scene. A successful automatic rebuild resets native state and
+checkpoint history exactly like a manual rebuild.
+
+On a failed automatic build, IPython reports the error and the entered cell
+still runs against the last working generation. The same broken content is
+not executed again on every cell: correct a watched file to retry, or use
+`reload()` for an explicit retry without a content change. A newly added helper
+can recover a missing import. Edits made during construction remain pending for
+the next cell. Arbitrary authored side effects are not rolled back.
+
+`auto_rebuild()` and definition-only `auto_reload()` are mutually exclusive:
+enabling either disables the other's pre-cell callback. Explicit
+`reload_source()` still refreshes definitions without reconstructing the scene.
+The full-scene watch requires an active `SceneProject` editor; it does not alter
+Studio's process-isolated worker protocol or enable background execution.
+
 ## Generation and failure rules
 
 Successful rebuilding resets native state, clock and checkpoint history. A new
@@ -105,7 +161,8 @@ implemented: place an explicit embed call in the source instead.
 
 Native acceptance lives in `tests/scene_project.py` and
 `tests/scene_project_editor.py` under `crates/fmn-python`, both registered in the
-installed-wheel gate. The separate `test_scene_project.py` and
-`test_project_editor.py` tests exercise real imports, production console code
-and real IPython with explicit native lifecycle/capture doubles; they are not
-native rendering evidence.
+installed-wheel gate. The separate `test_scene_project.py`,
+`test_project_editor.py`, `test_project_autorebuild.py` and
+`test_project_autorebuild_editor.py` tests exercise real imports, bounded
+filesystem watching, production console code and real IPython with explicit
+native lifecycle/capture doubles; they are not native rendering evidence.
