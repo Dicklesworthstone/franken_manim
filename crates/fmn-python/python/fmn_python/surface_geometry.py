@@ -6,6 +6,7 @@ are separate from resampling a fixed topology and are never silently flattened.
 """
 from __future__ import annotations
 
+import itertools
 import math
 import operator
 from types import SimpleNamespace
@@ -104,6 +105,13 @@ def install_surface_geometry(native):
         idle(self)
         if isinstance(self, Geometry):
             raise TypeError("indexed TexturedGeometry is not a UV-grid surface")
+        shape = tuple(operator.index(v) for v in itertools.islice(iter(self.resolution), 3))
+        if len(shape) == 2 and 0 in shape and all(0 <= v <= 65_536 for v in shape):
+            # Empty Surface construction calls this hook through _engine_init.
+            # There are no samples to regenerate, and no triangle grid to copy.
+            if self.n_records():
+                raise ValueError("surface resolution no longer matches its native records")
+            return None
         controls = _controls(self)
         if controls[0] != resolution(self):
             raise ValueError("surface resolution changed; construct a new surface and use become() for topology replacement")

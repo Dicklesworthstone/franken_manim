@@ -182,6 +182,24 @@ mod tests {
     }
 
     #[test]
+    fn live_surface_wireframes_and_native_output() {
+        crate::with_python_test_module("live surface wireframe", |py, _module, globals| {
+            let code =
+                std::ffi::CString::new(include_str!("../tests/live_surface_mesh.py")).unwrap();
+            py.run(code.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_live_surface_mesh_acceptance")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
+
+    #[test]
     fn live_surface_regeneration_and_native_output() {
         crate::with_python_test_module("live surface geometry", |py, _module, globals| {
             let code =

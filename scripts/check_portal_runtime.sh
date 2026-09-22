@@ -26,6 +26,7 @@ print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
 
+python3 crates/fmn-python/tests/live_surface_mesh.py
 python3 crates/fmn-python/tests/calculus_area.py
 
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
