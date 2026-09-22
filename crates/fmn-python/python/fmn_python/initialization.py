@@ -21,6 +21,8 @@ _STEPS = (
     ("camera_capture", "install_camera_capture"),
     ("surface_textures", "install_surface_textures"),
     ("image_authoring", "install_image_authoring"),
+    ("surface_admission", "install_surface_admission"),
+    ("graph_admission", "install_graph_admission"),
     ("surface_geometry", "install_surface_geometry"),
     ("surface_mesh", "install_surface_mesh"),
     ("surface_plotting", "install_surface_plotting"),

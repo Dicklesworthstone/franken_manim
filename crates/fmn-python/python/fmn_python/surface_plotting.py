@@ -5,39 +5,8 @@ coordinate triples through c2p, freezing the ordinary affine chart per rebuild.
 """
 from __future__ import annotations
 
-import itertools
-import math
-import operator
-
 from .graphing import _bind_method
-
-
-def _sampling_options(options):
-    """Bound and freeze sampling controls before Atlas allocates its grid."""
-    options = dict(options)
-    values = tuple(itertools.islice(iter(options.get("resolution", (101, 101))), 3))
-    if len(values) != 2:
-        raise ValueError("surface resolution requires two integer dimensions")
-    shape = tuple(operator.index(value) for value in values)
-    if any(value < 0 or value > 65_536 for value in shape) or math.prod(shape) > 65_536:
-        raise ValueError("surface plotting exceeds its 65536-point UV-grid budget")
-    options["resolution"] = shape
-    for key in ("u_range", "v_range"):
-        values = tuple(itertools.islice(iter(options.get(key, (0, 1))), 3))
-        if len(values) != 2:
-            raise ValueError(key + " requires exactly two finite endpoints")
-        pair = tuple(float(value) for value in values)
-        if not all(math.isfinite(value) for value in pair):
-            raise ValueError(key + " requires exactly two finite endpoints")
-        options[key] = pair
-    epsilon = float(options.get("epsilon", .001))
-    nudge = float(options.get("normal_nudge", .001))
-    if not math.isfinite(epsilon) or epsilon <= 0 or not math.isfinite(nudge) or nudge < 0:
-        raise ValueError("surface epsilon must be positive and normal_nudge nonnegative; both must be finite")
-    if any(not math.isfinite(value + epsilon) for key in ("u_range", "v_range") for value in options[key]):
-        raise ValueError("surface derivative samples must remain finite")
-    options.update(epsilon=epsilon, normal_nudge=nudge)
-    return options
+from .surface_admission import sampling_options as _sampling_options
 
 
 class _ChartRecipe:
