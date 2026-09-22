@@ -40,6 +40,8 @@ class MovementInitializerTests(unittest.TestCase):
         for name in ("__version__","__distribution__","__franken_manim__","__abi_policy__",
                      "__engine__","__thread_policy__","__reference_commit__"):
             setattr(native,name,"native-boundary-fixture")
+        native._FMN_PORTAL_RUNTIME_STATE = "ready"
+        native._FMN_ANIMATION_SEMANTICS_INSTALLED = True
         authority = types.ModuleType("fmn_python.library_constructor_authority")
         authority.REFERENCE_CLASS_BY_RUST_HELPER = aliases
         authority.REFERENCE_MODULE_BY_RUST_HELPER = {key:shapes.__name__ for key in aliases}
@@ -54,6 +56,12 @@ class MovementInitializerTests(unittest.TestCase):
             modules[module.__name__] = module
         modules["fmn_python.movement"] = movement
         modules["fmn_python.playback"] = playback
+        init_mod = types.ModuleType("fmn_python.initialization")
+        def mock_init(n):
+            movement.install_movement(n)
+            return n
+        init_mod.initialize = mock_init
+        modules["fmn_python.initialization"] = init_mod
         with patch.dict(sys.modules,modules):
             exec(compile(source,str(path),"exec"),vars(package))
             self.assertIs(package.Homotopy,cls)
