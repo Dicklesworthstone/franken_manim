@@ -90,6 +90,14 @@ impl RasterImage {
         })
     }
 
+    fn __copy__(&self) -> Self {
+        Self { resource: self.resource.clone() }
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.__copy__()
+    }
+
     #[getter]
     fn size(&self) -> (u32, u32) {
         (self.resource.width(), self.resource.height())

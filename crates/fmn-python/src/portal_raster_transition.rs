@@ -44,6 +44,7 @@ fn shape(left: &ImageResource, right: &ImageResource) -> PyResult<(u32, u32)> {
     Ok(size)
 }
 
+#[derive(Clone)]
 struct Plane {
     left: Arc<Texture>,
     right: Arc<Texture>,
@@ -78,6 +79,7 @@ impl Plane {
 }
 
 /// Immutable start/end materials and their bounded, decoded sampling plans.
+#[derive(Clone)]
 #[pyclass(frozen, name = "_RasterTransition")]
 struct RasterTransition {
     start: ImageResource,
@@ -136,6 +138,19 @@ impl RasterTransition {
         })
     }
 
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
+    #[getter]
+    fn has_dark(&self) -> bool {
+        self.dark.is_some()
+    }
+
     /// Produce an independent immutable material without advancing a scene.
     fn sample(&self, py: Python<'_>, alpha: f64) -> PyResult<RasterImage> {
         if !alpha.is_finite() {
@@ -168,6 +183,15 @@ pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn production_raster_animation_acceptance() {
+        crate::with_python_test_module("raster animation", |py, _module, globals| {
+            let text = std::ffi::CString::new(include_str!("../tests/raster_animation.py")).unwrap();
+            py.run(text.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py)).expect("native raster animation lifecycle and frames");
+        });
+    }
+
     #[test]
     fn production_raster_transition_kernel_acceptance() {
         crate::with_python_test_module("raster transition", |py, _module, globals| {

@@ -6,6 +6,8 @@ on:
       - '.github/workflows/live-raster.yml'
       - 'crates/fmn-library/src/image.rs'
       - 'crates/fmn-python/src/portal_raster.rs'
+      - 'crates/fmn-python/src/portal_raster_transition.rs'
+      - 'crates/fmn-python/python/fmn_python/raster_animation.py'
       - 'crates/fmn-python/src/portal_texture.rs'
       - 'crates/fmn-python/python/fmn_python/surface_textures.py'
       - 'crates/fmn-python/python/fmn_python/scene_state.py'
@@ -58,7 +60,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/raster-wheel 2>&1 | tee /tmp/raster-build.log
           python -m venv target/raster-venv
           target/raster-venv/bin/python -m pip install 'numpy==2.5.2' target/raster-wheel/*.whl
-          for suite in raster_authoring raster_textures raster_frames camera_readback camera_snapshot; do
+          for suite in raster_authoring raster_textures raster_frames raster_transition_kernel raster_animation camera_readback camera_snapshot; do
             target/raster-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/raster-$suite.log"
           done
       - name: Preserve source and evidence
@@ -69,6 +71,7 @@ jobs:
           rustfmt --edition 2024 --emit stdout crates/fmn-python/src/portal_raster.rs > /tmp/raster-formatted-portal.rs
           rustfmt --edition 2024 --emit stdout crates/fmn-library/src/image.rs > /tmp/raster-formatted-library.rs
           rustfmt --edition 2024 --config skip_children=true --emit stdout crates/fmn-python/src/portal_texture.rs > /tmp/raster-formatted-texture.rs
+          rustfmt --edition 2024 --emit stdout crates/fmn-python/src/portal_raster_transition.rs > /tmp/raster-formatted-transition.rs
           git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

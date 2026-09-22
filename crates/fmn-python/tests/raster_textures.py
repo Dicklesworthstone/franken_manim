@@ -158,20 +158,29 @@ class RasterTextureTests(unittest.TestCase):
             obj.rotate(m.PI, axis=m.UP)
             frame = np.frombuffer(capture(obj).pixels(), dtype=np.uint8).reshape(64, 80, 4)
             self.assertGreater(frame[32, 40, 2], 240)
+            records = obj.data.copy()
             for method in ('set_textures', 'set_pixel_array'):
-                with self.assertRaisesRegex(m._CapabilityError, 'not interpolated'):
-                    getattr(obj.animate, method)(self.red)
+                obj.set_pixel_array(self.green, dark_pixels=self.blue)
+                animation = getattr(obj.animate(rate_func=m.linear), method)(self.red).build()
+                animation.begin(); animation.interpolate(.5)
+                expected = pixels((188, 188, 0, 255), (6,5))
+                np.testing.assert_array_equal(obj.get_pixel_array(), expected)
+                animation.finish()
+                np.testing.assert_array_equal(obj.get_pixel_array(), self.red)
+                np.testing.assert_array_equal(obj.data, records)
 
-    def test_material_builder_refuses_instead_of_silently_dropping_target_pixels(self):
+    def test_material_builder_input_failure_preserves_both_material_sides(self):
         for obj in (m.TexturedSurface(surface(), self.red, self.blue),
                     m.TexturedGeometry(geometry(), self.red)):
             before = obj.data.copy(), obj.get_pixel_array().copy()
+            failure = ValueError('material conversion failed')
             class Explodes:
                 def __array__(self, *args, **kwargs):
-                    raise AssertionError('unsupported animation must not convert input')
+                    raise failure
             for method in ('set_textures', 'set_pixel_array'):
-                with self.assertRaisesRegex(m._CapabilityError, 'not interpolated'):
+                with self.assertRaises(ValueError) as caught:
                     getattr(obj.animate, method)(Explodes())
+                self.assertIs(caught.exception, failure)
             np.testing.assert_array_equal(obj.data, before[0])
             np.testing.assert_array_equal(obj.get_pixel_array(), before[1])
 

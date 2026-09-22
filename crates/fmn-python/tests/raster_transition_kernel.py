@@ -47,6 +47,10 @@ class RasterTransitionKernelTests(unittest.TestCase):
     def test_mixed_input_transfer_is_decoded_before_blending_and_exact_at_endpoints(self):
         start = m.ImageMobject.from_bytes(gamma_png((128, 128, 128, 255)))
         saved = start.copy()
+        self.assertFalse(m._raster_images_equal(start, m.ImageMobject(pixels((128, 128, 128, 255)))))
+        camera = m.Camera(resolution=(24, 16))
+        rendered = np.frombuffer(camera.capture_snapshot(start).pixels(), dtype=np.uint8).reshape(16,24,4)
+        np.testing.assert_array_equal(rendered[8,12], [188,188,188,255])
         end = resource(pixels((0, 0, 0, 255)))
         plan = m._RasterTransition(start, end)
         # Linear 128/255 at half strength => sRGB 137, not encoded-space 64.

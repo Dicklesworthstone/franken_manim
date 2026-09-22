@@ -206,19 +206,21 @@ class RasterAuthoringTests(unittest.TestCase):
             image.pixel_width = 99
         self.assertEqual(image.pixel_width, 6)
 
-    def test_raster_builder_refuses_before_evaluating_input_or_advancing_scene(self):
+    def test_raster_builder_input_failure_preserves_pixels_without_advancing_scene(self):
         image = m.ImageMobject(pixels())
         scene = m.Scene()
         scene.add(image)
         before = scene.time(), image.data.copy(), capture(image).png()
+        failure = ValueError('authored raster input failed')
         class Explodes:
             def __array__(self, *args, **kwargs):
-                raise AssertionError('raster animation must not evaluate pixel inputs')
+                raise failure
             def __fspath__(self):
-                raise AssertionError('raster animation must not evaluate path inputs')
+                raise failure
         for method in ('set_image', 'set_pixel_array'):
-            with self.assertRaisesRegex(m._CapabilityError, 'not interpolated'):
+            with self.assertRaises(ValueError) as caught:
                 getattr(image.animate, method)(Explodes())
+            self.assertIs(caught.exception, failure)
         self.assertEqual(scene.time(), before[0])
         np.testing.assert_array_equal(image.data, before[1])
         self.assertEqual(capture(image).png(), before[2])

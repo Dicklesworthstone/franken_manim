@@ -76,11 +76,71 @@ scene.add(image)
 scene.wait(1)
 ```
 
-Raster-to-raster morphing is not implemented by the generic record-field
-animation. `.animate.set_image(...)`, `.animate.set_pixel_array(...)` and
-`.animate.set_textures(...)` explicitly refuse instead of silently losing the
-new pixels. Ordinary image placement/opacity animations remain available.
-Use the normal updater path above to publish a sequence of generated rasters.
+Raster transitions now use the shared Animation lifecycle and a native texture
+interpolation plan. The image/material setters have dedicated `.animate`
+overrides rather than silently leaving pixels out of a record-field transform:
+
+```python
+scene.play(image.animate(run_time=1).set_pixel_array(next_rgba))
+scene.play(material.animate(run_time=1).set_textures(next_light, next_dark))
+```
+
+For explicit compositions or independent animation settings:
+
+```python
+from fmn_python.raster_animation import RasterTransition
+
+scene.play(RasterTransition(image, next_rgba, run_time=1, rate_func=linear))
+scene.play(Succession(
+    RasterTransition(image, blue_rgba, run_time=1),
+    RasterTransition(image, red_rgba, run_time=1),
+))
+```
+
+PNG `gAMA` metadata is carried into native image resources; an `sRGB` chunk
+takes precedence and untagged images remain sRGB. Raw decoded bytes are not
+changed or pre-corrected by this metadata handoff.
+
+Target inputs are copied/decoded once at animation construction. Each starting
+material is captured at `begin()`, so a later Succession member begins from the
+preceding member's actual result, not stale construction-time pixels. Input
+paths are informational after decoding and are not reopened during playback.
+
+Lumen's existing native sampler decodes each endpoint's transfer function and
+samples both on a common UV lattice. The lattice uses the larger width and
+height of each corresponding side; the output product and total decoded
+endpoint storage are checked before allocating. Interpolation is in
+**premultiplied linear light**, then encoded as an immutable sRGB RGBA8 image.
+Opaque black/white halfway is 188, not 128. Transparent hidden RGB does not leak
+into visible edges. The exact endpoints restore their original resources,
+including transfer metadata, dimensions, alpha and hidden RGB.
+
+Light and dark sides are sampled and published as one material revision. A
+missing dark side uses that endpoint's light image during the transition, then
+is truly absent again at its endpoint. Geometry, UV coordinates, placement and
+per-vertex opacity do not interpolate as a side effect of changing pixels.
+Native placement and a `RasterTransition` may share a `Scene.play` invocation.
+Method chaining on a raster builder still follows the existing override rule
+and refuses; this feature does not change other custom animation overrides.
+
+`rate_func`, `time_span`, `final_alpha_value`, `remover`, suspension and composition
+use the existing Animation protocol. A there-and-back rate ends on the starting
+material. Overshooting eased values clamp to endpoint coverage; nonfinite values
+raise before publishing an image. Failed/cancelled execution releases acquired
+animation flags and decoded plans, retaining the last published scene state;
+it does not rewind authored side effects or scene time. Owned output sessions
+retain their existing cancellation/no-partial-publication rules.
+
+The per-transition decoded endpoint ceiling is 256 MiB (counting explicit
+light/dark endpoints conservatively), and each intermediate side has the
+existing 16,777,216-pixel limit. Endpoint samplers must agree. These are per-plan
+limits, not a global history or process memory budget. Raster interpolation is
+standard image animation, not certification of arbitrary Python inputs. Generic
+`Transform` between different image-bearing objects is not changed here; use the
+dedicated setter overrides or `RasterTransition` for pixel interpolation.
+
+The updater path above remains appropriate for externally generated sequences;
+`demo/python/raster_transition.py` demonstrates native interpolation instead.
 
 The callback is ordinary authored Python. There is no image worker thread,
 independent clock or hidden video player. The immutable resource is frozen into
@@ -103,6 +163,6 @@ caller's synchronization responsibility. Retained frames/checkpoints consume
 memory for distinct raster generations; the per-raster admission limit is not a
 global scene-history memory limit.
 
-Acceptance suites are `raster_authoring.py`, `raster_textures.py` and
-`raster_frames.py` under `crates/fmn-python/tests`. They exercise actual native
+Acceptance suites are `raster_authoring.py`, `raster_textures.py`,
+`raster_frames.py`, `raster_transition_kernel.py` and `raster_animation.py` under `crates/fmn-python/tests`. They exercise actual native
 resources, geometry, checkpoints, captures and ordered PNG frame publication.
