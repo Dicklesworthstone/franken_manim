@@ -192,8 +192,142 @@ class LiveGraphingAcceptance(unittest.TestCase):
             self.assertEqual(artifacts[0], artifacts[1])
 
 
-suite = unittest.defaultTestLoader.loadTestsFromTestCase(LiveGraphingAcceptance)
-if suite.countTestCases() != 8:
+class RiemannAcceptance(unittest.TestCase):
+    def axes(self):
+        return m.Axes(x_range=(-2, 2, 1), y_range=(-2, 2, 1), width=8, height=4)
+
+    def test_bins_follow_rotated_stretched_and_three_dimensional_axes(self):
+        for angle, axis in ((math.pi / 2, m.OUT), (math.pi, m.OUT), (.7, m.RIGHT)):
+            for height in (1., -1.):
+                with self.subTest(angle=angle, height=height):
+                    axes = self.axes().stretch(1.3, 0).rotate(angle, axis).shift(m.UP)
+                    graph = axes.get_graph(lambda x: height)
+                    rects = axes.get_riemann_rectangles(graph, (0, 1), dx=.4)
+                    self.assertEqual(len(rects), 3)
+                    for rect, (left, right) in zip(rects, ((0, .4), (.4, .8), (.8, 1))):
+                        self.assertIsInstance(rect, m.Rectangle)
+                        np.testing.assert_allclose(rect.get_points()[::2], [
+                            axes.c2p(left, 0), axes.c2p(right, 0), axes.c2p(right, height),
+                            axes.c2p(left, height), axes.c2p(left, 0)], atol=2e-6)
+                        self.assertEqual(rect.positive, height > 0)
+
+    def test_partial_last_bin_and_original_range_are_preserved(self):
+        axes = self.axes()
+        graph = axes.get_graph(lambda x: 1)
+        for domain in ([0., 1.], np.array([0., 1.])):
+            original = np.array(domain, copy=True)
+            rects = axes.get_riemann_rectangles(graph, domain, dx=.3)
+            self.assertEqual(len(rects), 4)
+            last = np.array([axes.p2c(p) for p in rects[-1].get_points()[::2]])
+            np.testing.assert_allclose(last[:, 0], [.9, 1, 1, .9, .9], atol=1e-6)
+            np.testing.assert_array_equal(domain, original)
+        exact = axes.get_riemann_rectangles(graph, (0, .1 + .2), dx=.1)
+        self.assertEqual(len(exact), 3)
+
+    def test_three_value_domain_controls_step_and_final_sample_is_clipped(self):
+        axes = self.axes()
+        samples = []
+        graph = axes.get_graph(lambda x: x)
+        graph.underlying_function = lambda x: samples.append(x) or 1.
+        rects = axes.get_riemann_rectangles(graph, (0, 1, .4), dx=.2, input_sample_type='right')
+        self.assertEqual(len(rects), 3)
+        np.testing.assert_allclose(samples, [.4, .8, 1.])
+
+    def test_sampling_modes_use_each_actual_bin(self):
+        axes = self.axes()
+        graph = axes.get_graph(lambda x: x)
+        for mode, samples in (('left', [0., .4, .8]), ('right', [.4, .8, 1.]),
+                              ('center', [.2, .6, .9])):
+            rects = axes.get_riemann_rectangles(graph, (0, 1), dx=.4, input_sample_type=mode)
+            for rect, expected in zip(rects, samples):
+                self.assertAlmostEqual(axes.p2c(rect.get_points()[4])[1], expected, places=5)
+
+    def test_unsigned_area_keeps_negative_geometry_and_gradient(self):
+        axes = self.axes().rotate(math.pi)
+        graph = axes.get_graph(lambda x: -1)
+        for signed, color in ((True, m.RED), (False, m.BLUE)):
+            rects = axes.get_riemann_rectangles(graph, (0, 1), dx=.5,
+                                               colors=(m.BLUE,), show_signed_area=signed)
+            for rect in rects:
+                self.assertFalse(rect.positive)
+                np.testing.assert_allclose(m.color_to_rgb(rect.get_fill_color()), m.color_to_rgb(color))
+                self.assertAlmostEqual(axes.p2c(rect.get_points()[4])[1], -1., places=5)
+
+    def test_styles_are_native_and_zero_height_is_not_negative(self):
+        axes = self.axes()
+        graph = axes.get_graph(lambda x: 0)
+        rect = axes.get_riemann_rectangles(graph, (0, 1), dx=1., colors=(m.BLUE,),
+                                          fill_opacity=.3, stroke_color=m.YELLOW,
+                                          stroke_width=7, stroke_background=False)[0]
+        self.assertTrue(rect.positive)
+        np.testing.assert_allclose(rect.get_fill_opacities(), .3)
+        np.testing.assert_allclose(rect.get_stroke_widths(), 7)
+        np.testing.assert_allclose(m.color_to_rgb(rect.get_stroke_color()), m.color_to_rgb(m.YELLOW))
+        self.assertFalse(rect.stroke_behind)
+
+    def test_invalid_requests_are_rejected_before_authored_callbacks(self):
+        axes = self.axes()
+        graph = axes.get_graph(lambda x: 1)
+        called = []
+        graph.underlying_function = lambda x: called.append(x) or 1
+        requests = [dict(dx=0), dict(dx=-1), dict(dx=float('nan')), dict(dx=1e-10),
+                    dict(x_range=(1, 0)), dict(x_range=(0, float('inf'))),
+                    dict(x_range=(0, 1, 2, 3)), dict(input_sample_type='middle'),
+                    dict(fill_opacity=float('nan')), dict(stroke_width=-1), dict(colors=())]
+        for options in requests:
+            with self.subTest(options=options), self.assertRaises((TypeError, ValueError)):
+                axes.get_riemann_rectangles(graph, **options)
+        self.assertEqual(called, [])
+        self.assertEqual(len(axes.get_riemann_rectangles(graph, (1, 1))), 0)
+        self.assertEqual(called, [])
+
+    def test_geometric_graph_and_discontinuity_fail_without_editing_source(self):
+        axes = self.axes()
+        graph = m.VMobject().set_points_as_corners([axes.c2p(0, 1), axes.c2p(.4, 1)])
+        right = m.VMobject().set_points_as_corners([axes.c2p(.6, -1), axes.c2p(1, -1)])
+        graph.add_subpath(right.get_points())
+        before = graph.get_points().copy()
+        rects = axes.get_riemann_rectangles(graph, (0, .4), dx=.2)
+        self.assertEqual(len(rects), 2)
+        with self.assertRaisesRegex(ValueError, 'discontinuity'):
+            axes.get_riemann_rectangles(graph, (0, 1), dx=1, input_sample_type='center')
+        np.testing.assert_array_equal(graph.get_points(), before)
+
+    def test_native_render_matches_explicit_chart_polygons_at_each_thread_count(self):
+        def scene_class(use_helper):
+            class AreaScene(m.Scene):
+                def construct(self):
+                    axes = m.Axes(x_range=(-2, 2, 1), y_range=(-2, 2, 1), width=8, height=4)
+                    axes.rotate(math.pi / 2)
+                    if use_helper:
+                        graph = axes.get_graph(lambda x: 1)
+                        objects = axes.get_riemann_rectangles(graph, (0, 1), dx=.4,
+                                                              colors=(m.WHITE,), stroke_width=0)
+                    else:
+                        objects = m.VGroup(*(m.Polygon(*[axes.c2p(x, y) for x, y in
+                            ((a, 0), (b, 0), (b, 1), (a, 1))], fill_color=m.WHITE,
+                            fill_opacity=1, stroke_width=0) for a, b in ((0, .4), (.4, .8), (.8, 1))))
+                    self.add(objects)
+                    self.wait(.25)
+            return AreaScene
+        with tempfile.TemporaryDirectory(prefix='fmn-riemann-') as directory:
+            outputs = []
+            for helper, threads in ((False, 1), (True, 1), (True, 4)):
+                path = Path(directory) / f'area-{helper}-{threads}.y4m'
+                render_scene(scene_class(helper), path, format='y4m', resolution=(160, 90), fps=8, threads=threads)
+                data = path.read_bytes()
+                width, height, frames = y4m_frames(data)
+                self.assertEqual(len(frames), 2)
+                luma = np.frombuffer(frames[0][:width * height], dtype=np.uint8)
+                self.assertGreater(np.count_nonzero(luma > 100), 200)
+                outputs.append(data)
+            self.assertEqual(outputs[0], outputs[1])
+            self.assertEqual(outputs[1], outputs[2])
+
+
+suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
+                           for cls in (LiveGraphingAcceptance, RiemannAcceptance))
+if suite.countTestCases() != 17:
     raise AssertionError('live graph native acceptance inventory drift')
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():

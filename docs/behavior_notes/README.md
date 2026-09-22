@@ -52,6 +52,7 @@ migration guidance users read:
 | BN-16 | Polygon default corner rounding measures the complete cyclic edge set | [BN-16-polygon-corner-radius.md](BN-16-polygon-corner-radius.md) | W10 | Draft |
 | BN-17 | Image sampling rejects every outside point; image acquisition is explicit and bounded | [BN-17-image-input-and-sampling.md](BN-17-image-input-and-sampling.md) | W10 | Draft |
 | BN-18 | `PMobject.ingest_submobjects` consumes children instead of double-drawing stacked points | [BN-18-pmobject-ingest.md](BN-18-pmobject-ingest.md) | W10 | Draft |
+| BN-20 | Calculus helpers use transformed axes, bounded intervals and signed-area semantics | [BN-20-calculus-geometry.md](BN-20-calculus-geometry.md) | W7/W10 | Draft |
 
 BN-10, BN-12, BN-13, BN-14, BN-15, BN-16, BN-17, and BN-18 grew past §16.8's seed list, which is expected — the
 seed names the differences the plan could foresee, and a workstream that finds
