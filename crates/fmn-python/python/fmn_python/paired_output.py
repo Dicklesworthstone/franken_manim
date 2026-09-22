@@ -27,6 +27,55 @@ def _path(value):
     return Path(os.path.abspath(text))
 
 
+def companion_png_path(destination, format, *, subdivide=False):
+    """A file's stem.png, or a collection directory's adjacent name.png."""
+    path = _path(destination)
+    return (path.with_name(path.name + ".png") if subdivide or format == "png_sequence"
+            else path.with_suffix(".png"))
+
+
+def validate_paired_mode(native, format, *, reproducible=False, checkpoint=None):
+    if format not in _CLIPS:
+        raise ValueError("paired output requires gif, y4m, png_sequence, mp4, mov, or wav")
+    if reproducible:
+        raise RuntimeError("CAPABILITY: paired final PNGs are standard-only, not certified output")
+    if checkpoint is not None:
+        raise ValueError("paired outputs cannot reuse single-artifact checkpoint receipts")
+    if not callable(getattr(getattr(native, "_CameraCapture", None), "prepare_png", None)):
+        raise RuntimeError("CAPABILITY: paired output requires the matching native PNG preparation API")
+
+
+def take_last_frame_option(options, value_flags):
+    """Consume only this switch, never an option value that resembles it."""
+    forwarded, selected, index = [], False, 0
+    while index < len(options):
+        option = options[index]
+        if option in {"--save-last-frame", "--save_last_frame"}:
+            if selected:
+                raise ValueError("--save-last-frame must not be repeated")
+            selected = True
+        else:
+            forwarded.append(option)
+            if option in value_flags and index + 1 < len(options):
+                index += 1
+                forwarded.append(options[index])
+        index += 1
+    return forwarded, selected
+
+
+PAIRED_HELP = """Animation plus final image:
+  --save-last-frame, --save_last_frame
+      Also publish one final RGBA PNG without executing the Scene again.
+      Files use their stem plus .png; clip/sequence directories use an adjacent
+      directory-name.png. Applies to one scene, named batches, and --write_all.
+      --subdivide retains per-call clips and adds a single final image.
+      Not combined with -s/--skip_animations, still-only formats, certified
+      output or checkpoint/resume. Each artifact is independently no-clobber.
+      Late still-publication failure retains the primary output and reports
+      an incomplete pair, never whole-scene success or destructive rollback.
+"""
+
+
 @dataclass(frozen=True)
 class PairedRenderResult:
     destination: Path
@@ -214,16 +263,37 @@ def paired_render_session(scene, destination, still_destination, *, format=None,
     return PairedRenderSession(primary, still_destination)
 
 
-def render_scene_with_still(scene, destination, still_destination, *, scene_kwargs=None, **options):
+def render_scene_with_still(scene, destination, still_destination, *, scene_kwargs=None,
+                            format=None, resolution=None, fps=None, threads=None,
+                            animation_range=None, subdivide=False, max_segments=10_000,
+                            _output_options=None):
     """Execute a scene exactly once and return the receipts of both artifacts."""
     native = importlib.import_module("manimlib")
-    # Freeze caller paths before executing an authored constructor.
+    # Freeze caller paths and admit the whole mode before an authored constructor.
     destination, still_destination = _path(destination), _path(still_destination)
+    if format is None:
+        format = destination.suffix.lower().lstrip(".") or "png_sequence"
+    validate_paired_mode(native, format)
+    options = dict(format=format, resolution=resolution, fps=fps, threads=threads,
+                   animation_range=animation_range)
+    if not isinstance(subdivide, bool):
+        raise TypeError("subdivide must be bool")
+    if subdivide:
+        max_segments = rendering._positive_integer(max_segments, "max_segments", 100_000)
+    elif max_segments != 10_000:
+        raise ValueError("max_segments requires subdivide=True")
     if isinstance(scene, type) and issubclass(scene, native.Scene):
         scene = scene(**({} if scene_kwargs is None else dict(scene_kwargs)))
     elif scene_kwargs is not None:
         raise TypeError("scene_kwargs is valid only when rendering a Scene class")
-    session = paired_render_session(scene, destination, still_destination, **options)
+    if _output_options:
+        rendering._apply_output_options(scene, _output_options)
+    if subdivide:
+        from .subdivision_rendering import subdivided_render_session
+        primary = subdivided_render_session(scene, destination, max_segments=max_segments, **options)
+        session = PairedRenderSession(primary, still_destination)
+    else:
+        session = paired_render_session(scene, destination, still_destination, **options)
     return rendering._run_owned_scene_render(scene, session, native)
 
 

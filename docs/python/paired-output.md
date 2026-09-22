@@ -47,7 +47,7 @@ is explicitly supplied. The normal writer paths are used for both outputs.
 With `subdivide_output=True`, the primary is the existing per-call clip collection
 and one final PNG accompanies it. An explicit ordinary destination or format
 continues to select a single output; use the paired functions to select two
-explicitly. No console option is changed by this API.
+explicitly.
 
 ## Failure and publication semantics
 
@@ -88,3 +88,51 @@ publication, `snapshot.prepare_png(...)` returns an owner with `commit()` and
 `abort()`; aborting or dropping an unpublished preparation removes only its
 private native file. A committed preparation returns the same receipt on repeated
 commit and never deletes the published image on abort.
+
+## Console and ordered batches
+
+```bash
+fmn-python scenes.py Example --format y4m --save-last-frame
+fmn-python scenes.py Intro Main Outro --format mp4 --save-last-frame --robot
+fmn-python scenes.py --write_all --format gif --save_last_frame --keep-going
+fmn-python scenes.py Example --format y4m --subdivide --save-last-frame
+```
+
+Both spellings select the same boolean option. Native option parsing still owns
+resolution, fps, codec parameters and output directories. This switch never
+consumes another flag's value, and duplicate aliases are rejected. It cannot be
+combined with `-s`/`--skip_animations`, still-only formats, certified output, or
+checkpoint/resume. Incompatible modes are refused before importing scene code.
+
+A single file output `Example.mp4` is paired with `Example.png`. Directory
+outputs use an adjacent image: `Example/frames` with `Example/frames.png`, or
+`Example/clips` with `Example/clips.png`. Neither the still nor an extra frame
+is inserted into the primary sequence/clip collection. The usual `--video_dir`
+meaning is retained: a destination for a single scene and an output root for
+named/`--write_all` batches.
+
+The same workflow is available programmatically:
+
+```python
+from fmn_python import render_scenes
+
+report = render_scenes(
+    {"intro": Intro, "main": Main}, "outputs",
+    format="y4m", save_last_frame=True, threads=4,
+)
+for outcome in report.outcomes:
+    print(outcome.name, outcome.result.primary.digest, outcome.result.still.digest)
+```
+
+Batch admission checks **both destinations for all selected scenes before the
+first constructor**. Each scene executes once, sequentially on its creating
+thread. Success requires both receipts. A failure retains an incomplete paired
+receipt in the outcome when available; `continue_on_error=True` / `--keep-going`
+continues only after ordinary exceptions. KeyboardInterrupt/SystemExit still
+cancel the batch, preserving completed results and marking later jobs not run.
+
+Robot output emits one JSON record; source/constructor chatter goes to stderr.
+Single success has kind `render-paired` with a `pair` object. Batch outcomes
+carry the pair under `result`; failures never claim whole-scene success merely
+because the movie was already published. Animation-range selection applies to
+the existing primary execution, and the PNG observes the resulting final state.

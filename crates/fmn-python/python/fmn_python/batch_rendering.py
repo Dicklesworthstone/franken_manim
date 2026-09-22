@@ -19,6 +19,9 @@ from .batch_checkpoint import BatchCheckpoint
 from .batch_provenance import BatchProvenance, has_provenance, validate_batch_mode
 from .render_selection import animation_range as _animation_range
 from .rendering import RenderResult, SourceInputs, _FORMATS, _positive_integer, render_scene
+from .paired_output import (
+    PairedRenderResult, companion_png_path, render_scene_with_still, validate_paired_mode,
+)
 from .subdivision import SubdividedRenderResult
 from .subdivision_rendering import render_subdivided_scene, validate_subdivided_mode
 
@@ -39,7 +42,7 @@ class SceneRenderOutcome:
     name: str
     destination: Path
     status: str
-    result: RenderResult | SubdividedRenderResult | None = None
+    result: RenderResult | SubdividedRenderResult | PairedRenderResult | None = None
     error_type: str | None = None
     message: str | None = None
     notes: tuple[str, ...] = ()
@@ -203,6 +206,7 @@ def render_scenes(
     on_result: Callable[[SceneRenderOutcome], Any] | None = None,
     max_jobs: int = 1024,
     subdivide: bool = False, max_segments: int = 10_000,
+    save_last_frame: bool = False,
     animation_range: tuple[int, int | None] | None = None,
     checkpoint: os.PathLike[str] | str | None = None,
     resume: bool = False, resume_key: str | None = None,
@@ -223,8 +227,14 @@ def render_scenes(
     completed-clip budget per scene. Successful outcomes carry collection
     receipts; failed/cancelled outcomes retain partial collection receipts in
     result, without claiming whole-scene success. This mode does not accept
-    still output, reproducibility, or single-artifact checkpoint/resume. All
+    still-only output, reproducibility, or single-artifact checkpoint/resume. All
     selection, name/collision and mode checks precede scene construction.
+
+    save_last_frame=True composes each primary with one prepared native PNG,
+    including subdivided output. File primaries use stem.png; directories use
+    adjacent directory-name.png. Both paths for every job are preflighted.
+    Outcomes retain complete/partial paired receipts. This mode does not reuse
+    single-artifact checkpoints or inherit certification from another output.
 
     By default the first ordinary failure raises BatchRenderError with partial
     receipts and the original cause. continue_on_error returns a report with
@@ -255,6 +265,8 @@ def render_scenes(
     """
     if not isinstance(format, str) or format not in _FORMATS:
         raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
+    if not isinstance(save_last_frame, bool):
+        raise TypeError("save_last_frame must be bool")
     if not isinstance(subdivide, bool):
         raise TypeError("subdivide must be bool")
     if subdivide:
@@ -285,6 +297,8 @@ def render_scenes(
         raise ValueError("subdivision requires at most 16777216 pixels and 1..96 threads")
     if subdivide:
         validate_subdivided_mode(native, format, reproducible=reproducible, checkpoint=checkpoint)
+    if save_last_frame:
+        validate_paired_mode(native, format, reproducible=reproducible, checkpoint=checkpoint)
     validate_batch_mode(native, format, reproducible, checkpoint)
     owner = nullcontext(None) if checkpoint is None else BatchCheckpoint(checkpoint, resume=resume, key=resume_key)
     jobs, destinations = _plan(scenes, directory, format, native, maximum, None, subdivide=subdivide)
@@ -295,6 +309,11 @@ def render_scenes(
         for destination in destinations:
             if os.path.lexists(destination) and destination not in existing:
                 raise FileExistsError(f"render destination already exists: {destination}")
+        still_destinations = ([companion_png_path(path, format, subdivide=subdivide) for path in destinations]
+                              if save_last_frame else [])
+        for still_destination in still_destinations:
+            if os.path.lexists(still_destination):
+                raise FileExistsError(f"final PNG destination already exists: {still_destination}")
         provenance = (BatchProvenance(native, format, sources, runtime_identities, destinations)
                       if reproducible else None)
         outcomes = [SceneRenderOutcome(job.name, path, "not_run") for job, path in zip(jobs, destinations)]
@@ -315,13 +334,16 @@ def render_scenes(
             if job.name not in completed:
                 try:
                     provenance_options = {} if provenance is None else provenance.options(path)
-                    render = render_subdivided_scene if subdivide else render_scene
+                    render = (render_scene_with_still if save_last_frame else
+                              render_subdivided_scene if subdivide else render_scene)
                     kwargs = job.scene_kwargs
                     if journal is not None and kwargs is not None:
                         kwargs = journal.constructor_kwargs(index)
                     receipt = render(job.scene, path, format=format, resolution=resolution,
                                            fps=fps, threads=threads, scene_kwargs=kwargs,
                                            **provenance_options,
+                                           **({"still_destination": still_destinations[index], "subdivide": subdivide}
+                                              if save_last_frame else {}),
                                            **({"max_segments": max_segments} if subdivide else {}),
                                            **({} if not _output_options else {"_output_options": _output_options}),
                                            **({} if selection is None else {"animation_range": selection}))
@@ -332,12 +354,14 @@ def render_scenes(
                     kind, message = _error_fields(error)
                     outcomes[index] = SceneRenderOutcome(job.name, path, "failed", error_type=kind, message=message,
                                                         notes=_error_notes(error),
-                                                        result=_partial_subdivision(error, path) if subdivide else None)
+                                                        result=(_partial_pair(error, path) if save_last_frame else
+                                                                _partial_subdivision(error, path) if subdivide else None))
                 except BaseException as error:
                     kind, message = _error_fields(error)
                     outcomes[index] = SceneRenderOutcome(job.name, path, "cancelled", error_type=kind, message=message,
                                                         notes=_error_notes(error),
-                                                        result=_partial_subdivision(error, path) if subdivide else None)
+                                                        result=(_partial_pair(error, path) if save_last_frame else
+                                                                _partial_subdivision(error, path) if subdivide else None))
                     _attach_result(error, outcomes, reproducible=reproducible)
                     try:
                         _record_checkpoint(journal, outcomes)
@@ -356,6 +380,18 @@ def render_scenes(
             if failure is not None and not continue_on_error:
                 raise BatchRenderError(BatchRenderResult(tuple(outcomes), reproducible=reproducible)) from failure
         return BatchRenderResult(tuple(outcomes), reproducible=reproducible)
+
+
+def _partial_pair(error, destination):
+    """Keep this job's immutable partial pair, including a published primary."""
+    try:
+        result = vars(error).get("render_pair_result")
+        if (isinstance(result, PairedRenderResult)
+                and result.destination == destination and not result.completed):
+            return result
+    except BaseException:
+        pass
+    return None
 
 
 def _partial_subdivision(error, destination):

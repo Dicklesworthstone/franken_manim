@@ -25,6 +25,10 @@ from .rendering import (
 from .scene_loading import SceneSource
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
+from .paired_output import (
+    PAIRED_HELP, PairedRenderResult, PairedRenderSession, companion_png_path,
+    take_last_frame_option, validate_paired_mode,
+)
 from .subdivision import SubdividedRenderResult
 from .subdivision_rendering import (
     SUBDIVISION_HELP, subdivided_render_session, take_subdivision_option, validate_subdivided_mode,
@@ -113,6 +117,14 @@ def _message(error):
 
 
 def _single_result(native, result, robot, source, selected):
+    if isinstance(result, PairedRenderResult):
+        return native._portal_cli_emit(
+            0, "success", "render-paired",
+            f"rendered {result.destination} and final PNG {result.still_destination}",
+            robot, source=source, scene=selected, rendered=True,
+            destination=str(result.destination), still_destination=str(result.still_destination),
+            pair=result.as_dict(),
+        )
     if isinstance(result, SubdividedRenderResult):
         samples = getattr(result, "sample_frames", None)
         count = samples if samples is not None else result.frame_count
@@ -138,6 +150,14 @@ def _single_result(native, result, robot, source, selected):
     )
 
 
+def _partial_output(session, subdivide):
+    if isinstance(session, PairedRenderSession):
+        return {"pair": session.partial_result.as_dict()}
+    if subdivide and session is not None:
+        return {"subdivision": session.partial_result.as_dict()}
+    return {}
+
+
 def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     """Own ordinary renders; leave non-render commands on their native route."""
     native_options, raw_positionals, switches = _tokens(arguments, _SELECTION_FLAGS)
@@ -157,13 +177,14 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             "Certified output, opener flags, and Studio",
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
-        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
+        text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + PAIRED_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
     batch = bool(write_all or len(raw_positionals) > 2)
     try:
+        native_options, paired = take_last_frame_option(native_options, _VALUE_FLAGS)
         native_options, subdivide = take_subdivision_option(native_options, _VALUE_FLAGS)
         native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
         if recovery and not batch:
@@ -176,6 +197,11 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(parser_args)
         options = select_still_format(options, native_options, still)
         output_options = _output_overrides(options)
+        if paired:
+            if still:
+                raise ValueError("--save-last-frame cannot be combined with --skip_animations/-s")
+            validate_paired_mode(native, options["format"],
+                                reproducible=bool(options.get("reproducible")), checkpoint=recovery.get("checkpoint"))
         if subdivide:
             if recovery:
                 raise ValueError("--subdivide cannot reuse single-artifact checkpoint receipts")
@@ -255,6 +281,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
                     **({"subdivide": True} if subdivide else {}),
+                    **({"save_last_frame": True} if paired else {}),
                     **({} if selection is None else {"animation_range": selection}),
                     **({} if not output_options else {"_output_options": output_options}),
                     **({"reproducible": True, "sources": lambda: loaded.sources}
@@ -283,6 +310,11 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                         raise FileExistsError(
                             f"manifest destination {sidecar} already exists; sidecars are no-clobber generations"
                         )
+                if paired:
+                    still_destination = companion_png_path(destination, options["format"], subdivide=subdivide)
+                    if os.path.lexists(still_destination):
+                        phase = "start"
+                        raise FileExistsError(f"final PNG destination already exists: {still_destination}")
                 phase = "construct"
                 scene = scenes[selected]()
                 phase = "start"
@@ -303,6 +335,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                         runtime_identities=_runtime_identities(native),
                         _native=native,
                     )
+                if paired:
+                    session = PairedRenderSession(session, still_destination)
                 with session:
                     phase = "execute"
                     try:
@@ -325,8 +359,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        destination=None if destination is None else str(destination),
                                        notes=list(_error_notes(error)),
                                        artifact_published=session is not None and session.artifact_published,
-                                       **({"subdivision": session.partial_result.as_dict()}
-                                          if subdivide and session is not None else {}))
+                                       **_partial_output(session, subdivide))
     except Exception as error:
         partial = getattr(error, "render_batch_result", None)
         if phase == "batch" and isinstance(partial, BatchRenderResult):
@@ -354,8 +387,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        destination=None if destination is None else str(destination),
                                        notes=list(_error_notes(error)),
                                        artifact_published=session is not None and session.artifact_published,
-                                       **({"subdivision": session.partial_result.as_dict()}
-                                          if subdivide and session is not None else {}))
+                                       **_partial_output(session, subdivide))
     if batch:
         return _emit_result(native, report, robot, source, destination)
     return _single_result(native, session.result, robot, source, selected)

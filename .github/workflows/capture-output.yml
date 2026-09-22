@@ -9,8 +9,11 @@ on:
       - 'crates/fmn-python/python/fmn_python/camera_capture.py'
       - 'crates/fmn-python/python/fmn_python/paired_output.py'
       - 'crates/fmn-python/python/fmn_python/rendering.py'
+      - 'crates/fmn-python/python/fmn_python/batch_rendering.py'
+      - 'crates/fmn-python/python/fmn_python/console_rendering.py'
       - 'crates/fmn-python/tests/capture_output.py'
       - 'crates/fmn-python/tests/paired_output.py'
+      - 'crates/fmn-python/tests/paired_output_cli.py'
       - 'crates/fmn-python/tests/test_paired_output_protocol.py'
   workflow_dispatch:
 permissions:
@@ -52,7 +55,7 @@ jobs:
       - name: Run native publication and existing output acceptance
         run: |
           set -euo pipefail
-          for suite in capture_output paired_output camera_snapshot camera_readback programmatic_rendering portal_initialization; do
+          for suite in capture_output paired_output paired_output_cli camera_snapshot camera_readback programmatic_rendering portal_initialization batch_rendering configured_subdivision reproducible_batch batch_checkpoint_acceptance; do
             target/capture-output-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/capture-output-$suite.log
           done
           target/capture-output-venv/bin/python -I crates/fmn-python/tests/test_paired_output_protocol.py 2>&1 | tee /tmp/capture-output-protocol.log
