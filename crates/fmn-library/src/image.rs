@@ -22,6 +22,7 @@
 //! the decoded pixels into Marionette's durable, content-addressed image
 //! resource. Lumen interns repeated resources and consumes these same UVs.
 
+use fmn_codec::png::ColorIntent;
 use fmn_codec::{JpegError, JpegLimits, PngError, PngLimits, decode_jpeg, decode_png};
 use fmn_core::constants::{DL, DR, UL, UR};
 use fmn_core::types::Vec3;
@@ -112,7 +113,22 @@ impl ImageMobject {
     /// Decode PNG bytes under explicit budgets (the untrusted-input path).
     pub fn from_png_with_limits(bytes: &[u8], limits: &PngLimits) -> Result<Self, ImageError> {
         let decoded = decode_png(bytes, limits).map_err(ImageError::Png)?;
-        Self::from_rgba8(decoded.width, decoded.height, decoded.rgba)
+        // The decoder normalizes sample layout, not transfer. Carry its color
+        // intent into Marionette so Lumen applies the transfer exactly once,
+        // matching direct Texture::decode and preserving checkpoint identity.
+        let color_space = match decoded.intent {
+            ColorIntent::Gamma { gamma_100000 } => ImageColorSpace::Gamma(gamma_100000),
+            ColorIntent::Srgb { .. } | ColorIntent::AssumedSrgb => ImageColorSpace::Srgb,
+        };
+        let resource = ImageResource::rgba8(
+            decoded.width,
+            decoded.height,
+            decoded.rgba,
+            color_space,
+            ImageSampler::default(),
+        )
+        .map_err(ImageError::Resource)?;
+        Self::from_resource(resource)
     }
 
     /// Decode JPEG bytes under explicit budgets (the untrusted-input path).
@@ -319,6 +335,49 @@ mod tests {
         }
         let png = encode_rgba8(4, 3, &rgba, CompressionLevel::Fast);
         (png, rgba)
+    }
+
+    fn intent_png(gamma: Option<u32>, srgb: bool) -> Vec<u8> {
+        let encoded = encode_rgba8(1, 1, &[128, 128, 128, 255], CompressionLevel::Fast);
+        let mut result = PNG_MAGIC.to_vec();
+        let mut cursor = PNG_MAGIC.len();
+        while cursor < encoded.len() {
+            let size = u32::from_be_bytes(encoded[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let kind = &encoded[cursor + 4..cursor + 8];
+            if kind == b"gAMA" {
+                if let Some(value) = gamma {
+                    let mut chunk = kind.to_vec();
+                    chunk.extend_from_slice(&value.to_be_bytes());
+                    result.extend_from_slice(&4u32.to_be_bytes());
+                    result.extend_from_slice(&chunk);
+                    result.extend_from_slice(&fmn_codec::checksum::crc32(&chunk).to_be_bytes());
+                }
+            } else if kind != b"sRGB" || srgb {
+                result.extend_from_slice(&encoded[cursor..cursor + size + 12]);
+            }
+            cursor += size + 12;
+        }
+        result
+    }
+
+    #[test]
+    fn png_gamma_metadata_survives_native_resource_construction() {
+        for gamma in [100_000, 50_000, 45_455] {
+            let image = ImageMobject::from_png(&intent_png(Some(gamma), false)).unwrap();
+            assert_eq!(image.pixels(), &[128, 128, 128, 255]);
+            let object: Mobject = image.into();
+            assert_eq!(object.image.as_ref().unwrap().color_space(), ImageColorSpace::Gamma(gamma));
+        }
+    }
+
+    #[test]
+    fn png_srgb_precedence_and_untagged_default_stay_srgb() {
+        for (gamma, srgb) in [(Some(100_000), true), (None, true), (None, false)] {
+            let object: Mobject = ImageMobject::from_png(&intent_png(gamma, srgb)).unwrap().into();
+            let image = object.image.as_ref().unwrap();
+            assert_eq!(image.color_space(), ImageColorSpace::Srgb);
+            assert_eq!(image.pixels(), &[128, 128, 128, 255]);
+        }
     }
 
     #[test]
