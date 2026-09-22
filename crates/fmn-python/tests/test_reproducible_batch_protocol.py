@@ -38,7 +38,7 @@ def load_batch():
     rendering = types.ModuleType(name + ".rendering")
     sys.modules[rendering.__name__] = rendering
     package.rendering = rendering
-    selected = {"RenderResult", "_source_snapshot", "_positive_integer"}
+    selected = {"RenderResult", "_source_snapshot", "_positive_integer", "_apply_output_options"}
     constants = {"_FORMATS", "SourceInputs", "_MAX_PROVENANCE_INPUTS", "_MAX_PROVENANCE_BYTES"}
     path = _PYTHON / "rendering.py"
     nodes = []
@@ -52,6 +52,7 @@ def load_batch():
             nodes.append(node)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), vars(rendering))
     rendering.render_scene = None  # Explicit native-output boundary double.
+    rendering.RenderSession = type("RenderSession", (), {})
     rendering._runtime_identities = lambda native: {"wheel": "legacy version"}
     checkpoint = types.ModuleType(name + ".batch_checkpoint")
     def no_checkpoint(*args, **kwargs):
