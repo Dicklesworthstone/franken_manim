@@ -26,6 +26,8 @@ print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
 
+python3 crates/fmn-python/tests/calculus_area.py
+
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
 python3 crates/fmn-python/tests/test_paired_output_protocol.py
 python3 crates/fmn-python/tests/test_scene_attributes.py

@@ -38,10 +38,43 @@ evaluating authored graph callbacks. A sample in a geometric graph's missing
 interval raises a ValueError instead of inventing a bridge across the gap.
 No rollback of effects performed inside authored callbacks is promised.
 
+## Integral regions follow the drawn graph
+
+`CoordinateSystem.get_area_under_graph` clips the current quadratic geometry at
+its actual data-coordinate bounds. Nonuniform sampling and nonlinear curve
+parameters no longer shift an integration boundary. Reversed paths and plain
+VMobjects work without `x_range` or `underlying_function` metadata. Each
+continuous component closes to its own baseline; discontinuity gaps remain
+unfilled. Requests outside the drawn domain are intersected with that domain,
+not extrapolated. Empty intersections and zero-width intervals are empty paths.
+
+The result is a detached static VMobject, with fill and projection styles but
+without the source's callbacks, analytic metadata or child objects. Source live
+views, records and scene membership are not changed. An analytic function may
+have changed since the last scene tick: the *drawn geometry*, not a fresh call
+to that function, defines this area. Use `always_redraw` or an updater to obtain
+a live region, as shown in `demo/python/integral_regions.py`.
+
+This replaces the Reference's assumption that a data-coordinate fraction is a
+curve-index fraction and its single baseline closure across all components.
+Clipping delegates to the native partial-reveal geometry owner, preserving
+quadratic handles; it is not a second sampling or rendering implementation.
+
+The supported region is a graph with x-monotone quadratic subpaths in the axes'
+affine chart. Foldbacks are rejected explicitly rather than choosing one
+branch. Bounds must contain exactly two finite, nondecreasing endpoints.
+Input and output paths share the live-graph record budget. General multi-valued
+parametric regions and nonlinear coordinate charts are not promised by this
+helper.
+
 ## Evidence
 
 `crates/fmn-python/tests/live_graphing.py` exercises native transformed geometry,
 negative and zero samples, clipped bins, all sampling modes, styles, invalid
 requests, disconnected paths and a rendered reference-polygon comparison.
-The same Y4M output is checked at one and four threads. These witnesses do not
-close the wider compatibility or certified-rendering gates.
+`crates/fmn-python/tests/calculus_area.py` adds analytic quadratic endpoint and
+handle checks, reversed/nonuniform paths, declared poles, source-view ownership,
+projection styles and tracker-driven region playback. Independently constructed
+native polygons verify that disconnected fills have no invented bridge.
+Y4M comparisons run at one and four threads. These witnesses do not close the
+wider compatibility or certified-rendering gates.
