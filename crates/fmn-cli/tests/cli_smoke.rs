@@ -44,18 +44,11 @@ impl Fixture {
                 Ok(()) => return Self { root },
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
-                    assert!(
-                        false,
-                        "could not create CLI smoke fixture {root:?}: {error}"
-                    );
-                    return Self { root };
+                    panic!("could not create CLI smoke fixture {root:?}: {error}");
                 }
             }
         }
-        assert!(false, "could not allocate a unique CLI smoke fixture");
-        Self {
-            root: std::env::temp_dir(),
-        }
+        panic!("could not allocate a unique CLI smoke fixture");
     }
 
     fn cache(&self) -> PathBuf {

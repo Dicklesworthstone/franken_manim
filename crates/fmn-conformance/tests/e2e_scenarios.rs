@@ -2063,7 +2063,9 @@ fn python_complex_readouts_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         || (last.width, last.height) != (192, 108)
         || first.rgba == last.rgba
     {
-        return Err(fail("complex readouts did not animate native 192x108 pixels"));
+        return Err(fail(
+            "complex readouts did not animate native 192x108 pixels",
+        ));
     }
     ctx.event(
         LogEvent::new("e2e.python.complex_readouts")
