@@ -5358,43 +5358,28 @@ impl BridgeMobject {
         epsilon: f64,
         normal_nudge: f64,
     ) -> PyResult<Bound<'py, PyList>> {
-        let func = uv_func.clone().unbind();
-        let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
-        let closure_errors = Rc::clone(&error_cell);
-        let surface = fmn_library::ParametricSurface::new(move |u, v| {
-            Python::attach(|py| {
-                let sample = func
-                    .bind(py)
-                    .call1((u, v))
-                    .and_then(|value| value.extract::<Vec<f64>>());
-                match sample {
-                    Ok(point) if point.len() >= 3 => [point[0], point[1], point[2]],
-                    Ok(_) => {
-                        if closure_errors.borrow().is_none() {
-                            *closure_errors.borrow_mut() = Some(PyValueError::new_err(
-                                "uv_func must return three components",
-                            ));
-                        }
-                        [0.0; 3]
-                    }
-                    Err(error) => {
-                        if closure_errors.borrow().is_none() {
-                            *closure_errors.borrow_mut() = Some(error);
-                        }
-                        [0.0; 3]
-                    }
-                }
-            })
-        })
-        .u_range(u_range.0, u_range.1)
-        .v_range(v_range.0, v_range.1)
-        .resolution(resolution.0, resolution.1)
-        .epsilon(epsilon)
-        .normal_nudge(normal_nudge)
-        .build();
-        if let Some(error) = error_cell.borrow_mut().take() {
-            return Err(error);
+        if slf.borrow().engine.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a native surface builder requires a detached target",
+            ));
         }
+        let spec = fmn_library::solids::SurfaceSpec {
+            u_range,
+            v_range,
+            resolution,
+            epsilon,
+            normal_nudge,
+            ..fmn_library::solids::SurfaceSpec::default()
+        };
+        // No engine borrow spans user code. The fallible native loop returns
+        // immediately, without sentinel probes or constructing a doomed grid.
+        // Fixed-array extraction also prevents an unbounded result Vec allocation.
+        let surface = spec
+            .try_sample(|u, v| uv_func.call1((u, v))?.extract::<[f64; 3]>())
+            .map_err(|error| match error {
+                fmn_library::solids::SurfaceSampleError::Callback(error) => error,
+                other => PyValueError::new_err(other.to_string()),
+            })?;
         install_native_tree(slf, factory, surface)
     }
 

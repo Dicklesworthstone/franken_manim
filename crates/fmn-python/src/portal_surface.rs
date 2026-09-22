@@ -164,6 +164,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fallible_native_surface_sampling() {
+        crate::with_python_test_module("fallible surface sampling", |py, _module, globals| {
+            let code = std::ffi::CString::new(include_str!("../tests/native_surface_sampling.py"))
+                .unwrap();
+            py.run(code.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_native_surface_sampling")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
+
+    #[test]
     fn native_surface_alignment_and_morph_output() {
         crate::with_python_test_module("UV surface alignment", |py, _module, globals| {
             let code =

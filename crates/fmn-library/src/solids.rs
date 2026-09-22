@@ -97,6 +97,82 @@ use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive, ShapeTag
 use crate::poly::{Polygon, Rectangle};
 use crate::style::Style;
 use crate::vmobject::{VMobject, v_group};
+use crate::{SamplingBudget, SamplingError};
+
+/// A surface construction refusal, separate from the caller's sample error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SurfaceSampleError<E> {
+    /// A dimension, aggregate size, or allocation exceeded its admitted budget.
+    Budget(SamplingError),
+    /// The specification cannot produce a finite record grid.
+    InvalidControl(&'static str),
+    /// A point or normal-control point is not finite and f32-representable.
+    InvalidSample {
+        /// Zero-based u-major sample index.
+        index: usize,
+        /// The failed evaluation or derived column.
+        probe: &'static str,
+    },
+    /// The original callback error. No further callback is evaluated.
+    Callback(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for SurfaceSampleError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(error) => std::fmt::Display::fmt(error, f),
+            Self::InvalidControl(name) => write!(f, "invalid surface sampling control: {name}"),
+            Self::InvalidSample { index, probe } => write!(
+                f,
+                "surface sample {index} ({probe}) must be finite and f32-representable"
+            ),
+            Self::Callback(error) => write!(f, "surface callback failed: {error}"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for SurfaceSampleError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Budget(error) => Some(error),
+            Self::Callback(error) => Some(error),
+            Self::InvalidControl(_) | Self::InvalidSample { .. } => None,
+        }
+    }
+}
+
+impl<E> From<SamplingError> for SurfaceSampleError<E> {
+    fn from(error: SamplingError) -> Self {
+        Self::Budget(error)
+    }
+}
+
+fn surface_storage<T>(count: usize) -> Result<Vec<T>, SamplingError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| SamplingError::AllocationFailed {
+            context: "surface",
+            samples: count,
+        })?;
+    Ok(values)
+}
+
+fn surface_record(point: Vec3) -> bool {
+    point
+        .iter()
+        .all(|v| v.is_finite() && v.abs() <= f64::from(f32::MAX))
+}
+
+// Keep exactly the arithmetic used by linspace; do not substitute an FMA or
+// a lerp, since sampled surface and normal-control bytes are an oracle.
+fn surface_station(range: (f64, f64), count: usize, index: usize) -> f64 {
+    if count <= 1 {
+        range.0
+    } else {
+        range.0 + (range.1 - range.0) / (count - 1) as f64 * index as f64
+    }
+}
 
 /// The Reference's `Surface(resolution=(101, 101))` default.
 pub const SURFACE_RESOLUTION: (usize, usize) = (101, 101);
@@ -288,47 +364,159 @@ impl SurfaceSpec {
     /// Sample `uv_func` over the grid: points, `d_normal_point`, and the
     /// triangle indices, with the Reference's epsilon semantics (module
     /// docs).
+    ///
+    /// # Panics
+    /// The specification or produced records violate the default sampling
+    /// contract. For untrusted input use [`Self::try_sample`] instead.
     #[must_use]
     pub fn sample(&self, uv_func: impl Fn(f64, f64) -> Vec3) -> Surface {
-        let (nu, nv) = self.resolution;
-        let u_values = linspace(self.u_range.0, self.u_range.1, nu);
-        let v_values = linspace(self.v_range.0, self.v_range.1, nv);
+        self.try_sample(|u, v| Ok::<_, std::convert::Infallible>(uv_func(u, v)))
+            .expect("surface construction violated its sampling contract")
+    }
 
-        let n = nu * nv;
-        let mut points = Vec::with_capacity(n);
-        let mut d_normal_point = Vec::with_capacity(n);
-        for &u in &u_values {
-            for &v in &v_values {
-                let p = uv_func(u, v);
-                let du = sub(uv_func(u + self.epsilon, v), p);
-                let dv = sub(uv_func(u, v + self.epsilon), p);
+    /// Sample a fallible, possibly stateful function within the default budget.
+    /// The first failed point or derivative probe terminates the loop immediately.
+    /// No partial surface is returned and the original error is retained.
+    ///
+    /// # Errors
+    /// Invalid controls, allocation/budget refusal, nonrepresentable records,
+    /// or the first callback error.
+    pub fn try_sample<E>(
+        &self,
+        uv_func: impl FnMut(f64, f64) -> Result<Vec3, E>,
+    ) -> Result<Surface, SurfaceSampleError<E>> {
+        self.try_sample_with_budget(uv_func, SamplingBudget::DEFAULT)
+    }
+
+    /// The explicit-budget form of [`Self::try_sample`]. All dimensions,
+    /// columns and triangle storage are admitted before the first callback.
+    /// Empty grids and strips retain their ordinary no-triangle meaning.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::try_sample`], under `budget`.
+    pub fn try_sample_with_budget<E>(
+        &self,
+        mut uv_func: impl FnMut(f64, f64) -> Result<Vec3, E>,
+        budget: SamplingBudget,
+    ) -> Result<Surface, SurfaceSampleError<E>> {
+        let (nu, nv) = self.resolution;
+        budget.ensure_total("surface u axis", nu)?;
+        budget.ensure_total("surface v axis", nv)?;
+        let n = nu
+            .checked_mul(nv)
+            .ok_or(SamplingError::CapacityOverflow { context: "surface" })?;
+        budget.ensure_total("surface", n)?;
+        if n > u32::MAX as usize {
+            return Err(SamplingError::CapacityOverflow {
+                context: "surface indices",
+            }
+            .into());
+        }
+        let index_count = nu
+            .saturating_sub(1)
+            .checked_mul(nv.saturating_sub(1))
+            .and_then(|cells| cells.checked_mul(6))
+            .ok_or(SamplingError::CapacityOverflow {
+                context: "surface triangles",
+            })?;
+        if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
+            return Err(SurfaceSampleError::InvalidControl("epsilon"));
+        }
+        if !self.normal_nudge.is_finite()
+            || self.normal_nudge < 0.0
+            || self.normal_nudge > f64::from(f32::MAX)
+        {
+            return Err(SurfaceSampleError::InvalidControl("normal_nudge"));
+        }
+        if self.preferred_creation_axis > 1 {
+            return Err(SurfaceSampleError::InvalidControl(
+                "preferred_creation_axis",
+            ));
+        }
+        let rgba_value = [self.color.r, self.color.g, self.color.b, self.opacity];
+        if !rgba_value
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= f64::from(f32::MAX))
+            || !surface_record(self.shading)
+        {
+            return Err(SurfaceSampleError::InvalidControl("color/opacity/shading"));
+        }
+        for (name, range, count) in [("u_range", self.u_range, nu), ("v_range", self.v_range, nv)] {
+            if !range.0.is_finite()
+                || !range.1.is_finite()
+                || !(range.1 - range.0).is_finite()
+                || !(range.0 + self.epsilon).is_finite()
+                || !(range.1 + self.epsilon).is_finite()
+            {
+                return Err(SurfaceSampleError::InvalidControl(name));
+            }
+            for index in 0..count {
+                let value = surface_station(range, count, index);
+                if !value.is_finite() || !(value + self.epsilon).is_finite() {
+                    return Err(SurfaceSampleError::InvalidControl(name));
+                }
+            }
+        }
+        let mut points = surface_storage(n)?;
+        let mut d_normal_point = surface_storage(n)?;
+        let mut rgba = surface_storage(n)?;
+        let mut triangle_indices = surface_storage(index_count)?;
+        // Every allocation for the sampled value has succeeded before user code.
+        for i in 0..nu {
+            let u = surface_station(self.u_range, nu, i);
+            for j in 0..nv {
+                let v = surface_station(self.v_range, nv, j);
+                let index = i * nv + j;
+                let mut evaluate = |u, v, probe| {
+                    let p = uv_func(u, v).map_err(SurfaceSampleError::Callback)?;
+                    if !surface_record(p) {
+                        return Err(SurfaceSampleError::InvalidSample { index, probe });
+                    }
+                    Ok(p)
+                };
+                let p = evaluate(u, v, "point")?;
+                let du = sub(evaluate(u + self.epsilon, v, "u derivative")?, p);
+                let dv = sub(evaluate(u, v + self.epsilon, "v derivative")?, p);
                 let normal = normalize_or_zero(space_ops::cross(du, dv));
-                d_normal_point.push(add(p, mul(normal, self.normal_nudge)));
+                let normal_point = add(p, mul(normal, self.normal_nudge));
+                if !surface_record(normal_point) {
+                    return Err(SurfaceSampleError::InvalidSample {
+                        index,
+                        probe: "d_normal_point",
+                    });
+                }
+                d_normal_point.push(normal_point);
                 points.push(p);
             }
         }
-
+        rgba.resize(n, rgba_value);
+        for i in 0..nu.saturating_sub(1) {
+            for j in 0..nv.saturating_sub(1) {
+                let tl = (i * nv + j) as u32;
+                let bl = ((i + 1) * nv + j) as u32;
+                triangle_indices.extend_from_slice(&[tl, bl, tl + 1, tl + 1, bl, bl + 1]);
+            }
+        }
         let uniforms = Uniforms {
             shading: self.shading,
             depth_test: self.depth_test,
             ..Uniforms::default()
         };
 
-        let rgba = [self.color.r, self.color.g, self.color.b, self.opacity];
-        Surface {
+        Ok(Surface {
             points,
             d_normal_point,
-            rgba: vec![rgba; n],
+            rgba,
             u_range: self.u_range,
             v_range: self.v_range,
             resolution: self.resolution,
             epsilon: self.epsilon,
             normal_nudge: self.normal_nudge,
             preferred_creation_axis: self.preferred_creation_axis,
-            triangle_indices: compute_triangle_indices(self.resolution),
+            triangle_indices,
             uniforms,
             z_index: 0,
-        }
+        })
     }
 }
 

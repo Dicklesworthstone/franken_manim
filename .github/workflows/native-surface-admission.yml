@@ -4,9 +4,15 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/native-surface-admission.yml'
+      - 'crates/fmn-library/src/solids.rs'
+      - 'crates/fmn-library/tests/surface_sampling.rs'
+      - 'crates/fmn-python/src/lib.rs'
+      - 'crates/fmn-python/src/portal_surface.rs'
+      - 'crates/fmn-python/tests/native_surface_sampling.py'
+      - 'crates/fmn-python/python/fmn_python/surface_admission.py'
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: native-surface-admission
   cancel-in-progress: false
@@ -23,27 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 1
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.13'
-      - name: Prepare exact native implementation
-        run: |
-          set -euo pipefail
-          git fetch origin b8d8b00f1773a5b7415b913156c9a2c274f4f800
-          git show b8d8b00f1773a5b7415b913156c9a2c274f4f800:native-sampler-core.patch > /tmp/admission.patch
-          test "$(git hash-object /tmp/admission.patch)" = 3db8b14b5a71c16e5d6c04352cb376707fd00983
-          git apply --check /tmp/admission.patch
-          git apply /tmp/admission.patch
-          for path in crates/fmn-library/tests/surface_sampling.rs crates/fmn-python/tests/native_surface_sampling.py; do
-            test ! -e "$path"
-            git show "b8d8b00f1773a5b7415b913156c9a2c274f4f800:$path" > "$path"
-          done
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-library/src/solids.rs crates/fmn-library/tests/surface_sampling.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_surface.rs
-          git diff --check
-          git add crates/fmn-library/src/solids.rs crates/fmn-library/tests/surface_sampling.rs crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_surface.rs crates/fmn-python/tests/native_surface_sampling.py
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Candidate: terminate fallible native surface sampling at its first error'
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -65,37 +55,14 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/admission-wheel 2>&1 | tee /tmp/admission-build.log
           python -m venv target/admission-venv
           target/admission-venv/bin/python -m pip install 'numpy==2.5.2' target/admission-wheel/*.whl
-          for suite in native_surface_sampling surface_admission graph_admission surface_plotting surface_alignment surface_geometry live_surface_mesh surface_pointlikes; do
+          for suite in native_surface_sampling surface_admission graph_admission surface_plotting surface_alignment surface_geometry live_surface_mesh surface_pointlikes coordinate_mapping; do
             target/admission-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/admission-$suite.log"
           done
-      - name: Stage tested immutable blobs without moving repository refs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          git diff --exit-code
-          python - <<'PY'
-          import json, os, pathlib, urllib.request
-          paths = ['crates/fmn-library/src/solids.rs', 'crates/fmn-library/tests/surface_sampling.rs',
-                   'crates/fmn-python/src/lib.rs', 'crates/fmn-python/src/portal_surface.rs',
-                   'crates/fmn-python/tests/native_surface_sampling.py']
-          blobs = {}
-          for path in paths:
-              body = json.dumps({'content': pathlib.Path(path).read_text(), 'encoding': 'utf-8'}).encode()
-              request = urllib.request.Request('https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs',
-                  data=body, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-                                    'Content-Type': 'application/json', 'Accept': 'application/vnd.github+json'}, method='POST')
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  blobs[path] = json.load(response)['sha']
-          pathlib.Path('/tmp/admission-tested-blobs.json').write_text(json.dumps(
-              {'base_commit': os.environ['GITHUB_SHA'], 'blobs': blobs}, indent=2) + '\n')
-          print(pathlib.Path('/tmp/admission-tested-blobs.json').read_text())
-          PY
-      - name: Preserve candidate and evidence
+      - name: Preserve exact source and evidence
         if: always()
         run: |
           git rev-parse HEAD > /tmp/admission-source-sha.txt
-          git diff > /tmp/admission-working.patch
+          git diff --exit-code
           git archive --format=tar.gz HEAD > /tmp/admission-source.tar.gz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
