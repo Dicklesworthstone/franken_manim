@@ -1,4 +1,4 @@
-"""Evaluate authored Transform/composition easing on the callback clock.
+"""Evaluate authored animation easing on the callback clock.
 
 Native catalog curves stay native. Authored callables on supported protocols
 must not be replaced by a fixed-30-Hz table, especially with lag/time windows
@@ -44,11 +44,20 @@ def install_live_rates(native: Any) -> None:
             "animation_group", "lagged_start", "succession",
         }:
             return True
-        rotating = g.get("Rotating")
-        if rotating is not None and isinstance(animation, rotating):
-            return True
-        path_motion = g.get("MoveAlongPath")
-        return path_motion is not None and isinstance(animation, path_motion)
+        # These families have complete Python lifecycle implementations over
+        # native geometry. Their stock catalog rates still take the native
+        # path; only authored easing needs the callback clock. In particular,
+        # ShowPartial includes creation, uncreation and passing flashes, and
+        # DrawBorderThenFill includes Write. Treating these as unsupported
+        # silently sampled even a mixed Transform/Write play at 30 Hz.
+        for name in ("Rotating", "MoveAlongPath", "ShowPartial", "DrawBorderThenFill"):
+            cls = g.get(name)
+            if cls is not None and isinstance(animation, cls):
+                return True
+        # Adapters installed before this one already know whether an authored
+        # or specialized animation has a callback lifecycle. Honor that
+        # decision instead of reverting its play-level rate to a native table.
+        return previous_requires(animation)
 
     def requires(animation):
         if supported(animation) and custom(getattr(animation, "rate_func", None)):
