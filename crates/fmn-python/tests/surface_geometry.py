@@ -214,6 +214,38 @@ class SurfaceGeometryTests(unittest.TestCase):
             np.testing.assert_array_equal(surface.data['opacity'], before['opacity'])
             self.assertTrue(np.frombuffer(camera.capture_snapshot(surface).pixels(), dtype=np.uint8).any())
 
+    def test_specialized_solid_rebuilds_keep_shape_parameters_and_normal_rules(self):
+        cases = (
+            (m.Sphere, dict(radius=2, true_normals=True, clockwise=False)),
+            (m.Sphere, dict(radius=2, true_normals=True, clockwise=True)),
+            (m.Sphere, dict(radius=2, true_normals=False, clockwise=True)),
+            (m.Torus, dict(r1=2, r2=.5)),
+            (m.Cylinder, dict(radius=2, height=3, axis=(1, 2, 3))),
+            (m.Cone, dict(radius=2, height=3, axis=(1, 2, 3))),
+            (m.Disk3D, dict(radius=3)),
+            (m.Square3D, dict(side_length=5)),
+        )
+        for cls, parameters in cases:
+            with self.subTest(solid=cls.__name__, parameters=parameters):
+                surface = cls(resolution=(5, 7))
+                for name, value in parameters.items():
+                    setattr(surface, name, value)
+                colors = surface.data['rgba'].copy()
+                expected = cls(resolution=(5, 7), **parameters)
+                surface.init_points()
+                np.testing.assert_array_equal(surface.data['point'], expected.data['point'])
+                np.testing.assert_array_equal(surface.data['d_normal_point'], expected.data['d_normal_point'])
+                np.testing.assert_array_equal(surface.data['rgba'], colors)
+                self.assertEqual(surface._solid_params, expected._solid_params)
+
+    def test_solid_subclass_uv_override_still_executes_authored_callback(self):
+        class Custom(m.Sphere):
+            def uv_func(self, u, v):
+                return u, v, 7
+        surface = Custom(resolution=(5, 7))
+        surface.init_points()
+        np.testing.assert_array_equal(surface.data['point'][:, 2], 7)
+
     def test_tracker_driven_surface_writes_real_animation_frames(self):
         from fmn_python import render_scene
         class LiveSurface(m.Scene):

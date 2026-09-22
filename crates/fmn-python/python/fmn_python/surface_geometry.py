@@ -32,6 +32,42 @@ def _controls(surface):
     return resolution, *domains, epsilon, nudge
 
 
+
+def _solid_recipe(g, surface, controls):
+    """Reuse specialized Atlas constructors, including analytic sphere normals.
+
+    Unit UV functions do not encode cylinder radius/height/axis or disk/square
+    dimensions. Sampling those functions alone would silently discard shape
+    parameters. An authored UV override instead retains the generic callback path.
+    """
+    common = dict(resolution=controls[0], u_range=controls[1], v_range=controls[2],
+                  epsilon=controls[3], normal_nudge=controls[4],
+                  preferred_creation_axis=operator.index(surface.preferred_creation_axis))
+    function = getattr(surface.uv_func, "__func__", None)
+    for name in ("Sphere", "Torus", "Cone", "Cylinder", "Disk3D", "Square3D"):
+        cls = g[name]
+        if not isinstance(surface, cls) or function is not cls.uv_func:
+            continue
+        if name == "Sphere":
+            values = dict(radius=float(surface.radius), true_normals=bool(surface.true_normals),
+                          clockwise=bool(surface.clockwise))
+        elif name == "Torus":
+            values = dict(r1=float(surface.r1), r2=float(surface.r2))
+        elif name in ("Cone", "Cylinder"):
+            axis = tuple(float(value) for value in surface.axis)
+            if len(axis) != 3 or not all(math.isfinite(value) for value in axis):
+                raise ValueError("surface axis must contain three finite coordinates")
+            values = dict(height=float(surface.height), radius=float(surface.radius), axis=axis)
+        elif name == "Disk3D":
+            values = dict(radius=float(surface.radius))
+        else:
+            values = dict(side_length=float(surface.side_length))
+        if any(type(value) is float and not math.isfinite(value) for value in values.values()):
+            raise ValueError("surface shape parameters must be finite")
+        return cls, dict(common, **values)
+    return None
+
+
 def install_surface_geometry(native):
     g = vars(native)
     if g.get("_FMN_SURFACE_GEOMETRY_INSTALLED", False):
@@ -66,11 +102,11 @@ def install_surface_geometry(native):
         if vars(self).get(_BUSY, False):
             raise RuntimeError("surface regeneration is already in progress")
         idle(self)
+        if isinstance(self, Geometry):
+            raise TypeError("indexed TexturedGeometry is not a UV-grid surface")
         controls = _controls(self)
         if controls[0] != resolution(self):
             raise ValueError("surface resolution changed; construct a new surface and use become() for topology replacement")
-        if isinstance(self, Geometry):
-            raise TypeError("indexed TexturedGeometry is not a UV-grid surface")
         vars(self)[_BUSY] = True
         try:
             # Source records are retained before callbacks; a callback that edits
@@ -78,7 +114,12 @@ def install_surface_geometry(native):
             before = self.data.copy()
             owner = self._scene
             family = tuple(self.get_family())
-            if isinstance(self, Textured):
+            solid = None if isinstance(self, Textured) else _solid_recipe(g, self, controls)
+            recipe = getattr(self, "passed_uv_func", None)
+            if solid is not None:
+                cls, options = solid
+                candidate = cls(**options)
+            elif isinstance(self, Textured):
                 candidate = self.uv_surface
                 if not isinstance(candidate, Surface) or candidate is self:
                     raise TypeError("TexturedSurface requires a distinct source Surface")
@@ -116,6 +157,8 @@ def install_surface_geometry(native):
                             sample, u_range, v_range, shape, epsilon, nudge)
                 g["_hang_native_children"](candidate, specs)
             idle(self)
+            if solid is not None and _solid_recipe(g, self, _controls(self)) != solid:
+                raise RuntimeError("surface shape parameters changed during regeneration")
             if not isinstance(self, Textured) and getattr(self, "passed_uv_func", None) is not recipe:
                 raise RuntimeError("surface UV function changed during regeneration")
             if (self._scene is not owner or tuple(self.get_family()) != family
@@ -123,15 +166,19 @@ def install_surface_geometry(native):
                     or not np.array_equal(self.data, before)):
                 raise RuntimeError("surface changed during regeneration; sampled geometry was not published")
             g["_copy_surface_geometry"](self, candidate)
+            if solid is not None:
+                for key in ("_solid_params", "_solid_native_height"):
+                    if key in vars(candidate):
+                        vars(self)[key] = vars(candidate)[key]
         finally:
             vars(self).pop(_BUSY, None)
         return None
 
     def become(self, mobject, match_updaters=False):
+        other = mobject
         # Marionette already transfers durable primitive topology. Publish its
         # Python grid projection as well: UV queries and triangle-index helpers
         # must not reshape the new native records using the old dimensions.
-        other = mobject
         planned = {}
         if isinstance(other, Mobject):
             for source in other.get_family():
@@ -157,4 +204,7 @@ def install_surface_geometry(native):
                                (Mobject, "become", become)):
         method.__name__, method.__qualname__, method.__module__ = name, cls.__qualname__ + "." + name, cls.__module__
         setattr(cls, name, method)
+    # Cylinder historically overrides the Surface initializer with a no-op.
+    # Cone and Line3D inherit it; route the same method without another sampler.
+    g["Cylinder"].init_points = Surface.init_points
     g["_FMN_SURFACE_GEOMETRY_INSTALLED"] = True
