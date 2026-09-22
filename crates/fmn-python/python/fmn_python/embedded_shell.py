@@ -69,10 +69,11 @@ def _ipython_state(cls, shell=None):
 
 
 def _classes(native):
-    g = vars(native)
     module = sys.modules.get("manimlib.scene.scene_embed")
-    manager = g.get("CheckpointManager") or getattr(module, "CheckpointManager", None)
-    embedded = g.get("InteractiveSceneEmbed") or getattr(module, "InteractiveSceneEmbed", None)
+    # The installed package forwards runtime names through __getattr__. Do
+    # not mistake its own module dictionary for the extension's class table.
+    manager = getattr(native, "CheckpointManager", None) or getattr(module, "CheckpointManager", None)
+    embedded = getattr(native, "InteractiveSceneEmbed", None) or getattr(module, "InteractiveSceneEmbed", None)
     if manager is None or embedded is None:
         raise ImportError("native checkpoint/embed classes are absent from their canonical module")
     return manager, embedded

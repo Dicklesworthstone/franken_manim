@@ -203,7 +203,9 @@ def edit_project(project: SceneProject, *, clipboard=None):
         raise TypeError("project editor clipboard must be callable or None")
     _idle(project.scene)
     _, Embedded = _classes(project._native)
-    if not vars(project._native).get("_FMN_SCENE_PROJECT_EDITOR_INSTALLED", False):
+    # Installed manimlib forwards private runtime attributes to its extension
+    # via __getattr__; vars(package) is not the native initialization table.
+    if getattr(project._native, "_FMN_SCENE_PROJECT_EDITOR_INSTALLED", False) is not True:
         raise ImportError("scene project editor is not installed in the native runtime")
     embedded = Embedded(project.scene)
     embedded._fmn_namespace = project.namespace
@@ -219,7 +221,7 @@ def edit_project(project: SceneProject, *, clipboard=None):
 
 def install_scene_project_editor(native):
     """Complete the existing Embedded class after definition-autoreload hooks."""
-    if vars(native).get("_FMN_SCENE_PROJECT_EDITOR_INSTALLED", False):
+    if getattr(native, "_FMN_SCENE_PROJECT_EDITOR_INSTALLED", False) is True:
         return
     _, Embedded = _classes(native)
     original_launch, original_reload = Embedded.launch, Embedded.reload_scene
