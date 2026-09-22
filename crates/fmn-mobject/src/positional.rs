@@ -35,7 +35,7 @@ use fmn_core::constants::{DOWN, FRAME_X_RADIUS, FRAME_Y_RADIUS, IN, LEFT, ORIGIN
 use fmn_core::types::Vec3;
 use fmn_geom::{Mat3, QuadPath, space_ops};
 
-use crate::Placement;
+use crate::{Placement, RecordBuffer};
 use crate::StageError;
 use crate::bbox::{BoundingBox, BoxAccum};
 use crate::stage::{Mob, Stage};
@@ -63,6 +63,47 @@ impl From<Vec3> for PosTarget {
     fn from(p: Vec3) -> Self {
         Self::Point(p)
     }
+}
+
+/// Prepare all auxiliary 3D point fields before resetting retained placement.
+/// A normal-control point is a point, not a direction: translating only `point`
+/// changes their difference and therefore changes surface lighting. UVs, colors,
+/// and other non-pointlike fields must never receive the geometric map.
+fn mapped_auxiliary_points(
+    buffer: &RecordBuffer,
+    placement: Placement,
+    map: impl Fn(Vec3) -> Vec3,
+) -> Vec<(String, Vec<f32>)> {
+    let mut columns: Vec<(String, Vec<f32>)> = Vec::new();
+    for key in buffer.schema().pointlike_keys() {
+        if key == "point" || columns.iter().any(|(name, _)| name == key) {
+            continue;
+        }
+        if !buffer
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name == *key && field.width == 3)
+        {
+            continue;
+        }
+        if let Some(values) = buffer.read_column(key) {
+            #[allow(clippy::cast_possible_truncation)]
+            let mapped = values
+                .chunks_exact(3)
+                .flat_map(|point| {
+                    map(placement.apply_point([
+                        f64::from(point[0]),
+                        f64::from(point[1]),
+                        f64::from(point[2]),
+                    ]))
+                    .map(|value| value as f32)
+                })
+                .collect();
+            columns.push((key.clone(), mapped));
+        }
+    }
+    columns
 }
 
 // --- small f64 vector helpers (kept local; the geometry kernel's Vec3 math is
@@ -419,11 +460,20 @@ impl Stage {
             None
         };
         let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
-        entry.set_placement(Placement::IDENTITY);
         entry
             .buffer
             .resize_preserving_order(points.len())
             .map_err(StageError::Record)?;
+        // Resizing preserves the order of every column. Materialize the other
+        // pointlike fields at that SAME cardinality before discarding placement;
+        // a primary-point edit must not strand normal seeds in object space.
+        if !entry.placement().is_identity() {
+            let columns = mapped_auxiliary_points(&entry.buffer, entry.placement(), |p| p);
+            for (key, values) in columns {
+                entry.buffer.write_range(&key, 0, &values);
+            }
+        }
+        entry.set_placement(Placement::IDENTITY);
         #[allow(clippy::cast_possible_truncation)]
         let flat: Vec<f32> = points
             .iter()
@@ -532,8 +582,8 @@ impl Stage {
         Ok(self)
     }
 
-    /// Bake one entry's current world-space points back into its object-space
-    /// buffer and reset placement to identity.
+    /// Bake every declared 3D pointlike field into the authoritative records
+    /// and reset placement to identity, including surface normal-control points.
     ///
     /// Arbitrary pointwise maps need this boundary because their result is not
     /// generally representable by one affine map. Affine positional operations
@@ -544,11 +594,14 @@ impl Stage {
             return Ok(false);
         }
         let Some(points) = self.get_points(mob) else {
-            // A custom record schema may carry no `point` field. Its placement
-            // has no geometric observable to bake, but normalizing it keeps a
-            // later authoritative-buffer read from reporting a false stale
-            // handle.
-            self.set_placement(mob, Placement::IDENTITY)?;
+            // Custom records can contain pointlike fields without a primary
+            // `point`. Those fields still own world-space values on readback.
+            let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+            let columns = mapped_auxiliary_points(&entry.buffer, placement, |p| p);
+            for (key, values) in columns {
+                entry.buffer.write_range(&key, 0, &values);
+            }
+            entry.set_placement(Placement::IDENTITY);
             return Ok(true);
         };
         self.set_points(mob, &points)?;
@@ -587,20 +640,37 @@ impl Stage {
     /// (`f(p - pivot) + pivot`). The bounding box invalidates automatically via
     /// the record revision bump.
     fn transform_points<F: Fn(Vec3) -> Vec3>(&mut self, mob: Mob, pivot: Option<Vec3>, f: F) {
-        for m in self.family(mob) {
-            let points = match self.get_points(m) {
-                Some(points) if !points.is_empty() => points,
-                _ => continue,
-            };
-            let out: Vec<Vec3> = points
-                .into_iter()
-                .map(|point| match pivot {
-                    Some(pv) => add(f(sub(point, pv)), pv),
-                    None => f(point),
-                })
-                .collect();
-            let _ = self.set_points(m, &out);
+        for member in self.family(mob) {
+            let _ = self.map_world_pointlikes(member, |point| match pivot {
+                Some(pv) => add(f(sub(point, pv)), pv),
+                None => f(point),
+            });
         }
+    }
+
+    /// Apply one map to the complete record geometry without an intermediate
+    /// f32 bake. Retain the existing primary-point arithmetic and joint refresh,
+    /// and publish auxiliary columns through the same live-view generation.
+    fn map_world_pointlikes(
+        &mut self,
+        mob: Mob,
+        map: impl Fn(Vec3) -> Vec3,
+    ) -> Result<(), StageError> {
+        let points = self
+            .get_points(mob)
+            .map(|points| points.into_iter().map(&map).collect::<Vec<_>>());
+        let entry = self.get(mob).ok_or(StageError::StaleHandle)?;
+        let columns = mapped_auxiliary_points(&entry.buffer, entry.placement(), &map);
+        if let Some(points) = points {
+            self.set_points(mob, &points)?;
+        } else {
+            self.set_placement(mob, Placement::IDENTITY)?;
+        }
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        for (key, values) in columns {
+            entry.buffer.write_range(&key, 0, &values);
+        }
+        Ok(())
     }
 
     fn apply_affine_many(&mut self, mobs: &[Mob], affine: Placement) -> &mut Self {
@@ -616,15 +686,8 @@ impl Stage {
             let has_live_view = self
                 .get(member)
                 .is_some_and(|entry| entry.buffer.live_view_count() > 0);
-            if has_live_view
-                && let Some(points) = self.get_points(member)
-                && !points.is_empty()
-            {
-                let transformed: Vec<Vec3> = points
-                    .into_iter()
-                    .map(|point| affine.apply_point(point))
-                    .collect();
-                let _ = self.set_points(member, &transformed);
+            if has_live_view {
+                let _ = self.map_world_pointlikes(member, |point| affine.apply_point(point));
                 continue;
             }
             if let Some(entry) = self.get_mut(member) {
