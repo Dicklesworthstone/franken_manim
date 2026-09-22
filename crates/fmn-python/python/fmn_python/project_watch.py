@@ -152,7 +152,10 @@ def watch_project(
             scan_error = identity
             # A scan outage is not proof that pending bytes stayed stable.
             observed = _MISSING
+            initial = False
         else:
+            if stop.is_set():
+                return
             scan_error = None
             now = time.monotonic()
             if current != observed:
