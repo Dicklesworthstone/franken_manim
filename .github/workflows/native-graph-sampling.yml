@@ -1,0 +1,108 @@
+name: Native graph sampling
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/native-graph-sampling.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: native-graph-sampling
+  cancel-in-progress: false
+jobs:
+  native:
+    if: github.repository == 'Dicklesworthstone/franken_manim'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_TARGET_DIR: target/camera-runtime
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      PYO3_PYTHON: python
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - name: Prepare exact graph and contour implementation
+        run: |
+          set -euo pipefail
+          git fetch origin fb0be84a61c76dee974df90be280803d0d5fa6d4
+          for index in 0 1 2 3; do
+            git show "fb0be84a61c76dee974df90be280803d0d5fa6d4:graph-$index.b64"
+          done > /tmp/graph-candidate.b64
+          base64 --decode /tmp/graph-candidate.b64 > /tmp/graph-candidate.patch.gz
+          test "$(git hash-object /tmp/graph-candidate.patch.gz)" = 39ce8e5919573079e0479cc49faa3e4b4e01ed50
+          gzip -dc /tmp/graph-candidate.patch.gz > /tmp/graph-candidate.patch
+          echo '463442769496354d22fcf2d481c4331e0dcbd208c8a5e298b7c9194e957b8879  /tmp/graph-candidate.patch' | sha256sum -c -
+          git apply --check /tmp/graph-candidate.patch
+          git apply /tmp/graph-candidate.patch
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-geom/src/isolines.rs crates/fmn-geom/src/lib.rs crates/fmn-library/src/graphs.rs crates/fmn-library/tests/fallible_graph_sampling.rs crates/fmn-python/src/lib.rs
+          git diff --check
+          git add crates/fmn-geom/src/isolines.rs crates/fmn-geom/src/lib.rs crates/fmn-library/src/graphs.rs crates/fmn-library/tests/fallible_graph_sampling.rs crates/fmn-python/src/lib.rs crates/fmn-python/tests/native_graph_sampling.py
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Candidate: native fallible graph and implicit sampling'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/camera-runtime
+          key: camera-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
+      - name: Native geometry, constructors and animation regressions
+        run: |
+          set -euo pipefail
+          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
+          cargo test --locked -p fmn-geom -p fmn-library -p fmn-mobject -p fmn-anim 2>&1 | tee /tmp/graph-native.log
+          cargo clippy --locked -p fmn-geom -p fmn-library -p fmn-mobject -p fmn-anim --all-targets -- -D warnings 2>&1 | tee /tmp/graph-clippy.log
+      - name: Embedded callbacks and fresh installed wheel
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-python --lib fallible_native_graph_sampling -- --nocapture 2>&1 | tee /tmp/graph-embedded.log
+          cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/graph-portal-clippy.log
+          python -m maturin build --locked --interpreter python --profile dev --out target/graph-wheel 2>&1 | tee /tmp/graph-build.log
+          python -m venv target/graph-venv
+          target/graph-venv/bin/python -m pip install 'numpy==2.5.2' target/graph-wheel/*.whl
+          for suite in native_graph_sampling graph_admission native_surface_sampling surface_admission live_graphing calculus_area coordinate_mapping; do
+            target/graph-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/graph-$suite.log"
+          done
+      - name: Stage tested immutable source without moving repository refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          python - <<'PY'
+          import json, os, pathlib, urllib.request
+          paths = ['crates/fmn-geom/src/isolines.rs', 'crates/fmn-geom/src/lib.rs',
+                   'crates/fmn-library/src/graphs.rs', 'crates/fmn-library/tests/fallible_graph_sampling.rs',
+                   'crates/fmn-python/src/lib.rs', 'crates/fmn-python/tests/native_graph_sampling.py']
+          blobs = {}
+          for path in paths:
+              body = json.dumps({'content': pathlib.Path(path).read_text(), 'encoding': 'utf-8'}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs',
+                  data=body, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                                    'Content-Type': 'application/json', 'Accept': 'application/vnd.github+json',
+                                    'User-Agent': 'OpenAI File Downloader, XaiImageApiFetch/1.0'}, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  blobs[path] = json.load(response)['sha']
+          pathlib.Path('/tmp/graph-tested-blobs.json').write_text(json.dumps(
+              {'base_commit': os.environ['GITHUB_SHA'], 'blobs': blobs}, indent=2) + '\n')
+          print(pathlib.Path('/tmp/graph-tested-blobs.json').read_text())
+          PY
+      - name: Preserve exact candidate and evidence
+        if: always()
+        run: |
+          git rev-parse HEAD > /tmp/graph-source-sha.txt
+          git diff > /tmp/graph-working.patch
+          git archive --format=tar.gz HEAD > /tmp/graph-source.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-graph-${{ github.run_id }}
+          path: |
+            /tmp/graph-*
+            target/graph-wheel/*.whl
+          retention-days: 3
