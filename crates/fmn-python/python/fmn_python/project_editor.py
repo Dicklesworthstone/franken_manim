@@ -18,12 +18,13 @@ from .source_autoreload import _SHELL_NAMES, _STATE as _AUTO_STATE, _exports
 _MISSING = object()
 _FIELDS = ("scene", "checkpoint_manager", "_fmn_console", "_fmn_namespace")
 _HELP = """Rebuildable host scene editor:
-  fmn-python edit SOURCE.py SCENE
+  fmn-python edit [--watch] SOURCE.py SCENE
 
 Run the selected scene and enter its host IPython editor. An authored embed()
 ends construction and exposes its local names; no nested terminal is opened.
 At the prompt: reload() reconstructs the scene from current files; preview()
 returns a native image; reload_source()/auto_reload() refresh definitions only.
+--watch enables full-scene rebuilding from the first prompt. At the prompt,
 auto_rebuild() reconstructs changed sources before the next cell;
 stop_auto_rebuild() disables it. Asset paths and debounce seconds are optional.
 The two automatic reload modes are mutually exclusive; no background thread
@@ -202,8 +203,14 @@ def _reload_editor(embedded, project, *, if_changed=False):
     return project.scene
 
 
-def edit_project(project: SceneProject, *, clipboard=None):
+def edit_project(project: SceneProject, *, clipboard=None, auto_rebuild=False, debounce=0.0, paths=()):
     project._check()
+    if type(auto_rebuild) is not bool:
+        raise TypeError("auto_rebuild must be bool")
+    from .project_autorebuild import _watch_options
+    options = _watch_options(debounce=debounce, paths=paths)
+    if not auto_rebuild and (options["debounce"] != 0 or options["paths"]):
+        raise ValueError("debounce and paths require auto_rebuild=True")
     if project._editor is not None:
         raise RuntimeError("this scene project already has an editor")
     if clipboard is not None and not callable(clipboard):
@@ -218,6 +225,8 @@ def edit_project(project: SceneProject, *, clipboard=None):
     embedded._fmn_namespace = project.namespace
     embedded.clipboard = clipboard
     vars(embedded)[_PROJECT] = project
+    if auto_rebuild:
+        vars(embedded)["_fmn_project_autorebuild_options"] = options
     project._editor = embedded
     try:
         return embedded.launch()
@@ -302,13 +311,17 @@ def try_edit_cli(native, arguments):
     if not tokens or tokens[0] != "edit":
         return None
     robot = "--robot" in arguments
+    watch = "--watch" in tokens[1:]
+    if tokens[1:].count("--watch") > 1:
+        return native._portal_cli_emit(2, "usage", "usage-error", "--watch may be supplied only once", robot)
+    tokens = [tokens[0], *(arg for arg in tokens[1:] if arg != "--watch")]
     if tokens[1:] in (["--help"], ["-h"]):
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python edit usage", True, help=_HELP)
         print(_HELP)
         return 0
     if len(tokens) != 3 or any(arg.startswith("-") for arg in tokens[1:]):
-        return native._portal_cli_emit(2, "usage", "usage-error", "expected: fmn-python edit SOURCE.py SCENE", robot)
+        return native._portal_cli_emit(2, "usage", "usage-error", "expected: fmn-python edit [--watch] SOURCE.py SCENE", robot)
     if robot or not getattr(sys.stdin, "isatty", lambda: False)():
         return native._portal_cli_emit(4, "capability", "edit-capability-unavailable",
                                        "edit requires an interactive terminal; use SceneProject for host-controlled builds", robot)
@@ -319,7 +332,10 @@ def try_edit_cli(native, arguments):
                                        "edit requires IPython in its host interpreter", False)
     try:
         with SceneProject(tokens[1], tokens[2], _native=native) as project:
-            project.edit()
+            if watch:
+                project.edit(auto_rebuild=True)
+            else:
+                project.edit()
             generations = project.generation
     except (KeyboardInterrupt, SystemExit) as error:
         code = 130 if isinstance(error, KeyboardInterrupt) else 5

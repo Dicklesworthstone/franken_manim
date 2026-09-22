@@ -17,19 +17,25 @@ _STATE = "_fmn_project_autorebuild"
 _MISSING = object()
 
 
+def _watch_options(*, debounce=0.0, paths=()):
+    """Freeze and validate options before acquiring host editor resources."""
+    debounce = _timing(debounce, "debounce", positive=False)
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        raise TypeError("paths must be an iterable of file paths")
+    extras = []
+    for path in paths:
+        extras.append(Path(path).absolute())
+        if len(extras) > _MAX_FILES:
+            raise ValueError("scene watch exceeds its file count budget")
+    return {"debounce": debounce, "paths": tuple(extras)}
+
+
 class _RebuildWatch:
     """One attempted reconstruction per stable content generation."""
 
     def __init__(self, project, check, rebuild, *, debounce=0.0, paths=()):
-        self.debounce = _timing(debounce, "debounce", positive=False)
-        if isinstance(paths, (str, bytes, os.PathLike)):
-            raise TypeError("paths must be an iterable of file paths")
-        extras = []
-        for path in paths:
-            extras.append(Path(path).absolute())
-            if len(extras) > _MAX_FILES:
-                raise ValueError("scene watch exceeds its file count budget")
-        self.paths = tuple(extras)
+        options = _watch_options(debounce=debounce, paths=paths)
+        self.debounce, self.paths = options["debounce"], options["paths"]
         self.project, self.check, self.rebuild = project, check, rebuild
         self.observed = self.attempted = _MISSING
         self.stable_since = 0.0
@@ -107,6 +113,7 @@ def install_project_autorebuild(native):
     original_launch = Embedded.launch
     original_shortcuts = Embedded.get_shortcuts
     original_auto_reload = Embedded.auto_reload
+    original_update = Embedded.ensure_frame_update_post_cell
 
     def remove_hook(self, callback):
         for index, (events, event, installed) in enumerate(self._fmn_hooks):
@@ -187,6 +194,13 @@ def install_project_autorebuild(native):
             values.update(auto_rebuild=self.auto_rebuild, stop_auto_rebuild=self.stop_auto_rebuild)
         return values
 
+    def ensure_update(self):
+        result = original_update(self)
+        options = vars(self).pop("_fmn_project_autorebuild_options", None)
+        if options is not None:
+            self.auto_rebuild(**options)
+        return result
+
     def launch(self):
         previous = vars(self).get(_STATE)
         primary = None
@@ -206,6 +220,7 @@ def install_project_autorebuild(native):
                     BaseException.add_note(primary, "scene watch cleanup also failed: " + type(error).__name__)
 
     for name, function in (("auto_rebuild", auto_rebuild), ("stop_auto_rebuild", stop),
-                           ("auto_reload", auto_reload), ("get_shortcuts", shortcuts), ("launch", launch)):
+                           ("auto_reload", auto_reload), ("get_shortcuts", shortcuts), ("launch", launch),
+                           ("ensure_frame_update_post_cell", ensure_update)):
         _method(Embedded, name, function)
     native._FMN_PROJECT_AUTOREBUILD_INSTALLED = True

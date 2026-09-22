@@ -249,10 +249,20 @@ class SceneProject:
         return watch_project(self, poll_interval=poll_interval, debounce=debounce,
                              stop=stop, on_error=on_error, paths=paths)
 
-    def edit(self, *, clipboard=None):
-        """Open the host IPython editor; reload() reconstructs in the same shell."""
+    def edit(self, *, clipboard=None, auto_rebuild: bool = False,
+             debounce: float = 0.0, paths: Iterable[str | Path] = ()):
+        """Edit in one host IPython shell, optionally rebuilding before cells.
+
+        With ``auto_rebuild=True``, source/helper and explicit asset ``paths``
+        changes reconstruct the full scene at the next eligible cell boundary.
+        Nothing runs while the prompt is idle. ``debounce`` requires content to
+        remain stable across observations; zero rebuilds on the next cell.
+        Failed candidates retain the previous generation, and unchanged files
+        preserve interactive edits. This does not enable definition autoreload.
+        """
         from .project_editor import edit_project
-        return edit_project(self, clipboard=clipboard)
+        return edit_project(self, clipboard=clipboard, auto_rebuild=auto_rebuild,
+                            debounce=debounce, paths=paths)
 
     def close(self):
         self._check_thread()
