@@ -9,7 +9,10 @@ import unittest
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-movement = types.ModuleType("fmn_python.movement")
+python_dir = str(ROOT / "python")
+if python_dir not in sys.path:
+    sys.path.insert(0, python_dir)
+import fmn_python.movement as movement
 
 
 def _method(cls, name, function):
@@ -68,17 +71,7 @@ def _install_lifecycle(g, cls, prepare):
         _method(cls, name, function)
 
 
-movement._cancel_preserving = _cancel_preserving
-movement._install_lifecycle = _install_lifecycle
-package = types.ModuleType("fmn_python")
-package.__path__ = []
-sys.modules.setdefault("fmn_python", package)
-sys.modules["fmn_python.movement"] = movement
-spec = importlib.util.spec_from_file_location(
-    "update_animation_under_test", ROOT / "python/fmn_python/update_animations.py"
-)
-adapter = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(adapter)
+import fmn_python.update_animations as adapter
 
 
 def environment():
