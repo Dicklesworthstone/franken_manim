@@ -1,5 +1,7 @@
 """Source-compatible complex matrix construction and native live-cell updates."""
 import copy
+from pathlib import Path
+import tempfile
 import unittest
 
 import manimlib as m
@@ -7,6 +9,88 @@ import numpy as np
 
 
 class ComplexMatrixTests(unittest.TestCase):
+    def test_bound_cells_become_one_live_matrix_without_duplicate_roots(self):
+        scene = m.Scene(camera_config=dict(resolution=(96, 54), fps=4))
+        circle, square = m.Circle(radius=.2), m.Square(side_length=.3)
+        scene.add(circle, square)
+        matrix = m.Matrix([[circle, square]])
+        self.assertIs(matrix.elements[0], circle)
+        self.assertIs(matrix.elements[1], square)
+        scene.add(matrix)
+        self.assertEqual(list(scene.mobjects), [matrix])
+        before = circle.get_center().copy()
+        scene.play(circle.animate.shift(m.UP), run_time=.25)
+        np.testing.assert_allclose(circle.get_center(), before + m.UP, atol=1e-6)
+        self.assertEqual(list(scene.mobjects), [matrix])
+        self.assertIs(matrix.get_row(0)[0], circle)
+        self.assertIs(matrix.get_column(0)[0], circle)
+
+    def test_default_matrix_preserves_authored_native_cells_and_grid_aliases(self):
+        for container in ("list", "array", "iterators"):
+            with self.subTest(container=container):
+                cells = [m.Circle(radius=.2), m.Square(side_length=.5),
+                         m.Tex("x"), m.DecimalNumber(1.25)]
+                rows = [cells[:2], cells[2:]]
+                values = rows
+                if container == "array":
+                    values = np.empty((2, 2), dtype=object)
+                    for index, cell in enumerate(cells):
+                        values[index // 2, index % 2] = cell
+                elif container == "iterators":
+                    values = (iter(row) for row in rows)
+                widths = [cell.get_width() for cell in cells]
+                matrix = m.Matrix(values)
+                for index, cell in enumerate(cells):
+                    self.assertIs(matrix.elements[index], cell)
+                    self.assertIs(matrix.mob_matrix[index // 2][index % 2], cell)
+                    self.assertIs(matrix.get_row(index // 2)[index % 2], cell)
+                    self.assertIs(matrix.get_column(index % 2)[index // 2], cell)
+                    self.assertAlmostEqual(cell.get_width(), widths[index], places=5)
+                clone = matrix.copy()
+                self.assertIs(clone.elements[0], clone.get_row(0)[0])
+                self.assertIsNot(clone.elements[0], cells[0])
+                before = cells[0].get_points().copy()
+                clone.elements[0].shift(m.UP)
+                np.testing.assert_array_equal(cells[0].get_points(), before)
+
+    def test_default_matrix_mixes_geometry_text_and_real_numbers(self):
+        shape, label = m.Circle(color=m.GREEN), m.Tex("x")
+        matrix = m.Matrix([[shape, 1.25], [label, "y"]])
+        self.assertIs(matrix.elements[0], shape)
+        self.assertIs(matrix.elements[2], label)
+        self.assertIsInstance(matrix.elements[1], m.DecimalNumber)
+        self.assertEqual(matrix.elements[1].get_value(), 1.25)
+        self.assertIsInstance(matrix.elements[3], m.Tex)
+        self.assertLess(matrix.brackets[0].get_right()[0], matrix.get_entries().get_left()[0])
+        self.assertGreater(matrix.brackets[1].get_left()[0], matrix.get_entries().get_right()[0])
+        # Conversion completes before moving a caller-owned object, even when
+        # the invalid entry is a real scalar rather than a complex component.
+        before = shape.get_points().copy()
+        with self.assertRaises(ValueError):
+            m.Matrix([[shape, float("nan")]])
+        np.testing.assert_array_equal(shape.get_points(), before)
+
+    def test_geometry_matrix_motion_renders_without_duplicate_scene_roots(self):
+        class GeometryMatrix(m.Scene):
+            def construct(self):
+                shape = m.Circle(radius=.3, color=m.BLUE)
+                matrix = m.Matrix([[shape, m.Tex("x")], [m.Square(side_length=.5), 1.25]])
+                self.add(matrix)
+                self.play(shape.animate.shift(.5 * m.UP), run_time=.5)
+                assert list(self.mobjects) == [matrix]
+                assert matrix.get_row(0)[0] is shape
+                assert matrix.get_column(0)[0] is shape
+        root = Path(tempfile.mkdtemp(prefix="fmn-geometry-matrix-"))
+        sequences = []
+        for threads in (1, 4):
+            receipt = GeometryMatrix().render(root / str(threads), resolution=(192, 108),
+                                               fps=8, threads=threads)
+            self.assertEqual(receipt.frame_count, 4)
+            frames = [path.read_bytes() for path in sorted(receipt.destination.glob("*.png"))]
+            self.assertEqual(len(set(frames)), 4)
+            sequences.append(frames)
+        self.assertEqual(*sequences)
+
     def test_builtin_matrix_types_route_complex_values_to_native_readouts(self):
         values = [[1 + 2j, -3j], [complex(4, 0), 5.25 - 6.75j]]
         for constructor in (m.Matrix, m.DecimalMatrix, m.IntegerMatrix, m.TexMatrix):

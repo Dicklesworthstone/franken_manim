@@ -305,12 +305,13 @@ def _install_construction(native: Any) -> None:
             _finite(common["height"] - 2 * common["bracket_v_buff"], "matrix entry height", nonnegative=True)
         _owners(native, (entry for row in rows for entry in row))
         # Built-in ordinary scalar matrices keep their existing native layout,
-        # glyph decoration, span maps and exact fast-path output. Complex entries
-        # must use the native-backed readout composition, never float coercion
-        # or Tex(str(value)) in the scalar-only constructors.
-        has_complex = any(isinstance(entry, (complex, np.complexfloating))
-                          for row in rows for entry in row)
-        if unchanged(self, Matrix) and not config and not has_complex:
+        # glyph decoration, span maps and exact fast-path output. Already-built
+        # mobjects must retain their handles, and complex entries use the
+        # native-backed readout composition. Neither belongs in a scalar-only
+        # constructor, regardless of whether element_config was supplied.
+        needs_composition = any(isinstance(entry, (VMobject, complex, np.complexfloating))
+                                for row in rows for entry in row)
+        if unchanged(self, Matrix) and not config and not needs_composition:
             return original[Matrix](self, rows, element_config=config, **common)
         VMobject.__init__(self)
         self._matrix_entry_font_size = config.get("font_size", 48.0)
