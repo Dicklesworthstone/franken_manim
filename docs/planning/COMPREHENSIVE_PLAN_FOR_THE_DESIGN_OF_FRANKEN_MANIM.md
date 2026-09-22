@@ -516,7 +516,7 @@ Compile-tested spikes and executed decisions; no W2–W11 interface freezes unti
 
 **G4b — "Certified Reproducibility."** `--reproducible` end-to-end: the input closure; fmn-dmath (floating point throughout — G0 decided, ADR-0010); bundled-assets-only; bit-identical raw frames + canonical PNG + WAV across the certified matrix with sidecar manifests. PG-1(G4), PG-5. G4a and G4b are siblings after G3.
 
-**G5 — "Distribution & Leapfrogs."** W11 shipped (per-tier artifacts and selection UX included, §17.3); the WASM timeline player and browser Studio; Graph/DataFrame/Markdown mobjects; the fmd-math ratchet continuing past its G2 floor into tier-2; the Accelerator Annex broadened — the CUDA production backend from its ledger spike, wider platform tuning, the autotune corpus grown; the exploratory tier opened.
+**G5 — "Distribution & Leapfrogs."** W11 shipped (per-tier artifacts and selection UX included, §17.3); the WASM timeline player and browser Studio; Graph/DataFrame/Markdown mobjects; the fmd-math ratchet continuing past its G2 floor into tier-2; the Accelerator Annex broadened — the CUDA production backend from its ledger spike, wider platform tuning, the autotune corpus grown; the exploratory tier opened ([differentiable animation charter](docs/research/differentiable-animation-charter.md), [SME/AMX hardware note](docs/research/sme-amx-investigation.md), [feasibility spike](spikes/g5-differentiable/)).
 
 ---
 

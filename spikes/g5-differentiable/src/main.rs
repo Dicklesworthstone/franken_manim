@@ -164,10 +164,7 @@ fn main() {
     let radius = 2.5;
     let n_segments_list = [4, 8, 16, 32, 64];
 
-    println!(
-        "\n1. Theoretical Continuum Targets for R = {:.2}:",
-        radius
-    );
+    println!("\n1. Theoretical Continuum Targets for R = {:.2}:", radius);
     let true_area = PI * radius * radius;
     let true_darea_dr = 2.0 * PI * radius;
     println!("   True Area A(R) = π R² = {:.8}", true_area);
@@ -286,6 +283,9 @@ mod tests {
             err_64 < err_16,
             "Higher segment count must reduce geometric discretization error"
         );
-        assert!(err_64 < 0.005, "64-segment circle must be within 0.5% of 2π");
+        assert!(
+            err_64 < 0.005,
+            "64-segment circle must be within 0.5% of 2π"
+        );
     }
 }
