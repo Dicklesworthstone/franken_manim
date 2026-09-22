@@ -2,8 +2,8 @@
 
 ## Problem and scope
 
-The Python surface bridge delegates sampling and normals to Atlas. Its current
-infallible native sampling loop stores the first Python error but keeps invoking
+The Python surface bridge delegates sampling and normals to Atlas. Its former
+infallible native sampling loop stored the first Python error but kept invoking
 the callback: a 2-by-2 surface could run a failing user function twelve times.
 Native stock surface constructors also accepted sizes without an authoring budget.
 The existing plotting-only guard did not cover Surface subclasses, stock solids,
@@ -42,20 +42,41 @@ its shared admission rules. Saved native methods are resolved from the native
 namespace rather than held in class-method closures, following the portal's
 module-lifetime protocol.
 
+## Native fallible sampling
+
+`SurfaceSpec::try_sample` and `try_sample_with_budget` now perform admission and
+sampling in Rust, returning `SurfaceSampleError<E>`. The callback may borrow its
+environment and mutate local state; its error does not need `Clone`, `Send`, or a
+`'static` lifetime. An error from a position or either derivative probe returns
+immediately. No later probe, remaining grid iteration, or triangle generation
+runs, and no partially sampled surface is returned. Successful sample ordering
+and normal arithmetic remain unchanged.
+
+Both dimensions, their checked product, all record columns, and triangle storage
+are admitted before authored sampling. Every output allocation for the sampled
+surface is reserved before the first callback. Samples and derived normal-control
+points must be finite and f32-representable. Existing empty/strip behavior remains.
+The explicit budget belongs to the native caller; the Python raw bridge uses the
+default budget. The existing infallible `sample` entry delegates to this owner and
+panics on a violated construction contract; untrusted native inputs should use
+the fallible API.
+
+The raw PyO3 parametric-surface method now calls the fallible native API, including
+when deliberately invoked around the host admission adapter. It preserves the
+original Python exception and extracts exactly three coordinates without
+materializing an unbounded result vector. Scene-bound construction is refused
+before sampling. The host adapter remains responsible for Python input conversion
+and aggregate multi-face solid admission; it is not a second native sampler.
+
 ## Explicit limitations
 
-This protects the public Python constructors and the ordinary Mobject method
-resolution path, including their underscored native builder seams. It does not
-change direct Rust builders, raw PyO3 descriptors deliberately called around the
-adapter, or the renderer's arithmetic domain. Finite inputs alone do not prove
-that every possible derived point or normal from an extreme solid is finite.
-
-The legacy native sampler can still finish its bounded remaining internal
-iterations after a failure. The guard returns harmless sentinel samples during
-that unwinding, without calling authored code or repeatedly growing a traceback.
-The native first-error channel then refuses result publication. Replacing this
-with a fallible native sampler is separate work; this change does not claim to
-complete that Rust-level allocation or immediate-termination contract.
+The native fallible API applies to rectangular UV sampling, not every specialized
+solid's post-sampling transformation or compound allocation. In particular, a
+direct Rust cube/prism builder still does not expose a fallible aggregate
+six-face budget. Python aggregate admission and native single-grid admission are
+distinct contracts. The renderer's arithmetic domain is unchanged; finite inputs
+alone do not prove that all later transforms remain representable. A callback
+that does not return cannot be preempted by this synchronous error channel.
 
 Authored side effects before a callback failure are not rolled back. Existing
 empty/strip-grid restrictions in UV queries and morph alignment are unchanged.
@@ -68,3 +89,8 @@ reentrancy, live regeneration, and successful record/pixel equivalence with the
 unguarded native sampler on safe inputs. The surface workflow and installed-wheel
 gate execute this suite. No giant unchecked allocation is used as a negative
 control.
+
+`crates/fmn-library/tests/surface_sampling.rs` verifies the native owner directly.
+`crates/fmn-python/tests/native_surface_sampling.py` bypasses the host callback
+guard and tests the raw bridge's admission, each derivative-probe failure,
+original exception identity, and unchanged target records/views after refusal.

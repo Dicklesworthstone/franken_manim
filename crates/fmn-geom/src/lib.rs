@@ -54,7 +54,7 @@ pub use earclip::{
 };
 pub use isolines::{
     IsolineConfig, IsolineError, IsolineStats, MAX_ISOLINE_EVALUATIONS, MAX_ISOLINE_LEAVES,
-    plot_isoline, plot_isoline_with_stats,
+    plot_isoline, plot_isoline_with_stats, try_plot_isoline, try_plot_isoline_with_stats,
 };
 pub use quadpath::{
     AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, MAX_SUBDIVIDED_CURVES, QuadPath,

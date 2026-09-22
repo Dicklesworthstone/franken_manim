@@ -135,7 +135,9 @@ const EVALUATIONS_PER_REQUESTED_LEAF: usize = 2_048;
 /// An isoline extraction failure — every input fault is named, never a
 /// panic.
 #[derive(Debug, Clone, PartialEq)]
-pub enum IsolineError {
+pub enum IsolineError<E = std::convert::Infallible> {
+    /// The original field error. Extraction stops without another evaluation.
+    Callback(E),
     /// Domain endpoints and extents must be finite, and `pmin` must be
     /// componentwise strictly below `pmax`.
     Domain {
@@ -174,9 +176,10 @@ pub enum IsolineError {
     },
 }
 
-impl std::fmt::Display for IsolineError {
+impl<E: std::fmt::Display> std::fmt::Display for IsolineError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Callback(error) => write!(f, "isoline field failed: {error}"),
             Self::Domain { pmin, pmax } => write!(
                 f,
                 "isoline domain endpoints and extents must be finite and ordered: pmin {pmin:?}, pmax {pmax:?}"
@@ -202,7 +205,14 @@ impl std::fmt::Display for IsolineError {
     }
 }
 
-impl std::error::Error for IsolineError {}
+impl<E: std::error::Error + 'static> std::error::Error for IsolineError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Callback(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Extraction statistics, for tests and budget introspection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -215,7 +225,7 @@ pub struct IsolineStats {
 
 /// The memoizing sampler: `v(p) = f(p) − level`, cached by coordinate
 /// bits so both cells sharing an edge see identical values.
-struct Sampler<F: Fn(f64, f64) -> f64> {
+struct Sampler<F> {
     f: F,
     level: f64,
     cache: HashMap<(u64, u64), f64>,
@@ -223,8 +233,8 @@ struct Sampler<F: Fn(f64, f64) -> f64> {
     max_evaluations: usize,
 }
 
-impl<F: Fn(f64, f64) -> f64> Sampler<F> {
-    fn value(&mut self, x: f64, y: f64) -> Result<f64, IsolineError> {
+impl<E, F: FnMut(f64, f64) -> Result<f64, E>> Sampler<F> {
+    fn value(&mut self, x: f64, y: f64) -> Result<f64, IsolineError<E>> {
         let key = (x.to_bits(), y.to_bits());
         if let Some(&value) = self.cache.get(&key) {
             return Ok(value);
@@ -234,8 +244,8 @@ impl<F: Fn(f64, f64) -> f64> Sampler<F> {
                 max_evaluations: self.max_evaluations,
             });
         }
-        let value = (self.f)(x, y) - self.level;
         self.evaluations += 1;
+        let value = (self.f)(x, y).map_err(IsolineError::Callback)? - self.level;
         self.cache.insert(key, value);
         Ok(value)
     }
@@ -286,14 +296,14 @@ struct Cell {
 /// both sides compute it bit-for-bit identically and segments join
 /// exactly.
 #[allow(clippy::too_many_arguments)]
-fn edge_crossing<F: Fn(f64, f64) -> f64>(
+fn edge_crossing<E, F: FnMut(f64, f64) -> Result<f64, E>>(
     sampler: &mut Sampler<F>,
     pa: [f64; 2],
     va: f64,
     pb: [f64; 2],
     vb: f64,
     tol: [f64; 2],
-) -> Result<Option<[f64; 2]>, IsolineError> {
+) -> Result<Option<[f64; 2]>, IsolineError<E>> {
     let (mut p0, mut v0, mut p1, mut v1) =
         if (pa[0].to_bits(), pa[1].to_bits()) <= (pb[0].to_bits(), pb[1].to_bits()) {
             (pa, va, pb, vb)
@@ -359,14 +369,14 @@ struct Tri {
 /// The triangulator: fans four triangles across every internal
 /// leaf-leaf adjacency (Manson & Schaefer), plus the interior half-fan
 /// at boundary edges (see the module contract's Boundary rule).
-struct Triangulator<'a, F: Fn(f64, f64) -> f64> {
+struct Triangulator<'a, F> {
     cells: &'a [Cell],
     sampler: &'a mut Sampler<F>,
     triangles: Vec<Tri>,
 }
 
-impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
-    fn vertex(&mut self, p: [f64; 2]) -> Result<Vertex, IsolineError> {
+impl<E, F: FnMut(f64, f64) -> Result<f64, E>> Triangulator<'_, F> {
+    fn vertex(&mut self, p: [f64; 2]) -> Result<Vertex, IsolineError<E>> {
         Ok(Vertex {
             p,
             v: self.sampler.value(p[0], p[1])?,
@@ -374,13 +384,13 @@ impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
     }
 
     /// The center of the pmin..pmax box, evaluated.
-    fn face_dual(&mut self, pmin: [f64; 2], pmax: [f64; 2]) -> Result<Vertex, IsolineError> {
+    fn face_dual(&mut self, pmin: [f64; 2], pmax: [f64; 2]) -> Result<Vertex, IsolineError<E>> {
         let p = [midpoint(pmin[0], pmax[0]), midpoint(pmin[1], pmax[1])];
         self.vertex(p)
     }
 
     /// The midpoint of an edge, evaluated.
-    fn edge_dual(&mut self, a: [f64; 2], b: [f64; 2]) -> Result<Vertex, IsolineError> {
+    fn edge_dual(&mut self, a: [f64; 2], b: [f64; 2]) -> Result<Vertex, IsolineError<E>> {
         self.vertex([midpoint(a[0], b[0]), midpoint(a[1], b[1])])
     }
 
@@ -392,7 +402,7 @@ impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
         v2: [f64; 2],
         fa: Vertex,
         fb: Vertex,
-    ) -> Result<(), IsolineError> {
+    ) -> Result<(), IsolineError<E>> {
         let e = self.edge_dual(v1, v2)?;
         let a = self.vertex(v1)?;
         let b = self.vertex(v2)?;
@@ -405,7 +415,7 @@ impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
 
     /// The boundary half-fan: the two interior triangles from a cell's
     /// center to one of its edges (corners + edge midpoint).
-    fn half_fan(&mut self, v1: [f64; 2], v2: [f64; 2], fa: Vertex) -> Result<(), IsolineError> {
+    fn half_fan(&mut self, v1: [f64; 2], v2: [f64; 2], fa: Vertex) -> Result<(), IsolineError<E>> {
         let e = self.edge_dual(v1, v2)?;
         let a = self.vertex(v1)?;
         let b = self.vertex(v2)?;
@@ -426,7 +436,7 @@ impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
 
     /// Every internal adjacency, exactly once (the recursion descends
     /// to minimal pairs, sewing depth transitions exactly).
-    fn inside(&mut self, i: usize) -> Result<(), IsolineError> {
+    fn inside(&mut self, i: usize) -> Result<(), IsolineError<E>> {
         if !self.cells[i].branched {
             return Ok(());
         }
@@ -442,7 +452,7 @@ impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
     }
 
     /// Adjacency across a vertical edge: b is right of a.
-    fn cross_row(&mut self, a: usize, b: usize) -> Result<(), IsolineError> {
+    fn cross_row(&mut self, a: usize, b: usize) -> Result<(), IsolineError<E>> {
         let (a_br, a_ch, b_ch) = (
             self.cells[a].branched,
             self.cells[a].children,
@@ -478,7 +488,7 @@ impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
     }
 
     /// Adjacency across a horizontal edge: b is above a.
-    fn cross_col(&mut self, a: usize, b: usize) -> Result<(), IsolineError> {
+    fn cross_col(&mut self, a: usize, b: usize) -> Result<(), IsolineError<E>> {
         let (a_br, a_ch, b_ch) = (
             self.cells[a].branched,
             self.cells[a].children,
@@ -517,7 +527,7 @@ impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
         &mut self,
         domain_pmin: [f64; 2],
         domain_pmax: [f64; 2],
-    ) -> Result<(), IsolineError> {
+    ) -> Result<(), IsolineError<E>> {
         for i in 0..self.cells.len() {
             if self.cells[i].branched {
                 continue;
@@ -546,11 +556,11 @@ impl<'a, F: Fn(f64, f64) -> f64> Triangulator<'a, F> {
 /// One crossing triangle emits one segment: two crossing edges, the
 /// above region on the left. A crossing suppressed by an undefined
 /// endpoint or the asymptote guard drops the triangle's segment.
-fn triangle_segment<F: Fn(f64, f64) -> f64>(
+fn triangle_segment<E, F: FnMut(f64, f64) -> Result<f64, E>>(
     tri: &Tri,
     sampler: &mut Sampler<F>,
     tol: [f64; 2],
-) -> Result<Option<Segment>, IsolineError> {
+) -> Result<Option<Segment>, IsolineError<E>> {
     let above_mask = |i: usize| above(tri.vs[i].v);
     let count = (0..3).filter(|&i| above_mask(i)).count();
     if count == 0 || count == 3 {
@@ -599,10 +609,10 @@ fn triangle_segment<F: Fn(f64, f64) -> f64>(
     }
 }
 
-fn sample_corners<F: Fn(f64, f64) -> f64>(
+fn sample_corners<E, F: FnMut(f64, f64) -> Result<f64, E>>(
     sampler: &mut Sampler<F>,
     corners: [[f64; 2]; 4],
-) -> Result<[f64; 4], IsolineError> {
+) -> Result<[f64; 4], IsolineError<E>> {
     let mut values = [0.0; 4];
     for (value, point) in values.iter_mut().zip(corners) {
         *value = sampler.value(point[0], point[1])?;
@@ -648,6 +658,38 @@ pub fn plot_isoline_with_stats<F: Fn(f64, f64) -> f64>(
     pmax: [f64; 2],
     config: &IsolineConfig,
 ) -> Result<(IsolineCurves, IsolineStats), IsolineError> {
+    try_plot_isoline_with_stats(|x, y| Ok(f(x, y)), pmin, pmax, config)
+}
+
+/// Fallible field extraction using the same memoization, traversal and arithmetic
+/// as [`plot_isoline`]. The first callback error aborts the entire extraction,
+/// including errors in refinement or crossing searches. No partial curves escape.
+/// Borrowed, stateful callbacks are supported; deterministic output still requires
+/// the same value for each coordinate. `Ok(NaN)` retains undefined-region meaning.
+///
+/// # Errors
+/// The same admission errors as [`plot_isoline`], or [`IsolineError::Callback`]
+/// carrying the original callback error without requiring it to be cloned.
+pub fn try_plot_isoline<E, F: FnMut(f64, f64) -> Result<f64, E>>(
+    f: F,
+    pmin: [f64; 2],
+    pmax: [f64; 2],
+    config: &IsolineConfig,
+) -> Result<IsolineCurves, IsolineError<E>> {
+    try_plot_isoline_with_stats(f, pmin, pmax, config).map(|(curves, _)| curves)
+}
+
+/// [`try_plot_isoline`], with the successful extraction's statistics.
+///
+/// # Errors
+/// As [`try_plot_isoline`]. No statistics or partial geometry are published on error.
+#[allow(clippy::too_many_lines)]
+pub fn try_plot_isoline_with_stats<E, F: FnMut(f64, f64) -> Result<f64, E>>(
+    f: F,
+    pmin: [f64; 2],
+    pmax: [f64; 2],
+    config: &IsolineConfig,
+) -> Result<(IsolineCurves, IsolineStats), IsolineError<E>> {
     let extent = [pmax[0] - pmin[0], pmax[1] - pmin[1]];
     if pmin
         .iter()
@@ -1204,7 +1246,7 @@ mod tests {
     #[test]
     fn sampler_evaluation_budget_counts_only_distinct_points() {
         let mut sampler = Sampler {
-            f: |x, y| x + y,
+            f: |x, y| Ok::<_, std::convert::Infallible>(x + y),
             level: 0.0,
             cache: HashMap::new(),
             evaluations: 0,

@@ -40,7 +40,7 @@ use std::fmt;
 
 use fmn_core::constants::{FRAME_X_RADIUS, FRAME_Y_RADIUS, YELLOW};
 use fmn_core::types::Vec3;
-use fmn_geom::{GeomError, IsolineConfig, IsolineError, QuadPath, plot_isoline};
+use fmn_geom::{GeomError, IsolineConfig, IsolineError, QuadPath, try_plot_isoline};
 use fmn_mobject::uniforms::JointType;
 
 use crate::style::Style;
@@ -255,18 +255,32 @@ pub(crate) fn sampled_values(
 /// A graphing failure: bounded sampling, isoline extraction, or the path
 /// kernel's true spline solve.
 #[derive(Debug, Clone, PartialEq)]
-pub enum GraphError {
+pub enum GraphError<E = std::convert::Infallible> {
+    /// The original callback error. No later sample is evaluated.
+    Callback(E),
+    /// A sampled or smoothed point cannot be stored in finite native records.
+    InvalidPoint {
+        /// Zero-based sample index (or path-record index after smoothing).
+        index: usize,
+        /// The offending coordinates.
+        point: Vec3,
+    },
     /// Atlas sampling refused a non-finite or over-budget request.
     Sampling(SamplingError),
-    /// [`plot_isoline`] rejected the domain or depth.
-    Isoline(IsolineError),
+    /// [`fmn_geom::plot_isoline`] rejected the domain or depth.
+    Isoline(IsolineError<E>),
     /// The path kernel rejected a construction (the true smoothing solve).
     Geom(GeomError),
 }
 
-impl fmt::Display for GraphError {
+impl<E: fmt::Display> fmt::Display for GraphError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Callback(error) => write!(f, "graph callback failed: {error}"),
+            Self::InvalidPoint { index, point } => write!(
+                f,
+                "graph point {index} must be finite and f32-representable: {point:?}"
+            ),
             Self::Sampling(e) => write!(f, "graph sampling failed: {e}"),
             Self::Isoline(e) => write!(f, "isoline extraction failed: {e}"),
             Self::Geom(e) => write!(f, "path construction failed: {e}"),
@@ -274,9 +288,11 @@ impl fmt::Display for GraphError {
     }
 }
 
-impl std::error::Error for GraphError {
+impl<E: std::error::Error + 'static> std::error::Error for GraphError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Callback(error) => Some(error),
+            Self::InvalidPoint { .. } => None,
             Self::Sampling(error) => Some(error),
             Self::Isoline(error) => Some(error),
             Self::Geom(error) => Some(error),
@@ -284,19 +300,22 @@ impl std::error::Error for GraphError {
     }
 }
 
-impl From<SamplingError> for GraphError {
+impl<E> From<SamplingError> for GraphError<E> {
     fn from(e: SamplingError) -> Self {
         Self::Sampling(e)
     }
 }
 
-impl From<IsolineError> for GraphError {
-    fn from(e: IsolineError) -> Self {
-        Self::Isoline(e)
+impl<E> From<IsolineError<E>> for GraphError<E> {
+    fn from(e: IsolineError<E>) -> Self {
+        match e {
+            IsolineError::Callback(error) => Self::Callback(error),
+            other => Self::Isoline(other),
+        }
     }
 }
 
-impl From<GeomError> for GraphError {
+impl<E> From<GeomError> for GraphError<E> {
     fn from(e: GeomError) -> Self {
         Self::Geom(e)
     }
@@ -437,16 +456,80 @@ impl ParametricCurve {
 
     /// `init_points`: sample each continuity segment as corners.
     ///
-    /// The path-kernel calls cannot fail on the runs built here (every
-    /// subpath starts with [`QuadPath::start_new_path`] and corners append
-    /// whole line segments; approx-smoothing a valid shared-anchor run is
-    /// solver-free), so their results are discarded the way the sibling
-    /// builders discard provably-satisfied layout checks.
+    /// Delegates to [`ParametricCurveSpec::try_sample`] with the owned function.
+    /// The same admitted ranges, point validation and path kernel serve both
+    /// infallible and fallible callers; no sentinel geometry is constructed.
     ///
     /// # Errors
     /// [`GraphError::Sampling`] if the range controls are non-finite or
-    /// the requested boundary/sample work exceeds the configured budget.
+    /// the requested boundary/sample work exceeds the configured budget;
+    /// [`GraphError::InvalidPoint`] for unrepresentable samples or handles.
     pub fn build(self) -> Result<VMobject, GraphError> {
+        ParametricCurveSpec {
+            t_range: self.t_range,
+            epsilon: self.epsilon,
+            discontinuities: self.discontinuities,
+            use_smoothing: self.use_smoothing,
+            sampling_budget: self.sampling_budget,
+            style: self.style,
+        }
+        .try_sample(|t| Ok((self.t_func)(t)))
+    }
+}
+
+/// Sampling controls independent of callback storage. Both owned graph builders
+/// and borrowed, fallible host callbacks use this one path-construction owner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParametricCurveSpec {
+    /// Start, stop and increment, including the explicit stop sample.
+    pub t_range: [f64; 3],
+    /// Half the excluded width around each discontinuity.
+    pub epsilon: f64,
+    /// Interior discontinuities, sorted together with the domain endpoints.
+    pub discontinuities: Vec<f64>,
+    /// Apply the existing approximate smoothing after successful sampling.
+    pub use_smoothing: bool,
+    /// Aggregate boundary and sample admission budget.
+    pub sampling_budget: SamplingBudget,
+    /// Style of the completed path.
+    pub style: Style,
+}
+
+impl Default for ParametricCurveSpec {
+    fn default() -> Self {
+        Self {
+            t_range: DEFAULT_T_RANGE,
+            epsilon: DEFAULT_EPSILON,
+            discontinuities: Vec::new(),
+            use_smoothing: true,
+            sampling_budget: SamplingBudget::DEFAULT,
+            style: Style::default(),
+        }
+    }
+}
+
+fn finite_graph_point<E>(point: Vec3, index: usize) -> Result<Vec3, GraphError<E>> {
+    if point
+        .iter()
+        .all(|value| value.is_finite() && value.abs() <= f64::from(f32::MAX))
+    {
+        Ok(point)
+    } else {
+        Err(GraphError::InvalidPoint { index, point })
+    }
+}
+
+impl ParametricCurveSpec {
+    /// Construct a detached curve from a borrowed, stateful, fallible callback.
+    /// Sampling order and smoothing are identical to [`ParametricCurve::build`].
+    /// No partial path is returned, and no sample follows the first callback error.
+    ///
+    /// # Errors
+    /// Admission, invalid point, path-construction, or original callback error.
+    pub fn try_sample<E>(
+        &self,
+        mut function: impl FnMut(f64) -> Result<Vec3, E>,
+    ) -> Result<VMobject, GraphError<E>> {
         let [t_min, t_max, step] = self.t_range;
         ensure_finite("parametric curve", "t_min", t_min)?;
         ensure_finite("parametric curve", "t_max", t_max)?;
@@ -519,18 +602,34 @@ impl ParametricCurve {
         }
 
         let mut path = QuadPath::new();
+        let mut sample_index = 0;
         for pair in boundary_times.windows(2).step_by(2) {
             let (t1, t2) = (pair[0], pair[1]);
             let ts = sample_pair(t1, t2, step, self.sampling_budget)?;
-            path.start_new_path((self.t_func)(ts[0]));
-            let corners: Vec<Vec3> = ts[1..].iter().map(|&t| (self.t_func)(t)).collect();
-            let _ = path.add_points_as_corners(&corners);
+            let mut points = Vec::new();
+            points
+                .try_reserve_exact(ts.len())
+                .map_err(|_| SamplingError::AllocationFailed {
+                    context: "parametric curve points",
+                    samples: ts.len(),
+                })?;
+            for t in ts {
+                let point = function(t).map_err(GraphError::Callback)?;
+                points.push(finite_graph_point(point, sample_index)?);
+                sample_index += 1;
+            }
+            path.start_new_path(points[0]);
+            path.add_points_as_corners(&points[1..])?;
         }
         if self.use_smoothing {
-            let _ = path.make_smooth(true);
+            path.make_smooth(true)?;
         }
         if !path.has_points() {
-            let _ = path.set_points(vec![(self.t_func)(t_min)]);
+            let point = function(t_min).map_err(GraphError::Callback)?;
+            path.set_points(vec![finite_graph_point(point, sample_index)?])?;
+        }
+        for (index, &point) in path.points().iter().enumerate() {
+            finite_graph_point::<E>(point, index)?;
         }
         Ok(VMobject::from_path(&path).with_style(self.style))
     }
@@ -776,16 +875,69 @@ impl ImplicitFunction {
     /// the depth overflows the budget arithmetic; [`GraphError::Geom`]
     /// when `use_smoothing` runs the true spline solve and it fails.
     pub fn build(self) -> Result<VMobject, GraphError> {
-        let config = IsolineConfig {
-            min_depth: self.min_depth,
-            max_quads: self.max_quads,
-            ..IsolineConfig::default()
-        };
-        let curves = plot_isoline(
-            |x, y| (self.func)(x, y),
+        ImplicitFunctionSpec {
+            x_range: self.x_range,
+            y_range: self.y_range,
+            config: IsolineConfig {
+                min_depth: self.min_depth,
+                max_quads: self.max_quads,
+                ..IsolineConfig::default()
+            },
+            use_smoothing: self.use_smoothing,
+            joint_type: self.joint_type,
+            style: self.style,
+        }
+        .try_sample(|x, y| Ok((self.func)(x, y)))
+    }
+}
+
+/// Isoline controls independent of callback ownership. Native and host callers
+/// share Chisel's fallible contourer and Atlas's one path materializer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplicitFunctionSpec {
+    /// Horizontal domain bounds.
+    pub x_range: [f64; 2],
+    /// Vertical domain bounds.
+    pub y_range: [f64; 2],
+    /// Depth, leaf budget, level and tolerance for native contour extraction.
+    pub config: IsolineConfig,
+    /// Apply the existing true-spline smoothing to the extracted contours.
+    pub use_smoothing: bool,
+    /// Stroke joint policy.
+    pub joint_type: JointType,
+    /// Style of the completed path.
+    pub style: Style,
+}
+
+impl Default for ImplicitFunctionSpec {
+    fn default() -> Self {
+        Self {
+            x_range: [-FRAME_X_RADIUS, FRAME_X_RADIUS],
+            y_range: [-FRAME_Y_RADIUS, FRAME_Y_RADIUS],
+            config: IsolineConfig::default(),
+            use_smoothing: false,
+            joint_type: JointType::NoJoint,
+            style: Style::default(),
+        }
+    }
+}
+
+impl ImplicitFunctionSpec {
+    /// Extract and materialize a fallible field. NaN/infinity values retain the
+    /// native undefined-region meaning; an `Err` instead aborts immediately.
+    ///
+    /// # Errors
+    /// Native isoline admission, the original field error, invalid record points,
+    /// or the true-spline solve. No partial mobject is returned on any failure.
+    pub fn try_sample<E>(
+        &self,
+        function: impl FnMut(f64, f64) -> Result<f64, E>,
+    ) -> Result<VMobject, GraphError<E>> {
+        let curves = try_plot_isoline(
+            function,
             [self.x_range[0], self.y_range[0]],
             [self.x_range[1], self.y_range[1]],
-            &config,
+            &self.config,
         )?;
         let mut path = QuadPath::new();
         for curve in &curves {
@@ -799,6 +951,9 @@ impl ImplicitFunction {
         }
         if self.use_smoothing {
             path.make_smooth(false)?;
+        }
+        for (index, &point) in path.points().iter().enumerate() {
+            finite_graph_point::<E>(point, index)?;
         }
         Ok(VMobject::from_path(&path)
             .with_style(self.style)

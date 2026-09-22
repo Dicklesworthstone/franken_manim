@@ -5396,42 +5396,22 @@ impl BridgeMobject {
         discontinuities: Vec<f64>,
         use_smoothing: bool,
     ) -> PyResult<Bound<'py, PyList>> {
-        let func = t_func.clone().unbind();
-        let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
-        let closure_errors = Rc::clone(&error_cell);
-        let curve = fmn_library::ParametricCurve::new(move |t| {
-            Python::attach(|py| {
-                let sample = func
-                    .bind(py)
-                    .call1((t,))
-                    .and_then(|value| value.extract::<Vec<f64>>());
-                match sample {
-                    Ok(point) if point.len() >= 3 => [point[0], point[1], point[2]],
-                    Ok(_) => {
-                        if closure_errors.borrow().is_none() {
-                            *closure_errors.borrow_mut() =
-                                Some(PyValueError::new_err("t_func must return three components"));
-                        }
-                        [0.0; 3]
-                    }
-                    Err(error) => {
-                        if closure_errors.borrow().is_none() {
-                            *closure_errors.borrow_mut() = Some(error);
-                        }
-                        [0.0; 3]
-                    }
-                }
-            })
-        })
-        .t_range(range3(t_range)?)
-        .epsilon(epsilon)
-        .discontinuities(discontinuities)
-        .use_smoothing(use_smoothing)
-        .build();
-        if let Some(error) = error_cell.borrow_mut().take() {
-            return Err(error);
+        if slf.borrow().engine.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a native graph builder requires a detached target",
+            ));
         }
-        install_native_tree(slf, factory, curve.map_err(native_error)?)
+        let spec = fmn_library::graphs::ParametricCurveSpec {
+            t_range: range3(t_range)?,
+            epsilon,
+            discontinuities,
+            use_smoothing,
+            ..fmn_library::graphs::ParametricCurveSpec::default()
+        };
+        let curve = spec
+            .try_sample(|t| t_func.call1((t,))?.extract::<[f64; 3]>())
+            .map_err(graph_sampling_error)?;
+        install_native_tree(slf, factory, curve)
     }
 
     /// `FunctionGraph(function, ...)`: Atlas owns the bounded scalar graph
@@ -5447,43 +5427,29 @@ impl BridgeMobject {
         discontinuities: Vec<f64>,
         use_smoothing: bool,
     ) -> PyResult<Bound<'py, PyList>> {
-        let function = function.clone().unbind();
-        let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
-        let closure_errors = Rc::clone(&error_cell);
-        let graph = fmn_library::FunctionGraph::new(move |x| {
-            Python::attach(|py| match function.bind(py).call1((x,)) {
-                Ok(value) => match value.extract::<f64>() {
-                    Ok(value) => value,
-                    Err(error) => {
-                        if closure_errors.borrow().is_none() {
-                            *closure_errors.borrow_mut() = Some(error);
-                        }
-                        f64::NAN
-                    }
-                },
-                Err(error) => {
-                    if closure_errors.borrow().is_none() {
-                        *closure_errors.borrow_mut() = Some(error);
-                    }
-                    f64::NAN
-                }
-            })
-        })
-        .x_range(range3(x_range)?)
-        .epsilon(epsilon)
-        .discontinuities(discontinuities)
-        .use_smoothing(use_smoothing)
-        .build();
-        if let Some(error) = error_cell.borrow_mut().take() {
-            return Err(error);
+        if slf.borrow().engine.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a native graph builder requires a detached target",
+            ));
         }
-        install_native_tree(slf, factory, graph.map_err(native_error)?)
+        let spec = fmn_library::graphs::ParametricCurveSpec {
+            t_range: range3(x_range)?,
+            epsilon,
+            discontinuities,
+            use_smoothing,
+            style: fmn_library::Style::default().color(fmn_core::constants::YELLOW),
+            ..fmn_library::graphs::ParametricCurveSpec::default()
+        };
+        let graph = spec
+            .try_sample(|x| Ok([x, function.call1((x,))?.extract::<f64>()?, 0.0]))
+            .map_err(graph_sampling_error)?;
+        install_native_tree(slf, factory, graph)
     }
 
     /// `ImplicitFunction(func, ...)`: Chisel extracts the bounded zero set
-    /// and Atlas materializes its shared-anchor path. Python callback errors
-    /// remain the authority even when later native samples observe the NaN
-    /// sentinel used to finish the bounded traversal.
+    /// and Atlas materializes its shared-anchor path. A callback error terminates
+    /// the actual native traversal immediately; a returned NaN still means an
+    /// undefined region, not cancellation.
     #[allow(clippy::too_many_arguments)]
     fn _build_implicit_function<'py>(
         slf: &Bound<'py, Self>,
@@ -5495,38 +5461,23 @@ impl BridgeMobject {
         max_quads: usize,
         use_smoothing: bool,
     ) -> PyResult<Bound<'py, PyList>> {
-        let func = func.clone().unbind();
-        let error_cell: Rc<RefCell<Option<PyErr>>> = Rc::new(RefCell::new(None));
-        let closure_errors = Rc::clone(&error_cell);
-        let implicit = fmn_library::ImplicitFunction::new(move |x, y| {
-            Python::attach(|py| match func.bind(py).call1((x, y)) {
-                Ok(value) => match value.extract::<f64>() {
-                    Ok(value) => value,
-                    Err(error) => {
-                        if closure_errors.borrow().is_none() {
-                            *closure_errors.borrow_mut() = Some(error);
-                        }
-                        f64::NAN
-                    }
-                },
-                Err(error) => {
-                    if closure_errors.borrow().is_none() {
-                        *closure_errors.borrow_mut() = Some(error);
-                    }
-                    f64::NAN
-                }
-            })
-        })
-        .x_range([x_range.0, x_range.1])
-        .y_range([y_range.0, y_range.1])
-        .min_depth(min_depth)
-        .max_quads(max_quads)
-        .use_smoothing(use_smoothing)
-        .build();
-        if let Some(error) = error_cell.borrow_mut().take() {
-            return Err(error);
+        if slf.borrow().engine.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a native graph builder requires a detached target",
+            ));
         }
-        install_native_tree(slf, factory, implicit.map_err(native_error)?)
+        let mut spec = fmn_library::graphs::ImplicitFunctionSpec {
+            x_range: [x_range.0, x_range.1],
+            y_range: [y_range.0, y_range.1],
+            use_smoothing,
+            ..fmn_library::graphs::ImplicitFunctionSpec::default()
+        };
+        spec.config.min_depth = min_depth;
+        spec.config.max_quads = max_quads;
+        let implicit = spec
+            .try_sample(|x, y| func.call1((x, y))?.extract::<f64>())
+            .map_err(graph_sampling_error)?;
+        install_native_tree(slf, factory, implicit)
     }
 
     /// Build the native VectorField geometry from already-evaluated portal
@@ -10057,6 +10008,13 @@ fn native_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
+fn graph_sampling_error(error: fmn_library::graphs::GraphError<PyErr>) -> PyErr {
+    match error {
+        fmn_library::graphs::GraphError::Callback(error) => error,
+        other => native_error(other),
+    }
+}
+
 /// Preserve Scribe's precise Textbox diagnostic while naming the portal's
 /// schema-level unmapped-glyph refusal for callers that classify errors.
 fn textbox_error(error: fmn_library::TextMobjectError) -> PyErr {
@@ -11767,6 +11725,23 @@ except Exception:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallible_native_graph_sampling() {
+        crate::with_python_test_module("fallible graph sampling", |py, _module, globals| {
+            let code = CString::new(include_str!("../tests/native_graph_sampling.py")).unwrap();
+            py.run(code.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_native_graph_sampling")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
 
     #[test]
     fn production_native_output_acceptance_suite() {

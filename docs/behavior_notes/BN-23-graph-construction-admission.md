@@ -41,6 +41,35 @@ endpoint-only policy is preserved; this adapter does not replace it with a
 positive-step-only rule. The user function is never probed to guess its type,
 vectorization capability, output dimensions or purity.
 
+## Native propagation, not sentinel completion
+
+The Rust owners now accept fallible, borrowed callbacks directly:
+
+* `fmn_library::graphs::ParametricCurveSpec::try_sample` samples curves (and
+  scalar graphs expressed as `[x, f(x), 0]`) through the same admitted ranges and
+  path kernel as the existing owned `ParametricCurve` and `FunctionGraph` APIs.
+* `fmn_geom::try_plot_isoline` and `try_plot_isoline_with_stats` propagate a
+  field error through quadtree construction, adaptive refinement, conforming
+  triangulation and every crossing search. The existing infallible entry points
+  delegate to the same implementation; no alternative contourer is introduced.
+* `fmn_library::graphs::ImplicitFunctionSpec::try_sample` materializes these
+  contours through the existing Atlas path and true-spline smoothing owner.
+
+`GraphError<E>` and `IsolineError<E>` retain the original error value without
+cloning it, requiring a boxed callback, or imposing `'static` on borrowed data.
+No further sample, path smoothing, segment chaining, or partial-object publication
+follows a callback failure. When extraction succeeds, memoization, evaluation
+statistics, sample/contour ordering, and native arithmetic remain unchanged.
+Stateful callbacks are useful for cancellation and diagnostics; deterministic
+geometry still requires a stable value for each sampled coordinate. NaN and
+infinity returned normally by an implicit field keep their undefined-region
+meaning, while an `Err` aborts extraction.
+
+The raw Python graph methods now call those fallible APIs. They no longer retain
+an error in a side channel and finish native work using zero/NaN sentinels. A raw
+parametric point must have exactly three components, and sampled/smoothed curve
+points must be finite and f32-representable before becoming native records.
+
 ## Ownership and limits
 
 Scene-bound objects cannot be reconstructed with __init__ or a construction seam;
@@ -49,12 +78,12 @@ generation and exported views intact. Failed detached native builder calls do no
 publish replacement geometry. Authored side effects made before failure are not
 rolled back, nor is arbitrary unrelated host state transactionally restored.
 
-This is the Python boundary, not a new fallible Rust sampling API. The native
-loop can finish its already-bounded iterations after the first failure, receiving
-sentinels without further authored calls. The native error channel then refuses
-publication. Direct Rust callers and deliberate dispatch around Python Mobject
-methods remain outside this adapter. Finite input validation is not a proof that
-all extreme downstream smoothing/renderer arithmetic remains representable.
+Public Python iterable conversion and native sampling admission remain separate
+layers. The native callback result channel is synchronous: it does not preempt a
+callback that never returns, reverse authored side effects, or catch arbitrary
+Rust panics. Native allocation and evaluation budgets remain in force; this does
+not introduce an allocator-wide out-of-memory recovery mechanism. Finite point
+validation is not a proof that all later renderer arithmetic is representable.
 
 ## Tests
 
@@ -64,3 +93,12 @@ implicit undefined regions, bounded generators, native budget precedence,
 discontinuities, endpoint policies, ownership, independent nested construction,
 callable lifetime and idempotent installation. Successful points and animated Y4M
 are compared with the original native builders at one and four threads.
+
+`crates/fmn-library/tests/fallible_graph_sampling.rs` injects an error at every
+evaluation of a nontrivial implicit extraction and verifies the exact successful
+prefix, including refinement and crossing-search samples. It also checks curve
+discontinuity order, admission precedence, non-clone errors, explicit budgets,
+and existing owned-builder equivalence. `native_graph_sampling.py` exercises raw
+PyO3 descriptors rather than the host guard, including cancellation, conversion
+errors, nested construction, target/view preservation and an independently
+authored line-animation Y4M oracle at one and four threads.
