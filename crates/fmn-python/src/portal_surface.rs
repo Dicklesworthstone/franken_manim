@@ -79,15 +79,57 @@ fn _copy_surface_geometry(target: &Bound<'_, BridgeMobject>, source: &Bound<'_, 
     })?
 }
 
+/// Align proxies even when one is scene-bound and the other is detached.
+/// Prepare both immutable entry copies before changing either actual owner.
+/// The native Stage operation remains the only UV resampling implementation.
+#[pyfunction]
+fn _align_surface_grids(
+    left: &Bound<'_, BridgeMobject>,
+    right: &Bound<'_, BridgeMobject>,
+) -> PyResult<()> {
+    let mut preparation = Stage::new();
+    let a = copy_proxy_entry_into(left, &mut preparation)?;
+    let b = copy_proxy_entry_into(right, &mut preparation)?;
+    let (a_update, b_update) = fmn_mobject::stage::prepare_surface_grid_alignment(
+        preparation.get(a).ok_or_else(|| StaleHandleError::new_err("left surface is stale"))?,
+        preparation.get(b).ok_or_else(|| StaleHandleError::new_err("right surface is stale"))?,
+    ).map_err(native_error)?;
+    // No authored code runs between preparation and publication. The Stage
+    // also checks the captured record contents before accepting each update.
+    if let Some(update) = a_update {
+        with_stage(left, |stage, mob| {
+            stage.apply_surface_grid_update(mob, update).map_err(native_error)
+        })??;
+    }
+    if let Some(update) = b_update {
+        with_stage(right, |stage, mob| {
+            stage.apply_surface_grid_update(mob, update).map_err(native_error)
+        })??;
+    }
+    Ok(())
+}
+
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_surface_grid_resolution, module)?)?;
     module.add_function(wrap_pyfunction!(_copy_surface_geometry, module)?)?;
+    module.add_function(wrap_pyfunction!(_align_surface_grids, module)?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_surface_alignment_and_morph_output() {
+        crate::with_python_test_module("UV surface alignment", |py, _module, globals| {
+            let code = std::ffi::CString::new(include_str!("../tests/surface_alignment.py")).unwrap();
+            py.run(code.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py)).unwrap();
+            globals.get_item("run_surface_alignment_acceptance").unwrap().unwrap()
+                .call0().inspect_err(|error| error.print(py)).unwrap();
+        });
+    }
 
     #[test]
     fn live_surface_regeneration_and_native_output() {
