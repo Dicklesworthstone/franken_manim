@@ -1,4 +1,4 @@
-"""Content-triggered scene reconstruction at the host editor's cell boundary.
+"""Content-triggered scene reconstruction at safe host-editor boundaries.
 
 This is full SceneProject reconstruction, not definition-only autoreload. No
 thread, second scene clock or worker is started. A failed generation leaves the
@@ -17,9 +17,14 @@ _STATE = "_fmn_project_autorebuild"
 _MISSING = object()
 
 
-def _watch_options(*, debounce=0.0, paths=()):
+def _watch_options(*, debounce=0.0, paths=(), idle=None, poll_interval=0.25):
     """Freeze and validate options before acquiring host editor resources."""
     debounce = _timing(debounce, "debounce", positive=False)
+    if idle is not None and type(idle) is not bool:
+        raise TypeError("idle must be bool or None")
+    poll_interval = _timing(poll_interval, "poll_interval", positive=True)
+    if not 0.01 <= poll_interval <= 60.0:
+        raise ValueError("poll_interval must be in 0.01..60 seconds")
     if isinstance(paths, (str, bytes, os.PathLike)):
         raise TypeError("paths must be an iterable of file paths")
     extras = []
@@ -27,15 +32,19 @@ def _watch_options(*, debounce=0.0, paths=()):
         extras.append(Path(path).absolute())
         if len(extras) > _MAX_FILES:
             raise ValueError("scene watch exceeds its file count budget")
-    return {"debounce": debounce, "paths": tuple(extras)}
+    return {"debounce": debounce, "paths": tuple(extras),
+            "idle": idle, "poll_interval": poll_interval}
 
 
 class _RebuildWatch:
     """One attempted reconstruction per stable content generation."""
 
-    def __init__(self, project, check, rebuild, *, debounce=0.0, paths=()):
-        options = _watch_options(debounce=debounce, paths=paths)
+    def __init__(self, project, check, rebuild, *, debounce=0.0, paths=(),
+                 idle=None, poll_interval=0.25):
+        options = _watch_options(debounce=debounce, paths=paths, idle=idle, poll_interval=poll_interval)
         self.debounce, self.paths = options["debounce"], options["paths"]
+        self.idle_mode, self.poll_interval = options["idle"], options["poll_interval"]
+        self.prompt = None
         self.project, self.check, self.rebuild = project, check, rebuild
         self.observed = self.attempted = _MISSING
         self.stable_since = 0.0
@@ -97,7 +106,11 @@ class _RebuildWatch:
 
     def close(self):
         self.closed = True
-        self.project = self.check = self.rebuild = None
+        try:
+            if self.prompt is not None:
+                self.prompt.close()
+        finally:
+            self.project = self.check = self.rebuild = None
 
 
 def install_project_autorebuild(native):
@@ -137,7 +150,7 @@ def install_project_autorebuild(native):
         state.close()  # Retained callbacks are inert before unregistering.
         remove_hook(self, state.callback)
 
-    def auto_rebuild(self, *, debounce=0.0, paths=()):
+    def auto_rebuild(self, *, debounce=0.0, paths=(), idle=None, poll_interval=0.25):
         project = vars(self).get(_PROJECT)
         if project is None:
             raise native._CapabilityError("auto_rebuild requires an active SceneProject editor")
@@ -156,7 +169,8 @@ def install_project_autorebuild(native):
                 raise RuntimeError("scene rebuild editor no longer exists")
             return embedded.reload_scene(if_changed=if_changed)
 
-        state = _RebuildWatch(project, check, rebuild, debounce=debounce, paths=paths)
+        state = _RebuildWatch(project, check, rebuild, debounce=debounce, paths=paths,
+                              idle=idle, poll_interval=poll_interval)
 
         def before_cell(*_args, **_kwargs):
             embedded = owner()
@@ -167,12 +181,25 @@ def install_project_autorebuild(native):
             # available. The content generation is already marked attempted.
             state.poll()
 
-        state.arm()
+        from .project_prompt import prepare_prompt
+        previous = vars(self).get(_STATE)
+
+        def active():
+            embedded = owner()
+            return (embedded is not None and embedded._fmn_launching
+                    and vars(embedded).get(_STATE) is state and not state.closed)
+
+        try:
+            state.arm()
+            state.prompt = prepare_prompt(self.shell, state, active,
+                                          replacing=None if previous is None else previous.prompt)
+        except BaseException:
+            state.close()
+            raise
         state.callback = before_cell
         # Validate options before disturbing an existing mode. Definition-only
         # autoreload and full reconstruction must not execute the same source
         # generation twice at a single cell boundary.
-        previous = vars(self).get(_STATE)
         if previous is not None:
             release(self, previous)
         auto = vars(self).get(definition_state)
@@ -182,6 +209,12 @@ def install_project_autorebuild(native):
         self.shell.events.register("pre_run_cell", before_cell)
         self._fmn_hooks.append((self.shell.events, "pre_run_cell", before_cell))
         vars(self)[_STATE] = state
+        try:
+            if state.prompt is not None:
+                state.prompt.install()
+        except BaseException:
+            release(self, state)
+            raise
 
     def auto_reload(self):
         # Explicitly switching back to definitions disables full reconstruction.
