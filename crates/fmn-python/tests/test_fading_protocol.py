@@ -30,6 +30,9 @@ def environment():
             self.stroke_opacity = float(opacity)
         def __getitem__(self, index):
             return self.submobjects[index]
+        def set_submobjects(self, children):
+            self.submobjects = list(children)
+            return self
         def get_family(self):
             return [self, *(member for child in self.submobjects for member in child.get_family())]
         def family_members_with_points(self):
@@ -497,6 +500,9 @@ class FadeTransformTests(unittest.TestCase):
             setattr(native, name, "boundary-fixture")
         modules = {m.__name__: m for m in (native, package, distribution, shapes, authority,
                                           provenance, rendering, playback)}
+        initialization = types.ModuleType("fmn_python.initialization")
+        initialization.initialize = lambda module: fading_module.install_fading(module)
+        modules["fmn_python.initialization"] = initialization
         modules["fmn_python.fading"] = fading_module
         original = native.FadeTransform
         with patch.dict(sys.modules, modules):

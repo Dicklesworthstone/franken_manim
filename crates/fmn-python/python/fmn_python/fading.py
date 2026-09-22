@@ -175,7 +175,10 @@ def install_fading(native: Any) -> None:
         # saved records. Preserve original proxy identities and shared-child
         # edges; trimming the padded list by length would select wrong pieces.
         for member, children in reversed(self._fade_source_topology):
-            member.set_submobjects(children)
+            if hasattr(member, "set_submobjects"):
+                member.set_submobjects(children)
+            else:
+                member.submobjects = list(children)
         self._fade_source.become(self._fade_saved_source)
         if not self.is_remover():
             scene.add(self.to_add_on_completion)

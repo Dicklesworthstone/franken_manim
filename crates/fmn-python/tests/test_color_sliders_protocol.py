@@ -152,11 +152,9 @@ class ColorSliderTests(unittest.TestCase):
     def setUp(self):
         self.n = environment()
     def test_package_activates_after_control_event_installation(self):
-        init = SOURCE.parent.parent / "manimlib" / "__init__.py"
-        calls = [node.value.func.id for node in ast.parse(init.read_text()).body
-                 if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                 and isinstance(node.value.func, ast.Name)]
-        self.assertLess(calls.index("_install_control_events"), calls.index("_install_color_sliders"))
+        from fmn_python.initialization import _STEPS
+        step_names = [step[1] for step in _STEPS]
+        self.assertLess(step_names.index("install_control_events"), step_names.index("install_color_sliders"))
     def test_old_bank_is_not_independently_editable(self):
         old = environment(False)
         bank = old.ColorSliders()

@@ -10,12 +10,18 @@ from types import ModuleType
 import unittest
 from unittest.mock import patch
 
-from IPython.core.interactiveshell import InteractiveShell
-from IPython.terminal.embed import InteractiveShellEmbed
+try:
+    from IPython.core.interactiveshell import InteractiveShell
+    from IPython.terminal.embed import InteractiveShellEmbed
+    HAVE_IPYTHON = True
+except ImportError:
+    HAVE_IPYTHON = False
+
 from fmn_python import embedded_shell as adapter
 from test_embedded_shell_protocol import native_classes
 
 
+@unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
 class EmbeddedIPythonTests(unittest.TestCase):
     def setUp(self):
         self.native = native_classes()

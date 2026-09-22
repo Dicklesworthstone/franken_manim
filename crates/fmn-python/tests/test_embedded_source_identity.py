@@ -16,11 +16,17 @@ from types import ModuleType
 import unittest
 from unittest.mock import patch
 
-from IPython.terminal.embed import InteractiveShellEmbed
+try:
+    from IPython.terminal.embed import InteractiveShellEmbed
+    HAVE_IPYTHON = True
+except ImportError:
+    HAVE_IPYTHON = False
+
 from fmn_python.scene_loading import SceneSource
 from fmn_python.source_autoreload import SourceNamespace
 
 
+@unittest.skipUnless(HAVE_IPYTHON, "IPython is not installed")
 class EmbeddedSourceIdentityTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="fmn-shell-identity-")
