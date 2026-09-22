@@ -6,6 +6,9 @@ use fmn_mobject::RenderPrimitive;
 #[path = "portal_surface.rs"]
 mod surface;
 
+#[path = "portal_raster.rs"]
+mod raster;
+
 const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 
 fn image(payload: &Bound<'_, PyBytes>) -> PyResult<fmn_mobject::ImageResource> {
@@ -170,6 +173,7 @@ fn _build_textured_geometry<'py>(
 
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     surface::install(module)?;
+    raster::install(module)?;
     module.add_function(wrap_pyfunction!(_build_textured_surface, module)?)?;
     module.add_function(wrap_pyfunction!(_build_textured_geometry, module)?)?;
     Ok(())

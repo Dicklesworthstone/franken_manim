@@ -36,6 +36,8 @@ pub const DEFAULT_IMAGE_HEIGHT: f64 = 4.0;
 pub enum ImageError {
     /// Neither a PNG signature nor a JPEG SOI marker led the input.
     UnknownFormat,
+    /// Image quads accept one raster, not a light/dark surface material.
+    PairedResource,
     /// The PNG decoder refused the input.
     Png(PngError),
     /// The JPEG decoder refused the input.
@@ -52,6 +54,7 @@ impl std::fmt::Display for ImageError {
                 "not a recognized image: input leads with neither the PNG \
                  signature nor a JPEG SOI marker"
             ),
+            Self::PairedResource => f.write_str("image quads require an unpaired image resource"),
             Self::Png(e) => write!(f, "PNG decode refused the input: {e}"),
             Self::Jpeg(e) => write!(f, "JPEG decode refused the input: {e}"),
             Self::Resource(e) => write!(f, "decoded image layout is invalid: {e}"),
@@ -65,7 +68,7 @@ impl std::error::Error for ImageError {
             Self::Png(error) => Some(error),
             Self::Jpeg(error) => Some(error),
             Self::Resource(error) => Some(error),
-            Self::UnknownFormat => None,
+            Self::UnknownFormat | Self::PairedResource => None,
         }
     }
 }
@@ -131,6 +134,18 @@ impl ImageMobject {
             ImageSampler::default(),
         )
         .map_err(ImageError::Resource)?;
+        Self::from_resource(resource)
+    }
+
+    /// Reuse an immutable, validated raster without copying or decoding pixels.
+    /// The resource's transfer and sampler metadata stay authoritative.
+    ///
+    /// # Errors
+    /// A light/dark pair is a surface material, not an image-quad resource.
+    pub fn from_resource(resource: ImageResource) -> Result<Self, ImageError> {
+        if resource.dark_image().is_some() {
+            return Err(ImageError::PairedResource);
+        }
         Ok(Self {
             resource,
             height: DEFAULT_IMAGE_HEIGHT,
@@ -304,6 +319,18 @@ mod tests {
         }
         let png = encode_rgba8(4, 3, &rgba, CompressionLevel::Fast);
         (png, rgba)
+    }
+
+    #[test]
+    fn prepared_resource_reuses_pixels_and_refuses_surface_pairs() {
+        let resource = ImageResource::rgba8(
+            2, 1, vec![255; 8], ImageColorSpace::Srgb, ImageSampler::default(),
+        ).unwrap();
+        let pointer = resource.pixels().as_ptr();
+        let object: Mobject = ImageMobject::from_resource(resource.clone()).unwrap().into();
+        assert_eq!(object.image.as_ref().unwrap().pixels().as_ptr(), pointer);
+        let pair = resource.clone().with_dark_image(resource).unwrap();
+        assert_eq!(ImageMobject::from_resource(pair), Err(ImageError::PairedResource));
     }
 
     #[test]
