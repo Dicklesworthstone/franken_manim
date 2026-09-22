@@ -153,6 +153,7 @@ impl From<TexMobject> for Mobject {
 #[derive(Debug, Clone)]
 pub struct Tex<'a> {
     source: &'a str,
+    preamble: &'a str,
     mode: Mode,
     font_size: f64,
     font_size_for_unit_height: f64,
@@ -167,6 +168,7 @@ impl<'a> Tex<'a> {
     pub fn new(source: &'a str) -> Self {
         Self {
             source,
+            preamble: "",
             mode: Mode::Math(MathStyle::Text),
             font_size: DEFAULT_FONT_SIZE,
             font_size_for_unit_height: DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
@@ -193,6 +195,14 @@ impl<'a> Tex<'a> {
     #[must_use]
     pub fn font_size(mut self, font_size: f64) -> Self {
         self.font_size = font_size;
+        self
+    }
+
+    /// Native macro declarations applied only to this formula. Spans continue
+    /// to address the original source, never the prepended definitions.
+    #[must_use]
+    pub fn preamble(mut self, preamble: &'a str) -> Self {
+        self.preamble = preamble;
         self
     }
 
@@ -228,7 +238,7 @@ impl<'a> Tex<'a> {
     /// silence, never garbage. [`TexMobjectError::Calibration`]: the
     /// math face roster maps no measurable "0".
     pub fn build(&self, engine: &TexEngine) -> Result<TexMobject, TexMobjectError> {
-        let typeset = engine.typeset(self.mode, self.source)?;
+        let typeset = engine.typeset_with_preamble(self.mode, self.source, self.preamble)?;
         let scale = calibrate(engine, self.font_size, self.font_size_for_unit_height)?;
         // tex_to_color_map, resolved to child ordinals before
         // construction: later entries win (the Reference's dict-update).
@@ -278,6 +288,13 @@ impl<'a> TexText<'a> {
     #[must_use]
     pub fn font_size(mut self, font_size: f64) -> Self {
         self.inner = self.inner.font_size(font_size);
+        self
+    }
+
+    /// Native macro declarations for this text-mainland request.
+    #[must_use]
+    pub fn preamble(mut self, preamble: &'a str) -> Self {
+        self.inner = self.inner.preamble(preamble);
         self
     }
 
