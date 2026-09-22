@@ -20,6 +20,7 @@ _STEPS = (
     ("rendering", "install_scene_rendering"),
     ("camera_capture", "install_camera_capture"),
     ("surface_textures", "install_surface_textures"),
+    ("surface_geometry", "install_surface_geometry"),
     ("text_authoring", "install_text_authoring"),
     ("decimal_authoring", "install_decimal_authoring"),
     ("live_tex", "install_live_tex"),

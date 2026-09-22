@@ -35,11 +35,11 @@ use fmn_core::constants::{DOWN, FRAME_X_RADIUS, FRAME_Y_RADIUS, IN, LEFT, ORIGIN
 use fmn_core::types::Vec3;
 use fmn_geom::{Mat3, QuadPath, space_ops};
 
-use crate::{Placement, RecordBuffer};
 use crate::StageError;
 use crate::bbox::{BoundingBox, BoxAccum};
 use crate::stage::{Mob, Stage};
 use crate::uniforms::Uniforms;
+use crate::{Placement, RecordBuffer};
 
 /// A positional target: another mobject (positioned by its critical point) or a
 /// literal point. Methods that accept "a mobject or a point" take
@@ -90,7 +90,9 @@ fn mapped_auxiliary_points(
         if let Some(values) = buffer.read_column(key) {
             #[allow(clippy::cast_possible_truncation)]
             let mapped = values
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|point| {
                     map(placement.apply_point([
                         f64::from(point[0]),

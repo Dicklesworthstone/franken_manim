@@ -3,6 +3,9 @@
 use super::*;
 use fmn_mobject::RenderPrimitive;
 
+#[path = "portal_surface.rs"]
+mod surface;
+
 const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 
 fn image(payload: &Bound<'_, PyBytes>) -> PyResult<fmn_mobject::ImageResource> {
@@ -166,6 +169,7 @@ fn _build_textured_geometry<'py>(
 }
 
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    surface::install(module)?;
     module.add_function(wrap_pyfunction!(_build_textured_surface, module)?)?;
     module.add_function(wrap_pyfunction!(_build_textured_geometry, module)?)?;
     Ok(())
@@ -181,6 +185,16 @@ pub fn run_portal_gauntlet_textures() -> Result<(Vec<u8>, Vec<u8>), String> {
         let source = CString::new(include_str!("../tests/textured_surfaces.py"))
             .map_err(|error| error.to_string())?;
         py.run(source.as_c_str(), Some(globals), Some(globals))
+            .map_err(|error| error.to_string())?;
+        let live_source = CString::new(include_str!("../tests/surface_geometry.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(live_source.as_c_str(), Some(globals), Some(globals))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("run_surface_geometry_acceptance")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "live surface geometry witness is missing".to_owned())?
+            .call0()
             .map_err(|error| error.to_string())?;
         globals
             .get_item("verify_textured_rendering")
