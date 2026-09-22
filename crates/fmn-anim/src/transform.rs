@@ -38,6 +38,18 @@ mod motion_path;
 use motion_path::interpolate_placement;
 pub use motion_path::{PathFunc, STRAIGHT_PATH_THRESHOLD};
 
+/// Placement interpolation is sufficient only when ALL object-space geometric
+/// columns agree, not merely the primary vertices. Surface normal seeds and
+/// custom auxiliary-only schemas obey the same affine lift.
+fn same_pointlike_geometry(stage: &Stage, from: Mob, to: Mob) -> bool {
+    let (Some(a), Some(b)) = (stage.get(from), stage.get(to)) else {
+        return false;
+    };
+    a.buffer.schema().fields().iter()
+        .filter(|field| field.width == 3 && (field.name == "point" || a.buffer.schema().pointlike_keys().contains(&field.name)))
+        .all(|field| a.buffer.column_eq(&b.buffer, &field.name))
+}
+
 // ------------------------------------------------------------- lerp core
 
 /// The Reference's `Mobject.interpolate` (mobject.py:1810) over one
@@ -55,64 +67,47 @@ pub fn interpolate_fields(
     let Some(entry) = stage.get(submob) else {
         return;
     };
-    let endpoint_placements = stage.placement(from).zip(stage.placement(to));
-    let has_points = !entry.buffer.is_empty() && entry.buffer.schema().offset("point").is_some();
-    let point_representation_drifted = has_points
-        && stage
-            .get(from)
-            .is_some_and(|starting| !entry.buffer.column_eq(&starting.buffer, "point"));
-    // A host-side record access can transiently bake the current placement
-    // into the animated buffer even after its exported view has gone away.
-    // Once that happens, continuing to interpolate only the placement would
-    // compound the baked intermediate geometry. Re-derive explicit world
-    // points from the frozen endpoints just as we do while a view is live.
-    let sync_live_points =
-        has_points && (entry.buffer.live_view_count() > 0 || point_representation_drifted);
-    let placement =
-        endpoint_placements.map(|(from, to)| interpolate_placement(from, to, alpha, path));
+    let Some((from_placement, to_placement)) = stage.placement(from).zip(stage.placement(to)) else {
+        return;
+    };
     let schema = entry.buffer.schema();
-    let pointlike: Vec<String> = schema.pointlike_keys().to_vec();
+    let pointlike: Vec<String> = schema
+        .fields()
+        .iter()
+        .filter(|field| field.width == 3 && (field.name == "point" || schema.pointlike_keys().contains(&field.name)))
+        .map(|field| field.name.clone())
+        .collect();
+    // A host read can bake all geometric fields into this buffer, including
+    // while no view remains live. Return to the frozen endpoints rather than
+    // compounding that intermediate representation on the next sample.
+    let representation_drifted = stage.get(from).is_some_and(|starting| {
+        pointlike.iter().any(|key| !entry.buffer.column_eq(&starting.buffer, key))
+    });
+    let sync_world = !entry.buffer.is_empty()
+        && !pointlike.is_empty()
+        && (entry.buffer.live_view_count() > 0 || representation_drifted);
+    if sync_world {
+        // Never drop placement after materializing only part of a surface. A
+        // foreign resize/schema edit mid-play must not create mixed coordinates.
+        let valid = pointlike.iter().all(|key| {
+            let expected = entry.buffer.len().checked_mul(3);
+            [from, to].into_iter().all(|mob| {
+                stage.get(mob).and_then(|endpoint| endpoint.buffer.read_column(key))
+                    .is_some_and(|column| Some(column.len()) == expected)
+            })
+        });
+        if !valid {
+            return;
+        }
+    }
     let fields: Vec<String> = schema
         .fields()
         .iter()
-        .map(|f| f.name.clone())
-        .filter(|name| !(sync_live_points && name == "point"))
-        .filter(|name| !entry.buffer.is_locked(name))
+        // Equal object-space normals are normally locked. They still need a
+        // world-space write whenever vertices are materialized for a live view.
+        .filter(|field| (sync_world && pointlike.contains(&field.name)) || !entry.buffer.is_locked(&field.name))
+        .map(|field| field.name.clone())
         .collect();
-    if sync_live_points
-        && let (Some((from_placement, to_placement)), Some(a), Some(b)) = (
-            endpoint_placements,
-            stage
-                .get(from)
-                .and_then(|entry| entry.buffer.read_column("point")),
-            stage
-                .get(to)
-                .and_then(|entry| entry.buffer.read_column("point")),
-        )
-        && a.len() == b.len()
-    {
-        let (pa, ra) = a.as_chunks::<3>();
-        let (pb, rb) = b.as_chunks::<3>();
-        debug_assert!(ra.is_empty() && rb.is_empty(), "point fields are 3-lane");
-        #[allow(clippy::cast_possible_truncation)]
-        let out: Vec<f32> = pa
-            .iter()
-            .zip(pb)
-            .flat_map(|(a, b)| {
-                let point = path.eval(
-                    from_placement.apply_point([f64::from(a[0]), f64::from(a[1]), f64::from(a[2])]),
-                    to_placement.apply_point([f64::from(b[0]), f64::from(b[1]), f64::from(b[2])]),
-                    alpha,
-                );
-                [point[0] as f32, point[1] as f32, point[2] as f32]
-            })
-            .collect();
-        if let Some(entry) = stage.get_mut(submob)
-            && entry.buffer.read_column("point").as_deref() != Some(out.as_slice())
-        {
-            entry.buffer.write_range("point", 0, &out);
-        }
-    }
     for field in fields {
         let (Some(a), Some(b)) = (
             stage.get(from).and_then(|e| e.buffer.read_column(&field)),
@@ -121,24 +116,25 @@ pub fn interpolate_fields(
             continue;
         };
         if a.len() != b.len() {
-            continue; // alignment holds by construction; a foreign write mid-play is skipped, not garbled
+            continue;
         }
         #[allow(clippy::cast_possible_truncation)]
         let out: Vec<f32> = if pointlike.contains(&field) {
             let (pa, ra) = a.as_chunks::<3>();
-            let (pb, _) = b.as_chunks::<3>();
-            debug_assert!(ra.is_empty(), "pointlike fields are 3-lane");
-            pa.iter()
-                .zip(pb.iter())
-                .flat_map(|(ca, cb)| {
-                    let p = path.eval(
-                        [f64::from(ca[0]), f64::from(ca[1]), f64::from(ca[2])],
-                        [f64::from(cb[0]), f64::from(cb[1]), f64::from(cb[2])],
-                        alpha,
-                    );
-                    [p[0] as f32, p[1] as f32, p[2] as f32]
-                })
-                .collect()
+            let (pb, rb) = b.as_chunks::<3>();
+            if !ra.is_empty() || !rb.is_empty() {
+                continue;
+            }
+            pa.iter().zip(pb).flat_map(|(ca, cb)| {
+                let a = ca.map(f64::from);
+                let b = cb.map(f64::from);
+                let point = if sync_world {
+                    path.eval(from_placement.apply_point(a), to_placement.apply_point(b), alpha)
+                } else {
+                    path.eval(a, b, alpha)
+                };
+                point.map(|value| value as f32)
+            }).collect()
         } else {
             interpolate_linear_column(&a, &b, alpha)
         };
@@ -148,11 +144,12 @@ pub fn interpolate_fields(
             entry.buffer.write_range(&field, 0, &out);
         }
     }
-    if sync_live_points {
-        let _ = stage.set_placement(submob, Placement::IDENTITY);
-    } else if let Some(placement) = placement {
-        let _ = stage.set_placement(submob, placement);
-    }
+    let placement = if sync_world {
+        Placement::IDENTITY
+    } else {
+        interpolate_placement(from_placement, to_placement, alpha, path)
+    };
+    let _ = stage.set_placement(submob, placement);
     // ValueTracker state is the Reference's numeric `uniforms["value"]`
     // represented as a typed Marionette payload.  Interpolate the encoded
     // lanes: plain values remain arithmetic, exponential trackers interpolate
@@ -422,25 +419,15 @@ impl Animation for Transform {
             stage.copy_family(self.target)?
         };
         stage.align_data_and_family(mobject, target_copy)?;
-        // A pair whose object-space point runs differ cannot be represented by
+        // A pair whose object-space geometric columns differ cannot be represented by
         // placement interpolation alone. Bake each side once into world-space
         // geometry; pairs with equal object geometry retain their independent
         // placements, which is the fast and revision-correct path for
         // translate/rotate/scale transforms (fm-7if).
         let source_family = stage.family(mobject);
         let target_family = stage.family(target_copy);
-        let needs_geometry_bake =
-            source_family
-                .iter()
-                .zip(&target_family)
-                .any(|(&source, &target)| {
-                    stage
-                        .get(source)
-                        .and_then(|entry| entry.buffer.read_column("point"))
-                        != stage
-                            .get(target)
-                            .and_then(|entry| entry.buffer.read_column("point"))
-                });
+        let needs_geometry_bake = source_family.iter().zip(&target_family)
+            .any(|(&source, &target)| !same_pointlike_geometry(stage, source, target));
         // An already aligned target is normally safe to share. Baking is the
         // exception because it changes stored coordinates; preserve the user's
         // target by switching to a private family copy first.
@@ -450,13 +437,7 @@ impl Animation for Transform {
         let source_family = stage.family(mobject);
         let target_family = stage.family(target_copy);
         for (&source, &target) in source_family.iter().zip(target_family.iter()) {
-            let source_points = stage
-                .get(source)
-                .and_then(|entry| entry.buffer.read_column("point"));
-            let target_points = stage
-                .get(target)
-                .and_then(|entry| entry.buffer.read_column("point"));
-            if source_points != target_points {
+            if !same_pointlike_geometry(stage, source, target) {
                 stage.bake_placement(source)?;
                 stage.bake_placement(target)?;
             }
