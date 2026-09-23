@@ -35,6 +35,7 @@ _STEPS = (
     ("matrix", "install_matrix"),
     ("graphing", "install_graphing"),
     ("graphing", "install_implicit_regeneration"),
+    ("curve_regeneration", "install_curve_regeneration"),
     ("calculus", "install_graph_calculus"),
     ("vector_fields", "install_vector_fields"),
     ("text_reveal", "install_text_reveal"),

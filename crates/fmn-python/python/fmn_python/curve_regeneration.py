@@ -1,0 +1,81 @@
+"""In-place refresh of sampled 2D/3D paths through the native Atlas builder."""
+from __future__ import annotations
+
+from .graphing import _BINDING, _BUSY, _MAX_SAMPLES, _bind_method, _finite
+
+
+def install_curve_regeneration(native):
+    """Refresh sampled paths through Atlas without reconstructing their owner."""
+    g = vars(native)
+    if g.get("_FMN_CURVE_REGENERATION_INSTALLED", False):
+        return
+    Curve, np = g["ParametricCurve"], g["_np"]
+
+    def controls(obj):
+        from .graph_admission import _numbers
+        return (_numbers(obj.t_range, "curve t_range", 3, 2),
+                _finite(obj.epsilon, "curve epsilon"),
+                _numbers(obj.discontinuities, "curve discontinuities", _MAX_SAMPLES),
+                bool(obj.use_smoothing))
+
+    def identity(function):
+        return (getattr(function, "__func__", function),
+                getattr(function, "__self__", None))
+
+    def idle(obj):
+        if vars(obj).get("_is_animating", False) or getattr(obj, "locked_data_keys", ()):
+            raise RuntimeError("release the curve's active animation before regenerating it")
+        if vars(obj).get(_BINDING) is not None:
+            raise RuntimeError("unbind the live function graph before regenerating its parameter recipe")
+
+    def init_points(self):
+        """Replace geometry from the current t_func, range and discontinuities.
+
+        The recipe is evaluated in scene coordinates, just as at construction.
+        Earlier affine edits are not reapplied. Atlas owns all sampling and
+        smoothing; publication uses the existing point-record/view protocol.
+        """
+        if vars(self).get(_BUSY, False):
+            raise RuntimeError("curve regeneration cannot reenter itself")
+        idle(self)
+        if tuple(self.pointlike_data_keys) != ("point",):
+            raise TypeError("curve regeneration requires the VMobject pointlike schema")
+        vars(self)[_BUSY] = True
+        try:
+            options = controls(self)
+            function = self.t_func
+            function_identity = identity(function)
+            if not callable(function):
+                raise TypeError("curve t_func must be callable")
+            self.get_points()  # Observe/bake placement before taking the snapshot.
+            before = self.data.copy()
+            owner, bound = vars(self).get("_scene"), self._is_bound()
+            family = tuple(self.get_family())
+            prepare = g.get("_fmn_prepare_curve_function")
+            sample, verify = (function, None) if prepare is None else prepare(function)
+            candidate = Curve(sample, t_range=options[0], epsilon=options[1],
+                              discontinuities=options[2], use_smoothing=options[3])
+            if verify is not None:
+                verify()
+            idle(self)
+            current_identity = identity(self.t_func)
+            if (current_identity[0] is not function_identity[0]
+                    or current_identity[1] is not function_identity[1]
+                    or controls(self) != options
+                    or vars(self).get("_scene") is not owner or self._is_bound() != bound
+                    or tuple(self.get_family()) != family
+                    or tuple(self.pointlike_data_keys) != ("point",)
+                    or not np.array_equal(self.data, before)):
+                raise RuntimeError("curve changed during sampling; candidate was not published")
+            points = candidate.get_points()
+            if not np.isfinite(points).all():
+                raise ValueError("native curve sampling produced nonfinite records")
+            self.set_points(points)
+        finally:
+            vars(self).pop(_BUSY, None)
+        return self
+
+    _bind_method(Curve, "init_points", init_points)
+    g["_FMN_CURVE_REGENERATION_INSTALLED"] = True
+
+

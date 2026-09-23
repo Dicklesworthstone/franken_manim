@@ -35,6 +35,7 @@ python3 crates/fmn-python/tests/coordinate_mapping.py
 python3 crates/fmn-python/tests/native_surface_sampling.py
 python3 crates/fmn-python/tests/native_graph_sampling.py
 python3 crates/fmn-python/tests/live_implicit.py
+python3 crates/fmn-python/tests/live_curves.py
 
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
 python3 crates/fmn-python/tests/test_paired_output_protocol.py

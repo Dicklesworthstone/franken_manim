@@ -10,10 +10,12 @@ on:
       - 'crates/fmn-library/tests/fallible_graph_sampling.rs'
       - 'crates/fmn-python/src/lib.rs'
       - 'crates/fmn-python/python/fmn_python/graphing.py'
+      - 'crates/fmn-python/python/fmn_python/curve_regeneration.py'
       - 'crates/fmn-python/python/fmn_python/graph_admission.py'
       - 'crates/fmn-python/python/fmn_python/initialization.py'
       - 'crates/fmn-python/tests/native_graph_sampling.py'
       - 'crates/fmn-python/tests/live_implicit.py'
+      - 'crates/fmn-python/tests/live_curves.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -60,7 +62,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/graph-wheel 2>&1 | tee /tmp/graph-build.log
           python -m venv target/graph-venv
           target/graph-venv/bin/python -m pip install 'numpy==2.5.2' target/graph-wheel/*.whl
-          for suite in native_graph_sampling graph_admission native_surface_sampling surface_admission live_graphing live_implicit calculus_area coordinate_mapping portal_initialization; do
+          for suite in native_graph_sampling graph_admission native_surface_sampling surface_admission live_graphing live_implicit live_curves calculus_area coordinate_mapping portal_initialization; do
             target/graph-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/graph-$suite.log"
           done
       - name: Preserve exact source and evidence
