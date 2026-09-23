@@ -30,14 +30,14 @@ jobs:
       - name: Prepare exact native network implementation
         run: |
           set -euo pipefail
-          git fetch origin 511379e5732a7f34b4f0c2749cd9115610d72952
-          git show 511379e5732a7f34b4f0c2749cd9115610d72952:native-network.patch > /tmp/network.patch
+          git fetch origin c9fa4f0e4c7d5020b6168d801da43533bd82ce4b
+          git show c9fa4f0e4c7d5020b6168d801da43533bd82ce4b:native-network.patch > /tmp/network.patch
           test "$(git hash-object /tmp/network.patch)" = 5c002b7649f9c3503c145b23803d091f36a3fb4b
           git apply --check /tmp/network.patch
           git apply /tmp/network.patch
           for path in crates/fmn-python/src/portal_network.rs crates/fmn-python/tests/native_network_layout.py; do
             test ! -e "$path"
-            git show "511379e5732a7f34b4f0c2749cd9115610d72952:$path" > "$path"
+            git show "c9fa4f0e4c7d5020b6168d801da43533bd82ce4b:$path" > "$path"
           done
           rustfmt --edition 2024 crates/fmn-library/src/network_graph.rs crates/fmn-library/tests/network_graph.rs crates/fmn-python/src/portal_network.rs
           git diff --check
