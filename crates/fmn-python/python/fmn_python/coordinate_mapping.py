@@ -10,6 +10,7 @@ import math
 import sys
 import itertools
 import inspect
+from types import SimpleNamespace
 
 
 _MAX_LABELS = 4096
@@ -50,6 +51,8 @@ def install_coordinate_labels(native):
         return
     Line, Group, np = (g[name] for name in ("NumberLine", "VGroup", "_np"))
     stock_label, stock_ticks = Line.get_number_mobject, Line.get_tick_range
+    Axes, Plane, Complex = (g[name] for name in ("Axes", "NumberPlane", "ComplexPlane"))
+    stock_complex_defaults = Complex.get_default_coordinate_values
     active = set()
 
     def geometry_state(axis):
@@ -86,8 +89,10 @@ def install_coordinate_labels(native):
         g["_refuse_unrouted"]("NumberLine.add_numbers()",
                               [(name, True) for name in sorted(kwargs) if name not in allowed])
 
-    def planned_labels(formatter, values, kwargs):
-        labels, records, seen = [], 0, set()
+    def planned_labels(formatter, values, kwargs, budget=None):
+        if budget is None:
+            budget = [0]
+        labels, seen = [], set()
         for value in values:
             label = formatter(value, **kwargs)
             if not isinstance(label, g["VMobject"]):
@@ -96,8 +101,8 @@ def install_coordinate_labels(native):
                 if id(member) in seen:
                     continue
                 seen.add(id(member))
-                records += member.get_num_points()
-                if records > _MAX_LABEL_RECORDS:
+                budget[0] += member.get_num_points()
+                if budget[0] > _MAX_LABEL_RECORDS:
                     raise ValueError("coordinate labels exceed their native record budget")
                 points = member.get_points()
                 if not np.isfinite(points).all():
@@ -136,6 +141,162 @@ def install_coordinate_labels(native):
     add_numbers.__module__ = Line.__module__
     add_numbers.__qualname__ = Line.__qualname__ + ".add_numbers"
     Line.add_numbers = add_numbers
+
+    def chart_axes(self):
+        axes = tuple(itertools.islice(iter(self.get_axes()), 2))
+        ranges = tuple(tuple(float(x) for x in itertools.islice(iter(term), 4))
+                       for term in itertools.islice(iter(self.get_all_ranges()), 2))
+        if len(axes) != 2 or len(ranges) != 2:
+            raise ValueError("coordinate labeling requires two live axes")
+        for axis, terms in zip(axes, ranges):
+            if not isinstance(axis, g["VMobject"]) or axis.get_num_points() < 2:
+                raise TypeError("coordinate labeling requires native axis geometry")
+            if len(terms) != 3 or not all(math.isfinite(v) for v in terms) or terms[1] <= terms[0] or terms[2] <= 0:
+                raise ValueError("coordinate label range must be finite, ordered and have a positive step")
+        return axes, ranges
+
+    def axis_config(self, index):
+        name = ("x", "y")[index]
+        # NumberPlane's legacy _axes_params projection omits the caller's
+        # y-axis override. Use the actual constructor inputs for plane shells.
+        params = self._plane_params if isinstance(self, Plane) else self._axes_params
+        sources = (
+            self.default_axis_config, getattr(self, "default_" + name + "_axis_config"),
+            params[2], params[index + 3],
+        )
+        config = {}
+        for source in sources:
+            for key, value in source.items():
+                if key == "decimal_number_config":
+                    config[key] = dict(config.get(key) or {}, **(value or {}))
+                else:
+                    config[key] = value
+        return config
+
+    def formatter_for(self, axis, index, terms):
+        formatter = getattr(axis, "get_number_mobject", None)
+        if callable(formatter):
+            return formatter
+        config = axis_config(self, index)
+        # Axis proxies are currently VMobject shells, not NumberLine instances.
+        # Project only the label configuration onto an inert holder. The actual
+        # native axis retains its identity, class, records and family ownership.
+        holder = SimpleNamespace(
+            decimal_number_config=dict(config.get("decimal_number_config") or {"num_decimal_places": 0}),
+            line_to_number_direction=config.get("line_to_number_direction", g["DOWN"]),
+            line_to_number_buff=config.get("line_to_number_buff", g["MED_SMALL_BUFF"]),
+            number_to_point=lambda value: g["_axis_number_to_point"](axis, terms[0], terms[1], value),
+        )
+        return lambda value, **kw: Line.get_number_mobject(holder, value, **kw)
+
+    def enter_chart(self):
+        ids = {id(self)}
+        if id(self) in active:
+            raise RuntimeError("coordinate labeling cannot reenter itself")
+        active.update(ids)
+        try:
+            axes, ranges = chart_axes(self)
+            axis_ids = {id(axis) for axis in axes} - ids
+            if axis_ids & active:
+                raise RuntimeError("coordinate labeling cannot reenter shared axes")
+            active.update(axis_ids)
+            ids.update(axis_ids)
+            before = [(obj, geometry_state(obj)) for obj in (self, *axes)]
+        except BaseException:
+            active.difference_update(ids)
+            raise
+        return axes, ranges, ids, before
+
+    def check_chart(self, axes, ranges, before):
+        for obj, state in before:
+            check_geometry(obj, state)
+        if chart_axes(self) != (axes, ranges):
+            raise RuntimeError("coordinate axes or ranges changed while preparing labels")
+
+    def add_coordinate_labels(self, x_values=None, y_values=None, excluding=(0,), **kwargs):
+        axes, ranges, ids, before = enter_chart(self)
+        try:
+            stock_options(kwargs)
+            kwargs = options(kwargs)
+            if kwargs.get("font_size") is None:
+                kwargs["font_size"] = 24.0
+            try:
+                excluded = set(() if excluding is None else _label_values(excluding, "excluded labels"))
+            except TypeError as error:
+                if isinstance(self, Plane):
+                    raise TypeError("NumberPlane.add_coordinate_labels excluding must be an iterable of real numbers") from error
+                raise
+            batches = []
+            for index, values in enumerate((x_values, y_values)):
+                if values is None:
+                    axis = axes[index]
+                    values = (axis.get_tick_range() if isinstance(axis, Line)
+                              else _label_ticks(np, ranges[index], axis_config(self, index).get("include_tip", False)))
+                batches.append([v for v in _label_values(values, "axis labels") if v not in excluded])
+            if sum(map(len, batches)) > _MAX_LABELS:
+                raise ValueError("coordinate labels exceed the 4096-label budget")
+            budget = [0]
+            groups = [planned_labels(formatter_for(self, axis, index, ranges[index]), values, kwargs, budget)
+                      for index, (axis, values) in enumerate(zip(axes, batches))]
+            check_chart(self, axes, ranges, before)
+            # Both axes are completely prepared before either is attached.
+            # Keep each batch under its actual axis, not an additional detached
+            # aggregate whose copied aliases would name another native family.
+            for axis, group in zip(axes, groups):
+                axis.add(group)
+                axis.numbers = group
+            return self
+        finally:
+            active.difference_update(ids)
+
+    def complex_value(value):
+        if isinstance(value, (tuple, list, np.ndarray)):
+            if len(value) != 2:
+                raise ValueError("complex coordinate labels require complex numbers or real/imaginary pairs")
+            return complex(float(value[0]), float(value[1]))
+        return complex(value)
+
+    def complex_coordinate_labels(self, numbers=None, skip_first=True, font_size=36, **kwargs):
+        axes, ranges, ids, before = enter_chart(self)
+        try:
+            stock_options(kwargs)
+            kwargs = options(dict(kwargs, font_size=font_size))
+            if numbers is None:
+                if getattr(self.get_default_coordinate_values, "__func__", None) is stock_complex_defaults:
+                    ticks = [_label_ticks(np, terms, axis_config(self, index).get("include_tip", False))
+                             for index, terms in enumerate(ranges)]
+                    if skip_first:
+                        ticks = [values[1:] for values in ticks]
+                    numbers = [*ticks[0], *(complex(0, v) for v in ticks[1] if v != 0)]
+                else:
+                    numbers = self.get_default_coordinate_values(skip_first)
+            values = _label_values(numbers, "complex coordinate labels", complex_value)
+            formatters = [formatter_for(self, axis, i, ranges[i]) for i, axis in enumerate(axes)]
+            budget, labels = [0], []
+            for value in values:
+                imaginary = abs(value.imag) > abs(value.real)
+                # Do not leak the imaginary unit into subsequent real labels.
+                kw = dict(kwargs, **({"unit_tex": "i"} if imaginary else {}))
+                group = planned_labels(formatters[int(imaginary)],
+                                       [value.imag if imaginary else value.real], kw, budget)
+                labels.extend(group.submobjects)
+                # The final group alone should parent these labels.
+                group.set_submobjects([])
+            group = Group(*labels)
+            check_chart(self, axes, ranges, before)
+            self.add(group)
+            self.coordinate_labels = group
+            return self
+        finally:
+            active.difference_update(ids)
+
+    for cls, method in ((Axes, add_coordinate_labels), (Complex, complex_coordinate_labels)):
+        method.__name__ = "add_coordinate_labels"
+        method.__module__ = cls.__module__
+        method.__qualname__ = cls.__qualname__ + ".add_coordinate_labels"
+        cls.add_coordinate_labels = method
+    # Do not pass through the old plane wrapper's unbounded tuple conversion.
+    Plane.add_coordinate_labels = add_coordinate_labels
     g["_FMN_COORDINATE_LABELS_INSTALLED"] = True
 
 
