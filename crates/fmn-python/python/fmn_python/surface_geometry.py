@@ -11,7 +11,6 @@ import math
 import operator
 from types import SimpleNamespace
 
-_BUSY = "_fmn_surface_regenerating"
 _METADATA = ("u_range", "v_range", "epsilon", "normal_nudge", "preferred_creation_axis")
 
 
@@ -80,6 +79,10 @@ def install_surface_geometry(native):
         ("Surface", "TexturedSurface", "TexturedGeometry", "Mobject", "_np"))
     original_become = Mobject.become
     triangles = Surface.compute_triangle_indices
+    # An active operation belongs to this invocation, not serializable scene
+    # state. Copying a surface during a callback must not copy a permanent lock.
+    # IDs cannot be reused while the corresponding call retains its self.
+    active = set()
 
     def resolution(self):
         result = g["_surface_grid_resolution"](self)
@@ -100,7 +103,7 @@ def install_surface_geometry(native):
         changes are admitted only by set_resolution. Errors publish no geometry;
         arbitrary side effects made by the callback itself are not rolled back.
         """
-        if vars(self).get(_BUSY, False):
+        if id(self) in active:
             raise RuntimeError("surface regeneration is already in progress")
         if isinstance(self, Geometry):
             raise TypeError("indexed TexturedGeometry is not a UV-grid surface")
@@ -119,7 +122,7 @@ def install_surface_geometry(native):
         topology = None
         if controls[0] != original_controls[0]:
             topology = dict(resolution=controls[0], triangle_indices=triangles(SimpleNamespace(resolution=controls[0])))
-        vars(self)[_BUSY] = True
+        active.add(id(self))
         try:
             # Source records are retained before callbacks; a callback that edits
             # the destination must not have its changes overwritten by this build.
@@ -202,7 +205,7 @@ def install_surface_geometry(native):
                     if key in vars(candidate):
                         vars(self)[key] = vars(candidate)[key]
         finally:
-            vars(self).pop(_BUSY, None)
+            active.discard(id(self))
         return None
 
     def init_points(self):
@@ -217,7 +220,7 @@ def install_surface_geometry(native):
         TexturedSurface reads its uv_surface, which must already have the new
         native shape; it never mutates or evaluates that source implicitly.
         """
-        if vars(self).get(_BUSY, False):
+        if id(self) in active:
             raise RuntimeError("surface regeneration is already in progress")
         # Bound even an arbitrary iterable before allocation or UV evaluation.
         from .surface_admission import grid_shape

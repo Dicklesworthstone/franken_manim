@@ -124,6 +124,45 @@ class SurfaceRegriddingTests(unittest.TestCase):
         self.assertTrue(all(pair == ((3, 4), (3, 4)) for pair in observed))
         self.topology(obj, (5, 6))
 
+    def test_axes_owned_recipes_regrid_in_the_current_rotated_sheared_chart(self):
+        for method in ('get_graph', 'get_parametric_surface'):
+            with self.subTest(method=method):
+                axes = m.ThreeDAxes(x_range=(-2, 2), y_range=(-2, 2), z_range=(-2, 2))
+                state = [0.]
+                xyz = lambda u, v: (u, v, u*u - v*v + state[0])
+                fn = (lambda u, v: xyz(u, v)[2]) if method == 'get_graph' else xyz
+                obj = getattr(axes, method)(fn, u_range=(-1, 1), v_range=(-1, 1), resolution=(2, 3))
+                recipe = obj.passed_uv_func
+                axes.apply_matrix([[1, .5, 0], [0, 2, .25], [.5, 0, -1]], about_point=m.ORIGIN)
+                axes.rotate(.4, axis=m.RIGHT).shift((.5, -1, 2))
+                state[0] = .75
+                obj.set_resolution((5, 7))
+                expected = [axes.c2p(*xyz(u, v)) for u in np.linspace(-1, 1, 5)
+                            for v in np.linspace(-1, 1, 7)]
+                np.testing.assert_allclose(obj.get_points(), expected, atol=3e-6, rtol=0)
+                self.topology(obj, (5, 7))
+                self.assertIs(obj.passed_uv_func, recipe)
+
+    def test_chart_edits_during_sampling_refuse_the_candidate_not_the_edit(self):
+        axes = m.ThreeDAxes(x_range=(-2, 2), y_range=(-2, 2), z_range=(-2, 2))
+        edit = [False]
+        def fn(u, v):
+            if edit[0]:
+                edit[0] = False
+                axes.shift((.5, 0, 0))
+            return u, v, u*v
+        obj = axes.get_parametric_surface(fn, resolution=(3, 4))
+        before = obj.data.copy()
+        origin = axes.c2p(0, 0, 0).copy()
+        edit[0] = True
+        with self.assertRaisesRegex(RuntimeError, 'axes changed during sampling'):
+            obj.set_resolution((5, 7))
+        self.topology(obj, (3, 4))
+        np.testing.assert_array_equal(obj.data, before)
+        np.testing.assert_allclose(axes.c2p(0, 0, 0), origin + (.5, 0, 0), atol=1e-7)
+        obj.set_resolution((5, 7))
+        self.topology(obj, (5, 7))
+
     def test_failure_and_cancellation_preserve_original_exception_and_old_grid(self):
         for error in (ValueError('sample failed'), KeyboardInterrupt('cancel')):
             with self.subTest(error=type(error).__name__):
@@ -218,6 +257,27 @@ class SurfaceRegriddingTests(unittest.TestCase):
         obj.set_resolution((5, 6))
         scene.play(obj.animate.shift((1, 0, 0)), run_time=.1, rate_func=m.linear)
         np.testing.assert_allclose(obj.get_points(), analytic((5, 6)) + (1, 0, 0), atol=2e-6)
+
+    def test_copies_taken_during_sampling_do_not_inherit_a_permanent_operation_lock(self):
+        obj = surface()
+        copies = []
+        def recipe(u, v):
+            if not copies:
+                copies.extend((obj.copy(), copy.deepcopy(obj)))
+                obj.save_state()
+                copies.append(obj.saved_state)
+            return u, v, .5
+        obj.passed_uv_func = recipe
+        obj.set_resolution((7, 5))
+        self.assertEqual(len(copies), 3)
+        for clone in copies:
+            clone.passed_uv_func = lambda u, v: (u, v, 2)
+            clone.init_points()
+            clone.set_resolution((4, 3))
+            self.topology(clone, (4, 3))
+            np.testing.assert_array_equal(clone.get_points()[:, 2], 2.)
+        self.topology(obj, (7, 5))
+        np.testing.assert_array_equal(obj.get_points()[:, 2], .5)
 
     def test_textures_keep_pixels_and_uvs_while_following_regridded_source(self):
         source = surface((2, 3))

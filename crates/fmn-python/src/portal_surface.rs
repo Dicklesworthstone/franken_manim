@@ -143,7 +143,9 @@ fn _regrid_surface_geometry(
             &geometry.normal_points,
         )
         .map_err(native_error)?;
-        stage.apply_surface_grid_update(mob, update).map_err(native_error)
+        stage
+            .apply_surface_grid_update(mob, update)
+            .map_err(native_error)
     })?
 }
 
@@ -201,7 +203,8 @@ mod tests {
     #[test]
     fn live_surface_regridding_and_native_output() {
         crate::with_python_test_module("live surface regridding", |py, _module, globals| {
-            let code = std::ffi::CString::new(include_str!("../tests/surface_regridding.py")).unwrap();
+            let code =
+                std::ffi::CString::new(include_str!("../tests/surface_regridding.py")).unwrap();
             py.run(code.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .unwrap();

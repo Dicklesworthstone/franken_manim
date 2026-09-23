@@ -29,6 +29,7 @@ done
 python3 crates/fmn-python/tests/live_surface_mesh.py
 python3 crates/fmn-python/tests/calculus_area.py
 python3 crates/fmn-python/tests/surface_plotting.py
+python3 crates/fmn-python/tests/surface_regridding.py
 python3 crates/fmn-python/tests/surface_admission.py
 python3 crates/fmn-python/tests/graph_admission.py
 python3 crates/fmn-python/tests/coordinate_mapping.py

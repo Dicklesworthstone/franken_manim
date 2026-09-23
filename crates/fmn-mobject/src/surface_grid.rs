@@ -222,7 +222,9 @@ fn prepare_surface_grid_geometry(
         }
     }
     update.buffer.write_range("point", 0, points);
-    update.buffer.write_range("d_normal_point", 0, normal_points);
+    update
+        .buffer
+        .write_range("d_normal_point", 0, normal_points);
     update.placement = Placement::IDENTITY;
     Ok(update)
 }
