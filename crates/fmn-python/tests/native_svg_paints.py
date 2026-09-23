@@ -54,7 +54,7 @@ class NativeSvgPaintTests(unittest.TestCase):
         source='<svg><rect x="2" y="3" width="4" height="5" fill="red" stroke="blue"/></svg>'
         actual=build(source)
         old=m.VMobject()
-        specs=old._build_svg_mobject(m._native_shell_factory,None,source)
+        specs=old._build_svg_mobject(m._native_shell_factory,"",source)
         m._hang_native_children(old,specs)
         self.assertTrue(actual.looks_identical(old))
 

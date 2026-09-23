@@ -56,7 +56,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/svg-ingress-wheel 2>&1 | tee /tmp/svg-ingress-build.log
           python -m venv target/svg-ingress-venv
           target/svg-ingress-venv/bin/python -m pip install 'numpy==2.5.2' target/svg-ingress-wheel/*.whl
-          for suite in native_svg_paints text_authoring portal_initialization; do
+          for suite in native_svg_paints svg_paint_ingress text_authoring code_authoring copying_semantics fading_family portal_initialization; do
             target/svg-ingress-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/svg-ingress-$suite.log"
           done
       - name: Preserve exact source and evidence

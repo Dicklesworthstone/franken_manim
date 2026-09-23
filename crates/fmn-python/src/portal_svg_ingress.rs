@@ -26,12 +26,16 @@ fn _build_svg_paints<'py>(
             "fill_opacity" => overrides.fill_opacity = Some(value.extract()?),
             "stroke_opacity" => overrides.stroke_opacity = Some(value.extract()?),
             "stroke_width" => overrides.stroke_width = Some(value.extract()?),
-            name => return Err(PyTypeError::new_err(format!("unknown SVG paint override: {name}"))),
+            name => {
+                return Err(PyTypeError::new_err(format!(
+                    "unknown SVG paint override: {name}"
+                )));
+            }
         }
     }
-    let prepared = slf.py().detach(|| {
-        svg_mobject_with_paints(source.as_bytes(), overrides).map_err(native_error)
-    })?;
+    let prepared = slf
+        .py()
+        .detach(|| svg_mobject_with_paints(source.as_bytes(), overrides).map_err(native_error))?;
     install_native_tree(slf, factory, prepared)
 }
 

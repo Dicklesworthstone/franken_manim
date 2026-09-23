@@ -30,6 +30,7 @@ _STEPS = (
     ("surface_geometry", "install_surface_geometry"),
     ("surface_mesh", "install_surface_mesh"),
     ("surface_plotting", "install_surface_plotting"),
+    ("svg_ingress", "install_svg_ingress"),
     ("text_authoring", "install_text_authoring"),
     ("decimal_authoring", "install_decimal_authoring"),
     ("coordinate_mapping", "install_coordinate_labels"),
