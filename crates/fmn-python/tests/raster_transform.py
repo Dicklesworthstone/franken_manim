@@ -453,5 +453,12 @@ class RasterTransformTests(unittest.TestCase):
         sibling.resume_updating(call_updater=False)
 
 
+def run_raster_transform_acceptance():
+    result = unittest.TextTestRunner(verbosity=2).run(
+        unittest.defaultTestLoader.loadTestsFromTestCase(RasterTransformTests))
+    if not result.wasSuccessful():
+        raise AssertionError('native Transform material lifecycle failed')
+
+
 if __name__ == '__main__':
-    unittest.main()
+    run_raster_transform_acceptance()
