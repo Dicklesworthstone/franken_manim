@@ -146,7 +146,18 @@ fn prepare(entry: &Entry, shape: (usize, usize)) -> Result<Option<SurfaceGridUpd
     }))
 }
 
-/// Prepare new world-space geometry without losing destination-owned fields.
+/// Prepare a new geometric sample of an existing surface, at any admitted UV
+/// resolution. Only positions and normal-control points come from the sampler;
+/// all other record fields retain their normalized-UV interpolants. Materials,
+/// uniforms and graph ownership are not part of this operation.
+///
+/// Input points are world-space. Auxiliary pointlike fields are baked through
+/// the old placement before that placement is reset, matching geometry writes.
+/// No entry is mutated until [`Stage::apply_surface_grid_update`] succeeds.
+///
+/// # Errors
+/// Rejects malformed grids, nonfinite records, unrepresentable world-space
+/// auxiliary points and inconsistent sample lengths before publication.
 fn prepare_surface_grid_geometry(
     entry: &Entry,
     shape: (usize, usize),
@@ -159,7 +170,11 @@ fn prepare_surface_grid_geometry(
             "surface sample lengths do not match the UV grid",
         ));
     }
-    if points.iter().chain(normal_points).any(|value| !value.is_finite()) {
+    if points
+        .iter()
+        .chain(normal_points)
+        .any(|value| !value.is_finite())
+    {
         return Err(StageError::SurfaceGrid(
             "surface geometry samples must be finite",
         ));
@@ -175,9 +190,9 @@ fn prepare_surface_grid_geometry(
             placement: entry.placement(),
         },
     };
-    // The sampler replaces point and d_normal_point. Every other declared
-    // vec3 pointlike lane belongs to the destination and must stay in world
-    // space when the destination's retained placement is discarded.
+    // The geometry sampler replaces these two fields. Every other declared
+    // vec3 pointlike lane still belongs to the destination and must stay in
+    // world space when its retained placement is discarded.
     if !update.placement.is_identity() {
         let keys = update.buffer.schema().pointlike_keys().to_vec();
         for key in keys {
@@ -190,7 +205,10 @@ fn prepare_surface_grid_geometry(
             let mut column = update.buffer.read_column(&key).unwrap_or_default();
             for point in column.as_chunks_mut::<3>().0 {
                 let world = update.placement.apply_point(point.map(f64::from));
-                if world.iter().any(|value| !value.is_finite() || value.abs() > f64::from(f32::MAX)) {
+                if world
+                    .iter()
+                    .any(|value| !value.is_finite() || value.abs() > f64::from(f32::MAX))
+                {
                     return Err(StageError::SurfaceGrid(
                         "surface auxiliary points exceed finite f32 storage",
                     ));
@@ -245,9 +263,9 @@ pub fn prepare_surface_grid_alignment(
 }
 
 impl Stage {
-    /// Publish prepared records, placement and UV topology together. Old views
-    /// detach via the normal RecordBuffer generation protocol. Refuse a stale
-    /// preparation rather than overwrite later record or placement edits.
+    /// Publish prepared records, placement and UV topology together. Preserve
+    /// live views when record count is unchanged; resized generations detach.
+    /// Refuse stale preparation rather than overwrite later record/placement edits.
     pub fn apply_surface_grid_update(
         &mut self,
         mob: Mob,
@@ -268,7 +286,27 @@ impl Stage {
                 "surface changed after alignment was prepared",
             ));
         }
-        if !entry.buffer.assign_from(&update.buffer) {
+        if entry.buffer.len() == update.buffer.len() {
+            // set_data/become intentionally detaches even equal-size views.
+            // Regridding is an in-place edit instead: prepare all field copies
+            // before writing, then use the existing snapshot-aware write path.
+            let columns: Vec<_> = update
+                .buffer
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| {
+                    (
+                        field.name.clone(),
+                        update.buffer.read_column(&field.name).unwrap_or_default(),
+                    )
+                })
+                .collect();
+            for (name, values) in columns {
+                let written = entry.buffer.write_range(&name, 0, &values);
+                debug_assert!(written, "prepared surface column has the validated layout");
+            }
+        } else if !entry.buffer.assign_from(&update.buffer) {
             return Err(StageError::SchemaMismatch);
         }
         entry.render_primitive = RenderPrimitive::SurfaceGrid {
