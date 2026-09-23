@@ -45,6 +45,8 @@ python3 crates/fmn-python/tests/text_selection.py
 python3 crates/fmn-python/tests/live_bar_chart.py
 python3 crates/fmn-python/tests/native_network_layout.py
 python3 crates/fmn-python/tests/network_graph.py
+python3 crates/fmn-python/tests/native_table.py
+python3 crates/fmn-python/tests/live_table.py
 
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
 python3 crates/fmn-python/tests/test_paired_output_protocol.py

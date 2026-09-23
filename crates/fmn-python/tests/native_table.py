@@ -20,22 +20,28 @@ class NativeTableTests(unittest.TestCase):
         self.assertIs(table.get_columns()[1][2], table.get_cell(2,'score'))
         self.assertIs(table.get_rows()[-1][1], table.get_cell(-1,-2))
 
-    def test_custom_separator_quoted_fields_and_nulls(self):
-        table = TableMobject.from_csv('b;a\n"hello;world";2\n;3\n', separator=';')
+    def test_custom_separator_nulls_and_quoted_input_refusal(self):
+        table = TableMobject.from_csv('b;a\nhello;2\n;3\n', separator=';')
         self.assertEqual(table.headers, ('b','a'))
-        self.assertEqual(table.values, (('hello;world','2'),('','3')))
+        self.assertEqual(table.values, (('hello','2'),('','3')))
+        # Negative control: the unguarded native convenience reader produced
+        # ('"hello', 'world"'), silently dropping the real second column.
+        with self.assertRaisesRegex(ValueError, 'quoted CSV'):
+            TableMobject.from_csv('b;a\n"hello;world";2\n;3\n', separator=';')
+        literal = TableMobject(['b','a'], [['hello;world','2'],['','3']])
+        self.assertEqual(literal.values, (('hello;world','2'),('','3')))
 
     def test_grid_is_native_ruled_layout_not_a_second_host_layout(self):
-        table = TableMobject(['α','数'], [['β',''],['x','42']], font_size=48)
+        table = TableMobject(['α','Ω'], [['β',''],['x','42']], font_size=48)
         native = m.VMobject()
-        specs = m._build_table(native,m._native_shell_factory,['α','数'],[['β',''],['x','42']])
+        specs = m._build_table(native,m._native_shell_factory,['α','Ω'],[['β',''],['x','42']])
         m._hang_native_children(native,specs)
         shift = -native[0].get_center()
         native.shift(shift)
         for actual,expected in zip(table._table_cells,native.submobjects[4:]):
-            for a,b in zip(actual.family_members_with_points(),expected.family_members_with_points()):
+            for a,b in zip(actual._table_content.family_members_with_points(),expected.family_members_with_points()):
                 np.testing.assert_allclose(a.get_points(),b.get_points(),atol=2e-6)
-        self.assertEqual(table.get_cell(0,1).get_num_points(),0)
+        self.assertEqual(len(table.get_cell(0,1)._table_content),0)
 
     def test_cells_are_live_and_can_animate_on_one_scene_clock(self):
         table = TableMobject(['name','value'],[['one','1'],['two','2']])
@@ -74,5 +80,13 @@ class NativeTableTests(unittest.TestCase):
         with self.assertRaises(KeyError):table.get_cell(0,'x')
         with self.assertRaises(IndexError):table.get_cell(2,0)
         with self.assertRaises(IndexError):table.get_cell(0,-3)
+
+class NativeCsvAdmissionTests(unittest.TestCase):
+    def test_native_boundary_refuses_quoted_and_ragged_rows_without_data_loss(self):
+        for text, error in [('a,b\n"x,y",2\n', 'quoted CSV'),
+                            ('a,b\nx,y,z\n', 'field count'),
+                            ('a,b\nx\n', 'field count')]:
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError,error):
+                m._table_from_csv(text)
 
 if __name__=='__main__':unittest.main(verbosity=2)

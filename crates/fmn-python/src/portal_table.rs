@@ -13,20 +13,31 @@ type StringGrid = (Vec<String>, Vec<Vec<String>>);
 
 fn validate(headers: &[String], rows: &[Vec<String>]) -> PyResult<()> {
     if headers.is_empty() || rows.is_empty() {
-        return Err(PyValueError::new_err("table requires headers and at least one body row"));
+        return Err(PyValueError::new_err(
+            "table requires headers and at least one body row",
+        ));
     }
-    if rows.len().checked_add(1).and_then(|n| n.checked_mul(headers.len()))
+    if rows
+        .len()
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(headers.len()))
         .is_none_or(|n| n > MAX_CELLS)
     {
-        return Err(PyValueError::new_err("table exceeds 4096 cells including headers"));
+        return Err(PyValueError::new_err(
+            "table exceeds 4096 cells including headers",
+        ));
     }
     let mut bytes = 0usize;
     for row in std::iter::once(headers).chain(rows.iter().map(Vec::as_slice)) {
         if row.len() != headers.len() {
-            return Err(PyValueError::new_err("table rows must match the header count"));
+            return Err(PyValueError::new_err(
+                "table rows must match the header count",
+            ));
         }
         for value in row {
-            bytes = bytes.checked_add(value.len()).filter(|&n| n <= MAX_BYTES)
+            bytes = bytes
+                .checked_add(value.len())
+                .filter(|&n| n <= MAX_BYTES)
                 .ok_or_else(|| PyValueError::new_err("table exceeds 262144 UTF-8 bytes"))?;
         }
     }
@@ -36,10 +47,32 @@ fn validate(headers: &[String], rows: &[Vec<String>]) -> PyResult<()> {
 #[pyfunction(signature = (text, separator=','))]
 fn _table_from_csv(py: Python<'_>, text: &str, separator: char) -> PyResult<StringGrid> {
     if text.len() > MAX_BYTES {
-        return Err(PyValueError::new_err("table CSV exceeds 262144 UTF-8 bytes"));
+        return Err(PyValueError::new_err(
+            "table CSV exceeds 262144 UTF-8 bytes",
+        ));
     }
     if ['\r', '\n', '\0', '"'].contains(&separator) {
-        return Err(PyValueError::new_err("table CSV separator must not be a quote, NUL or newline"));
+        return Err(PyValueError::new_err(
+            "table CSV separator must not be a quote, NUL or newline",
+        ));
+    }
+    // fp-frame's convenience CSV reader is delimiter-only at the governed
+    // pin. Refuse syntax it would silently truncate/misparse. A quote-aware
+    // reader lives in fp-io, whose Arrow/Excel/parser closure is not admitted
+    // here. This is structural admission, not a second scalar/CSV decoder.
+    if text.contains('"') {
+        return Err(PyValueError::new_err(
+            "quoted CSV is unavailable in the pinned native frame reader; supply a literal string grid instead",
+        ));
+    }
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    if let Some(header) = lines.next() {
+        let separators = header.matches(separator).count();
+        if lines.any(|line| line.matches(separator).count() != separators) {
+            return Err(PyValueError::new_err(
+                "table CSV rows must match the header field count; no fields were discarded",
+            ));
+        }
     }
     py.detach(|| {
         let table = TableMobject::from_csv(text, separator).map_err(native_error)?;
@@ -52,7 +85,9 @@ fn strings(values: &Bound<'_, PyList>, bytes: &mut usize) -> PyResult<Vec<String
     let mut result = Vec::with_capacity(values.len());
     for value in values.iter() {
         let text = value.cast::<PyString>()?.to_str()?;
-        *bytes = bytes.checked_add(text.len()).filter(|&n| n <= MAX_BYTES)
+        *bytes = bytes
+            .checked_add(text.len())
+            .filter(|&n| n <= MAX_BYTES)
             .ok_or_else(|| PyValueError::new_err("table exceeds 262144 UTF-8 bytes"))?;
         result.push(text.to_owned());
     }
@@ -66,16 +101,24 @@ fn _build_table<'py>(
     headers: &Bound<'py, PyList>,
     rows: &Bound<'py, PyList>,
 ) -> PyResult<Bound<'py, PyList>> {
-    if headers.is_empty() || rows.is_empty()
-        || rows.len().checked_add(1).and_then(|n| n.checked_mul(headers.len()))
+    if headers.is_empty()
+        || rows.is_empty()
+        || rows
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(headers.len()))
             .is_none_or(|n| n > MAX_CELLS)
     {
-        return Err(PyValueError::new_err("table requires a nonempty grid of at most 4096 cells"));
+        return Err(PyValueError::new_err(
+            "table requires a nonempty grid of at most 4096 cells",
+        ));
     }
     // Check row lengths before cloning any authored strings or invoking Scribe.
     for row in rows.iter() {
         if row.cast::<PyList>()?.len() != headers.len() {
-            return Err(PyValueError::new_err("table rows must match the header count"));
+            return Err(PyValueError::new_err(
+                "table rows must match the header count",
+            ));
         }
     }
     let mut bytes = 0;
