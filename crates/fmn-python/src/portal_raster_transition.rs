@@ -44,6 +44,50 @@ fn shape(left: &ImageResource, right: &ImageResource) -> PyResult<(u32, u32)> {
     Ok(size)
 }
 
+
+fn resources(object: &Bound<'_, BridgeMobject>) -> PyResult<(Option<ImageResource>, RenderPrimitive)> {
+    with_stage(object, |stage, mob| {
+        let entry = stage.get(mob)
+            .ok_or_else(|| StaleHandleError::new_err("raster transform endpoint is stale"))?;
+        Ok((entry.image_resource().cloned(), entry.render_primitive()))
+    })?
+}
+
+fn endpoints(left: &Bound<'_, BridgeMobject>, right: &Bound<'_, BridgeMobject>)
+    -> PyResult<Option<(ImageResource, ImageResource)>>
+{
+    let (a, a_kind) = resources(left)?;
+    let (b, b_kind) = resources(right)?;
+    match (a, b) {
+        (None, None) => Ok(None),
+        (Some(a), Some(b)) if matches!((a_kind, b_kind),
+            (RenderPrimitive::ImageQuad, RenderPrimitive::ImageQuad)
+            | (RenderPrimitive::TriangleMesh, RenderPrimitive::TriangleMesh)
+            | (RenderPrimitive::SurfaceGrid { .. }, RenderPrimitive::SurfaceGrid { .. })) => Ok(Some((a, b))),
+        _ => Err(PyValueError::new_err(
+            "raster transform endpoints require compatible native image primitives")),
+    }
+}
+
+fn decoded_texels(start: &ImageResource, end: &ImageResource) -> PyResult<u64> {
+    if start.sampler() != end.sampler() {
+        return Err(PyValueError::new_err("raster transition endpoints must use the same sampler"));
+    }
+    // Constant materials retain their original descriptor; no decode or
+    // intermediate lattice is needed, even for very large identical endpoints.
+    if start == end { return Ok(0); }
+    let total = count(start) + count(end)
+        + start.dark_image().map_or(0, count) + end.dark_image().map_or(0, count);
+    if total > MAX_DECODED_TEXELS {
+        return Err(PyValueError::new_err("raster transition exceeds its 256 MiB decoded endpoint budget"));
+    }
+    shape(start, end)?;
+    if start.dark_image().is_some() || end.dark_image().is_some() {
+        shape(start.dark_image().unwrap_or(start), end.dark_image().unwrap_or(end))?;
+    }
+    Ok(total)
+}
+
 #[derive(Clone)]
 struct Plane {
     left: Arc<Texture>,
@@ -84,7 +128,7 @@ impl Plane {
 struct RasterTransition {
     start: ImageResource,
     end: ImageResource,
-    light: Plane,
+    light: Option<Plane>,
     dark: Option<Plane>,
 }
 
@@ -110,13 +154,8 @@ impl RasterTransition {
             || (primitive == RenderPrimitive::ImageQuad && end.dark_image().is_some()) {
             return Err(PyValueError::new_err("raster transition requires a compatible image or textured surface"));
         }
-        if start.sampler() != end.sampler() {
-            return Err(PyValueError::new_err("raster transition endpoints must use the same sampler"));
-        }
-        let total = count(&start) + count(&end)
-            + start.dark_image().map_or(0, count) + end.dark_image().map_or(0, count);
-        if total > MAX_DECODED_TEXELS {
-            return Err(PyValueError::new_err("raster transition exceeds its 256 MiB decoded endpoint budget"));
+        if decoded_texels(&start, &end)? == 0 {
+            return Ok(Self { start, end, light: None, dark: None });
         }
         let light_shape = shape(&start, &end)?;
         let has_dark = start.dark_image().is_some() || end.dark_image().is_some();
@@ -134,9 +173,34 @@ impl RasterTransition {
                     right: end.dark_image().map_or_else(|| Ok(right.clone()), decode)?, size,
                 })
             } else { None };
-            Ok(Self { start, end, light: Plane { left, right, size: light_shape }, dark })
+            Ok(Self { start, end, light: Some(Plane { left, right, size: light_shape }), dark })
         })
     }
+
+    /// Inspect complete native materials without decoding or modifying either endpoint.
+    #[staticmethod]
+    fn required_texels(left: &Bound<'_, BridgeMobject>, right: &Bound<'_, BridgeMobject>) -> PyResult<u64> {
+        endpoints(left, right)?.map_or(Ok(0), |(a, b)| decoded_texels(&a, &b))
+    }
+
+    /// Build the same interpolation plan for Transform's actual aligned endpoints.
+    #[staticmethod]
+    fn between(left: &Bound<'_, BridgeMobject>, right: &Bound<'_, BridgeMobject>) -> PyResult<Option<Self>> {
+        match endpoints(left, right)? {
+            None => Ok(None),
+            Some((_, end)) => Self::new(left, &RasterImage { resource: end }, None).map(Some),
+        }
+    }
+
+    fn matches(&self, left: &Bound<'_, BridgeMobject>, right: &Bound<'_, BridgeMobject>) -> PyResult<bool> {
+        Ok(endpoints(left, right)?.is_some_and(|(a, b)| a == self.start && b == self.end))
+    }
+
+    #[getter]
+    fn start_has_dark(&self) -> bool { self.start.dark_image().is_some() }
+
+    #[getter]
+    fn end_has_dark(&self) -> bool { self.end.dark_image().is_some() }
 
     fn __copy__(&self) -> Self {
         self.clone()
@@ -148,7 +212,7 @@ impl RasterTransition {
 
     #[getter]
     fn has_dark(&self) -> bool {
-        self.dark.is_some()
+        self.start.dark_image().is_some() || self.end.dark_image().is_some()
     }
 
     /// Produce an independent immutable material without advancing a scene.
@@ -160,8 +224,11 @@ impl RasterTransition {
         // and hidden transparent RGB. Overshooting rate curves clamp coverage.
         if alpha <= 0.0 { return Ok(RasterImage { resource: self.start.clone() }); }
         if alpha >= 1.0 { return Ok(RasterImage { resource: self.end.clone() }); }
+        let Some(light) = &self.light else {
+            return Ok(RasterImage { resource: self.start.clone() });
+        };
         py.detach(|| {
-            let mut resource = self.light.sample(alpha, self.start.sampler())?;
+            let mut resource = light.sample(alpha, self.start.sampler())?;
             if let Some(dark) = &self.dark {
                 resource = resource.with_dark_image(dark.sample(alpha, self.start.sampler())?)
                     .map_err(native_error)?;
@@ -183,6 +250,15 @@ pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn production_transform_material_kernel_acceptance() {
+        crate::with_python_test_module("transform materials", |py, _module, globals| {
+            let text = std::ffi::CString::new(include_str!("../tests/raster_transform_kernel.py")).unwrap();
+            py.run(text.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py)).expect("native Transform material plans");
+        });
+    }
+
     #[test]
     fn production_raster_animation_acceptance() {
         crate::with_python_test_module("raster animation", |py, _module, globals| {
