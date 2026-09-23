@@ -142,6 +142,16 @@ def install_text_authoring(native):
             self.set_height(height)
 
     Markup.__init__ = initialize
+
+    def get_part_by_text(self, selector, *args, **kwargs):
+        # This is an alias of select_part, not a second selector. Forward the
+        # occurrence index positionally or by keyword and retain authored
+        # select_part overrides, including their optional extension keywords.
+        return self.select_part(selector, *args, **kwargs)
+
+    get_part_by_text.__qualname__ = Markup.__qualname__ + ".get_part_by_text"
+    get_part_by_text.__module__ = Markup.__module__
+    Markup.get_part_by_text = get_part_by_text
     _install_code(g)
     g["_FMN_TEXT_AUTHORING_INSTALLED"] = True
 
