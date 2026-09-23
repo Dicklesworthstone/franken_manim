@@ -22,6 +22,7 @@ _STEPS = (
     ("surface_textures", "install_surface_textures"),
     ("image_authoring", "install_image_authoring"),
     ("raster_animation", "install_raster_animation"),
+    ("raster_transform", "install_raster_transform"),
     ("obj_models", "install_obj_models"),
     ("surface_admission", "install_surface_admission"),
     ("graph_admission", "install_graph_admission"),

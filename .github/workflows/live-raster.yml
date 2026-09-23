@@ -8,6 +8,7 @@ on:
       - 'crates/fmn-python/src/portal_raster.rs'
       - 'crates/fmn-python/src/portal_raster_transition.rs'
       - 'crates/fmn-python/python/fmn_python/raster_animation.py'
+      - 'crates/fmn-python/python/fmn_python/raster_transform.py'
       - 'crates/fmn-python/src/portal_texture.rs'
       - 'crates/fmn-python/python/fmn_python/surface_textures.py'
       - 'crates/fmn-python/python/fmn_python/scene_state.py'
@@ -60,7 +61,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/raster-wheel 2>&1 | tee /tmp/raster-build.log
           python -m venv target/raster-venv
           target/raster-venv/bin/python -m pip install 'numpy==2.5.2' target/raster-wheel/*.whl
-          for suite in raster_authoring raster_path_protocol raster_textures raster_frames raster_transition_kernel raster_animation camera_readback camera_snapshot; do
+          for suite in raster_authoring raster_path_protocol raster_textures raster_frames raster_transition_kernel raster_transform_kernel raster_transform raster_animation camera_readback camera_snapshot; do
             target/raster-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/raster-$suite.log"
           done
       - name: Preserve source and evidence

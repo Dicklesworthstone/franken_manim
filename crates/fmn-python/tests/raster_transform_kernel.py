@@ -26,8 +26,8 @@ class TransformMaterialKernelTests(unittest.TestCase):
 
     def test_plans_use_native_resources_not_class_or_filename_metadata(self):
         self.a.image_path = self.b.image_path = 'not a readable path'
-        start = m.Mobject().become(self.a)
-        end = m.Mobject().become(self.b)
+        start = m.Mobject(data_dtype=self.a.data_dtype).become(self.a)
+        end = m.Mobject(data_dtype=self.b.data_dtype).become(self.b)
         self.assertEqual(self.Plan.required_texels(start, end), 12)
         plan = self.Plan.between(start, end)
         self.assertTrue(plan.matches(start, end))

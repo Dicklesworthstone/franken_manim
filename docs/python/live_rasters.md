@@ -136,8 +136,9 @@ light/dark endpoints conservatively), and each intermediate side has the
 existing 16,777,216-pixel limit. Endpoint samplers must agree. These are per-plan
 limits, not a global history or process memory budget. Raster interpolation is
 standard image animation, not certification of arbitrary Python inputs. Generic
-`Transform` between different image-bearing objects is not changed here; use the
-dedicated setter overrides or `RasterTransition` for pixel interpolation.
+`Transform` also interpolates compatible native image materials alongside its
+record/path fields; see `raster_transforms.md`. Dedicated setter overrides or
+`RasterTransition` change only the image axis without moving geometry.
 
 The updater path above remains appropriate for externally generated sequences;
 `demo/python/raster_transition.py` demonstrates native interpolation instead.
