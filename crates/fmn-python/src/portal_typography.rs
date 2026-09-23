@@ -2,6 +2,8 @@
 //! No font discovery, markup rewriting, second shaper or external process.
 #[path = "portal_table.rs"]
 mod table;
+#[path = "portal_svg_ingress.rs"]
+mod svg_ingress;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -309,5 +311,6 @@ fn _build_styled_text<'py>(
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_build_styled_text, module)?)?;
     module.add_function(wrap_pyfunction!(_validate_tex_options, module)?)?;
-    table::install(module)
+    table::install(module)?;
+    svg_ingress::install(module)
 }

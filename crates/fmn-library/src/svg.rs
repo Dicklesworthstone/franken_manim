@@ -17,8 +17,18 @@
 //! (the Reference feeds `shape.stroke_width` straight into `set_stroke`),
 //! and element `opacity` — already multiplied down the group cascade by the
 //! processor — folds into both channel opacities, the same flattening the
-//! processor documents. `fill-rule` is carried by the geometry's records
-//! downstream; a paint of SVG `none` becomes a zero-opacity channel.
+//! processor documents. A paint of SVG `none` becomes a zero-opacity channel.
+//! Use [`svg_mobject_with_paints`] for user documents: it lowers even-odd fills
+//! and dash patterns to renderable native geometry. The original infallible
+//! [`svg_document_mobject`] remains a flat-path adapter for existing internal
+//! drawing builders; it does not lower these additional paint semantics.
+
+#[path = "svg_paint.rs"]
+mod paint;
+pub use paint::{
+    MAX_SVG_DASH_PIECES, MAX_SVG_PAINT_POINTS, SvgPaintError, SvgPaintOverrides,
+    svg_document_with_paints, svg_mobject_with_paints,
+};
 
 use fmn_geom::svg::{Paint, SvgShape, SvgStyle};
 // Consumers above this crate (the fmn-python portal) reach the processor's
