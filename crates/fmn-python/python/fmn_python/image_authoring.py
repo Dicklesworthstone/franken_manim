@@ -50,7 +50,9 @@ def _source(g, value):
     if isinstance(value, g["_RasterImage"]):
         return value, None
     if isinstance(value, (str, os.PathLike)):
-        path = g["_resolve_raster_image_path"](value)
+        # Resolve the filesystem protocol once, before the legacy asset resolver
+        # can stringify a PathLike and lose either its path or authored error.
+        path = g["_resolve_raster_image_path"](os.fsdecode(os.fspath(value)))
         with path.open("rb") as stream:
             encoded = stream.read(_MAX_ENCODED_BYTES + 1)
         return g["_RasterImage"].decode(_encoded(encoded)), str(path)
