@@ -21,6 +21,7 @@ mod live_tex;
 mod method_cache;
 pub mod perf_harness;
 mod portal_audio;
+mod portal_network;
 #[cfg(any(test, feature = "gauntlet"))]
 mod portal_console;
 #[cfg(feature = "gauntlet")]
@@ -10827,6 +10828,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
         "scene and mobject proxies are confined to their creating scene-worker thread",
     )?;
     portal_typography::install(module)?;
+    portal_network::install(module)?;
     portal_texture::install(module)?;
     execute_bootstrap(py, module)?;
     portal_recording::install(module)?;
