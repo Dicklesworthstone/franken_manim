@@ -32,6 +32,7 @@ _STEPS = (
     ("surface_plotting", "install_surface_plotting"),
     ("text_authoring", "install_text_authoring"),
     ("decimal_authoring", "install_decimal_authoring"),
+    ("coordinate_mapping", "install_coordinate_labels"),
     ("live_tex", "install_live_tex"),
     ("matrix", "install_matrix"),
     ("graphing", "install_graphing"),

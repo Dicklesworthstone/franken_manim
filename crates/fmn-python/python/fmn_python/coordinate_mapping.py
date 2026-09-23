@@ -8,6 +8,135 @@ from __future__ import annotations
 
 import math
 import sys
+import itertools
+import inspect
+
+
+_MAX_LABELS = 4096
+_MAX_LABEL_RECORDS = 1_048_576
+
+
+def _label_values(values, name, convert=float):
+    result = []
+    for value in itertools.islice(iter(values), _MAX_LABELS + 1):
+        if len(result) == _MAX_LABELS:
+            raise ValueError(name + " exceeds the 4096-label budget")
+        value = convert(value)
+        if not (math.isfinite(value.real) and math.isfinite(value.imag)):
+            raise ValueError(name + " must contain finite numbers")
+        result.append(value)
+    return result
+
+
+def _label_ticks(np, terms, include_tip):
+    low, high, step = (float(v) for v in terms)
+    if not all(math.isfinite(v) for v in (low, high, step)) or step <= 0 or high < low:
+        raise ValueError("coordinate label range must be finite, ordered and have a positive step")
+    stop = high if include_tip else high + step
+    count = (stop - low) / step
+    if not math.isfinite(count) or count > _MAX_LABELS:
+        raise ValueError("coordinate label range exceeds the 4096-label budget")
+    return [float(v) for v in np.arange(low, stop, step) if v <= high]
+
+
+def install_coordinate_labels(native):
+    """Compose Scribe numbers at live coordinates, never reconstructed boxes.
+
+    Preparation is separate from family publication. No glyph layout, axis
+    geometry, record generation or scene clock is implemented in this adapter.
+    """
+    g = vars(native)
+    if g.get("_FMN_COORDINATE_LABELS_INSTALLED", False):
+        return
+    Line, Group, np = (g[name] for name in ("NumberLine", "VGroup", "_np"))
+    stock_label, stock_ticks = Line.get_number_mobject, Line.get_tick_range
+    active = set()
+
+    def geometry_state(axis):
+        return (axis.get_points().copy(), tuple(axis.submobjects),
+                vars(axis).get("_scene"), axis._is_bound())
+
+    def check_geometry(axis, before):
+        points, children, owner, bound = before
+        if (tuple(axis.submobjects) != children or vars(axis).get("_scene") is not owner
+                or axis._is_bound() != bound or not np.array_equal(axis.get_points(), points)):
+            raise RuntimeError("coordinate geometry or ownership changed while preparing labels")
+
+    def options(kwargs):
+        out = dict(kwargs)
+        for name in ("font_size", "buff", "unit"):
+            if name in out and out[name] is not None:
+                value = float(out[name])
+                if not math.isfinite(value) or (name == "font_size" and value <= 0) or (name == "unit" and value == 0):
+                    raise ValueError("coordinate label " + name + " must be finite and valid")
+                out[name] = value
+        if out.get("direction") is not None:
+            direction = np.asarray(out["direction"], dtype=float)
+            if direction.shape != (3,) or not np.isfinite(direction).all():
+                raise ValueError("coordinate label direction must be a finite three-vector")
+            out["direction"] = direction.copy()
+        return out
+
+    def stock_options(kwargs):
+        # Keep the existing precise refusal for genuinely unknown keywords,
+        # while routing the actual DecimalNumber and unit-label surface.
+        allowed = set(inspect.signature(g["DecimalNumber"].__init__).parameters)
+        allowed.update(("direction", "buff", "unit", "unit_tex", "color", "opacity",
+                        "fill_color", "fill_opacity", "stroke_color", "stroke_width", "stroke_opacity"))
+        g["_refuse_unrouted"]("NumberLine.add_numbers()",
+                              [(name, True) for name in sorted(kwargs) if name not in allowed])
+
+    def planned_labels(formatter, values, kwargs):
+        labels, records, seen = [], 0, set()
+        for value in values:
+            label = formatter(value, **kwargs)
+            if not isinstance(label, g["VMobject"]):
+                raise TypeError("coordinate label formatter must return a VMobject")
+            for member in label.get_family():
+                if id(member) in seen:
+                    continue
+                seen.add(id(member))
+                records += member.get_num_points()
+                if records > _MAX_LABEL_RECORDS:
+                    raise ValueError("coordinate labels exceed their native record budget")
+                points = member.get_points()
+                if not np.isfinite(points).all():
+                    raise ValueError("coordinate label geometry must be finite")
+            labels.append(label)
+        return Group(*labels)
+
+    def add_numbers(self, x_values=None, excluding=None, font_size=24, **kwargs):
+        if id(self) in active:
+            raise RuntimeError("coordinate labeling cannot reenter itself")
+        active.add(id(self))
+        try:
+            before = geometry_state(self)
+            parameters = (self.x_min, self.x_max, self.x_step)
+            formatter = self.get_number_mobject
+            if getattr(formatter, "__func__", None) is stock_label:
+                stock_options(kwargs)
+            kwargs = options(dict(kwargs, font_size=font_size))
+            if x_values is None:
+                x_values = (_label_ticks(np, parameters, self.include_tip)
+                            if getattr(self.get_tick_range, "__func__", None) is stock_ticks
+                            else self.get_tick_range())
+            values = _label_values(x_values, "number-line labels")
+            excluded = self.numbers_to_exclude if excluding is None else excluding
+            excluded = set(() if excluded is None else _label_values(excluded, "excluded labels"))
+            group = planned_labels(formatter, [v for v in values if v not in excluded], kwargs)
+            check_geometry(self, before)
+            if (self.x_min, self.x_max, self.x_step) != parameters:
+                raise RuntimeError("number-line range changed while preparing labels")
+            self.add(group)
+            self.numbers = group
+            return group
+        finally:
+            active.remove(id(self))
+
+    add_numbers.__module__ = Line.__module__
+    add_numbers.__qualname__ = Line.__qualname__ + ".add_numbers"
+    Line.add_numbers = add_numbers
+    g["_FMN_COORDINATE_LABELS_INSTALLED"] = True
 
 
 def _dot(left, right):
