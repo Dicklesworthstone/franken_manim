@@ -38,6 +38,8 @@ python3 crates/fmn-python/tests/native_graph_sampling.py
 python3 crates/fmn-python/tests/live_implicit.py
 python3 crates/fmn-python/tests/live_curves.py
 python3 crates/fmn-python/tests/graph_callback_snapshots.py
+python3 crates/fmn-python/tests/field_callback_snapshots.py
+python3 crates/fmn-python/tests/test_invocation.py
 python3 crates/fmn-python/tests/live_bar_chart.py
 
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.

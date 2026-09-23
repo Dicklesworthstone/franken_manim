@@ -6,14 +6,14 @@ fields and publishes validated style columns through Marionette's live records.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from .invocation import InvocationGuard
 from functools import wraps
 import inspect
 import math
 import operator
 
 _MAX_POINTS = 65_536
-_BUSY = "_fmn_streamline_authoring_busy"
+_LINE_EDITS = InvocationGuard()
 
 
 def _finite(value, name, *, nonnegative=False):
@@ -54,15 +54,8 @@ def _field(np, function, coordinates, dimension):
     return padded
 
 
-@contextmanager
 def _editing(lines):
-    if vars(lines).get(_BUSY, False):
-        raise RuntimeError("StreamLines authoring cannot reenter itself")
-    vars(lines)[_BUSY] = True
-    try:
-        yield
-    finally:
-        vars(lines).pop(_BUSY, None)
+    return _LINE_EDITS.hold(lines, message="StreamLines authoring cannot reenter itself")
 
 
 def _widths(g, points, width, taper):

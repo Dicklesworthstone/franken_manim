@@ -7,23 +7,14 @@ never publishes an engine-authored partial family recoloring.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from .invocation import InvocationGuard
 
 _MAX_POINTS = 1_048_576
-_BUSY = "_fmn_functional_color_busy"
+_COLOR_EDITS = InvocationGuard()
 
 
-@contextmanager
 def _color_edit(members):
-    if any(vars(mob).get(_BUSY, False) for mob in members):
-        raise RuntimeError("callable color fields cannot reenter an active family")
-    for mob in members:
-        vars(mob)[_BUSY] = True
-    try:
-        yield
-    finally:
-        for mob in members:
-            vars(mob).pop(_BUSY, None)
+    return _COLOR_EDITS.hold(*members, message="callable color fields cannot reenter an active family")
 
 
 def _colors(np, value, count, channels):

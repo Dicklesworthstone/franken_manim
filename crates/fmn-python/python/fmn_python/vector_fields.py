@@ -12,9 +12,11 @@ import math
 import operator
 from typing import Any
 
+from .invocation import InvocationGuard
+
 _MAX_SAMPLES = 65_536
-_BUSY = "_fmn_vector_field_updating"
-_STYLE_TARGET = "_fmn_vector_field_style_target"
+_FIELD_UPDATES = InvocationGuard()
+_STYLE_TARGETS = {}
 _MISSING = object()
 
 
@@ -62,27 +64,26 @@ def _bind(cls, name, function):
 
 @contextmanager
 def _updating(mob):
-    attrs = vars(mob)
-    if attrs.get(_BUSY, False):
-        raise RuntimeError("cannot reenter a vector-field update")
-    attrs[_BUSY] = True
-    previous = {name: attrs.get(name, _MISSING) for name in (
-        "sample_points", "base_stroke_width_array",
-    )}
-    try:
-        yield
-    except BaseException:
-        # Roll back only projections we prepared. Authored callbacks retain
-        # their ordinary external side effects; no scene rewind is claimed.
-        for name, value in previous.items():
-            if value is _MISSING:
-                attrs.pop(name, None)
-            else:
-                attrs[name] = value
-        raise
-    finally:
-        attrs.pop(_STYLE_TARGET, None)
-        attrs.pop(_BUSY, None)
+    with _FIELD_UPDATES.hold(mob, message="cannot reenter a vector-field update"):
+        attrs = vars(mob)
+        previous = {name: attrs.get(name, _MISSING) for name in (
+            "sample_points", "base_stroke_width_array",
+        )}
+        try:
+            yield
+        except BaseException:
+            # Roll back only projections we prepared. Authored callbacks retain
+            # their ordinary external side effects; no scene rewind is claimed.
+            for name, value in previous.items():
+                if value is _MISSING:
+                    attrs.pop(name, None)
+                else:
+                    attrs[name] = value
+            raise
+        finally:
+            # The scratch paint destination is invocation state, not an
+            # attribute for copy/deepcopy/SceneState to inherit.
+            _STYLE_TARGETS.pop(id(mob), None)
 
 
 def install_vector_fields(native: Any) -> None:
@@ -141,7 +142,7 @@ def install_vector_fields(native: Any) -> None:
         self.base_stroke_width_array = values
 
     def set_sample_coords(self, sample_coords):
-        if vars(self).get(_BUSY, False):
+        if _FIELD_UPDATES.busy(self):
             raise RuntimeError("cannot resample during a vector-field update")
         coordinates = _rows(np, sample_coords, "VectorField sample_coords")
         if len(coordinates) < 2:
@@ -150,7 +151,7 @@ def install_vector_fields(native: Any) -> None:
         return self
 
     def apply_callback_style(self, outputs):
-        target = vars(self).get(_STYLE_TARGET, self)
+        target = _STYLE_TARGETS.get(id(self), self)
         outputs = _rows(np, outputs, "VectorField callback output")
         with np.errstate(over="ignore", invalid="ignore"):
             norms = np.repeat(np.linalg.norm(outputs, axis=1), 8)[:max(0, 8 * len(outputs) - 1)]
@@ -195,6 +196,13 @@ def install_vector_fields(native: Any) -> None:
 
     def update_vectors(self):
         with _updating(self):
+            self.get_points()
+            before = self.data.copy()
+            family = tuple(id(member) for member in self.get_family())
+            owner, bound = vars(self).get("_scene"), self._is_bound()
+            pointlike = tuple(self.pointlike_data_keys)
+            coordinates = _rows(np, self.sample_coords, "VectorField sample_coords")
+            chart = self.coordinate_system
             self.update_sample_points()
             outputs = self._evaluate_outputs()
             outputs = _rows(np, outputs, "VectorField callback output", count=len(self.sample_points))
@@ -217,10 +225,18 @@ def install_vector_fields(native: Any) -> None:
             paint = np.array(self._style_data()["stroke_rgba"], copy=True)
             paint = g["resize_preserving_order"](paint, count)
             scratch.data["stroke_rgba"][:] = paint
-            vars(self)[_STYLE_TARGET] = scratch
+            _STYLE_TARGETS[id(self)] = scratch
             self._apply_callback_style(outputs)
             paint = np.array(scratch.data["stroke_rgba"], copy=True)
             _representable(np, paint, "VectorField stroke paint")
+            self.get_points()  # Observe retained placement edits from authored callbacks.
+            if (vars(self).get("_scene") is not owner or self._is_bound() != bound
+                    or tuple(id(member) for member in self.get_family()) != family
+                    or tuple(self.pointlike_data_keys) != pointlike
+                    or self.coordinate_system is not chart
+                    or not np.array_equal(self.sample_coords, coordinates)
+                    or not np.array_equal(self.data, before)):
+                raise RuntimeError("vector field changed during sampling; candidate was not published")
             # Only now touch live records. The ordinary public set_points
             # protocol preserves live style and respects subclass hooks and
             # Marionette's view/resize rules.
