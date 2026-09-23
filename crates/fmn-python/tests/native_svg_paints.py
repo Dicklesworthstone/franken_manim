@@ -19,14 +19,14 @@ class NativeSvgPaintTests(unittest.TestCase):
         evenodd=build(NESTED);nonzero=build(NESTED.replace('evenodd','nonzero'))
         self.assertFalse(evenodd.looks_identical(nonzero))
         self.assertEqual(len(evenodd),1)
-        self.assertEqual(len(evenodd[0]),1)
+        self.assertEqual(len(evenodd[0]),2)
         self.assertEqual(evenodd[0][0].get_stroke_opacity(),0)
 
     def test_dash_geometry_follows_native_path_distance(self):
         dashed=build(DASHED)
         self.assertEqual(len(dashed),1)
-        self.assertEqual(len(dashed[0]),3)
-        for piece,(start,end) in zip(dashed[0],[(0,2),(4,6),(8,10)]):
+        self.assertEqual(len(dashed[0]),4)
+        for piece,(start,end) in zip(dashed[0].submobjects[1:],[(0,2),(4,6),(8,10)]):
             np.testing.assert_allclose(piece.get_start(),[start,0,0],atol=1e-6)
             np.testing.assert_allclose(piece.get_end(),[end,0,0],atol=1e-6)
             self.assertEqual(piece.get_fill_opacity(),0)

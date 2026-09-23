@@ -32,7 +32,7 @@ fn _build_svg_paints<'py>(
     let prepared = slf.py().detach(|| {
         svg_mobject_with_paints(source.as_bytes(), overrides).map_err(native_error)
     })?;
-    install_native_tree(slf, factory, prepared.into())
+    install_native_tree(slf, factory, prepared)
 }
 
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {

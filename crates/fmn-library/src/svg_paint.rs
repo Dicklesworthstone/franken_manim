@@ -151,16 +151,17 @@ fn prepare_shape(
     shape: &SvgShape, overrides: SvgPaintOverrides, budget: &mut Budget,
 ) -> Result<VMobject, SvgPaintError> {
     let style = overrides.apply(shape_style(&shape.style))?;
-    let even_odd = shape.style.fill_rule == FillRule::EvenOdd && style.fill_opacity > 0.0;
-    let stroked = style.stroke_opacity > 0.0 && style.stroke_width > 0.0;
-    let dashed = stroked && shape.style.stroke_dasharray.iter().any(|&value| value != 0.0);
+    let even_odd = shape.style.fill_rule == FillRule::EvenOdd;
+    let dashed = shape.style.stroke_dasharray.iter().any(|&value| value != 0.0);
     if !even_odd && !dashed {
         budget.points(shape.path.points().len())?;
         // Preserve existing ordinary-solid import bits and native stroke look.
         return Ok(VMobject::from_path(&shape.path).with_style(style));
     }
     let mut layers = Vec::new();
-    if style.fill_opacity > 0.0 {
+    // Retain both paint roles even when a constructor makes one invisible.
+    // Later styling must reveal the same filled set/dashes, not a solid path.
+    {
         let fill = if even_odd {
             let result = path_boolean(&shape.path, &QuadPath::new(), BooleanOperation::Union,
                 BooleanOptions { subject_fill_rule: FillRule::EvenOdd, limits: budget.boolean, ..Default::default() })?;
@@ -173,11 +174,9 @@ fn prepare_shape(
             result.path
         } else { shape.path.clone() };
         budget.points(fill.points().len())?;
-        if fill.has_points() {
-            layers.push(VMobject::from_path(&fill).with_style(Style { stroke_opacity: 0.0, stroke_width: 0.0, ..style }));
-        }
+        layers.push(VMobject::from_path(&fill).with_style(Style { stroke_opacity: 0.0, stroke_width: 0.0, ..style }));
     }
-    if stroked {
+    {
         let stroke_style = Style { fill_opacity: 0.0, ..style };
         if dashed {
             for path in dash_paths(shape, budget)? {
@@ -217,14 +216,14 @@ fn dash_paths(shape: &SvgShape, budget: &mut Budget) -> Result<Vec<QuadPath>, Sv
         if length == 0.0 { continue; }
         let mut intervals: Vec<(f64, f64)> = Vec::new();
         let mut position = -phase;
-        let mut index = 0;
+        let mut index: usize = 0;
         while position < length {
             budget.steps += 1;
             if budget.steps > MAX_DASH_STEPS { return Err(SvgPaintError::Limit("dash steps")); }
             let step = pattern[index % pattern.len()];
             let next = position + step;
             if step > 0.0 && next <= position { return Err(SvgPaintError::Invalid("dash length is below coordinate precision")); }
-            if index % 2 == 0 && next > 0.0 {
+            if index.is_multiple_of(2) && next > 0.0 {
                 let interval = (position.max(0.0), next.min(length));
                 if let Some(last) = intervals.last_mut().filter(|last| last.1 == interval.0) {
                     last.1 = interval.1;
