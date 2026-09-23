@@ -52,6 +52,7 @@ class RasterTransformTests(unittest.TestCase):
         self.assertNotIn(rt._CACHE, vars(animation))
         self.assertNotIn(rt._ACTIVE, vars(animation))
         self.assertNotIn(rt._TRANSIENTS, vars(animation))
+        self.assertNotIn(rt._FRAME_BUSY, vars(animation))
 
     def test_plain_and_unchanged_material_placement_keep_native_dispatch(self):
         self.assertFalse(m._requires_python_animation(m.Transform(m.Square(), m.Circle())))
@@ -358,6 +359,98 @@ class RasterTransformTests(unittest.TestCase):
             self.assertFalse(destination.exists())
         self.clean(t)
         self.assertFalse(item._is_updating_suspended())
+
+    def test_active_animation_copy_releases_only_its_own_status_and_materials(self):
+        t=m.Transform(self.a,self.b,rate_func=m.linear)
+        t.begin();t.interpolate(.5)
+        clone=copy.deepcopy(t)
+        self.assertIsNot(clone.mobject,self.a)
+        clone.interpolate(1);clone.abort()
+        np.testing.assert_array_equal(clone.mobject.get_pixel_array(),pixels(BLUE))
+        np.testing.assert_array_equal(self.a.get_pixel_array(),pixels(PURPLE))
+        self.assertFalse(vars(clone.mobject).get('_is_animating',False))
+        self.assertFalse(vars(clone.mobject).get('animating',False))
+        self.assertFalse(clone.mobject._is_updating_suspended())
+        self.assertTrue(vars(self.a).get('_is_animating',False))
+        self.clean(clone)
+        t.abort();self.clean(t)
+        self.assertFalse(vars(self.a).get('_is_animating',False))
+
+    def test_failed_begin_cleans_alignment_created_family_members_and_can_retry(self):
+        a=m.Group(image())
+        b=m.Group(image(BLUE),image(GREEN))
+        error=ValueError('failed initial alpha')
+        def rate(alpha):raise error
+        t=m.Transform(a,b,rate_func=rate)
+        with self.assertRaises(ValueError) as caught:t.begin()
+        self.assertIs(caught.exception,error)
+        self.assertEqual(len(a),2)  # authored/alignment geometry is not rolled back
+        for member in a.get_family():
+            self.assertFalse(vars(member).get('_is_animating',False))
+            self.assertFalse(member._is_updating_suspended())
+        self.clean(t)
+        scene=m.Scene();scene.add(a)
+        scene.play(m.Transform(a,b,rate_func=m.linear),run_time=.1)
+        for actual,target in zip(a,b):self.assertTrue(m._raster_images_equal(actual,target))
+
+    def test_same_animation_reentry_refuses_and_releases_acquired_state(self):
+        t=None
+        def rate(alpha):
+            if alpha>.2:t.interpolate(.1)
+            return alpha
+        t=m.Transform(self.a,self.b,rate_func=rate)
+        t.begin()
+        with self.assertRaisesRegex(RuntimeError,'reenter'):t.interpolate(.5)
+        self.clean(t)
+        self.assertFalse(self.a._is_updating_suspended())
+        self.assertFalse(vars(self.a).get('_is_animating',False))
+        np.testing.assert_array_equal(self.a.get_pixel_array(),pixels(RED))
+
+    def test_nested_different_transform_keeps_each_context_and_material_plan(self):
+        other=image(GREEN)
+        inner=m.Transform(other,image(BLUE),rate_func=m.linear)
+        inner.begin()
+        def path(a,b,alpha):
+            inner.interpolate(alpha)
+            return (1-alpha)*a+alpha*b
+        outer=m.Transform(self.a,self.b,rate_func=m.linear,path_func=path)
+        outer.begin();outer.interpolate(.5)
+        np.testing.assert_array_equal(self.a.get_pixel_array(),pixels(PURPLE))
+        np.testing.assert_array_equal(other.get_pixel_array(),pixels(CYAN))
+        outer.finish();inner.finish()
+        self.clean(outer);self.clean(inner)
+
+    def test_persistent_transform_updater_uses_existing_time_and_completion_boundary(self):
+        t=m.Transform(self.a,self.b,rate_func=m.linear,run_time=.5)
+        self.assertIs(m.turn_animation_into_updater(t),self.a)
+        # Existing updater protocol samples accumulated time before adding dt.
+        self.a.update(.25);self.a.update(0)
+        np.testing.assert_array_equal(self.a.get_pixel_array(),pixels(PURPLE))
+        np.testing.assert_allclose(self.a.get_center(),(0,0,0),atol=1e-7)
+        self.a.update(.25);self.a.update(0)
+        np.testing.assert_array_equal(self.a.get_pixel_array(),pixels(BLUE))
+        self.assertFalse(self.a.updaters)
+        self.assertFalse(self.a._is_updating_suspended())
+        self.clean(t)
+
+    def test_abort_recovers_ancestor_status_without_touching_unrelated_siblings(self):
+        sibling=m.Square()
+        parent=m.Group(self.a,sibling)
+        ancestor=m.Group(parent)
+        sibling.suspend_updating()
+        before=tuple((owner,dict(vars(owner))) for owner in (self.a,parent,ancestor))
+        t=m.Transform(self.a,self.b,rate_func=m.linear)
+        t.begin()
+        self.assertTrue(vars(parent).get('_is_animating',False))
+        self.assertTrue(vars(ancestor).get('_is_animating',False))
+        t.abort();self.clean(t)
+        for owner,attrs in before:
+            for key in ('_is_animating','animating'):
+                self.assertEqual(key in vars(owner),key in attrs)
+                if key in attrs:self.assertIs(vars(owner)[key],attrs[key])
+        self.assertTrue(sibling._is_updating_suspended())
+        self.assertFalse(vars(sibling).get('_is_animating',False))
+        sibling.resume_updating(call_updater=False)
 
 
 if __name__ == '__main__':

@@ -5,19 +5,34 @@ Only changed materials acquire decoded plans; ordinary placement remains native.
 """
 from __future__ import annotations
 
+import copy
 from contextvars import ContextVar
 from functools import wraps
 
 from .image_authoring import _method
 from .raster_animation import _METADATA
-from .scene_execution import _TransientState, _note
+from .scene_execution import _TransientState, _MISSING as _TRANSIENT_MISSING, _note
 
 _CONTEXT = ContextVar('fmn_transform_material_plans', default=None)
+_PREPARING = ContextVar('fmn_transform_material_preparing', default=None)
+_FRAME_BUSY = '_fmn_transform_material_interpolating'
 _CACHE = '_fmn_transform_material_plans'
 _TRANSIENTS = '_fmn_transform_material_transients'
 _ACTIVE = '_fmn_transform_material_active'
 _MAX_TEXELS = 16_777_216  # 256 MiB, summed before decoding a whole family.
 _MISSING = object()
+
+
+class _TransformTransient(_TransientState):
+    def __deepcopy__(self, memo):
+        # An active Animation.copy clones its endpoints through the same memo.
+        # Missing flag values are ownership sentinels, not authored objects:
+        # copying them into new object() values would restore truthy garbage.
+        result = type(self).__new__(type(self))
+        memo[id(self)] = result
+        for key, value in vars(self).items():
+            setattr(result, key, value if value is _TRANSIENT_MISSING else copy.deepcopy(value, memo))
+        return result
 
 
 def install_raster_transform(native):
@@ -29,6 +44,7 @@ def install_raster_transform(native):
         raise ImportError('native Transform material planning is missing')
     Mobject, Transform, CameraFrame = g['Mobject'], g['Transform'], g['CameraFrame']
     previous_interpolate = Mobject.interpolate
+    previous_align = Mobject.align_data_and_family
     previous_begin, previous_finish = Transform.begin, Transform.finish
     previous_frame = Transform.interpolate_mobject
     previous_abort = getattr(Transform, 'abort', None)
@@ -63,22 +79,47 @@ def install_raster_transform(native):
         except BaseException as cleanup:
             _note(error, 'Transform material cleanup also failed: ' + type(cleanup).__name__)
 
+    def capture_transients(animation):
+        snapshots = vars(animation).setdefault(_TRANSIENTS, [])
+        seen = {id(snapshot.mob) for snapshot in snapshots}
+        family = list(animation.mobject.get_family())
+        index = 0
+        while index < len(family):
+            member = family[index]
+            index += 1
+            if id(member) in seen:
+                continue
+            seen.add(id(member))
+            snapshots.append(_TransformTransient(member))
+            # Animating status also propagates upward. Capture those owners,
+            # not their unrelated siblings, before acquiring descendant flags.
+            family.extend(tuple(getattr(member, 'parents', ())))
+
+    @wraps(previous_align)
+    def align(self, mobject):
+        result = previous_align(self, mobject)
+        animation = _PREPARING.get()
+        if animation is not None and self is animation.mobject:
+            # Alignment can create copies/null members. Capture their baseline
+            # after creation but BEFORE Animation.begin acquires their flags.
+            capture_transients(animation)
+        return result
+
     @wraps(previous_begin)
     def begin(self):
         if vars(self).get(_ACTIVE, False):
             abort(self)
         clear(self)
-        snapshots, seen = [], set()
-        for member in self.mobject.get_family():
-            if id(member) not in seen:
-                seen.add(id(member))
-                snapshots.append(_TransientState(member))
-        vars(self).update({_CACHE: {}, _TRANSIENTS: snapshots, _ACTIVE: True})
+        vars(self).update({_CACHE: {}, _TRANSIENTS: [], _ACTIVE: True})
+        token = _PREPARING.set(self)
         try:
+            capture_transients(self)
             return previous_begin(self)
         except BaseException as error:
             failed(self, error)
             raise
+        finally:
+            _PREPARING.reset(token)
 
     @wraps(previous_finish)
     def finish(self):
@@ -115,6 +156,7 @@ def install_raster_transform(native):
                 retained[key] = None
         # All admission checks precede decoding or record/pixel interpolation.
         # Discard stale plans first, avoiding a second full family of decodes.
+        old = None  # Do not retain the final stale decode through the loop local.
         cache.clear()
         cache.update(retained)
         for key, (start, end) in pending.items():
@@ -123,6 +165,9 @@ def install_raster_transform(native):
 
     @wraps(previous_frame)
     def frame(self, alpha):
+        if vars(self).get(_FRAME_BUSY, False):
+            raise RuntimeError('Transform material interpolation cannot reenter the same animation')
+        vars(self)[_FRAME_BUSY] = True
         owned = vars(self).get(_ACTIVE, False)
         token = None
         try:
@@ -136,6 +181,7 @@ def install_raster_transform(native):
                 _CONTEXT.reset(token)
             if not owned:
                 vars(self).pop(_CACHE, None)
+            vars(self).pop(_FRAME_BUSY, None)
 
     @wraps(previous_interpolate)
     def interpolate(self, mobject1, mobject2, alpha, path_func=None):
@@ -192,6 +238,7 @@ def install_raster_transform(native):
     # Install before playback freezes the shipped Mobject/Transform protocols.
     # The later authored-dispatch guard runs before this resource admission.
     for cls, name, method in ((Mobject, 'interpolate', interpolate),
+                              (Mobject, 'align_data_and_family', align),
                               (Transform, 'begin', begin), (Transform, 'finish', finish),
                               (Transform, 'interpolate_mobject', frame), (Transform, 'abort', abort)):
         _method(cls, name, method)
