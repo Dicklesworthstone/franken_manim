@@ -1,8 +1,8 @@
 """Live UV-surface regeneration through Atlas, with native geometry publication.
 
-Only geometry changes: handles, child identities, materials, scene membership,
-updaters and live record views keep their existing owners. Grid-changing morphs
-are separate from resampling a fixed topology and are never silently flattened.
+Handles, child identities, materials, scene membership and updaters retain their
+owners. Explicit set_resolution rebuilds the UV recipe while native regridding
+preserves paint and texture fields; init_points retains its fixed-grid contract.
 """
 from __future__ import annotations
 
@@ -16,12 +16,12 @@ _METADATA = ("u_range", "v_range", "epsilon", "normal_nudge", "preferred_creatio
 
 
 def _controls(surface):
-    resolution = tuple(operator.index(v) for v in surface.resolution)
+    resolution = tuple(operator.index(v) for v in itertools.islice(iter(surface.resolution), 3))
     if len(resolution) != 2 or any(v < 2 for v in resolution) or math.prod(resolution) > 65_536:
         raise ValueError("surface regeneration requires a UV grid of 2..65536 points with both axes >= 2")
     domains = []
     for name in ("u_range", "v_range"):
-        pair = tuple(float(v) for v in getattr(surface, name))
+        pair = tuple(float(v) for v in itertools.islice(iter(getattr(surface, name)), 3))
         if len(pair) != 2 or not all(math.isfinite(v) for v in pair) or pair[0] == pair[1]:
             raise ValueError(name + " must contain two distinct finite bounds")
         domains.append(pair)
@@ -73,7 +73,7 @@ def install_surface_geometry(native):
     g = vars(native)
     if g.get("_FMN_SURFACE_GEOMETRY_INSTALLED", False):
         return
-    for name in ("_surface_grid_resolution", "_copy_surface_geometry"):
+    for name in ("_surface_grid_resolution", "_copy_surface_geometry", "_regrid_surface_geometry"):
         if not callable(g.get(name)):
             raise ImportError("native surface geometry seam is missing: " + name)
     Surface, Textured, Geometry, Mobject, np = (g[name] for name in
@@ -91,13 +91,13 @@ def install_surface_geometry(native):
         if vars(self).get("_is_animating", False) or getattr(self, "locked_data_keys", ()):
             raise RuntimeError("release the surface's active animation before regenerating its geometry")
 
-    def init_points(self):
+    def regenerate(self, requested=None):
         """Resample the current UV recipe, preserving native identity and style.
 
         Designed for explicit rebuilds and ValueTracker-driven updaters. Like
         construction, sampling evaluates the current UV function in its own
-        coordinates; previous affine geometry edits are not reapplied. Native
-        topology must remain unchanged. Callback errors publish no new geometry;
+        coordinates; previous affine geometry edits are not reapplied. Grid
+        changes are admitted only by set_resolution. Errors publish no geometry;
         arbitrary side effects made by the callback itself are not rolled back.
         """
         if vars(self).get(_BUSY, False):
@@ -105,16 +105,20 @@ def install_surface_geometry(native):
         if isinstance(self, Geometry):
             raise TypeError("indexed TexturedGeometry is not a UV-grid surface")
         shape = tuple(operator.index(v) for v in itertools.islice(iter(self.resolution), 3))
-        if len(shape) == 2 and 0 in shape and all(0 <= v <= 65_536 for v in shape):
+        if requested is None and len(shape) == 2 and 0 in shape and all(0 <= v <= 65_536 for v in shape):
             # Empty Surface construction calls this hook through _engine_init.
             # There are no samples to regenerate, and no triangle grid to copy.
             if self.n_records():
                 raise ValueError("surface resolution no longer matches its native records")
             return None
         idle(self)
-        controls = _controls(self)
-        if controls[0] != resolution(self):
-            raise ValueError("surface resolution changed; construct a new surface and use become() for topology replacement")
+        original_controls = _controls(self)
+        if original_controls[0] != resolution(self):
+            raise ValueError("surface resolution changed; use set_resolution() instead of assigning topology")
+        controls = original_controls if requested is None else (requested, *original_controls[1:])
+        topology = None
+        if controls[0] != original_controls[0]:
+            topology = dict(resolution=controls[0], triangle_indices=triangles(SimpleNamespace(resolution=controls[0])))
         vars(self)[_BUSY] = True
         try:
             # Source records are retained before callbacks; a callback that edits
@@ -175,7 +179,7 @@ def install_surface_geometry(native):
             if verify_sampling is not None:
                 verify_sampling()
             idle(self)
-            if solid is not None and _solid_recipe(g, self, _controls(self)) != solid:
+            if solid is not None and _solid_recipe(g, self, controls) != solid:
                 raise RuntimeError("surface shape parameters changed during regeneration")
             if not isinstance(self, Textured) and getattr(self, "passed_uv_func", None) is not recipe:
                 raise RuntimeError("surface UV function changed during regeneration")
@@ -187,10 +191,12 @@ def install_surface_geometry(native):
             # as well as its host mirror: a callback may bind this very object.
             if (vars(self).get("_scene") is not owner or self._is_bound() != bound
                     or tuple(self.get_family()) != family
-                    or _controls(self) != controls or resolution(self) != controls[0]
+                    or _controls(self) != original_controls or resolution(self) != original_controls[0]
                     or not np.array_equal(self.data, before)):
                 raise RuntimeError("surface changed during regeneration; sampled geometry was not published")
-            g["_copy_surface_geometry"](self, candidate)
+            g["_copy_surface_geometry" if topology is None else "_regrid_surface_geometry"](self, candidate)
+            if topology is not None:
+                vars(self).update(topology)
             if solid is not None:
                 for key in ("_solid_params", "_solid_native_height"):
                     if key in vars(candidate):
@@ -198,6 +204,36 @@ def install_surface_geometry(native):
         finally:
             vars(self).pop(_BUSY, None)
         return None
+
+    def init_points(self):
+        """Regenerate the current UV recipe without changing its grid shape."""
+        return regenerate(self)
+
+    def set_resolution(self, resolution):
+        """Resample the current recipe at a new UV resolution, retaining identity.
+
+        Paint, opacity, UVs and custom records are interpolated from the old
+        normalized UV chart. Geometry and normals are freshly sampled. A
+        TexturedSurface reads its uv_surface, which must already have the new
+        native shape; it never mutates or evaluates that source implicitly.
+        """
+        if vars(self).get(_BUSY, False):
+            raise RuntimeError("surface regeneration is already in progress")
+        # Bound even an arbitrary iterable before allocation or UV evaluation.
+        from .surface_admission import grid_shape
+        shape = grid_shape(resolution)
+        if min(shape) < 2:
+            raise ValueError("live surface regridding requires both UV dimensions >= 2")
+        regenerate(self, shape)
+        return self
+
+    def resolution_animation(self, *args, **kwargs):
+        raise g["_CapabilityError"](
+            "UV resolution changes are discrete; use set_resolution() in a scene updater, "
+            "or Transform to a separately sampled surface for geometric interpolation"
+        )
+
+    set_resolution._override_animate = resolution_animation
 
     def become(self, mobject, match_updaters=False):
         other = mobject
@@ -226,6 +262,7 @@ def install_surface_geometry(native):
         return result
 
     for cls, name, method in ((Surface, "init_points", init_points),
+                               (Surface, "set_resolution", set_resolution),
                                (Mobject, "become", become)):
         method.__name__, method.__qualname__, method.__module__ = name, cls.__qualname__ + "." + name, cls.__module__
         setattr(cls, name, method)

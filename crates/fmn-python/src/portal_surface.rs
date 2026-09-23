@@ -1,4 +1,4 @@
-//! Fixed-topology live surface geometry on the existing Stage/view protocol.
+//! Live surface geometry on the existing Stage/view protocol.
 //! Sampling is Atlas's job. This seam validates and commits its complete result
 //! without replacing the surface handle, family, material, or updater owner.
 use super::*;
@@ -113,6 +113,40 @@ fn _copy_surface_geometry(
     })?
 }
 
+/// Publish newly sampled positions at a different UV resolution. The shared
+/// Marionette owner retains and regrids destination paint/UV/custom records;
+/// this bridge only reads the source's world-space geometry.
+#[pyfunction]
+fn _regrid_surface_geometry(
+    target: &Bound<'_, BridgeMobject>,
+    source: &Bound<'_, BridgeMobject>,
+) -> PyResult<()> {
+    let geometry = with_stage(source, |stage, mob| -> PyResult<Geometry> {
+        let entry = stage
+            .get(mob)
+            .ok_or_else(|| StaleHandleError::new_err("source surface is stale"))?;
+        Ok(Geometry {
+            resolution: grid(entry)?
+                .ok_or_else(|| PyTypeError::new_err("source must be a native UV surface"))?,
+            points: world_column(entry, "point")?,
+            normal_points: world_column(entry, "d_normal_point")?,
+        })
+    })??;
+    with_stage(target, |stage, mob| -> PyResult<()> {
+        let entry = stage
+            .get(mob)
+            .ok_or_else(|| StaleHandleError::new_err("target surface is stale"))?;
+        let update = fmn_mobject::stage::SurfaceGridUpdate::for_geometry(
+            entry,
+            geometry.resolution,
+            &geometry.points,
+            &geometry.normal_points,
+        )
+        .map_err(native_error)?;
+        stage.apply_surface_grid_update(mob, update).map_err(native_error)
+    })?
+}
+
 /// Align proxies even when one is scene-bound and the other is detached.
 /// Prepare both immutable entry copies before changing either actual owner.
 /// The native Stage operation remains the only UV resampling implementation.
@@ -155,6 +189,7 @@ fn _align_surface_grids(
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_surface_grid_resolution, module)?)?;
     module.add_function(wrap_pyfunction!(_copy_surface_geometry, module)?)?;
+    module.add_function(wrap_pyfunction!(_regrid_surface_geometry, module)?)?;
     module.add_function(wrap_pyfunction!(_align_surface_grids, module)?)?;
     Ok(())
 }
@@ -162,6 +197,23 @@ pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_surface_regridding_and_native_output() {
+        crate::with_python_test_module("live surface regridding", |py, _module, globals| {
+            let code = std::ffi::CString::new(include_str!("../tests/surface_regridding.py")).unwrap();
+            py.run(code.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_surface_regridding_acceptance")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
 
     #[test]
     fn fallible_native_surface_sampling() {
