@@ -1,7 +1,7 @@
 """In-place refresh of sampled 2D/3D paths through the native Atlas builder."""
 from __future__ import annotations
 
-from .graphing import _BINDING, _BUSY, _MAX_SAMPLES, _bind_method, _finite
+from .graphing import _BINDING, _GRAPH_UPDATES, _MAX_SAMPLES, _bind_method, _finite
 
 
 def install_curve_regeneration(native):
@@ -35,13 +35,10 @@ def install_curve_regeneration(native):
         Earlier affine edits are not reapplied. Atlas owns all sampling and
         smoothing; publication uses the existing point-record/view protocol.
         """
-        if vars(self).get(_BUSY, False):
-            raise RuntimeError("curve regeneration cannot reenter itself")
         idle(self)
         if tuple(self.pointlike_data_keys) != ("point",):
             raise TypeError("curve regeneration requires the VMobject pointlike schema")
-        vars(self)[_BUSY] = True
-        try:
+        with _GRAPH_UPDATES.hold(self, message="curve regeneration cannot reenter itself"):
             options = controls(self)
             function = self.t_func
             function_identity = identity(function)
@@ -71,8 +68,6 @@ def install_curve_regeneration(native):
             if not np.isfinite(points).all():
                 raise ValueError("native curve sampling produced nonfinite records")
             self.set_points(points)
-        finally:
-            vars(self).pop(_BUSY, None)
         return self
 
     _bind_method(Curve, "init_points", init_points)

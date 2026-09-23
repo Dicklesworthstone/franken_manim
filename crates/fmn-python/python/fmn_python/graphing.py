@@ -12,12 +12,14 @@ import math
 import operator
 from typing import Any
 
+from .invocation import InvocationGuard
+
 _MAX_SAMPLES = 65_536
 _MAX_DISCONTINUITIES = 1_024
 _MAX_RECORDS = 4 * _MAX_SAMPLES + 2 * _MAX_DISCONTINUITIES
 _EPSILON = 1e-6
 _BINDING = "_fmn_function_graph_binding"
-_BUSY = "_fmn_function_graph_busy"
+_GRAPH_UPDATES = InvocationGuard()
 # Keep the public bind hook's original callable identity. A get_graph() call
 # supplies a scalar function; direct bind_graph_to_func() supplies an array one.
 _SCALAR_BIND = ContextVar("fmn_scalar_graph_binding", default=None)
@@ -133,7 +135,7 @@ def install_graphing(native):
             raise TypeError("get_discontinuities must be callable or None")
         if not isinstance(jagged, bool):
             raise TypeError("jagged must be bool")
-        if vars(graph).get(_BUSY, False):
+        if _GRAPH_UPDATES.busy(graph):
             raise RuntimeError("cannot rebind a graph during its update")
         # A custom pointlike schema cannot be copied from a plain native path.
         # Refuse before the native resize rather than partly copying fields.
@@ -166,10 +168,16 @@ def install_graphing(native):
         query = _GraphFunction(func, scalar, np)
 
         def update(current):
-            if vars(current).get(_BUSY, False):
-                raise RuntimeError("live graph update cannot reenter itself")
-            vars(current)[_BUSY] = True
-            try:
+            with _GRAPH_UPDATES.hold(current, message="live graph update cannot reenter itself"):
+                # Freeze the destination, not callback side effects. A callback
+                # can inspect/copy/save it, but an authored edit must not be
+                # silently replaced by a candidate sampled from obsolete state.
+                current.get_points()
+                before = current.data.copy()
+                family = tuple(id(member) for member in current.get_family())
+                owner, bound = vars(current).get("_scene"), current._is_bound()
+                binding = vars(current).get(_BINDING)
+                pointlike = tuple(current.pointlike_data_keys)
                 ds = (fixed if get_discontinuities is None else
                       _discontinuities(get_discontinuities(), low, high))
                 segments = _segments(samples, ds, epsilon, np)
@@ -204,10 +212,14 @@ def install_graphing(native):
                 # defaults, then reseeds those defaults when samples return.
                 # Raw match_points would resize an empty native buffer without
                 # that protocol and could bring back invisible zero-style rows.
-                current.get_points()  # Bake any live placement before writing world points.
+                current.get_points()  # Observe live placement edits before comparing records.
+                if (vars(current).get("_scene") is not owner or current._is_bound() != bound
+                        or vars(current).get(_BINDING) is not binding
+                        or tuple(id(member) for member in current.get_family()) != family
+                        or tuple(current.pointlike_data_keys) != pointlike
+                        or not np.array_equal(current.data, before)):
+                    raise RuntimeError("live graph changed during sampling; candidate was not published")
                 current.set_points(candidate.get_points())
-            finally:
-                vars(current).pop(_BUSY, None)
 
         # A binding owns one updater, not the author's entire updater list.
         # Rebinding replaces that one callback and retains the original grid.
@@ -221,7 +233,7 @@ def install_graphing(native):
     def unbind(self, graph):
         if not isinstance(graph, VMobject):
             raise TypeError("unbind_graph_from_func requires a VMobject graph")
-        if vars(graph).get(_BUSY, False):
+        if _GRAPH_UPDATES.busy(graph):
             raise RuntimeError("cannot unbind a graph during its update")
         binding = vars(graph).get(_BINDING)
         if binding is not None:
@@ -270,13 +282,10 @@ def install_implicit_regeneration(native):
         edits are not reapplied. Topology may change or vanish. Object identity,
         styles, children, saved states and updaters keep their existing owners.
         """
-        if vars(self).get(_BUSY, False):
-            raise RuntimeError("implicit graph regeneration cannot reenter itself")
         idle(self)
         if tuple(self.pointlike_data_keys) != ("point",):
             raise TypeError("implicit regeneration requires the VMobject pointlike schema")
-        vars(self)[_BUSY] = True
-        try:
+        with _GRAPH_UPDATES.hold(self, message="implicit graph regeneration cannot reenter itself"):
             options = controls(self)
             function = self.func
             function_identity = identity(function)
@@ -306,8 +315,6 @@ def install_implicit_regeneration(native):
             # The existing set_points protocol preserves record styles and
             # generation semantics, including empty-to-visible recovery.
             self.set_points(points)
-        finally:
-            vars(self).pop(_BUSY, None)
         return None
 
     _bind_method(Implicit, "init_points", init_points)
