@@ -21,9 +21,9 @@ mod live_tex;
 mod method_cache;
 pub mod perf_harness;
 mod portal_audio;
-mod portal_network;
 #[cfg(any(test, feature = "gauntlet"))]
 mod portal_console;
+mod portal_network;
 #[cfg(feature = "gauntlet")]
 pub use portal_console::run_portal_gauntlet_console;
 mod portal_playback;
