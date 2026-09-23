@@ -6,19 +6,22 @@
 //! sampler runs during alignment. This module is a child of `stage` so it can
 //! publish a buffer and its durable topology together without replacing identity.
 
-use super::{Entry, Mob, Stage};
+use super::{Entry, Mob, Placement, Stage};
 use crate::{RecordBuffer, RenderPrimitive, StageError};
 
 /// Maximum number of records in an aligned UV surface.
 pub const MAX_SURFACE_GRID_POINTS: usize = 65_536;
 
 /// A validated, prepared surface update. Preparation never changes a live entry.
-/// Application preserves placement, materials, family, updaters and saved state.
+/// Alignment preserves placement; geometry replacement bakes it. Materials,
+/// family, updaters and saved state retain their existing owners in both cases.
 pub struct SurfaceGridUpdate {
     before: RecordBuffer,
+    before_placement: Placement,
     old_resolution: (usize, usize),
     resolution: (usize, usize),
     buffer: RecordBuffer,
+    placement: Placement,
 }
 
 fn grid_count(resolution: (usize, usize)) -> Result<usize, StageError> {
@@ -135,10 +138,93 @@ fn prepare(entry: &Entry, shape: (usize, usize)) -> Result<Option<SurfaceGridUpd
     }
     Ok(Some(SurfaceGridUpdate {
         before: entry.buffer.snapshot_clone(),
+        before_placement: entry.placement(),
         old_resolution: old,
         resolution: shape,
         buffer,
+        placement: entry.placement(),
     }))
+}
+
+/// Prepare new world-space geometry without losing destination-owned fields.
+fn prepare_surface_grid_geometry(
+    entry: &Entry,
+    shape: (usize, usize),
+    points: &[f32],
+    normal_points: &[f32],
+) -> Result<SurfaceGridUpdate, StageError> {
+    let count = grid_count(shape)?;
+    if points.len() != 3 * count || normal_points.len() != 3 * count {
+        return Err(StageError::SurfaceGrid(
+            "surface sample lengths do not match the UV grid",
+        ));
+    }
+    if points.iter().chain(normal_points).any(|value| !value.is_finite()) {
+        return Err(StageError::SurfaceGrid(
+            "surface geometry samples must be finite",
+        ));
+    }
+    let mut update = match prepare(entry, shape)? {
+        Some(update) => update,
+        None => SurfaceGridUpdate {
+            before: entry.buffer.snapshot_clone(),
+            before_placement: entry.placement(),
+            old_resolution: shape,
+            resolution: shape,
+            buffer: entry.buffer.deep_clone(),
+            placement: entry.placement(),
+        },
+    };
+    // The sampler replaces point and d_normal_point. Every other declared
+    // vec3 pointlike lane belongs to the destination and must stay in world
+    // space when the destination's retained placement is discarded.
+    if !update.placement.is_identity() {
+        let keys = update.buffer.schema().pointlike_keys().to_vec();
+        for key in keys {
+            if key == "point"
+                || key == "d_normal_point"
+                || update.buffer.schema().field_width(&key) != Some(3)
+            {
+                continue;
+            }
+            let mut column = update.buffer.read_column(&key).unwrap_or_default();
+            for point in column.as_chunks_mut::<3>().0 {
+                let world = update.placement.apply_point(point.map(f64::from));
+                if world.iter().any(|value| !value.is_finite() || value.abs() > f64::from(f32::MAX)) {
+                    return Err(StageError::SurfaceGrid(
+                        "surface auxiliary points exceed finite f32 storage",
+                    ));
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    *point = world.map(|value| value as f32);
+                }
+            }
+            update.buffer.write_range(&key, 0, &column);
+        }
+    }
+    update.buffer.write_range("point", 0, points);
+    update.buffer.write_range("d_normal_point", 0, normal_points);
+    update.placement = Placement::IDENTITY;
+    Ok(update)
+}
+
+impl SurfaceGridUpdate {
+    /// Prepare an atomic geometry replacement, resampling all other record
+    /// fields onto `shape` and baking auxiliary pointlike fields to world space.
+    /// The input point and normal-control columns are already world-space.
+    ///
+    /// # Errors
+    /// Invalid dimensions, schemas, numeric values or sample lengths refuse
+    /// before any live records, placement or topology can be changed.
+    pub fn for_geometry(
+        entry: &Entry,
+        shape: (usize, usize),
+        points: &[f32],
+        normal_points: &[f32],
+    ) -> Result<Self, StageError> {
+        prepare_surface_grid_geometry(entry, shape, points, normal_points)
+    }
 }
 
 /// Prepare both sides on the component-wise maximum UV resolution. Neither
@@ -159,9 +245,9 @@ pub fn prepare_surface_grid_alignment(
 }
 
 impl Stage {
-    /// Publish prepared records and UV topology together. Old views detach via
-    /// the normal RecordBuffer generation protocol. Refuse a stale preparation
-    /// rather than overwrite record edits made since it was captured.
+    /// Publish prepared records, placement and UV topology together. Old views
+    /// detach via the normal RecordBuffer generation protocol. Refuse a stale
+    /// preparation rather than overwrite later record or placement edits.
     pub fn apply_surface_grid_update(
         &mut self,
         mob: Mob,
@@ -169,6 +255,7 @@ impl Stage {
     ) -> Result<(), StageError> {
         let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
         if resolution(entry)? != update.old_resolution
+            || !entry.placement().same_bits(update.before_placement)
             || entry.buffer.schema() != update.before.schema()
             || entry
                 .buffer
@@ -187,6 +274,25 @@ impl Stage {
         entry.render_primitive = RenderPrimitive::SurfaceGrid {
             resolution: update.resolution,
         };
+        entry.set_placement(update.placement);
+        Ok(())
+    }
+
+    /// Regrid stored surface records without evaluating a geometry recipe.
+    /// Supports refinement, coarsening and equal-count UV reshaping with the
+    /// same bilinear record owner used by Transform alignment. Placement and
+    /// every non-record owner are retained; equal shapes are true no-ops.
+    ///
+    /// # Errors
+    /// A stale handle, invalid grid or nonfinite record refuses before mutation.
+    pub fn resample_surface_grid(
+        &mut self,
+        mob: Mob,
+        shape: (usize, usize),
+    ) -> Result<(), StageError> {
+        if let Some(update) = prepare(self.try_get(mob)?, shape)? {
+            self.apply_surface_grid_update(mob, update)?;
+        }
         Ok(())
     }
 
