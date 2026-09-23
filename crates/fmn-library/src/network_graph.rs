@@ -161,6 +161,8 @@ impl NetworkGraph {
             graph.add_node(*label);
         }
         for (from, to) in edges {
+            graph.add_node(*from);
+            graph.add_node(*to);
             graph
                 .add_edge(*from, *to)
                 .expect("from_edge_list pre-adds every endpoint");
@@ -373,6 +375,23 @@ impl NetworkGraph {
                     ],
                 );
             }
+        }
+        // Keep the rooted component bit-identical, and include every
+        // disconnected vertex on an outer ring in node insertion order.
+        let remaining: Vec<_> = self
+            .labels
+            .iter()
+            .filter(|label| !visited.contains(label.as_str()))
+            .collect();
+        for (label, theta) in remaining.iter().zip(Self::circular_angles(remaining.len())) {
+            positions.insert(
+                (*label).clone(),
+                [
+                    1.5 * fmn_dmath::cos(theta),
+                    1.5 * fmn_dmath::sin(theta),
+                    0.0,
+                ],
+            );
         }
         Ok(positions)
     }

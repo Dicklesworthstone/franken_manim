@@ -234,3 +234,25 @@ fn layout_transition_animates_between_circular_and_spring() {
     // Interpolate to finish at alpha=1.0
     transform.finish(&mut stage);
 }
+
+#[test]
+fn edge_list_infers_vertices_without_panicking() {
+    let graph = NetworkGraph::from_edge_list(&["isolated"], &[("b", "a"), ("a", "c")])
+        .laid_out(&GraphLayout::Circular)
+        .unwrap();
+    assert_eq!(graph.nodes(), &["isolated", "b", "a", "c"]);
+    assert_eq!(graph.build().unwrap().children().len(), 6);
+}
+
+#[test]
+fn breadth_first_includes_disconnected_vertices_on_an_outer_ring() {
+    let graph = NetworkGraph::from_edge_list(&["a", "b", "c", "d"], &[("a", "b")])
+        .laid_out(&GraphLayout::BreadthFirst { root: "a".into() })
+        .unwrap();
+    assert_eq!(graph.position("a"), Some([0.0, 0.0, 0.0]));
+    assert_eq!(graph.position("b"), Some([1.0, 0.0, 0.0]));
+    assert_eq!(graph.position("c"), Some([1.5, 0.0, 0.0]));
+    let d = graph.position("d").unwrap();
+    assert!((d[0] + 1.5).abs() < 1e-12 && d[1].abs() < 1e-12);
+    assert_eq!(graph.build().unwrap().children().len(), 5);
+}
