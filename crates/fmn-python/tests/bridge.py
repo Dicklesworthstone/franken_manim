@@ -20477,6 +20477,26 @@ assert type(manimlib.ThreeDAxes().z_axis) is manimlib.NumberLine
 _scaled = manimlib.Axes(x_range=(0, 10, 1), width=5)
 assert math.isclose(_scaled.x_axis.get_unit_size(), 0.5)
 
+# fm-5wq.14: every natively built surface carries Reference Surface.__init__'s
+# grid triangles. 16 corpus scenes read sphere.triangle_indices or sort
+# faces back to front.
+for _surface in (
+    manimlib.ParametricSurface(lambda u, v: [u, v, 0]), manimlib.Sphere(),
+    manimlib.Torus(), manimlib.Cylinder(), manimlib.Cone(),
+    manimlib.Line3D(manimlib.ORIGIN, manimlib.RIGHT), manimlib.Disk3D(),
+    manimlib.Square3D(),
+):
+    _nu, _nv = _surface.resolution
+    assert len(_surface.triangle_indices) == 6 * (_nu - 1) * (_nv - 1), type(_surface)
+    assert _surface.triangle_indices is _surface.get_triangle_indices()
+_sphere = manimlib.Sphere()
+_unsorted = sorted(_sphere.triangle_indices.tolist())
+assert _sphere.sort_faces_back_to_front() is _sphere
+assert sorted(_sphere.triangle_indices.tolist()) == _unsorted
+assert [len(face.triangle_indices) for face in manimlib.Cube()] == [6] * 6
+assert manimlib.Cube(square_resolution=(3, 3))[0].triangle_indices.size == 24
+assert [len(face.triangle_indices) for face in manimlib.Prism()] == [6] * 6
+
 # fm-5wq.14: copying a never-added group whose descendants were added one by
 # one (3b1b's sir.py builds exp_tree this way, as do 40 other corpus scenes)
 # yields a detached, independent copy of every member.
@@ -20514,6 +20534,9 @@ assert _resolved["base"] == "/b" and _resolved["mirror_module_path"] is False
 assert _resolved["subdirs"]["data"] == "d" and _resolved["subdirs"]["output"] == "videos"
 assert _resolved["subdirs"]["pi_creature_images"] == "p/svg"
 _dirs_module = importlib.import_module("manimlib.utils.directories")
+# The top-level star surface re-exports the bound helpers, not stale stubs.
+assert manimlib.get_directories is _dirs_module.get_directories
+assert manimlib.get_output_dir is _dirs_module.get_output_dir
 _dirs = _dirs_module.get_directories()
 assert _dirs is importlib.import_module("manimlib.config").manim_config.directories
 for _key, _subdir in _dirs["subdirs"].items():

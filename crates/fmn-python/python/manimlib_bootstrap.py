@@ -12659,12 +12659,15 @@ class Cube(SGroup):
             z_index,
         )
         _hang_native_children(self, specs)
+        self._index_faces()
+        self._apply_surface_style(color, opacity, shading, depth_test)
+
+    def _index_faces(self):
         # Reference Cube faces are Square3D surfaces on square_resolution
         # grids; each carries its grid triangles.
         for face in self.submobjects:
             face.resolution = self.resolution
             face.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
 
 
 class Prism(Cube):
@@ -12686,6 +12689,7 @@ class Prism(Cube):
             z_index,
         )
         _hang_native_children(self, specs)
+        self._index_faces()
         self._apply_surface_style(color, opacity, shading, depth_test)
 
 
@@ -20109,6 +20113,8 @@ def _placeholder_function(module_name, name):
     unavailable.__name__ = name
     unavailable.__qualname__ = name
     unavailable.__module__ = module_name
+    # The runtime parity audit recognises placeholders by this marker.
+    unavailable._fmn_schema_placeholder = True
     return unavailable
 
 
@@ -23315,7 +23321,14 @@ def _install_directories_module(manim_config):
         get_three_d_model_dir, get_sound_dir,
     ):
         function.__module__ = "manimlib.utils.directories"
+        previous = vars(module).get(function.__name__)
         setattr(module, function.__name__, function)
+        # The schema surface bound the Reference's re-exports (the top-level
+        # star surface) to the placeholder before this binding landed.
+        if previous is not None:
+            for other in list(_sys.modules.values()) + [_FMN_MODULE]:
+                if other is not None and vars(other).get(function.__name__) is previous:
+                    setattr(other, function.__name__, function)
 
 
 def _install_config_module():
