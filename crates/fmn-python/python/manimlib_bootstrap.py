@@ -12659,6 +12659,11 @@ class Cube(SGroup):
             z_index,
         )
         _hang_native_children(self, specs)
+        # Reference Cube faces are Square3D surfaces on square_resolution
+        # grids; each carries its grid triangles.
+        for face in self.submobjects:
+            face.resolution = self.resolution
+            face.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
 
 
