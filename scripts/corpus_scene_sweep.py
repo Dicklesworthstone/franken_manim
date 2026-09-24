@@ -24,7 +24,9 @@ ordinary exception is first recorded as `runtime_error` (origin unknown).
 in-process and records which code raised it (`raised_in`: portal or scene),
 splitting them into `portal_exception` and `scene_code_error`. Raised-in is
 where the exception surfaced, not proof of fault: an AttributeError raised in
-scene code can still come from the portal returning the wrong type.
+scene code can still come from the portal returning the wrong type. A
+signature-binding TypeError raised at a portal entry point counts as scene
+code, because portal signatures follow the pinned Reference's API schema.
 """
 import argparse
 import ast
@@ -117,6 +119,8 @@ def classify(returncode, stderr, timed_out):
         returncode == 4
         or "capability/" in tail
         or exc_type in ("NotImplementedError", "CapabilityError")
+        # Only the bundled faces ship; a system font name is a named refusal.
+        or re.search(r"font family '[^']+' is not available", tail)
     ):
         return "capability_refusal", tail[:300]
     if re.search(r"UnsupportedCommand|TexError|fmd-math|is not yet supported", stderr):
@@ -164,6 +168,12 @@ def scene_env(args):
     return dict(os.environ, PYTHONPATH=path)
 
 
+SIGNATURE_MISMATCH = re.compile(
+    r"unexpected keyword argument|missing \d+ required|takes \d+ positional|"
+    r"got multiple values for argument"
+)
+
+
 def attribute(args, record, out_dir):
     target = out_dir / "attribution" / f"{record['module'].replace('/', '__')}__{record['scene']}.png"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -178,9 +188,14 @@ def attribute(args, record, out_dir):
     except (subprocess.TimeoutExpired, ValueError, IndexError):
         return record
     record = dict(record, raised_in=found["raised_in"], frames=found.get("frames", []))
-    if found["raised_in"] == "portal":
+    # Portal signatures come from the pinned Reference's API schema, so a call
+    # the signature rejects is rejected by the Reference too: scene code.
+    signature = found.get("type") == "TypeError" and SIGNATURE_MISMATCH.search(
+        record.get("detail", "")
+    )
+    if found["raised_in"] == "portal" and not signature:
         record["outcome"] = "portal_exception"
-    elif found["raised_in"] == "scene":
+    elif found["raised_in"] in ("scene", "portal"):
         record["outcome"] = "scene_code_error"
     return record
 
