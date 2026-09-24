@@ -20460,6 +20460,23 @@ except NotImplementedError as error:
 else:
     raise AssertionError("cdist silently accepted an unsupported metric")
 
+# fm-5wq.14: coordinate-system axes are the Reference's NumberLines, not bare
+# shells. 29 corpus scenes call axes.x_axis.get_unit_size() or add_numbers().
+_axes = manimlib.Axes(x_range=(-3, 3, 1), y_range=(-2, 2, 1), width=6, height=4)
+assert type(_axes.x_axis) is manimlib.NumberLine and type(_axes.y_axis) is manimlib.NumberLine
+assert math.isclose(_axes.x_axis.get_unit_size(), 1.0) and math.isclose(_axes.y_axis.get_unit_size(), 1.0)
+assert np.allclose(_axes.x_axis.n2p(2), _axes.c2p(2, 0))
+assert math.isclose(_axes.x_axis.p2n(_axes.c2p(1.5, 0)), 1.5)
+assert np.allclose(_axes.y_axis.line_to_number_direction, manimlib.LEFT)
+_axes.x_axis.add_numbers()
+assert len(_axes.x_axis.numbers) == 7
+assert type(_axes.copy().x_axis) is manimlib.NumberLine
+_plane = manimlib.ComplexPlane()
+assert type(_plane.x_axis) is manimlib.NumberLine and not _plane.x_axis.include_ticks
+assert type(manimlib.ThreeDAxes().z_axis) is manimlib.NumberLine
+_scaled = manimlib.Axes(x_range=(0, 10, 1), width=5)
+assert math.isclose(_scaled.x_axis.get_unit_size(), 0.5)
+
 # fm-5wq.14: copying a never-added group whose descendants were added one by
 # one (3b1b's sir.py builds exp_tree this way, as do 40 other corpus scenes)
 # yields a detached, independent copy of every member.

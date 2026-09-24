@@ -12233,6 +12233,8 @@ class ParametricSurface(Surface):
             self.normal_nudge,
         )
         _hang_native_children(self, specs)
+        # Reference Surface.__init__ computes the grid triangles.
+        self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
 
     def uv_func(self, u, v):
@@ -12282,6 +12284,8 @@ class Sphere(Surface):
             self.normal_nudge,
         )
         _hang_native_children(self, specs)
+        # Reference Surface.__init__ computes the grid triangles.
+        self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
 
     def uv_func(self, u, v):
@@ -12331,6 +12335,8 @@ class Torus(Surface):
             z_index,
         )
         _hang_native_children(self, specs)
+        # Reference Surface.__init__ computes the grid triangles.
+        self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
         self._solid_params = ("torus", self.r1, self.r2)
         self._solid_native_height = self.get_height()
@@ -12387,6 +12393,8 @@ class Cylinder(Surface):
             z_index,
         )
         _hang_native_children(self, specs)
+        # Reference Surface.__init__ computes the grid triangles.
+        self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
         self._solid_params = (
             "cylinder",
@@ -12453,6 +12461,8 @@ class Cone(Cylinder):
             z_index,
         )
         _hang_native_children(self, specs)
+        # Reference Surface.__init__ computes the grid triangles.
+        self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
         self._solid_params = (
             "cone",
@@ -12512,6 +12522,8 @@ class Line3D(Cylinder):
             z_index,
         )
         _hang_native_children(self, specs)
+        # Reference Surface.__init__ computes the grid triangles.
+        self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
         self._solid_params = (
             "cylinder",
@@ -12560,6 +12572,8 @@ class Disk3D(Surface):
             z_index,
         )
         _hang_native_children(self, specs)
+        # Reference Surface.__init__ computes the grid triangles.
+        self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
         self._solid_params = ("disk", self.radius)
         self._solid_native_height = self.get_height()
@@ -12606,6 +12620,8 @@ class Square3D(Surface):
             z_index,
         )
         _hang_native_children(self, specs)
+        # Reference Surface.__init__ computes the grid triangles.
+        self.compute_triangle_indices()
         self._apply_surface_style(color, opacity, shading, depth_test)
         self._solid_params = ("square", self.side_length)
         self._solid_native_height = self.get_height()
