@@ -91,10 +91,21 @@ impl ImageMobject {
     /// Decode PNG or JPEG bytes (sniffed by magic number) under the
     /// default decode budgets.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ImageError> {
+        Self::from_bytes_with_limits(bytes, &PngLimits::default(), &JpegLimits::default())
+    }
+
+    /// Decode PNG or JPEG bytes (sniffed by magic number) under explicit
+    /// budgets — the one untrusted-input entry, so every front door refuses
+    /// an unrecognized format with the same [`ImageError::UnknownFormat`].
+    pub fn from_bytes_with_limits(
+        bytes: &[u8],
+        png_limits: &PngLimits,
+        jpeg_limits: &JpegLimits,
+    ) -> Result<Self, ImageError> {
         if bytes.starts_with(PNG_MAGIC) {
-            Self::from_png(bytes)
+            Self::from_png_with_limits(bytes, png_limits)
         } else if bytes.starts_with(JPEG_MAGIC) {
-            Self::from_jpeg(bytes)
+            Self::from_jpeg_with_limits(bytes, jpeg_limits)
         } else {
             Err(ImageError::UnknownFormat)
         }
@@ -473,6 +484,24 @@ mod tests {
             ImageMobject::from_bytes(b"\xff\xd8\xff"),
             Err(ImageError::Jpeg(_))
         ));
+        // The budgeted entry sniffs the same way and honours the caller's
+        // pixel budget: the 4×3 synthetic PNG decodes at 12 pixels and is
+        // refused at 11.
+        let (png, _) = synthetic_png();
+        let jpeg_limits = JpegLimits::default();
+        let at = |max_pixels| PngLimits {
+            max_pixels,
+            ..PngLimits::default()
+        };
+        assert!(ImageMobject::from_bytes_with_limits(&png, &at(12), &jpeg_limits).is_ok());
+        assert!(matches!(
+            ImageMobject::from_bytes_with_limits(&png, &at(11), &jpeg_limits),
+            Err(ImageError::Png(_))
+        ));
+        assert_eq!(
+            ImageMobject::from_bytes_with_limits(b"class A: pass\n", &at(12), &jpeg_limits),
+            Err(ImageError::UnknownFormat)
+        );
         assert!(matches!(
             ImageMobject::from_rgba8(2, 2, vec![0; 4]),
             Err(ImageError::Resource(

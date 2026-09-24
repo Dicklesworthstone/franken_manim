@@ -60,26 +60,16 @@ impl RasterImage {
         }
         py.detach(|| {
             // Bound the decoder BEFORE allocation/decompression, not afterwards.
-            let image = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-                fmn_library::ImageMobject::from_png_with_limits(
-                    bytes,
-                    &fmn_codec::PngLimits {
-                        max_pixels: MAX_PIXELS,
-                        ..fmn_codec::PngLimits::default()
-                    },
-                )
-            } else if bytes.starts_with(b"\xff\xd8\xff") {
-                fmn_library::ImageMobject::from_jpeg_with_limits(
-                    bytes,
-                    &fmn_codec::JpegLimits {
-                        max_pixels: MAX_PIXELS,
-                    },
-                )
-            } else {
-                return Err(PyValueError::new_err(
-                    "raster input must be native PNG or JPEG bytes",
-                ));
-            }
+            let image = fmn_library::ImageMobject::from_bytes_with_limits(
+                bytes,
+                &fmn_codec::PngLimits {
+                    max_pixels: MAX_PIXELS,
+                    ..fmn_codec::PngLimits::default()
+                },
+                &fmn_codec::JpegLimits {
+                    max_pixels: MAX_PIXELS,
+                },
+            )
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
             let mut object: fmn_mobject::Mobject = image.into();
             Ok(Self {
