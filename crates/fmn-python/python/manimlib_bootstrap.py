@@ -24,6 +24,7 @@ import inspect as _inspect
 import itertools as _itertools
 import math as _math
 import operator as _operator
+import os as _os
 import pathlib as _pathlib
 import re as _re
 import sys as _sys
@@ -23151,6 +23152,77 @@ def _install_text_mobject_helpers():
 _install_text_mobject_helpers()
 
 
+_MAX_CUSTOM_CONFIG_BYTES = 1024 * 1024
+
+
+def _cwd_custom_config():
+    # The Reference reads custom_config.yml from the working directory.
+    path = _pathlib.Path("custom_config.yml")
+    if not path.is_file():
+        return None
+    with open(path, "rb") as handle:
+        payload = handle.read(_MAX_CUSTOM_CONFIG_BYTES + 1)
+    if len(payload) > _MAX_CUSTOM_CONFIG_BYTES:
+        raise ValueError("custom_config.yml exceeds the 1 MiB configuration budget")
+    return payload.decode("utf-8")
+
+
+def _user_cache_dir(name):
+    # appdirs.user_cache_dir(name) without the refused appdirs dependency.
+    if _sys.platform == "darwin":
+        return _os.path.join(_os.path.expanduser("~/Library/Caches"), name)
+    if _os.name == "nt":
+        local = _os.environ.get("LOCALAPPDATA") or _os.path.expanduser("~")
+        return _os.path.join(local, name, name, "Cache")
+    root = _os.environ.get("XDG_CACHE_HOME") or _os.path.expanduser("~/.cache")
+    return _os.path.join(root, name)
+
+
+def _install_directories_module(manim_config):
+    # Reference manimlib/utils/directories.py over manim_config.directories.
+    # Missing keys read as empty, like the Reference's addict Dict.
+    import tempfile as _tempfile
+
+    def get_directories():
+        return manim_config.directories
+
+    def get_cache_dir():
+        return get_directories().get("cache") or _user_cache_dir("manim")
+
+    def get_temp_dir():
+        return get_directories().get("temporary_storage") or _tempfile.gettempdir()
+
+    def get_downloads_dir():
+        return get_directories().get("downloads") or _user_cache_dir("manim_downloads")
+
+    def get_output_dir():
+        # Reference guarantee_existence: create it, return the absolute Path.
+        path = _pathlib.Path(get_directories()["output"])
+        path.mkdir(parents=True, exist_ok=True)
+        return path.absolute()
+
+    def get_raster_image_dir():
+        return get_directories()["raster_images"]
+
+    def get_vector_image_dir():
+        return get_directories()["vector_images"]
+
+    def get_three_d_model_dir():
+        return get_directories()["three_d_models"]
+
+    def get_sound_dir():
+        return get_directories()["sounds"]
+
+    module = _ensure_module("manimlib.utils.directories")
+    for function in (
+        get_directories, get_cache_dir, get_temp_dir, get_downloads_dir,
+        get_output_dir, get_raster_image_dir, get_vector_image_dir,
+        get_three_d_model_dir, get_sound_dir,
+    ):
+        function.__module__ = "manimlib.utils.directories"
+        setattr(module, function.__name__, function)
+
+
 def _install_config_module():
     class _ConfigDict(dict):
         def __getattr__(self, name):
@@ -23255,8 +23327,12 @@ def _install_config_module():
     def update_camera_config(config=None, args=None):
         return config
 
-    def update_directory_config(config=None):
-        return config
+    def update_directory_config(config):
+        # Reference config.py:235: each subdir hangs from the base.
+        dir_config = config.directories
+        base = dir_config.base
+        for key, subdir in dir_config.subdirs.items():
+            dir_config[key] = _os.path.join(base, subdir)
 
     def update_embed_config(config=None, args=None):
         return config
@@ -23281,19 +23357,19 @@ def _install_config_module():
                     "pixel_height": 1080,
                     "pixel_width": 1920,
                 },
-                "directories": {
-                    "output_dir": "videos",
-                    "raster_images": "",
-                    "vector_images": "",
-                },
+                # Reference defaults merged with the cwd custom_config.yml,
+                # resolved by the one native config reader (no PyYAML).
+                "directories": _FMN_ROOT._resolved_directories(_cwd_custom_config()),
                 "tex": {"font_size_for_unit_height": 48},
                 "text": {"font_size_for_unit_height": 48},
                 "log_level": "INFO",
             }
         )
+        update_directory_config(config)
         return config
 
     manim_config = initialize_manim_config()
+    _install_directories_module(manim_config)
 
     functions = {
         "get_animations_numbers": get_animations_numbers,

@@ -10783,6 +10783,42 @@ fn _composition_intervals(run_times: Vec<f64>, lag_ratio: f64) -> Vec<(f64, f64)
         .collect()
 }
 
+/// `manimlib.config` directories from the one typed native resolution: the
+/// bundled defaults, then an optional `custom_config.yml` document (the
+/// Reference's cwd layer). The bootstrap derives the per-subdir paths with
+/// Reference `update_directory_config` semantics.
+#[pyfunction]
+#[pyo3(signature = (custom_config = None))]
+fn _resolved_directories<'py>(
+    py: Python<'py>,
+    custom_config: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let layers: Vec<fmn_config::config::Layer<'_>> = custom_config
+        .map(|text| fmn_config::config::Layer {
+            name: "custom_config.yml",
+            text,
+        })
+        .into_iter()
+        .collect();
+    let resolved = fmn_config::Config::resolve(&layers, None)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let directories = &resolved.config.directories;
+    let out = PyDict::new(py);
+    out.set_item("mirror_module_path", directories.mirror_module_path)?;
+    out.set_item("base", &directories.base)?;
+    let subdirs = PyDict::new(py);
+    for (key, value) in &directories.subdirs {
+        subdirs.set_item(key, value)?;
+    }
+    out.set_item("subdirs", subdirs)?;
+    out.set_item("cache", &directories.cache)?;
+    out.set_item(
+        "removed_mirror_prefix",
+        directories.removed_mirror_prefix.as_deref(),
+    )?;
+    Ok(out)
+}
+
 fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BridgeMobject>()?;
     module.add_class::<PyScene>()?;
@@ -10806,6 +10842,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_reset, module)?)?;
     module.add_function(wrap_pyfunction!(report::_crossing_report, module)?)?;
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
+    module.add_function(wrap_pyfunction!(_resolved_directories, module)?)?;
     module.add_function(wrap_pyfunction!(
         portal_assignment::_linear_sum_assignment,
         module
