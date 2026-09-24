@@ -48,6 +48,8 @@ pub use stroke_profile::{StrokeKnot, StrokeProfile, StrokeProfileError};
 pub mod table;
 pub mod texture;
 pub mod three_d;
+pub mod vector_frame;
+pub use vector_frame::{OwnedVectorFrame, VectorFrameCompiler};
 
 pub use arena::{AllocStats, FrameArena};
 pub use bin::{Binning, BinningError, BinningLimits, ScreenMap, Tiling, Viewport};

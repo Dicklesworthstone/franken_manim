@@ -22,7 +22,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Preserve the exact tested source
+        run: |
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/pipeline-source.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/pipeline-source-sha.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pipeline-source-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pipeline-source.tar.gz
+            ${{ runner.temp }}/pipeline-source-sha.txt
+          retention-days: 1
+          if-no-files-found: error
       - name: Install pinned compiler
         run: rustup show active-toolchain
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -34,9 +47,11 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - name: Owned affine frames, cache reuse and certified bit identity
+        run: cargo test --locked -p fmn-render --lib vector_frame
       - name: Runtime bounds, ordering, cancellation and barriers
         run: cargo test --locked -p fmn-runtime --lib
-      - name: Owned render jobs and retained rendering
+      - name: Owned camera jobs and retained rendering
         run: cargo test --locked -p fmn-render --lib retained
       - name: Public native scene export
         run: cargo test --locked -p fmn --tests
