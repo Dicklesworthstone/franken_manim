@@ -20341,6 +20341,15 @@ except ImportError:
             raise AssertionError("a missing Pillow did not name itself")
 else:
     assert _camera_module.Image is _bridge_pil_image
+# matplotlib.pyplot is deliberately never imported; using it names the ruling.
+_pyplot = importlib.import_module("manimlib.utils.color").pyplot
+for _use_pyplot in (lambda: _pyplot.get_cmap("viridis"), lambda: _pyplot()):
+    try:
+        _use_pyplot()
+    except NotImplementedError as error:
+        assert "OOT-LEAKED-SURFACE-IMPORTS" in str(error), error
+    else:
+        raise AssertionError("the leaked pyplot was usable")
 for leaked, oot in (
     ("Rotation", "OOT-LEAKED-SCIPY-IMPORT"),
     ("earcut", "OOT-LEAKED-EARCUT-IMPORT"),

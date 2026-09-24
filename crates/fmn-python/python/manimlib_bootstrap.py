@@ -20185,33 +20185,49 @@ def _missing_leaked_import(module_name, name, origin, error):
     # not installed in this environment: say which package, as the
     # Reference's own import would.
     missing = getattr(error, "name", None) or origin.split(".", 1)[0]
-    return _MissingLeakedImport(module_name, name, origin, missing)
+    message = (
+        f"No module named '{missing}': {module_name}.{name} is the "
+        f"Reference's re-export of {origin}; install {missing} to use it"
+    )
+    return _UnavailableLeakedImport(
+        module_name, name, lambda: ModuleNotFoundError(message, name=missing)
+    )
 
 
-class _MissingLeakedImport:
-    """A leaked third-party name whose package is absent. Calling it or
-    using its API (`Image.open`) raises the Reference's own import error."""
+# Leaked imports the portal deliberately leaves unimported. No corpus scene
+# reads pyplot through manimlib, and importing it adds ~0.35 s to every
+# `import manimlib` where matplotlib is installed.
+_UNIMPORTED_LEAKED_ORIGINS = {"matplotlib.pyplot": "OOT-LEAKED-SURFACE-IMPORTS"}
 
-    def __init__(self, module_name, name, origin, missing):
+
+def _unimported_leaked_import(module_name, name, origin):
+    message = (
+        f"{module_name}.{name} is excluded ({_UNIMPORTED_LEAKED_ORIGINS[origin]}): "
+        f"the portal does not import {origin}; import it directly"
+    )
+    return _UnavailableLeakedImport(module_name, name, lambda: NotImplementedError(message))
+
+
+class _UnavailableLeakedImport:
+    """A leaked third-party name the portal cannot or does not bind. Calling
+    it or using its API (`Image.open`) raises a precise named error."""
+
+    def __init__(self, module_name, name, error):
         self.__name__ = self.__qualname__ = name
         self.__module__ = module_name
         # The runtime parity audit reads the marker from vars(value).
         self._fmn_schema_placeholder = True
-        self._missing = missing
-        self._message = (
-            f"No module named '{missing}': {module_name}.{name} is the "
-            f"Reference's re-export of {origin}; install {missing} to use it"
-        )
+        self._error = error
 
     def __call__(self, *args, **kwargs):
         del args, kwargs
-        raise ModuleNotFoundError(self._message, name=self._missing)
+        raise self._error()
 
     def __getattr__(self, attribute):
         # Private and dunder probes stay ordinary misses for introspection.
         if attribute.startswith("_"):
             raise AttributeError(attribute)
-        raise ModuleNotFoundError(self._message, name=self._missing)
+        raise self._error()
 
 
 def _placeholder_method(module_name, owner, name):
@@ -21553,6 +21569,8 @@ def _install_schema_surface():
                 continue
             if _origin.split(".", 1)[0] in _REFUSED_REFERENCE_RENDER_IMPORT_ROOTS:
                 value = _placeholder_function(module_name, qualified)
+            elif _origin in _UNIMPORTED_LEAKED_ORIGINS:
+                value = _unimported_leaked_import(module_name, qualified, _origin)
             else:
                 try:
                     value = _resolve_leaked_origin(qualified, _origin)

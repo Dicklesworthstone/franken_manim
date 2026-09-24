@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	031bebe1cb1a02c4ef7141b9e9a54b37ee15162a1ce12bf538a9100ee4a71683
+ledger_reviewed_digest	062b7074cf067318a8462fdb76bbcab2bde442eda3785cf4d738f71177b52351
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -2642,7 +2642,7 @@ manimlib.utils.color:get_color_map	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	c
 manimlib.utils.color:get_colormap_from_colors	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	colormap from colors is the fmn-core typed gradient builder
 manimlib.utils.color:get_colormap_list	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	colormap list is the typed registered colormap surface
 manimlib.utils.color:hex2rgb	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	hex parsing lives in the owned srgb eotf / hex parser
-manimlib.utils.color:pyplot	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-python/tests/bridge.py	is the host's matplotlib.pyplot when matplotlib is installed, otherwise a ModuleNotFoundError naming it; the bundled colormap tier covers the named-map use case
+manimlib.utils.color:pyplot	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-python/tests/bridge.py	is never imported (no corpus scene reads it through manimlib, and it costs ~0.35 s per import); using it names this ruling; the bundled colormap tier covers the named-map use case
 manimlib.utils.color:random_bright_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	a Color from HSL draws of the Scene-seeded stdlib RNG within the given ranges
 manimlib.utils.color:random_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	a Color from three draws of the Scene-seeded numpy RNG
 manimlib.utils.color:rgb2hex	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	rgb to hex is the owned hex encoder
