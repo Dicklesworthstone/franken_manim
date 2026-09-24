@@ -931,6 +931,7 @@ dependencies = [
  "fmn-runtime",
  "fmn-scene",
  "fmn-studio",
+ "fsci-opt",
  "pyo3",
 ]
 

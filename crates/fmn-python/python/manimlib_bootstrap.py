@@ -22960,27 +22960,62 @@ _install_svg_helpers()
 
 
 def _install_string_mobject_helpers():
-    try:
-        from scipy.spatial.distance import cdist
-    except ImportError:
+    # The Reference imports scipy's `cdist` and `linear_sum_assignment` into
+    # string_mobject, so `from manimlib import *` exports both. FrankenManim
+    # has no scipy dependency: these are real implementations (assignment
+    # by the suite's Hungarian solver, plan D4), never stand-ins that ignore
+    # their arguments.
+    _metrics = {
+        "euclidean": lambda d: _np.sqrt((d * d).sum(axis=-1)),
+        "sqeuclidean": lambda d: (d * d).sum(axis=-1),
+        "cityblock": lambda d: _np.abs(d).sum(axis=-1),
+        "chebyshev": lambda d: _np.abs(d).max(axis=-1),
+    }
 
-        def cdist(XA, XB, metric="euclidean", *args, **kwargs):
-            XA = _np.asarray(XA)
-            XB = _np.asarray(XB)
-            return _np.linalg.norm(XA[:, None, :] - XB[None, :, :], axis=-1)
+    def cdist(XA, XB, metric="euclidean", *args, **kwargs):
+        XA = _np.asarray(XA, dtype=float)
+        XB = _np.asarray(XB, dtype=float)
+        if XA.ndim != 2 or XB.ndim != 2 or XA.shape[1] != XB.shape[1]:
+            raise ValueError(
+                "cdist needs two 2-D arrays with the same number of columns, "
+                f"got shapes {XA.shape} and {XB.shape}"
+            )
+        if args:
+            raise TypeError("cdist takes metric parameters as keywords")
+        if callable(metric):
+            return _np.array(
+                [[float(metric(u, v, **kwargs)) for v in XB] for u in XA],
+                dtype=float,
+            ).reshape(len(XA), len(XB))
+        diff = XA[:, None, :] - XB[None, :, :]
+        if metric == "minkowski":
+            p = float(kwargs.pop("p", 2.0))
+            if kwargs:
+                raise TypeError(f"unexpected cdist keyword(s): {sorted(kwargs)}")
+            if p < 1.0:
+                raise ValueError("minkowski p must be at least 1")
+            return (_np.abs(diff) ** p).sum(axis=-1) ** (1.0 / p)
+        if kwargs:
+            raise TypeError(f"unexpected cdist keyword(s): {sorted(kwargs)}")
+        if metric == "cosine":
+            norms = _np.linalg.norm(XA, axis=1)[:, None] * _np.linalg.norm(XB, axis=1)[None, :]
+            with _np.errstate(invalid="ignore", divide="ignore"):
+                return 1.0 - (XA @ XB.T) / norms
+        if metric in _metrics:
+            return _metrics[metric](diff)
+        raise NotImplementedError(
+            f"cdist metric {metric!r} is not provided; supported: "
+            "euclidean, sqeuclidean, cityblock, chebyshev, cosine, minkowski, or a callable"
+        )
 
-    try:
-        from scipy.optimize import linear_sum_assignment
-    except ImportError:
-
-        def linear_sum_assignment(cost_matrix, maximize=False):
-            cost_matrix = _np.asarray(cost_matrix)
-            if maximize:
-                cost_matrix = -cost_matrix
-            n_rows, n_cols = cost_matrix.shape
-            row_ind = list(range(n_rows))
-            col_ind = list(range(min(n_rows, n_cols)))
-            return _np.array(row_ind[: len(col_ind)]), _np.array(col_ind)
+    def linear_sum_assignment(cost_matrix, maximize=False):
+        cost = _np.asarray(cost_matrix, dtype=float)
+        if cost.ndim != 2:
+            raise ValueError(f"expected a matrix (2-D array), got a {cost.ndim}-D array")
+        if cost.size == 0:
+            return _np.empty(0, dtype=_np.intp), _np.empty(0, dtype=_np.intp)
+        rows, cols = _FMN_ROOT._linear_sum_assignment(cost.tolist(), bool(maximize))
+        return _np.asarray(rows, dtype=_np.intp), _np.asarray(cols, dtype=_np.intp)
 
     mod = _ensure_module("manimlib.mobject.svg.string_mobject")
     setattr(mod, "cdist", cdist)
@@ -23205,13 +23240,33 @@ _install_config_module()
 
 
 def _install_main_module():
-    def main():
-        pass
+    # ManimGL's entry point (`manimgl` / `python -m manimlib`) is served by the
+    # portal console, which takes the same scene-file arguments (plan §15.2).
+    import importlib.machinery as _machinery
 
     def run_scenes():
-        pass
+        from fmn_python.__main__ import main as portal_main
+
+        return portal_main()
+
+    def main():
+        return run_scenes()
+
+    class _PortalMainLoader:
+        """Lets runpy execute `python -m manimlib` through this module."""
+
+        def get_code(self, fullname):
+            return compile(
+                "from manimlib.__main__ import main\nraise SystemExit(main())\n",
+                "<manimlib.__main__>",
+                "exec",
+            )
+
+        def is_package(self, fullname):
+            return False
 
     module = _ensure_module("manimlib.__main__")
+    module.__spec__ = _machinery.ModuleSpec("manimlib.__main__", _PortalMainLoader())
     setattr(module, "main", main)
     setattr(module, "run_scenes", run_scenes)
 

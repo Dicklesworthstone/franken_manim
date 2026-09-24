@@ -31,6 +31,9 @@ fmn-runtime.workspace = true
 # Host-CPython preview composition only; the standalone CLI has no Python edge.
 fmn-studio.workspace = true
 pyo3.workspace = true
+# manimlib's re-exported scipy `linear_sum_assignment` (plan D4: assignment is
+# frankenscipy's); already in the lock as fsci-integrate's dependency.
+fsci-opt.workspace = true
 
 [lints]
 workspace = true

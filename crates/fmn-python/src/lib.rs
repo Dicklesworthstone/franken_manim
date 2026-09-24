@@ -20,6 +20,7 @@ mod ladder;
 mod live_tex;
 mod method_cache;
 pub mod perf_harness;
+mod portal_assignment;
 mod portal_audio;
 #[cfg(any(test, feature = "gauntlet"))]
 mod portal_console;
@@ -10805,6 +10806,10 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_reset, module)?)?;
     module.add_function(wrap_pyfunction!(report::_crossing_report, module)?)?;
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        portal_assignment::_linear_sum_assignment,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(
         portal_streamlines::_stream_line_samples,
         module

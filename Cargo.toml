@@ -51,6 +51,7 @@ fnp-random-core = { git = "https://github.com/Dicklesworthstone/franken_numpy", 
 franken_markdown = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "82588865c453b175cb1263b36e30f5b9b1941a2e" }
 fsci-integrate = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "5b1441b13a0997901ad2f9835c30072f87ca93b2" }
 fsci-linalg = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "5b1441b13a0997901ad2f9835c30072f87ca93b2" }
+fsci-opt = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "5b1441b13a0997901ad2f9835c30072f87ca93b2" }
 fnx-classes = { git = "https://github.com/Dicklesworthstone/franken_networkx", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f" }
 fp-types = { git = "https://github.com/Dicklesworthstone/frankenpandas", rev = "da85cf65df48965e027b2f5aa21b7d0ce6a7e29c", default-features = false }
 fp-frame = { git = "https://github.com/Dicklesworthstone/frankenpandas", rev = "da85cf65df48965e027b2f5aa21b7d0ce6a7e29c", default-features = false }
