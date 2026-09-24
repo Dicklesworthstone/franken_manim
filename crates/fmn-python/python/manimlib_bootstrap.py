@@ -10506,6 +10506,13 @@ class OldTex(Tex):
         **kwargs,
     ):
         self._tex_arg_separator = str(arg_separator)
+        # Reference old_tex_mobject.py: split each string at every isolate
+        # and tex_to_color_map key before typesetting, so each piece is its
+        # own part (scenes index eq[2] into those parts).
+        substrings = [*(isolate or []), *(tex_to_color_map or {}).keys()]
+        tex_strings = self.break_up_tex_strings(
+            tex_strings, [s for s in substrings if isinstance(s, str) and s]
+        )
         super().__init__(
             *tex_strings,
             isolate=isolate,

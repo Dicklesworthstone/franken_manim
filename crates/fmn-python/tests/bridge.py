@@ -20567,6 +20567,17 @@ assert [len(face.triangle_indices) for face in manimlib.Cube()] == [6] * 6
 assert manimlib.Cube(square_resolution=(3, 3))[0].triangle_indices.size == 24
 assert [len(face.triangle_indices) for face in manimlib.Prism()] == [6] * 6
 
+# fm-5wq.14: Reference OldTex splits each string at every isolate and
+# tex_to_color_map key, one part per piece (23 corpus scenes index eq[2]).
+_old_tex_module = importlib.import_module("manimlib.mobject.svg.old_tex_mobject")
+_split = _old_tex_module.OldTexText(
+    "Prevalence = Prior", tex_to_color_map={"Prevalence": manimlib.WHITE, "Prior": manimlib.YELLOW}
+)
+assert _split.tex_strings == ["Prevalence", " = ", "Prior"] and len(_split) == 3
+assert all(glyph.get_fill_color().upper() == "#FFFF00" for glyph in _split[2])
+assert _old_tex_module.OldTex("x^2 + y", isolate=["y"]).tex_strings == ["x^2 + ", "y"]
+assert len(_old_tex_module.OldTex("a", "+", "b")) == 3
+
 # fm-5wq.14: Reference Scene.remove removes the family of every argument
 # (25 corpus scenes remove never-added groups of added members); an absent
 # mobject is a no-op; a partly removed group dissolves into its survivors.
