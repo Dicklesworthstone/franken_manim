@@ -239,7 +239,7 @@ def cluster_label(record):
     return detail[:140]
 
 
-def write_report(records, dashboard, tsv, title):
+def write_report(records, dashboard, tsv, title, note=None):
     counts = {name: 0 for name in OUTCOMES}
     for record in records:
         counts[record["outcome"]] += 1
@@ -260,6 +260,8 @@ def write_report(records, dashboard, tsv, title):
                 exception = match.group(1).rsplit(".", 1)[-1]
             handle.write(f"{record['module']}\t{record['scene']}\t{record['outcome']}\t{exception}\n")
     lines = [f"# {title}", ""]
+    if note:
+        lines += [note.strip(), ""]
     lines.append(
         f"{total} scene classes; **{counts['ok']} ok ({100 * counts['ok'] / total:.1f}%)**. "
         f"Module-weighted: {module_ok} of {len(modules)} modules render every scene "
@@ -300,6 +302,8 @@ def main():
     parser.add_argument("--dashboard", type=pathlib.Path)
     parser.add_argument("--tsv", type=pathlib.Path)
     parser.add_argument("--title", default="Corpus scene sweep")
+    parser.add_argument("--note", type=pathlib.Path,
+                        help="a Markdown paragraph describing the run's environment")
     parser.add_argument("--years", default="2020-2026")
     parser.add_argument("--out", type=pathlib.Path)
     parser.add_argument("--jobs", type=int, default=16)
@@ -319,7 +323,8 @@ def main():
         if not (args.dashboard and args.tsv):
             parser.error("--report requires --dashboard and --tsv")
         records = [json.loads(line) for line in args.report.read_text(encoding="utf-8").splitlines()]
-        write_report(records, args.dashboard, args.tsv, args.title)
+        note = args.note.read_text(encoding="utf-8") if args.note else None
+        write_report(records, args.dashboard, args.tsv, args.title, note)
         return 0
     if not (args.portal and args.videos and args.out):
         parser.error("a sweep requires --portal, --videos and --out")
