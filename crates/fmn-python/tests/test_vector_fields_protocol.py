@@ -10,6 +10,7 @@ import copy
 import importlib.util
 import itertools
 from pathlib import Path
+import sys
 from types import ModuleType
 import unittest
 from unittest.mock import patch
@@ -17,7 +18,13 @@ from unittest.mock import patch
 import numpy as np
 
 PATH = Path(__file__).resolve().parents[1] / "python/fmn_python/vector_fields.py"
-SPEC = importlib.util.spec_from_file_location("vector_fields_under_test", PATH)
+# The adapter uses package-relative imports, so load it as a submodule of
+# fmn_python: the importable one, else this source tree's.
+try:
+    importlib.import_module("fmn_python")
+except ImportError:
+    sys.path.insert(0, str(PATH.parents[1]))
+SPEC = importlib.util.spec_from_file_location("fmn_python.vector_fields_under_test", PATH)
 adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(adapter)
 
@@ -38,6 +45,8 @@ def fixture():
     native.resize_preserving_order = resize
 
     class VMobject:
+        pointlike_data_keys = ["point"]
+
         def __init__(self):
             self.data = np.zeros(0, dtype=dtype)
             self.defaults = np.ones(1, dtype=dtype)
@@ -51,6 +60,14 @@ def fixture():
 
         def get_points(self):
             return self.data["point"]
+
+        # The adapter compares family identity and binding around user
+        # callbacks; this double is a detached leaf.
+        def get_family(self, recurse=True):
+            return [self]
+
+        def _is_bound(self):
+            return False
 
         def get_num_points(self):
             return len(self.data)
@@ -206,7 +223,7 @@ class FieldProtocolTests(unittest.TestCase):
         self.assertIs(self.field.sample_points, points)
         self.assertIs(self.field.base_stroke_width_array, widths)
         np.testing.assert_array_equal(self.field.data, original)
-        self.assertNotIn(adapter._BUSY, vars(self.field))
+        self.assertFalse(adapter._FIELD_UPDATES.busy(self.field))
 
     def test_native_failure_preserves_last_field_and_next_update_works(self):
         self.native.fail_build = RuntimeError("native budget")
@@ -274,7 +291,7 @@ class FieldProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.field.update_vectors()
         np.testing.assert_array_equal(self.field.data, original)
-        self.assertNotIn(adapter._STYLE_TARGET, vars(self.field))
+        self.assertNotIn(id(self.field), adapter._STYLE_TARGETS)
 
     def test_scalar_opacity_and_rgb_preserve_unowned_lanes(self):
         self.field.norm_to_opacity_func = lambda xs: .4
@@ -299,7 +316,7 @@ class FieldProtocolTests(unittest.TestCase):
         self.field.func = lambda xs: self.field.update_vectors()
         with self.assertRaisesRegex(RuntimeError, "reenter"):
             self.field.update_vectors()
-        self.assertNotIn(adapter._BUSY, vars(self.field))
+        self.assertFalse(adapter._FIELD_UPDATES.busy(self.field))
 
     def test_resampling_from_callback_is_rejected(self):
         self.field.func = lambda xs: self.field.set_sample_coords([[7, 8]])

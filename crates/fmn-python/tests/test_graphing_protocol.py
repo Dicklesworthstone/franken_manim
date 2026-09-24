@@ -9,6 +9,7 @@ import copy
 import importlib.util
 import itertools
 from pathlib import Path
+import sys
 from types import ModuleType
 import unittest
 from unittest.mock import patch
@@ -16,7 +17,13 @@ from unittest.mock import patch
 import numpy as np
 
 MODULE = Path(__file__).resolve().parents[1] / "python/fmn_python/graphing.py"
-spec = importlib.util.spec_from_file_location("graphing_under_test", MODULE)
+# The adapter uses package-relative imports (6915ef65), so load it as a
+# submodule of fmn_python: the importable one, else this source tree's.
+try:
+    importlib.import_module("fmn_python")
+except ImportError:
+    sys.path.insert(0, str(MODULE.parents[1]))
+spec = importlib.util.spec_from_file_location("fmn_python.graphing_under_test", MODULE)
 graphing = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(graphing)
 
@@ -40,6 +47,23 @@ def fixture():
 
         def get_points(self):
             return self.points
+
+        # The adapter snapshots the record view and family identity around
+        # user callbacks (6915ef65); this detached double's only native
+        # record column is its points.
+        @property
+        def data(self):
+            return self.points
+
+        def get_family(self, recurse=True):
+            family = [self]
+            for child in self.submobjects if recurse else ():
+                # Tests hang opaque marker objects as children; they are leaves.
+                family.extend(child.get_family() if hasattr(child, "get_family") else [child])
+            return family
+
+        def _is_bound(self):
+            return False
 
         def get_num_points(self):
             return len(self.points)
@@ -256,7 +280,7 @@ class LiveGraphTests(unittest.TestCase):
             self.graph.update()
         self.assertIs(raised.exception, failure)
         np.testing.assert_array_equal(self.graph.points, previous)
-        self.assertNotIn(graphing._BUSY, vars(self.graph))
+        self.assertFalse(graphing._GRAPH_UPDATES.busy(self.graph))
         current[0] = lambda xs: xs * 2
         self.graph.update()
         self.assertFalse(np.array_equal(self.graph.points, previous))
@@ -376,7 +400,7 @@ class LiveGraphTests(unittest.TestCase):
             self.bind(lambda xs: operation())
             with self.assertRaises(RuntimeError):
                 self.graph.update()
-            self.assertNotIn(graphing._BUSY, vars(self.graph))
+            self.assertFalse(graphing._GRAPH_UPDATES.busy(self.graph))
         self.bind()
         self.graph.update()
 
