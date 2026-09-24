@@ -93,7 +93,7 @@ def camera_builder_owns_runtime_and_renderer_identity():
     samples = record_camera(scene)
     scene.play(live.animate(run_time=4 / 30, rate_func=linear).shift((4., 0., 0.)))
     np.testing.assert_allclose(np.array(samples)[:, 0], [1., 2., 3., 4.], atol=1e-8)
-    assert math.isclose(scene.time(), 4 / 30)
+    assert math.isclose(scene.time, 4 / 30)
     assert scene.frame is live and scene.camera.frame is live and live._core is core
     assert not live._is_bound()
     assert scene.mobjects == []

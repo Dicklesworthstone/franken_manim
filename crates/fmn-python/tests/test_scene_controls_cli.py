@@ -32,7 +32,7 @@ class SceneControlsCli(unittest.TestCase):
         self.native._native = self.native
         self.native._console_main = lambda: 77
         self.native.Scene._engine_facts = lambda scene: (1, 3, [-1, -2, 0], [1, 2, 0])
-        self.native.Scene.time = lambda scene: 1.25
+        self.native.Scene.time = property(lambda scene: 1.25)
         modules = patch.dict(sys.modules, {"manimlib": self.native})
         modules.start()
         self.addCleanup(modules.stop)

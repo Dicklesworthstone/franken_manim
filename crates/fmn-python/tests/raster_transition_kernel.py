@@ -112,11 +112,11 @@ class RasterTransitionKernelTests(unittest.TestCase):
         callbacks = []
         obj.add_updater(lambda mob, dt: callbacks.append(dt))
         before = len(callbacks)
-        view, records, clock = obj.data, obj.data.copy(), scene.time()
+        view, records, clock = obj.data, obj.data.copy(), scene.time
         frozen = scene.camera.capture_snapshot(obj); png = frozen.png()
         plan = m._RasterTransition(obj, resource(pixels((0, 0, 255, 255))))
         plan.apply(obj, .5)
-        self.assertEqual(scene.time(), clock)
+        self.assertEqual(scene.time, clock)
         self.assertEqual(len(callbacks), before)
         np.testing.assert_array_equal(view, records)
         self.assertEqual(frozen.png(), png)

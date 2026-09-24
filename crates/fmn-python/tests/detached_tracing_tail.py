@@ -28,10 +28,10 @@ class DetachedTailTests(unittest.TestCase):
         scene, source = m.Scene(), m.Dot()
         tail = m.TracingTail(source, time_traced=.5, time_per_anchor=.125)
         scene.add(source, tail)
-        before = scene.time()
+        before = scene.time
         scene.play(source.animate.shift(2 * m.RIGHT), run_time=.25, rate_func=m.linear)
         np.testing.assert_allclose(tail.get_end(), source.get_center(), atol=1e-6)
-        self.assertAlmostEqual(tail.time, scene.time() - before)
+        self.assertAlmostEqual(tail.time, scene.time - before)
         self.assertEqual(scene.mobjects, [source, tail])
         self.assertLess(tail.get_stroke_widths()[0], tail.get_stroke_widths()[-1])
         self.assertLess(tail.get_stroke_opacities()[0], tail.get_stroke_opacities()[-1])

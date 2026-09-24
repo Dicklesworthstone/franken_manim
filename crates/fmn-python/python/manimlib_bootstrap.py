@@ -14953,7 +14953,7 @@ class Scene(_SceneCore):
         return self._engine_roots(_native_scene_shell_factory)
 
     def get_time(self):
-        return self.time()
+        return self.time
 
     def get_top_level_mobjects(self):
         mobjects = self.get_mobjects()
@@ -24217,7 +24217,7 @@ def _console_main():
         scene = scene_type()
         scene.run()
         roots, family, low, high = scene._engine_facts()
-        scene_time = float(scene.time())
+        scene_time = float(scene.time)
     except Exception as error:
         return _portal_cli_emit(
             5,

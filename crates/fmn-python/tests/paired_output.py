@@ -88,7 +88,7 @@ class PairedOutput(unittest.TestCase):
         self.assertTrue(result.completed)
         self.assertIs(scene.render_result, result)
         self.assertEqual(scene.calls, ["setup", "construct", "tear_down"])
-        self.assertAlmostEqual(scene.time(), 0.375)
+        self.assertAlmostEqual(scene.time, 0.375)
         self.assertEqual(result.primary.frame_count, 3)
         self.assertTrue(self.receipt(result.primary).startswith(b"YUV4MPEG2 "))
         self.receipt(result.still)
@@ -236,7 +236,7 @@ class PairedOutput(unittest.TestCase):
                 self.add(m.Square(fill_opacity=1))
         scene = Static()
         result = render_scene_with_still(scene, self.root / "static.y4m", self.root / "static.png", threads=1)
-        self.assertEqual(scene.time(), 0.)
+        self.assertEqual(scene.time, 0.)
         self.assertEqual(result.primary.frame_count, 1)
         self.receipt(result.still)
 

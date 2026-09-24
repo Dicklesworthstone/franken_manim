@@ -49,7 +49,7 @@ class SceneProjectAcceptance(unittest.TestCase):
             new = project.rebuild(if_changed=True)
             self.assertIsNot(new, old)
             self.assertEqual(new.events, old.events)
-            self.assertEqual(new.time(), old.time())
+            self.assertEqual(new.time, old.time)
             self.assertEqual(project.generation, 2)
             np.testing.assert_allclose(new.item.get_center(), m.RIGHT, atol=2e-5)
             np.testing.assert_array_equal(old.item.get_points(), points)
@@ -63,7 +63,7 @@ class SceneProjectAcceptance(unittest.TestCase):
         self.write_scene()
         with SceneProject(self.path, "Demo") as project:
             old, module, preview = project.scene, project.module, project.preview
-            state, points, clock = old.get_state(), old.item.get_points().copy(), old.time()
+            state, points, clock = old.get_state(), old.item.get_points().copy(), old.time
             helper = sys.modules["project_native_helper"]
             self.helper.write_text("OFFSET = 2\n")
             self.write_scene("        raise ValueError('candidate failed after animation')\n")
@@ -73,7 +73,7 @@ class SceneProjectAcceptance(unittest.TestCase):
             self.assertIs(project.module, module)
             self.assertIs(project.preview, preview)
             self.assertIs(sys.modules["project_native_helper"], helper)
-            self.assertEqual(old.time(), clock)
+            self.assertEqual(old.time, clock)
             np.testing.assert_array_equal(old.item.get_points(), points)
             old.item.shift(m.UP)
             old.restore_state(state)
@@ -114,7 +114,7 @@ class SceneProjectAcceptance(unittest.TestCase):
         self.write_scene()
         with SceneProject(self.path, "Demo") as project:
             self.assertEqual(project.generation, 1)
-            self.assertGreater(project.scene.time(), 0)
+            self.assertGreater(project.scene.time, 0)
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(SceneProjectAcceptance)

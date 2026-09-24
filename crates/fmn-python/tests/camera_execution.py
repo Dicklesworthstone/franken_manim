@@ -121,9 +121,9 @@ def all_callback_phases_restore_real_roots():
                     for mob in objects:
                         mob.clear_updaters()
                         mob.resume_updating(call_updater=False)
-                    old_time = scene.time()
+                    old_time = scene.time
                     scene.wait(1 / 30)
-                    assert scene.time() > old_time and scene.num_plays == 1
+                    assert scene.time > old_time and scene.num_plays == 1
                     cases += 1
     assert cases == 40
     return cases
@@ -185,7 +185,7 @@ def renderer_state_progress_is_not_rolled_back_on_error():
         raise AssertionError("interpolation failure was swallowed")
     np.testing.assert_allclose(frame.get_center(), start + (0, .1, 0))
     # The native clock has not advanced the failed frame to scene updaters.
-    assert math.isclose(scene.time(), 0.)
+    assert math.isclose(scene.time, 0.)
     assert not frame._is_updating_suspended() and not getattr(frame, "_is_animating", False)
 
 

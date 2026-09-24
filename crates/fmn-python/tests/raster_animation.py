@@ -94,7 +94,7 @@ class RasterAnimationTests(unittest.TestCase):
         self.assertIs(animation.rate_func, m.linear)
         scene = m.Scene(); scene.add(self.obj)
         scene.play(builder)
-        self.assertAlmostEqual(scene.time(), .5)
+        self.assertAlmostEqual(scene.time, .5)
         np.testing.assert_array_equal(self.obj.get_pixel_array(), pixels(PURPLE))
         self.assertNotIn(self.obj, scene.mobjects)
         self.assertIsNone(animation._raster_plan)
@@ -135,7 +135,7 @@ class RasterAnimationTests(unittest.TestCase):
         self.assertEqual((self.obj.pixel_width,self.obj.pixel_height), (2,3))
         np.testing.assert_array_equal(self.obj.data, before)
         np.testing.assert_array_equal(view, before)
-        self.assertEqual(scene.time(), 0)
+        self.assertEqual(scene.time, 0)
 
     def test_surface_and_mesh_builders_interpolate_complete_light_dark_pairs(self):
         for obj in (m.TexturedSurface(m.Surface(resolution=(2,2)), pixels(RED), pixels(GREEN)),
@@ -178,7 +178,7 @@ class RasterAnimationTests(unittest.TestCase):
         self.assertEqual(len(observations),1)
         np.testing.assert_array_equal(observations[0],pixels(BLUE))
         np.testing.assert_array_equal(self.obj.get_pixel_array(),pixels(GREEN))
-        self.assertAlmostEqual(scene.time(),.5)
+        self.assertAlmostEqual(scene.time,.5)
         self.assertIsNone(first._raster_plan);self.assertIsNone(second._raster_plan)
 
     def test_preexisting_suspension_is_preserved_and_frozen_copies_do_not_tick(self):
@@ -199,7 +199,7 @@ class RasterAnimationTests(unittest.TestCase):
         scene.play(self.animation(run_time=.5,suspend_mobject_updating=False))
         self.assertGreater(len(observed),1)
         self.assertTrue(any(np.any(value!=pixels(RED)) and np.any(value!=pixels(BLUE)) for value in observed))
-        self.assertAlmostEqual(scene.time(),.5)
+        self.assertAlmostEqual(scene.time,.5)
 
     def test_failed_rate_preserves_last_published_image_and_releases_transients(self):
         error=ValueError('rate failure')
@@ -274,7 +274,7 @@ class RasterAnimationTests(unittest.TestCase):
         self.assertEqual(capture(old).png(),png)
         state.restore_scene(scene)
         np.testing.assert_array_equal(self.obj.get_pixel_array(),pixels(RED))
-        self.assertEqual(scene.time(),0)
+        self.assertEqual(scene.time,0)
 
     def test_cancelled_native_output_never_publishes_a_partial_movie(self):
         error=RuntimeError('cancel transition')
@@ -301,7 +301,7 @@ class RasterAnimationTests(unittest.TestCase):
         np.testing.assert_allclose(self.obj.get_center(), before+(1,0,0), atol=1e-6)
         np.testing.assert_array_equal(self.obj.get_pixel_array(), pixels(BLUE))
         self.assertFalse(self.obj._is_updating_suspended())
-        self.assertEqual(scene.time(), .5)
+        self.assertEqual(scene.time, .5)
 
     def test_other_animation_overrides_do_not_receive_new_builder_argument_behavior(self):
         # Local subclass prevents a test-only hook escaping to another suite.

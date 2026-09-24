@@ -67,7 +67,7 @@ def try_scene_cli(native: Any, arguments: list[str]) -> int | None:
                 phase = "inspect"
                 roots, family, low, high = scene._engine_facts()
                 details = {
-                    "scene_time": float(scene.time()),
+                    "scene_time": float(scene.time),
                     "root_count": int(roots), "family_count": int(family),
                     "bounds_low": [float(value) for value in low],
                     "bounds_high": [float(value) for value in high],

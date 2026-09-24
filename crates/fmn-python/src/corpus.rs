@@ -226,7 +226,7 @@ _roots, _family, _lo, _hi = scene._engine_facts()
 _frame = scene.frame
 _center = _frame.get_center()
 _values = [
-    *_lo, *_hi, scene.time(),
+    *_lo, *_hi, scene.time,
     _frame.get_height(), _frame.get_theta(), _frame.get_phi(), *_center,
 ]
 facts = "\t".join(

@@ -198,9 +198,9 @@ def wait_failure_leaves_the_same_native_scene_usable():
     restored(before)
     assert not root.updaters and animation.abort_calls == 1
     assert "_fmn_scene_execution" not in vars(scene)
-    at_failure = scene.time()
+    at_failure = scene.time
     scene.wait(.125)
-    assert scene.time() > at_failure
+    assert scene.time > at_failure
     np.testing.assert_allclose(root.get_center(), m.UP)
 
 

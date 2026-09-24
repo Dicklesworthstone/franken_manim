@@ -174,7 +174,7 @@ def foreign_helpers_and_destructive_camera_operations_are_refused():
             raise AssertionError("invalid camera motion was accepted")
         close(scene.frame.get_center(), before.get_center())
         close(scene.frame.get_orientation(), before.get_orientation())
-        assert scene.time() == 0 and scene.mobjects == []
+        assert scene.time == 0 and scene.mobjects == []
         assert not scene.frame._is_updating_suspended() and not scene.frame._is_bound()
     assert other.mobjects == [path, dot]
 

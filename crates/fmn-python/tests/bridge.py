@@ -7033,7 +7033,7 @@ release_mover = geometry.Rectangle(width=1.0, height=1.0)
 release_observations = []
 release_mover.add_updater(
     lambda mob, dt: release_observations.append(
-        (dt, release_scene.time(), mob.get_x())
+        (dt, release_scene.time, mob.get_x())
     ),
     call=False,
 )
@@ -12113,7 +12113,7 @@ class ReadmeHello(Scene):
 
 readme_hello = ReadmeHello()
 readme_hello.run()
-assert math.isclose(readme_hello.time(), 3.0)
+assert math.isclose(readme_hello.time, 3.0)
 readme_i_parts = readme_hello.formula.get_parts_by_tex("i")
 assert len(readme_i_parts) == 1
 assert all(
@@ -15599,7 +15599,26 @@ timed_write = TimedWrite(_dbtf_square())
 assert timed_write.timing_family_size == timed_write.lag_family_size == 1
 timed_write_scene = Scene()
 timed_write_scene.play(timed_write)
-assert math.isclose(timed_write_scene.time(), 2.0 / 30.0)
+assert math.isclose(timed_write_scene.time, 2.0 / 30.0)
+
+# fm-5wq.14: Scene.time is the Reference's float attribute (scene.py:121),
+# which corpus updaters read as a value (`np.cos(0.1 * sc.time)`); the
+# native clock owns it, so assignment is refused by name.
+_clock_scene = Scene()
+_clock_dot = manimlib.Dot()
+_clock_dot.add_updater(lambda m, sc=_clock_scene: m.move_to([np.cos(0.1 * sc.time), 0.0, 0.0]))
+_clock_scene.add(_clock_dot)
+assert isinstance(_clock_scene.time, float) and _clock_scene.time == 0.0
+_clock_scene.wait(0.5)
+assert math.isclose(_clock_scene.time, 0.5) and _clock_scene.time == _clock_scene.get_time()
+assert math.isclose(_clock_dot.get_x(), math.cos(0.05), abs_tol=1e-6)
+try:
+    _clock_scene.time = 0.0
+except AttributeError as error:
+    assert "BN-02" in str(error), error
+else:
+    raise AssertionError("Scene.time accepted an assignment")
+assert math.isclose(_clock_scene.time, 0.5)
 assert np.allclose(timed_write.mobject.data["fill_rgba"][:, 3], 1.0)
 
 # fm-5wq.4.57: TransformMatchingStrings matches by string identity over the

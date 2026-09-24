@@ -8162,9 +8162,22 @@ impl PyScene {
         self.engine.borrow().stage().roots().len()
     }
 
+    /// The Reference's `Scene.time` float attribute (scene.py:121), read
+    /// from the native clock; scene updaters read `self.time` as a value.
+    #[getter]
     fn time(&self) -> f64 {
         crossing::record(CrossingClass::Other);
         self.engine.borrow().stage().time()
+    }
+
+    /// The Reference advances `self.time += dt` itself; here the drift-free
+    /// rational frame clock (BN-02) owns time, so assignment is refused.
+    #[setter]
+    fn set_time(&self, _value: &Bound<'_, PyAny>) -> PyResult<()> {
+        Err(pyo3::exceptions::PyAttributeError::new_err(
+            "Scene.time is read-only: FrankenManim's drift-free rational frame clock \
+             (BN-02) owns scene time, so it cannot be assigned or rewound",
+        ))
     }
 
     fn increment_time(&self, dt: f64) {

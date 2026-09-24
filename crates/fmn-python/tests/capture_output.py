@@ -29,7 +29,7 @@ class CaptureOutput(unittest.TestCase):
         left = self.verify(self.snapshot.save_png(self.root / "one.png", threads=1))
         right = self.verify(self.snapshot.save_png(self.root / "four.png", threads=4))
         self.assertEqual(left, right)
-        self.assertEqual(self.scene.time(), 0.)
+        self.assertEqual(self.scene.time, 0.)
 
     def test_prepared_file_is_not_visible_until_commit(self):
         path = self.root / "nested" / "final.png"

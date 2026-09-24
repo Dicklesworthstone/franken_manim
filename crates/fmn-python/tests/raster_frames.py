@@ -102,7 +102,7 @@ class RasterFrameTests(unittest.TestCase):
                 for data,reference in zip(outputs,expected):
                     np.testing.assert_array_equal(rgba(data),reference)
                 delivered.append(outputs)
-                self.assertEqual(scene.time(),6/8)
+                self.assertEqual(scene.time,6/8)
         self.assertEqual(delivered[0],delivered[1])
         self.assertEqual(delivered[1],delivered[2])
 

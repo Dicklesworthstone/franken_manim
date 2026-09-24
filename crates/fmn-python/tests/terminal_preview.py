@@ -105,10 +105,10 @@ class TerminalPreviewTests(unittest.TestCase):
         ticks = []
         square.add_updater(lambda obj, dt: ticks.append(dt))
         snapshot = scene.camera.capture_snapshot(*scene.mobjects)
-        clock, points, count = scene.time(), square.get_points().copy(), len(ticks)
+        clock, points, count = scene.time, square.get_points().copy(), len(ticks)
         for protocol in ('kitty', 'sixel'):
             self.assertTrue(snapshot.terminal_bytes(protocol))
-        self.assertEqual(scene.time(), clock)
+        self.assertEqual(scene.time, clock)
         self.assertEqual(len(ticks), count)
         np.testing.assert_array_equal(square.get_points(), points)
 

@@ -152,20 +152,20 @@ class NativeTerminalEditorTests(unittest.TestCase):
 
     def test_base_scene_embed_remains_a_headless_noop_outside_a_project(self):
         scene = m.Scene()
-        clock = scene.time()
+        clock = scene.time
         with patch.object(InteractiveShellEmbed, '__call__', side_effect=AssertionError('unexpected terminal')):
             self.assertIsNone(scene.embed(close_scene_on_exit=False, show_animation_progress=True))
-        self.assertEqual(scene.time(), clock)
+        self.assertEqual(scene.time, clock)
 
     def test_explicit_snapshot_display_has_no_scene_or_clock_effects(self):
         with SceneProject(self.path, 'Demo') as project:
             snapshot = project.preview
-            clock = project.scene.time()
+            clock = project.scene.time
             png = snapshot.png()
             stream = io.StringIO()
             self.assertIs(show_snapshot(snapshot, protocol='kitty', stream=stream), snapshot)
             self.assertEqual(images(stream.getvalue()), [png])
-            self.assertEqual(project.scene.time(), clock)
+            self.assertEqual(project.scene.time, clock)
             self.assertEqual(project.generation, 1)
             project.scene.mobjects[0].shift((1, 0, 0))
             self.assertEqual(snapshot.png(), png)

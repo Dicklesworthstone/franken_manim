@@ -337,10 +337,10 @@ class NativeSpeedTests(unittest.TestCase):
         from manimlib.animation.speed import ChangeSpeed
         scene, dot = m.Scene(), m.Dot()
         scene.add(dot)
-        start = scene.time()
+        start = scene.time
         scene.play(ChangeSpeed(dot.animate(run_time=2, rate_func=m.linear).shift(m.RIGHT * 2),
                                {0: 2, 1: 2}))
-        self.assertAlmostEqual(scene.time() - start, 1.0, places=6)
+        self.assertAlmostEqual(scene.time - start, 1.0, places=6)
         self.assertAlmostEqual(float(dot.get_center()[0]), 2.0, places=5)
 
     def test_native_nested_group_and_remover(self):

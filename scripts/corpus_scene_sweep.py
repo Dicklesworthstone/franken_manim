@@ -25,8 +25,11 @@ in-process and records which code raised it (`raised_in`: portal or scene),
 splitting them into `portal_exception` and `scene_code_error`. Raised-in is
 where the exception surfaced, not proof of fault: an AttributeError raised in
 scene code can still come from the portal returning the wrong type. A
-signature-binding TypeError raised at a portal entry point counts as scene
-code, because portal signatures follow the pinned Reference's API schema.
+TypeError the pinned Reference raises identically counts as scene code even
+when a portal entry point raises it: a signature-binding error (portal
+signatures follow the Reference's API schema) or prepare_animation's "cannot
+be converted to an animation". `--report` re-derives that split from each
+record's evidence, so a rule fix applies to existing records.
 """
 import argparse
 import ast
@@ -168,10 +171,23 @@ def scene_env(args):
     return dict(os.environ, PYTHONPATH=path)
 
 
-SIGNATURE_MISMATCH = re.compile(
-    r"unexpected keyword argument|missing \d+ required|takes \d+ positional|"
-    r"got multiple values for argument"
+# TypeErrors the pinned Reference raises identically: portal signatures come
+# from its API schema, and prepare_animation's refusal (animation.py:216) is
+# reproduced verbatim. Raised at a portal entry point, they are scene code.
+REFERENCE_REJECTION = re.compile(
+    r"TypeError: .*(unexpected keyword argument|missing \d+ required|takes \d+ positional|"
+    r"got multiple values for argument|cannot be converted to an animation)"
 )
+
+
+def attributed_outcome(record):
+    """portal_exception or scene_code_error, from a record's recorded
+    attribution evidence alone, so --report re-derives it under the same rule."""
+    if record["raised_in"] == "portal" and not REFERENCE_REJECTION.search(
+        record.get("detail", "")
+    ):
+        return "portal_exception"
+    return "scene_code_error"
 
 
 def attribute(args, record, out_dir):
@@ -188,15 +204,8 @@ def attribute(args, record, out_dir):
     except (subprocess.TimeoutExpired, ValueError, IndexError):
         return record
     record = dict(record, raised_in=found["raised_in"], frames=found.get("frames", []))
-    # Portal signatures come from the pinned Reference's API schema, so a call
-    # the signature rejects is rejected by the Reference too: scene code.
-    signature = found.get("type") == "TypeError" and SIGNATURE_MISMATCH.search(
-        record.get("detail", "")
-    )
-    if found["raised_in"] == "portal" and not signature:
-        record["outcome"] = "portal_exception"
-    elif found["raised_in"] in ("scene", "portal"):
-        record["outcome"] = "scene_code_error"
+    if found["raised_in"] in ("scene", "portal"):
+        record["outcome"] = attributed_outcome(record)
     return record
 
 
@@ -229,10 +238,12 @@ def run_one(args, rel, scene, out_dir):
 def cluster_label(record):
     """A failure's cluster: exception type plus its message with every
     quoted literal that is not a bare identifier elided, so scene-authored
-    text (TeX, labels) never reaches a committed artifact."""
+    text (TeX, labels) never reaches a committed artifact. Absolute paths
+    are elided too: they name the sweep host's directories or the author's."""
     detail = record.get("detail", "")
     detail = re.sub(r"^fmn-python: scene/[a-z-]+: ", "", detail)
     detail = re.sub(r"\bat 0x[0-9a-f]+", "", detail)
+    detail = re.sub(r"(?<![\w.])/(?:[\w.@+-]+/)+[^\s'\"]*", "…", detail)
     detail = re.sub(r"'([^']*)'", lambda m: m.group(0) if re.fullmatch(r"[\w.()]{1,40}", m.group(1)) else "'…'", detail)
     detail = re.sub(r'"[^"]*"', '"…"', detail)
     detail = re.sub(r"\(bytes \d+\.\.\d+\)", "", detail)
@@ -323,6 +334,9 @@ def main():
         if not (args.dashboard and args.tsv):
             parser.error("--report requires --dashboard and --tsv")
         records = [json.loads(line) for line in args.report.read_text(encoding="utf-8").splitlines()]
+        for record in records:
+            if record.get("raised_in") in ("scene", "portal"):
+                record["outcome"] = attributed_outcome(record)
         note = args.note.read_text(encoding="utf-8") if args.note else None
         write_report(records, args.dashboard, args.tsv, args.title, note)
         return 0

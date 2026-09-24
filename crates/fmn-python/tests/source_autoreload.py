@@ -69,7 +69,7 @@ class NativeSourceAutoreloadAcceptance(unittest.TestCase):
         helper = self.write("live_helper.py", "from manimlib import RIGHT\ndef move(square): square.move_to(RIGHT)\n")
         path = self.write("scene.py", "from live_helper import move\n")
         scene, square = self.scene()
-        time = scene.time()
+        time = scene.time
         callbacks, frames = [], []
         with SceneSource(path, m.Scene) as loaded:
             namespace = dict(vars(loaded.module), scene=scene, self=scene, square=square)
@@ -91,7 +91,7 @@ class NativeSourceAutoreloadAcceptance(unittest.TestCase):
                 self.assertIs(shell.user_ns["square"], square)
                 self.assertIs(shell.user_ns["scene"], scene)
                 self.assertIs(embedded.checkpoint_manager.checkpoint_states["#before reload"], saved)
-                self.assertEqual(scene.time(), time)
+                self.assertEqual(scene.time, time)
                 state = vars(embedded)["_fmn_source_autoreload"]
                 callbacks.append(state.callback)
                 self.assertIs(state.source, loaded)

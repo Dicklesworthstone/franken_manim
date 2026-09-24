@@ -62,12 +62,12 @@ class RasterTextureTests(unittest.TestCase):
         ticks=[]
         obj.add_updater(lambda mob,dt: ticks.append(dt))
         initial_ticks=list(ticks)
-        clock=scene.time()
+        clock=scene.time
         self.assertIs(obj.set_pixel_array(self.green, dark_pixels=self.red), obj)
         np.testing.assert_array_equal(obj.data, saved)
         np.testing.assert_array_equal(live, saved)
         self.assertEqual(ticks, initial_ticks)
-        self.assertEqual(scene.time(), clock)
+        self.assertEqual(scene.time, clock)
         self.assertEqual(obj.num_textures, 2)
         np.testing.assert_array_equal(obj.get_pixel_array(), self.green)
         np.testing.assert_array_equal(obj.get_pixel_array(dark=True), self.red)

@@ -180,10 +180,10 @@ class ObjMaterialTests(unittest.TestCase):
         model = m.ThreeDModel(self.path, height=2)
         scene = m.Scene(); scene.add(model)
         ticks = []; model.add_updater(lambda mob, dt: ticks.append(dt))
-        count, clock = len(ticks), scene.time()
+        count, clock = len(ticks), scene.time
         images = [self.capture(model, threads=n).png() for n in (1, 4, 16)]
         self.assertTrue(all(image == images[0] for image in images))
-        self.assertEqual(scene.time(), clock)
+        self.assertEqual(scene.time, clock)
         self.assertEqual(len(ticks), count)
 
     def test_unsupported_map_transform_is_an_explicit_import_error(self):

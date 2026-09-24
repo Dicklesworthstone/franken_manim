@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-ownership-") as directory:
                 raise AssertionError("writer callback invalidated an accepted pristine scene")
             assert target.read_bytes() == b"prior artifact"
             assert scene.root_count() == (1 if mutation == "adopt" else 0)
-            assert scene.time() == (0 if mutation == "adopt" else 0.125)
+            assert scene.time == (0 if mutation == "adopt" else 0.125)
             assert not hasattr(scene, "_fmn_owned_render_session")
 
         # An already-owned, otherwise pristine generation must be rejected

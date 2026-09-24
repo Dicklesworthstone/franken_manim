@@ -93,7 +93,7 @@ class RasterTransformTests(unittest.TestCase):
         view=self.a.data
         t=m.Transform(self.a,self.b,rate_func=m.linear,run_time=.5)
         scene.play(t)
-        self.assertAlmostEqual(scene.time(),.5)
+        self.assertAlmostEqual(scene.time,.5)
         np.testing.assert_array_equal(view,self.a.data)
         np.testing.assert_array_equal(self.a.get_pixel_array(),pixels(BLUE))
         self.assertIn(self.a,scene.mobjects);self.assertNotIn(self.b,scene.mobjects)

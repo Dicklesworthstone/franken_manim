@@ -92,7 +92,7 @@ class RasterAuthoringTests(unittest.TestCase):
         image.add_updater(lambda mob, dt: count.append(dt))
         initial_ticks = list(count)
         updater = image.updaters[0]
-        clock = scene.time()
+        clock = scene.time
         old_png = capture(image).png()
         self.assertIs(image.set_pixel_array(pixels((0, 0, 255, 255), (7, 2))), image)
         np.testing.assert_array_equal(image.data, before)
@@ -101,7 +101,7 @@ class RasterAuthoringTests(unittest.TestCase):
         self.assertIs(image.note, identity)
         self.assertIs(image.updaters[0], updater)
         self.assertEqual(count, initial_ticks)
-        self.assertEqual(scene.time(), clock)
+        self.assertEqual(scene.time, clock)
         self.assertEqual(scene.mobjects, roots)
         self.assertEqual((image.pixel_width, image.pixel_height), (2, 7))
         self.assertNotEqual(capture(image).png(), old_png)
@@ -210,7 +210,7 @@ class RasterAuthoringTests(unittest.TestCase):
         image = m.ImageMobject(pixels())
         scene = m.Scene()
         scene.add(image)
-        before = scene.time(), image.data.copy(), capture(image).png()
+        before = scene.time, image.data.copy(), capture(image).png()
         failure = ValueError('authored raster input failed')
         class Explodes:
             def __array__(self, *args, **kwargs):
@@ -221,7 +221,7 @@ class RasterAuthoringTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 getattr(image.animate, method)(Explodes())
             self.assertIs(caught.exception, failure)
-        self.assertEqual(scene.time(), before[0])
+        self.assertEqual(scene.time, before[0])
         np.testing.assert_array_equal(image.data, before[1])
         self.assertEqual(capture(image).png(), before[2])
         # Ordinary record/placement animation is still available for images.
