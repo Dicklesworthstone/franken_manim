@@ -6777,7 +6777,7 @@ impl BridgeMobject {
     /// span map, no heuristic splitting), matching the Reference's
     /// per-`SingleStringTex` submobject structure.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (factory, parts, separator, text_mode, font_size, t2c, group_single_part, template="", preamble=""))]
+    #[pyo3(signature = (factory, parts, separator, text_mode, font_size, t2c, group_single_part, template="", preamble="", line_align="left"))]
     fn _build_tex<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
@@ -6789,7 +6789,18 @@ impl BridgeMobject {
         group_single_part: bool,
         template: &str,
         preamble: &str,
+        line_align: &str,
     ) -> PyResult<Bound<'py, PyList>> {
+        let align = match line_align {
+            "left" => fmn_library::LineAlign::Left,
+            "center" => fmn_library::LineAlign::Center,
+            "right" => fmn_library::LineAlign::Right,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown TexText line alignment '{other}'"
+                )));
+            }
+        };
         let source = parts.join(separator);
         let pairs = t2c_pairs(t2c)?;
         let refs: Vec<(&str, fmn_core::color::Srgb)> = pairs
@@ -6800,6 +6811,7 @@ impl BridgeMobject {
             if text_mode {
                 fmn_library::TexText::new(&source)
                     .preamble(preamble)
+                    .line_align(align)
                     .font_size(font_size)
                     .t2c(&refs)
                     .build(engine)
@@ -9414,22 +9426,21 @@ fn build_native_animation(
             fmn_anim::transform_from_copy(stage, need_mob(spec.mob)?, need_target(spec.target)?)
                 .map_err(anim_error)?,
         ),
-        "fade_in" => Box::new(
-            fmn_anim::fade_in(stage, need_mob(spec.mob)?, spec.shift, spec.scale)
-                .map_err(anim_error)?,
-        ),
-        "fade_out" => Box::new(
-            fmn_anim::fade_out(stage, need_mob(spec.mob)?, spec.shift, spec.scale)
-                .map_err(anim_error)?,
-        ),
-        "fade_in_from_point" => Box::new(
-            fmn_anim::fade_in_from_point(stage, need_mob(spec.mob)?, spec.point)
-                .map_err(anim_error)?,
-        ),
-        "fade_out_to_point" => Box::new(
-            fmn_anim::fade_out_to_point(stage, need_mob(spec.mob)?, spec.point)
-                .map_err(anim_error)?,
-        ),
+        "fade_in" | "fade_out" => {
+            let mob = need_mob(spec.mob)?;
+            let mut fade = if spec.kind == "fade_in" {
+                fmn_anim::fade_in(stage, mob, spec.shift, spec.scale)
+            } else {
+                fmn_anim::fade_out(stage, mob, spec.shift, spec.scale)
+            }
+            .map_err(anim_error)?;
+            // Fade is a Transform: its path_arc bends the travel
+            // (FadeInFromPoint/FadeOutToPoint arrive here as fades too).
+            if spec.path_arc != 0.0 {
+                fade = fade.with_path_arc(spec.path_arc, spec.path_arc_axis);
+            }
+            Box::new(fade)
+        }
         "v_fade_in" => Box::new(fmn_anim::v_fade_in(need_mob(spec.mob)?)),
         "v_fade_out" => Box::new(fmn_anim::v_fade_out(need_mob(spec.mob)?)),
         "v_fade_in_then_out" => Box::new(fmn_anim::v_fade_in_then_out(need_mob(spec.mob)?)),

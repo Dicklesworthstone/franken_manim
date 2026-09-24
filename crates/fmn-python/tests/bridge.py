@@ -12079,8 +12079,13 @@ assert all(
     for leaf in mapped_tex.get_part_by_tex("x")
 )
 
+# A paragraph alignment cannot move the Reference's align* display, so math
+# mode accepts it with no geometric effect (the TexText surface aligns).
+assert np.array_equal(
+    manimlib.Tex("x", alignment=r"\raggedright").get_all_points(),
+    manimlib.Tex("x").get_all_points(),
+)
 for unsupported_tex_kwargs, named_knob, error_type in [
-    ({"alignment": r"\raggedright"}, "alignment", NotImplementedError),
     ({"template": "legacy"}, "template", ValueError),
     ({"additional_preamble": r"\usepackage{foo}"}, "additional_preamble", ValueError),
 ]:
@@ -16188,6 +16193,52 @@ arc_scene.play(
 )
 assert np.allclose(arc_dot.get_center(), [0.0, -1.0, 0.0], atol=1e-6)
 
+# fm-5wq.14: every Fade is a Transform, so path_arc bends its travel.
+# FadeIn/FadeOut used to drop it silently and the point fades refused it.
+# FadeInFromPoint/FadeOutToPoint are the Reference's FadeIn/FadeOut
+# subclasses, with the shift fixed at construction (fading.py:71-88).
+fading_module = importlib.import_module("manimlib.animation.fading")
+paths_module = importlib.import_module("manimlib.utils.paths")
+assert fading_module.FadeInFromPoint.__bases__ == (fading_module.FadeIn,)
+assert fading_module.FadeOutToPoint.__bases__ == (fading_module.FadeOut,)
+for fade_arc in (0.0, -math.pi / 2.0, 2.0):
+    for fade_kind in ("from_point", "shift"):
+        fade_scene = InteractiveScene()
+        fade_dot = manimlib.Dot().move_to((1.0, 0.5, 0.0))
+        fade_end = np.array(fade_dot.get_points(), dtype=float)
+        if fade_kind == "from_point":
+            fade_start = np.tile([-1.0, 0.0, 0.0], (len(fade_end), 1))
+            fade = fading_module.FadeInFromPoint(
+                fade_dot, np.array([-1.0, 0.0, 0.0]), path_arc=fade_arc,
+                rate_func=lambda t: 0.5,
+            )
+        else:
+            fade_start = fade_end - [0.0, 2.0, 0.0]
+            fade = fading_module.FadeIn(
+                fade_dot, shift=[0.0, 2.0, 0.0], path_arc=fade_arc,
+                rate_func=lambda t: 0.5,
+            )
+        fade_scene.play(fade, run_time=1.0 / 30.0)
+        fade_expected = paths_module.path_along_arc(fade_arc)(fade_start, fade_end, 0.5)
+        assert np.allclose(fade_dot.get_points(), fade_expected, atol=1e-5), (
+            fade_kind, fade_arc,
+        )
+fade_out_dot = manimlib.Dot().move_to((1.0, 0.5, 0.0))
+fade_out = fading_module.FadeOutToPoint(fade_out_dot, np.array([-1.0, 0.0, 0.0]), path_arc=1.0)
+fade_out_dot.shift([5.0, 0.0, 0.0])
+assert np.allclose(fade_out.shift_vect, [-2.0, -0.5, 0.0])
+assert fade_out.scale_factor == 0.0 and fade_out.remover
+assert fade_out._native_params()["path_arc"] == 1.0
+assert fading_module.FadeOut(fade_out_dot, path_arc=0.5)._native_params()["path_arc"] == 0.5
+try:
+    fading_module.FadeOutToPoint(fade_out_dot, [0.0, 0.0, 0.0], bogus_keyword=1)
+except NotImplementedError as error:
+    assert "bogus_keyword" in str(error), error
+except TypeError as error:
+    assert "bogus_keyword" in str(error), error
+else:
+    raise AssertionError("FadeOutToPoint accepted an unknown keyword")
+
 # fm-5wq.4.63 / f9e529b1: Transform accepts an authored path function
 # through the callback lifecycle; non-callable stays TypeError.
 custom_transform = transform_module.Transform(
@@ -20254,13 +20305,45 @@ assert np.allclose(space_utils.midpoint([0.0, 0.0, 0.0], [2.0, 4.0, 6.0]), [1.0,
 rotated = space_utils.rotate_vector([1.0, 0.0, 0.0], np.pi / 2, [0.0, 0.0, 1.0])
 assert np.allclose(rotated, [0.0, 1.0, 0.0], atol=1e-7)
 assert np.allclose(space_utils.rotate_vector_2d([1.0, 0.0], np.pi / 2), [0.0, 1.0], atol=1e-7)
-# Reference space_ops leaked mapbox earcut, scipy Rotation, and the
-# functools/operator aliases. They refuse by the named OOT identities.
+# Reference space_ops leaked mapbox earcut and scipy Rotation; they refuse
+# by the named OOT identities. Its operator/functools aliases are the
+# stdlib objects, reachable through the star import as corpus scenes use
+# them (_2020/chess.py: `reduce(op.xor, ...)`).
+import functools as _bridge_functools
+import operator as _bridge_operator
+_star_namespace = {}
+exec("from manimlib import *", _star_namespace)
+assert space_utils.op is _bridge_operator and _star_namespace["op"] is _bridge_operator
+assert space_utils.reduce is _bridge_functools.reduce
+assert _star_namespace["reduce"] is _bridge_functools.reduce
+assert _star_namespace["reduce"](_star_namespace["op"].xor, [3, 5, 6], 0) == 0
+# Leaked submodule imports resolve as the Reference's import statements
+# do: `import urllib.request` binds the top package, and `from PIL import
+# Image` binds a submodule its package does not load on its own.
+import urllib as _bridge_urllib
+assert importlib.import_module("manimlib.utils.file_ops").urllib is _bridge_urllib
+assert hasattr(_bridge_urllib, "request")
+assert manimlib._resolve_leaked_origin("pulldom", "xml.dom.pulldom") is (
+    sys.modules["xml.dom.pulldom"]
+)
+assert manimlib._resolve_leaked_origin("xml", "xml.dom.pulldom") is importlib.import_module("xml")
+_camera_module = importlib.import_module("manimlib.camera.camera")
+try:
+    import PIL.Image as _bridge_pil_image
+except ImportError:
+    assert vars(_camera_module.Image)["_fmn_schema_placeholder"] is True
+    for _use_image in (lambda: _camera_module.Image.open("x.png"), lambda: _camera_module.Image()):
+        try:
+            _use_image()
+        except ModuleNotFoundError as error:
+            assert error.name == "PIL" and "PIL.Image" in str(error), error
+        else:
+            raise AssertionError("a missing Pillow did not name itself")
+else:
+    assert _camera_module.Image is _bridge_pil_image
 for leaked, oot in (
     ("Rotation", "OOT-LEAKED-SCIPY-IMPORT"),
     ("earcut", "OOT-LEAKED-EARCUT-IMPORT"),
-    ("op", "OOT-LEAKED-SPACEOPS-STDLIB"),
-    ("reduce", "OOT-LEAKED-SPACEOPS-STDLIB"),
 ):
     try:
         getattr(space_utils, leaked)()
@@ -20576,6 +20659,45 @@ assert _split.tex_strings == ["Prevalence", " = ", "Prior"] and len(_split) == 3
 assert all(glyph.get_fill_color().upper() == "#FFFF00" for glyph in _split[2])
 assert _old_tex_module.OldTex("x^2 + y", isolate=["y"]).tex_strings == ["x^2 + ", "y"]
 assert len(_old_tex_module.OldTex("a", "+", "b")) == 3
+
+
+# fm-5wq.14: TexText's `alignment` (tex_mobject.py:189). The default
+# \centering centers every line; "" and \raggedright leave them flush left.
+def _first_line_offsets(tex):
+    # (first line's left edge, center, right edge) relative to the block's;
+    # glyphs are in source order, so "ab" is the first two.
+    first = tex.family_members_with_points()[:2]
+    left = min(glyph.get_left()[0] for glyph in first)
+    right = max(glyph.get_right()[0] for glyph in first)
+    return (
+        left - tex.get_left()[0],
+        (left + right) / 2 - tex.get_center()[0],
+        right - tex.get_right()[0],
+    )
+
+
+_two_lines = r"ab\\a much longer second line"
+_left_gap, _centre_gap, _ = _first_line_offsets(manimlib.TexText(_two_lines))
+# Lines align by advance box, so ink side bearings leave ~0.002 residues.
+assert _left_gap > 1.0 and abs(_centre_gap) < 0.01, (_left_gap, _centre_gap)
+for _flush in ("", None, r"\raggedright", r"\flushleft"):
+    _left_gap, _centre_gap, _ = _first_line_offsets(manimlib.TexText(_two_lines, alignment=_flush))
+    assert abs(_left_gap) < 1e-3 and _centre_gap < -1.0, (_flush, _left_gap, _centre_gap)
+_left_gap, _, _right_gap = _first_line_offsets(manimlib.TexText(_two_lines, alignment=r"\raggedleft"))
+assert _left_gap > 1.0 and abs(_right_gap) < 0.01, (_left_gap, _right_gap)
+_left_gap, _, _ = _first_line_offsets(_old_tex_module.OldTexText(_two_lines, alignment=""))
+assert abs(_left_gap) < 1e-3
+_math_default, _math_empty = manimlib.Tex("x^2"), manimlib.Tex("x^2", alignment="")
+assert np.allclose(_math_default.get_all_points(), _math_empty.get_all_points())
+_colored = manimlib.TexText(_two_lines, t2c={"ab": manimlib.YELLOW})
+assert [g.get_fill_color().upper() for g in _colored.family_members_with_points()[:2]] == ["#FFFF00"] * 2
+assert all(g.get_fill_color().upper() != "#FFFF00" for g in _colored.family_members_with_points()[2:])
+try:
+    manimlib.TexText(_two_lines, alignment=r"\justifying")
+except NotImplementedError as error:
+    assert "justifying" in str(error), error
+else:
+    raise AssertionError("an unsupported alignment declaration was accepted")
 
 # fm-5wq.14: Reference Scene.remove removes the family of every argument
 # (25 corpus scenes remove never-added groups of added members); an absent

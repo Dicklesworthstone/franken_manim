@@ -7341,6 +7341,37 @@ def _refuse_unrouted(class_name, entries):
         )
 
 
+_TEX_LINE_ALIGNMENTS = {
+    "\\centering": "center",
+    "\\center": "center",
+    "\\raggedright": "left",
+    "\\flushleft": "left",
+    "\\raggedleft": "right",
+    "\\flushright": "right",
+}
+
+
+def _tex_line_align(alignment, text_mode):
+    """How a Tex body's lines align under the Reference's `alignment`.
+
+    tex_mobject.py:189 writes the declaration on its own line ahead of the
+    body (`if self.alignment:`, so any falsy value declares nothing and
+    lines stay flush left). It cannot move an align* display, so math mode
+    ignores it. A declaration outside the LaTeX alignment family refuses
+    by name.
+    """
+    if not text_mode or not alignment:
+        return "left"
+    align = _TEX_LINE_ALIGNMENTS.get(str(alignment).strip())
+    if align is None:
+        raise NotImplementedError(
+            f"TexText alignment {alignment!r} is not a supported line-alignment "
+            "declaration; supported: " + ", ".join(sorted(_TEX_LINE_ALIGNMENTS))
+            + " or ''"
+        )
+    return align
+
+
 def _convert_point_to_3d(x, y):
     # Reference svg_mobject.py:42.
     return _np.array([x, y, 0.0])
@@ -8281,13 +8312,8 @@ class Tex(StringMobject):
         should_center = kwargs.pop("should_center", True)
         self.base_color = kwargs.pop("base_color", "#FFFFFF")
         self.protect = kwargs.pop("protect", ())
-        _refuse_unrouted(
-            type(self).__name__ + "()",
-            [
-                ("alignment", alignment != "\\centering"),
-            ],
-        )
         _validate_tex_options(template, additional_preamble, bool(self._native_text_mode))
+        line_align = _tex_line_align(alignment, bool(self._native_text_mode))
         color_map = dict(t2c or {})
         color_map.update(tex_to_color_map or {})
         isolate = [] if isolate is None else isolate
@@ -8332,6 +8358,7 @@ class Tex(StringMobject):
             bool(self._native_group_single_part),
             template,
             additional_preamble,
+            line_align,
         )
         _hang_native_children(self, specs)
         self._validate_isolate_spans()
@@ -10364,13 +10391,8 @@ class SingleStringTex(SVGMobject):
         additional_preamble="",
         **kwargs,
     ):
-        _refuse_unrouted(
-            "SingleStringTex()",
-            [
-                ("alignment", alignment != r"\centering"),
-            ],
-        )
         _validate_tex_options(template, additional_preamble, bool(not math_mode))
+        line_align = _tex_line_align(alignment, not math_mode)
         style = dict(kwargs)
         style.update(
             fill_color=fill_color,
@@ -10399,6 +10421,7 @@ class SingleStringTex(SVGMobject):
             False,
             template,
             additional_preamble,
+            line_align,
         )
         _hang_native_children(self, specs)
         _apply_vmobject_style_kwargs(self, style)
@@ -18311,7 +18334,12 @@ class Fade(Transform):
         return self.target_mobject
 
     def _native_params(self):
-        return {"shift": self.shift_vect, "scale": self.scale_factor}
+        # Fade is a Transform, so its path_arc bends the fade's travel
+        # exactly as Transform's does (fading.py:20 passes **kwargs on).
+        params = super()._native_params()
+        params["shift"] = self.shift_vect
+        params["scale"] = self.scale_factor
+        return params
 
 
 class FadeIn(Fade):
@@ -19395,21 +19423,27 @@ class TransformMatchingTex(TransformMatchingStrings):
     _match_by_blocks = False
 
 
-class FadeInFromPoint(_NativeAnimation):
-    # Reference fading.py:71 — routed to the native fade_in_from_point,
-    # which encodes the same shift/scale composition.
-    _native_kind = "fade_in_from_point"
-
+class FadeInFromPoint(FadeIn):
+    # fading.py:71: a FadeIn whose shift is fixed from the construction-time
+    # center; scale=inf collapses the start onto the point.
     def __init__(self, mobject, point, **kwargs):
-        super().__init__(mobject, **kwargs)
-        self.point = _vec3(point)
+        super().__init__(
+            mobject,
+            shift=mobject.get_center() - point,
+            scale=_np.inf,
+            **kwargs,
+        )
 
-    def _native_params(self):
-        return {"point": self.point}
 
-
-class FadeOutToPoint(FadeInFromPoint):
-    _native_kind = "fade_out_to_point"
+class FadeOutToPoint(FadeOut):
+    # fading.py:81.
+    def __init__(self, mobject, point, **kwargs):
+        super().__init__(
+            mobject,
+            shift=point - mobject.get_center(),
+            scale=0,
+            **kwargs,
+        )
 
 
 class AnimationGroup(_NativeAnimation):
@@ -20126,25 +20160,58 @@ def _placeholder_function(module_name, name):
     return unavailable
 
 
+def _resolve_leaked_origin(name, origin):
+    # Origins are full object paths: a bare module ("io"), a module
+    # attribute ("pathlib.Path") or a submodule ("PIL.Image").
+    if "." not in origin:
+        return _importlib.import_module(origin)
+    head = origin.split(".", 1)[0]
+    if name == head:
+        # `import urllib.request` binds the top package once the
+        # submodule is loaded.
+        _importlib.import_module(origin)
+        return _importlib.import_module(head)
+    parent, _, leaf = origin.rpartition(".")
+    package = _importlib.import_module(parent)
+    if not hasattr(package, leaf):
+        # `from PIL import Image`: a submodule its package does not load
+        # on its own.
+        _importlib.import_module(origin)
+    return getattr(package, leaf)
+
+
 def _missing_leaked_import(module_name, name, origin, error):
     # The Reference re-exports a third-party name (e.g. colour.Color) that is
     # not installed in this environment: say which package, as the
     # Reference's own import would.
     missing = getattr(error, "name", None) or origin.split(".", 1)[0]
+    return _MissingLeakedImport(module_name, name, origin, missing)
 
-    def unavailable(*args, **kwargs):
-        del args, kwargs
-        raise ModuleNotFoundError(
+
+class _MissingLeakedImport:
+    """A leaked third-party name whose package is absent. Calling it or
+    using its API (`Image.open`) raises the Reference's own import error."""
+
+    def __init__(self, module_name, name, origin, missing):
+        self.__name__ = self.__qualname__ = name
+        self.__module__ = module_name
+        # The runtime parity audit reads the marker from vars(value).
+        self._fmn_schema_placeholder = True
+        self._missing = missing
+        self._message = (
             f"No module named '{missing}': {module_name}.{name} is the "
-            f"Reference's re-export of {origin}; install {missing} to use it",
-            name=missing,
+            f"Reference's re-export of {origin}; install {missing} to use it"
         )
 
-    unavailable.__name__ = name
-    unavailable.__qualname__ = name
-    unavailable.__module__ = module_name
-    unavailable._fmn_schema_placeholder = True
-    return unavailable
+    def __call__(self, *args, **kwargs):
+        del args, kwargs
+        raise ModuleNotFoundError(self._message, name=self._missing)
+
+    def __getattr__(self, attribute):
+        # Private and dunder probes stay ordinary misses for introspection.
+        if attribute.startswith("_"):
+            raise AttributeError(attribute)
+        raise ModuleNotFoundError(self._message, name=self._missing)
 
 
 def _placeholder_method(module_name, owner, name):
@@ -21488,16 +21555,7 @@ def _install_schema_surface():
                 value = _placeholder_function(module_name, qualified)
             else:
                 try:
-                    # Origins are full object paths since the extractor
-                    # fix: a bare module ("io") or module-attribute
-                    # ("pathlib.Path", "xml.etree.ElementTree").
-                    if "." in _origin:
-                        parent, _, leaf = _origin.rpartition(".")
-                        value = getattr(
-                            _importlib.import_module(parent), leaf
-                        )
-                    else:
-                        value = _importlib.import_module(_origin)
+                    value = _resolve_leaked_origin(qualified, _origin)
                 except ImportError as error:
                     value = _missing_leaked_import(module_name, qualified, _origin, error)
                 except (ValueError, AttributeError):
@@ -22685,8 +22743,6 @@ def _install_space_ops():
     for name, oot in (
         ("Rotation", "OOT-LEAKED-SCIPY-IMPORT"),
         ("earcut", "OOT-LEAKED-EARCUT-IMPORT"),
-        ("op", "OOT-LEAKED-SPACEOPS-STDLIB"),
-        ("reduce", "OOT-LEAKED-SPACEOPS-STDLIB"),
     ):
         leak = _excluded_leak(name, oot)
         setattr(module, name, leak)
@@ -22694,6 +22750,12 @@ def _install_space_ops():
         root = getattr(current, "__module__", "")
         if current is None or root.split(".", 1)[0] in _leak_roots:
             setattr(_FMN_MODULE, name, leak)
+    # space_ops.py:5-6 `import operator as op` / `from functools import
+    # reduce` leak through `from manimlib import *`, and corpus scenes
+    # call `reduce(op.xor, ...)` on them: they are the stdlib objects.
+    for name, value in (("op", _operator), ("reduce", _functools.reduce)):
+        setattr(module, name, value)
+        setattr(_FMN_MODULE, name, value)
 
 
 _install_space_ops()

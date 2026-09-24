@@ -26,6 +26,7 @@ use fmn_core::color::Srgb;
 use fmn_core::types::Vec3;
 use fmn_geom::QuadPath;
 use fmn_mobject::Mobject;
+pub use fmn_tex::LineAlign;
 use fmn_tex::{Mode, PathContour, PathSeg, Prim, Style as MathStyle, TexEngine, TexError, Typeset};
 
 use crate::spans::{SpanKindU8, SpanMapData, SpanMapEntry};
@@ -159,6 +160,7 @@ pub struct Tex<'a> {
     font_size_for_unit_height: f64,
     style: Style,
     t2c: &'a [(&'a str, Srgb)],
+    align: LineAlign,
 }
 
 impl<'a> Tex<'a> {
@@ -174,6 +176,7 @@ impl<'a> Tex<'a> {
             font_size_for_unit_height: DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
             style: text_style(),
             t2c: &[],
+            align: LineAlign::Left,
         }
     }
 
@@ -238,7 +241,7 @@ impl<'a> Tex<'a> {
     /// silence, never garbage. [`TexMobjectError::Calibration`]: the
     /// math face roster maps no measurable "0".
     pub fn build(&self, engine: &TexEngine) -> Result<TexMobject, TexMobjectError> {
-        let typeset = engine.typeset_with_preamble(self.mode, self.source, self.preamble)?;
+        let typeset = engine.typeset_aligned(self.mode, self.source, self.preamble, self.align)?;
         let scale = calibrate(engine, self.font_size, self.font_size_for_unit_height)?;
         // tex_to_color_map, resolved to child ordinals before
         // construction: later entries win (the Reference's dict-update).
@@ -295,6 +298,15 @@ impl<'a> TexText<'a> {
     #[must_use]
     pub fn preamble(mut self, preamble: &'a str) -> Self {
         self.inner = self.inner.preamble(preamble);
+        self
+    }
+
+    /// The `alignment=` surface: how the `\\`-split lines align. Left is
+    /// fmd-math's default; the Reference's own default is `\centering`
+    /// ([`LineAlign::Center`]), which the Python portal passes.
+    #[must_use]
+    pub fn line_align(mut self, align: LineAlign) -> Self {
+        self.inner.align = align;
         self
     }
 

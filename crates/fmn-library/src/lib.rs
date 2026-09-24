@@ -196,7 +196,7 @@ pub use solids::{
 pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};
 pub use style::{Style, VStyle};
 pub use svg::{svg_document_mobject, svg_mobject};
-pub use tex::{Tex, TexMobject, TexMobjectError, TexText};
+pub use tex::{LineAlign, Tex, TexMobject, TexMobjectError, TexText};
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use tip::TipEnd;
 pub use vmobject::{

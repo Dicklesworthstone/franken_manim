@@ -45,7 +45,7 @@ pub use error::{PreflightError, TexError};
 pub use memory_cache::{
     TYPESET_MEMORY_CACHE_MAX_BYTES, TYPESET_MEMORY_CACHE_MAX_ENTRIES, TypesetCacheStats,
 };
-pub use preamble::{TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES};
+pub use preamble::{LineAlign, TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES};
 pub use typeset::{
     Prim, Sub, TYPESET_DOCUMENT_LIMIT_BYTES, TYPESET_FORMAT_VERSION, Typeset, TypesetError,
 };

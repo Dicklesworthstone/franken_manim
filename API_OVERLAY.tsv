@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	f945e3881bc04d12d38007c4c84a83a3da1da4bdd7b28ac49320862dc46250c1
+ledger_reviewed_digest	031bebe1cb1a02c4ef7141b9e9a54b37ee15162a1ce12bf538a9100ee4a71683
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -360,9 +360,8 @@ OOT-EXOTIC-MEDIA-MESH	exotic image, media, and mesh formats	tiered	Owned native 
 OOT-IMAGE-ASSET-INPUT	ImageMobject input acquisition and decode	tiered	Local PNG and JPEG are native; implicit URL downloads are replaced by the host AssetFetcher boundary and other PIL formats have no silent substitute	A corpus-ranked input requires a host-wired AssetFetcher or an owned budgeted decoder with malformed-input Gauntlet evidence
 OOT-LEAKED-EARCUT-IMPORT	mapbox_earcut leaked import on utils.space_ops	excluded	The Reference triangulator import is replaced by Chisel's dependency-free earclip; the leaked mapbox name is not part of manimlib's public API surface	None; sovereign earclip_triangulation is authoritative
 OOT-LEAKED-PATHOPS-IMPORT	pathops module-level leaked import	excluded	Third-party skia-pathops dependency is not part of manimlib's public API surface	None; sovereign curve-boolean pipeline is authoritative
-OOT-LEAKED-PIL-IMPORT	leaked PIL/Pillow Image symbol imported into camera module namespace	excluded	Pillow dependency is not part of manimlib's public API surface	None; native image codec pipeline is authoritative
+OOT-LEAKED-PIL-IMPORT	leaked PIL/Pillow Image symbol imported into camera module namespace	excluded	Pillow is not an fmn-python dependency and the native image codec pipeline is authoritative; the leaked name resolves to the host's PIL.Image when Pillow is installed and otherwise raises the Reference's ModuleNotFoundError	None; native image codec pipeline is authoritative
 OOT-LEAKED-SCIPY-IMPORT	leaked scipy/numpy symbols imported into module namespaces	excluded	Upstream module namespaces leaked foreign library imports that do not belong to manimlib's public API surface	A scene explicitly depends on the leaked symbol and it is bound to the appropriate FrankenSuite crate
-OOT-LEAKED-SPACEOPS-STDLIB	functools.reduce and operator-as-op leaked into utils.space_ops	excluded	Those stdlib aliases are incidental Reference imports, not the public space_ops function surface	A scene imports reduce or op from manimlib.utils.space_ops rather than from functools/operator
 OOT-LEAKED-SURFACE-IMPORTS	logging pywavefront and trimesh leaked into types.surface	excluded	Third-party mesh loaders and incidental stdlib logging are not part of manimlib's public surface; Atlas owns the OBJ subset	None; native ThreeDModel parser is authoritative
 OOT-MATPLOTLIB-COLORMAPS	matplotlib named colormap tables	tiered	The bundled 3b1b colormap and caller-provided color-map functions are supported without importing matplotlib into the sovereign wheel	A corpus-ranked scene requires another named map and its audited immutable table is added to fmn-core with fixture-backed interpolation evidence
 OOT-MODERNGL-SHADER-SURFACE	ShaderWrapper VShaderWrapper and utils.shaders program surface	excluded	The Reference moderngl program pipeline is the refused GPU dependency; Lumen owns rasterization and analytic coverage replaces every shader path	A G4a allowlisted scene needs shader-program behavior no audited native adapter can express and OQ-8 is reopened by ADR
@@ -711,7 +710,7 @@ manimlib.camera.camera:Camera.init_light_source	same	scripts/manim_ref/manimlib/
 manimlib.camera.camera:Camera.refresh_uniforms	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	refreshes the uniform dictionary headlessly
 manimlib.camera.camera:Camera.resize_frame_shape	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	reseats the frame shape from pixels with the fixed-dimension option preserved
 manimlib.camera.camera:Camera.use_window_fbo	excluded	OOT-PYGLET-WINDOW-SURFACE	crates/fmn-python/tests/bridge.py	switches between an on-screen window's framebuffer and the file framebuffer; refuses as a capability error because the portal is headless and Studio owns previews
-manimlib.camera.camera:Image	excluded	OOT-LEAKED-PIL-IMPORT	crates/fmn-python/tests/bridge.py	leaked PIL Image import is refused as third-party dependency
+manimlib.camera.camera:Image	excluded	OOT-LEAKED-PIL-IMPORT	crates/fmn-python/tests/bridge.py	is the host's PIL.Image when Pillow is installed; without it, calling or using it raises ModuleNotFoundError naming PIL
 manimlib.camera.camera:ThreeDCamera	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	is the authored four-sample camera subclass for three-d scenes
 manimlib.camera.camera:ThreeDCamera.__init__	same	scripts/manim_ref/manimlib/camera/camera.py	crates/fmn-python/tests/bridge.py	defaults four samples through the shared constructor
 manimlib.camera.camera:gl	excluded	OOT-MODERNGL-SHADER-SURFACE	crates/fmn-python/tests/bridge.py	leaked OpenGL import is refused in favor of Lumen
@@ -2404,13 +2403,13 @@ manimlib.utils.space_ops:midpoint	same	scripts/manim_ref/manimlib/utils/space_op
 manimlib.utils.space_ops:norm_squared	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	keeps the component-wise quadratic sum verbatim
 manimlib.utils.space_ops:normalize	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	divides by get_norm and honors the zero-vector fall_back
 manimlib.utils.space_ops:normalize_along_axis	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	row-normalizes an array along the requested axis treating zero rows as unit
-manimlib.utils.space_ops:op	excluded	OOT-LEAKED-SPACEOPS-STDLIB	crates/fmn-python/tests/bridge.py	the operator module alias is a leaked Reference import, not a public space_ops name
+manimlib.utils.space_ops:op	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	is the stdlib operator module the Reference imports as op; corpus scenes reach it through the star import
 manimlib.utils.space_ops:poly_line_length	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	sums consecutive segment norms through Chisel's bounded kernel
 manimlib.utils.space_ops:project_along_vector	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes the plane projection through Chisel's identity-minus-outer kernel
 manimlib.utils.space_ops:quaternion_conjugate	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	negates only the vector part in scipy scalar-last order
 manimlib.utils.space_ops:quaternion_from_angle_axis	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes the rotvec quaternion through fmn-geom's scipy-exact series including small-angle expansion
 manimlib.utils.space_ops:quaternion_mult	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	folds varargs left under scipy scalar-last Hamilton product with the empty-call identity
-manimlib.utils.space_ops:reduce	excluded	OOT-LEAKED-SPACEOPS-STDLIB	crates/fmn-python/tests/bridge.py	functools.reduce is a leaked Reference import, not a public space_ops name
+manimlib.utils.space_ops:reduce	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	is functools.reduce as the Reference imports it; corpus scenes reach it through the star import
 manimlib.utils.space_ops:rotate_vector	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	routes angle-axis rotation through Chisel's one scipy-exact rotation implementation
 manimlib.utils.space_ops:rotate_vector_2d	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	applies the Reference complex-arithmetic 2D rotation
 manimlib.utils.space_ops:rotation_about_z	same	scripts/manim_ref/manimlib/utils/space_ops.py	crates/fmn-python/tests/bridge.py	returns the closed-form z rotation matrix through Chisel
@@ -2497,7 +2496,7 @@ manimlib.utils.simple_functions:get_num_args	excluded	OOT-REFERENCE-IMPORT-INTRO
 manimlib.utils.simple_functions:get_parameters	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-conformance/tests/api_schema.rs	reflection-based parameter introspection is absorbed by the generated schema
 manimlib.utils.bezier:linalg	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-geom/src/cubic.rs	the leaked numpy import is replaced by the sovereign cubic converter
 manimlib.utils.file_ops:hashlib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-cache/src/key.rs	file hashing is the owned content-addressed cache keying
-manimlib.utils.file_ops:urllib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-platform/src/fetch.rs	network access is the host-provided AssetFetcher capability, never urllib
+manimlib.utils.file_ops:urllib	same	scripts/manim_ref/manimlib/utils/file_ops.py	crates/fmn-python/tests/bridge.py	is the stdlib urllib package that `import urllib.request` binds; the portal's own URL fetches still refuse (find_file), so network stays the host AssetFetcher capability
 manimlib.utils.file_ops:manimlib	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-python/tests/bridge.py	leaked self-import is not part of manimlib's public API surface
 manimlib.utils.file_ops:validators	excluded	OOT-REFERENCE-IMPORT-INTROSPECTION	crates/fmn-python/tests/bridge.py	leaked validators import is not part of manimlib's public API surface
 manimlib.camera.camera_frame:CameraFrame.interpolate	same	crates/fmn-render/src/camera.rs	crates/fmn-render/tests/camera.rs	the C-16 fixed-conventions ruling lives in the camera and journal_digest; the parity R-3 space-ops audit rides the same fmn-geom scipy conventions
@@ -2643,7 +2642,7 @@ manimlib.utils.color:get_color_map	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	c
 manimlib.utils.color:get_colormap_from_colors	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	colormap from colors is the fmn-core typed gradient builder
 manimlib.utils.color:get_colormap_list	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	colormap list is the typed registered colormap surface
 manimlib.utils.color:hex2rgb	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	hex parsing lives in the owned srgb eotf / hex parser
-manimlib.utils.color:pyplot	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-python/tests/bridge.py	matplotlib pyplot is the refused third-party import; the bundled colormap tier covers the named-map use case
+manimlib.utils.color:pyplot	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-python/tests/bridge.py	is the host's matplotlib.pyplot when matplotlib is installed, otherwise a ModuleNotFoundError naming it; the bundled colormap tier covers the named-map use case
 manimlib.utils.color:random_bright_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	a Color from HSL draws of the Scene-seeded stdlib RNG within the given ranges
 manimlib.utils.color:random_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	a Color from three draws of the Scene-seeded numpy RNG
 manimlib.utils.color:rgb2hex	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	rgb to hex is the owned hex encoder

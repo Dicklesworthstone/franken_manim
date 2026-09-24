@@ -2,7 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use fmn_tex::{
-    Mode, Span, Style, TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES, TexEngine, TexError,
+    LineAlign, Mode, Span, Style, TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES, TexEngine,
+    TexError,
 };
 
 const MATH: Mode = Mode::Math(Style::Display);
@@ -274,4 +275,92 @@ fn visible_content_external_tools_and_over_budget_sources_are_refused() {
         engine.typeset_with_preamble(MATH, &huge_formula, "% comment"),
         Err(TexError::Preamble { .. })
     ));
+}
+
+/// Leftmost glyph origin of the glyphs whose source starts inside `bytes`.
+fn line_start(typeset: &fmn_tex::Typeset, bytes: std::ops::Range<usize>) -> f64 {
+    typeset
+        .layout
+        .glyphs
+        .iter()
+        .filter(|glyph| bytes.contains(&glyph.span.start))
+        .map(|glyph| glyph.x)
+        .fold(f64::INFINITY, f64::min)
+}
+
+#[test]
+fn line_alignment_places_each_line_by_its_slack_and_keeps_body_spans() {
+    let engine = engine();
+    // "ab" is the short first line; the second line starts at byte 4.
+    let source = r"ab\\abcdefgh";
+    let short_line_lead = |align| {
+        let typeset = engine
+            .typeset_aligned(Mode::Text, source, "", align)
+            .unwrap();
+        assert_eq!(typeset.source, source);
+        for sub in &typeset.subs {
+            assert!(sub.span.end <= source.len(), "{align:?}: {:?}", sub.span);
+        }
+        line_start(&typeset, 0..2) - line_start(&typeset, 4..source.len())
+    };
+    let left = short_line_lead(LineAlign::Left);
+    let center = short_line_lead(LineAlign::Center);
+    let right = short_line_lead(LineAlign::Right);
+    assert!(left.abs() < 1e-9, "{left}");
+    assert!(right > 1.0, "{right}");
+    // Centering places half of the slack that flush-right places.
+    assert!((center - right / 2.0).abs() < 1e-9, "{center} vs {right}");
+    // Left is the preamble path, byte for byte.
+    let preamble = r"\newcommand{\mine}{x}";
+    assert_eq!(
+        engine
+            .typeset_aligned(Mode::Text, source, preamble, LineAlign::Left)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
+        engine
+            .typeset_with_preamble(Mode::Text, source, preamble)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+    );
+}
+
+#[test]
+fn aligned_bodies_keep_preamble_macros_and_body_spans() {
+    let engine = engine();
+    let source = r"\mine\\ab";
+    let typeset = engine
+        .typeset_aligned(
+            Mode::Text,
+            source,
+            r"\newcommand{\mine}{$x^2$}",
+            LineAlign::Center,
+        )
+        .unwrap();
+    assert_eq!(typeset.source, source);
+    assert!(!typeset.occurrences(r"\mine")[0].is_empty());
+    assert!(!typeset.occurrences("ab")[0].is_empty());
+    for sub in &typeset.subs {
+        assert!(source.is_char_boundary(sub.span.start));
+        assert!(sub.span.end <= source.len());
+    }
+}
+
+#[test]
+fn alignment_is_text_only_and_body_errors_keep_body_coordinates() {
+    let engine = engine();
+    assert!(matches!(
+        engine.typeset_aligned(MATH, "x", "", LineAlign::Center),
+        Err(TexError::Preamble { .. })
+    ));
+    let source = r"ab \unknownnativecommand";
+    let expected = engine.typeset(Mode::Text, source).unwrap_err().to_string();
+    for align in [LineAlign::Center, LineAlign::Right] {
+        let error = engine
+            .typeset_aligned(Mode::Text, source, "", align)
+            .unwrap_err();
+        assert!(matches!(error, TexError::Math(_)), "{align:?}: {error}");
+        assert_eq!(error.to_string(), expected, "{align:?}");
+    }
 }
