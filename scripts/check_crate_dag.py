@@ -81,6 +81,11 @@ EXPECTED: dict[str, set[str]] = {
         "fmn-tex",
         "fmn-library",
         "fmn-scene",
+        "fmn-render",
+        "fmn-output",
+        "fmn-frame",
+        "fmn-codec",
+        "fmn-runtime",
     },
     # The standalone composition root consumes the native facade, Lumen,
     # frame conversion, codecs, and Reel directly; it does not duplicate any

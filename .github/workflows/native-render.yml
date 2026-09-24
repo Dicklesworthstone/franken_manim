@@ -1,0 +1,37 @@
+name: Native Rust scene rendering
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/fmn/**"
+      - "Cargo.lock"
+      - ".github/workflows/native-render.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_TARGET_DIR: target/native-render
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/native-render
+          key: native-render-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - run: cargo test --locked -p fmn --test native_render --test public_api
+      - run: cargo check --locked -p fmn --examples
+      - run: cargo fmt -p fmn -- --check

@@ -17,6 +17,11 @@ fmn-text.workspace = true
 fmn-tex.workspace = true
 fmn-library.workspace = true
 fmn-scene.workspace = true
+fmn-render.workspace = true
+fmn-output.workspace = true
+fmn-frame.workspace = true
+fmn-codec.workspace = true
+fmn-runtime.workspace = true
 
 [lints]
 workspace = true

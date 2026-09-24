@@ -64,6 +64,9 @@ use fmn_scene::{
 use fmn_tex::TexError;
 
 pub mod prelude;
+pub mod rendering;
+
+pub use rendering::{RenderError, RenderFormat, RenderOptions, RenderReport, render, render_with_fs};
 
 /// Built-in native scenes shipped with the standalone binary.
 ///

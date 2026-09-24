@@ -4,7 +4,10 @@
 //! crates. Less-common surfaces remain discoverable under `fmn::animation`,
 //! `fmn::library`, `fmn::scene`, and the other named modules.
 
-pub use crate::{CompletedScene, Error, ErrorKind, SceneConstruct, Stage, run_scene};
+pub use crate::{
+    CompletedScene, Error, ErrorKind, RenderError, RenderFormat, RenderOptions, RenderReport,
+    SceneConstruct, Stage, render, render_with_fs, run_scene,
+};
 pub use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationGroup, FramePacket, IntoAnimation, IntoAnimations,
     MoveAlongPath, RateFunc, Rotating, ShowPartial, Succession, Transform, fade_in, fade_out,

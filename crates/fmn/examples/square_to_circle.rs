@@ -25,8 +25,18 @@ impl SceneConstruct for SquareToCircle {
     }
 }
 
-fn main() -> fmn::Result<()> {
-    let mut sink = NullSceneSink;
-    let _completed = run_scene(&mut SquareToCircle, RuntimeConfig::default(), 0, &mut sink)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let output = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "media/square_to_circle".to_owned());
+    let mut options = RenderOptions::new(output)?;
+    options.config.camera.resolution = (640, 360);
+    options.config.camera.fps = 30;
+    let report = render(&mut SquareToCircle, options)?;
+    println!(
+        "Published {} frames to {}",
+        report.artifact.frame_count,
+        report.artifact.path.display()
+    );
     Ok(())
 }
