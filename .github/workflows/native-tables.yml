@@ -5,11 +5,15 @@ on:
     paths:
       - '.github/workflows/native-tables.yml'
       - 'crates/fmn-library/src/data_mobjects.rs'
+      - 'crates/fmn-library/src/markdown.rs'
       - 'crates/fmn-python/src/portal_table.rs'
       - 'crates/fmn-python/src/portal_typography.rs'
       - 'crates/fmn-python/python/fmn_python/table.py'
       - 'crates/fmn-python/tests/native_table.py'
       - 'crates/fmn-python/tests/live_table.py'
+      - 'crates/fmn-python/python/fmn_python/markdown.py'
+      - 'crates/fmn-python/tests/native_markdown.py'
+      - 'crates/fmn-python/tests/live_markdown.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -46,6 +50,9 @@ jobs:
           set -euo pipefail
           python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
           cargo test --locked -p fmn-library --test data_mobjects 2>&1 | tee /tmp/table-native.log
+          cargo test --locked -p fmn-library markdown::tests 2>&1 | tee /tmp/table-markdown-native.log
+          cargo clippy --locked -p fmn-library --all-targets -- -D warnings 2>&1 | tee /tmp/table-library-clippy.log
+          cargo test --locked -p fmn-python --lib markdown_tests -- --nocapture 2>&1 | tee /tmp/table-markdown-embedded.log
           cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/table-clippy.log
       - name: Build and exercise installed tables
         run: |
@@ -53,7 +60,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/table-wheel 2>&1 | tee /tmp/table-build.log
           python -m venv target/table-venv
           target/table-venv/bin/python -m pip install 'numpy==2.5.2' target/table-wheel/*.whl
-          for suite in native_table live_table text_authoring matrix_authoring portal_initialization; do
+          for suite in native_table live_table native_markdown text_authoring matrix_authoring portal_initialization; do
             target/table-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/table-$suite.log"
           done
       - name: Preserve exact source and evidence
@@ -63,6 +70,7 @@ jobs:
           git diff --exit-code
           git archive --format=tar.gz HEAD > /tmp/table-source.tar.gz
           rustfmt --edition 2024 --emit stdout crates/fmn-python/src/portal_table.rs > /tmp/table-formatted-portal_table.rs
+          rustfmt --edition 2024 --emit stdout crates/fmn-library/src/markdown.rs > /tmp/table-formatted-markdown.rs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

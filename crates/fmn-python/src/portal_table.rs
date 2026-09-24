@@ -1,4 +1,4 @@
-//! Structured typography: bounded native CSV ingestion and table construction.
+//! Structured typography: bounded native CSV, table and Markdown construction.
 //! Atlas owns parsing/layout; this boundary only admits owned host values.
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -135,5 +135,47 @@ fn _build_table<'py>(
 
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_table_from_csv, module)?)?;
-    module.add_function(wrap_pyfunction!(_build_table, module)?)
+    module.add_function(wrap_pyfunction!(_build_table, module)?)?;
+    module.add_function(wrap_pyfunction!(_build_markdown, module)?)
+}
+
+type MarkdownSpecs<'py> = (Bound<'py, PyList>, Vec<(usize, usize)>, Vec<String>);
+
+/// Preserve fmd source byte ranges alongside Scribe's real native blocks.
+#[pyfunction(signature = (slf, factory, source, font_size=48.0, theme="monokai", block_gap=0.45))]
+fn _build_markdown<'py>(
+    slf: &Bound<'py, BridgeMobject>,
+    factory: &Bound<'py, PyAny>,
+    source: &str,
+    font_size: f64,
+    theme: &str,
+    block_gap: f64,
+) -> PyResult<MarkdownSpecs<'py>> {
+    if slf.try_borrow()?.engine.is_some() {
+        return Err(PyValueError::new_err("Markdown construction requires a detached receiver"));
+    }
+    let theme = fmn_library::CodeTheme::from_pygments_name(theme)
+        .ok_or_else(|| PyValueError::new_err("unknown native Markdown code theme"))?;
+    let built = with_font_book(|book| {
+        fmn_library::Markdown::new(source).font_size(font_size).theme(theme)
+            .block_gap(block_gap).build(book).map_err(native_error)
+    })?;
+    let ranges = built.blocks.iter().map(|block| block.byte_range).collect();
+    let kinds = built.blocks.iter().map(|block| block.kind.to_owned()).collect();
+    let specs = install_native_tree(slf, factory, built.vmob)?;
+    Ok((specs, ranges, kinds))
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    #[test]
+    fn native_markdown_source_and_rendering() {
+        crate::with_python_test_module("native Markdown", |py, _module, globals| {
+            let code = std::ffi::CString::new(include_str!("../tests/native_markdown.py")).unwrap();
+            py.run(code.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py)).unwrap();
+            globals.get_item("run_native_markdown_acceptance").unwrap().unwrap()
+                .call0().inspect_err(|error| error.print(py)).unwrap();
+        });
+    }
 }
