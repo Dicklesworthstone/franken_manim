@@ -83,6 +83,7 @@ impl OutputTransform {
             self.map.scale.to_bits(),
             self.map.origin[0].to_bits(),
             self.map.origin[1].to_bits(),
+            u64::from(self.map.y_up),
             u64::from(self.pixel_format),
         ])
     }
@@ -1036,6 +1037,7 @@ mod tests {
                 map: ScreenMap {
                     scale: 2.0,
                     origin: [0.0, 0.0],
+                    y_up: false,
                 },
                 ..output()
             },
@@ -1043,6 +1045,7 @@ mod tests {
                 map: ScreenMap {
                     scale: 1.0,
                     origin: [3.0, 0.0],
+                    y_up: false,
                 },
                 ..output()
             },

@@ -1152,9 +1152,12 @@ mod tests {
         // tier; the reference aggregate is derived from the committed lock
         // (checked per scene by the producer), never pinned here.
         if Tier::COMPILED.name() == "portable" {
+            // Moved by adjudicated inputs only: the scene-golden lock (the
+            // 67b1c438 stroke/fill-profile re-pin, then fm-sq8.9's exact
+            // vertical mirror) and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "a63c6f818be6f3f2d52949a269f58196fd054099a59222b60a78e388b21283f7"
+                "22d85783d39eb1093b9c61fbaa2a79cc5897bf7e5d707fca3e6539888e3a9442"
             );
         }
     }

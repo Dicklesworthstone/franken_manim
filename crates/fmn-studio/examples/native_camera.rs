@@ -216,6 +216,7 @@ fn config(build_id: ProtocolDigest) -> Result<NativeWorkerConfig> {
             ScreenMap {
                 scale: 22.5,
                 origin: [160.0, 90.0],
+                y_up: true,
             },
             camera.background,
         ),

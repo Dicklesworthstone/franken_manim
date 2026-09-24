@@ -230,7 +230,7 @@
     if (!mask) { $("overlay-state").textContent = "Overlays off."; return; }
     if (!data || data.layers !== mask || !matchesFrame()) { $("overlay-state").textContent = "Waiting for overlay data matching the displayed frame…"; return; }
     const v = state.snapshot.view;
-    const point = p => Array.isArray(p) && p.length >= 2 && p.slice(0, 2).every(Number.isFinite) ? [v.origin[0] + p[0] * v.scale, v.origin[1] + p[1] * v.scale] : null;
+    const point = p => Array.isArray(p) && p.length >= 2 && p.slice(0, 2).every(Number.isFinite) ? [v.origin[0] + p[0] * v.scale, v.origin[1] - p[1] * v.scale] : null;
     ctx.lineWidth = Math.max(1, v.width / 960); ctx.font = `${Math.max(10, v.width / 80)}px monospace`;
     let primitives = 0;
     const inspectedNodes = new Map(state.snapshot.nodes.map(node => [node.id, node]));
@@ -498,7 +498,7 @@
     const v = state.snapshot?.view, rect = $("preview").getBoundingClientRect();
     if (!v || !rect.width || !rect.height) return null;
     return {x:((event.clientX - rect.left) * v.width / rect.width - v.origin[0]) / v.scale,
-      y:((event.clientY - rect.top) * v.height / rect.height - v.origin[1]) / v.scale};
+      y:(v.origin[1] - (event.clientY - rect.top) * v.height / rect.height) / v.scale};
   }
   const pointerButton = event => ["left","middle","right"][event.button] || `other:${event.button}`;
   $("preview").addEventListener("pointerdown", event => {

@@ -56,6 +56,7 @@ fn renderer(threads: usize) -> (RetainedFrameRenderer, Camera) {
         ScreenMap {
             scale: 4.5,
             origin: [32.0, 18.0],
+            y_up: false,
         },
         background,
     );

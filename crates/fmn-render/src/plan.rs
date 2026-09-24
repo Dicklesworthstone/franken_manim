@@ -1511,6 +1511,7 @@ mod tests {
         let map = ScreenMap {
             scale: 8.0,
             origin: [8.0, 8.0],
+            y_up: false,
         };
         let config = FrameConfig::new(
             viewport,

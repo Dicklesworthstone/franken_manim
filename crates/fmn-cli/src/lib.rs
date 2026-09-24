@@ -3758,6 +3758,7 @@ fn resolved_frame_config(config: &fmn_config::Config) -> Result<FrameConfig, Cli
         ScreenMap {
             scale: f64::from(height) / config.sizes.frame_height,
             origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
+            y_up: true,
         },
         background,
     )

@@ -1640,6 +1640,7 @@ mod wasm_tier1_determinism_proxy {
             ScreenMap {
                 scale: 20.0,
                 origin: [f64::from(WIDTH) / 2.0, f64::from(HEIGHT) / 2.0],
+                y_up: true,
             },
             Srgb::from_rgb8(0x22, 0x22, 0x22).to_linear(1.0),
         )

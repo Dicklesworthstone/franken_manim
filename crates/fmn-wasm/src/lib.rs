@@ -443,6 +443,7 @@ fn frame_config(width: u32, height: u32) -> FrameConfig {
         ScreenMap {
             scale: f64::from(height) / FRAME_HEIGHT_UNITS,
             origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
+            y_up: true,
         },
         Srgb::from_rgb8(0x00, 0x00, 0x00).to_linear(1.0),
     )

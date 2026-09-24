@@ -82,6 +82,12 @@ pub struct ScreenMap {
     pub scale: f64,
     /// Where object-space `[0, 0]` lands, in pixels.
     pub origin: [f64; 2],
+    /// Object-space +Y points **up** the frame. Frames are top-row-first
+    /// (D-23: no vflip anywhere), so every scene front door — manim's +Y-up
+    /// plane — sets this. `false` is a raw y-down object space (pixel-aligned
+    /// rasterization fixtures); a scene rendered that way is vertically
+    /// mirrored, which is what fm-sq8.9 fixed. Journaled with the map.
+    pub y_up: bool,
 }
 
 impl Default for ScreenMap {
@@ -89,6 +95,7 @@ impl Default for ScreenMap {
         ScreenMap {
             scale: 1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         }
     }
 }
@@ -102,9 +109,51 @@ impl ScreenMap {
     #[must_use]
     pub fn place(&self, p: Vec3, placement: Placement) -> [f64; 2] {
         let world = placement.apply_point(p);
+        self.to_pixel(world[0], world[1])
+    }
+
+    /// Pixels per object unit along +Y: negative when +Y points up a
+    /// top-row-first frame.
+    #[must_use]
+    pub fn y_scale(&self) -> f64 {
+        if self.y_up { -self.scale } else { self.scale }
+    }
+
+    /// A manim-oriented map: +Y up, object `[0, 0]` at `origin`.
+    #[must_use]
+    pub fn y_up(scale: f64, origin: [f64; 2]) -> Self {
+        ScreenMap {
+            scale,
+            origin,
+            y_up: true,
+        }
+    }
+
+    /// Object space → pixels. This, [`Self::delta_to_pixel`] and
+    /// [`Self::to_object`] are the one definition of the mapping; renderer
+    /// stages must not re-derive it (inlined copies once ignored the frame's
+    /// orientation and rendered every 2D scene upside down).
+    #[must_use]
+    pub fn to_pixel(&self, x: f64, y: f64) -> [f64; 2] {
         [
-            self.origin[0] + world[0] * self.scale,
-            self.origin[1] + world[1] * self.scale,
+            self.origin[0] + x * self.scale,
+            self.origin[1] + y * self.y_scale(),
+        ]
+    }
+
+    /// An object-space translation expressed in pixels.
+    #[must_use]
+    pub fn delta_to_pixel(&self, dx: f64, dy: f64) -> [f64; 2] {
+        [dx * self.scale, dy * self.y_scale()]
+    }
+
+    /// Pixels → object space, the inverse of [`Self::to_pixel`] after
+    /// removing a pixel-space `translate` (see [`Self::delta_to_pixel`]).
+    #[must_use]
+    pub fn to_object(&self, px: [f64; 2], translate: [f64; 2]) -> [f64; 2] {
+        [
+            (px[0] - self.origin[0] - translate[0]) / self.scale,
+            (px[1] - self.origin[1] - translate[1]) / self.y_scale(),
         ]
     }
 }
@@ -1228,6 +1277,41 @@ mod tests {
     use crate::plan::RenderPlan;
     use fmn_mobject::{JointType, Mobject, RecordBuffer, RecordSchema, ShapeTag, Stage};
 
+    #[test]
+    fn the_screen_map_is_one_invertible_definition_in_either_orientation() {
+        for y_up in [true, false] {
+            let map = ScreenMap {
+                scale: 67.5,
+                origin: [960.0, 540.0],
+                y_up,
+            };
+            // +Y is up a top-row-first frame exactly when y_up.
+            let above = map.to_pixel(0.0, 1.0);
+            assert_eq!(above[1] < map.origin[1], y_up);
+            assert_eq!(map.to_pixel(2.0, 0.0), [960.0 + 135.0, 540.0]);
+            // A placement's translation and a point move by the same amount.
+            let (p, d) = ([0.75, -1.5], [0.25, 2.0]);
+            let moved = map.to_pixel(p[0] + d[0], p[1] + d[1]);
+            let base = map.to_pixel(p[0], p[1]);
+            let delta = map.delta_to_pixel(d[0], d[1]);
+            assert_eq!(moved, [base[0] + delta[0], base[1] + delta[1]]);
+            // The inverse undoes both, translate included.
+            let translate = [3.0, -7.0];
+            let pixel = [base[0] + translate[0], base[1] + translate[1]];
+            assert_eq!(map.to_object(pixel, translate), p);
+            // `place` is the same map.
+            assert_eq!(map.place([p[0], p[1], 0.0], Placement::default()), base);
+        }
+        assert_eq!(
+            ScreenMap::y_up(2.0, [1.0, 1.0]),
+            ScreenMap {
+                scale: 2.0,
+                origin: [1.0, 1.0],
+                y_up: true
+            }
+        );
+    }
+
     fn rect_mobject(cx: f64, cy: f64, w: f64, h: f64, fill_alpha: f32) -> Mobject {
         let (hw, hh) = (0.5 * w, 0.5 * h);
         let pts: Vec<[f64; 3]> = vec![
@@ -1704,6 +1788,7 @@ mod tests {
         let flipped = ScreenMap {
             scale: -1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         let b = Binning::build(&plan, viewport(), Tiling::default(), flipped)
             .expect("bounded test binning");

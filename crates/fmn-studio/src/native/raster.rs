@@ -182,6 +182,7 @@ impl NativeRaster {
                     f64::from(camera.pixel_width()) * 0.5,
                     f64::from(camera.pixel_height()) * 0.5,
                 ],
+                y_up: true,
             });
         snapshot.view = Some(
             InspectorView::new(

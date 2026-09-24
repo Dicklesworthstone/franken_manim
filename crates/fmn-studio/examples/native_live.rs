@@ -162,6 +162,7 @@ fn config(build_id: ProtocolDigest) -> NativeWorkerConfig {
             ScreenMap {
                 scale: 45.0,
                 origin: [320.0, 180.0],
+                y_up: true,
             },
             LinearRgba {
                 r: 0.0,

@@ -279,7 +279,10 @@ pub const FRAME_SCHEMA: Schema = Schema::new(*b"FMNE", 2, 1, 0);
 /// every pixel. It is deliberately not the crate version: a refactor that cannot
 /// move a bit must not invalidate a manifest, and a one-line change to the AA
 /// profile must.
-pub const RENDERER_VERSION: u32 = 6;
+///
+/// 7: the 2D screen map sends object +Y up the frame (fm-sq8.9); version 6
+/// rendered every 2D frame vertically mirrored.
+pub const RENDERER_VERSION: u32 = 7;
 
 /// Boundary-sheet count at which an adaptive cell escalates to 2×2 samples.
 ///
@@ -883,6 +886,7 @@ pub fn journal(identity: EngineIdentity, config: &FrameConfig, tiling: Tiling) -
     w.put_f64(config.map.scale);
     w.put_f64(config.map.origin[0]);
     w.put_f64(config.map.origin[1]);
+    w.put_bool(config.map.y_up);
     w.put_f64(config.background.r);
     w.put_f64(config.background.g);
     w.put_f64(config.background.b);
@@ -3271,10 +3275,8 @@ fn hull_slab(segments: &[Segment], map: ScreenMap, translate: [f64; 2]) -> [f64;
         return [0.0; 4];
     }
     let to_px = |p: fmn_core::types::Vec3| {
-        [
-            map.origin[0] + p[0] * map.scale + translate[0],
-            map.origin[1] + p[1] * map.scale + translate[1],
-        ]
+        let q = map.to_pixel(p[0], p[1]);
+        [q[0] + translate[0], q[1] + translate[1]]
     };
     let mut slab = [
         f64::INFINITY,
@@ -3455,6 +3457,7 @@ mod tests {
             ScreenMap {
                 scale: 1.0,
                 origin: [0.0, 0.0],
+                y_up: false,
             },
             LinearRgba {
                 r: 0.04,
@@ -4258,6 +4261,7 @@ mod tests {
         let map = ScreenMap {
             scale: 1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         let style = Style {
             stroke_width: 299.0,

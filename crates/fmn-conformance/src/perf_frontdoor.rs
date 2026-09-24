@@ -1731,9 +1731,10 @@ mod tests {
         assert_eq!(opening_a, opening_b);
         assert_eq!(
             sha256(&opening_a).to_string(),
-            // Re-pinned for rich native typography & syntax-highlighted Code:
-            // Text layout uses layout_text_with_style.
-            "9c6bc3dac43062931426b0f7ed5da08bcc6e58f96659be9fbb1e8d41670d92ed"
+            // The bundle binds its renderer and animation-law identity:
+            // re-pinned for fmtl-law:2 (835cc580) and renderer version 7
+            // (fm-sq8.9, +Y up the frame).
+            "bf2074f2a1acb95e60dab748705f3eccb6affd280fad787aefc2551eff62e13f"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);

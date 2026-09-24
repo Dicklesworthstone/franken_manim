@@ -80,10 +80,7 @@ impl GradientField<'_> {
                 };
                 let t = fmn_geom::arclength::t_at_arc_fraction(g.p0, g.p1, g.p2, frac);
                 let p = fmn_geom::bezier::quadratic_point(g.p0, g.p1, g.p2, t);
-                points.put([
-                    map.origin[0] + p[0] * map.scale,
-                    map.origin[1] + p[1] * map.scale,
-                ]);
+                points.put(map.to_pixel(p[0], p[1]));
                 params.put(profile.endpoint_parameter(s, outgoing));
                 let current = points.len() - field_start - 1;
                 next.put(if outgoing { first } else { current + 1 });
@@ -291,6 +288,7 @@ mod tests {
             &[0],
             ScreenMap {
                 origin: [0.; 2],
+                y_up: false,
                 scale: 1.,
             },
             &p,
@@ -349,6 +347,7 @@ mod tests {
         let (mut points, mut params, mut next, mut edges) = (vec![], vec![], vec![], vec![]);
         let map = ScreenMap {
             origin: [0.; 2],
+            y_up: false,
             scale: 1.,
         };
         GradientField::build_profile_into(

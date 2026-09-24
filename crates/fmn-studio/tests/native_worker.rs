@@ -79,6 +79,7 @@ fn config() -> NativeWorkerConfig {
             ScreenMap {
                 scale: 16.0,
                 origin: [32.0, 32.0],
+                y_up: true,
             },
             LinearRgba {
                 r: 0.0,

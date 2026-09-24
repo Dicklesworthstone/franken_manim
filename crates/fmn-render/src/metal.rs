@@ -2234,10 +2234,8 @@ fn push_segment(
     straight_hint: bool,
 ) {
     let screen = |point: [f64; 3]| {
-        [
-            config.map.origin[0] + point[0] * config.map.scale + translate[0],
-            config.map.origin[1] + point[1] * config.map.scale + translate[1],
-        ]
+        let q = config.map.to_pixel(point[0], point[1]);
+        [q[0] + translate[0], q[1] + translate[1]]
     };
     let p0 = screen(segment.p0);
     let p1 = screen(segment.p1);
@@ -2614,6 +2612,7 @@ mod tests {
             ScreenMap {
                 scale: 1.0,
                 origin: [8.0, 8.0],
+                y_up: false,
             },
             LinearRgba {
                 r: 0.0,
@@ -2664,6 +2663,7 @@ mod tests {
             ScreenMap {
                 scale: 1.0,
                 origin: [8.0, 8.0],
+                y_up: false,
             },
             LinearRgba {
                 r: 0.04,

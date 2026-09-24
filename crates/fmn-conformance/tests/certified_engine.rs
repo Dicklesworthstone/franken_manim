@@ -106,10 +106,11 @@ fn config() -> FrameConfig {
         },
         ScreenMap {
             scale: SCALE,
-            // Object-space origin at the frame centre, with +y downward: the
-            // engine has no camera yet (that is fm-0gy), so the map carries the
-            // placement and a positive scale keeps `screen_aabb` honest.
+            // Object-space origin at the frame centre, +Y up the frame like
+            // every scene front door (fm-sq8.9 retired the pre-camera +y-down
+            // convention that rendered this corpus mirrored).
             origin: [f64::from(WIDTH) / 2.0, f64::from(HEIGHT) / 2.0],
+            y_up: true,
         },
         // The Reference's #333333, decoded once here rather than per pixel.
         Srgb::from_rgb8(0x33, 0x33, 0x33).to_linear(1.0),

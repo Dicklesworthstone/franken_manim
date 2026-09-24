@@ -817,6 +817,7 @@ mod tests {
                 ScreenMap {
                     scale: 2.25,
                     origin: [16.0, 9.0],
+                    y_up: false,
                 },
                 LinearRgba {
                     r: 0.0,
@@ -1016,6 +1017,60 @@ mod tests {
             .render_with_camera(&stage, &camera)
             .expect("camera-bound vector frame");
         assert_ne!(affine.frame().as_bytes(), camera_bound.frame().as_bytes());
+    }
+
+    /// Blue-channel coverage of each row (the vector fill is blue on black).
+    fn row_blue(frame: &FrameBuffer) -> Vec<f64> {
+        (0..18)
+            .map(|y| (0..32).map(|x| pixel(frame, x, y)[2]).sum())
+            .collect()
+    }
+
+    /// Topmost and bottommost rows the shape covers.
+    fn covered_extent(rows: &[f64]) -> (usize, usize) {
+        let covered: Vec<usize> = (0..rows.len()).filter(|&y| rows[y] > 0.05).collect();
+        (covered[0], *covered.last().expect("the shape is visible"))
+    }
+
+    #[test]
+    fn object_plus_y_is_the_top_of_a_scene_frame_on_both_routes() {
+        // fm-sq8.9. `vector()` is a triangle whose apex (y = 1.25) points +Y
+        // and whose base lies at y = -1: in a correctly oriented frame it is
+        // narrow at its topmost covered row and wide at its bottommost.
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).expect("live root");
+
+        let mut oriented = config(1);
+        oriented.frame.map.y_up = true;
+        let mut retained = RetainedFrameRenderer::new(oriented).expect("valid renderer");
+        retained.render(&stage, 0).expect("oriented 2D frame");
+        let up = row_blue(retained.frame());
+        let (top, bottom) = covered_extent(&up);
+        assert!(
+            up[top] < up[bottom],
+            "apex must be at the top of the frame: rows {up:?}"
+        );
+
+        let mut camera_route = RetainedFrameRenderer::new(oriented).expect("valid renderer");
+        camera_route
+            .render_with_camera(&stage, &camera())
+            .expect("camera frame");
+        let projected = row_blue(camera_route.frame());
+        let (top, bottom) = covered_extent(&projected);
+        assert!(
+            projected[top] < projected[bottom],
+            "the camera route agrees on orientation: rows {projected:?}"
+        );
+
+        // The raw y-down map (pixel-aligned fixtures) is the exact mirror:
+        // the origin sits on the frame's horizontal centre line.
+        let mut raw = RetainedFrameRenderer::new(config(1)).expect("valid renderer");
+        raw.render(&stage, 0).expect("raw frame");
+        let mirrored: Vec<f64> = row_blue(raw.frame()).into_iter().rev().collect();
+        for (row, (a, b)) in up.iter().zip(&mirrored).enumerate() {
+            assert!((a - b).abs() < 1e-2, "row {row}: {a} vs mirrored {b}");
+        }
     }
 
     #[test]

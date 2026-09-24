@@ -297,6 +297,7 @@ fn inspector_view_is_additive_and_obeys_the_exact_json_byte_limit() {
             fmn_render::ScreenMap {
                 scale: 6.75,
                 origin: [48.0, 27.0],
+                y_up: true,
             },
             false,
         )
@@ -334,6 +335,7 @@ fn inspector_view_refuses_malformed_range_geometry_and_maps() {
     let map = fmn_render::ScreenMap {
         scale: 6.75,
         origin: [48.0, 27.0],
+        y_up: true,
     };
     for (index, count, fps) in [(0, 0, 8), (3, 3, 8), (0, u64::MAX, 8), (0, 3, 0)] {
         assert!(matches!(

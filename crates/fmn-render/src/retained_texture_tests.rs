@@ -26,6 +26,7 @@ fn config(threads: usize) -> RetainedFrameRendererConfig {
             ScreenMap {
                 scale: 2.25,
                 origin: [16.0, 9.0],
+                y_up: false,
             },
             LinearRgba {
                 r: 0.0,

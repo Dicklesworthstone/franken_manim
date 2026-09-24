@@ -1806,6 +1806,7 @@ fn unit_screen_map() -> ScreenMap {
     ScreenMap {
         scale: 1.0,
         origin: [0.0; 2],
+        y_up: false,
     }
 }
 

@@ -502,12 +502,7 @@ impl MonoTable {
         subpath_starts: &[u32],
         map: ScreenMap,
     ) -> Result<PieceLayout, MonoTableError> {
-        let screen = |p: fmn_core::types::Vec3| {
-            [
-                map.origin[0] + p[0] * map.scale,
-                map.origin[1] + p[1] * map.scale,
-            ]
-        };
+        let screen = |p: fmn_core::types::Vec3| map.to_pixel(p[0], p[1]);
         let mut pieces = 0usize;
         let mut max_subpath_segments = 0usize;
         for (index, &start) in subpath_starts.iter().enumerate() {
@@ -674,12 +669,7 @@ impl MonoTable {
         subpath_starts: &[u32],
         map: ScreenMap,
     ) {
-        let screen = |p: fmn_core::types::Vec3| {
-            [
-                map.origin[0] + p[0] * map.scale,
-                map.origin[1] + p[1] * map.scale,
-            ]
-        };
+        let screen = |p: fmn_core::types::Vec3| map.to_pixel(p[0], p[1]);
         for (index, &start) in subpath_starts.iter().enumerate() {
             let end = subpath_starts
                 .get(index + 1)
@@ -762,7 +752,7 @@ pub fn instance_translation(inst: &Instance, map: ScreenMap) -> [f64; 2] {
         "non-translation placements require frame-local transformed pieces"
     );
     let translation = inst.placement.translation();
-    [translation[0] * map.scale, translation[1] * map.scale]
+    map.delta_to_pixel(translation[0], translation[1])
 }
 
 /// The parameter of a quadratic component's extremum, if it lies strictly inside
@@ -2364,10 +2354,7 @@ impl<'a> GradientField<'a> {
                 );
                 let point =
                     fmn_geom::bezier::quadratic_point(segment.p0, segment.p1, segment.p2, t);
-                points.put([
-                    map.origin[0] + point[0] * map.scale,
-                    map.origin[1] + point[1] * map.scale,
-                ]);
+                points.put(map.to_pixel(point[0], point[1]));
                 params.put(s);
                 next.put(if station + 1 < own_station_count {
                     station_start + station + 1
@@ -2426,10 +2413,7 @@ impl<'a> GradientField<'a> {
             };
             let t = fmn_geom::arclength::t_at_arc_fraction(g.p0, g.p1, g.p2, frac);
             let p = fmn_geom::bezier::quadratic_point(g.p0, g.p1, g.p2, t);
-            points.put([
-                map.origin[0] + p[0] * map.scale,
-                map.origin[1] + p[1] * map.scale,
-            ]);
+            points.put(map.to_pixel(p[0], p[1]));
             params.put(s);
         }
     }
@@ -2735,11 +2719,8 @@ fn nearest_boundary_location(
     if scale == 0.0 || segments.is_empty() {
         return None;
     }
-    let obj = [
-        (p[0] - map.origin[0] - translate[0]) / scale,
-        (p[1] - map.origin[1] - translate[1]) / scale,
-        0.0,
-    ];
+    let [ox, oy] = map.to_object(p, translate);
+    let obj = [ox, oy, 0.0];
     let mut best_d = f64::INFINITY;
     let mut best_s = 0.0;
     let mut at_end = false;
@@ -2966,10 +2947,8 @@ impl FillKernel {
         translate: [f64; 2],
     ) -> FillKernel {
         let to_px = |p: [f64; 3]| {
-            [
-                map.origin[0] + p[0] * map.scale + translate[0],
-                map.origin[1] + p[1] * map.scale + translate[1],
-            ]
+            let q = map.to_pixel(p[0], p[1]);
+            [q[0] + translate[0], q[1] + translate[1]]
         };
         let scale = map.scale.abs();
         // A hinted kernel is a closed form for **one** region, and every hint in
@@ -3280,12 +3259,7 @@ mod tests {
     /// the one that ships.
     fn pieces_of_path(path: &QuadPath, map: ScreenMap) -> Vec<MonoPiece> {
         let mut out = Vec::new();
-        let s = |p: Vec3| {
-            [
-                map.origin[0] + p[0] * map.scale,
-                map.origin[1] + p[1] * map.scale,
-            ]
-        };
+        let s = |p: Vec3| map.to_pixel(p[0], p[1]);
         let mut curves: Vec<[[f64; 2]; 3]> = Vec::new();
         for i in 0..path.num_curves() {
             let Some([p0, p1, p2]) = path.nth_curve_points(i) else {
@@ -3330,6 +3304,7 @@ mod tests {
         ScreenMap {
             scale: 1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         }
     }
 
@@ -3817,6 +3792,7 @@ mod tests {
             ScreenMap {
                 scale: 3.0,
                 origin: [2.0, 1.0],
+                y_up: false,
             },
         );
         let got = total_coverage(&big, 32, 32, 8);
@@ -4772,6 +4748,7 @@ mod tests {
             ScreenMap {
                 scale: 3.0,
                 origin: [0.0, 0.0],
+                y_up: false,
             },
         );
         let zoomed = GradientField::from_parts(&z_points, &z_params);
@@ -4893,6 +4870,7 @@ mod tests {
         let map = ScreenMap {
             scale: 135.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         assert!((border_width_px(1.0, map) - 1.35).abs() < 1e-12);
         assert!((border_width_px(4.0, map) - 5.4).abs() < 1e-12);
@@ -4988,6 +4966,7 @@ mod tests {
         let map = ScreenMap {
             scale: 1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         let mut points = Vec::new();
         let mut params = Vec::new();
@@ -5087,6 +5066,7 @@ mod tests {
         let map = ScreenMap {
             scale: 1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         for k in 1..8u32 {
             let theta = std::f64::consts::TAU * f64::from(k) / 8.0;
@@ -5106,6 +5086,7 @@ mod tests {
         let map = ScreenMap {
             scale: 2.0,
             origin: [7.0, -3.0],
+            y_up: false,
         };
         let here = nearest_boundary(&segs, map, [0.0, 0.0], [7.0, -3.0]).expect("segments");
         let there = nearest_boundary(&segs, map, [40.0, 60.0], [47.0, 57.0]).expect("segments");
@@ -5129,7 +5110,8 @@ mod tests {
                 &segs,
                 ScreenMap {
                     scale: 0.0,
-                    origin: [0.0, 0.0]
+                    origin: [0.0, 0.0],
+                    y_up: false,
                 },
                 [0.0, 0.0],
                 [1.0, 1.0]
@@ -5258,6 +5240,7 @@ mod tests {
         let map = ScreenMap {
             scale: px_per_unit,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         for (radius, admitted) in [(0.08f64, true), (2.0f64, false)] {
             let path = circle_path(0.0, 0.0, radius, 16);
@@ -5319,6 +5302,7 @@ mod tests {
         let map = ScreenMap {
             scale: 135.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         // The same hint on the same outer circle alone IS admitted, so the
         // decline is about the second subpath and not about the radius.
@@ -5567,6 +5551,7 @@ mod tests {
         let map = ScreenMap {
             scale: 135.0,
             origin: [10.0, 20.0],
+            y_up: false,
         };
         let disc = |k: FillKernel| match k {
             FillKernel::Disc { center, radius } => Some((center, radius)),

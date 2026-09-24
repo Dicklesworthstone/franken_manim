@@ -208,6 +208,7 @@ impl CameraCapture {
             ScreenMap {
                 scale: f64::from(height) / fmn_core::constants::FRAME_HEIGHT,
                 origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
+                y_up: true,
             },
             background,
         )

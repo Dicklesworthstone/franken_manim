@@ -436,6 +436,7 @@ fn frame_config() -> FrameConfig {
         ScreenMap {
             scale: SCALE,
             origin: [f64::from(WIDTH) / 2.0, f64::from(HEIGHT) / 2.0],
+            y_up: true,
         },
         Srgb::from_rgb8(0x33, 0x33, 0x33).to_linear(1.0),
     )
@@ -496,14 +497,19 @@ fn integer_pixel_translation_translates_the_frame() {
     let (stage, mobs) = translation_scene();
     let base = render(&stage);
     let mut shifted_stage = stage;
-    // +1.0, −0.5 object units at 60 px/unit is EXACTLY (+60, −30) screen
-    // pixels — an integer-pixel translation with no rounding anywhere.
+    // +1.0, −0.5 object units at 60 px/unit is EXACTLY 60 and 30 screen
+    // pixels — an integer-pixel translation with no rounding anywhere. The
+    // map decides the direction (+Y is up the frame, fm-sq8.9); the law is
+    // that the frame translates by exactly that many pixels.
+    let shift = [1.0, -0.5];
     for mob in &mobs {
-        shifted_stage.shift(*mob, [1.0, -0.5, 0.0]);
+        shifted_stage.shift(*mob, [shift[0], shift[1], 0.0]);
     }
     let shifted = render(&shifted_stage);
 
-    let (dx, dy) = (-60i64, 30i64);
+    let moved = frame_config().map.delta_to_pixel(shift[0], shift[1]);
+    assert_eq!(moved, [60.0, 30.0], "an integer-pixel translation");
+    let (dx, dy) = (-(moved[0] as i64), -(moved[1] as i64));
     let mut differing = 0u64;
     let mut worst = 0.0f64;
     // Stay 8 px inside the frame: binning clips at the viewport, and the

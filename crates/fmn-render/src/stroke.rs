@@ -158,10 +158,8 @@ pub fn stroke_rgba_at(style: &Style, s: f64) -> [f32; 4] {
 #[must_use]
 pub fn segment_slab(seg: &Segment, style: &Style, map: ScreenMap, translate: [f64; 2]) -> [f64; 4] {
     let to_px = |p: fmn_core::types::Vec3| {
-        [
-            map.origin[0] + p[0] * map.scale + translate[0],
-            map.origin[1] + p[1] * map.scale + translate[1],
-        ]
+        let q = map.to_pixel(p[0], p[1]);
+        [q[0] + translate[0], q[1] + translate[1]]
     };
     let pts = [to_px(seg.p0), to_px(seg.p1), to_px(seg.p2)];
     let mut lo = [f64::INFINITY; 2];
@@ -280,11 +278,8 @@ impl<'a> PreparedStroke<'a> {
         if scale == 0.0 || segments.is_empty() || segments.len() != self.segments.len() {
             return None;
         }
-        let obj = [
-            (p[0] - map.origin[0] - translate[0]) / scale,
-            (p[1] - map.origin[1] - translate[1]) / scale,
-            0.0,
-        ];
+        let [ox, oy] = map.to_object(p, translate);
+        let obj = [ox, oy, 0.0];
         let mut best = f64::INFINITY;
         let mut best_s = 0.0;
         let mut admitted = false;
@@ -465,11 +460,8 @@ pub fn stroke_nearest(
     if scale == 0.0 || segments.is_empty() {
         return None;
     }
-    let obj = [
-        (p[0] - map.origin[0] - translate[0]) / scale,
-        (p[1] - map.origin[1] - translate[1]) / scale,
-        0.0,
-    ];
+    let [ox, oy] = map.to_object(p, translate);
+    let obj = [ox, oy, 0.0];
     let mut best = f64::INFINITY;
     let mut best_s = 0.0;
     for g in segments {
@@ -719,10 +711,8 @@ pub(crate) fn join_wedges_into(
         return;
     }
     let to_px = |p: fmn_core::types::Vec3| {
-        [
-            map.origin[0] + p[0] * map.scale + translate[0],
-            map.origin[1] + p[1] * map.scale + translate[1],
-        ]
+        let q = map.to_pixel(p[0], p[1]);
+        [q[0] + translate[0], q[1] + translate[1]]
     };
     // A quadratic's tangents are `2(p1 − p0)` and `2(p2 − p1)`; a coincident
     // handle leaves one of them zero, so the chord stands in.
@@ -873,6 +863,7 @@ mod tests {
         ScreenMap {
             scale: 1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         }
     }
 
@@ -935,6 +926,7 @@ mod tests {
         let map = ScreenMap {
             scale: 60.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         let quantized_line = segment(
             [0.0, 0.0, 0.0],
@@ -983,6 +975,7 @@ mod tests {
         let map = ScreenMap {
             scale: 60.0,
             origin: [160.0, 90.0],
+            y_up: false,
         };
         let style = flat_stroke_style(14.0);
         let translate = [40.8, -84.0];
@@ -997,6 +990,7 @@ mod tests {
         let map = ScreenMap {
             scale: 135.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         assert!((width_px(1.0, map) - 1.35).abs() < 1e-12);
         assert!(
@@ -1262,6 +1256,7 @@ mod tests {
         let map = ScreenMap {
             scale: 2.0,
             origin: [5.0, 7.0],
+            y_up: false,
         };
         let translate = [11.0, -3.0];
         let slab = segment_slab(&segs[0], &style, map, translate);
@@ -1365,10 +1360,12 @@ mod tests {
             ScreenMap {
                 scale: 1.75,
                 origin: [7.0, -4.0],
+                y_up: false,
             },
             ScreenMap {
                 scale: -1.75,
                 origin: [7.0, -4.0],
+                y_up: false,
             },
         ] {
             for joint_type in [JointType::Auto, JointType::Bevel, JointType::Miter] {
@@ -1458,6 +1455,7 @@ mod tests {
         let degenerate_map = ScreenMap {
             scale: 0.0,
             origin: [0.0, 0.0],
+            y_up: false,
         };
         assert_eq!(
             stroke_excess_px(&segs, &style, degenerate_map, [0.0, 0.0], [1.0, 1.0]),
@@ -1835,6 +1833,7 @@ mod tests {
         let map = ScreenMap {
             scale: 3.0,
             origin: [4.0, 9.0],
+            y_up: false,
         };
         let here = stroke_coverage(&segs, &style, map, [0.0, 0.0], [4.0 + 30.0, 9.0]);
         let there = stroke_coverage(&segs, &style, map, [60.0, -21.0], [4.0 + 90.0, -12.0]);
