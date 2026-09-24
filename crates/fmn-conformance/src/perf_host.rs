@@ -24,10 +24,11 @@ use std::time::Duration;
 /// Stable exact-host profile schema.
 pub const HOST_PROFILE_SCHEMA: &str = "fmn-perf-host-profile/1";
 /// Stable content-addressed live-attestation schema.
-pub const HOST_ATTESTATION_SCHEMA: &str = "fmn-perf-host-attestation/2";
+pub const HOST_ATTESTATION_SCHEMA: &str = "fmn-perf-host-attestation/3";
 
 /// Fixed continuous-monitor policy recorded in every qualified attestation.
-pub const HOST_MONITOR_POLICY: &str = "linux-live-state-250ms-plus-full-postflight-v1";
+pub const HOST_MONITOR_POLICY: &str =
+    "linux-live-state-250ms-slice-quiescence-plus-full-postflight-v2";
 /// Sampling interval for volatile live host state during a qualified run.
 pub const HOST_MONITOR_INTERVAL_MILLIS: u64 = 250;
 
@@ -38,7 +39,16 @@ const MAX_TOKEN_BYTES: usize = 160;
 const MAX_PATH_BYTES: usize = 512;
 const MAX_KERNEL_BYTES: usize = 4 * 1024;
 const MAX_CGROUP_PROCESSES: usize = 4_096;
+/// Size of the benchmark slice in distinct physical cores. The machine may be
+/// larger: ADR-0024 qualifies an isolated slice, not a machine shape.
 const LINUX_PHYSICAL_CORES: u32 = 8;
+/// Busy ceiling, in permille of their CPU time since the monitor started, for
+/// the SMT siblings of the benchmark cores (ADR-0024: siblings carry no work).
+const MAX_SIBLING_BUSY_PERMILLE: u64 = 10;
+/// Aggregate busy ceiling, in permille of their CPU time since the monitor
+/// started, for every CPU outside the benchmark cores and their siblings
+/// (ADR-0024: the rest of the machine is quiescent while a slice measures).
+const MAX_BACKGROUND_BUSY_PERMILLE: u64 = 50;
 
 const SUITE_LOCK_BYTES: &[u8] = include_bytes!("../../../SUITE.lock");
 const RUST_TOOLCHAIN_BYTES: &[u8] = include_bytes!("../../../rust-toolchain.toml");
@@ -305,6 +315,7 @@ pub struct HostQualification {
     evidence: EvidenceRef,
     attestation_tsv: String,
     profile: HostProfile,
+    plan: IsolationPlan,
     artifact_path: PathBuf,
     process_id: u32,
 }
@@ -445,10 +456,15 @@ impl HostQualification {
         interval: Duration,
     ) -> Result<HostMonitor, HostError> {
         let profile = self.profile.clone();
+        let plan = self.plan.clone();
         let artifact_path = self.artifact_path.clone();
         let pid = self.process_id;
+        // Quiescence is judged cumulatively from this baseline, so the final
+        // sample covers the whole measurement window.
+        let baseline = read_cpu_ticks(fs.as_ref())?;
         HostMonitor::start_with_probe(interval, move || {
-            validate_linux_live_state(&profile, fs.as_ref(), &artifact_path, pid).map(|_| ())
+            validate_linux_live_state(&profile, &plan, fs.as_ref(), &artifact_path, pid)?;
+            require_quiescence(&plan, &baseline, &read_cpu_ticks(fs.as_ref())?)
         })
     }
 
@@ -677,20 +693,16 @@ fn attest_linux_host(
 
     let topology = HardwareTopology::detect_linux(fs)
         .map_err(|error| HostError::Probe(format!("topology: {error}")))?;
-    if topology.physical_cores != LINUX_PHYSICAL_CORES {
-        return Err(HostError::Mismatch(format!(
-            "linux profile requires {LINUX_PHYSICAL_CORES} physical cores, found {}",
-            topology.physical_cores
-        )));
-    }
+    // The digest pins the whole machine's topology; the slice below is what
+    // is measured and isolated, whatever the machine's size (ADR-0024).
     require_digest(
         "topology_digest",
         profile.topology_digest,
         sha256(topology.snapshot_text().as_bytes()),
     )?;
-    require_eight_distinct_cores(profile, &topology)?;
+    let plan = isolation_plan(profile, &topology)?;
 
-    let live = validate_linux_live_state(profile, fs, artifact_path, pid)?;
+    let live = validate_linux_live_state(profile, &plan, fs, artifact_path, pid)?;
 
     let host_fingerprint = profile.digest();
     let toolchain_fingerprint = compiled_toolchain_fingerprint();
@@ -713,6 +725,8 @@ fn attest_linux_host(
         ),
         ("topology_digest", profile.topology_digest.to_string()),
         ("benchmark_cpus", format_cpu_list(&profile.benchmark_cpus)),
+        ("reserved_cpus", format_cpu_list(&plan.reserved)),
+        ("numa_node", plan.numa_node.to_string()),
         ("cgroup_path", profile.cgroup_path.clone()),
         ("governor", profile.governor.clone()),
         ("boost_value", profile.boost_value.clone()),
@@ -737,6 +751,14 @@ fn attest_linux_host(
             "monitor_interval_millis",
             HOST_MONITOR_INTERVAL_MILLIS.to_string(),
         ),
+        (
+            "sibling_busy_ceiling_permille",
+            MAX_SIBLING_BUSY_PERMILLE.to_string(),
+        ),
+        (
+            "background_busy_ceiling_permille",
+            MAX_BACKGROUND_BUSY_PERMILLE.to_string(),
+        ),
         ("process_id", pid.to_string()),
         ("bare_metal", "true".to_owned()),
         ("isolated", "true".to_owned()),
@@ -757,6 +779,7 @@ fn attest_linux_host(
         evidence,
         attestation_tsv: attestation,
         profile: profile.clone(),
+        plan,
         artifact_path: artifact_path.to_path_buf(),
         process_id: pid,
     })
@@ -771,6 +794,7 @@ struct LinuxLiveState {
 
 fn validate_linux_live_state(
     profile: &HostProfile,
+    plan: &IsolationPlan,
     fs: &dyn FileSystem,
     artifact_path: &Path,
     pid: u32,
@@ -787,7 +811,7 @@ fn validate_linux_live_state(
         let text = read_required(fs, Path::new(path), MAX_KERNEL_BYTES)?;
         let cpus = parse_cpu_list(text.trim())
             .map_err(|error| HostError::Probe(format!("{label} CPU list: {error}")))?;
-        require_cpu_list(label, &profile.benchmark_cpus, &cpus)?;
+        require_cpu_superset(label, &plan.reserved, &cpus)?;
     }
 
     let cgroup = parse_unified_cgroup(&read_required(
@@ -805,6 +829,14 @@ fn validate_linux_live_state(
     let effective = parse_cpu_list(effective.trim())
         .map_err(|error| HostError::Probe(format!("cgroup cpuset: {error}")))?;
     require_cpu_list("cgroup cpuset", &profile.benchmark_cpus, &effective)?;
+    let mems = read_required(
+        fs,
+        &cgroup_root.join("cpuset.mems.effective"),
+        MAX_KERNEL_BYTES,
+    )?;
+    let mems = parse_cpu_list(mems.trim())
+        .map_err(|error| HostError::Probe(format!("cgroup cpuset.mems: {error}")))?;
+    require_cpu_list("cgroup cpuset.mems", &[plan.numa_node], &mems)?;
     let processes = parse_processes(&read_required(
         fs,
         &cgroup_root.join("cgroup.procs"),
