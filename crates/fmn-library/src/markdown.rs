@@ -12,6 +12,10 @@
 //! remain literal text, not browser markup or mathematical layout. Nested
 //! lists/quotes flatten with explicit prefixes and retain all nested content.
 
+#[path = "markdown_document.rs"]
+mod document;
+pub use document::{MathDocumentError, MarkdownMathOptions};
+
 use fmn_text::FontBook;
 
 use crate::code::{Code, CodeTheme};
