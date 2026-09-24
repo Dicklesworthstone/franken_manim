@@ -26,13 +26,17 @@ pub(super) fn protect(source: &str) -> Result<Protected, super::MathDocumentErro
             let delimiter = bytes[i];
             while bytes.get(i) == Some(&delimiter) { i += 1; }
             let n = i - start;
+            let mut closed = false;
             while i < bytes.len() {
                 if bytes[i] == delimiter {
                     let end = i;
                     while bytes.get(i) == Some(&delimiter) { i += 1; }
-                    if i - end == n { break; }
+                    if i - end == n { closed = true; break; }
                 } else { i += 1; }
             }
+            // An unmatched code delimiter is literal Markdown, not a code
+            // span swallowing every subsequent mathematical island.
+            if !closed { i = start + n; }
             continue;
         }
         if bytes[i] != b'$' { i += 1; continue; }

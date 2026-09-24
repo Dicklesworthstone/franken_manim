@@ -15,17 +15,17 @@ class Derivation(Scene):
         source = "# A useful identity\n\nFor $x>0$, let $f(x)=x^2$.\n\n```math\nf'(x)=2x\n```"
         document = MarkdownMobject(source, math_mode=True, line_width=7, font_size=28)
         self.add(document)
-        self.play(document.select_text("f'(x)").animate.set_color(YELLOW))
+        self.play(document.select_text("f'(x)")[0].animate.set_color(YELLOW))
         self.play(document.animate_source(source.replace("x^2", "x^3").replace("2x", "3x^2")))
 ```
 
 ## Native layout and controls
 
-Dollar islands `$...$` use native inline mathematics. Double-dollar islands and
-`math`/`tex` fences use native display style. A `textext` fence uses the native
+Dollar islands `$...$` use native inline mathematics. Double-dollar islands occupy their own lines; they and `math`/`tex` fences
+use native display style. A `textext` fence uses the native
 text-mainland TeX API. Underscores and backslashes inside formulas are protected
-from Markdown interpretation. Inline code and ordinary fenced code remain
-literal; an escaped or unmatched dollar remains text. Formulas have the same
+from Markdown interpretation. Reference links retain document-wide definitions even in mathematical paragraphs.
+Inline code and ordinary fenced code remain literal; an escaped or unmatched dollar remains text. Formulas have the same
 native glyphs, rules, calibration and error messages as ordinary `Tex` objects.
 
 `line_width` is a paragraph measure in initial scene units. Words, code spans,
@@ -78,3 +78,27 @@ at most 256 dollar islands and each island at most 8,192 bytes. For multiline or
 structurally complex display mathematics, use a `math` fence: dollar islands are
 scoped to original parser blocks, not a second Markdown block grammar. This is
 not a browser layout or full CommonMark/LaTeX implementation.
+
+## Saved-state recovery
+
+`save_state()` followed by `restore()` recovers the saved native document even
+when intervening edits inserted blocks, removed blocks or changed the glyph
+family shape. Restoration copies saved native geometry rather than reparsing or
+retypesetting the source. Saved paint, placement, document settings, catalogs and
+annotations are recovered without advancing the clock or replacing the scene's
+root object, visible-root list or root callbacks. Repeated restoration does not
+mutate the saved snapshot.
+
+Restored descendants are independent native copies, not aliases to the snapshot
+or promises to retain old glyph/block handles. Use `Scene.get_state()` and
+`Scene.restore_state()` when restoring the original block identities matters.
+Restoration refuses while the document is actively animating. A saved document
+bound to another Scene is copied without changing its original owner. A finished
+partial source morph can be recovered with `restore()` and then edited again.
+The `.animate.restore()` shorthand refuses; use the explicit source animation API
+for document morphs. Generic `Restore` is not an additional document-source
+animation protocol.
+
+Native Rust callers keep the existing `Markdown::build` literal behavior and
+select mathematics through `build_with_math(book, engine)` or
+`build_with_math_options(book, engine, MarkdownMathOptions { line_width, color })`.

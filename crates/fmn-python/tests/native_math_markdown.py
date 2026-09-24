@@ -64,6 +64,18 @@ class NativeMarkdownTests(unittest.TestCase):
                 np.testing.assert_array_equal(shape(root), before)
                 self.assertEqual(len(root), 0)
 
+    def test_display_lines_and_reference_links_preserve_native_formula_layout(self):
+        root, _ = build(r'before $$\frac{1}{x}$$ after', font_size=48)
+        self.assertEqual(len(root[0]), 3)
+        self.assertGreater(root[0][0].get_bottom()[1], root[0][1].get_top()[1])
+        self.assertGreater(root[0][1].get_bottom()[1], root[0][2].get_top()[1])
+        reference, _ = build('[details](https://example.invalid/) $x_i$')
+        actual, catalog = build('[details][info] $x_i$\n\n[info]: https://example.invalid/\n')
+        np.testing.assert_allclose(shape(actual), shape(reference), atol=3e-6)
+        self.assertEqual(len(catalog), 1)
+        code, _ = build('`unclosed $x_i$', font_size=48)
+        np.testing.assert_allclose(shape(code[0][-1]), shape(m.Tex('x_i')), atol=3e-6)
+
     def test_empty_source_is_an_empty_native_document(self):
         root, catalog = build(' \n\n')
         self.assertEqual(catalog, [])

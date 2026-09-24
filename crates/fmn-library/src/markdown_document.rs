@@ -148,29 +148,51 @@ impl<'a> Composer<'a> {
         if parsed.blocks.len() > super::MAX_MARKDOWN_BLOCKS {
             return Err(MathDocumentError::Limit("Markdown exceeds 256 top-level blocks"));
         }
+        // Protect each original block, but reparse the normalized document as
+        // a whole. Reference-link definitions outside a paragraph must remain
+        // in the parser context when that paragraph contains mathematics.
+        let mut normalized = String::new();
+        let mut prepared = Vec::new();
+        let mut cursor = 0;
+        for original in &parsed.blocks {
+            super::validate_tree(&original.node)?;
+            let raw = original.span.slice(self.source).ok_or(MathDocumentError::Invalid("Markdown parser returned an invalid source span"))?;
+            if original.span.start < cursor {
+                return Err(MathDocumentError::Invalid("Markdown parser returned overlapping block ranges"));
+            }
+            normalized.push_str(&self.source[cursor..original.span.start]);
+            let start = normalized.len();
+            let protected = if matches!(&original.node, Block::CodeBlock { .. } | Block::HtmlBlock(_)) {
+                None
+            } else {
+                Some(math::protect(raw)?)
+            };
+            normalized.push_str(protected.as_ref().map_or(raw, |part| part.source.as_str()));
+            prepared.push((start, normalized.len(), protected));
+            cursor = original.span.end;
+        }
+        normalized.push_str(&self.source[cursor..]);
+        let resolved = franken_markdown::parse::parse_document_spanned(&normalized);
         let mut budget = Budget::default();
         let mut blocks = Vec::new();
         let mut y = 0.0;
-        for original in parsed.blocks {
-            super::validate_tree(&original.node)?;
-            let raw = original.span.slice(self.source).ok_or(MathDocumentError::Invalid("Markdown parser returned an invalid source span"))?;
+        for (original, (start, end, protected)) in parsed.blocks.iter().zip(prepared) {
             let empty = math::Protected { source: String::new(), prefix: String::new(), islands: Vec::new() };
-            // Leave fenced code to the original parser. Dollar protection is
-            // local to each original block, so source ranges never get rewritten.
-            let content = if matches!(&original.node, Block::CodeBlock { .. } | Block::HtmlBlock(_)) {
-                self.block(book, engine, &original.node, &empty, &mut budget, 0, self.width)?
-            } else {
-                let protected = math::protect(raw)?;
-                if protected.islands.is_empty() {
-                    self.block(book, engine, &original.node, &empty, &mut budget, 0, self.width)?
-                } else {
-                    let reparsed = franken_markdown::parse::parse_document_spanned(&protected.source);
-                    let mut parts = Vec::new();
-                    for part in &reparsed.blocks {
-                        parts.push(self.block(book, engine, &part.node, &protected, &mut budget, 0, self.width)?);
+            let content = if let Some(protected) = protected.filter(|part| !part.islands.is_empty()) {
+                let mut parts = Vec::new();
+                for part in resolved.blocks.iter().filter(|part| start <= part.span.start && part.span.start < end) {
+                    if part.span.end > end {
+                        return Err(MathDocumentError::Invalid("Markdown math normalization crossed a source block boundary"));
                     }
-                    stack(parts, self.block_gap)
+                    super::validate_tree(&part.node)?;
+                    parts.push(self.block(book, engine, &part.node, &protected, &mut budget, 0, self.width)?);
                 }
+                if parts.is_empty() {
+                    return Err(MathDocumentError::Invalid("Markdown math normalization lost a source block"));
+                }
+                stack(parts, self.block_gap)
+            } else {
+                self.block(book, engine, &original.node, &empty, &mut budget, 0, self.width)?
             };
             let height = content.length_over_dim(1);
             let placed = top_left(content, 0.0, y);
@@ -289,8 +311,7 @@ impl<'a> Composer<'a> {
                 Inline::Text(text) => {
                     let mut rest = text.as_str();
                     while !rest.is_empty() {
-                        if !protected.islands.is_empty() && rest.starts_with(&protected.prefix) {
-                            let tail = &rest[protected.prefix.len()..];
+                        if let Some(tail) = rest.strip_prefix(&protected.prefix).filter(|_| !protected.islands.is_empty()) {
                             let n = tail.find('Q').ok_or(MathDocumentError::Invalid("invalid protected math marker"))?;
                             let index: usize = tail[..n].parse().map_err(|_| MathDocumentError::Invalid("invalid protected math index"))?;
                             let island = protected.islands.get(index).ok_or(MathDocumentError::Invalid("missing protected math island"))?;
@@ -302,8 +323,10 @@ impl<'a> Composer<'a> {
                             let scale = crate::tex::calibrate(engine, size, DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT)?;
                             let geometry = built.vmob.map_style_deep(|s| s.color(self.color));
                             budget.output(&geometry)?;
+                            if island.display { boxes.push(InlineBox::line_break()); }
                             boxes.push(InlineBox { geometry, advance: built.typeset.layout.width * scale,
                                 height: built.typeset.layout.height * scale, depth: built.typeset.layout.depth * scale, space: false, hard_break: false });
+                            if island.display { boxes.push(InlineBox::line_break()); }
                             rest = &tail[n+1..];
                         } else {
                             let end = if protected.islands.is_empty() { rest.len() } else { rest.find(&protected.prefix).unwrap_or(rest.len()) };
@@ -320,7 +343,7 @@ impl<'a> Composer<'a> {
                 Inline::Link { content, .. } => self.inline_boxes(book, engine, content, protected, budget, face, size, boxes, depth+1)?,
                 Inline::Image { .. } => return Err(MathDocumentError::Unsupported("Markdown images require an explicit scene asset; no image is fetched or silently substituted")),
                 Inline::SoftBreak => boxes.push(self.text_box(book, " ", face, size, budget)?),
-                Inline::HardBreak => boxes.push(InlineBox { geometry: VMobject::new(), advance: 0.0, height: 0.0, depth: 0.0, space: false, hard_break: true }),
+                Inline::HardBreak => boxes.push(InlineBox::line_break()),
             }
         }
         Ok(())

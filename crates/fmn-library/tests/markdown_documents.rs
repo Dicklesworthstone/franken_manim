@@ -51,7 +51,7 @@ fn display_and_fenced_math_are_exact_native_formulas() {
 #[test]
 fn code_spans_and_escaped_dollars_do_not_become_math_or_markup() {
     let book=book();
-    let doc=Markdown::new(r"`x_i $y_j$ a < b && c > d`").build(&book).unwrap();
+    let doc=Markdown::new(r"`x_i $y_j$ a < b && c > d`").build_with_math(&book, &engine()).unwrap();
     let reference=Text::new("x_i $y_j$ a < b && c > d").font(fmn_text::font::MONO_FAMILY).build(&book).unwrap();
     same_shape(&doc.vmob,&reference.vmob);
     Markdown::new(r"A \$literal and $unpaired").build(&book).unwrap();
@@ -108,4 +108,29 @@ fn source_and_layout_limits_refuse_before_unbounded_expansion() {
 fn invalid_math_is_a_named_error_not_literal_garbage() {
     let error=Markdown::new(r"$\thiscommanddoesnotexist{x}$").build_with_math(&book(),&engine()).err().unwrap().to_string();
     assert!(error.contains("thiscommanddoesnotexist"));
+}
+
+#[test]
+fn display_islands_take_their_own_line_and_unmatched_code_is_literal() {
+    let (book, engine)=(book(),engine());
+    let doc=Markdown::new(r"before $$\frac{1}{x}$$ after").build_with_math(&book,&engine).unwrap();
+    let children=doc.blocks[0].vmob.children();
+    assert_eq!(children.len(),3);
+    assert!(children[0].extent().unwrap().0[1] > children[1].extent().unwrap().1[1]);
+    assert!(children[1].extent().unwrap().0[1] > children[2].extent().unwrap().1[1]);
+    same_shape(&children[1],&Tex::new(r"\frac{1}{x}").display().build(&engine).unwrap().vmob);
+    let doc=Markdown::new(r"` $x_i$").build_with_math(&book,&engine).unwrap();
+    assert_eq!(doc.blocks[0].vmob.children().len(),2);
+    same_shape(&doc.blocks[0].vmob.children()[1],&Tex::new("x_i").build(&engine).unwrap().vmob);
+}
+
+#[test]
+fn mathematical_paragraphs_keep_document_reference_link_definitions() {
+    let (book, engine)=(book(),engine());
+    let source="See [reference][result] for $x_i$.\n\n[result]: https://example.invalid/result\n";
+    let referenced=Markdown::new(source).build_with_math(&book,&engine).unwrap();
+    let inline=Markdown::new("See [reference](https://example.invalid/result) for $x_i$.").build_with_math(&book,&engine).unwrap();
+    assert_eq!(referenced.blocks.len(),1);
+    same_shape(&referenced.vmob,&inline.vmob);
+    assert!(source[referenced.blocks[0].byte_range.0..referenced.blocks[0].byte_range.1].contains("[reference][result]"));
 }

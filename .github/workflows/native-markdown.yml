@@ -13,6 +13,7 @@ on:
       - 'crates/fmn-python/python/fmn_python/markdown.py'
       - 'crates/fmn-python/tests/native_math_markdown.py'
       - 'crates/fmn-python/tests/markdown_documents.py'
+      - 'crates/fmn-python/tests/markdown_restoration.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -57,7 +58,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/markdown-wheel 2>&1 | tee /tmp/markdown-build.log
           python -m venv target/markdown-venv
           target/markdown-venv/bin/python -m pip install 'numpy==2.5.2' target/markdown-wheel/*.whl
-          for suite in native_math_markdown markdown_documents native_markdown live_markdown text_authoring code_authoring portal_initialization; do
+          for suite in native_math_markdown markdown_documents markdown_restoration native_markdown live_markdown text_authoring code_authoring portal_initialization; do
             target/markdown-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/markdown-$suite.log"
           done
       - name: Preserve exact source and evidence
@@ -67,7 +68,7 @@ jobs:
           git diff --exit-code
           git archive --format=tar.gz HEAD > /tmp/markdown-source.tar.gz
           for path in crates/fmn-library/src/markdown*.rs crates/fmn-library/tests/markdown_documents.rs crates/fmn-python/src/portal_markdown.rs; do
-            rustfmt --edition 2024 --emit stdout "$path" > "/tmp/markdown-formatted-$(basename "$path")"
+            rustfmt --edition 2024 --config skip_children=true --emit stdout "$path" > "/tmp/markdown-formatted-$(basename "$path")"
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

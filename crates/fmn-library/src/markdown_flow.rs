@@ -11,6 +11,13 @@ pub(super) struct InlineBox {
     pub hard_break: bool,
 }
 
+impl InlineBox {
+    pub(super) fn line_break() -> Self {
+        Self { geometry: VMobject::new(), advance: 0.0, height: 0.0, depth: 0.0,
+            space: false, hard_break: true }
+    }
+}
+
 type MeasuredLine = (Vec<(VMobject, f64)>, f64, f64);
 
 pub(super) fn flow(boxes: Vec<InlineBox>, width: Option<f64>, leading: f64) -> VMobject {
