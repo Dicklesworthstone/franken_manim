@@ -1486,12 +1486,23 @@ mod tests {
         )
     }
 
+    /// The canonical 8-core, single-node, SMT-free host.
     fn synthetic_linux_fs(pid: u32) -> VirtualFs {
+        synthetic_host_fs(pid, 8, 1, 1)
+    }
+
+    /// A bare-metal host of `cores` physical cores with `smt` threads each,
+    /// split evenly across `nodes` NUMA nodes. Linux numbering: CPU
+    /// `thread * cores + core`, so core 0's SMT sibling is CPU `cores`. The
+    /// benchmark slice is cores 0-7 on CPUs 0-7, isolated together with its
+    /// siblings and bound to node 0.
+    fn synthetic_host_fs(pid: u32, cores: u32, smt: u32, nodes: u32) -> VirtualFs {
+        let cpus = cores * smt;
         let fs = VirtualFs::new();
         fs.insert("/etc/os-release", b"NAME=Test\n".to_vec());
         fs.insert("/proc/sys/kernel/osrelease", b"6.12.1\n".to_vec());
         let mut cpuinfo = String::new();
-        for cpu in 0..8 {
+        for cpu in 0..cpus {
             writeln!(&mut cpuinfo, "processor : {cpu}").expect("cpuinfo");
             writeln!(&mut cpuinfo, "vendor_id : GenuineTest").expect("cpuinfo");
             writeln!(&mut cpuinfo, "cpu family : 1").expect("cpuinfo");
@@ -1516,36 +1527,56 @@ mod tests {
                 format!("{value}\n").into_bytes(),
             );
         }
-        fs.insert("/sys/devices/system/cpu/online", b"0-7\n".to_vec());
-        for cpu in 0..8 {
+        fs.insert(
+            "/sys/devices/system/cpu/online",
+            format!("0-{}\n", cpus - 1).into_bytes(),
+        );
+        for cpu in 0..cpus {
             fs.insert(
                 format!("/sys/devices/system/cpu/cpu{cpu}/topology/physical_package_id"),
                 b"0\n".to_vec(),
             );
             fs.insert(
                 format!("/sys/devices/system/cpu/cpu{cpu}/topology/core_id"),
-                format!("{cpu}\n").into_bytes(),
+                format!("{}\n", cpu % cores).into_bytes(),
             );
             fs.insert(
                 format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor"),
                 b"performance\n".to_vec(),
             );
         }
+        if nodes > 1 {
+            let cores_per_node = cores / nodes;
+            for node in 0..nodes {
+                let members: Vec<u32> = (0..cpus)
+                    .filter(|cpu| (cpu % cores) / cores_per_node == node)
+                    .collect();
+                fs.insert(
+                    format!("/sys/devices/system/node/node{node}/cpulist"),
+                    format!("{}\n", format_cpu_list(&members)).into_bytes(),
+                );
+            }
+        }
         fs.insert(
             "/proc/self/status",
             format!("Name:\tfmn-perf\nNSpid:\t{pid}\nCpus_allowed_list:\t0-7\n").into_bytes(),
         );
+        let reserved: Vec<u32> = (0..cpus).filter(|cpu| cpu % cores < 8).collect();
         for path in [
             "/sys/devices/system/cpu/isolated",
             "/sys/devices/system/cpu/nohz_full",
             "/sys/devices/system/cpu/rcu_nocbs",
         ] {
-            fs.insert(path, b"0-7\n".to_vec());
+            fs.insert(path, format!("{}\n", format_cpu_list(&reserved)).into_bytes());
         }
         fs.insert("/proc/self/cgroup", b"0::/fmn-benchmark\n".to_vec());
         fs.insert(
             "/sys/fs/cgroup/fmn-benchmark/cpuset.cpus.effective",
             b"0-7\n".to_vec(),
+        );
+        fs.insert(
+            "/sys/fs/cgroup/fmn-benchmark/cpuset.mems.effective",
+            b"0\n".to_vec(),
         );
         fs.insert(
             "/sys/fs/cgroup/fmn-benchmark/cgroup.procs",
@@ -1559,7 +1590,25 @@ mod tests {
             b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:2 / /data rw - ext4 /dev/nvme0n1p1 rw\n"
                 .to_vec(),
         );
+        write_proc_stat(&fs, cpus, 0, |_| 0);
         fs
+    }
+
+    /// Rewrite `/proc/stat`: every CPU at a 150-tick busy and 10,010-tick idle
+    /// base, plus `idle` more idle ticks and `busy(cpu)` more busy ticks.
+    fn write_proc_stat(fs: &VirtualFs, cpus: u32, idle: u64, busy: impl Fn(u32) -> u64) {
+        let mut stat = String::from("cpu  0 0 0 0 0 0 0 0 0 0\n");
+        for cpu in 0..cpus {
+            writeln!(
+                &mut stat,
+                "cpu{cpu} {} 0 50 {} 10 0 0 0 0 0",
+                100 + busy(cpu),
+                10_000 + idle
+            )
+            .expect("stat");
+        }
+        stat.push_str("intr 0\nctxt 0\n");
+        fs.insert("/proc/stat", stat.into_bytes());
     }
 
     fn synthetic_profile(fs: &VirtualFs) -> HostProfile {
