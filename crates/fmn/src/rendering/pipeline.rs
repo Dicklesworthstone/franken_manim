@@ -7,7 +7,7 @@ use fmn_frame::convert::{rgba16f_to_rgba8, rgba_to_nv12, rgba_to_p010, swap_rb8}
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
 use fmn_render::{
-    Camera, EngineIdentity, FrameArena, OwnedVectorFrame, PixelTileCache, PreparedCameraFrame,
+    Camera, CameraConfig, EngineIdentity, FrameArena, OwnedVectorFrame, PixelTileCache, PreparedCameraFrame,
     RetainedFrameRenderer, RetainedFrameRendererConfig, RetainedFrameRendererError,
     VectorFrameCompiler, Viewport,
 };
@@ -252,6 +252,55 @@ impl NativeFramePipeline {
             output.publish().map_err(NativeFrameError::Emitter)
         }).map_err(RenderError::Pipeline)?;
         Ok(Self { compiler, stream: Some(stream), output, output_format, viewport })
+    }
+
+    /// Apply a camera pose and light update to subsequent captures only.
+    ///
+    /// Earlier jobs keep their frozen camera data. The retained camera's
+    /// revision stays monotone across updates, so a new pose cannot reuse an
+    /// earlier pose's projection cache. Camera policy (pixel shape, frame
+    /// rate, background, samples and point-norm bound) stays fixed.
+    ///
+    /// Validation precedes mutation or frame admission. A rejected update
+    /// leaves the current camera usable and consumes no sequence number.
+    ///
+    /// # Errors
+    /// Refuses non-camera pipelines, cancelled streams, invalid camera values,
+    /// or changes to immutable capture policy.
+    pub fn update_camera(&mut self, config: CameraConfig) -> Result<(), RenderError> {
+        let stream = self.stream.as_ref()
+            .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?;
+        if stream.cancellation_token().is_cancelled() {
+            return Err(RenderError::Pipeline(FrameStreamError::Closed));
+        }
+        let NativeCompiler::Camera { camera, .. } = &mut self.compiler else {
+            return Err(RenderError::InvalidOptions("camera updates require a camera pipeline"));
+        };
+        let candidate = Camera::new(config).map_err(RenderError::Camera)?;
+        if candidate.pixel_shape() != camera.pixel_shape()
+            || candidate.fps() != camera.fps()
+            || candidate.background() != camera.background()
+            || candidate.samples() != camera.samples()
+            || candidate.max_allowable_norm() != camera.max_allowable_norm()
+        {
+            return Err(RenderError::InvalidOptions("camera updates must preserve capture policy"));
+        }
+        let mut next = camera.clone();
+        let from = camera.frame();
+        let to = candidate.frame();
+        if from.center() != to.center() || from.shape() != to.shape()
+            || from.orientation() != to.orientation()
+            || from.field_of_view() != to.field_of_view()
+            || from.euler_axes() != to.euler_axes()
+        {
+            *next.frame_mut() = to.clone();
+        }
+        if next.light_source_position() != candidate.light_source_position() {
+            next.set_light_source_position(candidate.light_source_position())
+                .map_err(RenderError::Camera)?;
+        }
+        *camera = next;
+        Ok(())
     }
 
     /// Admit and freeze one captured scene, without running callbacks on workers.

@@ -43,6 +43,8 @@ use fmn_scene::{CaptureReason, IntegrationError, RuntimeConfig, SceneRunReport, 
 use crate::SceneConstruct;
 
 mod pipeline;
+mod camera_animation;
+pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
 
 pub use fmn_output::{EmitterReport, NativeArtifactReport};
@@ -493,6 +495,7 @@ impl RenderSink {
                 },
             )
             .map_err(RenderError::Sink)?
+            .with_no_clobber()
             .into_binding("png-sequence"),
             RenderFormat::Gif => GifSink::new(
                 fs,
@@ -508,6 +511,7 @@ impl RenderSink {
                 },
             )
             .map_err(RenderError::Sink)?
+            .with_no_clobber()
             .into_binding("gif"),
             RenderFormat::Y4m => Y4mSink::new(
                 fs,
@@ -523,6 +527,7 @@ impl RenderSink {
                 },
             )
             .map_err(RenderError::Sink)?
+            .with_no_clobber()
             .into_binding("y4m"),
         };
         let emitter = OrderedEmitter::new(
