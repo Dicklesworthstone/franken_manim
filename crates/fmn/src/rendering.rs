@@ -22,7 +22,7 @@ use fmn_codec::{CompressionLevel, Y4mColorspace};
 use fmn_config::Config;
 use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
 use fmn_core::color::{HexParseError, Srgb};
-use fmn_frame::convert::{rgba16f_to_rgba8, rgba_to_nv12};
+use fmn_frame::convert::{rgba_to_nv12, rgba16f_to_rgba8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_output::{
     EmitterConfig, EmitterError, EmitterFailure, GifSink, GifSinkConfig, OrderedEmitter, PngSink,
@@ -382,7 +382,9 @@ impl RenderSink {
         let planned = u64::try_from(plan.estimated_in_flight_bytes)
             .ok()
             .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
-            .ok_or(RenderError::InvalidOptions("render memory budget overflowed"))?;
+            .ok_or(RenderError::InvalidOptions(
+                "render memory budget overflowed",
+            ))?;
         if planned > options.max_resident_bytes {
             return Err(RenderError::InvalidOptions(
                 "render plan exceeds max_resident_bytes",
@@ -434,7 +436,8 @@ impl RenderSink {
         .map_err(RenderError::Renderer)?;
         let scratch = if pixel_format == PixelFormat::Nv12 {
             Some(FrameBuffer::new(
-                FrameLayout::tight(PixelFormat::Rgba8, width, height).map_err(RenderError::Frame)?,
+                FrameLayout::tight(PixelFormat::Rgba8, width, height)
+                    .map_err(RenderError::Frame)?,
             ))
         } else {
             None
@@ -462,6 +465,7 @@ impl RenderSink {
                 },
             )
             .map_err(RenderError::Sink)?
+            .with_no_clobber()
             .into_binding("png-sequence"),
             RenderFormat::Gif => GifSink::new(
                 fs,
@@ -477,6 +481,7 @@ impl RenderSink {
                 },
             )
             .map_err(RenderError::Sink)?
+            .with_no_clobber()
             .into_binding("gif"),
             RenderFormat::Y4m => Y4mSink::new(
                 fs,
@@ -492,6 +497,7 @@ impl RenderSink {
                 },
             )
             .map_err(RenderError::Sink)?
+            .with_no_clobber()
             .into_binding("y4m"),
         };
         let emitter = OrderedEmitter::new(
@@ -525,12 +531,9 @@ impl RenderSink {
                 .render(stage, 0)
                 .map_err(RenderError::Renderer)?;
         }
-        let emitter = self
-            .emitter
-            .as_ref()
-            .ok_or(RenderError::InvalidOptions(
-                "render emitter was already finalized",
-            ))?;
+        let emitter = self.emitter.as_ref().ok_or(RenderError::InvalidOptions(
+            "render emitter was already finalized",
+        ))?;
         let mut reservation = emitter
             .reserve(self.next_sequence)
             .map_err(RenderError::Emitter)?;
@@ -554,7 +557,11 @@ impl RenderSink {
 }
 
 impl SceneSink for RenderSink {
-    fn capture(&mut self, _reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        _reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         if let Some(error) = &self.failure {
             return Err(IntegrationError::new("native-render", error.to_string()));
         }
