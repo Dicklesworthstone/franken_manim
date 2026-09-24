@@ -5674,6 +5674,85 @@ class Vector(Arrow):
         super().__init__(_ORIGIN, direction, buff=buff, **kwargs)
 
 
+def _merged_config(*layers):
+    # Reference merge_dicts_recursively over plain dict layers.
+    result = {}
+    for layer in layers:
+        for key, value in (layer or {}).items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = _merged_config(result[key], value)
+            else:
+                result[key] = value
+    return result
+
+
+def _set_number_line_state(line, x_range, config):
+    # NumberLine's Python-side state (Reference number_line.py __init__).
+    parts = [float(v) for v in x_range]
+    if len(parts) == 2:
+        parts.append(1.0)
+    line.x_range = tuple(parts)
+    line.x_min, line.x_max, line.x_step = parts
+    line._number_line_params = (line.x_range, config)
+    line.tick_size = float(config.get("tick_size", 0.1))
+    line.longer_tick_multiple = float(config.get("longer_tick_multiple", 1.5))
+    line.tick_offset = float(config.get("tick_offset", 0.0))
+    line.include_tip = bool(config.get("include_tip", False))
+    line.include_ticks = bool(config.get("include_ticks", True))
+    spacing = config.get("big_tick_spacing")
+    if spacing is not None:
+        spacing = float(spacing)
+        line.big_tick_numbers = list(
+            _np.arange(line.x_min, line.x_max + spacing, spacing)
+        )
+    else:
+        line.big_tick_numbers = list(config.get("big_tick_numbers") or [])
+    direction = config.get("line_to_number_direction", _DOWN)
+    line.line_to_number_direction = _np.array(_vec3(direction), dtype=float)
+    line.line_to_number_buff = float(
+        config.get("line_to_number_buff", _MED_SMALL_BUFF)
+    )
+    decimal_config = config.get("decimal_number_config")
+    line.decimal_number_config = dict(
+        decimal_config
+        if decimal_config is not None
+        else dict(num_decimal_places=0, font_size=36)
+    )
+    line.numbers_to_exclude = config.get("numbers_to_exclude")
+
+
+def _set_number_line_ticks(line):
+    if line.include_ticks and line.submobjects:
+        line.ticks = line.submobjects[-1]
+    else:
+        line.ticks = VGroup()
+
+
+def _adopt_native_axes(owner, axis_config, unit_size, axes):
+    """Present natively built coordinate-system axes as NumberLines.
+
+    Atlas builds each axis with the same NumberLine builder a standalone
+    NumberLine uses (same family layout and line geometry); the generic
+    shell only lacks the class and the Python-side state. Each axis gets
+    Reference Axes.__init__'s config: the class defaults, the axis-specific
+    class defaults, axis_config with unit_size, then the caller's per-axis
+    config.
+    """
+    adopted = []
+    for shell, x_range, specific_default, specific in axes:
+        config = _merged_config(
+            owner.default_axis_config,
+            specific_default,
+            dict(axis_config or {}, unit_size=unit_size),
+            specific,
+        )
+        shell.__class__ = NumberLine
+        _set_number_line_state(shell, x_range, config)
+        _set_number_line_ticks(shell)
+        adopted.append(shell)
+    return adopted
+
+
 class NumberLine(Line):
     """Reference `NumberLine(Line)` over Atlas's native coords builder.
 
@@ -5684,46 +5763,12 @@ class NumberLine(Line):
 
     def __init__(self, x_range=(-8, 8, 1), **kwargs):
         _install_live_state(self)
-        parts = [float(v) for v in x_range]
-        if len(parts) == 2:
-            parts.append(1.0)
-        self.x_range = tuple(parts)
-        self.x_min, self.x_max, self.x_step = parts
-        config = dict(kwargs)
-        self._number_line_params = (self.x_range, config)
-        self.tick_size = float(config.get("tick_size", 0.1))
-        self.longer_tick_multiple = float(config.get("longer_tick_multiple", 1.5))
-        self.tick_offset = float(config.get("tick_offset", 0.0))
-        self.include_tip = bool(config.get("include_tip", False))
-        self.include_ticks = bool(config.get("include_ticks", True))
-        spacing = config.get("big_tick_spacing")
-        if spacing is not None:
-            spacing = float(spacing)
-            self.big_tick_numbers = list(
-                _np.arange(self.x_min, self.x_max + spacing, spacing)
-            )
-        else:
-            self.big_tick_numbers = list(config.get("big_tick_numbers") or [])
-        direction = config.get("line_to_number_direction", _DOWN)
-        self.line_to_number_direction = _np.array(_vec3(direction), dtype=float)
-        self.line_to_number_buff = float(
-            config.get("line_to_number_buff", _MED_SMALL_BUFF)
-        )
-        decimal_config = config.get("decimal_number_config")
-        self.decimal_number_config = dict(
-            decimal_config
-            if decimal_config is not None
-            else dict(num_decimal_places=0, font_size=36)
-        )
-        self.numbers_to_exclude = config.get("numbers_to_exclude")
+        _set_number_line_state(self, x_range, dict(kwargs))
         specs = self._build_number_line(
             _native_shell_factory, self.x_range, dict(kwargs)
         )
         _hang_native_children(self, specs)
-        if self.include_ticks and self.submobjects:
-            self.ticks = self.submobjects[-1]
-        else:
-            self.ticks = VGroup()
+        _set_number_line_ticks(self)
 
     # The coordinate mapping reads the proxy's LIVE line geometry (its own
     # first/last points), so a rescaled, moved, or even stretched line maps
@@ -6725,8 +6770,14 @@ class Axes(VGroup, CoordinateSystem):
         )
         specs = self._build_axes(_native_shell_factory, *self._axes_params)
         _hang_native_children(self, specs)
-        self.x_axis = self.submobjects[0]
-        self.y_axis = self.submobjects[1]
+        self.x_axis, self.y_axis = _adopt_native_axes(
+            self, self._axes_params[2], self._axes_params[7], (
+                (self.submobjects[0], self._axes_params[0],
+                 self.default_x_axis_config, self._axes_params[3]),
+                (self.submobjects[1], self._axes_params[1],
+                 self.default_y_axis_config, self._axes_params[4]),
+            ),
+        )
         self.axes = VGroup(self.x_axis, self.y_axis)
         self.x_range = self._axes_params[0]
         self.y_range = self._axes_params[1]
@@ -6886,7 +6937,16 @@ class ThreeDAxes(Axes):
             self._axes_params[7],
         )
         _hang_native_children(self, specs)
-        self.x_axis, self.y_axis, self.z_axis = self.submobjects[:3]
+        self.x_axis, self.y_axis, self.z_axis = _adopt_native_axes(
+            self, self._axes_params[2], self._axes_params[7], (
+                (self.submobjects[0], self._axes_params[0],
+                 self.default_x_axis_config, self._axes_params[3]),
+                (self.submobjects[1], self._axes_params[1],
+                 self.default_y_axis_config, self._axes_params[4]),
+                (self.submobjects[2], z_terms,
+                 self.default_z_axis_config, dict(z_axis_config or {})),
+            ),
+        )
         self.axes = VGroup(self.x_axis, self.y_axis, self.z_axis)
         self.x_range = self._axes_params[0]
         self.y_range = self._axes_params[1]
@@ -7041,8 +7101,14 @@ class NumberPlane(Axes):
         )
         specs = self._native_plane_specs()
         _hang_native_children(self, specs)
-        self.faded_lines, self.background_lines, self.x_axis, self.y_axis = (
-            self.submobjects[:4]
+        self.faded_lines, self.background_lines = self.submobjects[:2]
+        self.x_axis, self.y_axis = _adopt_native_axes(
+            self, self._plane_params[2], self._plane_params[10], (
+                (self.submobjects[2], self._plane_params[0],
+                 self.default_x_axis_config, self._plane_params[3]),
+                (self.submobjects[3], self._plane_params[1],
+                 self.default_y_axis_config, self._plane_params[4]),
+            ),
         )
         self.axes = VGroup(self.x_axis, self.y_axis)
         self.x_range = self._plane_params[0]
