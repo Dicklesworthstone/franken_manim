@@ -1,8 +1,10 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run again 2026-09-24 against `Cargo.lock` `6ce5886a` at `86f2896d`.
-**The release package gate still FAILS at its size budget**, so this audit does
-not claim a passing package.
+**Status:** re-run again 2026-09-24 against `Cargo.lock` `6ce5886a`, at `acd19004`.
+The measurements ran on that commit's pre-rebase twin `86f2896d`; the only
+commits rebased beneath it, f1d4afd5 and 92d3b889, touch `crates/fmn` and CI,
+which are outside every wasm graph. **The release package gate still FAILS at
+its size budget**, so this audit does not claim a passing package.
 
 - The lock change behind this re-run is d121ddd5. It adds five workspace edges to
   the `fmn` umbrella crate (`fmn-codec`, `fmn-frame`, `fmn-output`, `fmn-render`,
@@ -10,13 +12,13 @@ not claim a passing package.
   `git diff ad0b7d25 HEAD -- Cargo.lock` is those five lines, and `SUITE.lock` and
   `wasm-smoke/Cargo.lock` are unchanged. The path-normalized output of `cargo tree
   -p fmn-wasm --target wasm32-unknown-unknown --edges normal --locked` is identical
-  at `ad0b7d25` and `86f2896d` (130 lines).
+  at `ad0b7d25` and `acd19004` (130 lines).
 - `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown` exited 0.
   `wasm-smoke/run.sh` exited 0 with the unchanged Node digest `1f248a71347b82aa`.
 - `scripts/check_wasm_package.sh` was not re-run. It has failed at the size
   budget since `b492564b` (fm-8j70) and stops before the Chromium stage, and the
   wasm graph is unchanged. The qualified wasm-pack 0.15.0 bundler artifact at
-  `86f2896d` is 555,763 bytes against the 514,521-byte budget. The attribution
+  `acd19004` is 555,763 bytes against the 514,521-byte budget. The attribution
   is on fm-8j70.
 
 Earlier re-run, 2026-09-24, against `Cargo.lock` `b97f1d76` from a clean worktree
