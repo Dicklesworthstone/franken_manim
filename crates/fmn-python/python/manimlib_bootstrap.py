@@ -15176,11 +15176,8 @@ class Scene(_SceneCore):
                     float(getattr(proto, "lag_ratio", 0.0)),
                     params,
                 )
-            raise NotImplementedError(
-                ("a composition member" if nested else "Scene.play")
-                + " accepts mobject.animate builders and the bound "
-                "Animation classes; got " + type(proto).__name__
-            )
+            # Reference animation.py:216 rejects the same inputs this way.
+            raise TypeError(f"Object {proto} cannot be converted to an animation")
 
         def build_callback_composition(proto, effective_run_time=None, effective_rate=None):
             children, members = [], []

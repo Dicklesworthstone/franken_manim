@@ -17245,7 +17245,8 @@ deep_scene.play(
 )
 assert math.isclose(deep_decimal.get_value(), 9.0)
 
-# A non-Animation nested member stays the existing named refusal.
+# A non-Animation nested member is the Reference's prepare_animation
+# TypeError (animation.py:216).
 try:
     Scene().play(
         manimlib.AnimationGroup(
@@ -17253,8 +17254,8 @@ try:
             42,
         )
     )
-except NotImplementedError as error:
-    assert "a composition member" in str(error)
+except TypeError as error:
+    assert str(error) == "Object 42 cannot be converted to an animation", error
 else:
     raise AssertionError("AnimationGroup accepted a non-Animation member")
 
@@ -17619,14 +17620,12 @@ assert mix_faded_dot not in mix_scene.get_mobjects()
 assert mix_update_calls
 assert float(mix_moved_dot.get_center()[0]) > 0.0
 
-# A non-Animation play member stays the existing named refusal.
+# A non-Animation play member is the Reference's prepare_animation TypeError
+# (animation.py:216), not a portal capability gap.
 try:
     mix_scene.play("nope")
-except NotImplementedError as error:
-    assert "mobject.animate builders and the bound Animation classes" in str(
-        error
-    ), error
-    assert "str" in str(error), error
+except TypeError as error:
+    assert str(error) == "Object nope cannot be converted to an animation", error
 else:
     raise AssertionError("Scene.play accepted a non-Animation member")
 

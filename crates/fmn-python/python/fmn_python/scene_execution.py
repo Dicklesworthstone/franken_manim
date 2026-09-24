@@ -293,10 +293,9 @@ def install_scene_execution(native: Any) -> None:
         valid_types = (g["Animation"], builder_cls) if builder_cls is not None else (g["Animation"],)
         for item in animations:
             if not isinstance(item, valid_types):
-                raise NotImplementedError(
-                    "Scene.play accepts mobject.animate builders and the bound "
-                    "Animation classes; got " + type(item).__name__
-                )
+                # Reference animation.py:216 (prepare_animation) rejects the
+                # same inputs, bound Mobject methods included, this way.
+                raise TypeError(f"Object {item} cannot be converted to an animation")
         prepared = tuple(g["prepare_animation"](item) for item in animations)
         if not all(isinstance(item, g["Animation"]) for item in prepared):
             raise TypeError("prepare_animation must return an Animation")
