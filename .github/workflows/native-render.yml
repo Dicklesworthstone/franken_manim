@@ -32,6 +32,6 @@ jobs:
             ~/.cargo/git
             target/native-render
           key: native-render-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - run: cargo test --locked -p fmn --test native_render --test public_api
+      - run: cargo test --locked -p fmn --test native_render --test native_camera --test public_api
       - run: cargo check --locked -p fmn --examples
       - run: cargo fmt -p fmn -- --check

@@ -22,25 +22,28 @@ use fmn_codec::{CompressionLevel, Y4mColorspace};
 use fmn_config::Config;
 use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
 use fmn_core::color::{HexParseError, Srgb};
-use fmn_frame::convert::{rgba_to_nv12, rgba16f_to_rgba8};
+use fmn_frame::convert::{rgba16f_to_rgba8, rgba_to_nv12};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_output::{
-    EmitterConfig, EmitterError, EmitterFailure, GifSink, GifSinkConfig, OrderedEmitter,
-    PngSink, PngSinkConfig, PngTarget, ReceiptError, SinkAdapterError, SinkLimits,
-    SinkReceipt, Y4mSink, Y4mSinkConfig,
+    EmitterConfig, EmitterError, EmitterFailure, GifSink, GifSinkConfig, OrderedEmitter, PngSink,
+    PngSinkConfig, PngTarget, ReceiptError, SinkAdapterError, SinkLimits, SinkReceipt, Y4mSink,
+    Y4mSinkConfig,
 };
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::{
-    EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig,
-    RetainedFrameRendererError, ScreenMap, Tiling, Viewport,
+    Camera, CameraError, EngineIdentity, FrameConfig, RetainedFrameRenderer,
+    RetainedFrameRendererConfig, RetainedFrameRendererError, ScreenMap, Tiling, Viewport,
 };
-use fmn_runtime::{ExecutionEngine, OutputPixelFormat, PlanError, PlanRequest, RenderIntent, SurfaceSpec};
+use fmn_runtime::{
+    ExecutionEngine, OutputPixelFormat, PlanError, PlanRequest, RenderIntent, SurfaceSpec,
+};
 use fmn_scene::{CaptureReason, IntegrationError, RuntimeConfig, SceneRunReport, SceneSink};
 
 use crate::SceneConstruct;
 
 pub use fmn_output::{EmitterReport, NativeArtifactReport};
+pub use fmn_render::{CameraConfig, CameraFrame};
 pub use fmn_runtime::ExecutionPlan;
 
 /// Native output formats. The output path is a directory for PNG sequences
@@ -81,6 +84,12 @@ pub struct RenderOptions {
     pub format: RenderFormat,
     /// Scene and renderer settings, using the existing configuration schema.
     pub config: Config,
+    /// Explicit perspective camera for surfaces, dot clouds, textured images,
+    /// and vectors in one painter sequence. `None` keeps the cached 2D route.
+    /// Use [`Self::camera_config`] to match the export's viewport and background.
+    /// Camera captures use the certified CPU implementation even in standard
+    /// mode; `CameraConfig::samples` controls their adaptive edge ceiling.
+    pub camera: Option<CameraConfig>,
     /// Maximum number of captured frames (checked before rasterization).
     pub max_frames: u64,
     /// Maximum input stream and encoded artifact size, independently enforced.
@@ -102,10 +111,47 @@ impl RenderOptions {
             output: output.into(),
             format: RenderFormat::PngSequence,
             config: Config::resolve(&[], None)?.config,
+            camera: None,
             max_frames: 1_000_000,
             max_output_bytes: 64 * 1024 * 1024 * 1024,
             max_resident_bytes: 512 * 1024 * 1024,
             frames_in_flight: 2,
+        })
+    }
+
+    /// Build a perspective camera matching the current export configuration.
+    ///
+    /// Customize its frame orientation, center, field of view, or light, then
+    /// assign it to [`Self::camera`]. Configure resolution/fps/background before
+    /// calling this helper; a later mismatch is rejected rather than silently
+    /// resizing or recoloring output. This is a fixed camera for the render;
+    /// ordinary scene animations still move the captured mobjects.
+    ///
+    /// # Errors
+    /// Refuses invalid frame geometry or a malformed background color.
+    pub fn camera_config(&self) -> Result<CameraConfig, RenderError> {
+        let (width, height) = self.config.camera.resolution;
+        if width == 0 || height == 0 {
+            return Err(RenderError::InvalidOptions(
+                "camera resolution must be nonzero",
+            ));
+        }
+        let frame_height = self.config.sizes.frame_height;
+        let mut frame = CameraFrame::default();
+        frame
+            .set_shape([
+                frame_height * f64::from(width) / f64::from(height),
+                frame_height,
+            ])
+            .map_err(RenderError::Camera)?;
+        Ok(CameraConfig {
+            resolution: (width, height),
+            fps: self.config.camera.fps,
+            background: Srgb::from_hex(&self.config.camera.background_color)
+                .map_err(RenderError::Color)?
+                .to_linear(self.config.camera.background_opacity),
+            frame,
+            ..CameraConfig::default()
         })
     }
 }
@@ -132,6 +178,8 @@ pub enum RenderError {
     Capability(&'static str),
     /// The configured background color is not valid hexadecimal RGB.
     Color(HexParseError),
+    /// Invalid camera pose, geometry, or lighting.
+    Camera(CameraError),
     /// Invalid runtime configuration or a scene-authored error.
     Scene(crate::Error),
     /// Topology/scheduling request was refused.
@@ -155,6 +203,7 @@ impl fmt::Display for RenderError {
         match self {
             Self::InvalidOptions(message) | Self::Capability(message) => f.write_str(message),
             Self::Color(error) => error.fmt(f),
+            Self::Camera(error) => error.fmt(f),
             Self::Scene(error) => error.fmt(f),
             Self::Plan(error) => error.fmt(f),
             Self::Frame(error) => error.fmt(f),
@@ -172,6 +221,7 @@ impl std::error::Error for RenderError {
         match self {
             Self::InvalidOptions(_) | Self::Capability(_) => None,
             Self::Color(error) => Some(error),
+            Self::Camera(error) => Some(error),
             Self::Scene(error) => Some(error),
             Self::Plan(error) => Some(error),
             Self::Frame(error) => Some(error),
@@ -230,9 +280,14 @@ pub fn render_with_fs<P: SceneConstruct + ?Sized>(
     if sink.next_sequence == 0 {
         sink.render_stage(completed.scene().stage())?;
     }
-    let emission = sink.emitter.take().ok_or(RenderError::InvalidOptions(
-        "render emitter was already finalized",
-    ))?.finish().map_err(RenderError::Drain)?;
+    let emission = sink
+        .emitter
+        .take()
+        .ok_or(RenderError::InvalidOptions(
+            "render emitter was already finalized",
+        ))?
+        .finish()
+        .map_err(RenderError::Drain)?;
     let artifact = sink.receipt.take().map_err(RenderError::Receipt)?;
     Ok(RenderReport {
         scene: *completed.report(),
@@ -244,6 +299,7 @@ pub fn render_with_fs<P: SceneConstruct + ?Sized>(
 
 struct RenderSink {
     renderer: RetainedFrameRenderer,
+    camera: Option<Camera>,
     scratch: Option<FrameBuffer>,
     emitter: Option<OrderedEmitter>,
     receipt: SinkReceipt<NativeArtifactReport>,
@@ -262,27 +318,36 @@ impl RenderSink {
             ));
         }
         if !config.sizes.frame_height.is_finite() || config.sizes.frame_height <= 0.0 {
-            return Err(RenderError::InvalidOptions("frame height must be finite and positive"));
+            return Err(RenderError::InvalidOptions(
+                "frame height must be finite and positive",
+            ));
         }
         if !config.camera.background_opacity.is_finite()
             || !(0.0..=1.0).contains(&config.camera.background_opacity)
         {
-            return Err(RenderError::InvalidOptions("background opacity must be in [0, 1]"));
+            return Err(RenderError::InvalidOptions(
+                "background opacity must be in [0, 1]",
+            ));
         }
         if options.frames_in_flight == 0 {
-            return Err(RenderError::InvalidOptions("frames_in_flight must be nonzero"));
+            return Err(RenderError::InvalidOptions(
+                "frames_in_flight must be nonzero",
+            ));
         }
         let limits = SinkLimits::new(
             options.max_frames,
             options.max_resident_bytes,
             options.max_output_bytes,
             options.max_output_bytes,
-        ).map_err(RenderError::Sink)?;
+        )
+        .map_err(RenderError::Sink)?;
         let (width, height) = config.camera.resolution;
         let pixel_format = options.format.pixel_format();
         let layout = FrameLayout::tight(pixel_format, width, height).map_err(RenderError::Frame)?;
-        let logical = std::thread::available_parallelism().ok()
-            .and_then(|count| u32::try_from(count.get()).ok()).unwrap_or(1);
+        let logical = std::thread::available_parallelism()
+            .ok()
+            .and_then(|count| u32::try_from(count.get()).ok())
+            .unwrap_or(1);
         let topology = if cfg!(target_os = "linux") {
             HardwareTopology::detect_linux(fs.as_ref())
                 .unwrap_or_else(|_| HardwareTopology::fallback(logical))
@@ -300,7 +365,13 @@ impl RenderSink {
             PlanRequest::certified(RenderIntent::Offline, surface, output_format)
         } else {
             PlanRequest::standard(RenderIntent::Offline, surface, output_format)
-        }.with_max_frames_in_flight(options.frames_in_flight);
+        }
+        .with_max_frames_in_flight(options.frames_in_flight);
+        // ThreeDJob's camera path has one certified CPU implementation. Do not
+        // report a fast/annex engine that did not actually produce the pixels.
+        if options.camera.is_some() {
+            request = request.with_engine(ExecutionEngine::CertifiedCpu);
+        }
         if let ThreadPolicy::Fixed(threads) = config.render.threads {
             let threads = usize::try_from(threads)
                 .map_err(|_| RenderError::InvalidOptions("thread count exceeds this target"))?;
@@ -309,14 +380,31 @@ impl RenderSink {
         let plan = ExecutionPlan::derive(request, &topology, None).map_err(RenderError::Plan)?;
         // Check before allocating the renderer, conversion scratch or ring.
         let planned = u64::try_from(plan.estimated_in_flight_bytes)
-            .ok().and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
+            .ok()
+            .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
             .ok_or(RenderError::InvalidOptions("render memory budget overflowed"))?;
         if planned > options.max_resident_bytes {
-            return Err(RenderError::InvalidOptions("render plan exceeds max_resident_bytes"));
+            return Err(RenderError::InvalidOptions(
+                "render plan exceeds max_resident_bytes",
+            ));
         }
         let background = Srgb::from_hex(&config.camera.background_color)
             .map_err(RenderError::Color)?
             .to_linear(config.camera.background_opacity);
+        let camera = options
+            .camera
+            .map(|camera| {
+                if camera.resolution != (width, height)
+                    || camera.fps != config.camera.fps
+                    || camera.background != background
+                {
+                    return Err(RenderError::InvalidOptions(
+                        "camera resolution, fps, and background must match the export configuration",
+                    ));
+                }
+                Camera::new(camera).map_err(RenderError::Camera)
+            })
+            .transpose()?;
         let frame = FrameConfig::new(
             Viewport { width, height },
             ScreenMap {
@@ -325,53 +413,102 @@ impl RenderSink {
                 y_up: true,
             },
             background,
-        ).with_aa_policy(config.render.aa);
+        )
+        .with_aa_policy(config.render.aa);
         let renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
             frame,
-            tiling: Tiling { macro_tile: plan.macro_tile, fine_tile: plan.fine_tile },
+            tiling: Tiling {
+                macro_tile: plan.macro_tile,
+                fine_tile: plan.fine_tile,
+            },
             engine: if plan.engine == ExecutionEngine::CertifiedCpu {
                 EngineIdentity::certified()
             } else {
                 EngineIdentity::fast()
             },
-            threads: plan.render_teams.first().map_or(1, fmn_runtime::TeamPlan::threads),
-        }).map_err(RenderError::Renderer)?;
+            threads: plan
+                .render_teams
+                .first()
+                .map_or(1, fmn_runtime::TeamPlan::threads),
+        })
+        .map_err(RenderError::Renderer)?;
         let scratch = if pixel_format == PixelFormat::Nv12 {
-            Some(FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba8, width, height)
-                .map_err(RenderError::Frame)?))
+            Some(FrameBuffer::new(
+                FrameLayout::tight(PixelFormat::Rgba8, width, height).map_err(RenderError::Frame)?,
+            ))
         } else {
             None
         };
         let (binding, receipt) = match options.format {
-            RenderFormat::PngSequence => PngSink::new(fs, PngSinkConfig {
-                target: PngTarget::Sequence {
-                    directory: options.output,
-                    stem: "frame".to_owned(),
-                    digits: 6,
+            RenderFormat::PngSequence => PngSink::new(
+                fs,
+                PngSinkConfig {
+                    target: PngTarget::Sequence {
+                        directory: options.output,
+                        stem: "frame".to_owned(),
+                        digits: 6,
+                    },
+                    width,
+                    height,
+                    first_sequence: 0,
+                    compression: if certified {
+                        CompressionLevel::Best
+                    } else {
+                        CompressionLevel::Default
+                    },
+                    threads: plan.output_team.threads().max(1),
+                    limits,
+                    profile: None,
                 },
-                width, height, first_sequence: 0,
-                compression: if certified { CompressionLevel::Best } else { CompressionLevel::Default },
-                threads: plan.output_team.threads().max(1),
-                limits, profile: None,
-            }).map_err(RenderError::Sink)?.into_binding("png-sequence"),
-            RenderFormat::Gif => GifSink::new(fs, GifSinkConfig {
-                destination: options.output, width, height,
-                fps: (config.camera.fps, 1), loop_forever: true,
-                first_sequence: 0, limits, profile: None,
-            }).map_err(RenderError::Sink)?.into_binding("gif"),
-            RenderFormat::Y4m => Y4mSink::new(fs, Y4mSinkConfig {
-                destination: options.output, width, height,
-                fps: (config.camera.fps, 1), colorspace: Y4mColorspace::C420Mpeg2,
-                first_sequence: 0, limits, profile: None,
-            }).map_err(RenderError::Sink)?.into_binding("y4m"),
+            )
+            .map_err(RenderError::Sink)?
+            .into_binding("png-sequence"),
+            RenderFormat::Gif => GifSink::new(
+                fs,
+                GifSinkConfig {
+                    destination: options.output,
+                    width,
+                    height,
+                    fps: (config.camera.fps, 1),
+                    loop_forever: true,
+                    first_sequence: 0,
+                    limits,
+                    profile: None,
+                },
+            )
+            .map_err(RenderError::Sink)?
+            .into_binding("gif"),
+            RenderFormat::Y4m => Y4mSink::new(
+                fs,
+                Y4mSinkConfig {
+                    destination: options.output,
+                    width,
+                    height,
+                    fps: (config.camera.fps, 1),
+                    colorspace: Y4mColorspace::C420Mpeg2,
+                    first_sequence: 0,
+                    limits,
+                    profile: None,
+                },
+            )
+            .map_err(RenderError::Sink)?
+            .into_binding("y4m"),
         };
         let emitter = OrderedEmitter::new(
             EmitterConfig::new(layout, plan.frames_in_flight, 0).map_err(RenderError::Emitter)?,
             vec![binding],
-        ).map_err(RenderError::Emitter)?;
+        )
+        .map_err(RenderError::Emitter)?;
         Ok(Self {
-            renderer, scratch, emitter: Some(emitter), receipt, plan,
-            next_sequence: 0, max_frames: options.max_frames, failure: None,
+            renderer,
+            camera,
+            scratch,
+            emitter: Some(emitter),
+            receipt,
+            plan,
+            next_sequence: 0,
+            max_frames: options.max_frames,
+            failure: None,
         })
     }
 
@@ -379,15 +516,33 @@ impl RenderSink {
         if self.next_sequence >= self.max_frames {
             return Err(RenderError::InvalidOptions("scene exceeded max_frames"));
         }
-        self.renderer.render(stage, 0).map_err(RenderError::Renderer)?;
-        let emitter = self.emitter.as_ref().ok_or(RenderError::InvalidOptions(
-            "render emitter was already finalized",
-        ))?;
-        let mut reservation = emitter.reserve(self.next_sequence).map_err(RenderError::Emitter)?;
+        if let Some(camera) = &self.camera {
+            self.renderer
+                .render_with_camera(stage, camera)
+                .map_err(RenderError::Renderer)?;
+        } else {
+            self.renderer
+                .render(stage, 0)
+                .map_err(RenderError::Renderer)?;
+        }
+        let emitter = self
+            .emitter
+            .as_ref()
+            .ok_or(RenderError::InvalidOptions(
+                "render emitter was already finalized",
+            ))?;
+        let mut reservation = emitter
+            .reserve(self.next_sequence)
+            .map_err(RenderError::Emitter)?;
         if let Some(scratch) = &mut self.scratch {
             rgba16f_to_rgba8(self.renderer.frame(), scratch).map_err(RenderError::Frame)?;
-            rgba_to_nv12(scratch, reservation.frame_mut(), ColorRange::Limited, ChromaSiting::Left)
-                .map_err(RenderError::Frame)?;
+            rgba_to_nv12(
+                scratch,
+                reservation.frame_mut(),
+                ColorRange::Limited,
+                ChromaSiting::Left,
+            )
+            .map_err(RenderError::Frame)?;
         } else {
             rgba16f_to_rgba8(self.renderer.frame(), reservation.frame_mut())
                 .map_err(RenderError::Frame)?;
