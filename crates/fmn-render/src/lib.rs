@@ -77,7 +77,8 @@ pub use plan::{
     SyncStats,
 };
 pub use retained::{
-    RetainedFrameRenderer, RetainedFrameRendererConfig, RetainedFrameRendererError,
+    PreparedCameraFrame, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    RetainedFrameRendererError,
 };
 pub use revision::{Axis, Dependency, Revisions};
 pub use stroke::{JoinWedge, MITER_LIMIT};
