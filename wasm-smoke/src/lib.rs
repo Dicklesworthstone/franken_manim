@@ -61,9 +61,12 @@ fn frame_config() -> FrameConfig {
             width: WIDTH,
             height: HEIGHT,
         },
+        // The raw renderer map, like fmn-render's own fixtures: this probe
+        // checks wasm determinism, not the front doors' +Y-up orientation.
         ScreenMap {
             scale: 20.0,
             origin: [f64::from(WIDTH) / 2.0, f64::from(HEIGHT) / 2.0],
+            y_up: false,
         },
         Srgb::from_rgb8(0x22, 0x22, 0x22).to_linear(1.0),
     )
