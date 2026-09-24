@@ -148,8 +148,29 @@ def install_streamline_animation(native: Any) -> None:
 
     def initialize(self, stream_lines, lag_range=4, rate_multiple=1.0,
                    line_anim_config=None, **kwargs):
-        if not isinstance(stream_lines, StreamLines):
-            raise TypeError("AnimatedStreamLines requires a StreamLines instance")
+        try:
+            lines = list(stream_lines)
+        except TypeError:
+            raise TypeError(
+                "AnimatedStreamLines requires an iterable of lines; got "
+                + type(stream_lines).__name__
+            ) from None
+        if isinstance(stream_lines, StreamLines):
+            metadata = list(stream_lines._stream_virtual_times)
+            if len(lines) != len(metadata):
+                raise ValueError("StreamLines virtual-time metadata must match its lines")
+            draws = stream_lines._stream_rng_draws
+        else:
+            # vector_field.py:461 only iterates the group and reads each
+            # line's virtual_time, so any family of timed lines animates
+            # (hairy_ball flows plain Lines).
+            for line in lines:
+                if not hasattr(line, "virtual_time"):
+                    raise AttributeError(
+                        f"'{type(line).__name__}' object has no attribute 'virtual_time'"
+                    )
+            metadata = [line.virtual_time for line in lines]
+            draws = 0
         lag = _number(lag_range, "AnimatedStreamLines lag_range")
         speed = _number(rate_multiple, "AnimatedStreamLines rate_multiple", positive=True)
         if line_anim_config is not None and not isinstance(line_anim_config, Mapping):
@@ -159,18 +180,12 @@ def install_streamline_animation(native: Any) -> None:
             config.update(line_anim_config)
         if "run_time" in config:
             raise TypeError("line_anim_config.run_time conflicts with virtual_time / rate_multiple")
-        lines = list(stream_lines)
-        metadata = list(stream_lines._stream_virtual_times)
-        if len(lines) != len(metadata):
-            raise ValueError("StreamLines virtual-time metadata must match its lines")
         virtual_times = [_number(getattr(line, "virtual_time", value), "streamline virtual_time")
                          for line, value in zip(lines, metadata)]
         durations = [_number(value / speed, "streamline run_time") for value in virtual_times]
         # Use exactly the existing native substream and draw offset, including
         # stationary lines; do not consume Python or NumPy global randomness.
-        uniforms = list(g["_BridgeMobject"]._stream_line_lag_uniforms(
-            0, stream_lines._stream_rng_draws, len(lines),
-        ))
+        uniforms = list(g["_BridgeMobject"]._stream_line_lag_uniforms(0, draws, len(lines)))
         if len(uniforms) != len(lines) or any(not 0 <= value < 1 for value in uniforms):
             raise ValueError("native streamline lag draws must be one [0, 1) value per line")
         animations = [g["VShowPassingFlash"](line, run_time=duration, **config)

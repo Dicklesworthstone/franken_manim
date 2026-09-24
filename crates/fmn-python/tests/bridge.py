@@ -16910,12 +16910,38 @@ except TypeError as error:
 else:
     raise AssertionError("StreamLines accepted a missing coordinate system")
 
+# fm-5wq.14: the Reference's AnimatedStreamLines (vector_field.py:446) only
+# iterates its argument and reads each line's virtual_time, so a plain group
+# of timed lines animates (_2026/hairy_ball flows Lines this way); an empty
+# group animates nothing; a line without virtual_time fails as it does there.
+_plain_lines = manimlib.VGroup(
+    *(manimlib.Line([x, 0.0, 0.0], [x + 1.0, 0.0, 0.0]) for x in (-2.0, 0.0))
+)
+for _plain_line in _plain_lines:
+    _plain_line.virtual_time = 1.0
+_plain_flow = vector_field_module.AnimatedStreamLines(_plain_lines, rate_multiple=0.5)
+assert list(_plain_flow) == list(_plain_lines)
+assert [line.virtual_time for line in _plain_lines] == [1.0, 1.0]
+assert all(-4.0 <= line.time <= 0.0 for line in _plain_lines)
+_plain_times = [line.time for line in _plain_lines]
+_plain_flow.update(0.25)
+assert all(
+    math.isclose(line.time, before + 0.25) for line, before in zip(_plain_lines, _plain_times)
+)
+_plain_flow.clear_updaters()
+assert len(vector_field_module.AnimatedStreamLines(manimlib.VGroup())) == 0
 try:
-    vector_field_module.AnimatedStreamLines(manimlib.VGroup())
-except TypeError as error:
-    assert "requires a StreamLines instance" in str(error), error
+    vector_field_module.AnimatedStreamLines(manimlib.VGroup(manimlib.Line()))
+except AttributeError as error:
+    assert "virtual_time" in str(error), error
 else:
-    raise AssertionError("AnimatedStreamLines accepted a bare VGroup")
+    raise AssertionError("AnimatedStreamLines accepted a line without virtual_time")
+try:
+    vector_field_module.AnimatedStreamLines(3)
+except TypeError as error:
+    assert "iterable of lines" in str(error), error
+else:
+    raise AssertionError("AnimatedStreamLines accepted a non-iterable")
 
 # fm-5wq.4.81: Prismify over a VMobject family — one native extrusion tree
 # per pointful member, in family order, each matching its own source style.
