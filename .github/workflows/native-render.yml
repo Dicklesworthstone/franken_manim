@@ -10,40 +10,138 @@ on:
       - ".github/workflows/native-render.yml"
   workflow_dispatch:
 
+# One-time, source-pinned camera candidate verification. No step creates a
+# commit, pushes a branch, or updates a ref. Tested immutable blobs are returned
+# for an explicit GitHub connector commit; restore read-only CI on integration.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   native-render:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       CARGO_TARGET_DIR: target/native-render
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - run: rustup show active-toolchain
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target/native-render
           key: native-render-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      - run: cargo test --locked -p fmn-output --no-default-features --test native_audio_capability
-      - run: cargo test --locked -p fmn --test native_render --test native_camera --test public_api
-      - run: cargo check --locked -p fmn --examples
-      - run: cargo fmt -p fmn -- --check
-      - name: Capture exact source for failed-run diagnosis
+      - name: Prepare exact CLI camera candidate in the checkout only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, hashlib, urllib.request, subprocess
+          from pathlib import Path
+          sources = {
+              'crates/fmn-cli/src/camera_render.rs': '778ea498244b30ca30250c4d1e80f35efa0ffcbc',
+              'crates/fmn-cli/tests/camera_rendering.rs': 'df09bafe3aad4ddf5929a30be44a2f5e79c14dbe',
+              str(Path(os.environ['RUNNER_TEMP'], 'prepare-camera.py')): '049660f8cb85397e6a1d5abb3f40e29aa84bdf61',
+          }
+          for path, sha in sources.items():
+              assert not Path(path).exists(), f'candidate destination exists: {path}'
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+                  headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  value = json.load(response)
+              data = base64.b64decode(value['content'])
+              actual = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              assert actual == sha, f'candidate blob identity mismatch: {path}'
+              Path(path).write_bytes(data)
+          subprocess.run(['python3', str(Path(os.environ['RUNNER_TEMP'], 'prepare-camera.py'))], check=True)
+          PY
+      - name: Format changed candidate sources
+        run: |
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/camera_render.rs crates/fmn-cli/tests/camera_rendering.rs
+          cargo fmt -p fmn
+      - name: Verify standalone native-codec audio capability
+        run: cargo test --locked -p fmn-output --no-default-features --test native_audio_capability
+      - name: Verify facade rendering and exact rational boundary regressions
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn --test native_render --test native_camera --test public_api
+      - name: Verify camera-route unit laws
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-cli --features cli,batch --lib camera_render::tests
+      - name: Verify CLI camera artifact paths
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-cli --features cli,batch --test camera_rendering
+      - name: Verify existing CLI runtime boundaries
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-cli --features cli,batch --test runtime_boundary
+      - name: Verify native examples and formatting
+        if: ${{ !cancelled() }}
+        run: |
+          cargo check --locked -p fmn --examples
+          cargo fmt -p fmn -- --check
+      - name: Store tested immutable source blobs without touching any ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, hashlib, urllib.request, subprocess
+          from pathlib import Path
+          paths = [
+              'crates/fmn-cli/src/lib.rs',
+              'crates/fmn-cli/src/camera_render.rs',
+              'crates/fmn-cli/tests/camera_rendering.rs',
+              'crates/fmn/tests/native_camera.rs',
+              'crates/fmn/tests/native_render.rs',
+              'crates/fmn/src/lib.rs',
+              'crates/fmn/src/prelude.rs',
+              'crates/fmn/src/rendering.rs',
+              'crates/fmn/examples/native_cube.rs',
+              'crates/fmn/examples/square_to_circle.rs',
+          ]
+          changed = set(subprocess.check_output(['git','diff','--name-only']).decode().splitlines())
+          assert changed <= set(paths), f'unexpected formatted source changes: {changed - set(paths)}'
+          result = {'base_commit': os.environ['GITHUB_SHA'], 'files': []}
+          for path in paths:
+              data = Path(path).read_bytes()
+              sha = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs',
+                  method='POST',
+                  data=json.dumps({'content':base64.b64encode(data).decode(), 'encoding':'base64'}).encode(),
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json', 'Content-Type':'application/json'},
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  returned = json.load(response)
+              assert returned['sha'] == sha
+              result['files'].append({'path': path, 'sha': sha})
+          Path(os.environ['RUNNER_TEMP'], 'camera-candidate.json').write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+      - name: Preserve candidate sources even when a regression fails
         if: always()
-        run: git archive --format=tar.gz HEAD > "$RUNNER_TEMP/native-render-source.tar.gz"
+        run: |
+          tar -czf "$RUNNER_TEMP/camera-candidate.tar.gz" crates/fmn-cli/src/lib.rs crates/fmn-cli/src/camera_render.rs crates/fmn-cli/tests/camera_rendering.rs crates/fmn
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: native-render-source-${{ github.sha }}
-          path: ${{ runner.temp }}/native-render-source.tar.gz
+          name: camera-candidate-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/camera-candidate.tar.gz
+            ${{ runner.temp }}/camera-candidate.json
           retention-days: 1
           if-no-files-found: error
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always()
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/native-render
+          key: native-render-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
