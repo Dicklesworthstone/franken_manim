@@ -126,10 +126,10 @@ def install_svg_ingress(native):
         return result
 
     def rebuild(self):
-        prepared = parts(self, self.svg_string)
-        self.set_points([])
-        self.set_submobjects(prepared)
-        return self
+        # Reference svg_mobject.py:123 (Ledger row `same`): add a freshly
+        # built family, so a second call appends a second one, and return
+        # None. Preparing first keeps a refused source from publishing.
+        self.add(*parts(self, self.svg_string))
 
     Mob.set_rgba_array_by_color = by_color
     Mob.set_rgba_array = array

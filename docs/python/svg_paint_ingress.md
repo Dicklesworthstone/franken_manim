@@ -66,9 +66,10 @@ rendered geometry uses the exact source stored in `svg_string`/`hash_seed`.
 
 `mobjects_from_svg_string(source)` returns detached native shapes without replacing
 the receiver's geometry, even when the receiver is already part of a Scene.
-`init_svg_mobject()` prepares the stored source before replacing its family; it is
-the raw document-space rebuild operation, not an additional constructor centering
-or size-normalization pass. Root identity and callbacks remain owned by the Scene.
+`init_svg_mobject()` prepares the stored source, then adds the built family, as the
+Reference does: a second call appends a second family, and the call returns `None`
+(Ledger row `same`). It is the raw document-space build operation, not an additional
+constructor centering or size-normalization pass. Root identity and callbacks remain owned by the Scene.
 Parse, admission and geometry-preparation errors occur before either operation
 publishes replacement geometry.
 

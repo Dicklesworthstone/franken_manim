@@ -171,9 +171,13 @@ class SvgPaintIngressTests(unittest.TestCase):
         obj=m.SVGMobject(svg_string=NESTED);scene=m.Scene();scene.add(obj)
         calls=[];obj.add_updater(lambda mob,dt:calls.append(dt),call=False)
         obj.svg_string=DASHED
-        self.assertIs(obj.init_svg_mobject(),obj)
+        # Reference semantics (Ledger `same`): the rebuilt family is appended.
+        kept=tuple(obj.submobjects);added=len(obj.mobjects_from_svg_string(DASHED))
+        self.assertIsNone(obj.init_svg_mobject())
         self.assertTrue(obj._is_bound())
-        self.assertEqual(len(obj[0]),4)
+        self.assertEqual(tuple(obj.submobjects[:len(kept)]),kept)
+        self.assertEqual(len(obj.submobjects),len(kept)+added)
+        self.assertEqual(len(obj[len(kept)]),4)
         before=geometry(obj);children=tuple(obj.submobjects)
         obj.svg_string='<svg><script/></svg>'
         with self.assertRaises(ValueError):obj.init_svg_mobject()
