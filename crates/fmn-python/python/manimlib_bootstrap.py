@@ -7712,11 +7712,38 @@ class VMobjectFromSVGPath(VMobject):
         self.uniforms["scale_stroke_with_zoom"] = scale_stroke_with_zoom
         _apply_vmobject_style_kwargs(self, style)
 
+    # Reference svg_mobject.py walks svgelements segments through these
+    # hooks. Chisel's native path processor builds the geometry once in
+    # __init__, so re-running them has no portal counterpart
+    # (OOT-SVGELEMENTS-PARSER) and refuses by name.
+    def init_points(self):
+        raise NotImplementedError(
+            "VMobjectFromSVGPath.init_points re-parses through svgelements; "
+            "Chisel builds the path natively at construction "
+            "(OOT-SVGELEMENTS-PARSER); construct a new VMobjectFromSVGPath"
+        )
+
     def handle_arc(self, arc=None):
-        pass
+        raise NotImplementedError(
+            "VMobjectFromSVGPath.handle_arc consumes svgelements Arc segments; "
+            "Chisel converts SVG arcs natively (OOT-SVGELEMENTS-PARSER)"
+        )
 
     def handle_commands(self):
-        pass
+        raise NotImplementedError(
+            "VMobjectFromSVGPath.handle_commands walks svgelements path "
+            "segments; Chisel's native processor owns SVG path commands "
+            "(OOT-SVGELEMENTS-PARSER)"
+        )
+
+
+def _refuse_render_twice(name):
+    raise NotImplementedError(
+        f"StringMobject.{name} is a step of the Reference's render-twice "
+        "labelling pipeline, which native glyph span maps replace "
+        "(OOT-STRING-RENDER-TWICE-INTERNALS); select substrings with "
+        "select_part, select_parts or set_parts_color instead"
+    )
 
 
 class StringMobject(SVGMobject, _abc.ABC):
@@ -7771,68 +7798,73 @@ class StringMobject(SVGMobject, _abc.ABC):
     def span_contains(span_0, span_1):
         return span_0[0] <= span_1[0] and span_0[1] >= span_1[1]
 
+    # The Reference's render-twice labelling pipeline: parse commands, render
+    # a second colour-labelled SVG, and match it spatially to the first.
+    # Scribe keeps each glyph's source byte span instead, so these steps
+    # have no portal counterpart and refuse by name rather than return
+    # plausible empties (OOT-STRING-RENDER-TWICE-INTERNALS).
     @staticmethod
     def get_attr_dict_from_command_pair(open_command, close_command):
-        return {}
+        _refuse_render_twice("get_attr_dict_from_command_pair")
 
     @staticmethod
     def get_command_flag(match_obj):
-        return ""
+        _refuse_render_twice("get_command_flag")
 
     @staticmethod
     def get_command_matches(string):
-        return []
+        _refuse_render_twice("get_command_matches")
 
     @staticmethod
     def get_command_string(attr_dict, is_end=False, label_hex=None):
-        return ""
+        _refuse_render_twice("get_command_string")
 
     @staticmethod
     def replace_for_content(match_obj):
-        return ""
+        _refuse_render_twice("replace_for_content")
 
     @staticmethod
     def replace_for_matching(match_obj):
-        return ""
+        _refuse_render_twice("replace_for_matching")
 
     def get_svg_string(self, is_labelled: bool = False) -> str:
-        return ""
+        _refuse_render_twice("get_svg_string")
 
     def get_svg_string_by_content(self, content: str) -> str:
-        return ""
+        _refuse_render_twice("get_svg_string_by_content")
 
     def get_content(self, is_labelled: bool = False) -> str:
         return getattr(self, "string", "")
 
     def get_content_prefix_and_suffix(self, is_labelled: bool = False):
-        return ("", "")
+        _refuse_render_twice("get_content_prefix_and_suffix")
 
     def get_group_part_items(self):
-        return []
+        _refuse_render_twice("get_group_part_items")
 
     def get_specified_part_items(self):
-        return []
+        _refuse_render_twice("get_specified_part_items")
 
     def get_specified_substrings(self):
-        return []
+        _refuse_render_twice("get_specified_substrings")
 
     def get_symbol_substrings(self):
-        return []
+        _refuse_render_twice("get_symbol_substrings")
 
     def get_configured_items(self):
-        return []
+        _refuse_render_twice("get_configured_items")
 
     def parse(self):
-        pass
+        _refuse_render_twice("parse")
 
     def assign_labels_by_color(self, mobjects):
-        pass
+        _refuse_render_twice("assign_labels_by_color")
 
     def rearrange_submobjects_by_positions(self, labelled_submobs, unlabelled_submobs):
-        pass
+        _refuse_render_twice("rearrange_submobjects_by_positions")
 
     def build_groups(self):
-        return []
+        _refuse_render_twice("build_groups")
 
     def substr_to_path_count(self, substr):
         return len(substr)
@@ -10370,7 +10402,13 @@ class SingleStringTex(SVGMobject):
         return self
 
     def get_svg_string_by_content(self, content: str) -> str:
-        return ""
+        # Reference old_tex_mobject.py:77 shells out to LaTeX (D-03,
+        # OOT-TEX-LATEX-PIPELINE); fmd-math typesets natively instead.
+        raise NotImplementedError(
+            "SingleStringTex.get_svg_string_by_content runs the LaTeX "
+            "latex_to_svg pipeline, which FrankenManim does not ship "
+            "(OOT-TEX-LATEX-PIPELINE); fmd-math typesets the string natively"
+        )
 
 
 class OldTex(Tex):
@@ -14345,7 +14383,10 @@ class Camera:
         if not isinstance(frame_config, dict):
             raise TypeError("Camera frame_config must be a dict")
 
-        frame = CameraFrame(**frame_config)
+        # Reference Camera.__init__ order: init_frame, then (after the
+        # native core that stands in for init_context/init_fbo) the light.
+        self.init_frame(**frame_config)
+        frame = self.frame
         background_rgb = tuple(_color_to_rgb(background_color))
         core = _CameraCore(
             frame._core,
@@ -14358,7 +14399,6 @@ class Camera:
             samples,
         )
         frame._core.set_shape(core.frame_shape())
-        light_source = Point(light_source_position)
 
         self._core = core
         self.window = None
@@ -14376,8 +14416,7 @@ class Camera:
             _color_to_rgba(background_color, background_opacity)
         )
         self.uniforms = {}
-        self.frame = frame
-        self.light_source = light_source
+        self.init_light_source()
 
     def get_pixel_size(self):
         return self.frame.get_width() / self.get_pixel_width()
@@ -14424,20 +14463,28 @@ class Camera:
             "Lumen owns rasterization for the sovereign pipeline"
         )
 
-    def init_frame(self):
-        # The frame is constructed in __init__ and shared by identity;
-        # nothing left to initialize (Reference parity hook).
-        return None
+    def init_frame(self, **config):
+        # Reference camera.py:69. Lumen's camera core binds the frame it is
+        # built from, so a constructed camera cannot swap in a fresh frame.
+        if "_core" in vars(self):
+            raise NotImplementedError(
+                "Camera.init_frame cannot replace the frame of a constructed "
+                "camera: Lumen's camera core is bound to its frame at "
+                "construction; mutate camera.frame instead"
+            )
+        self.frame = CameraFrame(**config)
 
     def init_light_source(self):
-        # The light source is constructed in __init__ from the pinned
-        # position; Reference parity hook kept as a no-op.
-        return None
+        # Reference camera.py:97.
+        self.light_source = Point(self.light_source_position)
 
-    def use_window_fbo(self):
-        # Headless scenes never render into a window framebuffer; a bound
-        # window is Studio-owned and would set this through its own path.
-        return False
+    def use_window_fbo(self, use=True):
+        # Reference camera.py:100 switches moderngl framebuffers of an
+        # on-screen window (OOT-PYGLET-WINDOW-SURFACE).
+        raise _CapabilityError(
+            "Camera.use_window_fbo requires the pyglet/moderngl window "
+            "framebuffer; the portal is headless and Studio owns previews"
+        )
 
     def blit(self, **kwargs):
         del kwargs
@@ -14614,7 +14661,12 @@ class Scene(_SceneCore):
         return wrapper
 
     def assemble_render_groups(self):
-        return []
+        # Reference scene.py:300 batches moderngl shader wrappers
+        # (OOT-MODERNGL-SHADER-SURFACE); Lumen's Stage draw plan owns order.
+        raise _CapabilityError(
+            "Scene.assemble_render_groups batches moderngl shader wrappers; "
+            "Lumen owns render grouping through the native Stage draw plan"
+        )
 
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -23115,20 +23167,52 @@ def _install_config_module():
         def __setattr__(self, name, value):
             self[name] = value
 
-    def get_animations_numbers(args=None):
-        return []
+    # Reference config.py:350-395 over the same argparse Namespace fields.
+    def get_animations_numbers(args):
+        stan = args.start_at_animation_number
+        if stan is None:
+            return (None, None)
+        if "," in stan:
+            return tuple(map(int, stan.split(",")))
+        return int(stan), None
 
-    def get_file_ext(args=None):
+    def get_file_ext(args):
+        if args.transparent:
+            return ".mov"
+        if args.gif:
+            return ".gif"
         return ".mp4"
 
     def get_manim_dir():
         return str(_pathlib.Path(__file__).parent.resolve())
 
-    def get_output_directory(args=None, config=None):
-        return "videos"
+    def get_output_directory(args, config):
+        dir_config = config.directories
+        out_dir = args.video_dir or dir_config.output
+        if dir_config.mirror_module_path and args.file:
+            file_path = _pathlib.Path(args.file).absolute()
+            if str(file_path).startswith(dir_config.removed_mirror_prefix):
+                rel_path = file_path.relative_to(dir_config.removed_mirror_prefix)
+                rel_path = _pathlib.Path(str(rel_path).lstrip("_"))
+            else:
+                rel_path = file_path.stem
+            out_dir = _pathlib.Path(out_dir, rel_path).with_suffix("")
+        return out_dir
 
-    def get_resolution_from_args(args=None, resolution_options=None):
-        return (1920, 1080)
+    def get_resolution_from_args(args, resolution_options):
+        import ast
+
+        if args.resolution:
+            return tuple(map(int, args.resolution.split("x")))
+        for flag, key in (
+            ("low_quality", "low"),
+            ("medium_quality", "med"),
+            ("hd", "high"),
+            ("uhd", "4k"),
+        ):
+            if getattr(args, flag):
+                return ast.literal_eval(resolution_options[key])
+        return None
 
     def load_yaml(file_path):
         try:

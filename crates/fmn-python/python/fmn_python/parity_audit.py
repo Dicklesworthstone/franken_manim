@@ -7,7 +7,7 @@ import importlib
 import inspect
 import json
 from dataclasses import dataclass
-from types import ModuleType
+from types import FunctionType, MethodType, ModuleType
 from typing import Any, Callable
 
 from .schema_provenance import (
@@ -207,6 +207,109 @@ def _placeholder_contradiction(
     }
 
 
+# Reviewed callables whose effective runtime body is trivial on purpose, and
+# why. "reference-no-op": the pinned Reference body is itself empty (or
+# abstract). "native-hook": the engine dispatches the hook by name and does
+# the base work natively, so only subclass overrides add behaviour. Checkout
+# test scripts/test_audit_portal_runtime.py re-verifies every entry against
+# scripts/manim_ref and crates/fmn-python/src/lib.rs, so this table cannot
+# quietly absorb a stub.
+TRIVIAL_BODY_JUSTIFICATIONS: dict[str, str] = {
+    "manimlib.mobject.mobject:Mobject.get_shader_vert_indices": "reference-no-op",
+    "manimlib.mobject.mobject:Mobject.init_points": "reference-no-op",
+    "manimlib.mobject.svg.svg_mobject:SVGMobject.text_to_mobject": "reference-no-op",
+    "manimlib.mobject.types.surface:SGroup.init_points": "reference-no-op",
+    "manimlib.scene.scene:Scene.construct": "reference-no-op",
+    "manimlib.scene.scene:Scene.on_close": "reference-no-op",
+    "manimlib.scene.scene:Scene.on_show": "reference-no-op",
+    "manimlib.scene.scene:Scene.setup": "reference-no-op",
+    "manimlib.mobject.mobject:Mobject.init_data": "native-hook",
+    "manimlib.scene.scene:Scene.tear_down": "native-hook",
+}
+
+_FRAME_OPS = frozenset({"RESUME", "NOP", "CACHE", "COPY_FREE_VARS", "MAKE_CELL", "EXTENDED_ARG"})
+_RETURN_OPS = frozenset({"RETURN_VALUE", "RETURN_CONST"})
+_CONST_OPS = frozenset({"LOAD_CONST", "RETURN_CONST", "LOAD_SMALL_INT"})
+_BUILD_OPS = frozenset({"BUILD_LIST", "BUILD_MAP", "BUILD_TUPLE", "BUILD_SET"})
+_CALL_OPS = frozenset(
+    {"LOAD_GLOBAL", "LOAD_ATTR", "LOAD_METHOD", "CALL", "PUSH_NULL", "PRECALL", "KW_NAMES", "CALL_KW"}
+)
+_NUMPY_EMPTY_NAMES = frozenset({"_np", "np", "numpy", "empty", "float32", "float64"})
+_NON_FUNCTION_FLAGS = 0x20 | 0x80 | 0x200  # generator, coroutine, async generator
+
+
+def _is_empty_constant(value: object) -> bool:
+    if isinstance(value, tuple):
+        return len(value) <= 3 and all(_is_empty_constant(item) for item in value)
+    return value is None or (
+        type(value) in (str, int, float, bool) and not value
+    )
+
+
+def _trivial_body_shape(value: Any) -> str | None:
+    """Name the trivial shape of a Python callable's own body, or None.
+
+    Judged on bytecode because the installed wheel ships no source: "empty"
+    returns only an empty constant (pass, None, "", 0, False, (), [], {});
+    "ignores-arguments" returns only a constant while never reading any
+    declared parameter besides self/cls; "empty-array" returns only a freshly
+    allocated empty NumPy array.
+    """
+    import dis
+
+    if isinstance(value, (classmethod, staticmethod, MethodType)):
+        value = value.__func__
+    if isinstance(value, property):
+        value = value.fget
+    # Only genuine Python functions carry a body to judge; attribute-magic
+    # objects (e.g. manimlib.config's _ConfigDict) answer any name.
+    if not isinstance(value, FunctionType):
+        return None
+    code = value.__code__
+    if code.co_flags & _NON_FUNCTION_FLAGS:
+        return None
+    instructions = [
+        instruction
+        for instruction in dis.get_instructions(code)
+        if instruction.opname not in _FRAME_OPS
+    ]
+    ops = {instruction.opname for instruction in instructions}
+    if not ops & _RETURN_OPS:
+        return None
+    constants = [i.argval for i in instructions if i.opname in _CONST_OPS]
+    builds = [i for i in instructions if i.opname in _BUILD_OPS]
+    if ops <= _RETURN_OPS | _CONST_OPS | _BUILD_OPS:
+        if all(_is_empty_constant(c) for c in constants) and all(b.arg == 0 for b in builds):
+            return "empty"
+        declared = code.co_argcount + code.co_kwonlyargcount
+        receiver = code.co_argcount and code.co_varnames[0] in ("self", "cls")
+        return "ignores-arguments" if declared - int(bool(receiver)) > 0 else None
+    # Installers bind numpy through closures as often as through globals.
+    if (
+        ops <= _RETURN_OPS | _CONST_OPS | _BUILD_OPS | _CALL_OPS | {"LOAD_DEREF"}
+        and "empty" in code.co_names
+        and set(code.co_names) | set(code.co_freevars) <= _NUMPY_EMPTY_NAMES
+    ):
+        return "empty-array"
+    return None
+
+
+def _trivial_body_contradiction(row: StatusRow, value: Any) -> dict[str, str] | None:
+    shape = _trivial_body_shape(value)
+    if shape is None or row.symbol in TRIVIAL_BODY_JUSTIFICATIONS:
+        return None
+    return {
+        "symbol": row.symbol,
+        "status": row.status,
+        "code": "reviewed-symbol-has-trivial-body",
+        "detail": (
+            f"runtime body of {row.module_name}:{row.qualified} is {shape}; a "
+            f"{row.status} claim needs a real implementation, a named refusal "
+            "with a tiered/excluded row, or a TRIVIAL_BODY_JUSTIFICATIONS entry"
+        ),
+    }
+
+
 def _provenance_contradiction(row: StatusRow, module: ModuleType) -> dict[str, str] | None:
     if row.module_name != "manimlib" and not row.module_name.startswith("manimlib."):
         return None
@@ -295,6 +398,7 @@ def audit_rows(
     contradictions: list[dict[str, str]] = []
     placeholder_count = 0
     missing_count = 0
+    trivial_count = 0
     for row in reviewed:
         module = modules.get(row.module_name)
         import_error = import_errors.get(row.module_name)
@@ -362,6 +466,11 @@ def audit_rows(
             contradictions.append(
                 _placeholder_contradiction(row, owner_identity, owner=True)
             )
+            continue
+        trivial = _trivial_body_contradiction(row, resolved[-1].value)
+        if trivial is not None:
+            trivial_count += 1
+            contradictions.append(trivial)
     contradictions.sort(key=lambda row: (row["symbol"], row["code"], row["detail"]))
     status_counts = {
         status: sum(row.status == status for row in rows)
@@ -375,6 +484,7 @@ def audit_rows(
             "status_rows": len(rows),
             "reviewed_implemented": len(reviewed),
             "runtime_placeholders": placeholder_count,
+            "trivial_bodies": trivial_count,
             "missing_reviewed": missing_count,
             "contradictions": len(contradictions),
         },

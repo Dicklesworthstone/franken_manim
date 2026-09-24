@@ -14,6 +14,7 @@ import hmac
 import importlib
 import inspect
 import io
+import itertools
 import json
 import math
 import pickle
@@ -20370,6 +20371,118 @@ assert len(_svg_family.submobjects) == 2 * _before
 _duck_path = manimlib.VMobjectFromSVGPath(type("_D", (), {"d": lambda self: "M 0 0 L 40 0"})())
 assert _duck_path.get_num_points() > 0
 
+# fm-5wq.11: the svgelements re-parse hooks refuse by name; they no longer
+# return silently while doing nothing (OOT-SVGELEMENTS-PARSER).
+for _hook in ("init_points", "handle_commands", "handle_arc"):
+    try:
+        getattr(_duck_path, _hook)()
+    except NotImplementedError as error:
+        assert "OOT-SVGELEMENTS-PARSER" in str(error) and _hook in str(error)
+    else:
+        raise AssertionError(f"VMobjectFromSVGPath.{_hook} returned silently")
+assert _duck_path.get_num_points() > 0
+
+# fm-5wq.11: the render-twice labelling internals refuse by name instead of
+# returning plausible empties; the kept surface still answers.
+_labelled_tex = manimlib.Tex("x^2")
+_labelled_text = manimlib.Text("ab")
+for _name, _call in {
+    "get_command_matches": lambda: manimlib.Tex.get_command_matches("x^2"),
+    "replace_for_content": lambda: manimlib.MarkupText.replace_for_content(None),
+    "get_command_flag": lambda: manimlib.Text.get_command_flag(None),
+    "parse": _labelled_tex.parse,
+    "get_svg_string": _labelled_tex.get_svg_string,
+    "build_groups": _labelled_text.build_groups,
+    "get_content_prefix_and_suffix": _labelled_text.get_content_prefix_and_suffix,
+    "get_symbol_substrings": _labelled_tex.get_symbol_substrings,
+}.items():
+    try:
+        _call()
+    except NotImplementedError as error:
+        assert "OOT-STRING-RENDER-TWICE-INTERNALS" in str(error), error
+        assert _name in str(error), error
+    else:
+        raise AssertionError(f"StringMobject.{_name} returned a silent value")
+assert _labelled_tex.get_content() == "x^2"
+try:
+    importlib.import_module("manimlib.mobject.svg.old_tex_mobject").SingleStringTex \
+        .get_svg_string_by_content(None, "x")
+except NotImplementedError as error:
+    assert "OOT-TEX-LATEX-PIPELINE" in str(error)
+else:
+    raise AssertionError("SingleStringTex.get_svg_string_by_content returned silently")
+
+# fm-5wq.11: StringMobject matching's re-exported solvers are real. The
+# fsci-opt assignment must equal brute force (rectangular, maximize), and
+# cdist must equal each metric's closed form. The replaced stand-in returned
+# the identity assignment, so the anti-identity matrix below is its witness.
+_sm_module = importlib.import_module("manimlib.mobject.svg.string_mobject")
+_lsa, _cdist = _sm_module.linear_sum_assignment, _sm_module.cdist
+_rng = np.random.default_rng(7)
+for _shape in ((1, 1), (3, 3), (4, 4), (3, 5), (5, 3), (2, 6)):
+    for _maximize in (False, True):
+        _cost = _rng.integers(-9, 20, size=_shape).astype(float)
+        _rows, _cols = _lsa(_cost, maximize=_maximize)
+        assert list(_rows) == sorted(_rows) and len(set(_cols)) == len(_cols) == min(_shape)
+        _n, _m = _shape
+        _totals = [
+            sum(_cost[i, j] for i, j in zip(range(_n), _perm))
+            if _n <= _m
+            else sum(_cost[i, j] for i, j in zip(_perm, range(_m)))
+            for _perm in itertools.permutations(range(max(_shape)), min(_shape))
+        ]
+        assert _cost[_rows, _cols].sum() == (max(_totals) if _maximize else min(_totals))
+_anti = np.array([[9.0, 1.0, 9.0], [9.0, 9.0, 1.0], [1.0, 9.0, 9.0]])
+assert list(_lsa(_anti)[1]) == [1, 2, 0]
+for _bad in (np.array([[np.nan, 1.0]]), np.zeros((2, 2, 2))):
+    try:
+        _lsa(_bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"linear_sum_assignment accepted invalid cost {_bad.shape}")
+_a, _b = _rng.normal(size=(4, 3)), _rng.normal(size=(5, 3))
+_diff = _a[:, None, :] - _b[None, :, :]
+for _metric, _want in {
+    "euclidean": np.sqrt((_diff ** 2).sum(-1)),
+    "sqeuclidean": (_diff ** 2).sum(-1),
+    "cityblock": np.abs(_diff).sum(-1),
+    "chebyshev": np.abs(_diff).max(-1),
+    "cosine": 1 - (_a @ _b.T) / np.outer(np.linalg.norm(_a, axis=1), np.linalg.norm(_b, axis=1)),
+}.items():
+    assert np.allclose(_cdist(_a, _b, _metric), _want, rtol=0, atol=1e-12), _metric
+assert np.allclose(_cdist(_a, _b, "minkowski", p=3), (np.abs(_diff) ** 3).sum(-1) ** (1 / 3))
+try:
+    _cdist(_a, _b, "hamming")
+except NotImplementedError as error:
+    assert "hamming" in str(error)
+else:
+    raise AssertionError("cdist silently accepted an unsupported metric")
+
+# fm-5wq.11: manimlib.config's CLI helpers follow Reference config.py:350-395
+# over the same Namespace fields instead of ignoring their arguments.
+_cfg = importlib.import_module("manimlib.config")
+_ns = types.SimpleNamespace
+assert _cfg.get_animations_numbers(_ns(start_at_animation_number=None)) == (None, None)
+assert _cfg.get_animations_numbers(_ns(start_at_animation_number="3")) == (3, None)
+assert _cfg.get_animations_numbers(_ns(start_at_animation_number="2,5")) == (2, 5)
+assert _cfg.get_file_ext(_ns(transparent=True, gif=True)) == ".mov"
+assert _cfg.get_file_ext(_ns(transparent=False, gif=True)) == ".gif"
+assert _cfg.get_file_ext(_ns(transparent=False, gif=False)) == ".mp4"
+_flags = dict(resolution=None, low_quality=False, medium_quality=False, hd=False, uhd=False)
+_options = {"low": "(854, 480)", "med": "(1280, 720)", "high": "(1920, 1080)", "4k": "(3840, 2160)"}
+assert _cfg.get_resolution_from_args(_ns(**_flags), _options) is None
+assert _cfg.get_resolution_from_args(_ns(**{**_flags, "resolution": "640x360"}), _options) == (640, 360)
+assert _cfg.get_resolution_from_args(_ns(**{**_flags, "medium_quality": True}), _options) == (1280, 720)
+assert _cfg.get_resolution_from_args(_ns(**{**_flags, "uhd": True}), _options) == (3840, 2160)
+_dirs = _ns(output="/out", mirror_module_path=False, removed_mirror_prefix="")
+assert _cfg.get_output_directory(_ns(video_dir=None, file="s.py"), _ns(directories=_dirs)) == "/out"
+assert _cfg.get_output_directory(_ns(video_dir="/v", file="s.py"), _ns(directories=_dirs)) == "/v"
+_mirror = _ns(output="/out", mirror_module_path=True, removed_mirror_prefix="/nonmatching")
+assert _cfg.get_output_directory(
+    _ns(video_dir=None, file="/proj/_2020/scene.py"), _ns(directories=_mirror)
+) == pathlib.Path("/out/scene")
+
 # Module functions and constants carry the Reference identities.
 _svg_module = importlib.import_module("manimlib.mobject.svg.svg_mobject")
 assert np.allclose(_svg_module._convert_point_to_3d(3.0, 4.0), [3.0, 4.0, 0.0])
@@ -21947,10 +22060,36 @@ try:
 except Exception as error:
     _img_refused = "Lumen" in str(error)
 _check("Pillow image surface remains separate", _img_refused)
-_check("headless queries stay live",
-       _cam.use_window_fbo() is False
-       and _cam.init_frame() is None
-       and _cam.init_light_source() is None)
+_check("window framebuffer switching refuses headlessly",
+       _raises(lambda: _cam.use_window_fbo(), bridge_errors.CapabilityError))
+_frame_before = _cam.frame
+_check("a constructed camera refuses a frame swap and keeps its frame",
+       _raises(lambda: _cam.init_frame(), NotImplementedError)
+       and _cam.frame is _frame_before)
+_light_before = _cam.light_source
+_check("init_light_source rebuilds the light at light_source_position",
+       _cam.init_light_source() is None
+       and _cam.light_source is not _light_before
+       and np.allclose(_cam.light_source.get_center(), _cam.light_source_position))
+
+
+# Reference camera.py:69/97: construction runs the init_frame and
+# init_light_source hooks, so a subclass override is honoured (the former
+# inlined construction silently ignored both).
+class _HookedCamera(manimlib.Camera):
+    def init_frame(self, **config):
+        self._hooks = ["frame"]
+        super().init_frame(**config)
+
+    def init_light_source(self):
+        self._hooks.append("light")
+        super().init_light_source()
+
+
+_hooked = _HookedCamera(resolution=(64, 36))
+_check("camera construction dispatches overridable init hooks in order",
+       _hooked._hooks == ["frame", "light"]
+       and np.allclose(_hooked.light_source.get_center(), _hooked.light_source_position))
 
 
 # ---------------------------------------------------------------------------

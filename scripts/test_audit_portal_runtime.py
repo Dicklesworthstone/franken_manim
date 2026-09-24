@@ -387,6 +387,175 @@ class RuntimeAuditTests(unittest.TestCase):
             hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
+    # fm-5wq.11: a placeholder-free stub must not substantiate a claim.
+    def test_every_trivial_body_shape_fails_a_reviewed_claim(self) -> None:
+        module = self.module("fake_portal.trivial")
+        import numpy as np
+
+        def body_pass(self):
+            pass
+
+        def body_none(self, value):
+            return None
+
+        def body_empty_string(value):
+            return ""
+
+        def body_zero(value):
+            return 0
+
+        def body_false(value):
+            return False
+
+        def body_empty_tuple(value):
+            return ()
+
+        def body_empty_list(self):
+            return []
+
+        def body_empty_dict(self):
+            return {}
+
+        def body_pair_of_empties(self, is_labelled=False):
+            return ("", "")
+
+        def body_constant_ignoring_arguments(args=None, config=None):
+            return "videos"
+
+        def body_empty_array(self):
+            return np.empty((0, 3))
+
+        shapes = {
+            body_pass: "empty",
+            body_none: "empty",
+            body_empty_string: "empty",
+            body_zero: "empty",
+            body_false: "empty",
+            body_empty_tuple: "empty",
+            body_empty_list: "empty",
+            body_empty_dict: "empty",
+            body_pair_of_empties: "empty",
+            body_constant_ignoring_arguments: "ignores-arguments",
+            body_empty_array: "empty-array",
+        }
+        rows = []
+        for function, shape in shapes.items():
+            setattr(module, function.__name__, staticmethod(function))
+            rows.append(row(f"fake_portal.trivial:{function.__name__}", "same"))
+        report = audit.audit_rows(audit.parse_status_rows(status_text(*rows)))
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["counts"]["trivial_bodies"], len(shapes))
+        details = {entry["symbol"]: entry for entry in report["contradictions"]}
+        for function, shape in shapes.items():
+            entry = details[f"fake_portal.trivial:{function.__name__}"]
+            self.assertEqual(entry["code"], "reviewed-symbol-has-trivial-body")
+            self.assertIn(f"is {shape};", entry["detail"])
+
+    def test_real_bodies_justified_hooks_and_refusals_are_not_trivial(self) -> None:
+        module = self.module("fake_portal.nontrivial")
+
+        def reads_argument(value):
+            return value + 1
+
+        def constant_without_arguments():
+            return ".mp4"
+
+        def fluent(self):
+            return self
+
+        def refuses(self):
+            raise NotImplementedError("named refusal")
+
+        def stub(self):
+            pass
+
+        for function in (reads_argument, constant_without_arguments, fluent, refuses, stub):
+            setattr(module, function.__name__, function)
+        justified = next(iter(audit_contract().TRIVIAL_BODY_JUSTIFICATIONS))
+        justified_module_name, justified_path = justified.split(":", 1)
+        justified_module = self.module(justified_module_name)
+        owner_name, member = justified_path.split(".")
+        setattr(justified_module, owner_name, type(owner_name, (), {member: stub}))
+        report = audit.audit_rows(
+            audit.parse_status_rows(
+                status_text(
+                    row("fake_portal.nontrivial:reads_argument"),
+                    row("fake_portal.nontrivial:constant_without_arguments"),
+                    row("fake_portal.nontrivial:fluent", "improved"),
+                    row("fake_portal.nontrivial:refuses"),
+                    row("fake_portal.nontrivial:stub", "excluded"),
+                )
+            ),
+        )
+        self.assertTrue(report["ok"], report["contradictions"])
+        self.assertEqual(report["counts"]["trivial_bodies"], 0)
+        self.assertIsNone(
+            audit_contract()._trivial_body_contradiction(
+                audit.StatusRow(justified, "same", "e", "t", "n"),
+                stub,
+            )
+        )
+
+    def test_trivial_body_justifications_are_verified_against_the_sources(self) -> None:
+        """Each exemption must be true today: no silent allowlist growth."""
+        import ast
+
+        root = Path(__file__).resolve().parents[1]
+        dispatch = (root / "crates/fmn-python/src/lib.rs").read_text(encoding="utf-8")
+        table = audit_contract().TRIVIAL_BODY_JUSTIFICATIONS
+        self.assertTrue(table)
+        for symbol, reason in table.items():
+            module_name, qualified = symbol.split(":", 1)
+            name = qualified.rsplit(".", 1)[-1]
+            if reason == "native-hook":
+                self.assertIn(f'call_cached0(slf.as_any(), "{name}")', dispatch, symbol)
+                continue
+            self.assertEqual(reason, "reference-no-op", symbol)
+            source = root / "scripts/manim_ref" / (module_name.replace(".", "/") + ".py")
+            nodes = ast.parse(source.read_text(encoding="utf-8")).body
+            target = None
+            for part in qualified.split("."):
+                target = next(
+                    node
+                    for node in nodes
+                    if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == part
+                )
+                nodes = target.body
+            body = [
+                statement
+                for statement in target.body
+                if not (
+                    isinstance(statement, ast.Expr)
+                    and isinstance(statement.value, ast.Constant)
+                )
+            ]
+            abstract = any(
+                isinstance(decorator, (ast.Name, ast.Attribute))
+                and ast.unparse(decorator).endswith("abstractmethod")
+                for decorator in target.decorator_list
+            )
+            empty = not body or (
+                len(body) == 1
+                and (
+                    isinstance(body[0], ast.Pass)
+                    or isinstance(body[0], ast.Return)
+                    and (
+                        body[0].value is None
+                        or isinstance(body[0].value, ast.Constant)
+                        and not body[0].value.value
+                        or isinstance(body[0].value, (ast.List, ast.Tuple, ast.Dict))
+                        and not ast.unparse(body[0].value).strip("[](){} ")
+                    )
+                )
+            )
+            self.assertTrue(abstract or empty, f"{symbol}: Reference body is not a no-op")
+
+
+def audit_contract():
+    import fmn_python.parity_audit as contract
+
+    return contract
+
 
 if __name__ == "__main__":
     unittest.main()
