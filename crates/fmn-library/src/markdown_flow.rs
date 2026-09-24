@@ -13,8 +13,14 @@ pub(super) struct InlineBox {
 
 impl InlineBox {
     pub(super) fn line_break() -> Self {
-        Self { geometry: VMobject::new(), advance: 0.0, height: 0.0, depth: 0.0,
-            space: false, hard_break: true }
+        Self {
+            geometry: VMobject::new(),
+            advance: 0.0,
+            height: 0.0,
+            depth: 0.0,
+            space: false,
+            hard_break: true,
+        }
     }
 }
 
@@ -31,10 +37,15 @@ pub(super) fn flow(boxes: Vec<InlineBox>, width: Option<f64>, leading: f64) -> V
             continue;
         }
         if item.space {
-            if !line.is_empty() { pending_space += item.advance; }
+            if !line.is_empty() {
+                pending_space += item.advance;
+            }
             continue;
         }
-        if !line.is_empty() && pending_space > 0.0 && width.is_some_and(|w| x + pending_space + item.advance > w) {
+        if !line.is_empty()
+            && pending_space > 0.0
+            && width.is_some_and(|w| x + pending_space + item.advance > w)
+        {
             lines.push((std::mem::take(&mut line), height, depth));
             (x, height, depth, pending_space) = (0.0, leading * 0.8, leading * 0.2, 0.0);
         }
@@ -45,12 +56,17 @@ pub(super) fn flow(boxes: Vec<InlineBox>, width: Option<f64>, leading: f64) -> V
         height = height.max(item.height);
         depth = depth.max(item.depth);
     }
-    if !line.is_empty() { lines.push((line, height, depth)); }
+    if !line.is_empty() {
+        lines.push((line, height, depth));
+    }
     let mut children = Vec::new();
     let mut top = 0.0;
     for (line, height, depth) in lines {
         let baseline = top - height;
-        children.extend(line.into_iter().map(|(geometry, x)| geometry.shifted([x, baseline, 0.0])));
+        children.extend(
+            line.into_iter()
+                .map(|(geometry, x)| geometry.shifted([x, baseline, 0.0])),
+        );
         top = baseline - depth - leading * 0.2;
     }
     VMobject::new().with_children(children)

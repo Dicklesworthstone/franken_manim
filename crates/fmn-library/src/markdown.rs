@@ -14,7 +14,7 @@
 
 #[path = "markdown_document.rs"]
 mod document;
-pub use document::{MathDocumentError, MarkdownMathOptions};
+pub use document::{MarkdownMathOptions, MathDocumentError};
 
 use fmn_text::FontBook;
 

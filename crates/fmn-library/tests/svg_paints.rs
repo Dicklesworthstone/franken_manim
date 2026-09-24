@@ -158,9 +158,8 @@ fn invisible_channels_retain_geometry_for_later_styling() {
 
 #[test]
 fn dense_source_paths_do_not_duplicate_all_collapsed_points_for_every_dash() {
-    let mut source = String::from(
-        r#"<svg><path fill="none" stroke="red" stroke-dasharray="1 1" d="M0 0"#,
-    );
+    let mut source =
+        String::from(r#"<svg><path fill="none" stroke="red" stroke-dasharray="1 1" d="M0 0"#);
     for x in 1..=200 {
         source.push_str(&format!("L{x} 0"));
     }

@@ -327,9 +327,11 @@ fn dash_paths(shape: &SvgShape, budget: &mut Budget) -> Result<Vec<QuadPath>, Sv
         let mut pieces = Vec::with_capacity(intervals.len());
         for &(a, b) in &intervals {
             let locate = |distance: f64| {
-                table.curve_and_t_at(&path, distance / length).ok_or(
-                    SvgPaintError::Invalid("dash distance could not be resolved"),
-                )
+                table
+                    .curve_and_t_at(&path, distance / length)
+                    .ok_or(SvgPaintError::Invalid(
+                        "dash distance could not be resolved",
+                    ))
             };
             let (first, start_t) = locate(a)?;
             let (last, end_t) = locate(b)?;

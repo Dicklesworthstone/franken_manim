@@ -91,7 +91,9 @@ impl RasterImage {
     }
 
     fn __copy__(&self) -> Self {
-        Self { resource: self.resource.clone() }
+        Self {
+            resource: self.resource.clone(),
+        }
     }
 
     fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {

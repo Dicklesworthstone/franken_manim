@@ -332,7 +332,11 @@ impl<'a> TexText<'a> {
 /// The ems→scene-units scale, calibrated the Reference's way: typeset a
 /// reference "0" (text-style math, the Reference's calibration surface)
 /// and scale so its height is `font_size / font_size_for_unit_height`.
-pub(crate) fn calibrate(engine: &TexEngine, font_size: f64, fsuh: f64) -> Result<f64, TexMobjectError> {
+pub(crate) fn calibrate(
+    engine: &TexEngine,
+    font_size: f64,
+    fsuh: f64,
+) -> Result<f64, TexMobjectError> {
     let probe = engine.typeset(Mode::Math(MathStyle::Text), "0")?;
     let height = probe.layout.height + probe.layout.depth;
     if !height.is_finite() || height <= 0.0 {

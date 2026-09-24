@@ -366,14 +366,19 @@ mod tests {
             let image = ImageMobject::from_png(&intent_png(Some(gamma), false)).unwrap();
             assert_eq!(image.pixels(), &[128, 128, 128, 255]);
             let object: Mobject = image.into();
-            assert_eq!(object.image.as_ref().unwrap().color_space(), ImageColorSpace::Gamma(gamma));
+            assert_eq!(
+                object.image.as_ref().unwrap().color_space(),
+                ImageColorSpace::Gamma(gamma)
+            );
         }
     }
 
     #[test]
     fn png_srgb_precedence_and_untagged_default_stay_srgb() {
         for (gamma, srgb) in [(Some(100_000), true), (None, true), (None, false)] {
-            let object: Mobject = ImageMobject::from_png(&intent_png(gamma, srgb)).unwrap().into();
+            let object: Mobject = ImageMobject::from_png(&intent_png(gamma, srgb))
+                .unwrap()
+                .into();
             let image = object.image.as_ref().unwrap();
             assert_eq!(image.color_space(), ImageColorSpace::Srgb);
             assert_eq!(image.pixels(), &[128, 128, 128, 255]);

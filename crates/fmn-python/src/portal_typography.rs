@@ -1,11 +1,11 @@
 //! Rich text authoring over Scribe's existing font, span and layout authorities.
 //! No font discovery, markup rewriting, second shaper or external process.
-#[path = "portal_table.rs"]
-mod table;
-#[path = "portal_svg_ingress.rs"]
-mod svg_ingress;
 #[path = "portal_markdown.rs"]
 mod markdown;
+#[path = "portal_svg_ingress.rs"]
+mod svg_ingress;
+#[path = "portal_table.rs"]
+mod table;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;

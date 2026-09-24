@@ -7,8 +7,8 @@ use fmn_mobject::ImageResource;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
-use crate::{PyValueError, native_shell_specs};
 use super::raster::RasterImage;
+use crate::{PyValueError, native_shell_specs};
 
 const MAX_TEXTURE_BYTES: usize = 256 * 1024 * 1024;
 
@@ -41,7 +41,11 @@ impl Document {
 
     #[getter]
     fn part_materials(&self) -> Vec<Option<String>> {
-        self.value.runs().iter().map(|run| run.material.clone()).collect()
+        self.value
+            .runs()
+            .iter()
+            .map(|run| run.material.clone())
+            .collect()
     }
 }
 
@@ -65,7 +69,10 @@ impl Materials {
     /// Resolve images relative to the MTL which first defines the material.
     #[getter]
     fn entries(&self) -> Vec<(String, Option<String>)> {
-        self.value.iter().map(|(name, value)| (name.clone(), value.texture.clone())).collect()
+        self.value
+            .iter()
+            .map(|(name, value)| (name.clone(), value.texture.clone()))
+            .collect()
     }
 }
 
@@ -82,17 +89,23 @@ fn _build_obj_parts<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let limits = ObjAssetLimits::default();
     if libraries.len() > limits.max_materials || images.len() > limits.max_materials {
-        return Err(PyValueError::new_err("OBJ material input count budget exceeded"));
+        return Err(PyValueError::new_err(
+            "OBJ material input count budget exceeded",
+        ));
     }
     let mut materials = BTreeMap::new();
     for library in libraries.iter() {
         let library = library.cast::<Materials>()?.try_borrow()?;
         for (name, material) in &library.value {
             if !materials.contains_key(name) && materials.len() >= limits.max_materials {
-                return Err(PyValueError::new_err("OBJ aggregate material count budget exceeded"));
+                return Err(PyValueError::new_err(
+                    "OBJ aggregate material count budget exceeded",
+                ));
             }
             // File order is authoritative, never map iteration or I/O timing.
-            materials.entry(name.clone()).or_insert_with(|| material.clone());
+            materials
+                .entry(name.clone())
+                .or_insert_with(|| material.clone());
         }
     }
     let mut decoded = BTreeMap::<String, ImageResource>::new();
@@ -101,17 +114,21 @@ fn _build_obj_parts<'py>(
     for (key, value) in images.iter() {
         let name = key.extract::<String>()?;
         if !used.contains(&name) {
-            return Err(PyValueError::new_err("an OBJ image names an unused material"));
+            return Err(PyValueError::new_err(
+                "an OBJ image names an unused material",
+            ));
         }
         let image = value.cast::<RasterImage>()?.try_borrow()?;
         // A conservative aggregate bound includes each material binding,
         // even when two bindings share the same immutable decoded allocation.
-        byte_count = byte_count.checked_add(image.resource.pixels().len())
+        byte_count = byte_count
+            .checked_add(image.resource.pixels().len())
             .filter(|&size| size <= MAX_TEXTURE_BYTES)
             .ok_or_else(|| PyValueError::new_err("OBJ bound textures exceed the 256 MiB budget"))?;
         decoded.insert(name, image.resource.clone());
     }
-    let tree = py.detach(|| document.value.to_mobject(height, &materials, &decoded))
+    let tree = py
+        .detach(|| document.value.to_mobject(height, &materials, &decoded))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     native_shell_specs(py, factory, tree.submobjects)
 }

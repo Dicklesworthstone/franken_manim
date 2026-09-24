@@ -646,7 +646,11 @@ impl<'a> MarkupText<'a> {
 /// calibration is face-independent by design (the Reference calibrates
 /// on the default face whatever the text's own font); per-glyph metric
 /// differences are BN-05's territory.
-pub(crate) fn calibrate(book: &FontBook, font_size: f64, fsuh: f64) -> Result<f64, TextMobjectError> {
+pub(crate) fn calibrate(
+    book: &FontBook,
+    font_size: f64,
+    fsuh: f64,
+) -> Result<f64, TextMobjectError> {
     let probe = layout_text(book, &TextRequest::plain("0"))?;
     let calibration = || TextMobjectError::Calibration {
         family: book.default_family().name.clone(),
