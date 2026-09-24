@@ -1,6 +1,6 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-09-09. The September 9 assessment below supersedes earlier current-state statements; earlier execution records remain historical evidence.
+**Status date:** 2026-09-23. The September 23 assessment below supersedes earlier current-state statements; the September 9 and September 7 assessments and earlier execution records remain historical evidence.
 
 **September 7 reality-check source:** `d784048148002acdb7d3a914a8e764afcfad3b1d` on `main`; initially clean. That audit changed this report and Beads only.
 
@@ -8,6 +8,71 @@
 **Historical runtime-audit checkpoint:** `7aeb3f40a763998d07b43b74613f3c6becc49207`.  
 **Agent-governance checkpoint:** ADR-0023 and `docs/GOVERNANCE.md` through `19e1e8b0014f5e4dd68aebc0520cd7ba9fb98283`.  
 **Authority rule:** this document summarizes evidence. `.beads/issues.jsonl` remains the task, status, and dependency authority; the Revision-4 comprehensive plan remains the design authority.
+
+## 2026-09-23 reality check
+
+**Verdict: a real, well-engineered prerelease engine whose convergence has stalled.** The native core (geometry, records, animation clock, analytic renderer, native TeX layout, codecs, Studio protocol) is genuine code with no `todo!`/`unimplemented!` in any crate, and the certified path is impressively stable: HEAD `6b6fd393` produces the same certified PNG bytes as v0.4.0 for `@builtin circle_shift.v1`, at 1 and at 16 threads. But G2 through G5 are all open and serialized behind a performance rig that cannot produce a number. Of the 642 beads at entry, 622 were closed and 0 were claimable. What users can install is five weeks and 1,755 commits old, and it renders all text upside down. Swarm effort has shifted to Python-portal breadth, often outside the tracker and the local gates.
+
+Assessment source: `main` from `9eea4a26` to `6b6fd393` (two peer commits landed during the audit). Scratch receipts: `/data/tmp/claude-1000/-data-projects-franken-manim/4a70679f-c6ad-4f3b-8023-2add23c76ea3/scratchpad/`.
+
+### Executed evidence
+
+| Observation | Result and proof boundary |
+|---|---|
+| Published v0.4.0 install | GitHub API: v0.4.0 (2026-08-18, prerelease, from `d1e4274a`) is still the newest release. `install.sh --offline --version 0.4.0 --checksum SHA256SUMS` verified SHA-256 and installed. PyPI `franken-manim` and npm `fmn-wasm` return 404. |
+| Native README matrix, v0.4.0 and HEAD | `@builtin circle_shift.v1`: `png_sequence`, `png`, `gif`, `y4m`, `video`, `--transparent` video, `--write_all` (25 builtins), `batch`, `doctor` all exit 0 on both. `.py` input is refused with exit 4 (ADR-0017). `demo/wasm/bundle.fmtl` fails with exit 5 on v0.4.0 (engine-identity mismatch) and renders at HEAD. `--format wav` on a cue-less scene is refused with a named reason. |
+| Certified determinism (one host) | `--reproducible`, 320×180: 12 PNGs byte-identical at `--threads 1` and `--threads 16`, and identical between v0.4.0 and HEAD. The manifest still has two items with `id = 2`. `fmn --version --robot` on a `--release` HEAD build reports `"cargo_profile":"build"`. |
+| Timing (not a gate) | An interleaved A/B, same invocation, 5–7 repetitions, gave HEAD/v0.4.0 median ratios of 0.91–1.17: no regression. The box ran at load average 43–93 on 64 threads, and absolute times moved about 10× with load, so none of these numbers is a performance claim. |
+| Published wheel with the README's own scenes | Clean CPython 3.13.1 + NumPy 2.5.2 venv. `SquareToCircle` and `Hello` render png/png_sequence, but **all Text/Tex glyphs are vertically flipped** (label below the square, title off-centre). The fix, `fd6bea1d`, was never released. `--format gif`/`y4m`/`video`, `-o`, `--write_all`, `-so`, `--reproducible` and `--autoreload` return exit 4; `--uhd --transparent --vcodec prores_ks` returns exit 2. `--format png --video_dir X` writes the PNG *as* file `X`. |
+| Seed corpus with the published wheel | All scenes first fail with `ModuleNotFoundError: tqdm`, an undocumented era dependency. With tqdm installed, SquareOnASphere, FlattenCone, MaxProcess, QuadraticFormula and BeamSplitter render a final PNG. BeamSplitter looks good (upright TeX, 3D beams); MaxProcess text is upside down. |
+| Hosted CI | `ci.yml`: last green run on main was 2026-08-10. The last 100 runs are 47 failures and 51 cancellations. The latest runs fail at `cargo fmt --check`. Weekly scheduled runs failed 08-31, 09-07, 09-14 and 09-21. |
+| Local format gate | `cargo fmt --check` exits 1 at clean HEAD `6b6fd393` (`fmn-library/src/markdown.rs`, `image.rs`). |
+| Workspace tests | TEST-RESULT-PLACEHOLDER |
+
+### Vision checklist (changes since 2026-09-09)
+
+| # | Goal | Status now | Evidence |
+|---|---|---|---|
+| 1 | One-binary native CLI | WORKING for the 25 primitive builtins and FMTL. DISCONNECTED for user content and 3D. | The CLI renders only builtins/FMTL (`fmn-cli/src/lib.rs` ~5301-5421). The CLI never calls `render_with_camera`, so Surface, DotCloud and Image raise `CameraRequired` (`fmn-render/src/retained.rs` ~210-224). |
+| 2 | Native Rust front door | PARTIAL | The README example compiles (doctest) but ends in `NullSceneSink`. The `fmn` facade depends on neither fmn-render nor fmn-output, and `RenderSink` is private to fmn-cli. |
+| 3 | Native TeX (fmd-math) | WORKING engine; correctness UNPROVEN corpus-wide | About 9.8k lines, named errors, Appendix-G parameters, drawn delimiters. The ratchet counts `typeset()==Ok`. The pin is about 920 commits behind upstream. G2 criterion 7 (fmd `$…$` in HTML/PDF) is **not met at the pin**, yet the packet marks it green. |
+| 4 | Rev-4 scaling architecture in the product | DISCONNECTED | `FramePacket` holds `Rc<Snapshot>` (`fmn-anim/src/frame.rs:28`). `FramePipeline` is used only by conformance, and the CLI uses only `render_teams.first()`. `fmn-runtime/src/stream.rs` is an orphan, and `scripts/patches/native-frame-overlap.patch` still applies cleanly. |
+| 5 | Performance gates PG-1…PG-8 | NOT MEASURED | No FrankenManim timing exists for any gate. `perf_host.rs:41/680` requires the whole machine to have exactly 8 physical cores, and `:436` refuses macOS. Every release-perf producer refuses because `build.rs` derives the profile via `ancestors().nth(3)`. The PG-6 zero-allocation harness is tautological (`perf_pg6.rs` ~364-409). |
+| 6 | Certified reproducibility | WORKING on a single host; cross-platform STALE | The last real aarch64/macOS matrix run was green on 2026-08-10, and the locks have been re-pinned since. The closure has gaps: no dirty flag on BUILD_ID, C6 hard-codes "no font reads" (native and portal), C3 is platform-specific, and fsci-integrate `powf` leaks platform libm into certified StreamLines. |
+| 7 | Source-unedited Python scenes | PARTIAL; the measurement is too narrow | 8 seed scenes with self-blessed baselines, no Reference comparison and no Look Gallery. Commit `48c8405d` added trivial bodies that defeat the placeholder audit (e.g. `linear_sum_assignment` returns the identity assignment, `bootstrap.py:22976`). `init_points` overrides on library-class subclasses are never called. Custom `rate_func` is pre-sampled at 30 Hz. |
+| 8 | Portal architecture | PARTIAL WRONG_APPROACH | About 48.7k Python lines re-implement manim's animation layer next to the native one: 55 import-time monkeypatch installers, `_requires_python_animation` wrapped 16×, `Scene.play` replaced 9×. |
+| 9 | Studio | WORKING baseline | Live input works only for `@builtin interactive.v1`; Metal preview is opt-in only; there is no browser-local WASM Studio. |
+| 10 | WASM | PARTIAL | Tier 1 has 3 hard-coded scenes. Scribe is outside the wasm graph. npm is unpublished. |
+| 11 | Distribution | PARTIAL | Stale v0.4.0; no tiers, no signing, no PyPI. fm-m54 was closed with its acceptance unchecked. The `install.sh` fallback path corrupts the version (`warn()` prints to stdout inside `$(resolve_version)`). The README labels unreleased portal features as "works today (v0.4.0)". |
+| 12 | Engineering hygiene | REGRESSED | CI has been red since 08-10. 59 workflows grant `contents: write` and push to main; 48 bot commits since 09-10. 69 committed patch files. Of 558 commits since 09-10, 82 subjects (15%) cite a bead id; 185 (33%) mention one anywhere in the message. |
+
+### Tracker changes from this audit
+
+31 new beads, each self-contained with file:line evidence, work, acceptance, tests and logging. The new blocking edges are:
+- G2 (`fm-i1q`) is blocked by fm-5wq.8, fm-5wq.17 and fm-fmd-repin-g2-truth-y3gr.
+- G3 (`fm-o4q`) is blocked by fm-cli-camera-route-i1zc, fm-studio-general-input-juh7, fm-sq8.5 and fm-sq8.6.
+- G4a (`fm-boe`) is blocked by fm-5wq.11, .12, .13, .14 and .18.
+- G4b (`fm-yp0`) is blocked by fm-certified-closure-integrity-4fei, fm-certified-libm-leak-3aja and fm-5wq.16.
+- G5 (`fm-jip`) is blocked by fm-7wm.9, .10, fm-sq8.8, fm-facade-render-api-9ewt, fm-scene-fmtl-export-96ej and fm-5wq.19.
+
+The P0 roots are:
+- fm-5wq.8: the perf-qualification ADR (manual).
+- fm-5wq.9: the profile-detection fix, which the planner now recommends first.
+- fm-restore-green-ci-tqsr.
+- fm-neutralize-bot-push-workflows-ieol (manual; any deletion needs the owner).
+- fm-5wq.11: the audit-gaming stubs.
+- fm-fmd-repin-g2-truth-y3gr.
+
+Evidence comments were added to:
+- fm-5wq.4.143, fm-5wq.4 and fm-m54, which were closed without their acceptance. They were not reopened, to avoid a closed-parent containment violation; their unmet work is re-carried by the new beads.
+- fm-inr and its stale children, which have been claimed but idle for 37–39 days. The owner should release those claims.
+- fm-i1q, fm-3df and fm-ffj.72.
+
+After these changes the canonical planner and brief checks exit 0, containment and blocking cycles are 0 (`bv` agrees), and claimable leaves went from 0 to 22.
+
+### Limits
+
+This audit did not build a HEAD wheel, so the portal was executed only as the published v0.4.0 wheel. HEAD portal claims come from source reading. The audit did not run the full `scripts/check.sh`, ran nothing on macOS or aarch64, and ran no qualified performance measurement. Sub-audits read code at HEAD and each load-bearing claim above was re-verified directly. It is still a bounded investigation, not an exhaustive proof.
 
 ## 2026-09-09 comprehensive reality check
 
