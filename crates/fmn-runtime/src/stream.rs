@@ -5,10 +5,11 @@
 //! requests one source value only AFTER it has room, and the caller freezes
 //! that value under a [`FramePermit`]. There is no second queue of unaccounted
 //! frames and no second scheduler. Closing drains; dropping cancels and joins.
+//! [`FrameStream::flush`] drains prior work without closing or inserting a frame.
 
 use crate::{
-    CancellationToken, ExecutionPlan, FramePipeline, PipelineEvent, PipelineFailure, PipelineStages,
-    PipelineStats,
+    BarrierContext, CancellationToken, ExecutionPlan, FramePipeline, PipelineEvent,
+    PipelineFailure, PipelineStages, PipelineStats,
 };
 use std::fmt;
 use std::marker::PhantomData;
@@ -66,6 +67,7 @@ impl<E: std::error::Error + 'static> std::error::Error for FrameStreamError<E> {
 /// A sink that can block must be cancelled before dropping this stream.
 pub struct FrameStream<F: Send + 'static, E: Send + 'static> {
     requests: Option<Receiver<Ticket<F>>>,
+    barriers: Receiver<BarrierContext>,
     cancellation: CancellationToken,
     worker: Option<JoinHandle<Result<PipelineStats, PipelineFailure<E>>>>,
 }
@@ -92,6 +94,10 @@ impl<F: Send + 'static, E: Send + 'static> FrameStream<F, E> {
         // Buffer a demand ticket, never a frozen frame. This avoids polling
         // or an artificial per-frame delay when the front door is idle.
         let (requests, receiver) = mpsc::sync_channel(1);
+        // The exclusive producer can have only one flush outstanding. A
+        // buffered acknowledgment also lets cancellation abandon its wait
+        // without stranding the coordinator in a rendezvous send.
+        let (barrier_sender, barriers) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("fmn-frame-coordinator".into())
             .spawn(move || {
@@ -100,11 +106,15 @@ impl<F: Send + 'static, E: Send + 'static> FrameStream<F, E> {
                     cancellation: worker_cancel.clone(),
                 };
                 FramePipeline::with_cancellation(&plan, &stages, worker_cancel)
-                    .run(source, emit, |(), _| Ok(()))
+                    .run(source, emit, |(), context| {
+                        let _ = barrier_sender.send(context);
+                        Ok(())
+                    })
             })
             .map_err(FrameStreamError::Spawn)?;
         Ok(Self {
             requests: Some(receiver),
+            barriers,
             cancellation,
             worker: Some(worker),
         })
@@ -132,6 +142,36 @@ impl<F: Send + 'static, E: Send + 'static> FrameStream<F, E> {
                         owner: PhantomData,
                     });
                 }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return Err(FrameStreamError::Closed),
+            }
+        }
+    }
+
+    /// Drain earlier frames and wait for their ordered emit callbacks to return.
+    ///
+    /// This is an effect-model barrier, not another semantic frame: it neither
+    /// consumes a sequence number nor closes the source. It also releases
+    /// partially filled windows, so an imperative owner can inspect output
+    /// without having to submit a later frame first. More captures may follow.
+    ///
+    /// The caller's emit boundary is authoritative. When it hands work to an
+    /// asynchronous sink, that sink still owns its own drain and atomic
+    /// publication; this method does not finalize it or publish an artifact.
+    ///
+    /// # Errors
+    /// Refuses cancellation or a failed stage. [`Self::finish`] recovers the
+    /// original failure and final counters after joining every worker.
+    pub fn flush(&mut self) -> Result<BarrierContext, FrameStreamError<E>> {
+        self.reserve()?
+            .submit_event(PipelineEvent::barrier(()))
+            .map_err(|_| FrameStreamError::Closed)?;
+        loop {
+            if self.cancellation.is_cancelled() {
+                return Err(FrameStreamError::Closed);
+            }
+            match self.barriers.recv_timeout(STOP_CHECK) {
+                Ok(context) => return Ok(context),
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return Err(FrameStreamError::Closed),
             }
@@ -199,15 +239,22 @@ impl<F> FramePermit<'_, F> {
     /// A disconnected receiver means the pipeline failed; the owner must join
     /// it to recover the detailed stage failure. The unsent frame is returned.
     pub fn submit(
-        mut self,
+        self,
         sequence: u64,
         frame: F,
+    ) -> Result<(), mpsc::SendError<PipelineEvent<F, ()>>> {
+        self.submit_event(PipelineEvent::frame(sequence, frame))
+    }
+
+    fn submit_event(
+        mut self,
+        event: PipelineEvent<F, ()>,
     ) -> Result<(), mpsc::SendError<PipelineEvent<F, ()>>> {
         // A permit is constructed with its sender and consumed exactly once.
         let Some(sender) = self.sender.take() else {
             unreachable!("consumed frame permit")
         };
-        sender.send(PipelineEvent::frame(sequence, frame))
+        sender.send(event)
     }
 }
 
@@ -425,5 +472,82 @@ mod tests {
         ));
         assert_eq!(failure.stats.outstanding_slots, 0);
         assert_eq!(alive.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn flush_drains_partial_windows_without_closing_or_inserting_frames() {
+        for slots in [1, 2, 4] {
+            let alive = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let received = observed.clone();
+            let mut stream = FrameStream::new(
+                plan(slots), Stages { fail: None, panic: false },
+                move |sequence, frame| {
+                    received.lock().unwrap().push((sequence, frame.value));
+                    Ok(())
+                },
+            ).unwrap();
+            let empty = stream.flush().unwrap();
+            assert_eq!((empty.submitted, empty.emitted, empty.outstanding_slots), (0, 0, 0));
+            for range in [0..2, 2..5] {
+                let count = range.end;
+                for sequence in range {
+                    assert!(stream.reserve().unwrap().submit(sequence, tracked(sequence, &alive)).is_ok());
+                }
+                let barrier = stream.flush().unwrap();
+                assert_eq!((barrier.submitted, barrier.emitted), (count, count));
+                assert_eq!(barrier.outstanding_slots, 0);
+                assert_eq!(alive.load(Ordering::SeqCst), 0);
+                assert_eq!(*observed.lock().unwrap(), (0..count).map(|n| (n, n)).collect::<Vec<_>>());
+            }
+            let stats = stream.finish().unwrap();
+            assert_eq!((stats.submitted, stats.emitted, stats.barriers), (5, 5, 3));
+            assert_eq!(stats.outstanding_slots, 0);
+        }
+    }
+
+    #[test]
+    fn failed_flush_does_not_acknowledge_unemitted_frames_or_hide_the_error() {
+        for panic in [false, true] {
+            let alive = Arc::new(AtomicUsize::new(0));
+            let mut stream = stream(4, Some(0), panic);
+            assert!(stream.reserve().unwrap().submit(0, tracked(0, &alive)).is_ok());
+            assert!(matches!(stream.flush(), Err(FrameStreamError::Closed)));
+            let Err(FrameStreamError::Pipeline(failure)) = stream.finish() else {
+                panic!("flush lost the original worker failure");
+            };
+            if panic {
+                assert!(matches!(failure.error, PipelineError::CallbackPanicked { .. }));
+            } else {
+                assert!(matches!(failure.error, PipelineError::Stage { .. }));
+            }
+            assert_eq!(failure.stats.barriers, 0);
+            assert_eq!(failure.stats.emitted, 0);
+            assert_eq!(failure.stats.outstanding_slots, 0);
+            assert_eq!(alive.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn flush_preserves_emit_failure_and_refuses_idle_cancellation() {
+        let alive = Arc::new(AtomicUsize::new(0));
+        let mut failed = FrameStream::new(
+            plan(4), Stages { fail: None, panic: false },
+            |_, _| Err("emit refused the frame".to_owned()),
+        ).unwrap();
+        assert!(failed.reserve().unwrap().submit(0, tracked(0, &alive)).is_ok());
+        assert!(matches!(failed.flush(), Err(FrameStreamError::Closed)));
+        let Err(FrameStreamError::Pipeline(failure)) = failed.finish() else {
+            panic!("emit failure was lost");
+        };
+        assert!(matches!(failure.error, PipelineError::Stage {
+            stage: crate::PipelineStage::Emit, ref source, ..
+        } if source == "emit refused the frame"));
+        assert_eq!(failure.stats.outstanding_slots, 0);
+        assert_eq!(alive.load(Ordering::SeqCst), 0);
+        let mut cancelled = stream(1, None, false);
+        cancelled.cancellation_token().cancel();
+        assert!(matches!(cancelled.flush(), Err(FrameStreamError::Closed)));
+        assert!(cancelled.finish().is_err());
     }
 }

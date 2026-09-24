@@ -213,7 +213,8 @@ mod tests {
         let first = compiler.capture(&stage, 0).unwrap();
         let (before, _) = first.render_cached(1, &mut arena, &mut cache).unwrap();
         let second = compiler.capture(&stage, 0).unwrap();
-        assert_eq!(compiler.stats().shapes_rebuilt, 0);
+        assert_eq!(compiler.stats().shapes_compiled, 0);
+        assert_eq!(compiler.stats().shapes_reused, 1);
         let (after, stats) = second.render_cached(4, &mut arena, &mut cache).unwrap();
         assert_eq!(before.as_bytes(), after.as_bytes());
         assert!(stats.cache.hits > 0);

@@ -284,6 +284,24 @@ impl NativeFramePipeline {
             .map_err(|_| RenderError::Pipeline(FrameStreamError::Closed))
     }
 
+    /// Drain prior raster/conversion jobs without closing the capture stream.
+    ///
+    /// Earlier output reservations have been published in sequence when this
+    /// returns. The emitter still owns their asynchronous delivery and final
+    /// artifact commit; this barrier does not finalize an output sink. No
+    /// extra frame or sequence number is generated, and captures may resume.
+    ///
+    /// # Errors
+    /// Refuses cancellation or a failed stage. Call `finish` to recover the
+    /// original stage failure and its joined resource counters.
+    pub fn flush(&mut self) -> Result<fmn_runtime::BarrierContext, RenderError> {
+        let result = self.stream.as_mut()
+            .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?
+            .flush().map_err(RenderError::Pipeline);
+        if result.is_err() { self.output.cancel(); }
+        result
+    }
+
     /// Drain and join all frame stages. This does NOT publish the artifact.
     ///
     /// # Errors

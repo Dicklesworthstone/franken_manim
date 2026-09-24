@@ -97,11 +97,18 @@ fn all_cpu_formats_match_serial_lumen_on_multiple_render_teams() {
             expected.push((sequence, convert_reference(serial.frame(), format)));
             pipeline.capture(&stage, sequence).unwrap();
             stage.shift(mob, [0.1, 0.0, 0.0]);
+            if sequence % 4 == 3 {
+                let barrier = pipeline.flush().unwrap();
+                assert_eq!((barrier.submitted, barrier.emitted), (sequence + 1, sequence + 1));
+                assert_eq!(barrier.outstanding_slots, 0);
+                assert_eq!(emitter.stats().published, sequence + 1);
+            }
         }
         drop(stage);
         let stats = pipeline.finish().unwrap();
         let report = emitter.finish().unwrap();
         assert_eq!(stats.emitted, 12);
+        assert_eq!(stats.barriers, 3);
         assert_eq!(stats.outstanding_slots, 0);
         assert!(stats.max_in_flight <= plan.frames_in_flight);
         assert!(stats.render_team_frames.iter().all(|count| *count > 0));
@@ -147,4 +154,43 @@ fn negotiated_layout_mismatch_fails_closed_without_freezing() {
     let failure = emitter.finish().unwrap_err();
     assert_eq!(failure.report.stats.outstanding, 0);
     assert_eq!(failure.report.stats.published, 0);
+}
+
+#[test]
+fn drain_barriers_never_grant_artifact_publication() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use fmn_output::{FrameSink, SinkFailure};
+
+    struct CommitWitness(Arc<AtomicBool>);
+    impl FrameSink for CommitWitness {
+        fn write_frame(&mut self, _: u64, _: &FrameBuffer) -> Result<SinkWrite, SinkFailure> {
+            Ok(SinkWrite::Consumed)
+        }
+        fn finish(&mut self) -> Result<(), SinkFailure> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let plan = plan(OutputPixelFormat::Rgba8);
+    let config = config(&plan);
+    let committed = Arc::new(AtomicBool::new(false));
+    let emitter = OrderedEmitter::new(
+        EmitterConfig::new(FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(), plan.frames_in_flight, 0).unwrap(),
+        vec![SinkBinding::reliable("commit-witness", CommitWitness(committed.clone()))],
+    ).unwrap();
+    let mut pipeline = NativeFramePipeline::new(plan, config, None, emitter.handle()).unwrap();
+    let mut stage = Stage::new();
+    let mob = stage.add(shape());
+    stage.add_to_scene(mob).unwrap();
+    for sequence in 0..3 {
+        pipeline.capture(&stage, sequence).unwrap();
+        let barrier = pipeline.flush().unwrap();
+        assert_eq!(barrier.emitted, sequence + 1);
+        assert!(!committed.load(Ordering::SeqCst));
+    }
+    let stats = pipeline.finish().unwrap();
+    assert_eq!((stats.emitted, stats.barriers), (3, 3));
+    assert!(!committed.load(Ordering::SeqCst));
+    emitter.finish().unwrap();
+    assert!(committed.load(Ordering::SeqCst));
 }
