@@ -102,7 +102,7 @@ pub const FLAG_SPECS: &[FlagSpec] = &[
         value_type: None,
         status: FlagStatus::Tiered,
         source: FlagSource::Reference,
-        help: "Automatically reload Python modules to pick up code changes across different files",
+        help: "Not available in fmn (tiered OOT-CLI-AUTORELOAD): re-specified as supervised Studio worker reload",
     },
     FlagSpec {
         options: &["--clear-cache"],
@@ -318,7 +318,7 @@ pub const FLAG_SPECS: &[FlagSpec] = &[
         value_type: None,
         status: FlagStatus::Tiered,
         source: FlagSource::Reference,
-        help: "Adds a breakpoint at the inputted file dropping into an interactive iPython session at that point of the code.",
+        help: "Not available in fmn (tiered OOT-CLI-EMBED): Python front door or Studio breakpoint only",
     },
     FlagSpec {
         options: &["-f", "--full_screen"],

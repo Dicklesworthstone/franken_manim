@@ -2868,6 +2868,17 @@ pub fn generate_cli_rs(schema: &Schema) -> String {
         else {
             continue;
         };
+        // A tiered or excluded flag does not do what the Reference's help
+        // says, so `fmn --help` states the ruling and fmn's behavior instead.
+        let help = match binding.status {
+            Status::Tiered | Status::Excluded => format!(
+                "Not available in fmn ({} {}): {}",
+                binding.status.as_str(),
+                binding.evidence,
+                binding.note
+            ),
+            _ => flag.help.clone().unwrap_or_default(),
+        };
         write_flag_spec(
             &mut out,
             &flag.options,
@@ -2879,7 +2890,7 @@ pub fn generate_cli_rs(schema: &Schema) -> String {
             flag.ty.as_deref(),
             binding.status,
             "Reference",
-            flag.help.as_deref().unwrap_or(""),
+            &help,
         );
     }
     for flag in &schema.native_flags {
