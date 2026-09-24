@@ -7390,6 +7390,46 @@ fn scene_proxy_handles(
     Ok(handles)
 }
 
+/// Handles for the Reference's `Scene.remove`, whose removal set is the
+/// family of every argument. A bound mobject contributes its handle (the
+/// stage expands its family). A detached one, e.g. a never-added group of
+/// added members, contributes its bound descendants. A wholly detached family
+/// contributes nothing, because removing an absent mobject is a no-op.
+fn scene_removal_handles(
+    scene: &Bound<'_, PyScene>,
+    objects: &Bound<'_, PyTuple>,
+) -> PyResult<Vec<Mob>> {
+    let engine = Rc::clone(&scene.borrow().engine);
+    let mut handles = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending: Vec<Bound<'_, PyAny>> = objects.iter().collect();
+    while let Some(object) = pending.pop() {
+        if !seen.insert(object.as_ptr() as usize) {
+            continue;
+        }
+        let proxy = object.cast::<BridgeMobject>().map_err(|_| {
+            PyTypeError::new_err("Scene membership operations require Mobject instances")
+        })?;
+        let parts = bound_parts(&proxy.borrow());
+        match parts {
+            Ok((object_engine, mob)) => {
+                if !same_engine(&engine, &object_engine) {
+                    return Err(ForeignStageError::new_err(
+                        "mobject belongs to a different Scene",
+                    ));
+                }
+                handles.push(mob);
+            }
+            Err(_) => {
+                for child in object.getattr("submobjects")?.try_iter()? {
+                    pending.push(child?);
+                }
+            }
+        }
+    }
+    Ok(handles)
+}
+
 fn bind_scene_mobjects(
     scene: &Bound<'_, PyScene>,
     objects: &Bound<'_, PyTuple>,
@@ -8095,7 +8135,7 @@ impl PyScene {
         slf: &Bound<'py, Self>,
         mobjects: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, Self>> {
-        let handles = scene_proxy_handles(slf, mobjects)?;
+        let handles = scene_removal_handles(slf, mobjects)?;
         slf.borrow().engine.borrow_mut().remove(&handles);
         Ok(slf.clone())
     }

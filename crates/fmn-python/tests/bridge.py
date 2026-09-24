@@ -20567,6 +20567,27 @@ assert [len(face.triangle_indices) for face in manimlib.Cube()] == [6] * 6
 assert manimlib.Cube(square_resolution=(3, 3))[0].triangle_indices.size == 24
 assert [len(face.triangle_indices) for face in manimlib.Prism()] == [6] * 6
 
+# fm-5wq.14: Reference Scene.remove removes the family of every argument
+# (25 corpus scenes remove never-added groups of added members); an absent
+# mobject is a no-op; a partly removed group dissolves into its survivors.
+_remove_scene = manimlib.Scene()
+_ra, _rb, _rc = manimlib.Dot(), manimlib.Dot(), manimlib.Dot()
+_never_added = manimlib.VGroup(_ra, _rb)
+_remove_scene.add(manimlib.VGroup(_ra, _rb, _rc))
+_remove_scene.remove(_never_added)
+assert len(_remove_scene.mobjects) == 1 and _remove_scene.mobjects[0] is _rc
+_remove_scene.remove(manimlib.Square())
+assert len(_remove_scene.mobjects) == 1
+_foreign_scene = manimlib.Scene()
+_foreign = manimlib.Dot()
+_foreign_scene.add(_foreign)
+try:
+    _remove_scene.remove(_foreign)
+except bridge_errors.ForeignStageError:
+    pass
+else:
+    raise AssertionError("removing another Scene's mobject was accepted")
+
 # fm-5wq.14: copying a never-added group whose descendants were added one by
 # one (3b1b's sir.py builds exp_tree this way, as do 40 other corpus scenes)
 # yields a detached, independent copy of every member.
