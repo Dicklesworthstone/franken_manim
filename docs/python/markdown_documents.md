@@ -35,7 +35,9 @@ highlighting. Top-level tables with body rows use the native ruled-table
 layouter; cell text is retained but inline cell styling and column alignment
 hints are not applied. Lists and block quotes flatten with explicit prefixes,
 retaining nested non-paragraph content. Nested tables and header-only tables
-use a textual presentation. Thematic breaks are a textual rule.
+use a textual presentation. Thematic breaks are a textual rule. Default-mode
+ table rules use `GREY_B` so they remain visible on the scene's black background;
+cell fills, native stroke widths and syntax colors are otherwise retained.
 
 The source is bounded to 32,768 UTF-8 bytes, 256 top-level blocks and 24 levels
 of block/inline nesting; native completed geometry is bounded to 1,048,576
@@ -53,6 +55,14 @@ indices are accepted. `select_source(start, end)` accepts half-open Python
 in the original Markdown, including its delimiters. Neither selection implies
 inline glyph-to-source mapping. Empty intervals select nothing; absent literal
 occurrences raise rather than selecting an unrelated object.
+
+`get_blocks()` returns the document's owned block container, so animating it
+does not promote a temporary selection group into a scene root. Partial source
+selections are ordinary `VGroup` views: animate their individual blocks (for
+example `document.select_text('term')[0].animate.shift(RIGHT)`) to retain the
+document root for subsequent insertions. Animating a new selection group itself
+has the normal native scene-grouping semantics and can ungroup its old parent;
+explicitly re-add the document before further live edits in that workflow.
 
 ## Discrete edits and placement
 

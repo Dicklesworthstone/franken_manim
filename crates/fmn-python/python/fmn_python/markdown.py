@@ -97,7 +97,12 @@ class MarkdownMobject(m.VGroup):
         children = tuple(raw.submobjects)
         raw.remove(*children)
         blocks = m.VGroup()
-        for content in children:
+        for content, kind in zip(children, kinds):
+            if kind == 'table' and not math_mode:
+                # Atlas's standalone table uses black rules. The source scene
+                # defaults to light glyphs on black; recolor only the stroke
+                # channel, retaining native rule widths and all cell fills.
+                content.set_stroke(color=m.GREY_B)
             anchor = m.VectorizedPoint(content.get_corner(m.UL))
             block = m.VGroup(content, anchor)
             block._markdown_content, block._markdown_anchor = content, anchor
@@ -141,7 +146,9 @@ class MarkdownMobject(m.VGroup):
         return self._markdown_kinds
 
     def get_blocks(self):
-        return m.VGroup(*self._markdown_blocks.submobjects)
+        # Return the owned container, not a new group whose animation would
+        # legitimately promote its children to scene roots and ungroup us.
+        return self._markdown_blocks
 
     def get_block(self, index):
         return self._markdown_blocks[_index(index, len(self.block_ranges))]

@@ -344,6 +344,44 @@ class LiveMarkdownTests(unittest.TestCase):
         reference.shift(doc._markdown_anchors[0].get_center()-reference.get_corner(m.UL))
         self.assertEqual(capture(doc),capture(reference))
 
+    def test_owned_block_group_animation_keeps_future_edits_in_the_scene(self):
+        doc=MarkdownMobject('one\n\ntwo')
+        scene=m.Scene();scene.add(doc)
+        self.assertIs(doc.get_blocks(),doc.get_blocks())
+        scene.play(doc.get_blocks().animate.shift(m.RIGHT),run_time=.25)
+        self.assertEqual(tuple(scene.mobjects),(doc,))
+        doc.set_source('one\n\ntwo\n\nnewly inserted')
+        self.assertEqual(len(doc.block_ranges),3)
+        actual=m.Camera(resolution=(192,108)).capture_snapshot(*scene.mobjects).png()
+        self.assertEqual(actual,capture(doc))
+
+    def test_source_selected_block_animation_keeps_later_table_visible(self):
+        doc=MarkdownMobject('paragraph\n\n```rust\nlet x = 1;\n```')
+        scene=m.Scene();scene.add(doc)
+        scene.play(doc.select_text('let x')[0].animate.shift(.3*m.RIGHT),run_time=.25)
+        self.assertEqual(tuple(scene.mobjects),(doc,))
+        before=capture(doc)
+        doc.set_source(doc.source+'\n\n| Name | Value |\n| --- | --- |\n| ready | 1 |\n')
+        self.assertEqual(doc.block_kinds[-1],'table')
+        actual=m.Camera(resolution=(192,108)).capture_snapshot(*scene.mobjects).png()
+        self.assertEqual(actual,capture(doc))
+        self.assertNotEqual(actual,before)
+
+    def test_tables_render_visible_rules_and_match_independent_native_table(self):
+        from fmn_python.table import TableMobject
+        doc=MarkdownMobject('| Name | Value |\n| --- | --- |\n| ready | 8 |\n',font_size=24)
+        reference=TableMobject(['Name','Value'],[['ready','8']],font_size=24,
+                              color=m.WHITE,header_color=m.WHITE,rule_color=m.GREY_B)
+        reference.shift(doc._markdown_anchors[0].get_center()-reference.get_corner(m.UL))
+        self.assertEqual(capture(doc),capture(reference))
+        outline=doc.get_block(0)._markdown_content[0]
+        expected=m.color_to_rgb(m.GREY_B)
+        np.testing.assert_allclose(outline.data['stroke_rgba'][:,:3],
+                                   np.tile(expected,(len(outline.data),1)),atol=1e-6)
+        before=capture(doc)
+        outline.set_stroke(opacity=0)
+        self.assertNotEqual(capture(doc),before)
+
     def test_morph_frame_bytes_match_independent_text_at_one_and_four_threads(self):
         class Document(m.Scene):
             def construct(self):

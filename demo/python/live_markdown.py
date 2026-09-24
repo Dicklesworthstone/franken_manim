@@ -10,6 +10,6 @@ class LiveMarkdown(Scene):
         document = MarkdownMobject(initial, font_size=28).to_edge(UP)
         self.add(document)
         self.play(document.animate_source(updated), run_time=1.5)
-        self.play(document.select_text('let value').animate.shift(RIGHT * .3), run_time=.5)
+        self.play(document.select_text('let value')[0].animate.shift(RIGHT * .3), run_time=.5)
         document.set_source(updated + '\n| State | Value |\n| --- | --- |\n| ready | 8 |\n')
         self.wait(.5)
