@@ -53,7 +53,7 @@ class NativeMarkdownTests(unittest.TestCase):
         code, _, _ = build('```rust\nfn main() { let x = 2; }\n```')
         colors = set()
         for member in code.family_members_with_points():
-            colors.update(tuple(row) for row in member.get_fill_rgbas())
+            colors.update(tuple(row) for row in member.data['fill_rgba'])
         self.assertGreater(len(colors), 1)
         table, _, kinds = build('| a | b |\n| --- | --- |\n| x | 2 |\n')
         self.assertEqual(kinds, ('table',))

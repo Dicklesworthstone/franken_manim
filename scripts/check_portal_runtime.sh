@@ -47,6 +47,8 @@ python3 crates/fmn-python/tests/native_network_layout.py
 python3 crates/fmn-python/tests/network_graph.py
 python3 crates/fmn-python/tests/native_table.py
 python3 crates/fmn-python/tests/live_table.py
+python3 crates/fmn-python/tests/native_markdown.py
+python3 crates/fmn-python/tests/live_markdown.py
 python3 crates/fmn-python/tests/native_svg_paints.py
 python3 crates/fmn-python/tests/svg_paint_ingress.py
 
