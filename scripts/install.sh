@@ -44,40 +44,43 @@ if command -v gum >/dev/null 2>&1 && [[ -t 1 ]]; then
     HAS_GUM=1
 fi
 
+# Diagnostics go to stderr: several helpers run inside `$(...)` captures
+# (e.g. `version=$(resolve_version)`), and a message on stdout there becomes
+# part of the captured value.
 plain_output() {
-    [[ ! -t 1 || "${NO_COLOR:-}" == "1" ]]
+    [[ ! -t 2 || "${NO_COLOR:-}" == "1" ]]
 }
 
 info() {
     [[ "$QUIET" -eq 1 ]] && return 0
     if [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; then
-        gum style --foreground 39 -- "-> $*"
+        gum style --foreground 39 -- "-> $*" >&2
     elif plain_output; then
-        printf '%s\n' "-> $*"
+        printf '%s\n' "-> $*" >&2
     else
-        printf '\033[0;34m->\033[0m %s\n' "$*"
+        printf '\033[0;34m->\033[0m %s\n' "$*" >&2
     fi
 }
 
 ok() {
     [[ "$QUIET" -eq 1 ]] && return 0
     if [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; then
-        gum style --foreground 42 -- "✓ $*"
+        gum style --foreground 42 -- "✓ $*" >&2
     elif plain_output; then
-        printf '%s\n' "OK: $*"
+        printf '%s\n' "OK: $*" >&2
     else
-        printf '\033[0;32m✓\033[0m %s\n' "$*"
+        printf '\033[0;32m✓\033[0m %s\n' "$*" >&2
     fi
 }
 
 warn() {
     [[ "$QUIET" -eq 1 ]] && return 0
     if [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; then
-        gum style --foreground 214 -- "! $*"
+        gum style --foreground 214 -- "! $*" >&2
     elif plain_output; then
-        printf '%s\n' "WARNING: $*"
+        printf '%s\n' "WARNING: $*" >&2
     else
-        printf '\033[1;33m!\033[0m %s\n' "$*"
+        printf '\033[1;33m!\033[0m %s\n' "$*" >&2
     fi
 }
 
@@ -452,9 +455,12 @@ resolve_version() {
         --max-filesize 1048576 \
         --proto '=https' --tlsv1.2 ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} \
         "https://api.github.com/repos/${REPOSITORY}/releases?per_page=10" 2>/dev/null); then
-        discovered=$(printf '%s\n' "$response" \
-            | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' \
-            | head -n 1)
+        # Compact or pretty-printed JSON: GitHub pretty-prints only for some
+        # clients, so never assume one key per line.
+        discovered=$({ printf '%s\n' "$response" \
+            | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' || true; } \
+            | head -n 1 \
+            | sed 's/.*"v\{0,1\}\([^"]*\)"$/\1/')
         if [[ -n "$discovered" ]]; then
             normalize_version "$discovered"
             return

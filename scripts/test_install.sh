@@ -3,7 +3,7 @@
 
 set -euo pipefail
 umask 022
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 TMP_BASE="${TMPDIR:-/tmp}"
 TMP_BASE="${TMP_BASE%/}"
@@ -138,4 +138,76 @@ expect_failure concurrent env FMN_INSTALL_KEEP_STATE=1 \
 grep -q 'another install may be active' "$TEST_ROOT/concurrent.stderr" \
     || fail "concurrent-install refusal was not precise"
 
-printf 'installer smoke: success, tier selection, tier refusal, checksum refusal, archive refusal, and lock refusal passed\n'
+# Online path, still hermetic: a stand-in curl on PATH serves fixtures by URL
+# and logs every URL requested. Covers version discovery from compact and
+# pretty-printed GitHub JSON, and the fallback when the API refuses (rate
+# limiting): the fallback warning once leaked into `version=$(resolve_version)`
+# and produced an unusable download URL.
+online_cases=skipped
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+    fakebin="$TEST_ROOT/fakebin"
+    mkdir -p "$fakebin"
+    cat >"$fakebin/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+url="" out="" prev=""
+for arg in "$@"; do
+    [[ "$prev" == "-o" ]] && out=$arg
+    [[ "$arg" == https://* ]] && url=$arg
+    prev=$arg
+done
+printf '%s\n' "$url" >>"$FAKE_CURL_LOG"
+case "$url" in
+    https://api.github.com/*)
+        case "$FAKE_API_MODE" in
+            fail) exit 22 ;;
+            compact) printf '[{"url":"x","tag_name":"v%s","prerelease":true}]' "$FAKE_VERSION" ;;
+            pretty) printf '[\n  {\n    "tag_name": "v%s",\n    "prerelease": true\n  }\n]\n' "$FAKE_VERSION" ;;
+        esac
+        ;;
+    */SHA256SUMS) cp "$FAKE_RELEASE_DIR/SHA256SUMS" "$out" ;;
+    */fmn-x86_64-unknown-linux-gnu.tar.xz) cp "$FAKE_RELEASE_DIR/fmn-x86_64-unknown-linux-gnu.tar.xz" "$out" ;;
+    *) exit 22 ;;
+esac
+CURL
+    chmod 0755 "$fakebin/curl"
+    fallback_version=$(sed -n 's/^FALLBACK_VERSION="\(.*\)"$/\1/p' scripts/install.sh)
+    [[ -n "$fallback_version" ]] || fail "installer fallback version not found"
+
+    online_case() {
+        local mode=$1 version=$2 case_root="$TEST_ROOT/online-$1" url
+        mkdir -p "$case_root/release" "$case_root/fixture"
+        printf '%s\n' '#!/usr/bin/env bash' "printf 'fmn $version\\n'" >"$case_root/fixture/fmn"
+        chmod 0755 "$case_root/fixture/fmn"
+        tar -cJf "$case_root/release/fmn-x86_64-unknown-linux-gnu.tar.xz" -C "$case_root/fixture" fmn
+        printf '%s  %s\n' "$(sha256_file "$case_root/release/fmn-x86_64-unknown-linux-gnu.tar.xz")" \
+            fmn-x86_64-unknown-linux-gnu.tar.xz >"$case_root/release/SHA256SUMS"
+        : >"$case_root/urls.log"
+        if ! env PATH="$fakebin:$PATH" FAKE_CURL_LOG="$case_root/urls.log" \
+            FAKE_API_MODE="$mode" FAKE_VERSION="$version" FAKE_RELEASE_DIR="$case_root/release" \
+            FMN_INSTALL_KEEP_STATE=1 bash scripts/install.sh --no-gum --tier portable \
+            --install-dir "$case_root/bin" >"$case_root/stdout" 2>"$case_root/stderr"; then
+            fail "online install ($mode) failed: $(tr '\n' ' ' <"$case_root/stderr")"
+        fi
+        [[ "$("$case_root/bin/fmn" --version)" == "fmn $version" ]] \
+            || fail "online install ($mode) published the wrong version"
+        while IFS= read -r url; do
+            [[ "$url" =~ ^https://[^[:space:]]+$ ]] \
+                || fail "online install ($mode) requested a malformed URL: $url"
+        done <"$case_root/urls.log"
+        grep -qx "https://github.com/Dicklesworthstone/franken_manim/releases/download/v$version/SHA256SUMS" \
+            "$case_root/urls.log" || fail "online install ($mode) did not fetch v$version SHA256SUMS"
+        if grep -q 'WARNING' "$case_root/stdout"; then
+            fail "online install ($mode) wrote diagnostics to stdout"
+        fi
+    }
+
+    online_case compact 9.8.7
+    online_case pretty 9.8.7
+    online_case fail "$fallback_version"
+    grep -q 'using installer fallback' "$TEST_ROOT/online-fail/stderr" \
+        || fail "fallback warning was not reported on stderr"
+    online_cases=passed
+fi
+
+printf 'installer smoke: success, tier selection, tier refusal, checksum refusal, archive refusal, lock refusal passed; online discovery/fallback %s\n' "$online_cases"
