@@ -134,7 +134,6 @@ ATTRIBUTION_RUNNER = r"""
 import importlib, json, os, sys, traceback
 videos, rel, scene, dest = sys.argv[1:5]
 sys.path.insert(0, videos)
-os.chdir(videos)
 module = rel[:-3].replace("/", ".")
 try:
     cls = getattr(importlib.import_module(module), scene)
@@ -157,6 +156,14 @@ except BaseException as error:
 """
 
 
+def scene_env(args):
+    # The corpus root goes first; an inherited PYTHONPATH (e.g. a portal
+    # build under test) stays importable after it.
+    inherited = os.environ.get("PYTHONPATH")
+    path = str(args.videos) + (os.pathsep + inherited if inherited else "")
+    return dict(os.environ, PYTHONPATH=path)
+
+
 def attribute(args, record, out_dir):
     target = out_dir / "attribution" / f"{record['module'].replace('/', '__')}__{record['scene']}.png"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -164,7 +171,8 @@ def attribute(args, record, out_dir):
         proc = subprocess.run(
             [args.python, "-c", ATTRIBUTION_RUNNER, str(args.videos), record["module"],
              record["scene"], str(target)],
-            cwd=args.videos, capture_output=True, text=True, timeout=args.timeout,
+            cwd=args.workdir, env=scene_env(args), capture_output=True, text=True,
+            timeout=args.timeout,
         )
         found = json.loads(proc.stdout.strip().splitlines()[-1])
     except (subprocess.TimeoutExpired, ValueError, IndexError):
@@ -180,13 +188,13 @@ def attribute(args, record, out_dir):
 def run_one(args, rel, scene, out_dir):
     target = out_dir / "frames" / f"{rel.replace('/', '__')}__{scene}.png"
     target.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, PYTHONPATH=str(args.videos))
+    env = scene_env(args)
     start = time.monotonic()
     try:
         proc = subprocess.run(
-            [args.portal, rel, scene, "--format", "png", "--resolution", "320x180",
-             "--video_dir", str(target)],
-            cwd=args.videos, env=env, capture_output=True, text=True,
+            [args.portal, str(args.videos / rel), scene, "--format", "png",
+             "--resolution", "320x180", "--video_dir", str(target)],
+            cwd=args.workdir, env=env, capture_output=True, text=True,
             timeout=args.timeout,
         )
         outcome, detail = classify(proc.returncode, proc.stderr, False)
@@ -216,6 +224,11 @@ def main():
     parser.add_argument("--attribute", action="store_true",
                         help="re-run runtime_error scenes in-process to find where they raised")
     parser.add_argument("--python", help="the portal environment's python (for --attribute)")
+    parser.add_argument(
+        "--config", type=pathlib.Path,
+        help="a custom_config.yml to run under, as a user with their own directories "
+             "would; default: the corpus's own (its base is the author's machine)",
+    )
     args = parser.parse_args()
     if args.attribute and not args.python:
         parser.error("--attribute requires --python")
@@ -227,6 +240,15 @@ def main():
     if args.limit:
         scenes = scenes[: args.limit]
     args.out.mkdir(parents=True, exist_ok=True)
+    # Scenes run from a working directory whose custom_config.yml the portal
+    # reads, exactly as the Reference reads the cwd's.
+    args.workdir = args.videos
+    if args.config:
+        args.workdir = (args.out / "workdir").resolve()
+        args.workdir.mkdir(exist_ok=True)
+        (args.workdir / "custom_config.yml").write_text(
+            args.config.read_text(encoding="utf-8"), encoding="utf-8"
+        )
     print(f"enumerated {len(scenes)} scene classes in {args.years}", file=sys.stderr)
 
     records = []
