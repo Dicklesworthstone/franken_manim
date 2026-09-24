@@ -17,6 +17,7 @@ import io
 import itertools
 import json
 import math
+import os
 import pickle
 import pathlib
 import re
@@ -20458,6 +20459,35 @@ except NotImplementedError as error:
     assert "hamming" in str(error)
 else:
     raise AssertionError("cdist silently accepted an unsupported metric")
+
+# fm-5wq.14: manimlib.utils.directories serves Reference directories.py over
+# manim_config.directories. The native reader merges custom_config.yml
+# recursively over the defaults (3b1b's corpus depends on this), and each
+# subdir hangs from the base.
+_native_root = getattr(manimlib, "_resolved_directories", None) and manimlib
+_native_root = _native_root or importlib.import_module("manimlib.manimlib")
+_resolved = _native_root._resolved_directories(
+    "directories:\n  base: /b\n  subdirs:\n    data: d\n    pi_creature_images: p/svg\n"
+)
+assert _resolved["base"] == "/b" and _resolved["mirror_module_path"] is False
+assert _resolved["subdirs"]["data"] == "d" and _resolved["subdirs"]["output"] == "videos"
+assert _resolved["subdirs"]["pi_creature_images"] == "p/svg"
+_dirs_module = importlib.import_module("manimlib.utils.directories")
+_dirs = _dirs_module.get_directories()
+assert _dirs is importlib.import_module("manimlib.config").manim_config.directories
+for _key, _subdir in _dirs["subdirs"].items():
+    assert _dirs[_key] == os.path.join(_dirs["base"], _subdir), _key
+assert _dirs_module.get_sound_dir() == _dirs["sounds"]
+assert _dirs_module.get_temp_dir() == (_dirs.get("temporary_storage") or tempfile.gettempdir())
+assert _dirs_module.get_cache_dir().endswith("manim")
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as _scratch:
+    os.chdir(_scratch)
+    try:
+        _made = _dirs_module.get_output_dir()
+        assert isinstance(_made, pathlib.Path) and _made.is_dir() and _made.is_absolute()
+    finally:
+        os.chdir(_cwd)
 
 # fm-5wq.11: manimlib.config's CLI helpers follow Reference config.py:350-395
 # over the same Namespace fields instead of ignoring their arguments.

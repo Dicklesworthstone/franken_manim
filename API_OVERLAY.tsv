@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	59a644f8d6f647483f6509559b705f3bcf003420cdb365252c0fc3beb442a03d
+ledger_reviewed_digest	f40b201929b1a4369ecb8cce3cc1dc870d2133d1972f5c472031d488cde871e8
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -2651,16 +2651,16 @@ manimlib.utils.debug:index_labels	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	cr
 manimlib.utils.debug:print_family	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	print-family is the typed family walk with bounded traversal
 manimlib.utils.dict_ops:merge_dicts_recursively	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/coords.rs	merge dicts recursively is the typed config merge in fmn-config / fmn-library
 manimlib.utils.directories:appdirs	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-platform/src/fetch.rs	appdirs is the refused third-party directory helper; the typed directory config replaces it
-manimlib.utils.directories:get_cache_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-config/src/config.rs	cache directory resolution is the typed directories config
-manimlib.utils.directories:get_directories	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-config/src/config.rs	get directories is the typed directories config accessor
-manimlib.utils.directories:get_downloads_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	downloads directory is the AssetFetcher-resolved typed path
-manimlib.utils.directories:get_output_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-config/src/config.rs	output directory resolution is the typed directories config
-manimlib.utils.directories:get_raster_image_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	raster image directory is the AssetFetcher-resolved typed path
+manimlib.utils.directories:get_cache_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured cache directory, else the platform user cache dir named manim
+manimlib.utils.directories:get_directories	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	returns manim_config.directories: the native reader's defaults merged with the cwd custom_config.yml, each subdir joined to the base
+manimlib.utils.directories:get_downloads_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured downloads directory, else the platform user cache dir named manim_downloads
+manimlib.utils.directories:get_output_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	creates the configured output directory and returns its absolute Path
+manimlib.utils.directories:get_raster_image_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured raster_images directory
 manimlib.utils.directories:get_shader_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	shader directory is the AssetFetcher-resolved typed path
-manimlib.utils.directories:get_sound_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	sound directory is the AssetFetcher-resolved typed path
-manimlib.utils.directories:get_temp_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	temp directory is the AssetFetcher-resolved typed path
-manimlib.utils.directories:get_three_d_model_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	three-d model directory is the AssetFetcher-resolved typed path
-manimlib.utils.directories:get_vector_image_dir	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	vector image directory is the AssetFetcher-resolved typed path
+manimlib.utils.directories:get_sound_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured sounds directory
+manimlib.utils.directories:get_temp_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured temporary_storage directory, else the system temporary directory
+manimlib.utils.directories:get_three_d_model_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured three_d_models directory
+manimlib.utils.directories:get_vector_image_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured vector_images directory
 manimlib.utils.family_ops:extract_mobject_family_members	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	family extraction is the typed family walk in the Stage arena
 manimlib.utils.family_ops:recursive_mobject_remove	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	recursive removal is the typed Stage deferred-delete with pin semantics
 manimlib.utils.file_ops:find_file	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	file find is the AssetFetcher-resolved typed path
