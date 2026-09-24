@@ -6,6 +6,9 @@
 //! files and does not carry a second flag inventory.
 #![forbid(unsafe_code)]
 
+// Compiled into the build scripts via `include!`; here only for its tests.
+#[cfg(test)]
+mod cargo_profile;
 mod generated;
 mod studio_live;
 mod studio_session;

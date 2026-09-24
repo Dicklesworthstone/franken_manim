@@ -2827,6 +2827,16 @@ mod tests {
         assert!(COMPILED_CARGO_PROFILE.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
         }));
+        // A profile Cargo can actually select for this workspace: the
+        // build-directory layout change once made this `build`, and every
+        // release-perf producer then refused while this test stayed green.
+        assert!(
+            matches!(
+                COMPILED_CARGO_PROFILE,
+                "dev" | "test" | "release" | "bench" | "release-perf"
+            ),
+            "compiled Cargo profile {COMPILED_CARGO_PROFILE:?} is not a declared profile"
+        );
         assert_eq!(
             require_compiled_cargo_profile(COMPILED_CARGO_PROFILE),
             Ok(())
