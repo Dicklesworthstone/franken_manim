@@ -121,7 +121,8 @@ def classify(returncode, stderr, timed_out):
         return "capability_refusal", tail[:300]
     if re.search(r"UnsupportedCommand|TexError|fmd-math|is not yet supported", stderr):
         return "tex_unsupported", tail[:300]
-    if re.search(r"FileNotFoundError|No such file|asset", tail):
+    # "<name> not Found" is ImageMobject's Reference-worded missing-file error.
+    if re.search(r"FileNotFoundError|No such file|asset| not Found$", tail):
         return "missing_asset", tail[:300]
     if returncode < 0 or returncode > 100:
         return "crash", f"exit {returncode}"
