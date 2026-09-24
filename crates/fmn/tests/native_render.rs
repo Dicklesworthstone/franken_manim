@@ -81,9 +81,9 @@ fn animation_has_only_nominal_samples_and_changes_pixels() {
     let fs = Arc::new(VirtualFs::new());
     let report = render_with_fs(&mut MovingCircle, options("/moving", RenderFormat::PngSequence, 1), fs.clone())
         .expect("animated scene exports");
-    assert_eq!(report.artifact.frame_count, 2, "0.2 seconds at 10 fps, no extra frames");
+    assert_eq!(report.artifact.frame_count, 3, "exact f64 0.2 is above 1/5: upward rounding covers it with three samples");
     assert_eq!(report.scene.play_count, 1);
-    assert_eq!(report.emission.stats.emitted, 2);
+    assert_eq!(report.emission.stats.emitted, 3);
     let first = png(&fs, "/moving/frame_000000.png");
     let second = png(&fs, "/moving/frame_000001.png");
     assert_ne!(first.rgba, second.rgba);
@@ -124,14 +124,14 @@ fn native_gif_and_y4m_are_complete_real_streams() {
         let fs = Arc::new(VirtualFs::new());
         let report = render_with_fs(&mut MovingCircle, options(path, format, 1), fs.clone())
             .expect("native stream");
-        assert_eq!(report.artifact.frame_count, 2);
+        assert_eq!(report.artifact.frame_count, 3);
         let bytes = fs.read(Path::new(path)).unwrap();
         assert_eq!(report.artifact.bytes, bytes.len() as u64);
         if format == RenderFormat::Y4m {
             let decoded = decode_y4m(&bytes).expect("decodable native Y4M");
             assert_eq!((decoded.width, decoded.height), (96, 64));
             assert_eq!(decoded.fps, (10, 1));
-            assert_eq!(decoded.frames.len(), 2);
+            assert_eq!(decoded.frames.len(), 3);
             assert_ne!(decoded.frames[0], decoded.frames[1]);
         } else {
             assert!(bytes.starts_with(b"GIF89a"));
@@ -227,4 +227,29 @@ fn unwinding_scene_panic_aborts_and_joins_output() {
     assert!(!fs.exists(Path::new("/panic")));
     render_with_fs(&mut ApexUp, options("/panic", RenderFormat::PngSequence, 1), fs)
         .expect("panic cleanup completed before control returned");
+}
+
+#[test]
+fn adjacent_float_durations_straddle_the_exact_frame_boundary() {
+    struct DurationScene(f64);
+    impl SceneConstruct for DurationScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new())?;
+            stage.play(circle.animate().set_anim_args(AnimateArgs {
+                run_time: Some(self.0),
+                rate_func: Some(fmn::core::rate::linear),
+                ..AnimateArgs::default()
+            })?.shift(RIGHT)?)?;
+            Ok(())
+        }
+    }
+    for (duration, count) in [(f64::from_bits(0.2f64.to_bits() - 1), 2), (0.2, 3)] {
+        let fs = Arc::new(VirtualFs::new());
+        let report = render_with_fs(&mut DurationScene(duration),
+            options("/boundary", RenderFormat::PngSequence, 1), fs.clone()).unwrap();
+        assert_eq!(report.artifact.frame_count, count);
+        assert_eq!(report.emission.stats.emitted, count);
+        assert!(fs.exists(&Path::new("/boundary").join(format!("frame_{:06}.png", count - 1))));
+        assert!(!fs.exists(&Path::new("/boundary").join(format!("frame_{count:06}.png"))));
+    }
 }

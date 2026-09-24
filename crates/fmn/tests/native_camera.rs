@@ -112,7 +112,7 @@ fn camera_route_animation_frames_follow_the_same_scene_clock() {
         .unwrap();
     options.camera = Some(camera);
     let report = render_with_fs(&mut MovingCube, options, fs.clone()).unwrap();
-    assert_eq!(report.artifact.frame_count, 2);
+    assert_eq!(report.artifact.frame_count, 3);
     assert_eq!(report.scene.play_count, 1);
     assert_ne!(pixels(&fs, "/moving", 0), pixels(&fs, "/moving", 1));
 }

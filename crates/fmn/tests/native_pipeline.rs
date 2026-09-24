@@ -80,17 +80,18 @@ fn queued_camera_pixels_equal_serial_capture_at_every_window() {
         let seed = options.config.determinism.seed;
         let report = render_with_fs(&mut Moving, options, fs.clone()).unwrap();
         let stats = report.frame_pipeline.as_ref().expect("camera pipeline was bypassed");
-        assert_eq!(report.artifact.frame_count, 4);
-        assert_eq!(stats.submitted, 4);
-        assert_eq!(stats.emitted, 4);
+        // Exact f64 0.4 is above 2/5, so four samples do not cover it.
+        assert_eq!(report.artifact.frame_count, 5);
+        assert_eq!(stats.submitted, 5);
+        assert_eq!(stats.emitted, 5);
         assert_eq!(stats.outstanding_slots, 0);
         assert!(stats.max_in_flight <= report.execution_plan.frames_in_flight);
         assert!(report.execution_plan.frames_in_flight <= window);
-        let pixels: Vec<Vec<u8>> = (0..4).map(|sequence| {
+        let pixels: Vec<Vec<u8>> = (0..5).map(|sequence| {
             let bytes = fs.read(&Path::new("/frames").join(format!("frame_{sequence:06}.png"))).unwrap();
             decode_png(&bytes, &PngLimits::default()).unwrap().rgba
         }).collect();
-        assert_ne!(pixels[0], pixels[3], "animation must move the visible cube");
+        assert_ne!(pixels[0], pixels[4], "animation must move the visible cube");
         let mut reference = SerialReference {
             renderer: RetainedFrameRenderer::new(RetainedFrameRendererConfig {
                 frame: FrameConfig::new(
@@ -122,8 +123,8 @@ fn native_gif_and_y4m_are_window_independent() {
             let report = render_with_fs(
                 &mut Moving, options("/movie", format, window, 4), fs.clone(),
             ).unwrap();
-            assert_eq!(report.frame_pipeline.unwrap().emitted, 4);
-            assert_eq!(report.artifact.frame_count, 4);
+            assert_eq!(report.frame_pipeline.unwrap().emitted, 5);
+            assert_eq!(report.artifact.frame_count, 5);
             let bytes = fs.read(Path::new("/movie")).unwrap();
             if let Some(expected) = &expected { assert_eq!(&bytes, expected); }
             else { expected = Some(bytes); }
@@ -170,7 +171,7 @@ fn unwinding_scene_joins_camera_pipeline_and_aborts_artifact() {
 }
 
 #[test]
-fn cached_affine_exports_do_not_claim_camera_pipeline_execution() {
+fn cached_affine_exports_use_the_shared_frame_pipeline() {
     let fs = Arc::new(VirtualFs::new());
     let mut options = options("/affine", RenderFormat::PngSequence, 2, 1);
     options.camera = None;
@@ -179,6 +180,8 @@ fn cached_affine_exports_do_not_claim_camera_pipeline_execution() {
         fn construct(&mut self, _: &mut Stage<'_>) -> fmn::Result<()> { Ok(()) }
     }
     let report = render_with_fs(&mut Empty, options, fs).unwrap();
-    assert!(report.frame_pipeline.is_none());
+    let stats = report.frame_pipeline.expect("affine pipeline was bypassed");
+    assert_eq!(stats.emitted, 1);
+    assert_eq!(stats.outstanding_slots, 0);
     assert_eq!(report.artifact.frame_count, 1);
 }
