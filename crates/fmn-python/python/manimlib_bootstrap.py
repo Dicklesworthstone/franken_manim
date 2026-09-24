@@ -7345,6 +7345,9 @@ def _refuse_unrouted(class_name, entries):
         )
 
 
+# tex_mobject.py's get_command_matches: a control word or control symbol.
+_TEX_COMMAND_TOKEN = _re.compile(r"\\(?:[a-zA-Z]+|.)", flags=_re.S)
+
 _TEX_LINE_ALIGNMENTS = {
     "\\centering": "center",
     "\\center": "center",
@@ -8379,9 +8382,8 @@ class Tex(StringMobject):
         if len(self.tex_strings) != 1 or not self.isolate:
             return self.tex_strings, separator
         cuts = {0, len(self.string)}
-        for start, end in self.find_spans_by_selector(self.isolate):
-            if start != end:
-                cuts.update((start, end))
+        for start, end in self._labelled_isolate_spans(self.isolate):
+            cuts.update((start, end))
         ordered = sorted(cuts)
         segments = [
             self.string[start:end] for start, end in zip(ordered, ordered[1:])
@@ -8396,8 +8398,26 @@ class Tex(StringMobject):
             return self.tex_strings, separator
         return merged, ""
 
+    def _labelled_isolate_spans(self, selector):
+        """The isolate occurrences the Reference's parse labels
+        (string_mobject.py:210). It skips an occurrence inside or partly
+        overlapping a command token (protect level, overlap warning), and a
+        lone brace (level mismatch warning); a whitespace-only occurrence
+        draws nothing. Only the rest become parts or need native ink."""
+        commands = [match.span() for match in _TEX_COMMAND_TOKEN.finditer(self.string)]
+        for start, end in self.find_spans_by_selector(selector):
+            text = self.string[start:end].strip()
+            if not text or text in ("{", "}"):
+                continue
+            if any(
+                c_start < end and start < c_end and not (start <= c_start and c_end <= end)
+                for c_start, c_end in commands
+            ):
+                continue
+            yield start, end
+
     def _validate_isolate_spans(self):
-        """A present isolate occurrence that resolves to no span-map
+        """A labelled isolate occurrence that resolves to no span-map
         primitive is a named error, never a silent no-op selection."""
         entries = self.isolate
         if not entries:
@@ -8405,19 +8425,24 @@ class Tex(StringMobject):
         if isinstance(entries, (str, _re.Pattern, tuple)):
             entries = [entries]
         for entry in entries:
-            for span in self.find_spans_by_selector(entry):
-                if span[0] == span[1]:
-                    continue
+            for span in self._labelled_isolate_spans(entry):
                 start, end = self._byte_span(span)
                 if not any(
                     start <= sub_start and sub_end <= end
                     for sub_start, sub_end in self._string_sub_spans
                 ):
+                    keyword = _TEX_COMMAND_TOKEN.search(self.string[span[0] : span[1]])
                     raise _TexError(
                         "isolate "
                         + repr(self.string[span[0] : span[1]])
                         + " is not in the native span map of "
                         + repr(self.string)
+                        + (
+                            " (selecting a command's own ink, such as a fraction "
+                            "bar by its keyword, is fm-5wq.22)"
+                            if keyword
+                            else ""
+                        )
                     )
 
     def get_color_command(self, color: str) -> str:

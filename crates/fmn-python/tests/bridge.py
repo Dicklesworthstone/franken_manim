@@ -15921,12 +15921,18 @@ assert len(iso_fade_alphas) == 2, iso_fade_alphas
 assert math.isclose(iso_fade_alphas[0], 0.5, rel_tol=0.0, abs_tol=1e-9)
 assert math.isclose(iso_fade_alphas[1], 0.0, rel_tol=0.0, abs_tol=1e-9)
 
-# An isolate occurrence that resolves to no span-map primitive is a named
-# error, never a silent no-op selection; an isolate entry with no occurrence
-# at all stays tolerated (the Reference's behavior, pinned above for the
-# multi-part "=" case).
+# An isolate occurrence the Reference would give ink but that owns no
+# span-map primitive is a named error, never a silent no-op selection (a
+# command's own ink, fm-5wq.22). A whitespace isolate draws nothing under the
+# Reference's parse either, so it is tolerated and leaves the geometry alone.
+# An isolate entry with no occurrence at all stays tolerated (the Reference's
+# behavior, pinned above for the multi-part "=" case).
+assert np.array_equal(
+    manimlib.Tex("x^2 + y^2", isolate=[" "]).get_all_points(),
+    manimlib.Tex("x^2 + y^2").get_all_points(),
+)
 try:
-    manimlib.Tex("x^2 + y^2", isolate=[" "])
+    manimlib.Tex(r"{a \over b}", isolate=[r"\over"])
 except bridge_errors.TexError as error:
     assert "is not in the native span map" in str(error), error
 else:
@@ -20746,6 +20752,26 @@ assert _split.tex_strings == ["Prevalence", " = ", "Prior"] and len(_split) == 3
 assert all(glyph.get_fill_color().upper() == "#FFFF00" for glyph in _split[2])
 assert _old_tex_module.OldTex("x^2 + y", isolate=["y"]).tex_strings == ["x^2 + ", "y"]
 assert len(_old_tex_module.OldTex("a", "+", "b")) == 3
+
+# fm-5wq.14: isolate follows the Reference parse's labelling rules
+# (string_mobject.py:210). It skips an occurrence inside a command token
+# (the "s" in \sqrt) and a lone brace, and whitespace draws nothing, so none
+# of these errors. Isolating a command's own ink (\over) remains a named
+# error until fm-5wq.22.
+_isolated_s = manimlib.Tex(r"{s} = {-b \pm \sqrt{s}}", isolate=["s"])
+assert len(_isolated_s.select_parts("s").family_members_with_points()) == 2
+# Isolation regroups glyphs into parts, so compare the geometry as a multiset.
+assert sorted(map(tuple, np.round(_isolated_s.get_all_points(), 6))) == sorted(
+    map(tuple, np.round(manimlib.Tex(r"{s} = {-b \pm \sqrt{s}}").get_all_points(), 6))
+)
+manimlib.Tex("{x}+{y}", isolate=["}"])
+assert len(_old_tex_module.OldTex("a", "\n   ", "b").family_members_with_points()) == 2
+try:
+    manimlib.Tex(r"{a \over b}", isolate=[r"\over"])
+except bridge_errors.TexError as error:
+    assert "fm-5wq.22" in str(error), error
+else:
+    raise AssertionError("a command-keyword isolate silently lost the fraction bar")
 
 
 # fm-5wq.14: TexText's `alignment` (tex_mobject.py:189). The default
