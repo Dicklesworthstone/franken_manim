@@ -23341,21 +23341,111 @@ def _install_directories_module(manim_config):
     def get_sound_dir():
         return get_directories()["sounds"]
 
-    module = _ensure_module("manimlib.utils.directories")
     for function in (
         get_directories, get_cache_dir, get_temp_dir, get_downloads_dir,
         get_output_dir, get_raster_image_dir, get_vector_image_dir,
         get_three_d_model_dir, get_sound_dir,
     ):
-        function.__module__ = "manimlib.utils.directories"
-        previous = vars(module).get(function.__name__)
-        setattr(module, function.__name__, function)
-        # The schema surface bound the Reference's re-exports (the top-level
-        # star surface) to the placeholder before this binding landed.
-        if previous is not None:
-            for other in list(_sys.modules.values()) + [_FMN_MODULE]:
-                if other is not None and vars(other).get(function.__name__) is previous:
-                    setattr(other, function.__name__, function)
+        _bind_reference_function("manimlib.utils.directories", function)
+
+
+def _bind_reference_function(module_name, function):
+    # Bind a Reference module function, and repoint every re-export (the
+    # top-level star surface, other modules' leaked imports) that the schema
+    # surface had bound to the placeholder it replaces.
+    module = _ensure_module(module_name)
+    function.__module__ = module_name
+    previous = vars(module).get(function.__name__)
+    setattr(module, function.__name__, function)
+    if previous is not None:
+        for other in list(_sys.modules.values()) + [_FMN_MODULE]:
+            if other is not None and vars(other).get(function.__name__) is previous:
+                setattr(other, function.__name__, function)
+
+
+def _install_reference_utils():
+    # Reference utils helpers that real scenes call (the corpus sweep met
+    # OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS' revisit trigger for these).
+    import colorsys as _colorsys
+    import random as _stdlib_random
+
+    def merge_dicts_recursively(*dicts):
+        # Reference utils/dict_ops.py: later dicts win; dict values merge.
+        result = dict()
+        for key, value in _itertools.chain(*[d.items() for d in dicts]):
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = merge_dicts_recursively(result[key], value)
+            else:
+                result[key] = value
+        return result
+
+    def random_color():
+        # Reference utils/color.py:132 over the Scene-seeded numpy RNG.
+        return _ColorValue(tuple(_np.random.random(3)))
+
+    def random_bright_color(
+        hue_range=(0.0, 1.0),
+        saturation_range=(0.5, 0.8),
+        luminance_range=(0.5, 1.0),
+    ):
+        # Reference utils/color.py:136 over the Scene-seeded stdlib RNG;
+        # colour's HSL is colorsys's HLS with the last two swapped.
+        hue = _interpolate(*hue_range, _stdlib_random.random())
+        saturation = _interpolate(*saturation_range, _stdlib_random.random())
+        luminance = _interpolate(*luminance_range, _stdlib_random.random())
+        return _ColorValue(_colorsys.hls_to_rgb(hue, luminance, saturation))
+
+    def find_file(file_name, directories=None, extensions=None):
+        # Reference utils/file_ops.py:26, minus the URL download: network
+        # access belongs to the host's AssetFetcher (D-02).
+        if _re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", str(file_name)):
+            raise _CapabilityError(
+                f"find_file cannot download {file_name!r}; network assets "
+                "enter through the host-provided AssetFetcher"
+            )
+        if _os.path.exists(file_name):
+            return _pathlib.Path(file_name)
+        directories = directories or [""]
+        extensions = extensions or [""]
+        for directory in directories:
+            for extension in extensions:
+                path = _pathlib.Path(directory, file_name + extension)
+                if path.exists():
+                    return path
+        raise IOError(f"{file_name} not Found")
+
+    directories = _ensure_module("manimlib.utils.directories")
+
+    def get_full_raster_image_path(image_file_name):
+        return find_file(
+            image_file_name,
+            directories=[directories.get_raster_image_dir()],
+            extensions=[".jpg", ".jpeg", ".png", ".gif", ""],
+        )
+
+    def get_full_vector_image_path(image_file_name):
+        return find_file(
+            image_file_name,
+            directories=[directories.get_vector_image_dir()],
+            extensions=[".svg", ".xdv", ""],
+        )
+
+    def get_full_three_d_model_path(model_file_name):
+        return find_file(
+            model_file_name,
+            directories=[directories.get_three_d_model_dir()],
+            extensions=[".obj", ""],
+        )
+
+    _bind_reference_function("manimlib.utils.dict_ops", merge_dicts_recursively)
+    _bind_reference_function("manimlib.utils.color", random_color)
+    _bind_reference_function("manimlib.utils.color", random_bright_color)
+    _bind_reference_function("manimlib.utils.file_ops", find_file)
+    for function in (
+        get_full_raster_image_path, get_full_vector_image_path,
+        get_full_three_d_model_path,
+    ):
+        _bind_reference_function("manimlib.utils.images", function)
 
 
 def _install_config_module():
@@ -23532,6 +23622,7 @@ def _install_config_module():
 
 
 _install_config_module()
+_install_reference_utils()
 
 
 def _install_main_module():

@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	f40b201929b1a4369ecb8cce3cc1dc870d2133d1972f5c472031d488cde871e8
+ledger_reviewed_digest	f945e3881bc04d12d38007c4c84a83a3da1da4bdd7b28ac49320862dc46250c1
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -2644,12 +2644,12 @@ manimlib.utils.color:get_colormap_from_colors	tiered	OOT-UTILS-PYTHON-NATIVE-REP
 manimlib.utils.color:get_colormap_list	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	colormap list is the typed registered colormap surface
 manimlib.utils.color:hex2rgb	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	hex parsing lives in the owned srgb eotf / hex parser
 manimlib.utils.color:pyplot	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-python/tests/bridge.py	matplotlib pyplot is the refused third-party import; the bundled colormap tier covers the named-map use case
-manimlib.utils.color:random_bright_color	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	random bright color is the fmn-core palette random selection
-manimlib.utils.color:random_color	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	random color is the fmn-core palette random selection
+manimlib.utils.color:random_bright_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	a Color from HSL draws of the Scene-seeded stdlib RNG within the given ranges
+manimlib.utils.color:random_color	same	scripts/manim_ref/manimlib/utils/color.py	crates/fmn-python/tests/bridge.py	a Color from three draws of the Scene-seeded numpy RNG
 manimlib.utils.color:rgb2hex	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-core/src/color.rs	rgb to hex is the owned hex encoder
 manimlib.utils.debug:index_labels	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	debug label index is absorbed by the typed label and family surfaces
 manimlib.utils.debug:print_family	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	print-family is the typed family walk with bounded traversal
-manimlib.utils.dict_ops:merge_dicts_recursively	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/coords.rs	merge dicts recursively is the typed config merge in fmn-config / fmn-library
+manimlib.utils.dict_ops:merge_dicts_recursively	same	scripts/manim_ref/manimlib/utils/dict_ops.py	crates/fmn-python/tests/bridge.py	merges dicts left to right; later values win and dict values merge recursively
 manimlib.utils.directories:appdirs	excluded	OOT-LEAKED-SURFACE-IMPORTS	crates/fmn-platform/src/fetch.rs	appdirs is the refused third-party directory helper; the typed directory config replaces it
 manimlib.utils.directories:get_cache_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured cache directory, else the platform user cache dir named manim
 manimlib.utils.directories:get_directories	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	returns manim_config.directories: the native reader's defaults merged with the cwd custom_config.yml, each subdir joined to the base
@@ -2663,11 +2663,11 @@ manimlib.utils.directories:get_three_d_model_dir	same	scripts/manim_ref/manimlib
 manimlib.utils.directories:get_vector_image_dir	same	scripts/manim_ref/manimlib/utils/directories.py	crates/fmn-python/tests/bridge.py	the configured vector_images directory
 manimlib.utils.family_ops:extract_mobject_family_members	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	family extraction is the typed family walk in the Stage arena
 manimlib.utils.family_ops:recursive_mobject_remove	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-mobject/src/stage.rs	recursive removal is the typed Stage deferred-delete with pin semantics
-manimlib.utils.file_ops:find_file	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	file find is the AssetFetcher-resolved typed path
+manimlib.utils.file_ops:find_file	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-python/tests/bridge.py	searches the given directories and extensions locally and raises the Reference's not-Found IOError; URL names refuse toward the host AssetFetcher (D-02) instead of downloading
 manimlib.utils.file_ops:guarantee_existence	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-platform/src/fetch.rs	file existence guarantee is the typed FileSystem capability
-manimlib.utils.images:get_full_raster_image_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/image.rs	raster image path resolution is the typed ImageMobject asset path
-manimlib.utils.images:get_full_three_d_model_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/three_d.rs	three-d model path resolution is the typed OBJ subset reader
-manimlib.utils.images:get_full_vector_image_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-library/src/image.rs	vector image path resolution is the typed ImageMobject asset path
+manimlib.utils.images:get_full_raster_image_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-python/tests/bridge.py	find_file over the configured raster_images directory with the Reference's extensions; URL names refuse toward the AssetFetcher
+manimlib.utils.images:get_full_three_d_model_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-python/tests/bridge.py	find_file over the configured three_d_models directory with the Reference's extensions; URL names refuse toward the AssetFetcher
+manimlib.utils.images:get_full_vector_image_path	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-python/tests/bridge.py	find_file over the configured vector_images directory with the Reference's extensions; URL names refuse toward the AssetFetcher
 manimlib.utils.images:invert_image	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-render/src/fill.rs	color inversion is the typed fill path color resolver
 manimlib.utils.iterables:listify	tiered	OOT-UTILS-PYTHON-NATIVE-REPLACEMENTS	crates/fmn-render/src/plan.rs	listify is absorbed by the typed plan/parser collections
 manimlib.utils.paths:STRAIGHT_PATH_THRESHOLD	same	crates/fmn-anim/src/transform.rs	crates/fmn-anim/tests/path.rs	straight-path threshold is the owned scalar at crates/fmn-anim/src/transform.rs

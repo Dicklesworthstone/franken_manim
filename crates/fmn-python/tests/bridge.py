@@ -20460,6 +20460,45 @@ except NotImplementedError as error:
 else:
     raise AssertionError("cdist silently accepted an unsupported metric")
 
+# fm-5wq.14: Reference utils helpers real scenes call. merge_dicts_recursively
+# lets later dicts win and merges dict values; the random colours draw from
+# the Scene-seeded numpy and stdlib RNGs as the Reference does; find_file
+# searches locally, raises the Reference's "not Found", and refuses URLs
+# toward the host AssetFetcher.
+import random as _stdlib_random  # noqa: E402
+
+_dict_ops = importlib.import_module("manimlib.utils.dict_ops")
+_color_utils = importlib.import_module("manimlib.utils.color")
+_file_ops = importlib.import_module("manimlib.utils.file_ops")
+_image_utils = importlib.import_module("manimlib.utils.images")
+assert _dict_ops.merge_dicts_recursively(
+    {"a": 1, "d": {"x": 1, "y": 2}}, {"b": 2, "d": {"y": 3}}
+) == {"a": 1, "d": {"x": 1, "y": 3}, "b": 2}
+_draws = []
+for _ in range(2):
+    _stdlib_random.seed(4)
+    np.random.seed(4)
+    _draws.append((_color_utils.random_color().get_rgb(), _color_utils.random_bright_color().get_rgb()))
+assert _draws[0] == _draws[1]
+assert manimlib.Square().set_color(_color_utils.random_bright_color()).get_color()
+with tempfile.TemporaryDirectory() as _asset_root:
+    pathlib.Path(_asset_root, "pic.png").write_bytes(b"x")
+    assert _file_ops.find_file("pic", [_asset_root], [".jpg", ".png"]).name == "pic.png"
+    try:
+        _file_ops.find_file("absent", [_asset_root])
+    except OSError as error:
+        assert str(error) == "absent not Found"
+    else:
+        raise AssertionError("find_file returned for a missing file")
+try:
+    _file_ops.find_file("https://example.invalid/a.png")
+except bridge_errors.CapabilityError as error:
+    assert "AssetFetcher" in str(error)
+else:
+    raise AssertionError("find_file accepted a URL")
+assert manimlib.merge_dicts_recursively is _dict_ops.merge_dicts_recursively
+assert manimlib.get_full_raster_image_path is _image_utils.get_full_raster_image_path
+
 # fm-5wq.14: Reference color_to_rgb takes colour.Color, i.e. anything with
 # get_rgb(); both the Python and the native colour parsers accept it (54
 # corpus scenes pass Color objects). The re-exported Color names its missing
