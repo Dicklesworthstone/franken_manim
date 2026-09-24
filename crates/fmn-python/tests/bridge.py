@@ -14108,28 +14108,31 @@ assert manimlib.np is np
 
 # Installing the Reference's optional OpenGL/window packages beside the wheel
 # must not make the Rust portal initialize a second renderer or require an X11
-# display.  Their leaked names remain import-compatible, but calling one names
-# the exact unsupported semantic binding.
-for refused_module, refused_name in (
-    ("manimlib.camera.camera", "gl"),
-    ("manimlib.camera.camera", "moderngl"),
-    ("manimlib.mobject.interactive", "PygletWindowKeys"),
-    ("manimlib.window", "Timer"),
-    ("manimlib.window", "mglw"),
-    ("manimlib.window", "screeninfo"),
+# display.  Their leaked names remain import-compatible, but calling one or
+# reading an attribute (a class body's `moderngl.TRIANGLE_STRIP`) names its
+# excluded ruling.
+for refused_module, refused_name, refused_origin, refused_oot in (
+    ("manimlib.camera.camera", "gl", "OpenGL.GL", "OOT-MODERNGL-SHADER-SURFACE"),
+    ("manimlib.camera.camera", "moderngl", "moderngl", "OOT-MODERNGL-SHADER-SURFACE"),
+    ("manimlib.mobject.interactive", "PygletWindowKeys", "pyglet.window.key", "OOT-PYGLET-WINDOW-KEYS"),
+    ("manimlib.window", "Timer", "moderngl_window.timers.clock.Timer", "OOT-PYGLET-WINDOW-SURFACE"),
+    ("manimlib.window", "mglw", "moderngl_window", "OOT-PYGLET-WINDOW-SURFACE"),
+    ("manimlib.window", "screeninfo", "screeninfo", "OOT-PYGLET-WINDOW-SURFACE"),
 ):
     refused_value = getattr(importlib.import_module(refused_module), refused_name)
-    try:
-        refused_value()
-    except NotImplementedError as error:
-        assert str(error) == (
-            f"{refused_module}.{refused_name} is present in the parity surface "
-            "but its semantic binding has not landed"
-        )
-    else:
-        raise AssertionError(
-            f"Reference renderer leak {refused_module}.{refused_name} became live"
-        )
+    for refused_use in (lambda: refused_value(), lambda: refused_value.TRIANGLE_STRIP):
+        try:
+            refused_use()
+        except NotImplementedError as error:
+            assert str(error) == (
+                f"{refused_module}.{refused_name} ({refused_origin}) is excluded "
+                f"({refused_oot}): FrankenManim renders through Lumen and windows "
+                "through Studio"
+            ), error
+        else:
+            raise AssertionError(
+                f"Reference renderer leak {refused_module}.{refused_name} became live"
+            )
 window_mod = importlib.import_module("manimlib.window")
 pyglet_window = window_mod.PygletWindow
 assert isinstance(pyglet_window, type)
@@ -15658,6 +15661,36 @@ assert (
     len([key for _, key in swap_params["source_keys"] if key.startswith("block:")])
     == 1
 )
+
+# fm-5wq.11: reordered runs. The Reference's matching_blocks
+# (transform_matching_parts.py:169) repeatedly claims the longest remaining
+# common run, nulling what it claimed; this is that loop, over the same
+# symbol sequences, as the oracle for "abcde" -> "cdeab".
+import difflib as _difflib
+
+_blocks_source, _blocks_target = manimlib.Text("abcde"), manimlib.Text("cdeab")
+_blocks_pairs = matching_module.TransformMatchingStrings(
+    _blocks_source, _blocks_target
+).matching_blocks(_blocks_source, _blocks_target, (), {})
+_syms = [list("abcde"), list("cdeab")]
+_expected_blocks = []
+while True:
+    _run = _difflib.SequenceMatcher(None, *_syms).find_longest_match(0, 5, 0, 5)
+    if _run.size == 0:
+        break
+    _expected_blocks.append(
+        (list(range(_run.a, _run.a + _run.size)), list(range(_run.b, _run.b + _run.size)))
+    )
+    for _offset in range(_run.size):
+        _syms[0][_run.a + _offset], _syms[1][_run.b + _offset] = "Null1", "Null2"
+assert _expected_blocks == [([2, 3, 4], [0, 1, 2]), ([0, 1], [3, 4])]
+_block_glyphs = [m.family_members_with_points() for m in (_blocks_source, _blocks_target)]
+assert len(_blocks_pairs) == len(_expected_blocks)
+for _pair, _indices in zip(_blocks_pairs, _expected_blocks):
+    for _side in (0, 1):
+        assert [id(g) for g in _pair[_side].family_members_with_points()] == [
+            id(_block_glyphs[_side][i]) for i in _indices[_side]
+        ], (_pair, _indices)
 
 # matched_keys pins a key to raw global identity on both sides, so the user's
 # asserted match survives outside any block.

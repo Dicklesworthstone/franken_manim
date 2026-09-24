@@ -112,11 +112,15 @@ _there_and_back_rate.__qualname__ = "there_and_back"
 # Python namespaces.  Those names remain part of the compatibility surface,
 # but importing their host packages would initialize a second renderer (and
 # pyglet creates a shadow X11 window merely on import).  The sovereign portal
-# therefore keeps these names as precise unavailable callables regardless of
-# which incidental packages happen to be installed beside the wheel.
-_REFUSED_REFERENCE_RENDER_IMPORT_ROOTS = frozenset(
-    {"OpenGL", "moderngl", "moderngl_window", "pyglet", "screeninfo"}
-)
+# therefore keeps these names unavailable regardless of which incidental
+# packages happen to be installed beside the wheel; each root names its ruling.
+_REFUSED_REFERENCE_RENDER_IMPORT_ROOTS = {
+    "OpenGL": "OOT-MODERNGL-SHADER-SURFACE",
+    "moderngl": "OOT-MODERNGL-SHADER-SURFACE",
+    "moderngl_window": "OOT-PYGLET-WINDOW-SURFACE",
+    "pyglet": "OOT-PYGLET-WINDOW-KEYS",
+    "screeninfo": "OOT-PYGLET-WINDOW-SURFACE",
+}
 
 
 def _vec3(value):
@@ -20208,6 +20212,17 @@ def _unimported_leaked_import(module_name, name, origin):
     return _UnavailableLeakedImport(module_name, name, lambda: NotImplementedError(message))
 
 
+def _refused_render_import(module_name, name, origin):
+    # A class body reading `moderngl.TRIANGLE_STRIP` fails here by name,
+    # not as an AttributeError on a placeholder.
+    oot = _REFUSED_REFERENCE_RENDER_IMPORT_ROOTS[origin.split(".", 1)[0]]
+    message = (
+        f"{module_name}.{name} ({origin}) is excluded ({oot}): FrankenManim "
+        "renders through Lumen and windows through Studio"
+    )
+    return _UnavailableLeakedImport(module_name, name, lambda: NotImplementedError(message))
+
+
 class _UnavailableLeakedImport:
     """A leaked third-party name the portal cannot or does not bind. Calling
     it or using its API (`Image.open`) raises a precise named error."""
@@ -21568,7 +21583,7 @@ def _install_schema_surface():
             if hasattr(module, qualified):
                 continue
             if _origin.split(".", 1)[0] in _REFUSED_REFERENCE_RENDER_IMPORT_ROOTS:
-                value = _placeholder_function(module_name, qualified)
+                value = _refused_render_import(module_name, qualified, _origin)
             elif _origin in _UNIMPORTED_LEAKED_ORIGINS:
                 value = _unimported_leaked_import(module_name, qualified, _origin)
             else:

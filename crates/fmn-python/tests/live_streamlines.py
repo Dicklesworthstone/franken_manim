@@ -79,6 +79,28 @@ class LiveStreamlineTests(unittest.TestCase):
         np.testing.assert_array_equal(random_state[1], after[1])
         self.assertEqual(random_state[2:], after[2:])
 
+    def test_sample_coords_follow_the_reference_grid_repeats_and_noise_bound(self):
+        # vector_field.py:119/406: each repeat walks the whole grid (every
+        # range's step divided by density, np.arange(min, max + step, step)),
+        # each coordinate displaced by U[0, noise_factor); the default
+        # noise_factor is half an x unit divided by density.
+        density, repeats = 2.0, 3
+        lines = self.lines(noise_factor=None, density=density, n_repeats=repeats)
+        coordinates = lines.coordinate_system
+        ranges = [np.arange(low, high + step / density, step / density)
+                  for low, high, step in coordinates.get_all_ranges()]
+        grid = np.array(list(itertools.product(*ranges)))
+        self.assertEqual(grid.shape, (25, 2))
+        seeds = lines.get_sample_coords()
+        self.assertEqual(seeds.shape, (repeats * len(grid), 2))
+        offsets = seeds.reshape(repeats, len(grid), 2) - grid
+        noise = coordinates.x_axis.get_unit_size() / density * 0.5
+        self.assertTrue(np.all(offsets >= 0.0) and np.all(offsets < noise), offsets)
+        self.assertGreater(offsets.max(), noise / 2)
+        self.assertFalse(np.allclose(offsets[0], offsets[1]))
+        exact = self.lines(noise_factor=0, density=density, n_repeats=2).get_sample_coords()
+        np.testing.assert_allclose(exact, np.tile(grid, (2, 1)))
+
     def test_redraw_updates_field_geometry_but_preserves_root_scene_and_updaters(self):
         lines = self.lines()
         scene, unrelated = m.Scene(), m.Square().shift(4 * m.RIGHT)
@@ -300,7 +322,7 @@ class LiveStreamlineTests(unittest.TestCase):
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(LiveStreamlineTests)
-assert suite.countTestCases() == 16, "native live-streamlines inventory changed"
+assert suite.countTestCases() == 17, "native live-streamlines inventory changed"
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 gc.collect()
 if not result.wasSuccessful():
