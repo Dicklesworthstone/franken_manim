@@ -1,19 +1,41 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-derived 2026-09-17 on the local qualified-tool host at commit
-`efdf8e4041bbbe9f2a63b4b91f30b59286861b89`. The current locked dependency
-tree, wasm32 target build, locked Node smoke, and the complete serial /
-shared-memory package and Chromium gate all exited 0 on a **clean tree**
-(`source_dirty=false`, receipt schema `fmn-wasm-package-receipt/2`). The
-Node smoke digest remains `1f248a71347b82aa`; the browser digests are
-byte-identical to the prior diagnostic run
-(`f5b7f4b9` / `c864b03d` / `8d9ea9c9`).
+**Status:** re-run 2026-09-24 against `Cargo.lock` `b97f1d76` from a clean
+worktree at `c5f50e1e`, with the qualified tools (wasm-pack 0.15.0, wasm-bindgen
+0.2.127, wasm-opt 117, webpack 5.109.2 / webpack-cli 7.2.2). **The release
+package gate currently FAILS**, so this audit does not claim a passing package.
+
+- The lock change behind this re-run is a single edge: `fmn-python` now depends on
+  `fsci-opt` (6bc0ddb2), which the lock already held. `fmn-python` is not in any
+  wasm graph. **VERIFIED (mechanical):** `git diff 2649c18b HEAD -- Cargo.lock` is
+  that one line, and `SUITE.lock` and `wasm-smoke/Cargo.lock` are unchanged.
+- `cargo tree -p fmn-wasm --target wasm32-unknown-unknown --edges normal --locked`
+  exited 0, and `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  exited 0.
+- `wasm-smoke/run.sh` exited 0 with the unchanged Node digest `1f248a71347b82aa`,
+  after 3837dac0 restored its build (it had missed fm-sq8.9's `ScreenMap::y_up`).
+- `scripts/check_wasm_package.sh` exited 1 at the size budget: the bundler wasm is
+  555,759 bytes against the 514,521-byte `crates/fmn-wasm/SIZE_BUDGET.tsv` budget.
+  The breach is older than this lock change. The same build at `b492564b` (before
+  fm-sq8.9) is already 554,530 bytes; fm-sq8.9 adds 1,229. The growth landed after
+  the 2026-09-17 pass below and needs bisecting (bead fm-8j70). The
+  Chromium stage was not reached. The browser digests and the
+  `certified-cpu:scalar:6` identity recorded below predate fm-sq8.9, which flips
+  front-door frames to +Y-up and bumps the renderer to `scalar:7`; they are
+  historical until the package gate passes again.
+
+Previous full pass: re-derived 2026-09-17 on the local qualified-tool host at commit
+`efdf8e4041bbbe9f2a63b4b91f30b59286861b89`. The locked dependency tree, wasm32
+target build, locked Node smoke, and the complete serial / shared-memory package
+and Chromium gate all exited 0 on a **clean tree** (`source_dirty=false`, receipt
+schema `fmn-wasm-package-receipt/2`). Node smoke digest `1f248a71347b82aa`;
+browser digests `f5b7f4b9` / `c864b03d` / `8d9ea9c9`.
 The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
-either authority changes, forcing this audit to be re-run instead of leaving a
-plausible but stale “current pins” claim behind.
+either authority changes. That forces this audit to be re-run and its outcome
+recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
 - `SUITE.lock` SHA-256: `d38bb18884f060d3867dfbb26b1c985e90ddf8ce716589dd13d2e68aa404b3d3`
-- `Cargo.lock` SHA-256: `02c1d8223ae3dc8c096806ef455f8175a4f8fc7a9d89474414aeb79c5e902a88`
+- `Cargo.lock` SHA-256: `b97f1d76c6e31866f9e5e30df548c406781c9086b6eee2d89bca7fec421123a8`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `01f3e42a699383d33b42379bab14661069b40496b869cfbbd7d35b7e58fde53b`
 
 Method labels are deliberately narrow:
