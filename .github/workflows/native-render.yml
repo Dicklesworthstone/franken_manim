@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "crates/fmn/**"
+      - "crates/fmn-output/**"
       - "Cargo.lock"
       - ".github/workflows/native-render.yml"
   workflow_dispatch:
@@ -32,6 +33,17 @@ jobs:
             ~/.cargo/git
             target/native-render
           key: native-render-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - run: cargo test --locked -p fmn-output --no-default-features --test native_audio_capability
       - run: cargo test --locked -p fmn --test native_render --test native_camera --test public_api
       - run: cargo check --locked -p fmn --examples
       - run: cargo fmt -p fmn -- --check
+      - name: Capture exact source for failed-run diagnosis
+        if: always()
+        run: git archive --format=tar.gz HEAD > "$RUNNER_TEMP/native-render-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-render-source-${{ github.sha }}
+          path: ${{ runner.temp }}/native-render-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error

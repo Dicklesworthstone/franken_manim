@@ -12,7 +12,11 @@ use std::sync::Arc;
 
 use fmn_codec::{WavAudio, WavError, WavLimits, decode_wav};
 use fmn_hash::{Digest, Sha256, sha256};
-use fmn_platform::process::{FfmpegLocator, StdFfmpegLocator, StdProcessRunner};
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "exact-process")))]
+use fmn_platform::process::NoProcessRunner as HostProcessRunner;
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+use fmn_platform::process::StdProcessRunner as HostProcessRunner;
+use fmn_platform::process::{FfmpegLocator, StdFfmpegLocator};
 
 use crate::{Boundary, BoundaryError, FfmpegTool, InvocationReport, JobLimits};
 
@@ -317,7 +321,18 @@ impl AudioDecoder {
                 .ffmpeg_bin
                 .as_ref()
                 .ok_or(AudioDecodeError::TranscoderRequired { format })?;
-            let runner = Arc::new(StdProcessRunner);
+            // The native-codec facade deliberately disables exact-process.
+            // Do not enable a process substrate just to decode WAV, or inspect
+            // ambient PATH when this build cannot honor a transcode request.
+            // An explicitly injected boundary remains usable without the host
+            // runner, and native WAV returned above never reaches this check.
+            if !cfg!(all(not(target_arch = "wasm32"), feature = "exact-process")) {
+                return Err(AudioDecodeError::Capability(
+                    "host transcoding requires a native exact-process build or an injected boundary"
+                        .into(),
+                ));
+            }
+            let runner = Arc::new(HostProcessRunner);
             let executable = self
                 .locator
                 .locate_ffmpeg(path)
