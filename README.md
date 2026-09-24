@@ -70,13 +70,15 @@ class SquareToCircle(Scene):
 ```
 
 ```bash
-# Works today (v0.4.0 portal):
+# Latest release (v0.4.0 wheel) — PNG output only. Known defect in that wheel:
+# Text/Tex render vertically mirrored (fixed in source, not yet released).
 fmn-python scene.py SquareToCircle --format png_sequence   # real rendered frames; no LaTeX installed, anywhere
+
+# Current source (unreleased): the portal adds native GIF/y4m/WAV output
 fmn-python scene.py SquareToCircle --format gif            # native animated GIF
 
 # 1.0 target — fails closed today with capability exit 4:
 fmn-python scene.py SquareToCircle -o                # renders and opens
-fmn-python scene.py SquareToCircle --reproducible    # certified: bit-identical frames on every machine
 ```
 
 **Rust (the native API):**
@@ -221,7 +223,7 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 
 ## The `fmn` CLI
 
-> The CLI keeps the Reference's flag surface where it still means something, with exit codes and flag interactions pinned in the API schema. The first block below is what ships and works at v0.4.0; the second block is the 1.0 target contract and fails closed today.
+> The CLI keeps the Reference's flag surface where it still means something, with exit codes and flag interactions pinned in the API schema. Every command in the first block exits 0 with the latest release (v0.4.0) unless marked *current source*; those need a build from this checkout until the next release. The last block is the 1.0 target contract and fails closed today. Standalone `fmn` renders built-in scenes and compiled FMTL/1 bundles; your own scenes reach it through the Rust library (or the Python portal). Releases through v0.4.0 render the vector 2D path vertically mirrored — invisible on the symmetric primitive scenes, obvious on text; fixed in current source (fm-sq8.9).
 
 ```bash
 # The shipped native G1 corpus renders through the standalone CPython-free binary
@@ -238,10 +240,10 @@ fmn --format video --transparent --resolution 640x360 @builtin circle_shift.v1
 # Certified artifacts stop before ffmpeg: canonical frames are the promised bits
 fmn --reproducible --format png_sequence @builtin circle_shift.v1
 
-# Compiled FMTL/1 scenes use the same Lumen/Reel render path and fixed artifact fps
-# (Note: demo/wasm/bundle.fmtl tracks active development schema minor 7; the published
-# v0.4.0 binary enforces reader minor 6 under strict policy. Use a version-matched
-# minor-6 bundle with v0.4.0 or compile fmn from current checkout source)
+# Compiled FMTL/1 scenes use the same Lumen/Reel render path and fixed artifact fps.
+# Current source: a bundle binds the renderer and animation-law versions it was
+# written for, so v0.4.0 refuses the checked-in demo bundle (exit 5); build fmn
+# from this checkout to play it.
 fmn --format png_sequence demo/wasm/bundle.fmtl DemoTimeline
 
 # Batch farms under asupersync, with budgets and per-scene manifests
@@ -251,17 +253,20 @@ fmn batch --format png_sequence --video_dir ./media \
 # Capabilities: ffmpeg fingerprint + hardware encoders, fonts, cache, ExecutionPlan
 fmn doctor
 
-# Python sources use the separately installed portal — the v0.4.0 console surface
-# (see docs/dist/python_wheel.md for the exact contract):
+# Python sources use the separately installed portal
+# (see docs/dist/python_wheel.md for the exact contract). The v0.4.0 wheel:
 fmn-python --version
 fmn-python --list-scenes scene.py
 fmn-python --construct-only scene.py SquareToCircle        # lifecycle diagnostic; no pixels claimed
 fmn-python scene.py SquareToCircle --format png_sequence   # real Lumen/Reel frames, atomically published
 fmn-python scene.py SquareToCircle --format png            # atomic final-state still
-fmn-python scene.py SquareToCircle --format gif            # native animated GIF
-fmn-python scene.py SquareToCircle --format y4m            # native YUV video stream
 fmn-python scene.py SquareToCircle --format png_sequence \
   --resolution 640x360 --fps 30 --threads 4 --video_dir ./media
+
+# Current source (unreleased) adds:
+fmn-python scene.py SquareToCircle --format gif            # native animated GIF
+fmn-python scene.py SquareToCircle --format y4m            # native YUV video stream
+fmn-python scene.py SquareToCircle --format png --reproducible   # certified png/png_sequence/wav + sidecar manifest
 fmn-python studio scene.py SquareToCircle                  # browser Studio: scrub, inspect, overlays
 ```
 
@@ -276,9 +281,6 @@ fmn-python scene.py SquareToCircle -o                 # write and open
 fmn-python scene.py --write_all                       # every scene in the file
 fmn-python scene.py SquareToCircle -so                # skip to the end, show final frame
 fmn-python scene.py SquareToCircle --uhd --transparent --vcodec prores_ks   # 1.0 target — unrecognized today (exit 2); the other rows below are capability refusals (exit 4)
-
-# Certified determinism: the whole input closure content-hashed, bits promised
-fmn-python scene.py SquareToCircle --reproducible     # + sidecar provenance manifest
 
 # Standalone scene autoreload without Studio
 fmn-python scene.py SquareToCircle --autoreload
@@ -353,30 +355,26 @@ fmn = { git = "https://github.com/Dicklesworthstone/franken_manim" }
 **4. As the optional Python portal** (requires a supported host CPython and NumPy; wheels bundle the engine and fonts, not an interpreter):
 
 ```bash
-pip install franken-manim
+# Not yet on PyPI: install the cp313 wheel for your platform from the GitHub release
+pip install https://github.com/Dicklesworthstone/franken_manim/releases/download/v0.4.0/franken_manim-0.4.0-cp313-cp313-manylinux_2_34_x86_64.whl
 python -c "from manimlib import *"    # the pinned manimlib surface, no LaTeX anywhere
 fmn-python --version                   # portal entry point; distinct from standalone fmn
 ```
 
-> **Current pre-1.0 status:** the repository now builds a CPython 3.13
-> `franken-manim` wheel, and a clean virtual environment proves the exact
-> 663-name `manimlib` import surface, scene discovery, and real standard-mode
-> PNG sequences, atomic final-state PNGs, animated GIF and y4m through retained
-> Lumen and Reel. `--format wav` mixes PCM WAV cues added by `Scene.add_sound`
-> into a 48 kHz stereo soundtrack with the same sampled scene lifecycle.
-> The locked eight-scene source-unedited corpus now reaches decodable,
-> non-uniform final PNGs and reproduces their bytes across same-process runs.
-> The live rendering forms are `fmn-python scene.py Scene --format
-> png_sequence`, `--format png`, `--format gif`, `--format y4m`, and
-> `--format wav`; `--resolution`, `--fps`, `--threads`, and
-> `--video_dir` are supported. `--construct-only` remains an
-> explicitly non-rendering lifecycle diagnostic. Certified output
-> (`--reproducible`), ffmpeg video containers, opener/write-all flags, and the Python
-> Studio route still fail closed with capability exit 4: their complete input
-> closure, provenance, output, or worker contracts have not landed. See the
-> [wheel/namespace policy](docs/dist/python_wheel.md). The broader commands
-> below remain the 1.0 target contract until those seams and the native
-> platform wheel matrix are proven.
+> **Current pre-1.0 status.** The published v0.4.0 wheel (CPython 3.13,
+> linux-x86-64 / macOS arm64 / Windows) exposes the exact 663-name `manimlib`
+> import surface and renders `--format png_sequence` / `--format png`; its
+> Text/Tex output is vertically mirrored (fixed in source, fm-5wq.4.20). Other
+> formats exit 4 in that wheel. Current source additionally renders animated
+> GIF, y4m and a 48 kHz WAV soundtrack from `Scene.add_sound` cues, supports
+> `--reproducible` for png/png_sequence/wav with a sidecar manifest, and serves
+> the Python Studio. None of that is in a release yet. `--resolution`, `--fps`,
+> `--threads` and `--video_dir` are supported; `--construct-only` is a
+> non-rendering lifecycle diagnostic. The eight allowlisted source-unedited
+> corpus scenes (VIDEO_CORPUS.lock) reach decodable, non-uniform final PNGs;
+> real 3b1b scenes also need the era's own imports (`tqdm`) installed. Opener
+> and write-all flags still fail closed with capability exit 4. See the
+> [wheel/namespace policy](docs/dist/python_wheel.md).
 
 ## Quick start
 
@@ -395,24 +393,27 @@ class Hello(Scene):
         self.wait()
 EOF
 
-# 2. Render it through the Python portal; no LaTeX is installed (works today, v0.4.0)
+# 2. Render it through the Python portal; no LaTeX is installed
+#    (v0.4.0 renders this; its text is vertically mirrored — fixed in source)
 fmn-python hello.py Hello --format png_sequence --video_dir ./media
 
 # 3. Look at the frames it atomically published
 sha256sum ./media/**/*.png
 
-# 4. Iterate live with crash isolation, scrub and inspect in browser Studio
+# 4. Current source: iterate live with crash isolation, scrub and inspect in browser Studio
 fmn-python studio hello.py Hello
 ```
 
-The rest of the loop is the **1.0 target** and fails closed today with capability
-exit 4:
+The rest of the loop is the **1.0 target** (`-o` fails closed today with
+capability exit 4):
 
 ```bash
 # Render and open
 fmn-python hello.py Hello -o
 
-# Prove it's reproducible: same bytes on your laptop and your server
+# Prove it's reproducible on every certified platform: same bytes on your
+# laptop and your server (single-host identity works in current source; the
+# cross-platform matrix has not been re-verified since 2026-08-10)
 fmn-python hello.py Hello --reproducible
 ```
 
@@ -453,7 +454,7 @@ output:
 
 ## Performance
 
-Numbers below are the CI **gates** (§17.2 of the plan), enforced on pinned bare-metal profiles (an 8-core x86-64 Linux box and an Apple-silicon Mac), with medians + robust dispersion over multiple repetitions and versioned baselines. The organizing principle: **semantics and bits stay pinned; the scheduler gets freedom.**
+Numbers below are the CI **gates** (§17.2 of the plan), to be enforced on pinned bare-metal profiles (an 8-core x86-64 Linux box and an Apple-silicon Mac), with medians + robust dispersion over multiple repetitions and versioned baselines. No qualified observation exists yet for any gate: the producers exist, and the host-qualification rules are being settled (fm-5wq.8). The organizing principle: **semantics and bits stay pinned; the scheduler gets freedom.**
 
 | Gate | Requirement |
 |---|---|
@@ -517,7 +518,7 @@ Please don't take this the wrong way, but I do not accept outside contributions 
 
 The `franken_manim` source code is licensed under the **MIT License with an OpenAI/Anthropic Rider**, Copyright (c) 2026 Jeffrey Emanuel (see [`LICENSE`](./LICENSE)). The rider withholds all rights from OpenAI, Anthropic, their affiliates, and anyone acting on their behalf, including any use of the software or derivative works in a machine-learning dataset, training corpus, evaluation harness, or pipeline. In any conflict between the rider and the rest of the license, the rider controls.
 
-Bundled fonts (Computer Modern, IBM Plex Sans, CM Typewriter, Noto Sans Math) are distributed under their own licenses (OFL); see the font bundle manifest shipped with releases.
+Bundled fonts (Computer Modern, IBM Plex Sans, CM Typewriter, Noto Sans Math) are distributed under their own licenses (OFL); their license texts ship in the Python wheel (`dist/licenses/fonts/`).
 
 ## See also
 
