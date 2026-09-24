@@ -49,17 +49,26 @@ impl std::fmt::Display for MarkdownError {
 
 impl std::error::Error for MarkdownError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Text(error) => Some(error), Self::InvalidParameter(_) => None }
+        match self {
+            Self::Text(error) => Some(error),
+            Self::InvalidParameter(_) => None,
+        }
     }
 }
 
 impl From<TextMobjectError> for MarkdownError {
-    fn from(error: TextMobjectError) -> Self { Self::Text(error) }
+    fn from(error: TextMobjectError) -> Self {
+        Self::Text(error)
+    }
 }
 
 fn limit(context: &'static str, requested: usize, maximum: usize) -> Result<(), TextMobjectError> {
     if requested > maximum {
-        return Err(TextMobjectError::ResourceLimit { context, requested, limit: maximum });
+        return Err(TextMobjectError::ResourceLimit {
+            context,
+            requested,
+            limit: maximum,
+        });
     }
     Ok(())
 }
@@ -203,12 +212,20 @@ impl<'a> Markdown<'a> {
     /// Whatever the per-block [`Text::build`] calls hit.
     pub fn build(&self, book: &FontBook) -> Result<MarkdownMobject, MarkdownError> {
         if !self.font_size.is_finite() || self.font_size <= 0.0 || self.font_size > 10_000.0 {
-            return Err(MarkdownError::InvalidParameter("Markdown font_size must be finite and in (0, 10000]"));
+            return Err(MarkdownError::InvalidParameter(
+                "Markdown font_size must be finite and in (0, 10000]",
+            ));
         }
         if !self.block_gap.is_finite() || !(0.0..=1000.0).contains(&self.block_gap) {
-            return Err(MarkdownError::InvalidParameter("Markdown block_gap must be finite and in [0, 1000]"));
+            return Err(MarkdownError::InvalidParameter(
+                "Markdown block_gap must be finite and in [0, 1000]",
+            ));
         }
-        limit("Markdown source bytes", self.source.len(), MAX_MARKDOWN_BYTES)?;
+        limit(
+            "Markdown source bytes",
+            self.source.len(),
+            MAX_MARKDOWN_BYTES,
+        )?;
         let spanned = franken_markdown::parse::parse_document_spanned(self.source);
         limit("Markdown blocks", spanned.blocks.len(), MAX_MARKDOWN_BLOCKS)?;
         for block in &spanned.blocks {
@@ -222,7 +239,9 @@ impl<'a> Markdown<'a> {
         for spanned_block in &spanned.blocks {
             let (start, end) = (spanned_block.span.start, spanned_block.span.end);
             if self.source.get(start..end).is_none() {
-                return Err(MarkdownError::InvalidParameter("Markdown parser returned an invalid UTF-8 source span"));
+                return Err(MarkdownError::InvalidParameter(
+                    "Markdown parser returned an invalid UTF-8 source span",
+                ));
             }
             let vmob = match &spanned_block.node {
                 franken_markdown::ast::Block::Heading { level, inlines } => {
@@ -248,7 +267,8 @@ impl<'a> Markdown<'a> {
                         .build(book)?
                         .vmob
                 }
-                franken_markdown::ast::Block::List(_) | franken_markdown::ast::Block::BlockQuote(_) => {
+                franken_markdown::ast::Block::List(_)
+                | franken_markdown::ast::Block::BlockQuote(_) => {
                     let mut markup = String::new();
                     block_to_markup(&spanned_block.node, "", &mut markup);
                     self.layout_text_block(book, markup, 1.0)?.vmob
@@ -259,11 +279,25 @@ impl<'a> Markdown<'a> {
                         inlines_to_markup(cell, &mut markup);
                         Ok(fmn_text::markup::parse_markup(&markup)?.iter().map(|c| c.ch).collect())
                     };
-                    let headers = table.head.iter().map(|cell| plain(cell)).collect::<Result<Vec<_>, _>>()?;
-                    let rows = table.rows.iter().map(|row| row.iter().map(|cell| plain(cell)).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
+                    let headers = table
+                        .head
+                        .iter()
+                        .map(|cell| plain(cell))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let rows = table
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|cell| plain(cell))
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     crate::data_mobjects::TableMobject::from_grid(headers, rows)
                         .build(book)
-                        .map_err(|e| TextMobjectError::Geometry { what: e.to_string() })?
+                        .map_err(|e| TextMobjectError::Geometry {
+                            what: e.to_string(),
+                        })?
                         .scaled_about(self.font_size / crate::text::DEFAULT_FONT_SIZE, [0.0; 3])
                 }
                 other => {
@@ -274,7 +308,11 @@ impl<'a> Markdown<'a> {
 
             let mut pending = vec![&vmob];
             while let Some(member) = pending.pop() {
-                records = records.checked_add(member.points().len()).ok_or(TextMobjectError::CapacityOverflow { context: "Markdown records" })?;
+                records = records.checked_add(member.points().len()).ok_or(
+                    TextMobjectError::CapacityOverflow {
+                        context: "Markdown records",
+                    },
+                )?;
                 limit("Markdown records", records, MAX_RECORDS)?;
                 pending.extend(member.children());
             }
@@ -331,18 +369,28 @@ fn validate_tree(root: &franken_markdown::ast::Block) -> Result<(), TextMobjectE
     while let Some((block, depth)) = blocks.pop() {
         limit("Markdown nesting", depth, MAX_DEPTH)?;
         match block {
-            Block::Heading { inlines: values, .. } | Block::Paragraph(values) => {
+            Block::Heading {
+                inlines: values, ..
+            }
+            | Block::Paragraph(values) => {
                 inlines.extend(values.iter().map(|value| (value, 0usize)));
             }
-            Block::BlockQuote(children) => blocks.extend(children.iter().map(|child| (child, depth + 1))),
+            Block::BlockQuote(children) => {
+                blocks.extend(children.iter().map(|child| (child, depth + 1)))
+            }
             Block::List(list) => {
                 for item in &list.items {
                     blocks.extend(item.blocks.iter().map(|child| (child, depth + 1)));
                 }
             }
             Block::Table(table) => {
-                let cells = table.rows.iter().try_fold(table.head.len(), |n, row| n.checked_add(row.len()))
-                    .ok_or(TextMobjectError::CapacityOverflow { context: "Markdown table cells" })?;
+                let cells = table
+                    .rows
+                    .iter()
+                    .try_fold(table.head.len(), |n, row| n.checked_add(row.len()))
+                    .ok_or(TextMobjectError::CapacityOverflow {
+                        context: "Markdown table cells",
+                    })?;
                 limit("Markdown table cells", cells, 4096)?;
                 for row in std::iter::once(&table.head).chain(table.rows.iter()) {
                     for cell in row {
@@ -356,8 +404,12 @@ fn validate_tree(root: &franken_markdown::ast::Block) -> Result<(), TextMobjectE
     while let Some((inline, depth)) = inlines.pop() {
         limit("Markdown inline nesting", depth, MAX_DEPTH)?;
         match inline {
-            Inline::Emphasis(children) | Inline::Strong(children) | Inline::Strikethrough(children)
-            | Inline::Link { content: children, .. } => {
+            Inline::Emphasis(children)
+            | Inline::Strong(children)
+            | Inline::Strikethrough(children)
+            | Inline::Link {
+                content: children, ..
+            } => {
                 inlines.extend(children.iter().map(|child| (child, depth + 1)));
             }
             _ => {}
@@ -376,16 +428,28 @@ fn block_to_markup(block: &franken_markdown::ast::Block, prefix: &str, out: &mut
                 let marker = if list.ordered {
                     // Do not wrap an authored maximum-u64 start value.
                     format!("{}. ", u128::from(list.start) + index as u128)
-                } else { "• ".to_owned() };
-                let task = match item.task { Some(true) => "[x] ", Some(false) => "[ ] ", None => "" };
+                } else {
+                    "• ".to_owned()
+                };
+                let task = match item.task {
+                    Some(true) => "[x] ",
+                    Some(false) => "[ ] ",
+                    None => "",
+                };
                 for (line, child) in item.blocks.iter().enumerate() {
-                    let next = if line == 0 { format!("{prefix}{marker}{task}") } else { format!("{prefix}    ") };
+                    let next = if line == 0 {
+                        format!("{prefix}{marker}{task}")
+                    } else {
+                        format!("{prefix}    ")
+                    };
                     block_to_markup(child, &next, out);
                 }
             }
         }
         Block::BlockQuote(children) => {
-            for child in children { block_to_markup(child, &format!("{prefix}&gt; "), out); }
+            for child in children {
+                block_to_markup(child, &format!("{prefix}&gt; "), out);
+            }
         }
         Block::Paragraph(inlines) | Block::Heading { inlines, .. } => {
             out.push_str(prefix);
@@ -509,22 +573,33 @@ mod tests {
     fn literal_text_and_inline_code_cannot_become_markup() {
         use franken_markdown::ast::Inline;
         let mut markup = String::new();
-        inlines_to_markup(&[
-            Inline::Text("a < b & c > d ".into()),
-            Inline::Code("<b>&amp;</b>".into()),
-            Inline::Html("<script>x</script>".into()),
-        ], &mut markup);
+        inlines_to_markup(
+            &[
+                Inline::Text("a < b & c > d ".into()),
+                Inline::Code("<b>&amp;</b>".into()),
+                Inline::Html("<script>x</script>".into()),
+            ],
+            &mut markup,
+        );
         let chars = fmn_text::markup::parse_markup(&markup).unwrap();
-        assert_eq!(chars.iter().map(|c| c.ch).collect::<String>(),
-                   "a < b & c > d <b>&amp;</b><script>x</script>");
+        assert_eq!(
+            chars.iter().map(|c| c.ch).collect::<String>(),
+            "a < b & c > d <b>&amp;</b><script>x</script>"
+        );
         assert!(chars.iter().all(|c| !c.style.bold));
         assert!(chars[14].style.mono);
-        assert!(Markdown::new("Use `Vec<T>` & **borrowed** values.").build(&book()).is_ok());
+        assert!(
+            Markdown::new("Use `Vec<T>` & **borrowed** values.")
+                .build(&book())
+                .is_ok()
+        );
     }
 
     #[test]
     fn different_block_heights_never_overlap_and_share_a_left_edge() {
-        let md = Markdown::new("# Heading\n\nShort\n\n```rust\nlet x = 1;\nlet y = 2;\n```\n\nEnd").build(&book()).unwrap();
+        let md = Markdown::new("# Heading\n\nShort\n\n```rust\nlet x = 1;\nlet y = 2;\n```\n\nEnd")
+            .build(&book())
+            .unwrap();
         for block in &md.blocks {
             assert!(block.vmob.bbox_point([-1.0, 1.0, 0.0]).unwrap()[0].abs() < 1e-6);
         }
@@ -538,7 +613,11 @@ mod tests {
 
     #[test]
     fn block_gap_scales_with_typography() {
-        let md = Markdown::new("first\n\nsecond").font_size(24.0).block_gap(0.8).build(&book()).unwrap();
+        let md = Markdown::new("first\n\nsecond")
+            .font_size(24.0)
+            .block_gap(0.8)
+            .build(&book())
+            .unwrap();
         let bottom = md.blocks[0].vmob.bbox_point([0.0, -1.0, 0.0]).unwrap()[1];
         let top = md.blocks[1].vmob.bbox_point([0.0, 1.0, 0.0]).unwrap()[1];
         assert!((bottom - top - 0.4).abs() < 1e-6);
@@ -549,8 +628,14 @@ mod tests {
         let source = "- outer\n  - inner\n\n> # Quoted heading\n>\n> ```rust\n> x < y\n> ```\n";
         let document = franken_markdown::parse::parse_document_spanned(source);
         let mut markup = String::new();
-        for block in &document.blocks { block_to_markup(&block.node, "", &mut markup); }
-        let text: String = fmn_text::markup::parse_markup(&markup).unwrap().iter().map(|c| c.ch).collect();
+        for block in &document.blocks {
+            block_to_markup(&block.node, "", &mut markup);
+        }
+        let text: String = fmn_text::markup::parse_markup(&markup)
+            .unwrap()
+            .iter()
+            .map(|c| c.ch)
+            .collect();
         for expected in ["outer", "inner", "Quoted heading", "x < y"] {
             assert!(text.contains(expected), "lost {expected}: {text}");
         }
@@ -559,23 +644,41 @@ mod tests {
 
     #[test]
     fn tables_are_ruled_native_families_not_tab_separated_placeholders() {
-        let md = Markdown::new("| name | value |\n| --- | --- |\n| **A** | 2 |\n| B | 3 |\n").build(&book()).unwrap();
+        let md = Markdown::new("| name | value |\n| --- | --- |\n| **A** | 2 |\n| B | 3 |\n")
+            .build(&book())
+            .unwrap();
         assert_eq!(md.blocks.len(), 1);
         assert_eq!(md.blocks[0].kind, "table");
         let expected = crate::data_mobjects::TableMobject::from_grid(
             vec!["name".into(), "value".into()],
-            vec![vec!["A".into(), "2".into()], vec!["B".into(), "3".into()]])
-            .build(&book()).unwrap();
-        assert_eq!(md.blocks[0].vmob.children().len(), expected.children().len());
-        assert!(!md.blocks[0].vmob.children()[0].points().is_empty(), "native outer rule");
+            vec![vec!["A".into(), "2".into()], vec!["B".into(), "3".into()]],
+        )
+        .build(&book())
+        .unwrap();
+        assert_eq!(
+            md.blocks[0].vmob.children().len(),
+            expected.children().len()
+        );
+        assert!(
+            !md.blocks[0].vmob.children()[0].points().is_empty(),
+            "native outer rule"
+        );
     }
 
     #[test]
     fn unicode_spans_are_byte_ranges_and_empty_documents_are_valid() {
         let source = "# αβ\n\nText Ω.\n";
         let md = Markdown::new(source).build(&book()).unwrap();
-        assert_eq!(md.blocks.iter().map(|b| b.kind).collect::<Vec<_>>(), ["heading", "paragraph"]);
-        assert!(source.get(md.blocks[0].byte_range.0..md.blocks[0].byte_range.1).unwrap().contains("αβ"));
+        assert_eq!(
+            md.blocks.iter().map(|b| b.kind).collect::<Vec<_>>(),
+            ["heading", "paragraph"]
+        );
+        assert!(
+            source
+                .get(md.blocks[0].byte_range.0..md.blocks[0].byte_range.1)
+                .unwrap()
+                .contains("αβ")
+        );
         assert!(Markdown::new("").build(&book()).unwrap().blocks.is_empty());
     }
 
@@ -587,11 +690,21 @@ mod tests {
         for gap in [-1.0, f64::NAN, f64::INFINITY] {
             assert!(Markdown::new("x").block_gap(gap).build(&book()).is_err());
         }
-        assert!(Markdown::new(&"x".repeat(MAX_MARKDOWN_BYTES + 1)).build(&book()).is_err());
-        assert!(Markdown::new(&"x\n\n".repeat(MAX_MARKDOWN_BLOCKS + 1)).build(&book()).is_err());
+        assert!(
+            Markdown::new(&"x".repeat(MAX_MARKDOWN_BYTES + 1))
+                .build(&book())
+                .is_err()
+        );
+        assert!(
+            Markdown::new(&"x\n\n".repeat(MAX_MARKDOWN_BLOCKS + 1))
+                .build(&book())
+                .is_err()
+        );
         use franken_markdown::ast::Block;
         let mut nested = Block::ThematicBreak;
-        for _ in 0..=MAX_DEPTH { nested = Block::BlockQuote(vec![nested]); }
+        for _ in 0..=MAX_DEPTH {
+            nested = Block::BlockQuote(vec![nested]);
+        }
         assert!(validate_tree(&nested).is_err());
     }
 }

@@ -239,6 +239,105 @@ class LiveMarkdownTests(unittest.TestCase):
         self.assertEqual(records(doc),before)
         self.assertFalse(vars(doc).get('_is_animating',False))
 
+    def test_reinitialization_refuses_without_changing_scene_membership(self):
+        doc=MarkdownMobject('original')
+        scene=m.Scene(); scene.add(doc)
+        before=records(doc)
+        with self.assertRaisesRegex(RuntimeError,'set_source'):
+            doc.__init__('replacement')
+        self.assertEqual(doc.source,'original')
+        self.assertEqual(records(doc),before)
+        self.assertEqual(tuple(scene.mobjects),(doc,))
+        doc.set_source('supported edit')
+
+    def test_reflow_overflow_refuses_before_publishing_new_geometry(self):
+        doc=MarkdownMobject('M').scale(1e38,about_point=m.ORIGIN)
+        before=records(doc)
+        with np.errstate(over='ignore',invalid='ignore'):
+            with self.assertRaises((ValueError,m._CapabilityError)):
+                doc.set_source('W'*100)
+        self.assertEqual(doc.source,'M')
+        self.assertEqual(records(doc),before)
+        self.assertTrue(np.isfinite(doc.get_all_points()).all())
+
+    def test_bound_saved_document_restores_full_family_and_frozen_source(self):
+        doc=MarkdownMobject('first\n\nsecond')
+        doc.add(m.Dot((2,1,0)))
+        scene=m.Scene(); scene.add(doc)
+        doc.save_state()
+        saved=doc.saved_state
+        saved_records=records(saved)
+        before=capture(doc)
+        doc.shift(m.RIGHT).set_color(m.RED).set_source('only one new block')
+        self.assertIs(doc.restore(),doc)
+        self.assertEqual(doc.source,'first\n\nsecond')
+        self.assertEqual(tuple(scene.mobjects),(doc,))
+        self.assertEqual(capture(doc),before)
+        self.assertEqual(records(saved),saved_records)
+        self.assertEqual(len(doc.submobjects),3)
+        doc.set_source('different\n\nblocks\n\nagain')
+        doc.restore()
+        self.assertEqual(capture(doc),before)
+
+    def test_scene_checkpoint_restores_source_catalog_and_original_block_identities(self):
+        doc=MarkdownMobject('first\n\nsecond')
+        scene=m.Scene();scene.add(doc)
+        blocks=tuple(doc.get_blocks())
+        state=scene.get_state()
+        before=capture(doc)
+        doc.set_source('new\n\nfirst\n\nsecond').shift(m.RIGHT)
+        scene.restore_state(state)
+        self.assertEqual(doc.source,'first\n\nsecond')
+        self.assertEqual(tuple(doc.get_blocks()),blocks)
+        self.assertEqual(capture(doc),before)
+        self.assertIs(doc.select_text('second')[0],blocks[1])
+        doc.set_source('restored document remains editable')
+
+    def test_direct_interpolation_failure_restores_source_geometry_and_can_retry(self):
+        doc=MarkdownMobject('initial')
+        before=capture(doc)
+        error=KeyboardInterrupt('cancel authored path')
+        def path(a,b,alpha):
+            if alpha > 0:
+                raise error
+            return a.copy()
+        animation=doc.animate_source('replacement',rate_func=m.linear,path_func=path)
+        animation.begin()
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            animation.interpolate(.5)
+        self.assertIs(caught.exception,error)
+        self.assertEqual(doc.source,'initial')
+        self.assertEqual(capture(doc),before)
+        self.assertFalse(vars(doc).get('_is_animating',False))
+        self.assertFalse(animation._source_owned)
+        animation.abort()  # Cleanup is idempotent, including after path failure.
+        animation.path_func=m.straight_path
+        animation.begin(); animation.finish()
+        self.assertEqual(doc.source,'replacement')
+
+    def test_scene_updater_cancellation_restores_document_and_independent_annotations(self):
+        doc=MarkdownMobject('before')
+        annotation=m.Dot((2,1,0))
+        doc.add(annotation)
+        before=capture(doc)
+        error=RuntimeError('stop at frame boundary')
+        def stop(obj,dt):
+            if dt > 0:
+                raise error
+        sentinel=m.VectorizedPoint()
+        sentinel.add_updater(stop,call=False)
+        scene=m.Scene(); scene.add(doc,sentinel)
+        with self.assertRaises(RuntimeError) as caught:
+            scene.play(doc.animate_source('after'),run_time=.25,rate_func=m.linear)
+        self.assertIs(caught.exception,error)
+        self.assertEqual(doc.source,'before')
+        self.assertEqual(capture(doc),before)
+        self.assertIn(annotation,doc.submobjects)
+        self.assertFalse(vars(doc).get('_is_animating',False))
+        sentinel.remove_updater(stop)
+        scene.play(doc.animate_source('recovered'),run_time=.25)
+        self.assertEqual(doc.source,'recovered')
+
     def test_literal_paragraph_matches_independent_native_text_pixels(self):
         doc=MarkdownMobject('Hello **world** & `x < y`')
         reference=m.MarkupText('Hello <b>world</b> &amp; <tt>x &lt; y</tt>',font_size=24)

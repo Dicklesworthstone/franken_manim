@@ -54,6 +54,8 @@ class MarkdownMobject(m.VGroup):
     """
     def __init__(self, source, *, font_size=24, theme='monokai', block_gap=.45,
                  math_mode=False, line_width=None, body_color=None, **kwargs):
+        if '_markdown_blocks' in vars(self) or self._is_bound():
+            raise RuntimeError("an existing Markdown document must be edited with set_source")
         source = _source(source)
         size, gap = float(font_size), float(block_gap)
         if not math.isfinite(size) or not 0 < size <= 10000:
@@ -217,6 +219,11 @@ class MarkdownMobject(m.VGroup):
         candidate.shift(-candidate._markdown_anchors[0].get_center())
         candidate.apply_matrix(matrix, about_point=m.ORIGIN)
         candidate.shift(origin)
+        # Valid local glyphs may overflow native f32 records after an extreme
+        # authored affine transform. Do not replace a finite live document with
+        # an unrenderable candidate even when its local layout was admissible.
+        if any(not np.isfinite(member.get_points()).all() for member in candidate.get_family()):
+            raise ValueError("Markdown reflow exceeds finite native point coordinates")
         if self._stamp() != before or vars(self).get('_is_animating', False):
             raise RuntimeError("Markdown changed during native document preparation")
         return candidate
@@ -279,6 +286,40 @@ class MarkdownMobject(m.VGroup):
                 self._publish(candidate)
         return self
 
+    @_discrete
+    def restore(self):
+        """Restore the saved source and its complete native family over this root.
+
+        Block/glyph counts can differ after edits or Transform alignment, which
+        the generic detached restore cannot reconcile. Use the existing native
+        family copier and become operation on isomorphic, independent copies.
+        The root retains identity and scene membership; restored block objects
+        are snapshot copies, so callers should reacquire source selections.
+        """
+        with _EDITS.hold(self, message="Markdown restoration cannot reenter its document"):
+            if vars(self).get('_is_animating', False):
+                raise RuntimeError("finish the active Markdown animation before restoring")
+            saved = getattr(self, 'saved_state', None)
+            if not isinstance(saved, MarkdownMobject):
+                raise RuntimeError("Markdown restore requires a saved Markdown state")
+            before = self._stamp()
+            saved._structure()
+            # Independent copies avoid aliasing receiver/source native records.
+            # Detach through the common copier so snapshots from another scene
+            # remain readable without adopting or mutating their original owner.
+            source = m._copy_mobject_graph(saved, False, detach_bound=True)
+            candidate = source.copy()
+            if self._stamp() != before:
+                raise RuntimeError("Markdown changed during saved-state preparation")
+            self.set_submobjects(tuple(candidate.submobjects))
+            self.become(source)
+            for name in ('_markdown_source', '_markdown_ranges', '_markdown_kinds',
+                         '_markdown_size', '_markdown_options'):
+                vars(self)[name] = vars(source)[name]
+            self._markdown_math_options = (source.math_mode, source.line_width, source.body_color)
+            vars(self).pop('_markdown_partial', None)
+        return self
+
     def animate_source(self, source, **animation_config):
         """Morph equal-count block documents; inserts/removals use set_source.
 
@@ -327,7 +368,11 @@ class MarkdownSourceAnimation(m.Transform):
 
     def interpolate_mobject(self, alpha):
         self._source_alphas = []
-        return super().interpolate_mobject(alpha)
+        try:
+            return super().interpolate_mobject(alpha)
+        except BaseException as error:
+            self._recover(error)
+            raise
 
     def interpolate_submobject(self, submobject, start, target, alpha):
         self._source_alphas.append(float(alpha))

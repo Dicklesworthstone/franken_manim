@@ -79,6 +79,14 @@ active/partial document animation, and detected authored changes during preparat
 refuse. Arbitrary side effects from host callbacks or custom publication methods
 are not transactionally rolled back.
 
+`save_state()` / `restore()` restore both source metadata and the complete saved
+family, including after a change in block/glyph counts. The document root and
+its scene membership survive, but direct document restoration installs copied
+saved blocks; reacquire block selections afterward. Scene checkpoints instead
+use the existing native identity-preserving scene restore and retain original
+block references. Neither operation changes the saved source's geometry.
+Calling the constructor again on an existing document refuses; use `set_source`.
+
 ## Animation and scope
 
 `animate_source(text, **animation_config)` uses the existing `Transform`
@@ -96,9 +104,12 @@ source metadata. Normal native block animations, copies and scene checkpoints
 remain available. Changed block content uses the new source's native styles;
 unchanged content retains authored styling.
 
-There is no automatic wrapping/pagination, inline math layout, embedded-image
-loading or network access in this tranche. Links show their text, images show
-alt text, and HTML/math syntax is literal. Code themes are the names accepted
+The default text-only mode has no automatic wrapping/pagination, inline math
+layout, embedded-image loading or network access. Links show their text, images
+show alt text, and HTML/math syntax is literal. The separately added opt-in
+`math_mode=True` extension and its wrapping controls are described in
+`mathematical_markdown.md`; edits and restore retain those settings too.
+Code themes are the names accepted
 by the native `CodeTheme` catalog. `font_size` must be finite in `(0, 10000]`;
 `block_gap` must be finite in `[0, 1000]` and scales with body font size.
 
