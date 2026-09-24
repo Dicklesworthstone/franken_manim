@@ -7,6 +7,7 @@ on:
       - 'crates/fmn-cli/**'
       - 'crates/fmn-runtime/**'
       - 'crates/fmn-render/**'
+      - 'crates/fmn-scene/**'
       - 'crates/fmn/**'
   workflow_dispatch:
 permissions:
@@ -47,7 +48,10 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - name: Compiled frame ownership, reconstruction law and recorded updaters
+        run: cargo test --locked -p fmn-scene --test shared_bundle
       - name: Runtime bounds, ordering, cancellation and barriers
+        if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-runtime --lib
       - name: Owned affine frames, cache reuse and certified bit identity
         if: ${{ !cancelled() }}
@@ -55,7 +59,7 @@ jobs:
       - name: Owned camera jobs and retained rendering
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-render --lib retained
-      - name: Native camera motion, CPU pipeline and atomic publication
+      - name: Native camera motion, compiled replay and atomic publication
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn --tests
       - name: Native executable examples

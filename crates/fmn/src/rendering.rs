@@ -44,6 +44,8 @@ use crate::SceneConstruct;
 
 mod pipeline;
 mod camera_animation;
+mod compiled;
+pub use compiled::{render_bundle, render_bundle_with_fs};
 pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
 
@@ -180,6 +182,8 @@ pub struct RenderReport {
 /// Typed failure of native scene rendering; underlying sources are retained.
 #[derive(Debug)]
 pub enum RenderError {
+    /// A compiled FMTL input refused schema, engine or snapshot validation.
+    Bundle(fmn_scene::timeline_bundle::BundleReadError),
     /// Invalid bounds or a configuration combination this entry point cannot use.
     InvalidOptions(&'static str),
     /// A requested backend is not available through this entry point.
@@ -212,6 +216,7 @@ impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidOptions(message) | Self::Capability(message) => f.write_str(message),
+            Self::Bundle(error) => error.fmt(f),
             Self::Color(error) => error.fmt(f),
             Self::Camera(error) => error.fmt(f),
             Self::Scene(error) => error.fmt(f),
@@ -231,6 +236,7 @@ impl std::error::Error for RenderError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidOptions(_) | Self::Capability(_) => None,
+            Self::Bundle(error) => Some(error),
             Self::Color(error) => Some(error),
             Self::Camera(error) => Some(error),
             Self::Scene(error) => Some(error),
@@ -412,7 +418,10 @@ impl RenderSink {
         // surfaces. Each affine render team retains its own tile cache; camera
         // preparation retains one raw frame. Check before allocating anything.
         let retained_frames = if options.camera.is_some() {
-            1
+            // Live-camera preparation plus the largest compiled-camera mode:
+            // one retained raw preparation frame on each active render team.
+            plan.render_teams.len().checked_add(1)
+                .ok_or(RenderError::InvalidOptions("retained frame count overflowed"))?
         } else {
             plan.render_teams.len()
         };
