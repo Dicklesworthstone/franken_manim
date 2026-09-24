@@ -152,30 +152,48 @@ fn _build_markdown<'py>(
     block_gap: f64,
 ) -> PyResult<MarkdownSpecs<'py>> {
     if slf.try_borrow()?.engine.is_some() {
-        return Err(PyValueError::new_err("Markdown construction requires a detached receiver"));
+        return Err(PyValueError::new_err(
+            "Markdown construction requires a detached receiver",
+        ));
     }
     let theme = fmn_library::CodeTheme::from_pygments_name(theme)
         .ok_or_else(|| PyValueError::new_err("unknown native Markdown code theme"))?;
     let built = with_font_book(|book| {
-        fmn_library::Markdown::new(source).font_size(font_size).theme(theme)
-            .block_gap(block_gap).build(book).map_err(native_error)
+        fmn_library::Markdown::new(source)
+            .font_size(font_size)
+            .theme(theme)
+            .block_gap(block_gap)
+            .build(book)
+            .map_err(native_error)
     })?;
     let ranges = built.blocks.iter().map(|block| block.byte_range).collect();
-    let kinds = built.blocks.iter().map(|block| block.kind.to_owned()).collect();
+    let kinds = built
+        .blocks
+        .iter()
+        .map(|block| block.kind.to_owned())
+        .collect();
     let specs = install_native_tree(slf, factory, built.vmob)?;
     Ok((specs, ranges, kinds))
 }
 
 #[cfg(test)]
 mod markdown_tests {
+    use pyo3::types::{PyAnyMethods, PyDictMethods};
+
     #[test]
     fn native_markdown_source_and_rendering() {
         crate::with_python_test_module("native Markdown", |py, _module, globals| {
             let code = std::ffi::CString::new(include_str!("../tests/native_markdown.py")).unwrap();
             py.run(code.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py)).unwrap();
-            globals.get_item("run_native_markdown_acceptance").unwrap().unwrap()
-                .call0().inspect_err(|error| error.print(py)).unwrap();
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_native_markdown_acceptance")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
         });
     }
 }
