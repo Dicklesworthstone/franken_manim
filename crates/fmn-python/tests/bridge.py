@@ -20460,6 +20460,30 @@ except NotImplementedError as error:
 else:
     raise AssertionError("cdist silently accepted an unsupported metric")
 
+# fm-5wq.14: copying a never-added group whose descendants were added one by
+# one (3b1b's sir.py builds exp_tree this way, as do 40 other corpus scenes)
+# yields a detached, independent copy of every member.
+_copy_scene = manimlib.Scene()
+_rows = manimlib.VGroup(
+    manimlib.VGroup(manimlib.Dot(), manimlib.Dot().shift(manimlib.RIGHT)),
+    manimlib.VGroup(manimlib.Dot()),
+)
+_copy_scene.add(_rows[0])
+_rows[0][1].set_color(manimlib.RED)
+_tree = manimlib.VGroup(_rows, manimlib.VGroup(manimlib.Line()))
+assert not _tree._is_bound() and _rows[0]._is_bound()
+_tree_copy = _tree.copy()
+assert not any(member._is_bound() for member in _tree_copy.get_family())
+assert len(_tree_copy.get_family()) == len(_tree.get_family())
+for _copied, _source in zip(_tree_copy.get_family(), _tree.get_family()):
+    assert _copied is not _source and np.allclose(_copied.get_points(), _source.get_points())
+assert _tree_copy[0][0][1].get_color() == _tree[0][0][1].get_color()
+_tree_copy[0][0][1].shift(manimlib.UP)
+assert not np.allclose(_tree_copy[0][0][1].get_center(), _rows[0][1].get_center())
+assert _rows[0][1]._is_bound()
+_copy_scene.add(_tree_copy)
+assert _tree_copy._is_bound()
+
 # fm-5wq.14: manimlib.utils.directories serves Reference directories.py over
 # manim_config.directories. The native reader merges custom_config.yml
 # recursively over the defaults (3b1b's corpus depends on this), and each

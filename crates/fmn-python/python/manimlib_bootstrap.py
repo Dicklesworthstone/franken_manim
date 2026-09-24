@@ -638,10 +638,18 @@ def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
     else:
         bound_shells = root._copy_family_shells()
         if bound_shells is None:
+            # A detached root can still hold scene-bound descendants, e.g. a
+            # never-added VGroup whose rows were added one by one. Its copy is
+            # detached throughout, so each member is copied from its own
+            # state: a bound member through the same engine snapshot the
+            # detach_bound path uses, a detached one through its nursery.
             pairs = []
             for old in _family_preorder(root):
                 new = type(old).__new__(type(old))
-                old._copy_detached_state_to(new)
+                if old._is_bound():
+                    new._restore_engine_state(old._engine_state())
+                else:
+                    old._copy_detached_state_to(new)
                 pairs.append((old, new))
         else:
             pairs = list(bound_shells)
