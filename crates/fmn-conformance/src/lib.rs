@@ -93,6 +93,9 @@
 //!
 //! The rest of the Gauntlet lands with its owning workstreams; see
 //! COMPREHENSIVE_PLAN §19 for the crate map.
+// corpus_leak's Windows file identity (volume serial + file index) is the
+// pinned nightly's `windows_by_handle` API, exactly as fmn-output uses it.
+#![cfg_attr(windows, feature(windows_by_handle))]
 #![forbid(unsafe_code)]
 
 pub mod closure;
