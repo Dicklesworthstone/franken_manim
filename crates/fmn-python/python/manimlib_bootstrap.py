@@ -4449,16 +4449,13 @@ class ImplicitFunction(VMobject):
 
 class CubicBezier(VMobject):
     def __init__(self, a0, h0, h1, a1, **kwargs):
-        _install_live_state(self)
-        specs = self._build_cubic_bezier(
-            _native_shell_factory,
-            _vec3(a0),
-            _vec3(h0),
-            _vec3(h1),
-            _vec3(a1),
+        self.control_points = _np.array([_vec3(point) for point in (a0, h0, h1, a1)], dtype=float)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_cubic_bezier", *[_vec3(point) for point in self.control_points]
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class Polygon(VMobject):
@@ -4468,12 +4465,13 @@ class Polygon(VMobject):
         if not vertices:
             # Reference geometry.py indexes vertices[0] before any mutation.
             raise IndexError("tuple index out of range")
-        _install_live_state(self)
-        specs = self._build_polygon(
-            _native_shell_factory, [_vec3(vertex) for vertex in vertices]
+        self.vertices = _np.array([_vec3(vertex) for vertex in vertices], dtype=float)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_polygon", [_vec3(vertex) for vertex in self.vertices]
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
     def get_vertices(self):
         return self.get_start_anchors()
@@ -4490,12 +4488,13 @@ class Polyline(VMobject):
     """Atlas's open shared-anchor path through caller-supplied vertices."""
 
     def __init__(self, *vertices, **kwargs):
-        _install_live_state(self)
-        specs = self._build_polyline(
-            _native_shell_factory, [_vec3(vertex) for vertex in vertices]
+        self.vertices = _np.array([_vec3(vertex) for vertex in vertices], dtype=float)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_polyline", [_vec3(vertex) for vertex in self.vertices]
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 def _boolean_from_operands(self, operation, operands, kwargs):
@@ -4548,17 +4547,16 @@ class RegularPolygon(Polygon):
             # Reference compass_directions divides TAU by n first.
             raise ZeroDivisionError("float division by zero")
         if n < 0:
-            # range(n) produces no vertices and Polygon then indexes [0].
             raise IndexError("tuple index out of range")
-        _install_live_state(self)
-        specs = self._build_regular_polygon(
-            _native_shell_factory,
-            n,
-            float(radius),
-            None if start_angle is None else float(start_angle),
+        self.n = n
+        self.radius = float(radius)
+        self.start_angle = None if start_angle is None else float(start_angle)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_regular_polygon", self.n, self.radius, self.start_angle
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class Triangle(RegularPolygon):
@@ -4613,12 +4611,14 @@ class ArrowTip(Triangle):
 
 class Rectangle(Polygon):
     def __init__(self, width=4.0, height=2.0, **kwargs):
-        _install_live_state(self)
-        specs = self._build_rectangle(
-            _native_shell_factory, float(width), float(height)
+        self.width = float(width)
+        self.height = float(height)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_rectangle", self.width, self.height
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
     def surround(self, mobject, buff=_SMALL_BUFF):
         self.set_shape(
@@ -4631,15 +4631,15 @@ class Rectangle(Polygon):
 
 class RoundedRectangle(Rectangle):
     def __init__(self, width=4.0, height=2.0, corner_radius=0.5, **kwargs):
-        _install_live_state(self)
-        specs = self._build_rounded_rectangle(
-            _native_shell_factory,
-            float(width),
-            float(height),
-            float(corner_radius),
+        self.width = float(width)
+        self.height = float(height)
+        self.corner_radius = float(corner_radius)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_rounded_rectangle", self.width, self.height, self.corner_radius
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class Square(Rectangle):
@@ -4650,12 +4650,14 @@ class Square(Rectangle):
 
 class ScreenRectangle(Rectangle):
     def __init__(self, aspect_ratio=_ASPECT_RATIO, height=4, **kwargs):
-        _install_live_state(self)
-        specs = self._build_screen_rectangle(
-            _native_shell_factory, float(aspect_ratio), float(height)
+        self.aspect_ratio = float(aspect_ratio)
+        self.height = float(height)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_screen_rectangle", self.aspect_ratio, self.height
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class FullScreenRectangle(ScreenRectangle):
@@ -5283,19 +5285,15 @@ class Elbow(VMobject):
 
 class Line(TipableVMobject):
     def __init__(self, start=_LEFT, end=_RIGHT, buff=0.0, path_arc=0.0, **kwargs):
-        _install_live_state(self)
         self.path_arc = float(path_arc)
         self.buff = float(buff)
         self.set_start_and_end_attrs(start, end)
-        specs = self._build_line(
-            _native_shell_factory,
-            _vec3(self.start),
-            _vec3(self.end),
-            self.buff,
-            self.path_arc,
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_line", _vec3(self.start), _vec3(self.end), self.buff, self.path_arc
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
     def _replace_line_geometry(self, start, end, buff=0.0, path_arc=0.0):
         """Commit one Atlas-built point run while preserving portal state."""
