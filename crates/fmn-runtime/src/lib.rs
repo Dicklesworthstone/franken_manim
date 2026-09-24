@@ -16,6 +16,7 @@
 
 mod pipeline;
 mod plan;
+mod stream;
 
 pub use fmn_platform::profile::{
     PROFILE_SCHEMA, ProfileCounter, ProfileCounterRecord, ProfileLane, ProfileLaneRole,
@@ -31,3 +32,5 @@ pub use plan::{
     OutputPixelFormat, PlanError, PlanRequest, RenderIntent, SurfaceSpec, TeamPlan, TeamRole,
     TopologyFingerprint, TuningSource,
 };
+
+pub use stream::{FramePermit, FrameStream, FrameStreamError};

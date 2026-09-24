@@ -1,0 +1,42 @@
+name: Native frame pipeline
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/native-frame-pipeline.yml'
+      - 'crates/fmn-runtime/**'
+      - 'crates/fmn-render/**'
+      - 'crates/fmn/src/rendering*'
+      - 'crates/fmn/src/rendering/**'
+      - 'crates/fmn/tests/native*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pipeline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TARGET_DIR: target/portable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned compiler
+        run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - name: Runtime bounds, ordering, cancellation and barriers
+        run: cargo test --locked -p fmn-runtime --lib
+      - name: Owned render jobs and retained rendering
+        run: cargo test --locked -p fmn-render --lib retained
+      - name: Public native scene export
+        run: cargo test --locked -p fmn --tests
