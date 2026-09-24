@@ -4,14 +4,17 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/native-frame-pipeline.yml'
+      - 'crates/fmn-cli/**'
       - 'crates/fmn-runtime/**'
       - 'crates/fmn-render/**'
       - 'crates/fmn/src/rendering*'
       - 'crates/fmn/src/rendering/**'
       - 'crates/fmn/tests/native*'
   workflow_dispatch:
+# Candidate verification only: blob writes, never commits or ref updates.
+# Restored to read-only source-tree tests in the explicit integration commit.
 permissions:
-  contents: read
+  contents: write
 jobs:
   pipeline:
     runs-on: ubuntu-24.04
@@ -19,25 +22,42 @@ jobs:
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
       CARGO_TARGET_DIR: target/portable
+      CARGO_BUILD_JOBS: '2'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Preserve the exact tested source
+      - name: Prepare reviewed immutable CPU integration
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/pipeline-source.tar.gz"
-          git rev-parse HEAD > "$RUNNER_TEMP/pipeline-source-sha.txt"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: pipeline-source-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/pipeline-source.tar.gz
-            ${{ runner.temp }}/pipeline-source-sha.txt
-          retention-days: 1
-          if-no-files-found: error
-      - name: Install pinned compiler
-        run: rustup show active-toolchain
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, json, base64, hashlib, urllib.request, subprocess
+          sources = {
+              'crates/fmn-cli/src/offline_cpu.rs': 'd746ce75989564f7d8a4562dc91c621ea5cc4205',
+              'crates/fmn-cli/tests/cpu_pipeline.rs': 'ca22552e4438bb71234d9fb4d169f602685d7009',
+              str(Path(os.environ['RUNNER_TEMP'], 'prepare-cli.py')): '3d62e26d78cef14c598c1456b72a0af209d3bb83',
+          }
+          for path, sha in sources.items():
+              assert not Path(path).exists(), path
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+                  headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  value = json.load(response)
+              data = base64.b64decode(value['content'])
+              assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == sha
+              Path(path).parent.mkdir(parents=True, exist_ok=True)
+              Path(path).write_bytes(data)
+          subprocess.run(['python3', str(Path(os.environ['RUNNER_TEMP'], 'prepare-cli.py'))], check=True)
+          PY
+      - name: Install pinned compiler and format candidate sources
+        run: |
+          rustup show active-toolchain
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/offline_cpu.rs crates/fmn-cli/tests/cpu_pipeline.rs crates/fmn/src/rendering.rs
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -47,11 +67,62 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - name: CLI multiple teams, serial pixel oracle, no-clobber and abort
+        run: cargo test --locked -p fmn-cli --features cli,batch --lib offline_cpu
+      - name: Shipping binary pipeline and certified 1-4-16 native bytes
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-cli --features cli,batch --test cpu_pipeline
+      - name: Existing standalone CLI, batch, subdivisions and compiled timelines
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-cli --features cli,batch --test runtime_boundary
       - name: Owned affine frames, cache reuse and certified bit identity
+        if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-render --lib vector_frame
       - name: Runtime bounds, ordering, cancellation and barriers
+        if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-runtime --lib
       - name: Owned camera jobs and retained rendering
+        if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-render --lib retained
-      - name: Public native scene export
+      - name: Public native scene export and publication
+        if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn --tests
+      - name: Preserve immutable tested blobs without changing any ref
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_STATUS: ${{ job.status }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, json, base64, hashlib, urllib.request, subprocess
+          paths = ['crates/fmn-cli/src/lib.rs', 'crates/fmn-cli/src/offline_cpu.rs', 'crates/fmn-cli/tests/cpu_pipeline.rs', 'crates/fmn/src/rendering.rs']
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only']).decode().splitlines())
+          assert changed <= set(paths), changed
+          result = {'base_commit': os.environ['GITHUB_SHA'], 'validation_status': os.environ['VALIDATION_STATUS'], 'files': []}
+          for path in paths:
+              data = Path(path).read_bytes()
+              sha = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', method='POST',
+                  data=json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode(),
+                  headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'},
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  assert json.load(response)['sha'] == sha
+              result['files'].append({'path': path, 'sha': sha})
+          Path(os.environ['RUNNER_TEMP'], 'cli-candidate.json').write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+      - name: Archive exact candidate sources
+        if: always()
+        run: tar -czf "$RUNNER_TEMP/cli-candidate.tar.gz" crates/fmn-cli crates/fmn/src/rendering.rs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: cli-candidate-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/cli-candidate.tar.gz
+            ${{ runner.temp }}/cli-candidate.json
+          retention-days: 1
+          if-no-files-found: error
