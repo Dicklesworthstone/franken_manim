@@ -220,6 +220,7 @@ fn render_centered_vmob(group: VMobject) -> Result<FrameBuffer, Box<dyn std::err
         ScreenMap {
             scale: 1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         },
         Srgb::from_rgb8(0x33, 0x33, 0x33).to_linear(1.0),
     );
@@ -279,6 +280,7 @@ fn render_gradient_fills() -> Result<FrameBuffer, Box<dyn std::error::Error>> {
         ScreenMap {
             scale: 1.0,
             origin: [0.0, 0.0],
+            y_up: false,
         },
         Srgb::from_rgb8(0x33, 0x33, 0x33).to_linear(1.0),
     );
