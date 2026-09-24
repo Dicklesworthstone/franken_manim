@@ -1,11 +1,29 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run 2026-09-24 against `Cargo.lock` `b97f1d76` from a clean
-worktree at `c5f50e1e`, with the qualified tools (wasm-pack 0.15.0, wasm-bindgen
-0.2.127, wasm-opt 117, webpack 5.109.2 / webpack-cli 7.2.2). **The release
-package gate currently FAILS**, so this audit does not claim a passing package.
+**Status:** re-run again 2026-09-24 against `Cargo.lock` `6ce5886a` at `86f2896d`.
+**The release package gate still FAILS at its size budget**, so this audit does
+not claim a passing package.
 
-- The lock change behind this re-run is a single edge: `fmn-python` now depends on
+- The lock change behind this re-run is d121ddd5. It adds five workspace edges to
+  the `fmn` umbrella crate (`fmn-codec`, `fmn-frame`, `fmn-output`, `fmn-render`,
+  `fmn-runtime`), and `fmn` is not in any wasm graph. **VERIFIED (mechanical):**
+  `git diff ad0b7d25 HEAD -- Cargo.lock` is those five lines, and `SUITE.lock` and
+  `wasm-smoke/Cargo.lock` are unchanged. The path-normalized output of `cargo tree
+  -p fmn-wasm --target wasm32-unknown-unknown --edges normal --locked` is identical
+  at `ad0b7d25` and `86f2896d` (130 lines).
+- `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown` exited 0.
+  `wasm-smoke/run.sh` exited 0 with the unchanged Node digest `1f248a71347b82aa`.
+- `scripts/check_wasm_package.sh` was not re-run. It has failed at the size
+  budget since `b492564b` (fm-8j70) and stops before the Chromium stage, and the
+  wasm graph is unchanged. The qualified wasm-pack 0.15.0 bundler artifact at
+  `86f2896d` is 555,763 bytes against the 514,521-byte budget. The attribution
+  is on fm-8j70.
+
+Earlier re-run, 2026-09-24, against `Cargo.lock` `b97f1d76` from a clean worktree
+at `c5f50e1e`, with the qualified tools (wasm-pack 0.15.0, wasm-bindgen 0.2.127,
+wasm-opt 117, webpack 5.109.2 / webpack-cli 7.2.2):
+
+- The lock change behind that re-run is a single edge: `fmn-python` now depends on
   `fsci-opt` (6bc0ddb2), which the lock already held. `fmn-python` is not in any
   wasm graph. **VERIFIED (mechanical):** `git diff 2649c18b HEAD -- Cargo.lock` is
   that one line, and `SUITE.lock` and `wasm-smoke/Cargo.lock` are unchanged.
@@ -35,7 +53,7 @@ either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
 - `SUITE.lock` SHA-256: `d38bb18884f060d3867dfbb26b1c985e90ddf8ce716589dd13d2e68aa404b3d3`
-- `Cargo.lock` SHA-256: `b97f1d76c6e31866f9e5e30df548c406781c9086b6eee2d89bca7fec421123a8`
+- `Cargo.lock` SHA-256: `6ce5886ad19ccd5c11fe29bfcc6818b9d83317740cc87e8f5b66378ddba28a11`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `01f3e42a699383d33b42379bab14661069b40496b869cfbbd7d35b7e58fde53b`
 
 Method labels are deliberately narrow:
