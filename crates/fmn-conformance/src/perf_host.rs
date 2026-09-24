@@ -1117,10 +1117,25 @@ fn normalize_space(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn require_eight_distinct_cores(
+/// The CPUs a qualified run reserves (ADR-0024): the benchmark cores with
+/// their SMT siblings, inside one NUMA node. Every other online CPU is
+/// background that must stay quiescent while the slice measures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IsolationPlan {
+    /// Every logical CPU of a benchmark core, ascending.
+    reserved: Vec<u32>,
+    /// Reserved CPUs the benchmark itself does not run on.
+    siblings: Vec<u32>,
+    /// Online CPUs outside the reservation.
+    background: Vec<u32>,
+    /// The NUMA node holding every benchmark CPU.
+    numa_node: u32,
+}
+
+fn isolation_plan(
     profile: &HostProfile,
     topology: &HardwareTopology,
-) -> Result<(), HostError> {
+) -> Result<IsolationPlan, HostError> {
     let mut cores = BTreeSet::new();
     for &id in &profile.benchmark_cpus {
         let cpu = topology
@@ -1135,6 +1150,137 @@ fn require_eight_distinct_cores(
             "benchmark CPU set spans {} distinct physical cores, expected {LINUX_PHYSICAL_CORES}",
             cores.len()
         )));
+    }
+    let numa_node = topology
+        .numa_nodes
+        .iter()
+        .find(|node| {
+            profile
+                .benchmark_cpus
+                .iter()
+                .all(|cpu| node.cpus.contains(cpu))
+        })
+        .ok_or_else(|| {
+            HostError::Mismatch(format!(
+                "benchmark CPUs {} span more than one NUMA node",
+                format_cpu_list(&profile.benchmark_cpus)
+            ))
+        })?
+        .id;
+    let mut plan = IsolationPlan {
+        reserved: Vec::new(),
+        siblings: Vec::new(),
+        background: Vec::new(),
+        numa_node,
+    };
+    for cpu in &topology.cpus {
+        if cores.contains(&(cpu.package_id, cpu.core_id)) {
+            plan.reserved.push(cpu.id);
+            if !profile.benchmark_cpus.contains(&cpu.id) {
+                plan.siblings.push(cpu.id);
+            }
+        } else {
+            plan.background.push(cpu.id);
+        }
+    }
+    for cpus in [&mut plan.reserved, &mut plan.siblings, &mut plan.background] {
+        cpus.sort_unstable();
+    }
+    Ok(plan)
+}
+
+fn require_cpu_superset(name: &str, required: &[u32], found: &[u32]) -> Result<(), HostError> {
+    let missing: Vec<u32> = required
+        .iter()
+        .copied()
+        .filter(|cpu| !found.contains(cpu))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(HostError::Mismatch(format!(
+            "{name} must include {}, missing {}",
+            format_cpu_list(required),
+            format_cpu_list(&missing)
+        )))
+    }
+}
+
+/// Per-CPU `(busy, total)` USER_HZ ticks from `/proc/stat`.
+type CpuTicks = BTreeMap<u32, (u64, u64)>;
+
+fn read_cpu_ticks(fs: &dyn FileSystem) -> Result<CpuTicks, HostError> {
+    let stat = read_required(fs, Path::new("/proc/stat"), MAX_HOST_FILE_BYTES)?;
+    let mut ticks = CpuTicks::new();
+    for row in stat.lines() {
+        // `cpuN user nice system idle iowait irq softirq steal guest
+        // guest_nice`; the aggregate `cpu ` row has no id and is skipped.
+        // Guest time is already inside user/nice, so only eight fields count.
+        let Some((id, fields)) = row
+            .strip_prefix("cpu")
+            .and_then(|rest| rest.split_once(' '))
+        else {
+            continue;
+        };
+        let Ok(id) = id.parse::<u32>() else {
+            continue;
+        };
+        let values = fields
+            .split_whitespace()
+            .take(8)
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| HostError::Probe(format!("/proc/stat cpu{id} row is malformed")))?;
+        if values.len() < 5 {
+            return Err(HostError::Probe(format!(
+                "/proc/stat cpu{id} row lacks idle and iowait"
+            )));
+        }
+        let total = values.iter().fold(0_u64, |sum, value| sum.saturating_add(*value));
+        let idle = values[3].saturating_add(values[4]);
+        ticks.insert(id, (total.saturating_sub(idle), total));
+    }
+    Ok(ticks)
+}
+
+fn require_quiescence(
+    plan: &IsolationPlan,
+    before: &CpuTicks,
+    after: &CpuTicks,
+) -> Result<(), HostError> {
+    for (label, cpus, ceiling) in [
+        (
+            "benchmark-core SMT siblings",
+            &plan.siblings,
+            MAX_SIBLING_BUSY_PERMILLE,
+        ),
+        ("background CPUs", &plan.background, MAX_BACKGROUND_BUSY_PERMILLE),
+    ] {
+        let (mut busy, mut total) = (0_u64, 0_u64);
+        for cpu in cpus {
+            let ((busy_before, total_before), (busy_after, total_after)) =
+                match (before.get(cpu), after.get(cpu)) {
+                    (Some(before), Some(after)) => (*before, *after),
+                    _ => {
+                        return Err(HostError::Probe(format!(
+                            "/proc/stat lost CPU {cpu} during the run"
+                        )));
+                    }
+                };
+            busy = busy.saturating_add(busy_after.saturating_sub(busy_before));
+            total = total.saturating_add(total_after.saturating_sub(total_before));
+        }
+        // One tick of grace per CPU absorbs USER_HZ quantization in short
+        // windows; the fraction governs any window long enough to matter.
+        let cpu_count = u64::try_from(cpus.len()).unwrap_or(u64::MAX);
+        let allowance = (total.saturating_mul(ceiling) / 1000).saturating_add(cpu_count);
+        if busy > allowance {
+            return Err(HostError::Mismatch(format!(
+                "{label} {} were busy {busy} of {total} ticks since the run began, over the \
+                 {ceiling} permille ceiling",
+                format_cpu_list(cpus)
+            )));
+        }
     }
     Ok(())
 }
