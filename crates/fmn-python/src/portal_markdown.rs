@@ -29,7 +29,7 @@ fn _build_math_markdown<'py>(
         builder.build_with_math_options(book, engine, MarkdownMathOptions { line_width, color }).map_err(native_error)
     }))?;
     let catalog = built.blocks.iter().map(|b| (b.byte_range.0, b.byte_range.1, b.kind.to_owned())).collect();
-    let specs = install_native_tree(slf, factory, built.vmob.into())?;
+    let specs = install_native_tree(slf, factory, built.vmob)?;
     Ok((specs, catalog))
 }
 

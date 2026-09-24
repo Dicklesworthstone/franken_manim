@@ -57,7 +57,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/markdown-wheel 2>&1 | tee /tmp/markdown-build.log
           python -m venv target/markdown-venv
           target/markdown-venv/bin/python -m pip install 'numpy==2.5.2' target/markdown-wheel/*.whl
-          for suite in native_math_markdown text_authoring code_authoring portal_initialization; do
+          for suite in native_math_markdown markdown_documents native_markdown live_markdown text_authoring code_authoring portal_initialization; do
             target/markdown-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/markdown-$suite.log"
           done
       - name: Preserve exact source and evidence

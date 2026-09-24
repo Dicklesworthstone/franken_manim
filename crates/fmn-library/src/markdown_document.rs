@@ -267,7 +267,7 @@ impl<'a> Composer<'a> {
         let scale = crate::text::calibrate(book, size, DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT)?;
         let geometry = built.vmob.map_style_deep(|s| s.color(self.color));
         budget.output(&geometry)?;
-        Ok(InlineBox { geometry, advance: built.layout.width * scale,
+        Ok(InlineBox { geometry, advance: built.layout.lines.iter().map(|line| line.width).fold(0.0, f64::max) * scale,
             height: built.layout.height * scale, depth: built.layout.depth * scale,
             space: source.chars().all(char::is_whitespace), hard_break: false })
     }

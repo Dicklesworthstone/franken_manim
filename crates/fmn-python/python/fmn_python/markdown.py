@@ -48,10 +48,12 @@ class MarkdownMobject(m.VGroup):
     ``block_ranges`` are UTF-8 byte intervals from fmd. ``select_source`` uses
     Python character offsets and returns intersecting whole blocks, not glyphs.
     The document is centered initially; edits retain its authored upper-left
-    affine frame. Lists/quotes flatten with prefixes; there is no browser, asset
-    fetch, line wrapping or inline math renderer in this tier.
+    affine frame. ``math_mode=True`` composes native dollar/fenced mathematics
+    and enables ``line_width`` wrapping. The default remains literal text at
+    dollar delimiters. Neither mode launches a browser or fetches link targets.
     """
-    def __init__(self, source, *, font_size=24, theme='monokai', block_gap=.45, **kwargs):
+    def __init__(self, source, *, font_size=24, theme='monokai', block_gap=.45,
+                 math_mode=False, line_width=None, body_color=None, **kwargs):
         source = _source(source)
         size, gap = float(font_size), float(block_gap)
         if not math.isfinite(size) or not 0 < size <= 10000:
@@ -60,11 +62,31 @@ class MarkdownMobject(m.VGroup):
             raise ValueError("Markdown block_gap must be finite and in [0, 1000]")
         if not isinstance(theme, str):
             raise TypeError("Markdown theme must be a native code-theme name")
-        builder = getattr(m, '_build_markdown', None)
+        if not isinstance(math_mode, bool):
+            raise TypeError("Markdown math_mode must be a bool")
+        if not math_mode and (line_width is not None or body_color is not None):
+            raise ValueError("Markdown line_width/body_color require math_mode=True")
+        if line_width is not None:
+            line_width = float(line_width)
+            if not math.isfinite(line_width) or not 0 < line_width <= 1e6:
+                raise ValueError("Markdown line_width must be finite and in (0, 1000000]")
+        if body_color is not None:
+            body_color = tuple(float(v) for v in m.color_to_rgb(body_color))
+            if len(body_color) != 3 or not all(math.isfinite(v) and 0 <= v <= 1 for v in body_color):
+                raise ValueError("Markdown body_color must have finite RGB components in [0,1]")
+        name = '_build_math_markdown' if math_mode else '_build_markdown'
+        builder = getattr(m, name, None)
         if not callable(builder):
-            raise m._CapabilityError("this native wheel does not provide Markdown construction")
+            raise m._CapabilityError("this native wheel does not provide " + name)
         raw = m.VMobject()
-        specs, ranges, kinds = builder(raw, m._native_shell_factory, source, size, theme, gap)
+        if math_mode:
+            specs, catalog = builder(raw, m._native_shell_factory, source,
+                                     font_size=size, line_width=line_width, block_gap=gap,
+                                     code_style=theme, color=body_color)
+            ranges = [(start, end) for start, end, _ in catalog]
+            kinds = [kind for _, _, kind in catalog]
+        else:
+            specs, ranges, kinds = builder(raw, m._native_shell_factory, source, size, theme, gap)
         m._hang_native_children(raw, specs)
         if len(raw) != len(ranges) or len(raw) != len(kinds):
             raise RuntimeError("native Markdown source catalog disagrees with its block family")
@@ -89,7 +111,20 @@ class MarkdownMobject(m.VGroup):
         self._markdown_kinds = tuple(kinds)
         self._markdown_size = (width, height)
         self._markdown_options = (size, theme, gap)
+        self._markdown_math_options = (math_mode, line_width, body_color)
         self.shift(-self.get_center())
+
+    @property
+    def math_mode(self):
+        return getattr(self, '_markdown_math_options', (False, None, None))[0]
+
+    @property
+    def line_width(self):
+        return getattr(self, '_markdown_math_options', (False, None, None))[1]
+
+    @property
+    def body_color(self):
+        return getattr(self, '_markdown_math_options', (False, None, None))[2]
 
     @property
     def source(self):
@@ -151,6 +186,7 @@ class MarkdownMobject(m.VGroup):
         for obj in family:
             obj.get_points()
         return (self.source, self.block_ranges, self.block_kinds, self._markdown_size, self._markdown_options,
+                (self.math_mode, self.line_width, self.body_color),
                 tuple((id(obj), id(getattr(obj, '_scene', None)), tuple(map(id, obj.submobjects)),
                        obj.data.dtype.descr, obj.data.tobytes()) for obj in family))
 
@@ -175,7 +211,9 @@ class MarkdownMobject(m.VGroup):
             return None
         origin, matrix = self._chart()
         size, theme, gap = self._markdown_options
-        candidate = MarkdownMobject(source, font_size=size, theme=theme, block_gap=gap)
+        candidate = MarkdownMobject(source, font_size=size, theme=theme, block_gap=gap,
+                                    math_mode=self.math_mode, line_width=self.line_width,
+                                    body_color=self.body_color)
         candidate.shift(-candidate._markdown_anchors[0].get_center())
         candidate.apply_matrix(matrix, about_point=m.ORIGIN)
         candidate.shift(origin)
