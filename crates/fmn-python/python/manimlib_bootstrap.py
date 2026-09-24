@@ -3247,17 +3247,7 @@ class VMobject(Mobject):
         self.uniforms["joint_type"] = joint_code
         self.uniforms["flat_stroke"] = self.flat_stroke
         self.uniforms["scale_stroke_with_zoom"] = self.scale_stroke_with_zoom
-        self.set_stroke(
-            color=self.stroke_color,
-            width=self.stroke_width,
-            opacity=self.stroke_opacity,
-            behind=self.stroke_behind,
-        )
-        self.set_fill(
-            color=self.fill_color,
-            opacity=self.fill_opacity,
-            border_width=self.fill_border_width,
-        )
+        self.init_colors()
 
     def refresh_joint_angles(self):
         # This public method invalidates the whole family's derived metadata;
@@ -4134,6 +4124,61 @@ def _preflight_vmobject_style_kwargs(kwargs):
             raise ValueError("anti_alias_width must be finite and non-negative")
 
 
+
+
+def _set_native_vmobject_points(mobject, builder_name, *arguments):
+    """Publish an Atlas point-only primitive without replacing live identity.
+
+    Fresh standard-schema shells take the direct native constructor path. A
+    custom dtype, init_data-owned children or a later init_points call instead
+    copies the native candidate's points through Marionette's record protocol.
+    That retains extra fields, live scene handles, styles, updaters and children.
+    """
+    direct = (
+        not mobject._is_bound()
+        and mobject.get_num_points() == 0
+        and not mobject.submobjects
+        and type(mobject).data_dtype is VMobject.data_dtype
+    )
+    target = mobject if direct else _native_shell_factory()
+    specs = getattr(target, builder_name)(_native_shell_factory, *arguments)
+    if specs:
+        raise RuntimeError("a point-only native geometry builder returned children")
+    if not direct:
+        mobject.set_points(target.get_points())
+    return mobject
+
+
+def _init_native_vmobject(mobject, kwargs):
+    """Run native-backed geometry through the ordinary VMobject lifecycle.
+
+    The geometry recipe is installed by the concrete constructor before this
+    call. The engine dispatches init_data/init_points/init_uniforms using the
+    real Python MRO, and VMobject dispatches init_colors after geometry exists.
+    Builders remain Atlas's responsibility, not Python geometry implementations.
+    """
+    _preflight_vmobject_style_kwargs(kwargs)
+    style = dict(kwargs)
+    color = style.get("color")
+    if color is not None:
+        # Preserve native constructors' established color shorthand: it wins
+        # over even the concrete class's explicit fill/stroke defaults.
+        style["fill_color"] = color
+        style["stroke_color"] = color
+    opacity = style.pop("opacity", None)
+    if opacity is not None:
+        for channel in ("fill_opacity", "stroke_opacity"):
+            if style.get(channel) is None:
+                style[channel] = opacity
+    flags = {
+        key: style.pop(key)
+        for key in ("shading", "depth_test", "is_fixed_in_frame")
+        if key in style
+    }
+    VMobject.__init__(mobject, **style)
+    _apply_vmobject_style_kwargs(mobject, flags)
+
+
 def _split_native_vgroup3d_kwargs(class_name, kwargs, default_shading):
     """Preflight the shared vectorized-solid kwargs before native install."""
     style = dict(kwargs)
@@ -4875,19 +4920,22 @@ class Arc(TipableVMobject):
         arc_center=_ORIGIN,
         **kwargs,
     ):
-        _install_live_state(self)
         self.start_angle = float(start_angle)
         self.angle = float(angle)
-        specs = self._build_arc(
-            _native_shell_factory,
+        self.radius = float(radius)
+        self.n_components = None if n_components is None else int(n_components)
+        self.arc_center = _np.array(_vec3(arc_center), dtype=float)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_arc",
             self.start_angle,
             self.angle,
-            float(radius),
-            _vec3(arc_center),
-            None if n_components is None else int(n_components),
+            self.radius,
+            _vec3(self.arc_center),
+            self.n_components,
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
     def get_arc_center(self):
         return _np.array(self._arc_center())
@@ -4970,20 +5018,20 @@ class CurvedDoubleArrow(CurvedArrow):
 
 class Circle(Arc):
     def __init__(self, start_angle=0, stroke_color=_RED, **kwargs):
-        radius = kwargs.pop("radius", 1.0)
-        arc_center = kwargs.pop("arc_center", _ORIGIN)
-        _install_live_state(self)
+        self.radius = float(kwargs.pop("radius", 1.0))
+        self.arc_center = _np.array(_vec3(kwargs.pop("arc_center", _ORIGIN)), dtype=float)
         self.start_angle = float(start_angle)
         self.angle = _math.tau
-        specs = self._build_circle(
-            _native_shell_factory,
-            self.start_angle,
-            float(radius),
-            _vec3(arc_center),
-        )
-        _hang_native_children(self, specs)
         kwargs.setdefault("stroke_color", stroke_color)
-        _apply_vmobject_style_kwargs(self, kwargs)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_circle",
+            self.start_angle,
+            self.radius,
+            _vec3(self.arc_center),
+        )
 
     def surround(self, mobject, dim_to_match=0, stretch=False, buff=_MED_SMALL_BUFF):
         self.replace(mobject, dim_to_match, stretch)
@@ -5009,13 +5057,10 @@ class Dot(Circle):
         fill_color=_WHITE,
         **kwargs,
     ):
-        _install_live_state(self)
-        specs = self._build_dot(
-            _native_shell_factory, _vec3(point), float(radius)
-        )
-        _hang_native_children(self, specs)
-        # Route the public values through the ordinary style path even though
-        # Atlas already installs the same Reference defaults.
+        self.arc_center = _np.array(_vec3(point), dtype=float)
+        self.radius = float(radius)
+        self.start_angle = 0.0
+        self.angle = _math.tau
         for name, value in (
             ("stroke_color", stroke_color),
             ("stroke_width", stroke_width),
@@ -5023,7 +5068,12 @@ class Dot(Circle):
             ("fill_color", fill_color),
         ):
             kwargs.setdefault(name, value)
-        _apply_vmobject_style_kwargs(self, kwargs)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_dot", _vec3(self.arc_center), self.radius
+        )
 
 
 class SmallDot(Dot):
@@ -5033,18 +5083,22 @@ class SmallDot(Dot):
 
 class Ellipse(Circle):
     def __init__(self, width=2.0, height=1.0, **kwargs):
-        arc_center = kwargs.pop("arc_center", _ORIGIN)
-        start_angle = float(kwargs.pop("start_angle", 0))
-        _install_live_state(self)
-        specs = self._build_ellipse(
-            _native_shell_factory,
-            float(width),
-            float(height),
-            _vec3(arc_center),
-            start_angle,
+        self.width = float(width)
+        self.height = float(height)
+        self.arc_center = _np.array(_vec3(kwargs.pop("arc_center", _ORIGIN)), dtype=float)
+        self.start_angle = float(kwargs.pop("start_angle", 0))
+        self.angle = _math.tau
+        kwargs.setdefault("stroke_color", _RED)
+        _init_native_vmobject(self, kwargs)
+
+    def init_points(self):
+        return _set_native_vmobject_points(
+            self, "_build_ellipse",
+            self.width,
+            self.height,
+            _vec3(self.arc_center),
+            self.start_angle,
         )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
 
 
 class AnnularSector(VMobject):

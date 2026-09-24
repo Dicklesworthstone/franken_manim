@@ -38,6 +38,7 @@ python3 crates/fmn-python/tests/native_surface_sampling.py
 python3 crates/fmn-python/tests/native_graph_sampling.py
 python3 crates/fmn-python/tests/live_implicit.py
 python3 crates/fmn-python/tests/live_curves.py
+python3 crates/fmn-python/tests/native_geometry_lifecycle.py
 python3 crates/fmn-python/tests/graph_callback_snapshots.py
 python3 crates/fmn-python/tests/field_callback_snapshots.py
 python3 crates/fmn-python/tests/test_invocation.py
