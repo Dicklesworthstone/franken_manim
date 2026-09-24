@@ -10064,9 +10064,13 @@ fn srgb_from_py(value: &Bound<'_, PyAny>) -> PyResult<fmn_core::color::Srgb> {
         return fmn_core::color::Srgb::from_hex(&text)
             .map_err(|error| PyValueError::new_err(format!("invalid color {text:?}: {error}")));
     }
-    let rgb: Vec<f64> = value
-        .extract()
-        .map_err(|_| PyTypeError::new_err("colors must be hex strings or (r, g, b) sequences"))?;
+    // Reference color_to_rgb also takes colour.Color: anything with get_rgb().
+    let rgb: Vec<f64> = match value.getattr("get_rgb") {
+        Ok(get_rgb) if get_rgb.is_callable() => get_rgb.call0()?.extract()?,
+        _ => value.extract().map_err(|_| {
+            PyTypeError::new_err("colors must be hex strings, (r, g, b) sequences or Color objects")
+        })?,
+    };
     if rgb.len() < 3 {
         return Err(PyValueError::new_err("an rgb color needs three components"));
     }

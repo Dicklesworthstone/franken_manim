@@ -20460,6 +20460,29 @@ except NotImplementedError as error:
 else:
     raise AssertionError("cdist silently accepted an unsupported metric")
 
+# fm-5wq.14: Reference color_to_rgb takes colour.Color, i.e. anything with
+# get_rgb(); both the Python and the native colour parsers accept it (54
+# corpus scenes pass Color objects). The re-exported Color names its missing
+# package instead of posing as an unbound portal stub.
+class _DuckColor:
+    def get_rgb(self):
+        return (0.2, 0.4, 0.6)
+
+
+assert manimlib.Square().set_color(_DuckColor()).get_color().lower() == "#336699"
+assert manimlib.Dot(color=_DuckColor()).get_color().lower() == "#336699"
+try:
+    importlib.import_module("colour")
+except ImportError:
+    try:
+        manimlib.Color("red")
+    except ModuleNotFoundError as error:
+        assert error.name == "colour" and "colour.Color" in str(error)
+    else:
+        raise AssertionError("Color without the colour package returned silently")
+else:
+    assert manimlib.Color("red").get_rgb() == (1.0, 0.0, 0.0)
+
 # fm-5wq.14: coordinate-system axes are the Reference's NumberLines, not bare
 # shells. 29 corpus scenes call axes.x_axis.get_unit_size() or add_numbers().
 _axes = manimlib.Axes(x_range=(-3, 3, 1), y_range=(-2, 2, 1), width=6, height=4)

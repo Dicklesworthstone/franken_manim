@@ -284,6 +284,10 @@ def _color_to_rgb(color):
         return _np.array(color.rgb)
     if isinstance(color, str):
         return _np.array(_BridgeMobject._hex_to_rgb(color))
+    # Reference color_to_rgb also takes colour.Color: anything with get_rgb().
+    get_rgb = getattr(color, "get_rgb", None)
+    if callable(get_rgb):
+        return _np.array([float(component) for component in get_rgb()][:3])
     return _np.array([float(component) for component in color][:3])
 
 
@@ -20118,6 +20122,27 @@ def _placeholder_function(module_name, name):
     return unavailable
 
 
+def _missing_leaked_import(module_name, name, origin, error):
+    # The Reference re-exports a third-party name (e.g. colour.Color) that is
+    # not installed in this environment: say which package, as the
+    # Reference's own import would.
+    missing = getattr(error, "name", None) or origin.split(".", 1)[0]
+
+    def unavailable(*args, **kwargs):
+        del args, kwargs
+        raise ModuleNotFoundError(
+            f"No module named '{missing}': {module_name}.{name} is the "
+            f"Reference's re-export of {origin}; install {missing} to use it",
+            name=missing,
+        )
+
+    unavailable.__name__ = name
+    unavailable.__qualname__ = name
+    unavailable.__module__ = module_name
+    unavailable._fmn_schema_placeholder = True
+    return unavailable
+
+
 def _placeholder_method(module_name, owner, name):
     def unavailable(self, *args, **kwargs):
         del self, args, kwargs
@@ -21469,7 +21494,9 @@ def _install_schema_surface():
                         )
                     else:
                         value = _importlib.import_module(_origin)
-                except (ImportError, ValueError, AttributeError):
+                except ImportError as error:
+                    value = _missing_leaked_import(module_name, qualified, _origin, error)
+                except (ValueError, AttributeError):
                     value = _placeholder_function(module_name, qualified)
             setattr(module, qualified, value)
 
