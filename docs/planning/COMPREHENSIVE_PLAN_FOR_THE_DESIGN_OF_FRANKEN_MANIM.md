@@ -394,7 +394,7 @@ Rev 4's largest structural change: §17 stops being a monitoring section and bec
 
 **17.1 Hypothesis, then evidence.** W1 publishes the checked-in baseline report (corpus, profiler, hardware, resolution, cache state, ffmpeg in/out, phase breakdown, raw data) before gates are finalized; the "Python churn dominates" premise is measured, not assumed. The report's **stage-level phase instrumentation** becomes a permanent fixture of every profiled run: scene/update, Python callback, geometry compilation, render-IR synchronization, binning, raster, color conversion, annex upload/readback, ffmpeg feed, and encode are timed separately — optimization begins by deleting work, and work that isn't measured can't be deleted.
 
-**17.2 The gates.** Dedicated pinned bare-metal profiles (8-core x86-64 Linux; Apple-silicon macOS); multiple repetitions; median + robust dispersion; alert vs blocking thresholds; versioned baselines.
+**17.2 The gates.** Dedicated pinned bare-metal profiles (an isolated 8-physical-core x86-64 Linux slice — benchmark cores and their SMT siblings isolated, one NUMA node, the rest of the machine quiescent, whatever the machine's size; Apple-silicon macOS for the Apple-named rows, PG-A and G3's annex preview — ADR-0024); multiple repetitions; median + robust dispersion; alert vs blocking thresholds; versioned baselines.
 
 | Gate | Requirement |
 |---|---|

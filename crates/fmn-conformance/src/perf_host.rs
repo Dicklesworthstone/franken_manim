@@ -1236,7 +1236,9 @@ fn read_cpu_ticks(fs: &dyn FileSystem) -> Result<CpuTicks, HostError> {
                 "/proc/stat cpu{id} row lacks idle and iowait"
             )));
         }
-        let total = values.iter().fold(0_u64, |sum, value| sum.saturating_add(*value));
+        let total = values
+            .iter()
+            .fold(0_u64, |sum, value| sum.saturating_add(*value));
         let idle = values[3].saturating_add(values[4]);
         ticks.insert(id, (total.saturating_sub(idle), total));
     }
@@ -1254,7 +1256,11 @@ fn require_quiescence(
             &plan.siblings,
             MAX_SIBLING_BUSY_PERMILLE,
         ),
-        ("background CPUs", &plan.background, MAX_BACKGROUND_BUSY_PERMILLE),
+        (
+            "background CPUs",
+            &plan.background,
+            MAX_BACKGROUND_BUSY_PERMILLE,
+        ),
     ] {
         let (mut busy, mut total) = (0_u64, 0_u64);
         for cpu in cpus {
@@ -1567,7 +1573,10 @@ mod tests {
             "/sys/devices/system/cpu/nohz_full",
             "/sys/devices/system/cpu/rcu_nocbs",
         ] {
-            fs.insert(path, format!("{}\n", format_cpu_list(&reserved)).into_bytes());
+            fs.insert(
+                path,
+                format!("{}\n", format_cpu_list(&reserved)).into_bytes(),
+            );
         }
         fs.insert("/proc/self/cgroup", b"0::/fmn-benchmark\n".to_vec());
         fs.insert(
@@ -1898,6 +1907,173 @@ mod tests {
             .stop_and_validate()
             .expect_err("a recovered transient must still invalidate the run");
         assert!(error.to_string().contains("synthetic transient"));
+    }
+
+    fn attest(
+        fs: &VirtualFs,
+        profile: &HostProfile,
+        pid: u32,
+    ) -> Result<HostQualification, HostError> {
+        attest_linux_host(
+            profile,
+            fs,
+            Path::new("/data/artifacts/raw.tsv"),
+            "tests/artifacts/perf/run/host.tsv".to_owned(),
+            pid,
+        )
+    }
+
+    #[test]
+    fn an_isolated_slice_of_a_larger_smt_numa_machine_qualifies() {
+        // ADR-0024: 16 cores × 2 threads over two nodes. The verifier used to
+        // refuse this on machine size alone.
+        let pid = 71;
+        let fs = Arc::new(synthetic_host_fs(pid, 16, 2, 2));
+        let profile = synthetic_profile(fs.as_ref());
+        let qualification = attest(fs.as_ref(), &profile, pid).expect("isolated slice qualifies");
+        let attestation = qualification.attestation_tsv();
+        assert!(attestation.contains("reserved_cpus\t0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23\n"));
+        assert!(attestation.contains("numa_node\t0\n"));
+        assert!(attestation.contains(&format!(
+            "background_busy_ceiling_permille\t{MAX_BACKGROUND_BUSY_PERMILLE}\n"
+        )));
+        assert_eq!(qualification.plan.siblings, (16..24).collect::<Vec<_>>());
+        assert_eq!(
+            qualification.plan.background,
+            (8..16).chain(24..32).collect::<Vec<_>>()
+        );
+
+        // Saturated benchmark cores, idle siblings and a ~1% background pass
+        // the whole-run quiescence check.
+        let monitor = qualification
+            .start_live_monitor_with_fs(fs.clone(), Duration::from_secs(60))
+            .expect("monitor");
+        write_proc_stat(&fs, 32, 1_000, |cpu| match cpu {
+            0..8 => 1_000,
+            16..24 => 0,
+            _ => 10,
+        });
+        assert_eq!(monitor.stop_and_validate().expect("quiet machine"), 1);
+    }
+
+    #[test]
+    fn live_monitor_refuses_busy_siblings_and_a_busy_background() {
+        let pid = 71;
+        for (busy_cpus, expected) in [(16..24, "SMT siblings"), (8..16, "background CPUs")] {
+            let fs = Arc::new(synthetic_host_fs(pid, 16, 2, 2));
+            let profile = synthetic_profile(fs.as_ref());
+            let qualification = attest(fs.as_ref(), &profile, pid).expect("preflight");
+            let monitor = qualification
+                .start_live_monitor_with_fs(fs.clone(), Duration::from_secs(60))
+                .expect("monitor");
+            write_proc_stat(&fs, 32, 1_000, |cpu| {
+                if busy_cpus.contains(&cpu) { 200 } else { 0 }
+            });
+            let error = monitor
+                .stop_and_validate()
+                .expect_err("contended slice must not publish");
+            assert!(error.to_string().contains(expected), "{expected}: {error}");
+        }
+    }
+
+    #[test]
+    fn quiescence_grants_one_tick_per_cpu_for_short_windows_only() {
+        let fs = synthetic_host_fs(71, 16, 2, 2);
+        let profile = synthetic_profile(&fs);
+        let plan = isolation_plan(
+            &profile,
+            &HardwareTopology::detect_linux(&fs).expect("topology"),
+        )
+        .expect("plan");
+        let before = read_cpu_ticks(&fs).expect("before");
+        // A 250 ms window at USER_HZ 100: one stray tick per sibling passes.
+        write_proc_stat(&fs, 32, 24, |cpu| u64::from((16..24).contains(&cpu)));
+        require_quiescence(&plan, &before, &read_cpu_ticks(&fs).expect("short")).expect("grace");
+        // Three ticks each across a 1 s window (3%) exceed 1% plus the grace.
+        write_proc_stat(&fs, 32, 97, |cpu| 3 * u64::from((16..24).contains(&cpu)));
+        assert!(
+            require_quiescence(&plan, &before, &read_cpu_ticks(&fs).expect("long"))
+                .expect_err("sustained sibling work")
+                .to_string()
+                .contains("SMT siblings")
+        );
+        // A CPU that disappears mid-run is a probe failure, never a pass.
+        write_proc_stat(&fs, 31, 98, |_| 0);
+        assert!(
+            require_quiescence(&plan, &before, &read_cpu_ticks(&fs).expect("offline"))
+                .expect_err("lost CPU")
+                .to_string()
+                .contains("lost CPU 31")
+        );
+    }
+
+    #[test]
+    fn every_isolation_list_must_cover_the_slice_siblings() {
+        let pid = 71;
+        for path in [
+            "/sys/devices/system/cpu/isolated",
+            "/sys/devices/system/cpu/nohz_full",
+            "/sys/devices/system/cpu/rcu_nocbs",
+        ] {
+            let fs = synthetic_host_fs(pid, 16, 2, 2);
+            let profile = synthetic_profile(&fs);
+            fs.insert(path, b"0-7\n".to_vec());
+            let error = attest(&fs, &profile, pid).expect_err("uncovered siblings");
+            assert!(
+                error
+                    .to_string()
+                    .contains("missing 16,17,18,19,20,21,22,23"),
+                "{path}: {error}"
+            );
+        }
+        // Isolating more than the slice is admitted.
+        let fs = synthetic_host_fs(pid, 16, 2, 2);
+        let profile = synthetic_profile(&fs);
+        fs.insert("/sys/devices/system/cpu/isolated", b"0-31\n".to_vec());
+        attest(&fs, &profile, pid).expect("superset isolation");
+    }
+
+    #[test]
+    fn the_slice_must_sit_in_one_numa_node_with_memory_bound_to_it() {
+        let pid = 71;
+        let fs = synthetic_host_fs(pid, 16, 2, 2);
+        let mut profile = synthetic_profile(&fs);
+        profile.benchmark_cpus = (4..12).collect();
+        let error = attest(&fs, &profile, pid).expect_err("cross-node slice");
+        assert!(error.to_string().contains("span more than one NUMA node"));
+
+        let profile = synthetic_profile(&fs);
+        for mems in ["1", "0-1"] {
+            fs.insert(
+                "/sys/fs/cgroup/fmn-benchmark/cpuset.mems.effective",
+                format!("{mems}\n").into_bytes(),
+            );
+            let error = attest(&fs, &profile, pid).expect_err("unbound memory");
+            assert!(
+                error.to_string().contains("cgroup cpuset.mems"),
+                "{mems}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_slice_is_exactly_eight_distinct_cores_on_any_machine() {
+        let pid = 71;
+        let fs = synthetic_host_fs(pid, 16, 2, 2);
+        let mut profile = synthetic_profile(&fs);
+        // CPU 16 is core 0's sibling, so this set covers seven cores.
+        profile.benchmark_cpus = (0..7).chain([16]).collect();
+        let error = attest(&fs, &profile, pid).expect_err("seven-core slice");
+        assert!(
+            error
+                .to_string()
+                .contains("spans 7 distinct physical cores")
+        );
+
+        let small = synthetic_host_fs(pid, 6, 1, 1);
+        let profile = synthetic_profile(&small);
+        let error = attest(&small, &profile, pid).expect_err("six-core machine");
+        assert!(error.to_string().contains("benchmark CPU 6 is not online"));
     }
 
     #[test]

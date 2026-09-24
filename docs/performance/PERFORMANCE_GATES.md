@@ -213,7 +213,7 @@ observed baseline and replayed raw source before it can pass.
 ## Pinned-host profile and live-attestation authority
 
 `fmn_conformance::perf_host` owns two bounded schemas:
-`fmn-perf-host-profile/1` and `fmn-perf-host-attestation/2`. A profile is an
+`fmn-perf-host-profile/1` and `fmn-perf-host-attestation/3`. A profile is an
 exact key/value TSV manifest for one machine generation. It names the profile
 and platform and pins hashes of `/etc/os-release`, stable CPU identity rows,
 non-serial DMI identity, the complete `HardwareTopology` snapshot, and the
@@ -226,12 +226,15 @@ profiles are rejected.
 On `linux-x86_64`, qualification re-reads every pinned value through bounded
 host capabilities and additionally requires all of the following:
 
-- exactly eight physical cores and eight distinct physical cores in the
-  benchmark CPU set;
+- a benchmark CPU set of exactly eight distinct physical cores, whatever the
+  machine's total size (ADR-0024 qualifies an isolated slice, not a machine
+  shape; the topology digest still pins the whole machine);
+- every benchmark CPU in one NUMA node, with the cgroup's effective
+  `cpuset.mems` equal to exactly that node;
 - no CPU hypervisor flag, `/sys/hypervisor/type`, nested PID namespace, or
   known virtual/cloud DMI marker;
-- exact process affinity plus exact `isolated`, `nohz_full`, and `rcu_nocbs`
-  CPU lists;
+- exact process affinity, and `isolated`, `nohz_full`, and `rcu_nocbs` CPU
+  lists that each include the benchmark cores and all their SMT siblings;
 - one unified cgroup-v2 whose effective cpuset is exact and whose
   `cgroup.procs` contains only the direct measurement binary's PID;
 - the pinned governor on every benchmark CPU, exact turbo policy, temperature
@@ -244,9 +247,15 @@ Those compiled identities—not caller text—must match the baseline. The live
 authority starts a fixed 250 ms monitor around every qualified canonical
 producer. Each sample rechecks process affinity and PID namespace, isolated /
 nohz-full / RCU CPU sets, exclusive cgroup membership, governor and boost,
-thermal and load ceilings, and artifact-mount identity. The monitor retains
+thermal and load ceilings, and artifact-mount identity. It also judges
+quiescence from `/proc/stat`, cumulatively from the monitor's start: the SMT
+siblings of the benchmark cores may be busy for at most 10‰ of their CPU time,
+and all CPUs outside the slice together for at most 50‰, each with one tick of
+grace per CPU for USER_HZ quantization in short windows. The monitor retains
 the first failure even if the host later recovers and performs a mandatory
-final sample. The attestation records the exact monitor policy and interval.
+final sample, so the final sample covers the whole measurement window. The
+attestation records the exact monitor policy and interval, the reserved CPU
+set, the NUMA node, and both quiescence ceilings.
 After the monitor finishes, the authority repeats the complete static
 machine, topology, compiler, suite-lock, affinity, isolation, power, thermal,
 load, cgroup, and storage checks. Only then is the preflight attestation
@@ -282,9 +291,11 @@ open under fm-inr.1.
    `fmn-perf verify-baseline`; hand-authored medians or copied qualification
    booleans are invalid.
 4. Run the complete Gauntlet, compare the prior generation, adjudicate every
-   alert/block, then update the scheduled host lane. Until both declared Linux
-   and macOS profiles have real replayable observations for applicable keys,
-   fm-inr.1 and whole-gate claims remain open.
+   alert/block, then update the scheduled host lane. Core PG rows close on
+   real replayable observations from the Linux profile. The Apple profile is
+   required only for rows the plan names for Apple silicon — PG-A and G3's
+   annex-preview criterion — and no macOS host qualifies until a probe exists
+   that D-02 and D3 admit; macOS observations are calibration (ADR-0024).
 
 ## Canonical PG-1/PG-3/PG-4 front-door workloads
 
