@@ -226,12 +226,82 @@ def run_one(args, rel, scene, out_dir):
     }
 
 
+def cluster_label(record):
+    """A failure's cluster: exception type plus its message with every
+    quoted literal that is not a bare identifier elided, so scene-authored
+    text (TeX, labels) never reaches a committed artifact."""
+    detail = record.get("detail", "")
+    detail = re.sub(r"^fmn-python: scene/[a-z-]+: ", "", detail)
+    detail = re.sub(r"\bat 0x[0-9a-f]+", "", detail)
+    detail = re.sub(r"'([^']*)'", lambda m: m.group(0) if re.fullmatch(r"[\w.()]{1,40}", m.group(1)) else "'…'", detail)
+    detail = re.sub(r'"[^"]*"', '"…"', detail)
+    detail = re.sub(r"\(bytes \d+\.\.\d+\)", "", detail)
+    return detail[:140]
+
+
+def write_report(records, dashboard, tsv, title):
+    counts = {name: 0 for name in OUTCOMES}
+    for record in records:
+        counts[record["outcome"]] += 1
+    total = len(records)
+    by_year = {}
+    modules = {}
+    for record in records:
+        year = record["module"].split("/", 1)[0]
+        by_year.setdefault(year, {name: 0 for name in OUTCOMES})[record["outcome"]] += 1
+        modules.setdefault(record["module"], []).append(record["outcome"] == "ok")
+    module_ok = sum(1 for outcomes in modules.values() if all(outcomes))
+    with open(tsv, "w", encoding="utf-8") as handle:
+        handle.write("module\tscene\toutcome\texception\n")
+        for record in sorted(records, key=lambda r: (r["module"], r["scene"])):
+            exception = ""
+            match = re.search(r"scene/[a-z-]+: ([A-Za-z_.]+):", record.get("detail", ""))
+            if match:
+                exception = match.group(1).rsplit(".", 1)[-1]
+            handle.write(f"{record['module']}\t{record['scene']}\t{record['outcome']}\t{exception}\n")
+    lines = [f"# {title}", ""]
+    lines.append(
+        f"{total} scene classes; **{counts['ok']} ok ({100 * counts['ok'] / total:.1f}%)**. "
+        f"Module-weighted: {module_ok} of {len(modules)} modules render every scene "
+        f"({100 * module_ok / len(modules):.1f}%)."
+    )
+    lines += ["", "| outcome | scenes | share |", "|---|---:|---:|"]
+    for name in OUTCOMES:
+        lines.append(f"| {name} | {counts[name]} | {100 * counts[name] / total:.1f}% |")
+    lines += ["", "| year | scenes | ok | ok % |", "|---|---:|---:|---:|"]
+    for year in sorted(by_year):
+        year_counts = by_year[year]
+        year_total = sum(year_counts.values())
+        lines.append(
+            f"| {year} | {year_total} | {year_counts['ok']} | {100 * year_counts['ok'] / year_total:.1f}% |"
+        )
+    for outcome in ("portal_exception", "portal_unbound", "scene_code_error", "capability_refusal",
+                    "tex_unsupported", "missing_dependency", "missing_asset"):
+        clusters = {}
+        for record in records:
+            if record["outcome"] == outcome:
+                label = cluster_label(record)
+                clusters[label] = clusters.get(label, 0) + 1
+        if not clusters:
+            continue
+        lines += ["", f"## {outcome}: top clusters", "", "| scenes | cluster |", "|---:|---|"]
+        for label, count in sorted(clusters.items(), key=lambda item: (-item[1], item[0]))[:10]:
+            lines.append(f"| {count} | {label.replace('|', '/')} |")
+    with open(dashboard, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--portal", required=True)
-    parser.add_argument("--videos", required=True, type=pathlib.Path)
+    parser.add_argument("--portal")
+    parser.add_argument("--videos", type=pathlib.Path)
+    parser.add_argument("--report", type=pathlib.Path,
+                        help="regenerate --dashboard/--tsv from an existing records.ndjson")
+    parser.add_argument("--dashboard", type=pathlib.Path)
+    parser.add_argument("--tsv", type=pathlib.Path)
+    parser.add_argument("--title", default="Corpus scene sweep")
     parser.add_argument("--years", default="2020-2026")
-    parser.add_argument("--out", required=True, type=pathlib.Path)
+    parser.add_argument("--out", type=pathlib.Path)
     parser.add_argument("--jobs", type=int, default=16)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--limit", type=int, default=0)
@@ -245,6 +315,14 @@ def main():
              "would; default: the corpus's own (its base is the author's machine)",
     )
     args = parser.parse_args()
+    if args.report:
+        if not (args.dashboard and args.tsv):
+            parser.error("--report requires --dashboard and --tsv")
+        records = [json.loads(line) for line in args.report.read_text(encoding="utf-8").splitlines()]
+        write_report(records, args.dashboard, args.tsv, args.title)
+        return 0
+    if not (args.portal and args.videos and args.out):
+        parser.error("a sweep requires --portal, --videos and --out")
     if args.attribute and not args.python:
         parser.error("--attribute requires --python")
     args.videos = args.videos.resolve()
