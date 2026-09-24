@@ -20476,6 +20476,14 @@ assert type(_plane.x_axis) is manimlib.NumberLine and not _plane.x_axis.include_
 assert type(manimlib.ThreeDAxes().z_axis) is manimlib.NumberLine
 _scaled = manimlib.Axes(x_range=(0, 10, 1), width=5)
 assert math.isclose(_scaled.x_axis.get_unit_size(), 0.5)
+# Reference NumberLine accepts VMobject style keywords through axis_config
+# (21 corpus scenes pass stroke_opacity); its ticks match the line.
+_faint = manimlib.ThreeDAxes(axis_config=dict(stroke_opacity=0.7))
+# Records store float32, so compare at float32 resolution.
+assert all(
+    math.isclose(float(axis.get_stroke_opacity()), 0.7, abs_tol=1e-6) for axis in _faint.axes
+)
+assert math.isclose(float(_faint.x_axis.ticks[0].get_stroke_opacity()), 0.7, abs_tol=1e-6)
 
 # fm-5wq.14: every natively built surface carries Reference Surface.__init__'s
 # grid triangles. 16 corpus scenes read sphere.triangle_indices or sort

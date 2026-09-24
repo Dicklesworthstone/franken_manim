@@ -488,6 +488,14 @@ impl NumberLine {
         self
     }
 
+    /// `stroke_opacity=`: the Reference's VMobject style keyword, which the
+    /// line's ticks match.
+    #[must_use]
+    pub fn stroke_opacity(mut self, opacity: f64) -> Self {
+        self.style.stroke_opacity = opacity;
+        self
+    }
+
     /// Replace the line's style wholesale.
     #[must_use]
     pub fn style(mut self, style: Style) -> Self {
@@ -896,6 +904,8 @@ pub struct AxisConfig {
     pub color: Option<Srgb>,
     /// `stroke_width=`.
     pub stroke_width: Option<f64>,
+    /// `stroke_opacity=`.
+    pub stroke_opacity: Option<f64>,
     /// `unit_size=`.
     pub unit_size: Option<f64>,
     /// `include_ticks=`.
@@ -931,6 +941,7 @@ impl AxisConfig {
         Self {
             color: over.color.or(self.color),
             stroke_width: over.stroke_width.or(self.stroke_width),
+            stroke_opacity: over.stroke_opacity.or(self.stroke_opacity),
             unit_size: over.unit_size.or(self.unit_size),
             include_ticks: over.include_ticks.or(self.include_ticks),
             tick_size: over.tick_size.or(self.tick_size),
@@ -957,6 +968,9 @@ impl AxisConfig {
         }
         if let Some(v) = self.stroke_width {
             line = line.stroke_width(v);
+        }
+        if let Some(v) = self.stroke_opacity {
+            line = line.stroke_opacity(v);
         }
         if let Some(v) = self.unit_size {
             line = line.unit_size(v);
@@ -2391,6 +2405,30 @@ mod tests {
         // arange(-1, 2 + 0.5, 0.5) → 7 bounds → 6 rects of width 0.5.
         assert_eq!(rects.children().len(), 6);
         assert!((rects.children()[0].length_over_dim(0) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn axis_stroke_opacity_reaches_the_line_and_its_ticks() {
+        // The Reference passes axis_config style keywords to NumberLine
+        // (a Line), whose ticks match its style.
+        let axes = Axes::new()
+            .axis_config(AxisConfig {
+                stroke_opacity: Some(0.25),
+                ..AxisConfig::default()
+            })
+            .build(&book())
+            .expect("build axes");
+        for axis in [axes.x_axis(), axes.y_axis()] {
+            let line = axis.vmob();
+            assert!((line.style().stroke_opacity - 0.25).abs() < 1e-15);
+            let ticks = line.children().last().expect("ticks group");
+            assert!(!ticks.children().is_empty());
+            for tick in ticks.children() {
+                assert!((tick.style().stroke_opacity - 0.25).abs() < 1e-15);
+            }
+        }
+        let default = Axes::new().build(&book()).expect("build axes");
+        assert!((default.x_axis().vmob().style().stroke_opacity - 1.0).abs() < 1e-15);
     }
 
     #[test]

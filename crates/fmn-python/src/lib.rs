@@ -10088,6 +10088,7 @@ fn apply_axis_config_key(
     match key {
         "color" => config.color = Some(srgb_from_py(value)?),
         "stroke_width" => config.stroke_width = Some(value.extract()?),
+        "stroke_opacity" => config.stroke_opacity = Some(value.extract()?),
         "unit_size" => config.unit_size = Some(value.extract()?),
         "include_ticks" => config.include_ticks = Some(value.extract()?),
         "tick_size" => config.tick_size = Some(value.extract()?),
