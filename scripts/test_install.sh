@@ -161,6 +161,7 @@ case "$url" in
     https://api.github.com/*)
         case "$FAKE_API_MODE" in
             fail) exit 22 ;;
+            empty) printf '[]' ;;
             compact) printf '[{"url":"x","tag_name":"v%s","prerelease":true}]' "$FAKE_VERSION" ;;
             pretty) printf '[\n  {\n    "tag_name": "v%s",\n    "prerelease": true\n  }\n]\n' "$FAKE_VERSION" ;;
         esac
@@ -205,6 +206,7 @@ CURL
     online_case compact 9.8.7
     online_case pretty 9.8.7
     online_case fail "$fallback_version"
+    online_case empty "$fallback_version"
     grep -q 'using installer fallback' "$TEST_ROOT/online-fail/stderr" \
         || fail "fallback warning was not reported on stderr"
     online_cases=passed
