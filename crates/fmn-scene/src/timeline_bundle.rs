@@ -55,6 +55,9 @@ use fmn_mobject::persist::PersistError;
 use fmn_mobject::{Snapshot, Stage};
 use fmn_render::engine::EngineIdentity;
 
+mod shared;
+pub use shared::{SharedTimelineBundle, TimelineFrameCache, TimelineFrameJob};
+
 /// The canonical container schema for an FMTL/1 timeline bundle — the
 /// §6.7 registration for the timeline-bundle format family, id 1.
 pub const TIMELINE_BUNDLE_SCHEMA: Schema = Schema::new(*b"FMTL", 1, 0, 0);
