@@ -27,7 +27,7 @@ Assessment source: `main` from `9eea4a26` to `6b6fd393` (two peer commits landed
 | Seed corpus with the published wheel | All scenes first fail with `ModuleNotFoundError: tqdm`, an undocumented era dependency. With tqdm installed, SquareOnASphere, FlattenCone, MaxProcess, QuadraticFormula and BeamSplitter render a final PNG. BeamSplitter looks good (upright TeX, 3D beams); MaxProcess text is upside down. |
 | Hosted CI | `ci.yml`: last green run on main was 2026-08-10. The last 100 runs are 47 failures and 51 cancellations. The latest runs fail at `cargo fmt --check`. Weekly scheduled runs failed 08-31, 09-07, 09-14 and 09-21. |
 | Local format gate | `cargo fmt --check` exits 1 at clean HEAD `6b6fd393` (`fmn-library/src/markdown.rs`, `image.rs`). |
-| Workspace tests | TEST-RESULT-PLACEHOLDER |
+| Workspace tests | **No verdict.** `cargo test --workspace --locked --no-fail-fast` was launched through RCH on worker hz4 at 02:24 UTC. After 43 minutes it was still running, and the RCH progress detector had flagged it stale (no progress for about 24 minutes). The last complete green run on record is still the peer receipt at `cb28b5ae` (2026-09-09; see below). A single slow or hung test binary under `--no-fail-fast` should be identified and bounded. |
 
 ### Vision checklist (changes since 2026-09-09)
 
