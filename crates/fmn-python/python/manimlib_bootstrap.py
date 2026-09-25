@@ -5022,6 +5022,9 @@ class Circle(Arc):
     def __init__(self, start_angle=0, stroke_color=_RED, **kwargs):
         self.radius = float(kwargs.pop("radius", 1.0))
         self.arc_center = _np.array(_vec3(kwargs.pop("arc_center", _ORIGIN)), dtype=float)
+        # geometry.py:386 passes **kwargs to Arc, so n_components reaches it.
+        n_components = kwargs.pop("n_components", None)
+        self.n_components = None if n_components is None else int(n_components)
         self.start_angle = float(start_angle)
         self.angle = _math.tau
         kwargs.setdefault("stroke_color", stroke_color)
@@ -5033,6 +5036,7 @@ class Circle(Arc):
             self.start_angle,
             self.radius,
             _vec3(self.arc_center),
+            getattr(self, "n_components", None),
         )
 
     def surround(self, mobject, dim_to_match=0, stretch=False, buff=_MED_SMALL_BUFF):

@@ -71,10 +71,12 @@ pub(crate) fn linspace(a: f64, b: f64, n: usize) -> Vec<f64> {
 }
 
 /// The declared arc-component budget (fm-4tb.1): no arc may request more
-/// quadratic components than this. Far beyond BN-09's 16 for a full
-/// circle; anything above it is a caller error or hostile input, not a
-/// quality choice.
-pub const MAX_ARC_COMPONENTS: usize = 4096;
+/// quadratic components than this (131,073 points, about 3 MB). Real scenes
+/// do ask for dense arcs explicitly: 3b1b's `_2022/visual_proofs/lies.py`
+/// draws `Circle(n_components=2**14)`, which the earlier 4096 refused. A
+/// request far past this, such as the ~5.6e7 components an unbounded angle
+/// implies, is still a caller error or hostile input.
+pub const MAX_ARC_COMPONENTS: usize = 65_536;
 
 /// Validate an arc request and return its exact shared-anchor point count.
 ///

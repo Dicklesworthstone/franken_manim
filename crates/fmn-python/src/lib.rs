@@ -4713,18 +4713,23 @@ impl BridgeMobject {
 
     /// `Circle(start_angle, radius, arc_center)` — the native circle
     /// builder, keeping its semantic shape tag.
+    #[pyo3(signature = (factory, start_angle, radius, arc_center, n_components=None))]
     fn _build_circle<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
         start_angle: f64,
         radius: f64,
         arc_center: [f64; 3],
+        n_components: Option<usize>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let built = fmn_library::Circle::new()
+        let circle = fmn_library::Circle::new()
             .start_angle(start_angle)
             .radius(radius)
-            .arc_center(arc_center)
-            .build();
+            .arc_center(arc_center);
+        let built = match n_components {
+            Some(count) => circle.build_with_components(count).map_err(native_error)?,
+            None => circle.build(),
+        };
         install_native_tree(slf, factory, built)
     }
 
