@@ -141,15 +141,27 @@ class TexPreambleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "loop"):
             m.Tex(r"\loop", additional_preamble=r"\newcommand{\loop}{\loop}")
 
-    def test_definition_nested_macros_refuse_bad_upstream_provenance(self):
-        # UPSTREAM_LEDGER #13: never repair escaped definition spans by
-        # clamping them into the formula, or draw an unexpanded #1 token.
-        for preamble, source in (
-            (r"\newcommand{\inner}{x}\newcommand{\outer}{\inner}", r"\outer"),
-            (r"\newcommand{\sq}[1]{#1^2}\newcommand{\outer}[1]{\sq{#1}}", r"\outer{x}"),
+    def test_definition_nested_macros_keep_call_site_and_argument_provenance(self):
+        # UPSTREAM_LEDGER #13, resolved at the e911be2a pin: a macro whose
+        # definition calls another macro lays out as its full expansion,
+        # generated ink keeps the call site's span, and a forwarded argument
+        # keeps its own source bytes. No span escapes the formula.
+        for preamble, source, expansion in (
+            (r"\newcommand{\inner}{x}\newcommand{\outer}{\inner}", r"\outer", "x"),
+            (r"\newcommand{\sq}[1]{#1^2}\newcommand{\outer}[1]{\sq{#1}}", r"\outer{x}", "x^2"),
         ):
-            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "span outside the formula"):
-                m.Tex(source, additional_preamble=preamble)
+            with self.subTest(source=source):
+                formula = m.Tex(source, additional_preamble=preamble)
+                self.assertGeometryEqual(formula, m.Tex(expansion))
+                self.assertTrue(all(
+                    0 <= start <= end <= len(source.encode())
+                    for start, end in formula._string_sub_spans
+                ))
+        forwarded = m.Tex(r"\outer{x}", additional_preamble=(
+            r"\newcommand{\sq}[1]{#1^2}\newcommand{\outer}[1]{\sq{#1}}"
+        ))
+        self.assertIn((7, 8), [tuple(span) for span in forwarded._string_sub_spans])
+        self.assertEqual(len(forwarded["x"].family_members_with_points()), 1)
 
     def test_live_number_inside_macro_argument_preserves_generated_ink(self):
         for preamble, source in (
