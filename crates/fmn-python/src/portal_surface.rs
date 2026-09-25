@@ -3,6 +3,9 @@
 //! without replacing the surface handle, family, material, or updater owner.
 use super::*;
 
+#[path = "portal_surface_init.rs"]
+mod initialization;
+
 fn grid(entry: &fmn_mobject::Entry) -> PyResult<Option<(usize, usize)>> {
     let RenderPrimitive::SurfaceGrid { resolution } = entry.render_primitive() else {
         return Ok(None);
@@ -189,6 +192,7 @@ fn _align_surface_grids(
 }
 
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    initialization::install(module)?;
     module.add_function(wrap_pyfunction!(_surface_grid_resolution, module)?)?;
     module.add_function(wrap_pyfunction!(_copy_surface_geometry, module)?)?;
     module.add_function(wrap_pyfunction!(_regrid_surface_geometry, module)?)?;
