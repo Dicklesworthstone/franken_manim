@@ -5063,22 +5063,39 @@ fn render_manifest(
         ],
     )
     .map_err(|error| internal(error.to_string()))?;
+    // Fonts: every face compiled into the binary is a C6 byte input
+    // (bundling is not an exemption, docs/INPUT_CLOSURE.md). Listing the
+    // whole compiled set is a sound superset of the faces a scene reads.
+    let bundled_faces = fmn::text::bundled_faces();
+    let font_items = bundled_faces
+        .iter()
+        .map(|(name, bytes)| {
+            ClosureItem::byte_input(
+                6,
+                format!("bundled-font/{name}"),
+                bytes,
+                "font face compiled into the binary",
+            )
+            .map_err(|error| internal(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let face_count = u64::try_from(bundled_faces.len()).unwrap_or(u64::MAX);
     let c6 = if cue_assets.is_empty() {
         ClosureItem::structural(
             6,
-            "no asset or font reads on the native primitive/FMTL route",
+            "no asset reads on the native primitive/FMTL route; bundled fonts listed",
             &[
                 StructuralField::Absent("asset reads"),
-                StructuralField::Absent("font reads"),
+                StructuralField::U64(face_count),
             ],
         )
     } else {
         ClosureItem::structural(
             6,
-            "scene sound-cue asset reads on the native route; no font reads",
+            "scene sound-cue asset reads on the native route; bundled fonts listed",
             &[
                 StructuralField::U64(u64::try_from(cue_assets.len()).unwrap_or(u64::MAX)),
-                StructuralField::Absent("font reads"),
+                StructuralField::U64(face_count),
             ],
         )
     }
@@ -5206,6 +5223,7 @@ fn render_manifest(
         ]
         .into_iter()
         .chain(cue_items)
+        .chain(font_items)
         .collect(),
         identity,
         vec![output_manifest_entry(mode, artifact)],

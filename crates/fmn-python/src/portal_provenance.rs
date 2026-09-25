@@ -368,22 +368,40 @@ pub(crate) fn _portal_publish_manifest(
     )
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
+    // Fonts: every face compiled into the extension is a C6 byte input, as
+    // on the native route (bundling is not an exemption). Arbitrary files
+    // a Python scene opens itself are not yet recorded; that remains open
+    // on fm-certified-closure-integrity-4fei.
+    let bundled_faces = fmn_library::bundled_faces();
+    let font_items = bundled_faces
+        .iter()
+        .map(|(name, bytes)| {
+            ClosureItem::byte_input(
+                6,
+                format!("bundled-font/{name}"),
+                bytes,
+                "font face compiled into the extension",
+            )
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let face_count = bundled_faces.len() as u64;
     let c6 = if cue_count == 0 {
         ClosureItem::structural(
             6,
-            "no asset or font reads on the portal route",
+            "no asset reads on the portal route; bundled fonts listed",
             &[
                 StructuralField::Absent("asset reads"),
-                StructuralField::Absent("font reads"),
+                StructuralField::U64(face_count),
             ],
         )
     } else {
         ClosureItem::structural(
             6,
-            "scene sound-cue asset reads on the portal route; no font reads",
+            "scene sound-cue asset reads on the portal route; bundled fonts listed",
             &[
                 StructuralField::U64(cue_count as u64),
-                StructuralField::Absent("font reads"),
+                StructuralField::U64(face_count),
             ],
         )
     }
@@ -526,6 +544,7 @@ pub(crate) fn _portal_publish_manifest(
         c10,
     ];
     items.extend(source_items);
+    items.extend(font_items);
 
     let manifest = ProvenanceManifest::new(ManifestMode::Certified, items, identity, outputs, None)
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;

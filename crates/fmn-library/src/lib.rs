@@ -224,7 +224,7 @@ pub use fmn_geom::{
     },
 };
 pub use fmn_tex::TexEngine;
-pub use fmn_text::FontBook;
+pub use fmn_text::{FontBook, bundled_faces};
 
 // The Scribe span-map seam: the composition root's translation data
 // between the builders' native span tables and Studio's SpanRegistry.

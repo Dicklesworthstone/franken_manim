@@ -37,7 +37,7 @@ pub mod shape;
 pub use error::TextError;
 pub use font::{
     BUNDLED_FONT_FAMILIES, DEFAULT_FAMILY, FontBook, MATH_FAMILY, MONO_FAMILY, SANS_FAMILY,
-    bundled_font_inventory, is_bundled_text_family,
+    bundled_faces, bundled_font_inventory, is_bundled_text_family,
 };
 pub use layout::{
     Align, Decoration, Line, LineBreaker, PlacedTextGlyph, TextLayout, TextRequest, layout_text,

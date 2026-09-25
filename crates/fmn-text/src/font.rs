@@ -250,6 +250,14 @@ pub fn bundled_font_inventory() -> Result<Vec<String>, TextError> {
         .collect())
 }
 
+/// Every face compiled into the binary, by bundle name, with its exact
+/// bytes (text faces and the mathematics fallback alike): the font input a
+/// certified manifest's C6 records.
+#[must_use]
+pub fn bundled_faces() -> &'static [(&'static str, &'static [u8])] {
+    &fmd_font::bundled::ALL_FACES
+}
+
 /// Whether a configured text-family name resolves inside the compiled bundle.
 ///
 /// Selectable text-family aliases are accepted exactly as [`FontBook::family`]

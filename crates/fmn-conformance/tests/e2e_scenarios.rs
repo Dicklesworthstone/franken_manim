@@ -1248,6 +1248,16 @@ fn determinism_certified_manifest_compare_run(
         .compare(&other)
         .map_err(|error| fail(format!("compare: {error}")))?;
     let has_platform_record = one.items.iter().any(ClosureItem::is_platform_specific);
+    // C6 names every compiled font face by its exact bytes (bundling is
+    // not an exemption).
+    let fonts_recorded = fmn_text::bundled_faces().iter().all(|(name, bytes)| {
+        let path = format!("bundled-font/{name}");
+        one.items.iter().any(|item| {
+            item.item_id == 6
+                && item.virtual_path.as_deref() == Some(path.as_str())
+                && item.digest == sha256(bytes)
+        })
+    });
     ctx.event(
         LogEvent::new("e2e.determinism.manifest")
             .field("same_input_agree", truth(same.certified_bits_agree()))
@@ -1256,7 +1266,8 @@ fn determinism_certified_manifest_compare_run(
                 "other_input_semantic_equal",
                 truth(different.semantic_equal),
             )
-            .field("platform_record", truth(has_platform_record)),
+            .field("platform_record", truth(has_platform_record))
+            .field("fonts_recorded", truth(fonts_recorded)),
     );
     let agree = same.certified_bits_agree();
     let distinguished = !different.semantic_equal && !different.certified_bits_agree();
@@ -1265,9 +1276,9 @@ fn determinism_certified_manifest_compare_run(
         "certified_manifest_input_distinguished",
         u64::from(distinguished),
     );
-    if !agree || !distinguished || !has_platform_record {
+    if !agree || !distinguished || !has_platform_record || !fonts_recorded {
         return Err(fail(format!(
-            "certified manifest comparison drifted: same={same:?} other={different:?} platform_record={has_platform_record}"
+            "certified manifest comparison drifted: same={same:?} other={different:?} platform_record={has_platform_record} fonts_recorded={fonts_recorded}"
         )));
     }
     Ok(RunOutcome::ok()
@@ -5173,6 +5184,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("same_input_agree", "true"),
                 FieldPred::str_eq("other_input_semantic_equal", "false"),
                 FieldPred::str_eq("platform_record", "true"),
+                FieldPred::str_eq("fonts_recorded", "true"),
             ],
         )],
     ));
