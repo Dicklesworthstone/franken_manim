@@ -38,8 +38,8 @@ The eight criteria are quoted from `fm-i1q` (plan §20.3).
 | (4) SVGMobject works for user files (W2SVG) | Chisel processor exists and `fm-6nm` is closed (`crates/fmn-geom/src/svg.rs`), but portal `SVGMobject` is **still a structural base**: users cannot load a real `.svg` through it until `fm-5wq.4.50` lands (in progress) | **NOT YET** |
 | (5) Typeset caching live (W6TEX + W8CACHE) | `fm-fw6` (fmn-cache content-addressed store) and `fm-7dw` (fmn-tex typeset caching + pre-play preflight) closed; `crates/fmn-tex/src/typeset.rs` | **Green** |
 | (6) Coverage-ratchet dashboard public and live (W6RATCHET) | `docs/ratchet/dashboard.md` — frozen G0-4 denominator (9269 strings / 17711 occurrences), CI-enforced pin/ratchet lockstep, eight-rev rising trend; `fm-mol` closed | **Green** |
-| (7) fmd renders `$…$` in HTML/PDF via the same crates | Same `Layout`/span-map surface serves HTML/PDF (`docs/g0/G0-3-fmd-math-ratification.md:103`); demonstration artifacts live in the `franken_markdown` repo's corpus goldens at the pinned rev, not in this tree | **Green (cross-repo citation)** |
-| (8) PG-1(G2) and PG-7 enforced and blocking | Policy rows exist and are `blocking` in `docs/performance/PERF_GATES.tsv`; rig code shipped (`crates/fmn-conformance/src/perf_pg7.rs`, `perf_frontdoor.rs`, `bin/fmn-perf.rs`); Reference denominator captured (`docs/performance/reference-baseline-2026-07-28.json`); **no pinned-host observed baseline is committed — PG-1 is NOT green** | **NOT GREEN** |
+| (7) fmd renders `$…$` in HTML/PDF via the same crates | Measured 2026-09-25 against the `e911be2a` pin's math path (see "Cross-repo payoff"). PDF display equations are laid out by fmd-math and drawn from its outlines. Inline `$…$` in PDF prints its TeX source as text, and HTML emits browser-laid-out MathML from the fmd-math parse tree. This was previously marked green from a design-document citation; that was not evidence, and the corpus goldens it pointed to are parse-only | **NOT GREEN (PDF display math only)** |
+| (8) PG-1(G2) and PG-7 enforced and blocking | Policy rows exist and are `blocking` in `docs/performance/PERF_GATES.tsv`; rig code shipped (`crates/fmn-conformance/src/perf_pg7.rs`, `perf_frontdoor.rs`, `bin/fmn-perf.rs`); Reference capture (`docs/performance/reference-baseline-2026-07-28.json`) is calibration-only, not the PG-1 denominator (`docs/performance/PERFORMANCE_GATES.md:57`); **no pinned-host observed baseline is committed — PG-1 is NOT green** | **NOT GREEN** |
 
 ## Dependency closure
 
@@ -148,12 +148,36 @@ cache's latency claim will be measured, not asserted, when the rig runs.
 ## Cross-repo payoff (criterion 7)
 
 fmd-math and fmd-font are franken_markdown workspace crates consumed here as
-git dependencies at the pinned rev (`SUITE.lock:33`). The same `Layout` and
-span-mapped `PlacedGlyph` surface serves franken_markdown's HTML/PDF `$…$`
-rendering (`docs/g0/G0-3-fmd-math-ratification.md:103`); the demonstration
-artifacts (corpus goldens) live in the `franken_markdown` repository at that
-rev rather than in this tree. This packet cites, and does not duplicate,
-that evidence.
+git dependencies at the pinned rev (`SUITE.lock:33`). Whether fmd itself
+renders `$…$` through the same crates was measured on 2026-09-25 at
+franken_markdown `09562c1f`. The pin that fm-fmd-repin-g2-truth-y3gr
+consumes, `e911be2a`, differs from it only in PDF line layout and a
+text-mode fmd-math line-break fix, neither of which changes how math is
+rendered to HTML or PDF. The input was this document:
+
+```markdown
+# Criterion 7 probe
+
+Inline math: $\frac{a}{b} + x^2$ in a sentence.
+
+$$\int_0^1 \sqrt{1 - x^2}\,dx = \frac{\pi}{4}$$
+```
+
+`fmd render probe.md --to both --out probe.html`, built from that rev,
+produces:
+
+- **HTML:** both formulas become MathML `<math display="inline">` and
+  `<math display="block">` elements, generated from the fmd-math parse tree
+  and laid out by the browser. fmd-math's `Layout` is not involved.
+- **PDF:** the display equation is one `/Formula` structure element, drawn
+  from fmd-math's `Layout` and glyph outlines (`src/pdf/math.rs`). The inline
+  formula is written into the content stream as its literal source text.
+
+So criterion 7 holds only for display equations in PDF. Inline `$…$` in
+PDF, and all math in HTML, does not go through the shared layout. It was
+previously marked green on the strength of a design sentence
+(`docs/g0/G0-3-fmd-math-ratification.md:103`) and parse-only corpus
+goldens; neither demonstrates rendering.
 
 ## Performance gates (criterion 8) — PG-1 is NOT green
 
@@ -166,9 +190,10 @@ What exists at the evidence commit:
   `fmn_conformance::perf::Baseline`.
 - The rig code is in-tree: `crates/fmn-conformance/src/perf.rs`,
   `perf_pg7.rs`, `perf_frontdoor.rs`, `perf_host.rs`, and the
-  `fmn-perf` binary. The PG-1 denominator — the Python Reference
-  wall-clock — is captured in
-  `docs/performance/reference-baseline-2026-07-28.json`.
+  `fmn-perf` binary. The Python Reference wall-clock captured in
+  `docs/performance/reference-baseline-2026-07-28.json` is calibration-only
+  shared-host evidence, not the PG-1 denominator
+  (`docs/performance/PERFORMANCE_GATES.md:57`).
 - `fm-inr` (the rig on pinned profiles) is **in progress**.
 
 What does not exist: any committed pinned-host observed baseline for
