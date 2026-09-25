@@ -50,8 +50,17 @@ def install_curve_regeneration(native):
             family = tuple(self.get_family())
             prepare = g.get("_fmn_prepare_curve_function")
             sample, verify = (function, None) if prepare is None else prepare(function)
-            candidate = Curve(sample, t_range=options[0], epsilon=options[1],
-                              discontinuities=options[2], use_smoothing=options[3])
+            # Do not recursively construct a public Curve: its init_points
+            # now reaches this same protocol. Atlas still builds every sample
+            # and smooth handle, on a detached candidate. Never replace self's
+            # native owner (including during initial custom-dtype construction).
+            candidate = g["_native_shell_factory"]()
+            specs = candidate._build_parametric_curve(
+                g["_native_shell_factory"], sample, options[0], options[1],
+                list(options[2]), options[3],
+            )
+            if specs:
+                raise RuntimeError("native curve sampling unexpectedly returned children")
             if verify is not None:
                 verify()
             idle(self)
@@ -68,6 +77,12 @@ def install_curve_regeneration(native):
             if not np.isfinite(points).all():
                 raise ValueError("native curve sampling produced nonfinite records")
             self.set_points(points)
+            if len(before) == 0:
+                # Keep Atlas's initial normals and joints, including its
+                # pre-quantization joint calculation at discontinuities. Later
+                # refreshes retain the existing live point/paint protocol.
+                for key in ("base_normal", "joint_angle"):
+                    self.data[key][:] = candidate.data[key]
         return self
 
     _bind_method(Curve, "init_points", init_points)

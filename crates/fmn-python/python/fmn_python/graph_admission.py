@@ -87,7 +87,41 @@ def install_graph_admission(native):
             for parameter in signature.parameters.values():
                 if parameter.kind == inspect.Parameter.VAR_KEYWORD and parameter.name in bound.arguments:
                     _controls(bound.arguments[parameter.name], implicit)
-            return original(*bound.args, **bound.kwargs)
+            if implicit:
+                return original(*bound.args, **bound.kwargs)
+            bound.apply_defaults()
+            values = bound.arguments
+            style = dict(values["kwargs"])
+            if cls is g["ParametricCurve"]:
+                function = values["t_func"]
+                if not callable(function):
+                    raise TypeError("t_func must be callable")
+                self.t_func = function
+                self.t_range = values["t_range"]
+                self.epsilon = float(values["epsilon"])
+                self.discontinuities = tuple(float(v) for v in values["discontinuities"])
+                self.use_smoothing = bool(values["use_smoothing"])
+            else:
+                function = values["function"]
+                if not callable(function):
+                    raise TypeError("function must be callable")
+                self.function = function
+                self.x_range = values["x_range"]
+                self.t_range = self.x_range
+                self.epsilon = float(style.pop("epsilon", 1e-8))
+                self.discontinuities = tuple(float(v) for v in style.pop("discontinuities", ()))
+                self.use_smoothing = bool(style.pop("use_smoothing", True))
+                style.setdefault("color", values["color"])
+
+                def parametric_function(t):
+                    return [t, scalar_sample(function(t), finite_record=True), 0.0]
+
+                self.t_func = parametric_function
+            # The recipe is ready before init_data/init_points. The existing
+            # engine dispatcher owns MRO, custom dtypes and all four hooks;
+            # curve_regeneration installs the native sampling implementation
+            # of init_points before any public constructor is exposed.
+            g["_init_native_vmobject"](self, style)
         return initialize
 
     for name, original, signature in builders:

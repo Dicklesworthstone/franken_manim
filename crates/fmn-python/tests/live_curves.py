@@ -133,10 +133,15 @@ class LiveCurveTests(unittest.TestCase):
                 return super().init_points()
         wave = Wave()
         obj = Custom(wave.sample, t_range=(-1, 1, .25), use_smoothing=False)
+        # Construction now dispatches the same authored hook as an explicit
+        # refresh. Assert both calls separately rather than hiding a skipped
+        # constructor behind the old refresh-only count.
+        self.assertEqual(obj.refreshes, 1)
+        np.testing.assert_array_equal(obj.get_points(), analytic_points(1.))
         wave.level = 5.
         obj.init_points()
         np.testing.assert_array_equal(obj.get_points(), analytic_points(5.))
-        self.assertEqual(obj.refreshes, 1)
+        self.assertEqual(obj.refreshes, 2)
 
     def test_errors_and_cancellation_stop_once_preserve_records_and_allow_retry(self):
         for error in (LookupError('curve'), KeyboardInterrupt('cancel'), SystemExit('stop')):
