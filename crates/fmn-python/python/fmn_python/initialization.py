@@ -29,6 +29,7 @@ _STEPS = (
     ("graph_admission", "install_graph_admission"),
     ("coordinate_mapping", "install_coordinate_mapping"),
     ("coordinate_lifecycle", "install_axes_lifecycle"),
+    ("plane_lifecycle", "install_plane_lifecycle"),
     ("surface_geometry", "install_surface_geometry"),
     ("surface_lifecycle", "install_surface_lifecycle"),
     ("surface_mesh", "install_surface_mesh"),
