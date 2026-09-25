@@ -1132,6 +1132,206 @@ pub(crate) struct CompiledVector {
     fill_plane: Option<[f64; 4]>,
     draws_fill: bool,
     draws_stroke: bool,
+    /// Screen bins over `curves`, present for stroked vectors with many
+    /// curves; `None` means every stroke sample scans every curve.
+    bins: Option<CurveBins>,
+}
+
+/// Vectors with fewer curves scan them all; binning would cost more than it
+/// saves.
+const CURVE_BIN_MIN_CURVES: usize = 32;
+/// Upper bound on bins per vector. The cell edge doubles until it fits.
+const CURVE_BIN_MAX_CELLS: f64 = (1u64 << 22) as f64;
+/// Upper bound on (curve, bin) memberships per vector. A vector over it is
+/// left unbinned, as when the preparation budget cannot hold the bins.
+const CURVE_BIN_MAX_ENTRIES: u64 = 1 << 24;
+
+/// Screen-space bins over a compiled vector's curves.
+///
+/// A stroke sample takes the curve minimising distance minus projected
+/// half-width. Scanning every curve per sample costs samples x curves, which a
+/// single vector with tens of thousands of subpaths (a vector field's lines)
+/// turns into hours. A sample instead visits the curves whose control box
+/// meets the square of half-size `radius` around it. Every other curve then
+/// has a stroke excess of at least half the AA ramp, so the visited minimum is
+/// either the full scan's exact answer or proof that the sample is
+/// uncovered. [`binned_stroke_nearest`] states the cases.
+#[derive(Debug, Clone)]
+struct CurveBins {
+    /// Screen position of the first bin's corner: the viewport grown by
+    /// `radius` on every side is the binned extent.
+    origin: [f64; 2],
+    /// Far corner of the binned extent.
+    limit: [f64; 2],
+    /// Bin edge in pixels.
+    cell: f64,
+    columns: u32,
+    rows: u32,
+    /// An upper bound on any curve's projected stroke half-width, plus half
+    /// the AA ramp, plus rounding slack.
+    radius: f64,
+    /// Bin `b` holds `entries[starts[b]..starts[b + 1]]`, in curve order.
+    starts: Vec<u32>,
+    entries: Vec<u32>,
+    /// Inclusive bin range `[x0, y0, x1, y1]` of each curve's control box;
+    /// `x0 > x1` for a curve outside the binned extent.
+    ranges: Vec<[u32; 4]>,
+}
+
+impl CurveBins {
+    /// Bin coordinate of a screen position, clamped to the grid. Registration
+    /// and queries share this one monotone map, so a query square meeting a
+    /// control box always shares a bin with it, whatever the rounding.
+    fn bin_of(&self, position: [f64; 2]) -> [u32; 2] {
+        let axis = |value: f64, origin: f64, count: u32| -> u32 {
+            let bin = ((value - origin) / self.cell).floor();
+            if bin <= 0.0 {
+                0
+            } else if bin >= f64::from(count - 1) {
+                count - 1
+            } else {
+                bin as u32
+            }
+        };
+        [
+            axis(position[0], self.origin[0], self.columns),
+            axis(position[1], self.origin[1], self.rows),
+        ]
+    }
+}
+
+/// The AA ramp width [`crate::stroke::aa_coverage`] divides by.
+fn aa_ramp_width(style: &Style) -> f64 {
+    let aa = f64::from(style.anti_alias_width);
+    if aa > 0.0 { aa } else { 1e-8 }
+}
+
+fn build_curve_bins(
+    camera: &Camera,
+    style: &Style,
+    curves: &[ProjectedCurvePiece],
+    budget: &mut PreparationBudget,
+) -> Result<Option<CurveBins>, ThreeDError> {
+    if !style.draws_stroke()
+        || curves.len() < CURVE_BIN_MIN_CURVES
+        || u32::try_from(curves.len()).is_err()
+        || camera.pixel_width() == 0
+        || camera.pixel_height() == 0
+    {
+        return Ok(None);
+    }
+    let mut reach = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for curve in curves {
+        // A stroke slab that can meet the projection horizon has no pixel
+        // reach, and a non-finite control point has no box: scan instead.
+        let Some(curve_reach) = perspective_stroke_reach_px(camera, style, curve.world) else {
+            return Ok(None);
+        };
+        if !curve_reach.is_finite() {
+            return Ok(None);
+        }
+        reach = reach.max(curve_reach);
+        for point in [curve.screen.p0, curve.screen.p1, curve.screen.p2] {
+            if !point.iter().all(|value| value.is_finite()) {
+                return Ok(None);
+            }
+            magnitude = magnitude.max(point[0].abs()).max(point[1].abs());
+        }
+    }
+    let width = f64::from(camera.pixel_width());
+    let height = f64::from(camera.pixel_height());
+    // Absorbs the rounding in the power-basis curve evaluation, the projected
+    // width and the excess subtraction, all relative to coordinate magnitude.
+    let slack = 1e-6 + 1e-9 * magnitude.max(width).max(height);
+    let radius = reach + 0.5 * aa_ramp_width(style) + 4.0 * slack;
+    let extent = [width + 2.0 * radius, height + 2.0 * radius];
+    let mut cell = radius.max((extent[0] * extent[1] / (2.0 * curves.len() as f64)).sqrt());
+    while (extent[0] / cell).ceil() * (extent[1] / cell).ceil() > CURVE_BIN_MAX_CELLS {
+        cell *= 2.0;
+    }
+    let mut bins = CurveBins {
+        origin: [-radius, -radius],
+        limit: [width + radius, height + radius],
+        cell,
+        columns: ((extent[0] / cell).ceil() as u32).max(1),
+        rows: ((extent[1] / cell).ceil() as u32).max(1),
+        radius,
+        starts: Vec::new(),
+        entries: Vec::new(),
+        ranges: Vec::new(),
+    };
+    let range_of = |curve: &ProjectedCurvePiece| -> [u32; 4] {
+        let points = [curve.screen.p0, curve.screen.p1, curve.screen.p2];
+        let low = [0, 1].map(|axis| points.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min));
+        let high = [0, 1].map(|axis| {
+            points
+                .iter()
+                .map(|p| p[axis])
+                .fold(f64::NEG_INFINITY, f64::max)
+        });
+        if high[0] < bins.origin[0]
+            || high[1] < bins.origin[1]
+            || low[0] > bins.limit[0]
+            || low[1] > bins.limit[1]
+        {
+            return [1, 1, 0, 0];
+        }
+        let first = bins.bin_of(low);
+        let last = bins.bin_of(high);
+        [first[0], first[1], last[0], last[1]]
+    };
+    let members = |range: [u32; 4]| -> u64 {
+        if range[0] > range[2] {
+            return 0;
+        }
+        u64::from(range[2] - range[0] + 1) * u64::from(range[3] - range[1] + 1)
+    };
+    // Size everything before charging the budget: charges are not refunded,
+    // and bins that do not fit are skipped, never an error.
+    let total: u64 = curves.iter().map(|curve| members(range_of(curve))).sum();
+    let cells = bins.columns as usize * bins.rows as usize;
+    let bytes = (cells as u64 + 1) * 4 + total * 4 + curves.len() as u64 * 16;
+    if total > CURVE_BIN_MAX_ENTRIES || bytes > budget.remaining_buffer_rows::<u8>() as u64 {
+        return Ok(None);
+    }
+    let mut starts = Vec::new();
+    let mut entries = Vec::new();
+    let mut ranges = Vec::new();
+    budget.reserve_retained(&mut starts, "stroke curve bins", cells + 1)?;
+    budget.reserve_retained(&mut entries, "stroke curve bin entries", total as usize)?;
+    budget.reserve_retained(&mut ranges, "stroke curve bin ranges", curves.len())?;
+    ranges.extend(curves.iter().map(range_of));
+    // Counts, then prefix sums: starts[b] is where bin b begins.
+    starts.resize(cells + 1, 0u32);
+    for range in &ranges {
+        for y in range[1]..=range[3] {
+            for x in range[0]..=range[2] {
+                starts[(y * bins.columns + x) as usize + 1] += 1;
+            }
+        }
+    }
+    for index in 0..cells {
+        starts[index + 1] += starts[index];
+    }
+    // Place each curve, in curve order, using starts[b] as bin b's cursor;
+    // the cursors finish at each bin's end, one slot right of its start.
+    entries.resize(total as usize, 0u32);
+    for (curve, range) in ranges.iter().enumerate() {
+        for y in range[1]..=range[3] {
+            for x in range[0]..=range[2] {
+                let cursor = &mut starts[(y * bins.columns + x) as usize];
+                entries[*cursor as usize] = curve as u32;
+                *cursor += 1;
+            }
+        }
+    }
+    starts.copy_within(0..cells, 1);
+    starts[0] = 0;
+    bins.starts = starts;
+    bins.entries = entries;
+    bins.ranges = ranges;
+    Ok(Some(bins))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1781,6 +1981,7 @@ fn compile_vector<'a>(
         None
     };
     let bounds = vector_bounds(camera, &style, &fill_pieces, &curves);
+    let bins = build_curve_bins(camera, &style, &curves, budget)?;
     let vector = CompiledVector {
         fill: fill_pieces,
         curves,
@@ -1791,6 +1992,7 @@ fn compile_vector<'a>(
         fill_plane,
         draws_fill,
         draws_stroke,
+        bins,
     };
     let mut vector_rows = Vec::new();
     budget.reserve_retained(&mut vector_rows, "compiled vector rows", 1)?;
@@ -3053,6 +3255,132 @@ fn vector_nearest(
     best
 }
 
+/// One curve's stroke excess at `point`: screen distance minus the projected
+/// half-width toward the point.
+fn stroke_candidate(
+    camera: &Camera,
+    vector: &CompiledVector,
+    curve_index: usize,
+    point: [f64; 2],
+) -> (f64, VectorNearest) {
+    let mut nearest = nearest_on_vector_curve(camera, vector, curve_index, point);
+    nearest.s = vector
+        .style
+        .stroke_endpoint_parameter(nearest.s, nearest.t == 1.0);
+    let curve = &vector.curves[curve_index];
+    let half_width = projected_width_toward(
+        camera,
+        &vector.style,
+        vector.normal,
+        CurvePosition {
+            world: curve.world,
+            t: nearest.t,
+            s: nearest.s,
+        },
+        point,
+        None,
+    );
+    (nearest.distance - half_width, nearest)
+}
+
+/// The defining search: the first curve, in index order, of least excess.
+fn scanned_stroke_nearest(
+    camera: &Camera,
+    vector: &CompiledVector,
+    point: [f64; 2],
+) -> Option<(f64, VectorNearest)> {
+    let mut best: Option<(f64, VectorNearest)> = None;
+    for curve_index in 0..vector.curves.len() {
+        let (excess, nearest) = stroke_candidate(camera, vector, curve_index, point);
+        if best.is_none_or(|(current, _)| excess < current) {
+            best = Some((excess, nearest));
+        }
+    }
+    best
+}
+
+enum StrokeSearch {
+    /// The scan's exact answer.
+    Nearest(f64, VectorNearest),
+    /// Every curve's excess is at least half the AA ramp and no join can
+    /// lower it, so the stroke covers nothing here.
+    Uncovered,
+    /// The bins cannot decide; scan.
+    Scan,
+}
+
+/// [`scanned_stroke_nearest`] over the curves [`CurveBins`] places near
+/// `point`.
+///
+/// An unvisited curve's control box misses the square of half-size `radius`
+/// around the point, so its screen distance exceeds `radius`, and its
+/// projected half-width is at most the reach inside `radius`: its excess is at
+/// least half the AA ramp. Hence:
+/// - a visited excess below half the ramp beats every unvisited curve, and the
+///   least (excess, index) pair among the visited is the scan's first least
+///   excess;
+/// - otherwise the least excess anywhere is at least half the ramp. Round,
+///   bevel and auto joins never lower it, and `aa_coverage` of it is exactly
+///   zero, which every caller treats as no stroke; only a miter wedge
+///   containing the point can lower it, and that case scans.
+///
+/// Curve 0 is always visited: the scan keeps a NaN-excess first curve, so any
+/// NaN also scans. A point whose square leaves the binned extent (outside the
+/// viewport) scans too.
+fn binned_stroke_nearest(
+    camera: &Camera,
+    vector: &CompiledVector,
+    bins: &CurveBins,
+    point: [f64; 2],
+) -> StrokeSearch {
+    let low = [point[0] - bins.radius, point[1] - bins.radius];
+    let high = [point[0] + bins.radius, point[1] + bins.radius];
+    if !(low[0] >= bins.origin[0]
+        && low[1] >= bins.origin[1]
+        && high[0] <= bins.limit[0]
+        && high[1] <= bins.limit[1])
+    {
+        return StrokeSearch::Scan;
+    }
+    let mut best = stroke_candidate(camera, vector, 0, point);
+    if best.0.is_nan() {
+        return StrokeSearch::Scan;
+    }
+    let first = bins.bin_of(low);
+    let last = bins.bin_of(high);
+    for y in first[1]..=last[1] {
+        for x in first[0]..=last[0] {
+            let bin = (y * bins.columns + x) as usize;
+            let members = &bins.entries[bins.starts[bin] as usize..bins.starts[bin + 1] as usize];
+            for &member in members {
+                let curve = member as usize;
+                let range = bins.ranges[curve];
+                // Visit each curve once: at the first bin it shares with the
+                // query square.
+                if curve == 0 || x != range[0].max(first[0]) || y != range[1].max(first[1]) {
+                    continue;
+                }
+                let (excess, nearest) = stroke_candidate(camera, vector, curve, point);
+                if excess.is_nan() {
+                    return StrokeSearch::Scan;
+                }
+                if excess < best.0 || (excess == best.0 && curve < best.1.curve) {
+                    best = (excess, nearest);
+                }
+            }
+        }
+    }
+    if best.0 < 0.5 * aa_ramp_width(&vector.style) {
+        return StrokeSearch::Nearest(best.0, best.1);
+    }
+    if vector.style.joint_type == fmn_mobject::JointType::Miter
+        && vector.joins.iter().any(|wedge| wedge.contains(point))
+    {
+        return StrokeSearch::Scan;
+    }
+    StrokeSearch::Uncovered
+}
+
 fn vector_stroke_sample(
     camera: &Camera,
     vector: &CompiledVector,
@@ -3061,31 +3389,14 @@ fn vector_stroke_sample(
     if !vector.draws_stroke {
         return None;
     }
-    let mut best: Option<(f64, VectorNearest)> = None;
-    for curve_index in 0..vector.curves.len() {
-        let mut nearest = nearest_on_vector_curve(camera, vector, curve_index, point);
-        nearest.s = vector
-            .style
-            .stroke_endpoint_parameter(nearest.s, nearest.t == 1.0);
-        let curve = &vector.curves[curve_index];
-        let half_width = projected_width_toward(
-            camera,
-            &vector.style,
-            vector.normal,
-            CurvePosition {
-                world: curve.world,
-                t: nearest.t,
-                s: nearest.s,
-            },
-            point,
-            None,
-        );
-        let excess = nearest.distance - half_width;
-        if best.is_none_or(|(current, _)| excess < current) {
-            best = Some((excess, nearest));
-        }
-    }
-    let (round_excess, nearest) = best?;
+    let search = vector.bins.as_ref().map_or(StrokeSearch::Scan, |bins| {
+        binned_stroke_nearest(camera, vector, bins, point)
+    });
+    let (round_excess, nearest) = match search {
+        StrokeSearch::Nearest(excess, nearest) => (excess, nearest),
+        StrokeSearch::Uncovered => return None,
+        StrokeSearch::Scan => scanned_stroke_nearest(camera, vector, point)?,
+    };
     let curve = &vector.curves[nearest.curve];
     let excess =
         crate::stroke::apply_joins(round_excess, &vector.joins, vector.style.joint_type, point);
@@ -4794,6 +5105,7 @@ mod tests {
             fill_plane: None,
             draws_fill: false,
             draws_stroke: true,
+            bins: None,
         };
         let query = [16.0, 10.5];
         assert_eq!(
@@ -4810,6 +5122,97 @@ mod tests {
             "the farther wide curve must win distance-minus-width: s={s}"
         );
         assert!(coverage > 0.99);
+    }
+
+    #[test]
+    fn binned_stroke_search_matches_the_full_scan_bit_for_bit() {
+        let camera = camera();
+        // A 3D helix: 59 curves at varying depth, so the per-curve reach is
+        // perspective-dependent and the bins are built.
+        let corners: Vec<Vec3> = (0..60)
+            .map(|index| {
+                let angle = f64::from(index) * 0.37;
+                [
+                    2.5 * angle.cos(),
+                    1.8 * angle.sin(),
+                    -1.5 + f64::from(index) / 20.0,
+                ]
+            })
+            .collect();
+        let points = path_points(&corners, false);
+        let mut binned_samples = 0usize;
+        let mut covered_samples = 0usize;
+        for (joint_type, flat_stroke, width) in [
+            (JointType::Auto, false, 20.0),
+            (JointType::Auto, false, 100.0),
+            (JointType::Miter, false, 100.0),
+            (JointType::Bevel, false, 100.0),
+            (JointType::Auto, true, 60.0),
+        ] {
+            let plan = vector_plan(
+                &points,
+                [0.0; 4],
+                [1.0; 4],
+                width,
+                camera.revision(),
+                |uniforms| {
+                    uniforms.joint_type = joint_type;
+                    uniforms.flat_stroke = flat_stroke;
+                },
+            );
+            let job = ThreeDJob::new(
+                &camera,
+                &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+                Tiling::default(),
+            )
+            .expect("helix job");
+            let binned = compiled_vector(&job);
+            let bins = binned.bins.as_ref().expect("a 59-curve stroke is binned");
+            let mut scanned = binned.clone();
+            scanned.bins = None;
+            // Callers treat coverage <= 0 as no stroke, so compare that view,
+            // bit for bit.
+            let observed = |sample: Option<(f64, f64, Vec3, f64)>| {
+                sample
+                    .filter(|(coverage, ..)| coverage.is_nan() || *coverage > 0.0)
+                    .map(|(coverage, s, world, depth)| {
+                        (
+                            coverage.to_bits(),
+                            s.to_bits(),
+                            world.map(f64::to_bits),
+                            depth.to_bits(),
+                        )
+                    })
+            };
+            for row in 0..80 {
+                for column in 0..100 {
+                    // Includes points outside the 32x24 viewport, which scan.
+                    let point = [
+                        -3.0 + f64::from(column) * 0.38,
+                        -3.0 + f64::from(row) * 0.38,
+                    ];
+                    let expected = observed(vector_stroke_sample(&camera, &scanned, point));
+                    assert_eq!(
+                        observed(vector_stroke_sample(&camera, binned, point)),
+                        expected,
+                        "{joint_type:?} flat={flat_stroke} width={width} at {point:?}"
+                    );
+                    covered_samples += usize::from(expected.is_some());
+                    binned_samples += usize::from(!matches!(
+                        binned_stroke_nearest(&camera, binned, bins, point),
+                        StrokeSearch::Scan
+                    ));
+                }
+            }
+        }
+        assert!(
+            covered_samples > 2_000,
+            "the helix covers a real share: {covered_samples}"
+        );
+        assert!(
+            binned_samples > 20_000,
+            "most samples are decided by the bins: {binned_samples}"
+        );
     }
 
     #[test]
