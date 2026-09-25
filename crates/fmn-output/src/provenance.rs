@@ -689,7 +689,11 @@ mod tests {
     fn a_class_holds_many_items_but_an_identity_appears_once() {
         let manifest = complete_manifest();
         assert_eq!(
-            manifest.items.iter().filter(|item| item.item_id == 2).count(),
+            manifest
+                .items
+                .iter()
+                .filter(|item| item.item_id == 2)
+                .count(),
             2
         );
         assert!(manifest.to_bytes().is_ok());
