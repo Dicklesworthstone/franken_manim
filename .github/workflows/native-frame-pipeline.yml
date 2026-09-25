@@ -68,6 +68,14 @@ jobs:
           subprocess.run(['git','apply','-'], input=patch, check=True)
           for path, sha in final.items():
               assert blob(Path(path).read_bytes()) == sha, path
+          # Finalized reports own their journal; the Option belongs only to
+          # BackendAccumulator. Preserve the provenance assertion unchanged.
+          path = Path('crates/fmn-cli/src/camera_route.rs')
+          text = path.read_text()
+          old = 'report.backend.journal.unwrap().ends_with'
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, 'report.backend.journal.ends_with'))
+          assert blob(path.read_bytes()) == 'd5f4f96ba76a0369c3c70ed66109b4afec3cf75d'
           PY
       - name: Install pinned compiler and format candidate sources
         run: |
@@ -93,7 +101,9 @@ jobs:
         run: cargo test --locked -p fmn --tests
       - name: Compiled timeline reconstruction
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p fmn-scene --lib timeline_bundle --test shared_bundle
+        run: |
+          cargo test --locked -p fmn-scene --lib timeline_bundle
+          cargo test --locked -p fmn-scene --test shared_bundle
       - name: Preserve compiler-formatted source blobs without changing refs
         if: ${{ !cancelled() }}
         env:
