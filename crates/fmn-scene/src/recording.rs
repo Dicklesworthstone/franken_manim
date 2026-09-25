@@ -14,7 +14,7 @@
 
 use fmn_anim::timeline::{TIMELINE_SCHEMA, TimelineError, TimelinePlan};
 use fmn_anim::{FramePacket, RationalFrameClock, SegmentKind};
-use fmn_hash::serial::Writer;
+use fmn_hash::serial::{Limits, Writer};
 use fmn_hash::{Digest, SerialError, sha256};
 use fmn_mobject::Stage;
 
@@ -33,6 +33,13 @@ pub enum RecordingError {
     Plan(TimelineError),
     /// The finished artifact did not satisfy the production reader.
     Decode(BundleReadError),
+    /// Encoding was refused before growing beyond the artifact budget.
+    OutputLimit {
+        /// Size of the next canonical append that would exceed the cap.
+        needed: usize,
+        /// Effective output cap, no larger than the production reader limit.
+        limit: usize,
+    },
     /// A capture protocol or capability that FMTL/1 cannot represent.
     Unsupported(&'static str),
 }
@@ -43,6 +50,10 @@ impl std::fmt::Display for RecordingError {
             Self::Bundle(error) => error.fmt(f),
             Self::Plan(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
+            Self::OutputLimit { needed, limit } => write!(
+                f,
+                "scene bundle needs {needed} bytes, exceeding the {limit}-byte output budget"
+            ),
             Self::Unsupported(message) => write!(f, "scene bundle recording: {message}"),
         }
     }
@@ -54,7 +65,7 @@ impl std::error::Error for RecordingError {
             Self::Bundle(error) => Some(error),
             Self::Plan(error) => Some(error),
             Self::Decode(error) => Some(error),
-            Self::Unsupported(_) => None,
+            Self::OutputLimit { .. } | Self::Unsupported(_) => None,
         }
     }
 }
@@ -89,11 +100,17 @@ struct RecordedSegment {
     frames: Vec<Vec<u8>>,
 }
 
+struct ActiveSegment {
+    recorded: RecordedSegment,
+    base_frame: i64,
+    play_index: u64,
+}
+
 /// A SceneSink for arbitrary imperative native or host-language scene programs.
 ///
 /// Feed it the real lifecycle events and captures, then call [`Self::finish`]
 /// only after the whole program has succeeded. Any sink failure is sticky.
-/// Memory is bounded cumulatively, including destination-table capacity; frame
+/// Capture storage is charged cumulatively, including destination tables; frame
 /// admission is checked before serializing the next snapshot. As with Scene's
 /// other sinks, an error stops capture, not the deterministic completion of the
 /// already-running animation segment.
@@ -103,7 +120,7 @@ pub struct SceneBundleRecorder {
     charged: usize,
     frames: u64,
     segments: Vec<RecordedSegment>,
-    active: Option<RecordedSegment>,
+    active: Option<ActiveSegment>,
     failure: Option<RecordingError>,
 }
 
@@ -149,7 +166,9 @@ impl SceneBundleRecorder {
     /// Refuses a nonempty/active/failed recording or exhausted capture budgets.
     pub fn capture_terminal_still(&mut self, stage: &Stage) -> Result<(), IntegrationError> {
         let result = if self.frames != 0 || self.active.is_some() {
-            Err(RecordingError::Unsupported("terminal still requires an idle empty recording"))
+            Err(RecordingError::Unsupported(
+                "terminal still requires an idle empty recording",
+            ))
         } else {
             self.admit_frame()
                 .and_then(|()| self.capture_snapshot(stage.snapshot().to_bytes()))
@@ -158,19 +177,19 @@ impl SceneBundleRecorder {
     }
 
     fn charge(&mut self, additional: usize, context: &'static str) -> Result<(), RecordingError> {
-        let needed = self.charged.checked_add(additional).ok_or(
-            BundleError::CaptureLimitExceeded {
-                context,
-                needed: usize::MAX,
-                limit: self.limits.max_capture_bytes,
-            },
-        )?;
+        let overflow = BundleError::CaptureLimitExceeded {
+            context,
+            needed: usize::MAX,
+            limit: self.limits.max_capture_bytes,
+        };
+        let needed = self.charged.checked_add(additional).ok_or(overflow)?;
         if needed > self.limits.max_capture_bytes {
             return Err(BundleError::CaptureLimitExceeded {
                 context,
                 needed,
                 limit: self.limits.max_capture_bytes,
-            }.into());
+            }
+            .into());
         }
         self.charged = needed;
         Ok(())
@@ -180,18 +199,21 @@ impl SceneBundleRecorder {
         if table.len() == table.capacity() {
             // Geometric, fallible growth rather than reallocating on each frame.
             let additional = table.capacity().max(4);
-            let bytes = additional.checked_mul(std::mem::size_of::<T>()).ok_or(
-                BundleError::CaptureLimitExceeded {
-                    context,
-                    needed: usize::MAX,
-                    limit: self.limits.max_capture_bytes,
-                },
-            )?;
-            self.charge(bytes, context)?;
-            table.try_reserve_exact(additional).map_err(|_| BundleError::AllocationFailed {
+            let overflow = BundleError::CaptureLimitExceeded {
                 context,
-                requested: additional,
-            })?;
+                needed: usize::MAX,
+                limit: self.limits.max_capture_bytes,
+            };
+            let bytes = additional
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or(overflow)?;
+            self.charge(bytes, context)?;
+            table
+                .try_reserve_exact(additional)
+                .map_err(|_| BundleError::AllocationFailed {
+                    context,
+                    requested: additional,
+                })?;
         }
         Ok(())
     }
@@ -205,7 +227,8 @@ impl SceneBundleRecorder {
             return Err(BundleError::FrameLimitExceeded {
                 frames: self.frames.saturating_add(1),
                 max_frames,
-            }.into());
+            }
+            .into());
         }
         Ok(())
     }
@@ -220,21 +243,26 @@ impl SceneBundleRecorder {
         result
     }
 
-    fn capture_snapshot(&mut self, bytes: Result<Vec<u8>, SerialError>) -> Result<(), RecordingError> {
+    fn capture_snapshot(
+        &mut self,
+        bytes: Result<Vec<u8>, SerialError>,
+    ) -> Result<(), RecordingError> {
         self.admit_frame()?;
         let bytes = bytes?;
         self.charge(bytes.len(), "recorded frame snapshot")?;
-        let active = self.active.is_some();
-        let mut segment = self.active.take().unwrap_or(RecordedSegment {
-            kind: SegmentKind::Wait,
-            frames: Vec::new(),
-        });
-        self.reserve(&mut segment.frames, "recorded frame table")?;
-        segment.frames.push(bytes);
-        if active {
-            self.active = Some(segment);
+        let mut frames = self
+            .active
+            .as_mut()
+            .map_or_else(Vec::new, |active| std::mem::take(&mut active.recorded.frames));
+        self.reserve(&mut frames, "recorded frame table")?;
+        frames.push(bytes);
+        if let Some(active) = &mut self.active {
+            active.recorded.frames = frames;
         } else {
-            self.append_segment(segment)?;
+            self.append_segment(RecordedSegment {
+                kind: SegmentKind::Wait,
+                frames,
+            })?;
         }
         self.frames += 1;
         Ok(())
@@ -249,26 +277,44 @@ impl SceneBundleRecorder {
                 if event.skipping || self.active.is_some() {
                     return Err(RecordingError::Unsupported("skipped or nested segment"));
                 }
-                self.active = Some(RecordedSegment {
-                    kind: event.segment.ok_or(RecordingError::Unsupported("segment kind missing"))?,
-                    frames: Vec::new(),
+                self.active = Some(ActiveSegment {
+                    recorded: RecordedSegment {
+                        kind: event
+                            .segment
+                            .ok_or(RecordingError::Unsupported("segment kind missing"))?,
+                        frames: Vec::new(),
+                    },
+                    base_frame: event.time.frames(),
+                    play_index: event.play_index,
                 });
             }
             LifecyclePhase::FinishSegment => {
-                let segment = self.active.take().ok_or(
-                    RecordingError::Unsupported("segment finished without beginning"),
-                )?;
-                if Some(segment.kind) != event.segment {
-                    return Err(RecordingError::Unsupported("segment kind changed"));
+                let active = self.active.take().ok_or(RecordingError::Unsupported(
+                    "segment finished without beginning",
+                ))?;
+                if Some(active.recorded.kind) != event.segment
+                    || active.play_index != event.play_index
+                {
+                    return Err(RecordingError::Unsupported("segment identity changed"));
                 }
-                self.append_segment(segment)?;
+                let count = i64::try_from(active.recorded.frames.len())
+                    .map_err(|_| RecordingError::Unsupported("frame count exceeds the clock"))?;
+                if active.base_frame.checked_add(count) != Some(event.time.frames()) {
+                    return Err(RecordingError::Unsupported(
+                        "segment finish does not match captured frame count",
+                    ));
+                }
+                self.append_segment(active.recorded)?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn retain_failure(&mut self, result: Result<(), RecordingError>) -> Result<(), IntegrationError> {
+    fn retain_failure(
+        &mut self,
+        result: Result<(), RecordingError>,
+    ) -> Result<(), IntegrationError> {
         if self.failure.is_none() {
             self.failure = result.err();
         }
@@ -284,58 +330,97 @@ impl SceneBundleRecorder {
     /// Returns the first capture failure, unfinished-segment errors, or canonical
     /// size/reader refusals. No file is created by this method.
     pub fn finish(self) -> Result<RecordedSceneBundle, RecordingError> {
+        self.finish_with_max_bytes(Limits::DEFAULT.max_total)
+    }
+
+    /// Finish under an explicit canonical output cap, enforced before growth.
+    ///
+    /// Both the nested schedule and the complete bundle use bounded writers.
+    /// Captured snapshots are released as they are encoded, before the finished
+    /// bytes are decoded for validation. Capture and decoder budgets remain
+    /// separate; this is not a bound on arbitrary scene-code allocations.
+    ///
+    /// # Errors
+    /// As [`Self::finish`], plus [`RecordingError::OutputLimit`] when the next
+    /// append would exceed the smaller of `max_bytes` and the reader's limit.
+    pub fn finish_with_max_bytes(
+        self,
+        max_bytes: usize,
+    ) -> Result<RecordedSceneBundle, RecordingError> {
         if let Some(error) = self.failure {
             return Err(error);
         }
         if self.active.is_some() {
             return Err(RecordingError::Unsupported("scene ended inside a segment"));
         }
-        let count = u32::try_from(self.segments.len()).map_err(|_| {
-            RecordingError::Unsupported("segment count exceeds FMTL/1")
-        })?;
+        let count = u32::try_from(self.segments.len())
+            .map_err(|_| RecordingError::Unsupported("segment count exceeds FMTL/1"))?;
         // Encode the existing FMNA/5 schedule and validate it with its sole
         // authoritative decoder. No new clock or playback law is introduced.
-        let mut schedule = Writer::new(TIMELINE_SCHEMA);
+        let limits = Limits {
+            max_total: max_bytes.min(Limits::DEFAULT.max_total),
+            ..Limits::DEFAULT
+        };
+        let encoding_error = |error| match error {
+            SerialError::SizeLimit { needed, limit } if limit == limits.max_total => {
+                RecordingError::OutputLimit { needed, limit }
+            }
+            error => RecordingError::from(error),
+        };
+        let mut schedule = Writer::with_limits(TIMELINE_SCHEMA, limits);
         schedule.put_u32(self.fps);
         schedule.put_u32(count);
-        let mut clock = RationalFrameClock::new(self.fps).map_err(|_| {
-            RecordingError::Unsupported("fps must be nonzero")
-        })?;
+        let mut clock = RationalFrameClock::new(self.fps)
+            .map_err(|_| RecordingError::Unsupported("fps must be nonzero"))?;
         for segment in &self.segments {
-            let n = i64::try_from(segment.frames.len()).map_err(|_| {
-                RecordingError::Unsupported("frame count exceeds the clock")
-            })?;
+            let n = i64::try_from(segment.frames.len())
+                .map_err(|_| RecordingError::Unsupported("frame count exceeds the clock"))?;
             // A rounded-up f64 quotient can create an extra frame (e.g. 3/30).
             // Choose the immediately lower value and verify with the exact clock.
-            let duration = if n == 0 { 0.0 } else { (n as f64 / f64::from(self.fps)).next_down() };
-            if clock.segment(duration).map_err(fmn_anim::AnimError::Clock)
-                .map_err(BundleError::Anim)?.n_frames() != n {
-                return Err(RecordingError::Unsupported("recorded duration does not fit the frame grid"));
+            let duration = if n == 0 {
+                0.0
+            } else {
+                (n as f64 / f64::from(self.fps)).next_down()
+            };
+            let sampled = clock
+                .segment(duration)
+                .map_err(fmn_anim::AnimError::Clock)
+                .map_err(BundleError::Anim)?;
+            if sampled.n_frames() != n {
+                return Err(RecordingError::Unsupported(
+                    "recorded duration does not fit the frame grid",
+                ));
             }
-            schedule.put_u8(match segment.kind { SegmentKind::Play => 0, SegmentKind::Wait => 1 });
+            schedule.put_u8(match segment.kind {
+                SegmentKind::Play => 0,
+                SegmentKind::Wait => 1,
+            });
             schedule.put_f64(duration);
             schedule.put_i64(clock.now().frames());
             schedule.put_i64(n);
-            clock.advance_frames(n).map_err(fmn_anim::AnimError::Clock).map_err(BundleError::Anim)?;
+            clock
+                .advance_frames(n)
+                .map_err(fmn_anim::AnimError::Clock)
+                .map_err(BundleError::Anim)?;
         }
         schedule.put_u32(0); // Imperative Scene has no authored Timeline labels.
-        let plan_bytes = schedule.finish()?;
+        let plan_bytes = schedule.finish().map_err(encoding_error)?;
         TimelinePlan::from_bytes(&plan_bytes).map_err(RecordingError::Plan)?;
-        let mut writer = Writer::new(TIMELINE_BUNDLE_SCHEMA);
+        let mut writer = Writer::with_limits(TIMELINE_BUNDLE_SCHEMA, limits);
         writer.put_str(&bundle_engine_version());
         writer.put_u32(self.fps);
         writer.put_bytes(&plan_bytes);
         writer.put_u32(count);
-        for segment in &self.segments {
+        for segment in self.segments {
             writer.put_u8(1); // Observed snapshots, never an unproven pure law.
             writer.put_u32(u32::try_from(segment.frames.len()).map_err(|_| {
                 RecordingError::Unsupported("segment frame count exceeds FMTL/1")
             })?);
-            for frame in &segment.frames {
-                writer.put_bytes(frame);
+            for frame in segment.frames {
+                writer.put_bytes(&frame);
             }
         }
-        let bytes = writer.finish()?;
+        let bytes = writer.finish().map_err(encoding_error)?;
         let decoded = TimelineBundle::from_bytes(&bytes).map_err(RecordingError::Decode)?;
         Ok(RecordedSceneBundle {
             digest: sha256(&bytes),
@@ -348,20 +433,44 @@ impl SceneBundleRecorder {
 
 impl SceneSink for SceneBundleRecorder {
     fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
-        let result = if self.failure.is_some() { Ok(()) } else { self.observe(event) };
+        let result = if self.failure.is_some() {
+            Ok(())
+        } else {
+            self.observe(event)
+        };
         self.retain_failure(result)
     }
 
-    fn capture(&mut self, reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         let result = (|| {
             self.admit_frame()?;
             if packet.time().fps() != self.fps {
                 return Err(RecordingError::Unsupported("capture frame rate changed"));
             }
-            match reason {
-                CaptureReason::Segment if self.active.is_some() => {}
-                CaptureReason::Show if self.active.is_none() => {}
-                _ => return Err(RecordingError::Unsupported("capture requires an ordinary segment or explicit show")),
+            match (reason, &self.active) {
+                (CaptureReason::Segment, Some(active)) => {
+                    let next = i64::try_from(active.recorded.frames.len())
+                        .ok()
+                        .and_then(|count| count.checked_add(1))
+                        .ok_or(RecordingError::Unsupported("frame count exceeds the clock"))?;
+                    if packet.segment_frame() != next
+                        || active.base_frame.checked_add(next) != Some(packet.time().frames())
+                    {
+                        return Err(RecordingError::Unsupported(
+                            "missing, duplicated or reordered segment capture",
+                        ));
+                    }
+                }
+                (CaptureReason::Show, None) if packet.segment_frame() == 0 => {}
+                _ => {
+                    return Err(RecordingError::Unsupported(
+                        "capture requires an ordinary segment or explicit show",
+                    ));
+                }
             }
             self.capture_snapshot(packet.state().to_bytes())
         })();

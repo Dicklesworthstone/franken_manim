@@ -70,8 +70,11 @@ Capture limits bound admitted frame count and cumulative canonical snapshot and
 destination-table storage. They do not interrupt arbitrary Rust code or the
 runtime's deterministic completion of an already-started animation segment.
 The complete canonical artifact also has the production format limit and the
-caller's `max_output_bytes` limit. Any capture failure permanently poisons the
-recording, even when scene code catches its play/wait error. Scene execution,
+caller's `max_output_bytes` limit, enforced by bounded writers before growth.
+Captured snapshots are released as they are encoded, before output validation.
+The recorder rejects missing, duplicated, reordered and mistagged segment
+captures, including a missing final capture detected at the finish boundary.
+Any capture failure permanently poisons the recording, even when scene code catches its play/wait error. Scene execution,
 serialization, size checks and production-reader validation all finish before
 file staging starts; a failed or panicking scene cannot publish partial output.
 

@@ -31,7 +31,7 @@ pub struct BundleExportOptions {
     pub config: Config,
     /// Cumulative snapshot/table budget and maximum admitted output frames.
     pub limits: BundleExportLimits,
-    /// Maximum complete canonical artifact size, checked before publication.
+    /// Maximum complete canonical artifact size, enforced during encoding.
     pub max_output_bytes: usize,
 }
 
@@ -103,7 +103,7 @@ pub enum BundleExportError {
     Scene(crate::Error),
     /// Snapshot capture, allocation, clock or format validation failed.
     Recording(RecordingError),
-    /// The finished artifact exceeded its declared output limit.
+    /// Encoding would exceed the effective canonical output limit.
     OutputLimit { needed: usize, limit: usize },
     /// Private staging, durable preparation or create-only publication failed.
     FileSystem(FsError),
@@ -116,7 +116,10 @@ impl fmt::Display for BundleExportError {
             Self::Scene(error) => error.fmt(f),
             Self::Recording(error) => error.fmt(f),
             Self::OutputLimit { needed, limit } => {
-                write!(f, "scene bundle needs {needed} bytes, exceeding the {limit}-byte output budget")
+                write!(
+                    f,
+                    "scene bundle needs {needed} bytes, exceeding the {limit}-byte output budget"
+                )
             }
             Self::FileSystem(error) => error.fmt(f),
         }
@@ -176,13 +179,14 @@ pub fn export_bundle_bytes<P: SceneConstruct + ?Sized>(
         // The typed failure is retained by the recorder and returned by finish.
         let _ = recorder.capture_terminal_still(completed.scene().stage());
     }
-    let bundle = recorder.finish().map_err(BundleExportError::Recording)?;
-    if bundle.bytes.len() > options.max_output_bytes {
-        return Err(BundleExportError::OutputLimit {
-            needed: bundle.bytes.len(),
-            limit: options.max_output_bytes,
-        });
-    }
+    let bundle = recorder
+        .finish_with_max_bytes(options.max_output_bytes)
+        .map_err(|error| match error {
+            RecordingError::OutputLimit { needed, limit } => {
+                BundleExportError::OutputLimit { needed, limit }
+            }
+            error => BundleExportError::Recording(error),
+        })?;
     Ok(SceneBundleExport {
         scene: *completed.report(),
         bundle,

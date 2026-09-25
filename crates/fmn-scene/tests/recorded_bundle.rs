@@ -22,42 +22,69 @@ impl SceneSink for ObservedRecording {
         self.recorder.event(event)
     }
 
-    fn capture(&mut self, reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         self.frames.push(packet.state().to_bytes().unwrap());
         self.recorder.capture(reason, packet)
     }
 }
 
 fn scene(fps: u32) -> Scene {
-    Scene::new(RuntimeConfig { fps, ..RuntimeConfig::default() }, 19).unwrap()
+    let config = RuntimeConfig {
+        fps,
+        ..RuntimeConfig::default()
+    };
+    Scene::new(config, 19).unwrap()
 }
 
 #[test]
 fn imperative_play_wait_and_show_replay_every_observed_snapshot_without_callbacks() {
     let mut source = scene(30);
-    let moving = source.add_mobject(Mobject::from_points(&[[0.0, 0.0, 0.0]])).unwrap();
-    let following = source.add_mobject(Mobject::from_points(&[[0.0, 1.0, 0.0]])).unwrap();
+    let moving = source
+        .add_mobject(Mobject::from_points(&[[0.0, 0.0, 0.0]]))
+        .unwrap();
+    let following = source
+        .add_mobject(Mobject::from_points(&[[0.0, 1.0, 0.0]]))
+        .unwrap();
     let calls = Rc::new(Cell::new(0));
     let counter = calls.clone();
-    source.stage_mut().add_updater(following, move |stage, me| {
-        counter.set(counter.get() + 1);
-        // This depends on post-interpolation geometry, not just final endpoints.
-        let x = stage.get_center(moving)[0];
-        stage.set_x(me, x * x);
-    }, false).unwrap();
+    source
+        .stage_mut()
+        .add_updater(
+            following,
+            move |stage, me| {
+                counter.set(counter.get() + 1);
+                // This depends on post-interpolation geometry, not just endpoints.
+                let x = stage.get_center(moving)[0];
+                stage.set_x(me, x * x);
+            },
+            false,
+        )
+        .unwrap();
     let animation = prepare_animation(
-        moving.animate().set_anim_args(AnimateArgs {
-            run_time: Some(0.1),
-            rate_func: Some(fmn_core::rate::there_and_back),
-            ..AnimateArgs::default()
-        }).unwrap().shift([2.0, 0.0, 0.0]).unwrap(),
+        moving
+            .animate()
+            .set_anim_args(AnimateArgs {
+                run_time: Some(0.1),
+                rate_func: Some(fmn_core::rate::there_and_back),
+                ..AnimateArgs::default()
+            })
+            .unwrap()
+            .shift([2.0, 0.0, 0.0])
+            .unwrap(),
         source.stage_mut(),
-    ).unwrap();
+    )
+    .unwrap();
     let mut sink = ObservedRecording {
         recorder: SceneBundleRecorder::new(30, BundleExportLimits::default()).unwrap(),
         frames: Vec::new(),
     };
-    source.play(vec![animation], PlayOverrides::default(), &mut sink).unwrap();
+    source
+        .play(vec![animation], PlayOverrides::default(), &mut sink)
+        .unwrap();
     source.wait(Some(0.0), &mut sink).unwrap();
     source.show(&mut sink).unwrap();
     source.wait(Some(0.1), &mut sink).unwrap();
@@ -69,11 +96,15 @@ fn imperative_play_wait_and_show_replay_every_observed_snapshot_without_callback
     assert_eq!(artifact.segment_count, 4);
     let bundle = TimelineBundle::from_bytes(&artifact.bytes).unwrap();
     for segment in 0..4 {
-        assert_eq!(bundle.segment_kind(segment), Some(BundleSegmentKind::Stateful));
+        assert_eq!(
+            bundle.segment_kind(segment),
+            Some(BundleSegmentKind::Stateful)
+        );
     }
     // Reverse/random-access playback must not execute the original updater.
     for index in (0..artifact.frame_count).rev() {
-        assert_eq!(bundle.stage_at(index).unwrap().snapshot().to_bytes().unwrap(), sink.frames[index as usize]);
+        let replayed = bundle.stage_at(index).unwrap().snapshot().to_bytes().unwrap();
+        assert_eq!(replayed, sink.frames[index as usize]);
     }
     assert_eq!(calls.get(), calls_before_playback);
 }
@@ -106,37 +137,52 @@ fn static_terminal_capture_is_explicit_and_deterministic() {
     let b = export();
     assert_eq!(a.bytes, b.bytes);
     assert_eq!(a.frame_count, 1);
-    let restored = TimelineBundle::from_bytes(&a.bytes).unwrap().stage_at(0).unwrap();
-    assert_eq!(restored.snapshot().to_bytes().unwrap(), stage.snapshot().to_bytes().unwrap());
+    let restored = TimelineBundle::from_bytes(&a.bytes)
+        .unwrap()
+        .stage_at(0)
+        .unwrap();
+    assert_eq!(
+        restored.snapshot().to_bytes().unwrap(),
+        stage.snapshot().to_bytes().unwrap()
+    );
 }
 
 #[test]
 fn frame_limit_is_typed_sticky_and_never_yields_a_partial_bundle() {
     let mut source = scene(30);
-    let mut sink = SceneBundleRecorder::new(30, BundleExportLimits {
+    let limits = BundleExportLimits {
         max_frames: 1,
         ..BundleExportLimits::default()
-    }).unwrap();
+    };
+    let mut sink = SceneBundleRecorder::new(30, limits).unwrap();
     assert!(source.wait(Some(0.1), &mut sink).is_err());
     assert_eq!(sink.frame_count(), 1);
     assert!(source.show(&mut sink).is_err());
-    assert!(matches!(sink.finish(), Err(RecordingError::Bundle(
-        BundleError::FrameLimitExceeded { frames: 2, max_frames: 1 }
-    ))));
+    assert!(matches!(
+        sink.finish(),
+        Err(RecordingError::Bundle(BundleError::FrameLimitExceeded {
+            frames: 2,
+            max_frames: 1
+        }))
+    ));
 }
 
 #[test]
 fn capture_budget_includes_destination_tables() {
     let stage = Stage::new();
     let snapshot_bytes = stage.snapshot().to_bytes().unwrap().len();
-    let mut sink = SceneBundleRecorder::new(30, BundleExportLimits {
+    let limits = BundleExportLimits {
         max_frames: 10,
         max_capture_bytes: snapshot_bytes,
-    }).unwrap();
+    };
+    let mut sink = SceneBundleRecorder::new(30, limits).unwrap();
     assert!(sink.capture_terminal_still(&stage).is_err());
-    assert!(matches!(sink.finish(), Err(RecordingError::Bundle(
-        BundleError::CaptureLimitExceeded { .. }
-    ))));
+    assert!(matches!(
+        sink.finish(),
+        Err(RecordingError::Bundle(
+            BundleError::CaptureLimitExceeded { .. }
+        ))
+    ));
 }
 
 #[test]
@@ -144,9 +190,15 @@ fn unsupported_capture_and_clock_mismatch_fail_closed() {
     let stage = Stage::new();
     let clock = RationalFrameClock::new(30).unwrap();
     let rng = RngRoot::from_seed(0);
-    for reason in [CaptureReason::SkippedPreview, CaptureReason::PresenterHold, CaptureReason::Segment] {
+    let reasons = [
+        CaptureReason::SkippedPreview,
+        CaptureReason::PresenterHold,
+        CaptureReason::Segment,
+    ];
+    for reason in reasons {
         let mut sink = SceneBundleRecorder::new(30, BundleExportLimits::default()).unwrap();
-        assert!(sink.capture(reason, FramePacket::freeze_barrier(&stage, &clock, &rng)).is_err());
+        let packet = FramePacket::freeze_barrier(&stage, &clock, &rng);
+        assert!(sink.capture(reason, packet).is_err());
         assert!(sink.finish().is_err());
     }
     let mut source = scene(24);
@@ -157,12 +209,136 @@ fn unsupported_capture_and_clock_mismatch_fail_closed() {
 
 #[test]
 fn zero_frame_budget_refuses_even_terminal_stills() {
-    let mut sink = SceneBundleRecorder::new(30, BundleExportLimits {
+    let limits = BundleExportLimits {
         max_frames: 0,
         ..BundleExportLimits::default()
-    }).unwrap();
+    };
+    let mut sink = SceneBundleRecorder::new(30, limits).unwrap();
     assert!(sink.capture_terminal_still(&Stage::new()).is_err());
     assert_eq!(sink.frame_count(), 0);
     assert!(sink.finish().is_err());
     assert!(SceneBundleRecorder::new(0, BundleExportLimits::default()).is_err());
+}
+
+#[derive(Clone)]
+enum TraceItem {
+    Event(LifecycleEvent),
+    Capture(CaptureReason, FramePacket),
+}
+
+#[derive(Default)]
+struct CaptureTrace(Vec<TraceItem>);
+
+impl SceneSink for CaptureTrace {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        self.0.push(TraceItem::Event(event));
+        Ok(())
+    }
+
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
+        self.0.push(TraceItem::Capture(reason, packet));
+        Ok(())
+    }
+}
+
+fn recorded_trace(items: Vec<TraceItem>) -> Result<(), RecordingError> {
+    let mut recorder = SceneBundleRecorder::new(30, BundleExportLimits::default()).unwrap();
+    // Continue after adapter errors to verify that ignored failures stay sticky.
+    for item in items {
+        let _ = match item {
+            TraceItem::Event(event) => recorder.event(event),
+            TraceItem::Capture(reason, packet) => recorder.capture(reason, packet),
+        };
+    }
+    recorder.finish().map(|_| ())
+}
+
+#[test]
+fn missing_repeated_or_out_of_order_frames_are_not_silently_retimed() {
+    let mut source = scene(30);
+    let mut trace = CaptureTrace::default();
+    source.wait(Some(0.1), &mut trace).unwrap();
+    assert!(recorded_trace(trace.0.clone()).is_ok());
+    let captures: Vec<usize> = trace
+        .0
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| matches!(item, TraceItem::Capture(_, _)).then_some(index))
+        .collect();
+    assert!(captures.len() > 1);
+
+    let mut missing_first = trace.0.clone();
+    missing_first.remove(captures[0]);
+    assert!(recorded_trace(missing_first).is_err());
+
+    let mut missing_last = trace.0.clone();
+    missing_last.remove(*captures.last().unwrap());
+    assert!(recorded_trace(missing_last).is_err());
+
+    let mut duplicated = trace.0.clone();
+    duplicated.insert(captures[0], duplicated[captures[0]].clone());
+    assert!(recorded_trace(duplicated).is_err());
+
+    let mut reordered = trace.0.clone();
+    reordered.swap(captures[0], captures[1]);
+    assert!(recorded_trace(reordered).is_err());
+
+    let mut sampled_show = trace.0;
+    let TraceItem::Capture(reason, _) = &mut sampled_show[captures[0]] else {
+        panic!("the trace item must be a capture");
+    };
+    *reason = CaptureReason::Show;
+    assert!(recorded_trace(sampled_show).is_err());
+}
+
+#[test]
+fn altered_or_missing_segment_boundaries_cannot_finalize() {
+    let mut source = scene(30);
+    let mut trace = CaptureTrace::default();
+    source.wait(Some(0.1), &mut trace).unwrap();
+    let finish = trace
+        .0
+        .iter()
+        .position(|item| {
+            matches!(item,
+                TraceItem::Event(event) if event.phase == fmn_scene::LifecyclePhase::FinishSegment
+            )
+        })
+        .unwrap();
+
+    let mut mismatched = trace.0.clone();
+    let TraceItem::Event(event) = &mut mismatched[finish] else {
+        panic!("the trace item must be an event");
+    };
+    event.play_index += 1;
+    assert!(recorded_trace(mismatched).is_err());
+
+    let mut unfinished = trace.0;
+    unfinished.remove(finish);
+    assert!(recorded_trace(unfinished).is_err());
+}
+
+#[test]
+fn canonical_output_budget_accepts_exact_size_and_refuses_one_byte_less() {
+    let stage = Stage::new();
+    let record = || {
+        let mut recorder = SceneBundleRecorder::new(30, BundleExportLimits::default()).unwrap();
+        recorder.capture_terminal_still(&stage).unwrap();
+        recorder
+    };
+    let expected = record().finish().unwrap();
+    let exact = record().finish_with_max_bytes(expected.bytes.len()).unwrap();
+    assert_eq!(exact.bytes, expected.bytes);
+    let limit = expected.bytes.len() - 1;
+    assert!(matches!(record().finish_with_max_bytes(limit),
+        Err(RecordingError::OutputLimit { needed, limit: actual })
+            if needed == expected.bytes.len() && actual == limit));
+    assert!(matches!(
+        record().finish_with_max_bytes(0),
+        Err(RecordingError::OutputLimit { limit: 0, .. })
+    ));
 }
