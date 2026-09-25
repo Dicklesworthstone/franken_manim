@@ -75,7 +75,7 @@ fn overflowed_normal_control_is_never_published() {
 
 #[test]
 fn hostile_dimensions_and_products_fail_before_callbacks() {
-    for shape in [(usize::MAX, 2), (0, usize::MAX), (257, 256), (65537, 0)] {
+    for shape in [(usize::MAX, 2), (0, usize::MAX), (513, 512), (262145, 0)] {
         let mut s = spec();
         s.resolution = shape;
         let result = s
@@ -118,7 +118,7 @@ fn explicit_budget_is_exact_and_allows_deliberate_larger_grids() {
         .unwrap();
     assert_eq!(surface.points().len(), 12);
     let large = SurfaceSpec {
-        resolution: (257, 256),
+        resolution: (513, 512),
         ..spec()
     };
     assert!(
@@ -130,12 +130,12 @@ fn explicit_budget_is_exact_and_allows_deliberate_larger_grids() {
         large
             .try_sample_with_budget(
                 |u, v| Ok::<_, Infallible>([u, v, 0.0]),
-                SamplingBudget::new(257 * 256)
+                SamplingBudget::new(513 * 512)
             )
             .unwrap()
             .points()
             .len(),
-        257 * 256
+        513 * 512
     );
 }
 

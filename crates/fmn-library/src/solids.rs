@@ -174,6 +174,13 @@ fn surface_station(range: (f64, f64), count: usize, index: usize) -> f64 {
     }
 }
 
+/// Default UV sampling budget, shared with Marionette's alignment ceiling.
+///
+/// Dense charts (including 301-by-301) are distinct from curves, fields and
+/// wireframe output, whose [`SamplingBudget::DEFAULT`] remains unchanged.
+pub const SURFACE_SAMPLING_BUDGET: SamplingBudget =
+    SamplingBudget::new(fmn_mobject::stage::MAX_SURFACE_GRID_POINTS);
+
 /// The Reference's `Surface(resolution=(101, 101))` default.
 pub const SURFACE_RESOLUTION: (usize, usize) = (101, 101);
 /// The Reference's `Surface(epsilon=1e-3)` — the du/dv step, added in UV
@@ -385,7 +392,7 @@ impl SurfaceSpec {
         &self,
         uv_func: impl FnMut(f64, f64) -> Result<Vec3, E>,
     ) -> Result<Surface, SurfaceSampleError<E>> {
-        self.try_sample_with_budget(uv_func, SamplingBudget::DEFAULT)
+        self.try_sample_with_budget(uv_func, SURFACE_SAMPLING_BUDGET)
     }
 
     /// The explicit-budget form of [`Self::try_sample`]. All dimensions,
@@ -2339,7 +2346,7 @@ impl SurfaceMesh {
     }
 
     fn validate_grid(&self) -> Result<(), SurfaceMeshError> {
-        let budget = crate::SamplingBudget::DEFAULT.max_samples();
+        let budget = SURFACE_SAMPLING_BUDGET.max_samples();
         let (nu, nv) = self.source_resolution;
         let count = nu.checked_mul(nv).ok_or(SurfaceMeshError::SampleLimit)?;
         if count > budget || nu > budget || nv > budget {
