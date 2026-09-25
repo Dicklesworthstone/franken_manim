@@ -8490,18 +8490,11 @@ class Tex(StringMobject):
                     start <= sub_start and sub_end <= end
                     for sub_start, sub_end in self._string_sub_spans
                 ):
-                    keyword = _TEX_COMMAND_TOKEN.search(self.string[span[0] : span[1]])
                     raise _TexError(
                         "isolate "
                         + repr(self.string[span[0] : span[1]])
                         + " is not in the native span map of "
                         + repr(self.string)
-                        + (
-                            " (selecting a command's own ink, such as a fraction "
-                            "bar by its keyword, is fm-5wq.22)"
-                            if keyword
-                            else ""
-                        )
                     )
 
     def get_color_command(self, color: str) -> str:

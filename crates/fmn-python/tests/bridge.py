@@ -15944,18 +15944,18 @@ assert len(iso_fade_alphas) == 2, iso_fade_alphas
 assert math.isclose(iso_fade_alphas[0], 0.5, rel_tol=0.0, abs_tol=1e-9)
 assert math.isclose(iso_fade_alphas[1], 0.0, rel_tol=0.0, abs_tol=1e-9)
 
-# An isolate occurrence the Reference would give ink but that owns no
-# span-map primitive is a named error, never a silent no-op selection (a
-# command's own ink, fm-5wq.22). A whitespace isolate draws nothing under the
-# Reference's parse either, so it is tolerated and leaves the geometry alone.
-# An isolate entry with no occurrence at all stays tolerated (the Reference's
-# behavior, pinned above for the multi-part "=" case).
+# A labelled isolate occurrence that owns no span-map primitive (a bare
+# script marker) is a named error, never a silent no-op selection. A
+# whitespace isolate draws nothing under the Reference's parse either, so it
+# is tolerated and leaves the geometry alone. An isolate entry with no
+# occurrence at all stays tolerated (the Reference's behavior, pinned above
+# for the multi-part "=" case).
 assert np.array_equal(
     manimlib.Tex("x^2 + y^2", isolate=[" "]).get_all_points(),
     manimlib.Tex("x^2 + y^2").get_all_points(),
 )
 try:
-    manimlib.Tex(r"{a \over b}", isolate=[r"\over"])
+    manimlib.Tex("x^2 + y^2", isolate=["^"])
 except bridge_errors.TexError as error:
     assert "is not in the native span map" in str(error), error
 else:
@@ -20779,8 +20779,7 @@ assert len(_old_tex_module.OldTex("a", "+", "b")) == 3
 # fm-5wq.14: isolate follows the Reference parse's labelling rules
 # (string_mobject.py:210). It skips an occurrence inside a command token
 # (the "s" in \sqrt) and a lone brace, and whitespace draws nothing, so none
-# of these errors. Isolating a command's own ink (\over) remains a named
-# error until fm-5wq.22.
+# of these errors.
 _isolated_s = manimlib.Tex(r"{s} = {-b \pm \sqrt{s}}", isolate=["s"])
 assert len(_isolated_s.select_parts("s").family_members_with_points()) == 2
 # Isolation regroups glyphs into parts, so compare the geometry as a multiset.
@@ -20789,12 +20788,20 @@ assert sorted(map(tuple, np.round(_isolated_s.get_all_points(), 6))) == sorted(
 )
 manimlib.Tex("{x}+{y}", isolate=["}"])
 assert len(_old_tex_module.OldTex("a", "\n   ", "b").family_members_with_points()) == 2
-try:
-    manimlib.Tex(r"{a \over b}", isolate=[r"\over"])
-except bridge_errors.TexError as error:
-    assert "fm-5wq.22" in str(error), error
-else:
-    raise AssertionError("a command-keyword isolate silently lost the fraction bar")
+# fm-5wq.22: a command keyword selects the ink the command draws, as the
+# Reference's select_unisolated_substring does: \over the fraction bar,
+# \sqrt the radical sign and vinculum. Isolating \over gives the bar its own
+# part, and argument glyphs never join it.
+_over = manimlib.Tex(r"{a \over b}", isolate=[r"\over"])
+_bar = _over[r"\over"].family_members_with_points()
+assert len(_bar) == 1 and _bar[0].get_height() < 0.1 < _bar[0].get_width()
+assert len(_over.submobjects) == 3
+_root = manimlib.Tex(r"x = \sqrt{c}")
+assert len(_root[r"\sqrt"].family_members_with_points()) == 2
+assert len(_root["c"].family_members_with_points()) == 1
+_nested = manimlib.Tex(r"\frac{\sqrt{x}}{2}")
+assert len(_nested[r"\frac"].family_members_with_points()) == 1
+assert len(_nested[r"\sqrt"].family_members_with_points()) == 2
 
 
 # fm-5wq.14: TexText's `alignment` (tex_mobject.py:189). The default
