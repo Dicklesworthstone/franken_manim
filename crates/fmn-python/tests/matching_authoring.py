@@ -58,8 +58,14 @@ def test_custom_block_plan_controls_real_children_and_native_metadata():
             return [(source._string_submobject(0), target._string_submobject(0))]
     source, target = ml.Text("ab"), ml.Text("ba").shift(ml.RIGHT)
     animation = FirstOnly(source, target, run_time=2 / 30)
+    # The matched block transforms; the leftovers fade to/from points
+    # (FadeOutToPoint/FadeInFromPoint are the Reference's FadeOut/FadeIn
+    # subclasses, riding the fade_out/fade_in kinds).
     assert [child._native_kind for child in animation.animations] == [
-        "transform", "fade_out_to_point", "fade_in_from_point",
+        "transform", "fade_out", "fade_in",
+    ]
+    assert [type(child) for child in animation.animations[1:]] == [
+        ml.FadeOutToPoint, ml.FadeInFromPoint,
     ]
     params = animation._native_params()
     assert "source_keys" in params and "target_keys" in params

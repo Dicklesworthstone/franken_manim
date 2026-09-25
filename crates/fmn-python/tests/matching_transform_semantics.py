@@ -69,7 +69,12 @@ def test_stock_native_matches_and_unmatched_fades():
     animation = ml.TransformMatchingShapes(source, target, run_time=3 / 30)
     kinds = [anim._native_kind for anim in animation.animations]
     assert "transform" in kinds
-    assert "fade_out_to_point" in kinds and "fade_in_from_point" in kinds
+    # Unmatched pieces fade to/from points, as transform_matching_parts.py
+    # builds them. The point fades are the Reference's FadeOut/FadeIn
+    # subclasses, so they ride the fade_out/fade_in kinds.
+    classes = [type(anim) for anim in animation.animations]
+    assert ml.FadeOutToPoint in classes and ml.FadeInFromPoint in classes
+    assert {"fade_out", "fade_in"} <= set(kinds)
     scene = ml.Scene()
     scene.add(source)
     scene.play(animation)
