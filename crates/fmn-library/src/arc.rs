@@ -948,7 +948,9 @@ mod tests {
                 .build_with_components(count)
                 .expect("a valid explicit count");
             assert_eq!(circle.points().len(), 2 * count + 1);
-            assert!(matches!(circle.shape(), ShapeTag::Circle { radius, .. } if close(radius, 2.0)));
+            assert!(
+                matches!(circle.shape(), ShapeTag::Circle { radius, .. } if close(radius, 2.0))
+            );
             for anchor in circle.points().iter().step_by(2) {
                 assert!(close(space_ops::get_norm(*anchor), 2.0));
             }

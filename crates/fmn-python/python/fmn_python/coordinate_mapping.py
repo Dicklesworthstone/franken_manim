@@ -230,8 +230,16 @@ def install_coordinate_labels(native):
             for index, values in enumerate((x_values, y_values)):
                 if values is None:
                     axis = axes[index]
-                    values = (axis.get_tick_range() if isinstance(axis, Line)
-                              else _label_ticks(np, ranges[index], axis_config(self, index).get("include_tip", False)))
+                    # coordinate_systems.py:529 labels each axis's own tick
+                    # range. The stock one is computed under the label budget
+                    # (as NumberLine.add_numbers does); an authored override
+                    # is honoured.
+                    if not isinstance(axis, Line):
+                        values = _label_ticks(np, ranges[index], axis_config(self, index).get("include_tip", False))
+                    elif getattr(axis.get_tick_range, "__func__", None) is stock_ticks:
+                        values = _label_ticks(np, (axis.x_min, axis.x_max, axis.x_step), axis.include_tip)
+                    else:
+                        values = axis.get_tick_range()
                 batches.append([v for v in _label_values(values, "axis labels") if v not in excluded])
             if sum(map(len, batches)) > _MAX_LABELS:
                 raise ValueError("coordinate labels exceed the 4096-label budget")
@@ -240,12 +248,15 @@ def install_coordinate_labels(native):
                       for index, (axis, values) in enumerate(zip(axes, batches))]
             check_chart(self, axes, ranges, before)
             # Both axes are completely prepared before either is attached.
-            # Keep each batch under its actual axis, not an additional detached
-            # aggregate whose copied aliases would name another native family.
+            # Each batch is parented by its own axis. coordinate_systems.py:520
+            # also keeps the pair as self.coordinate_labels and returns it; that
+            # group is an unparented view, so a copy of the chart shares it as
+            # the Reference's copy does, while deepcopy and pickle remap it.
             for axis, group in zip(axes, groups):
                 axis.add(group)
                 axis.numbers = group
-            return self
+            self.coordinate_labels = Group(*groups)
+            return self.coordinate_labels
         finally:
             active.difference_update(ids)
 

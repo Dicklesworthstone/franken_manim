@@ -221,7 +221,11 @@ class AxesLabelsTests(unittest.TestCase):
         matrix = np.array([[-1.2, .5, 0], [.75, 1.5, 0], [.4, -.3, 1.]])
         offset = np.array([.25, -.5, 1.])
         axes = m.Axes((-2, 2, 1), (-2, 2, 1)).apply_matrix(matrix).shift(offset)
-        self.assertIs(axes.add_coordinate_labels([-1, 1], [-1, 1]), axes)
+        # coordinate_systems.py:520 returns the labels, kept as
+        # axes.coordinate_labels = VGroup(x numbers, y numbers).
+        labels = axes.add_coordinate_labels([-1, 1], [-1, 1])
+        self.assertIs(labels, axes.coordinate_labels)
+        self.assertEqual(list(labels), [axes.x_axis.numbers, axes.y_axis.numbers])
         for dim, axis in enumerate(axes.get_axes()):
             direction = m.DOWN if dim == 0 else m.LEFT
             for value, label in zip((-1, 1), axis.numbers):
@@ -328,7 +332,7 @@ class AxesLabelsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'reenter'):
             axes.add_coordinate_labels([1], [1])
         axes.recursive = False
-        self.assertIs(axes.add_coordinate_labels([1], [1]), axes)
+        self.assertIs(axes.add_coordinate_labels([1], [1]), axes.coordinate_labels)
 
     def test_shared_axis_reentry_cannot_publish_another_charts_batch(self):
         first = m.Axes((-1, 1, 1), (-1, 1, 1))
@@ -346,8 +350,8 @@ class AxesLabelsTests(unittest.TestCase):
         self.assertEqual((tuple(first.x_axis.submobjects), tuple(first.y_axis.submobjects)), before)
         self.assertNotIn('numbers', vars(second.y_axis))
         del first.y_axis.get_number_mobject
-        self.assertIs(first.add_coordinate_labels([1], [1]), first)
-        self.assertIs(second.add_coordinate_labels([1], [1]), second)
+        self.assertIs(first.add_coordinate_labels([1], [1]), first.coordinate_labels)
+        self.assertIs(second.add_coordinate_labels([1], [1]), second.coordinate_labels)
 
     def test_callback_copies_of_chart_remain_labelable(self):
         axes = m.Axes((-1, 1, 1), (-1, 1, 1)); copies = []
@@ -359,7 +363,7 @@ class AxesLabelsTests(unittest.TestCase):
         axes.y_axis.get_number_mobject = MethodType(duplicate, axes.y_axis)
         axes.add_coordinate_labels([1], [1])
         for cloned in copies:
-            self.assertIs(cloned.add_coordinate_labels([1], [1]), cloned)
+            self.assertIs(cloned.add_coordinate_labels([1], [1]), cloned.coordinate_labels)
 
     def test_bound_plane_grid_views_snapshot_and_animation_ownership(self):
         plane = m.NumberPlane((-1, 1, 1), (-1, 1, 1), faded_line_ratio=1)
@@ -400,7 +404,10 @@ class AxesLabelsTests(unittest.TestCase):
             axes.add_coordinate_labels(itertools.repeat(1), [])
         with self.assertRaisesRegex(ValueError, 'budget'):
             axes.add_coordinate_labels([1]*2050, [1]*2050)
-        axes.x_range = (-1, 1, 1e-50)
+        # Default labels come from each axis's own tick range
+        # (coordinate_systems.py:529), so an explosive axis step is refused
+        # by the label budget before any formatting.
+        axes.x_axis.x_step = 1e-50
         with self.assertRaisesRegex(ValueError, 'budget'):
             axes.add_coordinate_labels()
         self.assertEqual(calls, [])

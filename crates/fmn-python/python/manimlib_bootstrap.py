@@ -6929,7 +6929,10 @@ class Axes(VGroup, CoordinateSystem):
         )
         _hang_native_children(self.x_axis, x_specs)
         _hang_native_children(self.y_axis, y_specs)
-        return self
+        # coordinate_systems.py:520 keeps both axes' number groups and
+        # returns them, not the axes.
+        self.coordinate_labels = VGroup(self.x_axis.numbers, self.y_axis.numbers)
+        return self.coordinate_labels
 
 
 class ThreeDAxes(Axes):
@@ -9557,28 +9560,19 @@ class Clock(VGroup):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        style = dict(
-            stroke_color=stroke_color,
-            stroke_width=float(stroke_width),
-            fill_opacity=0.0,
-        )
-        circle = Circle(radius=1.0, **style)
-        ticks = VGroup()
+        # drawings.py:296: ticks run inward from the rim, every third one
+        # (12, 3, 6, 9) twice as long; the family is circle, hands, ticks.
+        style = dict(stroke_color=stroke_color, stroke_width=float(stroke_width))
+        circle = Circle(**style)
+        self.ticks = VGroup()
         for hour in range(12):
             angle = hour * _math.tau / 12.0
-            direction = _np.array(
-                [_math.sin(angle), _math.cos(angle), 0.0], dtype=float
-            )
-            ticks.add(
-                Line((1.0 - float(tick_length)) * direction, direction, **style)
-            )
-        self.hour_hand = Line(
-            _ORIGIN, float(hour_hand_height) * _UP, **style
-        )
-        self.minute_hand = Line(
-            _ORIGIN, float(minute_hand_height) * _UP, **style
-        )
-        self.add(circle, ticks, self.hour_hand, self.minute_hand)
+            point = _math.cos(angle) * _UP + _math.sin(angle) * _RIGHT
+            length = float(tick_length) * (2.0 if hour % 3 == 0 else 1.0)
+            self.ticks.add(Line(point, (1.0 - length) * point, **style))
+        self.hour_hand = Line(_ORIGIN, float(hour_hand_height) * _UP, **style)
+        self.minute_hand = Line(_ORIGIN, float(minute_hand_height) * _UP, **style)
+        self.add(circle, self.hour_hand, self.minute_hand, self.ticks)
 
 
 class Speedometer(VMobject):

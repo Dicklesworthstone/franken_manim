@@ -6496,13 +6496,32 @@ assert list(inspect.signature(drawings.Clock).parameters) == [
     "tick_length",
     "kwargs",
 ]
+# geometry.py:386: Circle passes n_components on to Arc; 2**14 is a real
+# corpus request (_2022/visual_proofs/lies.py).
+_dense_circle = manimlib.Circle(radius=2.0, n_components=32)
+assert len(_dense_circle.get_points()) == 65 and np.isclose(_dense_circle.get_radius(), 2.0)
+assert len(manimlib.Circle(n_components=2**14).get_points()) == 2 * 2**14 + 1
+try:
+    manimlib.Circle(n_components=0)
+except ValueError as error:
+    assert "component" in str(error), error
+else:
+    raise AssertionError("Circle accepted zero arc components")
+
 clock = drawings.Clock()
+# drawings.py:296: VGroup(circle, hour_hand, minute_hand, ticks), with
+# self.ticks exposed; ticks run inward from the rim, every third doubled.
 assert len(clock.submobjects) == 4
-assert clock.hour_hand is clock.submobjects[2]
-assert clock.minute_hand is clock.submobjects[3]
+assert clock.hour_hand is clock.submobjects[1]
+assert clock.minute_hand is clock.submobjects[2]
+assert clock.ticks is clock.submobjects[3] and len(clock.ticks) == 12
 assert np.isclose(clock.hour_hand.get_length(), 0.3)
 assert np.isclose(clock.minute_hand.get_length(), 0.6)
-assert len(clock.submobjects[1].submobjects) == 12
+assert np.allclose(clock.ticks[0].get_start(), [0.0, 1.0, 0.0])
+assert np.allclose(clock.ticks[0].get_end(), [0.0, 0.8, 0.0])
+assert np.allclose(clock.ticks[1].get_start(), [0.5, math.sqrt(3) / 2, 0.0])
+assert np.isclose(clock.ticks[1].get_length(), 0.1)
+assert [round(tick.get_length(), 6) for tick in clock.ticks[::3]] == [0.2] * 4
 tall_clock = drawings.Clock(hour_hand_height=0.4, minute_hand_height=0.8)
 assert np.isclose(tall_clock.hour_hand.get_length(), 0.4)
 assert np.isclose(tall_clock.minute_hand.get_length(), 0.8)
@@ -12586,7 +12605,12 @@ label_counts_before = (
     len(label_plane.x_axis.submobjects),
     len(label_plane.y_axis.submobjects),
 )
-assert label_plane.add_coordinate_labels() is label_plane
+# coordinate_systems.py:520 returns the labels, kept as coordinate_labels.
+assert label_plane.add_coordinate_labels() is label_plane.coordinate_labels
+assert list(label_plane.coordinate_labels) == [
+    label_plane.x_axis.numbers,
+    label_plane.y_axis.numbers,
+]
 assert len(label_plane.x_axis.submobjects) == label_counts_before[0] + 1
 assert len(label_plane.y_axis.submobjects) == label_counts_before[1] + 1
 plane_label_members = [
@@ -12599,16 +12623,13 @@ assert any(member.get_width() > 0.0 for member in plane_label_members)
 assert any(member.get_height() > 0.0 for member in plane_label_members)
 
 # The native DecimalNumber shelf accepts font_size, so Axes forwards it.
-small_label_axes = manimlib.Axes(
+small_labels = manimlib.Axes(
     x_range=(-1.0, 2.0, 1.0), y_range=(-1.0, 2.0, 1.0)
 ).add_coordinate_labels(font_size=18)
-large_label_axes = manimlib.Axes(
+large_labels = manimlib.Axes(
     x_range=(-1.0, 2.0, 1.0), y_range=(-1.0, 2.0, 1.0)
 ).add_coordinate_labels(font_size=36)
-assert (
-    large_label_axes.x_axis.submobjects[-1].get_height()
-    > small_label_axes.x_axis.submobjects[-1].get_height()
-)
+assert large_labels[0].get_height() > small_labels[0].get_height()
 
 try:
     manimlib.NumberPlane().add_coordinate_labels(excluding=object())
@@ -21018,7 +21039,7 @@ assert np.allclose(
     two_term_axes.point_to_coords(two_term_axes.c2p(1.0, 0.5)),
     [1.0, 0.5],
 )
-assert two_term_axes.add_coordinate_labels() is two_term_axes
+assert two_term_axes.add_coordinate_labels() is two_term_axes.coordinate_labels
 assert manimlib.Axes.default_axis_config == {}
 assert manimlib.Axes.default_x_axis_config == {}
 assert manimlib.Axes.default_y_axis_config["line_to_number_direction"] is not None
