@@ -7,7 +7,7 @@ use fmn::rendering::{NativeFramePipeline, RenderError};
 use fmn_output::EmitterHandle;
 use fmn_render::RetainedFrameRendererConfig;
 use fmn_runtime::{ExecutionPlan, PipelineStats};
-use fmn_scene::IntegrationError;
+use fmn_scene::{IntegrationError, timeline_bundle::TimelineFrameJob};
 
 use super::CliError;
 
@@ -36,7 +36,24 @@ impl CpuRenderer {
         let pipeline = self.pipeline.as_mut().ok_or_else(|| {
             IntegrationError::new("lumen", "CPU frame pipeline was already finalized")
         })?;
-        let Err(mut error) = pipeline.capture(stage, sequence) else {
+        let result = pipeline.capture(stage, sequence);
+        self.capture_result(result)
+    }
+
+    pub(super) fn capture_compiled(
+        &mut self,
+        job: TimelineFrameJob,
+        sequence: u64,
+    ) -> Result<(), IntegrationError> {
+        let pipeline = self.pipeline.as_mut().ok_or_else(|| {
+            IntegrationError::new("lumen", "CPU frame pipeline was already finalized")
+        })?;
+        let result = pipeline.capture_compiled(job, sequence);
+        self.capture_result(result)
+    }
+
+    fn capture_result(&mut self, result: Result<(), RenderError>) -> Result<(), IntegrationError> {
+        let Err(mut error) = result else {
             return Ok(());
         };
         // Source admission may only see Closed. Recover the actual failing
@@ -63,6 +80,36 @@ impl CpuRenderer {
     pub(super) fn abort(&mut self) {
         // NativeFramePipeline wakes the output ring before joining workers.
         drop(self.pipeline.take());
+    }
+}
+
+impl super::RenderSink {
+    /// Submit immutable FMTL input; CPU reconstruction happens after admission
+    /// on the assigned render team. Keep the annex's serial path explicit.
+    pub(super) fn render_compiled(
+        &mut self,
+        job: TimelineFrameJob,
+    ) -> Result<(), IntegrationError> {
+        match &mut self.renderer {
+            super::OfflineFrameRenderer::Cpu(renderer) => {
+                renderer.capture_compiled(job, self.next_sequence)?;
+                self.backend.record_cpu_frame()?;
+                self.backend.route = "compiled-cpu";
+                self.next_sequence = self
+                    .next_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| IntegrationError::new("reel", "frame sequence exhausted"))?;
+                Ok(())
+            }
+            #[cfg(feature = "metal")]
+            super::OfflineFrameRenderer::Metal { .. } => {
+                let revision = u64::from(job.index()) + 1;
+                let stage = job
+                    .materialize()
+                    .map_err(|error| IntegrationError::new("compiled", error.to_string()))?;
+                self.render_stage(&stage, revision)
+            }
+        }
     }
 }
 
@@ -109,6 +156,68 @@ mod tests {
         );
         records.write_range("fill_rgba", 0, &[0.2, 0.6, 1.0, 1.0].repeat(3));
         Mobject::from_buffer(records)
+    }
+
+    #[test]
+    fn compiled_jobs_reconstruct_on_all_cli_render_teams() {
+        let mut stage = Stage::new();
+        let mob = stage.add(shape());
+        stage.add_to_scene(mob).unwrap();
+        let mut timeline = fmn::animation::Timeline::new(8).unwrap();
+        timeline.wait(1.0).unwrap();
+        let bytes = fmn_scene::export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(0))
+            .unwrap();
+        let shared = fmn_scene::timeline_bundle::SharedTimelineBundle::from_bytes(&bytes).unwrap();
+        let fs = Arc::new(VirtualFs::new());
+        let plan = plan(OutputPixelFormat::Rgba8, 4);
+        assert_eq!(plan.render_teams.len(), 2);
+        let mut sink = RenderSink::new(
+            fs,
+            &config(),
+            &plan,
+            &RenderTarget::Native(NativeFrameFormat::PngSequence),
+            PathBuf::from("/compiled"),
+        )
+        .unwrap();
+        for index in 0..shared.frame_count() {
+            sink.render_compiled(shared.frame_job(index).unwrap())
+                .unwrap();
+        }
+        let finished = sink.finish().unwrap();
+        assert_eq!(finished.backend.route, "compiled-cpu");
+        let stats = finished.backend.pipeline.unwrap();
+        assert_eq!(
+            (stats.submitted, stats.emitted, stats.outstanding_slots),
+            (8, 8, 0)
+        );
+        assert_eq!(stats.render_team_frames.len(), 2);
+        assert!(stats.render_team_frames.iter().all(|n| *n > 0));
+    }
+
+    #[test]
+    fn compiled_camera_refusal_occurs_on_worker_not_serial_capture() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from(fmn::library::Cube::new(1.0)));
+        stage.add_to_scene(mob).unwrap();
+        let mut timeline = fmn::animation::Timeline::new(8).unwrap();
+        timeline.wait(0.125).unwrap();
+        let bytes = fmn_scene::export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(0))
+            .unwrap();
+        let shared = fmn_scene::timeline_bundle::SharedTimelineBundle::from_bytes(&bytes).unwrap();
+        let fs = Arc::new(VirtualFs::new());
+        let mut sink = RenderSink::new(
+            fs.clone(),
+            &config(),
+            &plan(OutputPixelFormat::Rgba8, 1),
+            &RenderTarget::Native(NativeFrameFormat::PngSequence),
+            PathBuf::from("/refused"),
+        )
+        .unwrap();
+        // Ordinary affine capture refuses Cube before queueing. The compiled
+        // route must admit its input and let the worker discover that refusal.
+        sink.render_compiled(shared.frame_job(0).unwrap()).unwrap();
+        assert!(sink.finish().is_err());
+        assert!(!fs.exists(Path::new("/refused")));
     }
 
     #[test]

@@ -10,10 +10,8 @@ on:
       - 'crates/fmn-scene/**'
       - 'crates/fmn/**'
   workflow_dispatch:
-# Source-pinned candidate verification only. No commits, pushes or ref updates.
-# The explicit connector integration restores ordinary read-only source CI.
 permissions:
-  contents: write
+  contents: read
 jobs:
   pipeline:
     runs-on: ubuntu-24.04
@@ -27,50 +25,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Apply the reviewed compiled-playback candidate in this checkout only
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import base64, hashlib, json, os, subprocess, urllib.request
-          original = {
-              'crates/fmn-cli/src/lib.rs': '460b4d203520d4a0afd2a728b8b8562b6319a9b0',
-              'crates/fmn-cli/src/offline_cpu.rs': '1ae0dd37cc9dc10e8dcc621f72e32f20c3f0c9dc',
-              'crates/fmn/tests/native_camera_pipeline.rs': '307f739106d776769762c9c40b5b7d6106e9ccdc',
-              'crates/fmn-cli/tests/compiled_pipeline.rs': None,
-          }
-          final = {
-              'crates/fmn-cli/src/lib.rs': '6763fde76c9644981c8b7f8667cd44d18284df8a',
-              'crates/fmn-cli/src/offline_cpu.rs': '3ec3444f2d523386bafd1ee12fb41b13d4422185',
-              'crates/fmn/tests/native_camera_pipeline.rs': 'e067b4a28fcf5397825bb5ce37b99f337374f346',
-              'crates/fmn-cli/tests/compiled_pipeline.rs': '8177094ad273f4e19959a650530a9bcdc0f2a2e8',
-          }
-          def blob(data):
-              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
-          for path, sha in original.items():
-              assert not Path(path).exists() if sha is None else blob(Path(path).read_bytes()) == sha, path
-          sha = 'f4c4414af363ef57ebab0c61516ec4cb49526f2a'
-          request = urllib.request.Request(
-              f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
-              headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
-          )
-          with urllib.request.urlopen(request, timeout=60) as response:
-              patch = base64.b64decode(json.load(response)['content'])
-          assert blob(patch) == sha
-          # Correct the single transport transcription before verifying the
-          # exact reviewed patch and each of its resulting source identities.
-          patch = patch.replace(b'+#![cfg(all(feature = "cli", feature = "batch")))]', b'+#![cfg(all(feature = "cli", feature = "batch"))]')
-          assert hashlib.sha256(patch).hexdigest() == 'd9c943961f3f4cc691984c96fe9ddcd503f5776715133c773ed3275b9e2105e7'
-          subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
-          subprocess.run(['git', 'apply', '-'], input=patch, check=True)
-          for path, sha in final.items():
-              assert blob(Path(path).read_bytes()) == sha, path
-          PY
-      - name: Install pinned compiler and format candidate sources
-        run: |
-          rustup show active-toolchain
-          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/offline_cpu.rs crates/fmn-cli/tests/compiled_pipeline.rs crates/fmn/tests/native_camera_pipeline.rs
+      - name: Install pinned compiler
+        run: rustup show active-toolchain
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -80,55 +36,19 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
-      - name: Actual compiled CLI reconstruction on multiple teams
-        run: cargo test --locked -p fmn-cli --features cli,batch --lib offline_cpu
-      - name: Shipping compiled pixels, frame selection, subdivisions and native formats
-        if: ${{ !cancelled() }}
-        run: cargo test --locked -p fmn-cli --features cli,batch --test compiled_pipeline --test cpu_pipeline --test runtime_boundary
-      - name: Camera and compiled facade regression suites
+      - name: Shipping CLI pipeline and compiled playback
+        run: cargo test --locked -p fmn-cli --features cli,batch --tests
+      - name: Native camera motion, compiled reconstruction and publication
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn --tests
-      - name: Shared reconstruction and runtime semantics
+      - name: Shared compiled inputs and runtime semantics
         if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p fmn-scene --test shared_bundle
           cargo test --locked -p fmn-runtime --lib
-      - name: Preserve exact tested source blobs without changing refs
+      - name: Retained camera and affine rendering
         if: ${{ !cancelled() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VALIDATION_STATUS: ${{ job.status }}
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import base64, hashlib, json, os, subprocess, urllib.request
-          paths = ['crates/fmn-cli/src/lib.rs', 'crates/fmn-cli/src/offline_cpu.rs', 'crates/fmn-cli/tests/compiled_pipeline.rs', 'crates/fmn/tests/native_camera_pipeline.rs']
-          changed = set(subprocess.check_output(['git', 'diff', '--name-only']).decode().splitlines())
-          assert changed <= set(paths), changed
-          result = {'base_commit': os.environ['GITHUB_SHA'], 'validation_status': os.environ['VALIDATION_STATUS'], 'files': []}
-          for path in paths:
-              data = Path(path).read_bytes()
-              sha = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
-              request = urllib.request.Request(
-                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', method='POST',
-                  data=json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode(),
-                  headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'},
-              )
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  assert json.load(response)['sha'] == sha
-              result['files'].append({'path': path, 'sha': sha})
-          Path(os.environ['RUNNER_TEMP'], 'compiled-candidate.json').write_text(json.dumps(result, indent=2))
-          print(json.dumps(result, indent=2))
-          PY
-      - name: Archive the exact candidate
-        if: always()
-        run: tar -czf "$RUNNER_TEMP/compiled-candidate.tar.gz" crates/fmn-cli crates/fmn/tests/native_camera_pipeline.rs
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: compiled-candidate-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/compiled-candidate.tar.gz
-            ${{ runner.temp }}/compiled-candidate.json
-          retention-days: 1
-          if-no-files-found: error
+        run: cargo test --locked -p fmn-render --lib retained
+      - name: Native examples
+        if: ${{ !cancelled() }}
+        run: cargo check --locked -p fmn --examples

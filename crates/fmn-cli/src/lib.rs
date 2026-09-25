@@ -35,8 +35,12 @@ use std::time::Instant;
 use fmn_codec::{SampleFormat, WavLimits, decode_wav};
 use fmn_core::color::Srgb;
 use fmn_core::rng::{RNG_LAYOUT_VERSION, RngRoot};
-use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
-use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
+use fmn_frame::convert::rgba16f_to_rgba8;
+#[cfg(feature = "metal")]
+use fmn_frame::convert::swap_rb8;
+#[cfg(feature = "metal")]
+use fmn_frame::{ChromaSiting, ColorRange};
+use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_output::{
     ArtifactDigest, ClosureItem, ColorDescription, Container, DitherPolicy, EmitterConfig,
     EmitterHandle, EncoderCapabilities, EncoderChoice, FfmpegArtifactReport, FfmpegSink,
@@ -47,13 +51,15 @@ use fmn_output::{
     Y4mSinkConfig, frames_to_samples, publish_svg, publish_wav,
 };
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
+#[cfg(test)]
+use fmn_render::RetainedFrameRenderer;
+use fmn_render::RetainedFrameRendererConfig;
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
 use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob, journal as render_engine_journal};
 use fmn_render::fill::MonoTable;
 #[cfg(feature = "metal")]
 use fmn_render::metal::{MetalRenderer, MetalReport};
 use fmn_render::plan::RenderPlan;
-use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig};
 use fmn_scene::studio_bridge::SceneState;
 use fmn_scene::{
     AssetRead, BundleReadError, CaptureReason, CommandRecord, DEFAULT_MAX_BUNDLE_BYTES,
@@ -5972,6 +5978,28 @@ fn execute_native_render_with_cancellation(
                 )?);
                 return Ok(reports);
             }
+            // Keep only immutable frame inputs in the producer. Source clock
+            // indices survive output rebasing for stills and subdivisions.
+            let segment_ranges = (0..bundle.segment_count())
+                .map(|index| {
+                    bundle.segment_frame_range(index).ok_or_else(|| {
+                        CliError::new("internal", "validated bundle omitted a segment frame range")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if bundle.frame_count() == 0 {
+                return Err(CliError::new(
+                    "scene",
+                    "the compiled timeline has no frames to render",
+                ));
+            }
+            if command.subdivide && segment_ranges.iter().any(std::ops::Range::is_empty) {
+                return Err(CliError::new(
+                    "scene",
+                    "a zero-frame segment cannot produce an output generation",
+                ));
+            }
+            let bundle = (*bundle).into_shared().map_err(bundle_read_error)?;
             let play_indices = (0..bundle.segment_count())
                 .map(|index| {
                     u64::try_from(index).map_err(|_| {
@@ -6022,7 +6050,7 @@ fn execute_native_render_with_cancellation(
                         cancellation.cli_checkpoint()?;
                     }
                     let segment_frames =
-                        bundle.segment_frame_range(segment_index).ok_or_else(|| {
+                        segment_ranges.get(segment_index).cloned().ok_or_else(|| {
                             CliError::new(
                                 "internal",
                                 "validated bundle omitted a segment frame range",
@@ -6043,8 +6071,8 @@ fn execute_native_render_with_cancellation(
                         if let Some(cancellation) = cancellation {
                             cancellation.cli_checkpoint()?;
                         }
-                        let stage = bundle.stage_at(index).map_err(bundle_read_error)?;
-                        sink.render_stage(&stage, u64::from(index) + 1)
+                        let job = bundle.frame_job(index).map_err(bundle_read_error)?;
+                        sink.render_compiled(job)
                             .map_err(|error| CliError::new("render", error.to_string()))?;
                     }
                     let artifact = sink.finish()?;
@@ -6095,8 +6123,8 @@ fn execute_native_render_with_cancellation(
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
-                let stage = bundle.stage_at(index).map_err(bundle_read_error)?;
-                sink.render_stage(&stage, u64::from(index) + 1)
+                let job = bundle.frame_job(index).map_err(bundle_read_error)?;
+                sink.render_compiled(job)
                     .map_err(|error| CliError::new("render", error.to_string()))?;
             }
             if let Some(cancellation) = cancellation {
