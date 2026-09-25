@@ -710,10 +710,18 @@ mod tests {
         };
         // One glyph on both lines, so side bearings cancel: the center
         // environment centers boxes, not ink.
-        let centered = TexText::new(r"aaaa\\aa").build(&engine()).expect("builds");
-        let centers = line_centers(&centered);
-        assert_eq!(centers.len(), 2);
-        assert!((centers[0] - centers[1]).abs() < 1e-3, "{centers:?}");
+        // Spaces around `\\` do not move a line: LaTeX's `\\` unskips the
+        // space before it and swallows the space after it (fmd-math
+        // e911be2a, UPSTREAM_LEDGER row 15).
+        for source in [r"aaaa\\aa", r"aaaa \\aa", r"aaaa\\ aa", r"aaaa \\ aa"] {
+            let centered = TexText::new(source).build(&engine()).expect("builds");
+            let centers = line_centers(&centered);
+            assert_eq!(centers.len(), 2, "{source}");
+            assert!(
+                (centers[0] - centers[1]).abs() < 1e-3,
+                "{source}: {centers:?}"
+            );
+        }
         let flush = TexText::new(r"aaaa\\aa")
             .line_align(LineAlign::Left)
             .build(&engine())
