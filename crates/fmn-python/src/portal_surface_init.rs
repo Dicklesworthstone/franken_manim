@@ -125,10 +125,18 @@ fn _initialize_surface_grid(
             world_column(entry, "point")?;
             world_column(entry, "d_normal_point")?;
         }
+        // Empty Surface/SGroup roots are containers, not drawable UV grids.
+        // Keeping them unstructured is essential for family-level become and
+        // Transform, which query topology only on actual surface leaves.
+        let primitive = if count == 0 {
+            RenderPrimitive::Vector
+        } else {
+            RenderPrimitive::SurfaceGrid { resolution }
+        };
         let value = Mobject::from_buffer(buffer)
             .with_uniforms(*entry.uniforms())
             .with_z_index(preparation.z_index(copy))
-            .with_render_primitive(RenderPrimitive::SurfaceGrid { resolution });
+            .with_render_primitive(primitive);
         let candidate = stage.add(value);
         // The one native become operation retains the root's handle, saved
         // state, pins and updater ownership. Its schema/family checks are kept.

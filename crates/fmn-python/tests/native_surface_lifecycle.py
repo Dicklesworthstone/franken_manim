@@ -124,6 +124,28 @@ class SurfaceLifecycleTests(unittest.TestCase):
         self.assertEqual(group.n_records(), 0)
         self.assertEqual(len(group.submobjects), 1)
 
+    def test_empty_containers_do_not_gain_a_fake_grid(self):
+        for factory in (m.Surface, m.SGroup):
+            with self.subTest(factory=factory.__name__):
+                left = factory(**({'resolution': (0, 0)} if factory is m.Surface else {}))
+                right = left.copy()
+                self.assertIsNone(m._surface_grid_resolution(left))
+                left.become(right)
+                scene = m.Scene()
+                scene.add(left)
+                scene.play(m.Transform(left, right), run_time=.1)
+                self.assertEqual(left.n_records(), 0)
+                self.assertIsNone(m._surface_grid_resolution(left))
+        first = m.ParametricSurface(lambda u, v: (u, v, 0), resolution=(2, 3))
+        second = m.ParametricSurface(lambda u, v: (u, v, 1), resolution=(3, 4))
+        left, right = m.SGroup(first), m.SGroup(second)
+        scene = m.Scene()
+        scene.add(left)
+        scene.play(m.Transform(left, right), run_time=.1)
+        self.assertIsNone(m._surface_grid_resolution(left))
+        self.assertEqual(m._surface_grid_resolution(left[0]), (3, 4))
+        np.testing.assert_array_equal(left[0].get_points()[:, 2], 1)
+
     def test_callback_error_preserves_identity_and_stops_execution(self):
         for kind in (RuntimeError, KeyboardInterrupt, SystemExit):
             error, calls, roots = kind('surface sampling failed'), [], []
@@ -147,7 +169,7 @@ class SurfaceLifecycleTests(unittest.TestCase):
             self.assertEqual(m.Surface(resolution=(2, 2)).n_records(), 4)
 
     def test_callback_mutation_is_not_overwritten(self):
-        for mutation in ('records', 'schema', 'bind', 'recipe', 'family'):
+        for mutation in ('records', 'schema', 'bind', 'recipe', 'family', 'lock'):
             with self.subTest(mutation=mutation):
                 roots, scene = [], m.Scene()
                 class Authored(m.ParametricSurface):
@@ -168,6 +190,8 @@ class SurfaceLifecycleTests(unittest.TestCase):
                             scene.add(target)
                         elif mutation == 'recipe':
                             target.passed_uv_func = lambda u, v: (u, v, 3)
+                        elif mutation == 'lock':
+                            target.lock_data(['point'])
                         else:
                             target.add(m.Dot())
                     return u, v, 0
@@ -180,6 +204,8 @@ class SurfaceLifecycleTests(unittest.TestCase):
                     self.assertIs(roots[0]._scene, scene)
                 elif mutation == 'family':
                     self.assertEqual(len(roots[0].submobjects), 1)
+                elif mutation == 'lock':
+                    self.assertIn('point', roots[0].locked_data_keys)
 
     def test_raw_initializer_refuses_invalid_requests_without_mutation(self):
         surface = m.Surface(resolution=(2, 2)).shift(m.RIGHT)

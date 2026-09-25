@@ -21,6 +21,10 @@ def install_surface_lifecycle(native):
     # distinct nested surface, but cannot recursively initialize its own owner.
     constructing, sampling = set(), set()
 
+    def idle(self):
+        if vars(self).get("_is_animating", False) or getattr(self, "locked_data_keys", ()):
+            raise RuntimeError("release the surface's active animation before initializing its geometry")
+
     def controls(self):
         return sampling_options({name: getattr(self, name) for name in
             ("resolution", "u_range", "v_range", "epsilon", "normal_nudge",
@@ -54,6 +58,7 @@ def install_surface_lifecycle(native):
             # An authored hook may replace sampling entirely. Its actual table
             # must still gain durable native topology before entering a Scene.
             shape = controls(self)["resolution"]
+            idle(self)
             g["_initialize_surface_grid"](self, shape)
             self.compute_triangle_indices()
             self.set_z_index(self.z_index)
@@ -86,6 +91,7 @@ def install_surface_lifecycle(native):
         sampling.add(id(self))
         try:
             options = controls(self)
+            idle(self)
             before = self.data.copy()
             owner, bound = vars(self).get("_scene"), self._is_bound()
             family = tuple(id(member) for member in self.get_family())
@@ -111,6 +117,7 @@ def install_surface_lifecycle(native):
                 raise RuntimeError("a UV surface sampler returned unexpected children")
             if verify is not None:
                 verify()
+            idle(self)
             current = self.uv_func
             if (vars(self).get("_scene") is not owner or self._is_bound() != bound
                     or tuple(id(member) for member in self.get_family()) != family
