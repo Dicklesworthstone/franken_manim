@@ -462,7 +462,18 @@ pub fn render_dashboard(
     let _ = writeln!(out, "| Plane | Occurrence-weighted | Unique-string |");
     let _ = writeln!(out, "|---|---|---|");
     let _ = writeln!(out, "| **Parse** | {po:.3} % | {pu:.3} % |");
-    let _ = writeln!(out, "| **Parse + layout** | {lo:.3} % | {lu:.3} % |");
+    let _ = writeln!(
+        out,
+        "| **Parse + typeset returned Ok** | {lo:.3} % | {lu:.3} % |"
+    );
+    let _ = writeln!(out, "| **Layout checked by an oracle** | 0 % | 0 % |");
+    let _ = writeln!(
+        out,
+        "\n\"Typeset returned Ok\" means fmd-math produced a layout without an \
+         error. It does not show that the layout is right. No layout-correctness \
+         oracle runs over the corpus yet (fm-tex-layout-oracle-bkbc), so that row \
+         is 0 until one lands."
+    );
     let _ = writeln!(out, "\n## Pending constructs (parse plane)\n");
     let _ = writeln!(out, "| Construct | Occurrences blocked | Tracked at |");
     let _ = writeln!(out, "|---|---|---|");

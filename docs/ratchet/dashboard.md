@@ -10,7 +10,10 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
 | **Parse** | 99.994 % | 99.989 % |
-| **Parse + layout** | 99.994 % | 99.989 % |
+| **Parse + typeset returned Ok** | 99.994 % | 99.989 % |
+| **Layout checked by an oracle** | 0 % | 0 % |
+
+"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. No layout-correctness oracle runs over the corpus yet (fm-tex-layout-oracle-bkbc), so that row is 0 until one lands.
 
 ## Pending constructs (parse plane)
 

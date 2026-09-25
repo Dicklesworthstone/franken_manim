@@ -100,7 +100,8 @@ fn dashboard_headline_matches_the_baseline() -> Result<(), String> {
     let [po, pu, lo, lu] = baseline.percentages();
     for needle in [
         format!("| **Parse** | {po:.3} % | {pu:.3} % |"),
-        format!("| **Parse + layout** | {lo:.3} % | {lu:.3} % |"),
+        format!("| **Parse + typeset returned Ok** | {lo:.3} % | {lu:.3} % |"),
+        "| **Layout checked by an oracle** | 0 % | 0 % |".to_owned(),
         baseline.corpus_hash.clone(),
     ] {
         assert!(
