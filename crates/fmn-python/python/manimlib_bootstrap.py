@@ -2797,6 +2797,20 @@ class Mobject(_BridgeMobject):
             raise _ForeignStageError("become endpoints must belong to one Scene")
         if self._is_bound() and not mobject._is_bound():
             self._scene._adopt(mobject)
+        elif not self._is_bound() and not mobject._is_bound():
+            # A detached root can still own members a Scene holds: playing a
+            # slice such as group[:3] binds those members only. A bound
+            # member can become only a Scene-owned source, so the source
+            # joins that Scene first, exactly as for a bound root.
+            scenes = {
+                id(member._scene): member._scene
+                for member in self.get_family()
+                if member._is_bound()
+            }
+            if len(scenes) > 1:
+                raise _ForeignStageError("become receiver spans more than one Scene")
+            if scenes:
+                next(iter(scenes.values()))._adopt(mobject)
         self.align_family(mobject)
         receiver_family = self.get_family()
         source_family = mobject.get_family()

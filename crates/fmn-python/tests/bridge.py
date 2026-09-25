@@ -9743,6 +9743,23 @@ assert np.allclose(
     few_dashes.submobjects[0].get_points(),
 )
 
+# A detached group can still own members a Scene holds: playing a slice
+# (group[:2]) binds only those members. become() works on it as in the
+# Reference (added_dimension.py's radial_lines updater): the bound members
+# follow the source, and the source joins that Scene for them.
+partly_bound_scene = Scene()
+partly_bound = manimlib.VGroup(
+    *(geometry.Line([0.0, 0.0, 0.0], [float(i), 0.0, 0.0]) for i in range(1, 4))
+)
+partly_bound_scene.add(partly_bound[:2])
+assert not partly_bound._is_bound() and partly_bound[0]._is_bound()
+partly_bound_target = manimlib.VGroup(
+    *(geometry.Line([0.0, 0.0, 0.0], [0.0, float(i), 0.0]) for i in range(1, 5))
+)
+assert partly_bound.become(partly_bound_target) is partly_bound
+assert len(partly_bound) == 4
+assert np.allclose(partly_bound.get_all_points(), partly_bound_target.get_all_points())
+
 named_source = manimlib.VGroup(geometry.Dot(), geometry.Dot())
 named_source.focus = named_source.submobjects[1]
 named_receiver = manimlib.VGroup(geometry.Dot())
