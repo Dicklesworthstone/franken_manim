@@ -160,7 +160,10 @@ def fixture():
         _smooth_rate=lambda alpha: alpha, _refuse_unrouted=refuse, _OUT=(0, 0, 1),
         straight_path=straight, _requires_python_animation=requires,
     )
-    protocol.install(native)
+    # Only the transform protocol: the subsystem protocols `install` layers
+    # on top need their own classes and are covered by
+    # scripts/test_animation_semantics_installer.py.
+    protocol.install(native, subsystems=False)
     return native
 
 
@@ -248,8 +251,13 @@ class TransformPathProtocolTests(unittest.TestCase):
 
     def test_camera_path_refuses_instead_of_silently_using_pose_lerp(self):
         frame = self.n.CameraFrame()
+        # d65d47aa (fm-5wq.4.143) runs authored camera paths through the
+        # camera choreography callback, so construction accepts one. The
+        # native endpoint-only lowering still refuses it rather than lerp.
+        authored = self.n.Transform(frame, frame.copy(), path_func=excursion)
+        self.assertTrue(self.n._requires_python_animation(authored))
         with self.assertRaisesRegex(NotImplementedError, "camera track"):
-            self.n.Transform(frame, frame.copy(), path_func=excursion)
+            authored._native_target()
         animation = self.n.Transform(frame, frame.copy())
         self.assertIs(animation._native_target(), animation.target_mobject)
         animation.path_func = excursion
@@ -368,7 +376,7 @@ class TransformPathProtocolTests(unittest.TestCase):
     def test_installer_is_idempotent_and_module_local(self):
         constructor = self.n.Transform.__init__
         dispatcher = self.n._requires_python_animation
-        protocol.install(self.n)
+        protocol.install(self.n, subsystems=False)
         self.assertIs(self.n.Transform.__init__, constructor)
         self.assertIs(self.n._requires_python_animation, dispatcher)
         second = fixture()

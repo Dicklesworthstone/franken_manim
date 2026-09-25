@@ -1,7 +1,11 @@
 """Install the pinned shared animation protocol onto the native module."""
 
 
-def install(native):
+def install(native, subsystems=True):
+    """The shared protocol: the Animation/Transform core, then (unless
+    subsystems is False) every subsystem protocol layered on it. The core
+    alone needs only those classes; scripts/test_python_transform_paths.py
+    exercises it over a minimal namespace. Idempotent."""
     g = vars(native)
     if g.get("_FMN_ANIMATION_SEMANTICS_INSTALLED", False):
         return
@@ -611,16 +615,17 @@ def install(native):
         and getattr(cls, "_target_attr", None) is not None
     }
     g["_requires_python_animation"] = requires_python_animation
-    _install_matching_parts(g)
-    _install_matching_strings(g)
-    _install_composition_lifecycle(g)
-    _install_camera_pose(g)
-    _install_camera_motion(g)
-    _install_camera_choreography(g)
-    if "ShowPartial" in g:
-        _install_partial_reveals(g)
-    if "DrawBorderThenFill" in g and "Write" in g:
-        _install_border_write(g)
+    if subsystems:
+        _install_matching_parts(g)
+        _install_matching_strings(g)
+        _install_composition_lifecycle(g)
+        _install_camera_pose(g)
+        _install_camera_motion(g)
+        _install_camera_choreography(g)
+        if "ShowPartial" in g:
+            _install_partial_reveals(g)
+        if "DrawBorderThenFill" in g and "Write" in g:
+            _install_border_write(g)
     g["_FMN_ANIMATION_SEMANTICS_INSTALLED"] = True
 
 

@@ -82,6 +82,7 @@ python3 -m py_compile \
     crates/fmn-python/python/manimlib/__init__.py \
     crates/fmn-python/python/manimlib/_animation_semantics.py \
     scripts/test_animation_semantics_installer.py \
+    scripts/test_python_transform_paths.py \
     scripts/audit_portal_runtime.py \
     scripts/verify_portal_runtime_receipt.py \
     scripts/test_schema_provenance.py \
@@ -91,6 +92,7 @@ python3 -m py_compile \
 bash -n scripts/check_portal_runtime.sh
 python3 scripts/test_schema_provenance.py
 python3 scripts/test_animation_semantics_installer.py
+python3 scripts/test_python_transform_paths.py
 python3 scripts/test_audit_portal_runtime.py
 python3 scripts/test_portal_parity_cli.py
 python3 scripts/test_verify_portal_runtime_receipt.py
