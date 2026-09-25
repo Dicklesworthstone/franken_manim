@@ -16,7 +16,13 @@ Usage:
         --years 2020-2026 --out DIR [--jobs 16] [--timeout 180] [--limit N]
 
 Writes DIR/records.ndjson (one JSON record per scene, sorted) and prints a
-summary; `--summary-tsv` also writes the per-outcome counts.
+summary; `--summary-tsv` also writes the per-outcome counts. Each record
+carries its era (year), wall time, the child's own peak RSS (KiB, from
+os.wait4), and `portal_digest`, a sha256 over the imported manimlib and
+fmn_python trees. `--construct-check` re-runs every scene that did not
+render with the portal's `--construct-only` and records
+`construct_outcome`: a scene that constructs but does not render failed in
+the render layer.
 
 The portal CLI reports one structured error line without a traceback, so an
 ordinary exception is first recorded as `runtime_error` (origin unknown).
@@ -34,12 +40,15 @@ record's evidence, so a rule fix applies to existing records.
 import argparse
 import ast
 import concurrent.futures
+import hashlib
 import json
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 
 SCENE_ROOTS = {"Scene", "ThreeDScene", "InteractiveScene"}
@@ -209,30 +218,104 @@ def attribute(args, record, out_dir):
     return record
 
 
+def run_child(argv, cwd, env, timeout):
+    """Run one portal child to completion or to its timeout, killing its
+    whole process group on expiry. Returns (exit code or None, stderr,
+    peak RSS in KiB): the peak is the child's own ru_maxrss from os.wait4,
+    so concurrent children never share one figure."""
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    chunks = []
+    reader = threading.Thread(target=lambda: chunks.append(proc.stderr.read()), daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while True:
+        pid, status, usage = os.wait4(proc.pid, os.WNOHANG)
+        if pid:
+            break
+        if time.monotonic() >= deadline:
+            timed_out = True
+            os.killpg(proc.pid, signal.SIGKILL)
+            pid, status, usage = os.wait4(proc.pid, 0)
+            break
+        time.sleep(0.05)
+    proc.returncode = os.waitstatus_to_exitcode(status)
+    reader.join()
+    proc.stderr.close()
+    return (None if timed_out else proc.returncode), "".join(chunks), usage.ru_maxrss
+
+
 def run_one(args, rel, scene, out_dir):
     target = out_dir / "frames" / f"{rel.replace('/', '__')}__{scene}.png"
     target.parent.mkdir(parents=True, exist_ok=True)
-    env = scene_env(args)
     start = time.monotonic()
-    try:
-        proc = subprocess.run(
-            [args.portal, str(args.videos / rel), scene, "--format", "png",
-             "--resolution", "320x180", "--video_dir", str(target)],
-            cwd=args.workdir, env=env, capture_output=True, text=True,
-            timeout=args.timeout,
-        )
-        outcome, detail = classify(proc.returncode, proc.stderr, False)
-        code = proc.returncode
-    except subprocess.TimeoutExpired:
-        outcome, detail, code = "timeout", f"exceeded {args.timeout}s", None
+    code, stderr, peak = run_child(
+        [args.portal, str(args.videos / rel), scene, "--format", "png",
+         "--resolution", "320x180", "--video_dir", str(target)],
+        args.workdir, scene_env(args), args.timeout,
+    )
+    if code is None:
+        outcome, detail = "timeout", f"exceeded {args.timeout}s"
+    else:
+        outcome, detail = classify(code, stderr, False)
     return {
         "module": rel,
         "scene": scene,
+        "era": rel.split("/", 1)[0].lstrip("_"),
         "outcome": outcome,
         "detail": detail,
         "exit": code,
         "seconds": round(time.monotonic() - start, 2),
+        "peak_rss_kib": peak,
+        "portal_digest": args.portal_digest,
     }
+
+
+def construct_check(args, record):
+    """Re-run a scene that did not render with --construct-only, which runs
+    its whole lifecycle without rasterizing. A scene that constructs but
+    does not render failed in the render layer."""
+    start = time.monotonic()
+    code, stderr, peak = run_child(
+        [args.portal, str(args.videos / record["module"]), record["scene"], "--construct-only"],
+        args.workdir, scene_env(args), args.timeout,
+    )
+    outcome, _ = ("timeout", "") if code is None else classify(code, stderr, False)
+    return dict(record, construct_outcome=outcome,
+                construct_seconds=round(time.monotonic() - start, 2),
+                construct_peak_rss_kib=peak)
+
+
+def portal_digest(python, env):
+    """sha256 over every file (bytecode caches aside) of the manimlib and
+    fmn_python package trees the portal interpreter imports: the exact
+    portal code under test, whether from a wheel or a build tree."""
+    code = ("import os, manimlib, fmn_python; "
+            "print(os.path.dirname(manimlib.__file__)); "
+            "print(os.path.dirname(fmn_python.__file__))")
+    roots = subprocess.run([python, "-c", code], env=env, capture_output=True, text=True,
+                           timeout=300, check=True).stdout.split("\n")
+    digest = hashlib.sha256()
+    for index, root in enumerate(filter(None, roots)):
+        root = pathlib.Path(root)
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and "__pycache__" not in path.parts:
+                digest.update(f"{index}/{path.relative_to(root).as_posix()}".encode() + b"\0")
+                digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def portal_python(args):
+    """The portal environment's interpreter: --python, else the console
+    script's shebang."""
+    if args.python:
+        return args.python
+    with open(args.portal, "rb") as handle:
+        first = handle.readline().decode("utf-8", "replace").strip()
+    if not first.startswith("#!"):
+        raise SystemExit("--python is required when --portal has no shebang")
+    return first[2:].split()[0]
 
 
 def cluster_label(record):
@@ -324,6 +407,8 @@ def main():
     parser.add_argument("--attribute", action="store_true",
                         help="re-run runtime_error scenes in-process to find where they raised")
     parser.add_argument("--python", help="the portal environment's python (for --attribute)")
+    parser.add_argument("--construct-check", action="store_true",
+                        help="re-run every scene that did not render with --construct-only")
     parser.add_argument(
         "--config", type=pathlib.Path,
         help="a custom_config.yml to run under, as a user with their own directories "
@@ -362,6 +447,8 @@ def main():
             args.config.read_text(encoding="utf-8"), encoding="utf-8"
         )
     print(f"enumerated {len(scenes)} scene classes in {args.years}", file=sys.stderr)
+    args.portal_digest = portal_digest(portal_python(args), scene_env(args))
+    print(f"portal digest {args.portal_digest}", file=sys.stderr)
 
     records = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -378,6 +465,14 @@ def main():
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             keep.extend(pool.map(lambda r: attribute(args, r, args.out), pending))
         records = keep
+
+    if args.construct_check:
+        failed = [r for r in records if r["outcome"] != "ok"]
+        print(f"construct-checking {len(failed)} scenes that did not render", file=sys.stderr)
+        rendered = [r for r in records if r["outcome"] == "ok"]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            rendered.extend(pool.map(lambda r: construct_check(args, r), failed))
+        records = rendered
 
     records.sort(key=lambda r: (r["module"], r["scene"]))
     with open(args.out / "records.ndjson", "w", encoding="utf-8") as handle:
