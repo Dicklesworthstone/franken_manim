@@ -358,6 +358,22 @@ impl Circle {
             .expect("Circle's fixed full-turn component request is valid")
             .with_shape(ShapeTag::Circle { center, radius })
     }
+
+    /// Build with an explicit component count: the Reference's
+    /// `Circle(n_components=...)`, which reaches `Arc`. Unlike the default
+    /// density, an explicit count can be invalid.
+    ///
+    /// # Errors
+    /// As [`Arc::build`] for an invalid `n_components`.
+    pub fn build_with_components(self, n_components: usize) -> Result<VMobject, GeomError> {
+        let center = self.arc.arc_center;
+        let radius = self.arc.radius;
+        Ok(self
+            .arc
+            .n_components(n_components)
+            .build()?
+            .with_shape(ShapeTag::Circle { center, radius }))
+    }
 }
 
 impl From<Circle> for Mobject {
