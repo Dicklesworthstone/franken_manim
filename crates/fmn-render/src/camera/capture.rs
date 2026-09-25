@@ -100,8 +100,10 @@ impl CameraSample {
         if self.values().any(|value| !value.is_finite()) {
             return Err(CameraError::NonFinite);
         }
-        if self.resolution.0 == 0 || self.resolution.1 == 0
-            || self.shape[0] <= 0.0 || self.shape[1] <= 0.0
+        if self.resolution.0 == 0
+            || self.resolution.1 == 0
+            || self.shape[0] <= 0.0
+            || self.shape[1] <= 0.0
         {
             return Err(CameraError::ZeroDimension);
         }
@@ -154,9 +156,8 @@ impl CameraSample {
         if u64::from(resolution.0) * u64::from(self.resolution.1)
             != u64::from(self.resolution.0) * u64::from(resolution.1)
         {
-            frame.resize_to_aspect_ratio(
-                f64::from(resolution.0) / f64::from(resolution.1), false,
-            )?;
+            frame
+                .resize_to_aspect_ratio(f64::from(resolution.0) / f64::from(resolution.1), false)?;
         }
         let [r, g, b, a] = self.background;
         Ok(Camera {
@@ -209,9 +210,9 @@ impl CameraSample {
 
 #[cfg(test)]
 mod tests {
+    use super::super::CameraConfig;
     use super::*;
     use fmn_hash::serial::{Limits, Schema, UnknownPolicy};
-    use super::super::CameraConfig;
 
     const TEST_SCHEMA: Schema = Schema::new(*b"TEST", 1, 0, 0);
 
@@ -220,7 +221,8 @@ mod tests {
         sample.write_to(&mut writer);
         let bytes = writer.finish().unwrap();
         assert_eq!(bytes.len(), 56 + CameraSample::WIRE_BYTES);
-        let mut reader = Reader::open(&bytes, TEST_SCHEMA, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+        let mut reader =
+            Reader::open(&bytes, TEST_SCHEMA, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
         let restored = CameraSample::read_from(&mut reader).unwrap();
         reader.finish().unwrap();
         restored
@@ -233,8 +235,12 @@ mod tests {
             let mut camera = Camera::new(CameraConfig {
                 resolution: (320, 180),
                 ..CameraConfig::default()
-            }).unwrap();
-            camera.frame_mut().set_orientation([f64::from(i), 2.3, -4.7, 0.9]).unwrap();
+            })
+            .unwrap();
+            camera
+                .frame_mut()
+                .set_orientation([f64::from(i), 2.3, -4.7, 0.9])
+                .unwrap();
             camera.frame_mut().set_center([0.2, -0.3, 1.1]).unwrap();
             camera.set_light_source_position([3.0, 2.0, 7.0]).unwrap();
             let before = camera.frame().orientation();
@@ -243,22 +249,34 @@ mod tests {
             non_idempotent += usize::from(normalized_again.orientation() != before);
             let sample = CameraSample::capture(&camera).unwrap();
             let restored = round_trip(&sample).camera((320, 180), 30, 91).unwrap();
-            assert_eq!(restored.frame().orientation().map(f64::to_bits), before.map(f64::to_bits));
+            assert_eq!(
+                restored.frame().orientation().map(f64::to_bits),
+                before.map(f64::to_bits)
+            );
             for fixed in [0.0, 0.35, 1.0] {
                 for point in [[0.3, -0.2, 1.0], [1.0, 2.0, -0.5], [0.0; 3]] {
-                    assert_eq!(camera.project(point, fixed).clip.map(f64::to_bits),
-                               restored.project(point, fixed).clip.map(f64::to_bits));
+                    assert_eq!(
+                        camera.project(point, fixed).clip.map(f64::to_bits),
+                        restored.project(point, fixed).clip.map(f64::to_bits)
+                    );
                 }
             }
             assert_eq!(restored.revision(), 91);
             assert_eq!(restored.light_source_position(), [3.0, 2.0, 7.0]);
         }
-        assert!(non_idempotent > 0, "the corpus must detect accidental renormalization");
+        assert!(
+            non_idempotent > 0,
+            "the corpus must detect accidental renormalization"
+        );
     }
 
     #[test]
     fn viewport_adaptation_preserves_equal_aspect_bits_and_width() {
-        let camera = Camera::new(CameraConfig { resolution: (320, 180), ..CameraConfig::default() }).unwrap();
+        let camera = Camera::new(CameraConfig {
+            resolution: (320, 180),
+            ..CameraConfig::default()
+        })
+        .unwrap();
         let sample = round_trip(&CameraSample::capture(&camera).unwrap());
         let same = sample.camera((1280, 720), 60, 1).unwrap();
         assert_eq!(same.frame().shape(), camera.frame().shape());
@@ -283,8 +301,12 @@ mod tests {
             let mut writer = Writer::new(TEST_SCHEMA);
             sample.write_to(&mut writer);
             let bytes = writer.finish().unwrap();
-            let mut reader = Reader::open(&bytes, TEST_SCHEMA, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
-            assert!(matches!(CameraSample::read_from(&mut reader), Err(CameraSampleError::Camera(_))));
+            let mut reader =
+                Reader::open(&bytes, TEST_SCHEMA, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+            assert!(matches!(
+                CameraSample::read_from(&mut reader),
+                Err(CameraSampleError::Camera(_))
+            ));
         }
     }
 }

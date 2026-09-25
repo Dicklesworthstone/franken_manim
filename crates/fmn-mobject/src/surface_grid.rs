@@ -384,9 +384,8 @@ mod dense_grid_tests {
                 buffer.write(row, "temperature", &[x + 2.0 * y]);
             }
         }
-        Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::SurfaceGrid {
-            resolution: shape,
-        })
+        Mobject::from_buffer(buffer)
+            .with_render_primitive(RenderPrimitive::SurfaceGrid { resolution: shape })
     }
 
     #[test]
@@ -450,9 +449,7 @@ mod dense_grid_tests {
             for v in 0..301 {
                 let row = u * 301 + v;
                 let (x, y) = (u as f64 / 300.0, v as f64 / 300.0);
-                for (actual, expected) in
-                    points[3 * row..3 * row + 3].iter().zip([x, y, x + y])
-                {
+                for (actual, expected) in points[3 * row..3 * row + 3].iter().zip([x, y, x + y]) {
                     assert!((f64::from(*actual) - expected).abs() < 1e-6);
                 }
                 assert!((f64::from(normals[3 * row + 2]) - (x + y + 1.0)).abs() < 1e-6);
