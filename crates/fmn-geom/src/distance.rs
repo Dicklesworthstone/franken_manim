@@ -78,32 +78,45 @@ pub fn solve_cubic_real(a3: f64, a2: f64, a1: f64, a0: f64, out: &mut [f64; 3]) 
     let big_p = q - p * p / 3.0;
     let big_q = 2.0 * p * p * p / 27.0 - p * q / 3.0 + r;
 
+    // One real root: Cardano. The discriminant is non-negative wherever this is
+    // called (`P ≥ 0`, or `P < 0` with the cosine well outside `[−1, 1]`), so
+    // there is no complex arithmetic to carry.
+    let cardano = |out: &mut [f64; 3]| {
+        let disc = (big_q / 2.0) * (big_q / 2.0) + fmn_dmath::powi(big_p / 3.0, 3);
+        let s = disc.max(0.0).sqrt();
+        out[0] = scalar::cbrt(-big_q / 2.0 + s) + scalar::cbrt(-big_q / 2.0 - s) - shift;
+        1
+    };
     let n = if big_p < 0.0 {
         // Three real roots are possible: the trigonometric branch. `radius` is
         // `√(−P³/27)`, and `−Q/(2 radius)` is a cosine that rounding can push a
         // hair outside `[−1, 1]` precisely when the discriminant is near zero —
         // so it is clamped, which turns a `NaN` into the triple root it is.
+        // `P < 0` alone does not make three real roots, though: when that
+        // cosine is *well* outside `[−1, 1]` (`|Q|/2 > radius`) there is one
+        // real root and a complex pair, and clamping would report the double
+        // root of a different cubic — three wrong roots, which silently drop
+        // the true nearest point (a query on the curve read as far off it).
         let radius = (-big_p * big_p * big_p / 27.0).sqrt();
         if radius == 0.0 {
             out[0] = -shift;
             1
         } else {
-            let cos_phi = (-big_q / (2.0 * radius)).clamp(-1.0, 1.0);
-            let phi = scalar::acos(cos_phi);
-            let amp = 2.0 * (-big_p / 3.0).sqrt();
-            for (k, slot) in out.iter_mut().enumerate() {
-                let angle = (phi + core::f64::consts::TAU * k as f64) / 3.0;
-                *slot = amp * scalar::cos(angle) - shift;
+            let cos_phi = -big_q / (2.0 * radius);
+            if cos_phi.abs() > 1.0 + 1e-9 {
+                cardano(out)
+            } else {
+                let phi = scalar::acos(cos_phi.clamp(-1.0, 1.0));
+                let amp = 2.0 * (-big_p / 3.0).sqrt();
+                for (k, slot) in out.iter_mut().enumerate() {
+                    let angle = (phi + core::f64::consts::TAU * k as f64) / 3.0;
+                    *slot = amp * scalar::cos(angle) - shift;
+                }
+                3
             }
-            3
         }
     } else {
-        // One real root: Cardano. `P ≥ 0` makes the discriminant non-negative, so
-        // there is nothing to clamp and no complex arithmetic to carry.
-        let disc = (big_q / 2.0) * (big_q / 2.0) + fmn_dmath::powi(big_p / 3.0, 3);
-        let s = disc.max(0.0).sqrt();
-        out[0] = scalar::cbrt(-big_q / 2.0 + s) + scalar::cbrt(-big_q / 2.0 - s) - shift;
-        1
+        cardano(out)
     };
 
     // Polish on the original coefficients, not the depressed ones: the shift and
@@ -185,18 +198,14 @@ fn sort_prefix(out: &mut [f64; 3], n: usize) {
 /// because a curve's nearest point to an outside query is very often one of them
 /// and no interior root reports it.
 ///
-/// **Nearly straight segments** (GH #1) are where the closed-form cubic is
-/// ill-conditioned: `set_points_as_corners` puts each handle at its chord's
-/// midpoint, storage rounds it off the line by an ulp, and `C` becomes tiny but
-/// not zero. Then `a3 = 2 C·C` is far below the other coefficients yet above
-/// the relative degeneracy test, the monic form divides by it, and the roots in
-/// `[0, 1]` come back as cancellation noise — the solve silently reports only
-/// the endpoints, and a stroke loses its middle wherever a segment is longer
-/// than the stroke is wide. There the in-range stationary points are those of
-/// the quadratic `a2 t² + a1 t + a0` perturbed by `a3 t³`, so the deflated
-/// quadratic's roots, Newton-polished on the full cubic, are candidates too.
-/// Adding candidates cannot make the answer worse: each is judged by its actual
-/// squared distance, and ties keep the incumbent.
+/// **Nearly straight segments** (GH #1) are where that cubic has one real root
+/// and a complex pair while its depressed form still has `P < 0`:
+/// `set_points_as_corners` puts each handle at its chord's midpoint, storage
+/// rounds it off the line by an ulp, and `C` becomes tiny but not zero. The
+/// solve must then take the one-real-root (Cardano) branch; clamping the
+/// trigonometric branch's out-of-range cosine there reported three wrong roots,
+/// only the endpoints survived, and a stroke lost its middle wherever a segment
+/// was longer than the stroke is wide. See [`solve_cubic_real`].
 #[must_use]
 pub fn nearest_on_quadratic(a0: Vec3, h: Vec3, a1: Vec3, p: Vec3) -> Nearest {
     let b = vec::scale(vec::sub(h, a0), 2.0);
@@ -227,12 +236,7 @@ pub fn nearest_on_quadratic(a0: Vec3, h: Vec3, a1: Vec3, p: Vec3) -> Nearest {
         best_t = 1.0;
         best_d2 = end_d2;
     }
-    let mut deflated = [0.0f64; 3];
-    let m = solve_quadratic_real(a2, a1c, a0c, &mut deflated);
-    for t in deflated.iter_mut().take(m) {
-        *t = polish_cubic_root(a3, a2, a1c, a0c, *t);
-    }
-    for &t in roots.iter().take(n).chain(deflated.iter().take(m)) {
+    for &t in roots.iter().take(n) {
         if !(0.0..=1.0).contains(&t) {
             continue;
         }
@@ -441,6 +445,70 @@ mod tests {
             let got = nearest_on_quadratic(a0, h, a1, p);
             assert!(got.distance < 1e-9, "t={t}: {}", got.distance);
         }
+    }
+
+    /// `P < 0` does not mean three real roots: with `|Q| / 2 > √(−P³/27)` the
+    /// cubic has one real root and a complex pair. The trigonometric branch
+    /// clamped that cosine (far outside `[−1, 1]`, not a rounding hair) and
+    /// reported three wrong roots, so a query *on* the curve near `t = 1` read
+    /// as a quarter-unit away and collapsed to the endpoint.
+    #[test]
+    fn one_real_root_with_negative_p_is_not_forced_through_the_trig_branch() {
+        let curves: [[Vec3; 3]; 3] = [
+            [[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [3.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [2.0, 3.0, 0.0], [1.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [4.0, 1.0, 0.0], [1.0, 3.0, 0.0]],
+        ];
+        for [a0, h, a1] in curves {
+            for k in 0..=200 {
+                let t = f64::from(k) / 200.0;
+                let p = crate::bezier::quadratic_point(a0, h, a1, t);
+                let got = nearest_on_quadratic(a0, h, a1, p);
+                assert!(
+                    got.distance < 1e-9,
+                    "t={t} on {a0:?}{h:?}{a1:?}: {}",
+                    got.distance
+                );
+            }
+        }
+        // Seeded random curves (half with an `f32`-rounded midpoint handle, as
+        // `set_points_as_corners` makes them), queried near the curve: the
+        // closed form can never lose to a dense sampling.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut unit = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        for i in 0..300 {
+            let a0 = [unit() * 5.0, unit() * 3.0, 0.0];
+            let a1 = [a0[0] + unit(), a0[1] + unit(), 0.0];
+            let h = if i % 2 == 0 {
+                let mid = |k: usize| f64::from(((a0[k] + a1[k]) / 2.0) as f32);
+                [mid(0), mid(1), 0.0]
+            } else {
+                [a0[0] + unit(), a0[1] + unit(), 0.0]
+            };
+            for _ in 0..6 {
+                let t = (unit() + 1.0) / 2.0;
+                let on = crate::bezier::quadratic_point(a0, h, a1, t);
+                let p = [on[0] + unit() * 0.05, on[1] + unit() * 0.05, 0.0];
+                let got = nearest_on_quadratic(a0, h, a1, p);
+                let (_, brute_d) = brute(a0, h, a1, p, 4_000);
+                assert!(
+                    got.distance <= brute_d + 1e-12,
+                    "closed form {} vs brute force {brute_d} for {p:?} on {a0:?}{h:?}{a1:?}",
+                    got.distance
+                );
+            }
+        }
+        // The solver itself: 34t³ − 42t² + 15.915t − 6.365 has the single
+        // real root 0.95 (the first curve's stationary point at t = 0.95).
+        let mut out = [0.0f64; 3];
+        let n = solve_cubic_real(34.0, -42.0, 15.915, -6.365, &mut out);
+        assert_eq!(n, 1, "{:?}", &out[..n]);
+        assert!((out[0] - 0.95).abs() < 1e-12, "{}", out[0]);
     }
 
     #[test]
