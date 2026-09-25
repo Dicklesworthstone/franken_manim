@@ -250,7 +250,9 @@ fn every_camera_registration_reaches_the_real_binary_at_all_thread_caps() {
             );
             let rgba = decode_png(&frames[0], &PngLimits::default()).unwrap().rgba;
             assert!(
-                rgba.chunks_exact(4)
+                rgba.as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0)
             );
             if let Some(baseline) = &baseline {
@@ -284,9 +286,13 @@ fn pure_and_recorded_mixed_bundles_match_serial_camera_for_the_whole_artifact() 
         if recorded {
             let visible: Vec<_> = (0..reader.frame_count())
                 .map(|index| {
-                    reader.stage_at(index).unwrap().draw_plan().items().iter().any(|item| {
-                        item.key.program != fmn::mobject::ProgramKind::Vector
-                    })
+                    reader
+                        .stage_at(index)
+                        .unwrap()
+                        .draw_plan()
+                        .items()
+                        .iter()
+                        .any(|item| item.key.program != fmn::mobject::ProgramKind::Vector)
                 })
                 .collect();
             assert_eq!(visible, [false, true, true, false]);

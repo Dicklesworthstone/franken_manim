@@ -3824,6 +3824,7 @@ impl RenderSink {
         self.emitter.as_ref().map(OrderedEmitter::handle)
     }
 
+    #[cfg(test)]
     fn new(
         fs: Arc<dyn FileSystem>,
         config: &fmn_config::Config,

@@ -16,14 +16,6 @@ pub(super) struct CpuRenderer {
 }
 
 impl CpuRenderer {
-    pub(super) fn new(
-        plan: ExecutionPlan,
-        config: RetainedFrameRendererConfig,
-        output: EmitterHandle,
-    ) -> Result<Self, CliError> {
-        Self::new_with_camera(plan, config, output, None)
-    }
-
     pub(super) fn new_with_camera(
         plan: ExecutionPlan,
         config: RetainedFrameRendererConfig,
