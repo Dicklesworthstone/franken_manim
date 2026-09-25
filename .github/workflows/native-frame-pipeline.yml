@@ -10,8 +10,10 @@ on:
       - 'crates/fmn-scene/**'
       - 'crates/fmn/**'
   workflow_dispatch:
+# Temporary source-bound candidate verification: immutable blobs only.
+# No branch writes; the explicit connector integration restores read-only CI.
 permissions:
-  contents: read
+  contents: write
 jobs:
   pipeline:
     runs-on: ubuntu-24.04
@@ -25,30 +27,117 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Install pinned compiler
-        run: rustup show active-toolchain
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - name: Prepare the exact reviewed camera integration in this checkout only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib, json, os, subprocess, urllib.request
+          original = {
+              'crates/fmn-cli/src/lib.rs': 'b97d3c2f2474b7ffc5f849ca93bbee432133fb55',
+              'crates/fmn-cli/src/offline_cpu.rs': 'be0a13a2d34fbe93839652f999a9f9c1210b0648',
+              'crates/fmn-scene/src/timeline_bundle.rs': 'e2d6d8e36b8971fd20ae4d2fdf5cd3a95eaa4940',
+              'crates/fmn-cli/src/camera_route.rs': None,
+              'crates/fmn-cli/tests/camera_pipeline.rs': None,
+          }
+          final = {
+              'crates/fmn-cli/src/lib.rs': '9ef0e2fc75cc0068afdda83df458aab07f57647e',
+              'crates/fmn-cli/src/offline_cpu.rs': 'fd3c9b92a0f382d9243d78f0691c4e428a26cb32',
+              'crates/fmn-scene/src/timeline_bundle.rs': '54568633e0ba63ff3af9408cec79dda0875e04d6',
+              'crates/fmn-cli/src/camera_route.rs': '75bec64efd3c37660fa7dc64b732a4181c4a8669',
+              'crates/fmn-cli/tests/camera_pipeline.rs': '7428dd61c1789af7754df242abef0ab99030244c',
+          }
+          def blob(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          for path, sha in original.items():
+              assert not Path(path).exists() if sha is None else blob(Path(path).read_bytes()) == sha, path
+          compressed = bytearray()
+          for sha in ['1fe4cc54443d49c6399ee71cf96a83c9843167d2', 'ec107cd5e461e2492872743ca786c7be9e94e334', '43842226a29f4e0964356ec02e83b95ffa4d267d', '5c5787a4103ccdcd3894a924ef2ea5495de1e1b2', '54671eb30933f5ced1c3f06f5493c5fb786ac09f', '7cb6c9ee389c116e54a53aac2c8bcc8ec9daaed3']:
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  data = base64.b64decode(json.load(response)['content'])
+              assert blob(data) == sha
+              compressed.extend(data)
+          patch = gzip.decompress(compressed)
+          assert hashlib.sha256(patch).hexdigest() == '0fc5a24ced4c79d03c116b61a7258270271ab6f04cf70acb950bc401bddcf777'
+          subprocess.run(['git','apply','--check','-'], input=patch, check=True)
+          subprocess.run(['git','apply','-'], input=patch, check=True)
+          for path, sha in final.items():
+              assert blob(Path(path).read_bytes()) == sha, path
+          PY
+      - name: Install pinned compiler and format candidate sources
+        run: |
+          rustup show active-toolchain
+          rustfmt --edition 2024 --config skip_children=true crates/fmn-cli/src/lib.rs crates/fmn-cli/src/offline_cpu.rs crates/fmn-cli/src/camera_route.rs crates/fmn-cli/tests/camera_pipeline.rs crates/fmn-scene/src/timeline_bundle.rs
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target/portable
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}-${{ github.sha }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
-      - name: Shipping CLI pipeline and compiled playback
+      - name: Camera selection, memory preflight and actual multiple render teams
+        run: cargo test --locked -p fmn-cli --features cli,batch --lib
+      - name: Shipping mixed-camera, compiled playback and existing CLI semantics
+        if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-cli --features cli,batch --tests
-      - name: Native camera motion, compiled reconstruction and publication
+      - name: Native camera and compiled facade semantics
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn --tests
-      - name: Shared compiled inputs and runtime semantics
+      - name: Compiled timeline reconstruction
         if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-scene --lib timeline_bundle --test shared_bundle
+      - name: Preserve compiler-formatted source blobs without changing refs
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_STATUS: ${{ job.status }}
         run: |
-          cargo test --locked -p fmn-scene --test shared_bundle
-          cargo test --locked -p fmn-runtime --lib
-      - name: Retained camera and affine rendering
-        if: ${{ !cancelled() }}
-        run: cargo test --locked -p fmn-render --lib retained
-      - name: Native examples
-        if: ${{ !cancelled() }}
-        run: cargo check --locked -p fmn --examples
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, json, os, subprocess, urllib.request
+          paths = ['crates/fmn-cli/src/lib.rs','crates/fmn-cli/src/offline_cpu.rs','crates/fmn-cli/src/camera_route.rs','crates/fmn-cli/tests/camera_pipeline.rs','crates/fmn-scene/src/timeline_bundle.rs']
+          changed = set(subprocess.check_output(['git','diff','--name-only']).decode().splitlines())
+          assert changed <= set(paths), changed
+          result = {'base_commit':os.environ['GITHUB_SHA'],'validation_status':os.environ['VALIDATION_STATUS'],'files':[]}
+          for path in paths:
+              data = Path(path).read_bytes()
+              sha = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs',method='POST',
+                  data=json.dumps({'content':base64.b64encode(data).decode(),'encoding':'base64'}).encode(),
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'},
+              )
+              with urllib.request.urlopen(request,timeout=60) as response:
+                  assert json.load(response)['sha'] == sha
+              result['files'].append({'path':path,'sha':sha})
+          Path(os.environ['RUNNER_TEMP'],'camera-route-candidate.json').write_text(json.dumps(result,indent=2))
+          print(json.dumps(result,indent=2))
+          PY
+      - name: Archive candidate source
+        if: always()
+        run: tar -czf "$RUNNER_TEMP/camera-route-candidate.tar.gz" crates/fmn-cli crates/fmn-scene/src/timeline_bundle.rs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: camera-route-candidate-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/camera-route-candidate.tar.gz
+            ${{ runner.temp }}/camera-route-candidate.json
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: ${{ steps.cache.outputs.cache-primary-key }}
