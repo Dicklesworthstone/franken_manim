@@ -103,7 +103,12 @@ fn imperative_play_wait_and_show_replay_every_observed_snapshot_without_callback
     }
     // Reverse/random-access playback must not execute the original updater.
     for index in (0..artifact.frame_count).rev() {
-        let replayed = bundle.stage_at(index).unwrap().snapshot().to_bytes().unwrap();
+        let replayed = bundle
+            .stage_at(index)
+            .unwrap()
+            .snapshot()
+            .to_bytes()
+            .unwrap();
         assert_eq!(replayed, sink.frames[index as usize]);
     }
     assert_eq!(calls.get(), calls_before_playback);
@@ -119,7 +124,10 @@ fn clock_rounding_and_early_stop_preserve_emitted_counts() {
         let observed = sink.frame_count();
         let artifact = sink.finish().unwrap();
         assert_eq!(u64::from(artifact.frame_count), observed);
-        assert_eq!(TimelineBundle::from_bytes(&artifact.bytes).unwrap().fps(), fps);
+        assert_eq!(
+            TimelineBundle::from_bytes(&artifact.bytes).unwrap().fps(),
+            fps
+        );
     }
 }
 
@@ -331,7 +339,9 @@ fn canonical_output_budget_accepts_exact_size_and_refuses_one_byte_less() {
         recorder
     };
     let expected = record().finish().unwrap();
-    let exact = record().finish_with_max_bytes(expected.bytes.len()).unwrap();
+    let exact = record()
+        .finish_with_max_bytes(expected.bytes.len())
+        .unwrap();
     assert_eq!(exact.bytes, expected.bytes);
     let limit = expected.bytes.len() - 1;
     assert!(matches!(record().finish_with_max_bytes(limit),

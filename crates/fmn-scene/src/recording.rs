@@ -195,7 +195,11 @@ impl SceneBundleRecorder {
         Ok(())
     }
 
-    fn reserve<T>(&mut self, table: &mut Vec<T>, context: &'static str) -> Result<(), RecordingError> {
+    fn reserve<T>(
+        &mut self,
+        table: &mut Vec<T>,
+        context: &'static str,
+    ) -> Result<(), RecordingError> {
         if table.len() == table.capacity() {
             // Geometric, fallible growth rather than reallocating on each frame.
             let additional = table.capacity().max(4);
@@ -250,10 +254,9 @@ impl SceneBundleRecorder {
         self.admit_frame()?;
         let bytes = bytes?;
         self.charge(bytes.len(), "recorded frame snapshot")?;
-        let mut frames = self
-            .active
-            .as_mut()
-            .map_or_else(Vec::new, |active| std::mem::take(&mut active.recorded.frames));
+        let mut frames = self.active.as_mut().map_or_else(Vec::new, |active| {
+            std::mem::take(&mut active.recorded.frames)
+        });
         self.reserve(&mut frames, "recorded frame table")?;
         frames.push(bytes);
         if let Some(active) = &mut self.active {
@@ -413,9 +416,11 @@ impl SceneBundleRecorder {
         writer.put_u32(count);
         for segment in self.segments {
             writer.put_u8(1); // Observed snapshots, never an unproven pure law.
-            writer.put_u32(u32::try_from(segment.frames.len()).map_err(|_| {
-                RecordingError::Unsupported("segment frame count exceeds FMTL/1")
-            })?);
+            writer.put_u32(
+                u32::try_from(segment.frames.len()).map_err(|_| {
+                    RecordingError::Unsupported("segment frame count exceeds FMTL/1")
+                })?,
+            );
             for frame in segment.frames {
                 writer.put_bytes(&frame);
             }

@@ -206,9 +206,7 @@ struct AudioScene;
 
 impl SceneConstruct for AudioScene {
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
-        stage
-            .scene_mut()
-            .add_sound("sound.wav", 0.0, None, None)?;
+        stage.scene_mut().add_sound("sound.wav", 0.0, None, None)?;
         stage.wait(0.1)?;
         Ok(())
     }

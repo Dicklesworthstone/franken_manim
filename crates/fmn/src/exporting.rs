@@ -159,7 +159,12 @@ pub fn export_bundle_bytes<P: SceneConstruct + ?Sized>(
     let runtime = RuntimeConfig::from_config(&options.config);
     let mut recorder = SceneBundleRecorder::new(runtime.effective_fps(), options.limits)
         .map_err(BundleExportError::Recording)?;
-    let run = crate::run_scene(program, runtime, options.config.determinism.seed, &mut recorder);
+    let run = crate::run_scene(
+        program,
+        runtime,
+        options.config.determinism.seed,
+        &mut recorder,
+    );
     let completed = match run {
         Ok(completed) => completed,
         Err(error) => {

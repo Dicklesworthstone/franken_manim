@@ -107,7 +107,11 @@ impl BundleCapture {
                 ));
             }
             if let Some(points) = entry.buffer.read_column("point")
-                && points.chunks_exact(3).any(|point| point[2] != 0.0)
+                && points
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .any(|point| point[2] != 0.0)
             {
                 return Err(capability(
                     "nonplanar geometry requires a camera-bearing bundle",
@@ -193,7 +197,9 @@ fn _portal_begin_bundle(
         .lock()
         .map_err(|_| PyRuntimeError::new_err("bundle output lock poisoned"))?;
     if slot.is_some() {
-        return Err(PyRuntimeError::new_err("a render generation is already active"));
+        return Err(PyRuntimeError::new_err(
+            "a render generation is already active",
+        ));
     }
     let mut owner = scene.try_borrow_mut()?;
     owner.engine = Rc::new(EngineState::new(replacement));
