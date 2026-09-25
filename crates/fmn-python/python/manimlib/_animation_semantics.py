@@ -2105,8 +2105,10 @@ def _install_partial_reveals(g):
                       should_match_start=True, **kwargs):
         Creation.__init__(self, mobject, rate_func=rate_func, remover=remover,
                           should_match_start=should_match_start, **kwargs)
-        self._native_kind = ("uncreate_surface" if isinstance(mobject, g["Surface"])
-                             and hasattr(mobject, "resolution") else "uncreate")
+        # ShowPartial leaves a point cloud or plain Group Python-driven.
+        if self._native_kind is not None:
+            self._native_kind = ("uncreate_surface" if isinstance(mobject, g["Surface"])
+                                 and hasattr(mobject, "resolution") else "uncreate")
 
     def passing_init(self, mobject, time_width=0.1, remover=True, **kwargs):
         self.time_width = float(time_width)

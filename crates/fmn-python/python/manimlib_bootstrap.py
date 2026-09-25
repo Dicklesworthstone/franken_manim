@@ -7404,8 +7404,47 @@ def _refuse_unrouted(class_name, entries):
         )
 
 
-# tex_mobject.py's get_command_matches: a control word or control symbol.
-_TEX_COMMAND_TOKEN = _re.compile(r"\\(?:[a-zA-Z]+|.)", flags=_re.S)
+# tex_mobject.py's get_command_matches: a control word or control symbol, or
+# a run of braces.
+_TEX_COMMAND_OR_BRACES = _re.compile(
+    r"(?P<command>\\(?:[a-zA-Z]+|.))|(?P<open>{+)|(?P<close>}+)", flags=_re.S
+)
+# Source that draws nothing: whitespace, braces, alignment and tie, the line
+# break, and the spacing commands.
+_TEX_INKLESS = _re.compile(
+    r"(?:\s|[{}&~]|\\\\|\\[,;:! ]|\\(?:quad|qquad|enspace|thinspace|medspace"
+    r"|thickspace|negthinspace|negmedspace|negthickspace)(?![a-zA-Z]))*",
+    flags=_re.S,
+)
+
+
+def _tex_command_matches(string):
+    """tex_mobject.py:92 get_command_matches as (start, end, flag) triples:
+    flag 1 for an opening brace run, -1 for its closing run, 0 for a
+    command. Adjacent brace runs are lumped and paired exactly as the
+    Reference pairs them; an unmatched brace is left to the typesetter."""
+    result = []
+    open_stack = []
+    for match in _TEX_COMMAND_OR_BRACES.finditer(string):
+        if match.group("open"):
+            open_stack.append((match.span(), len(result)))
+        elif match.group("close"):
+            close_start, close_end = match.span()
+            while open_stack:
+                (open_start, open_end), index = open_stack.pop()
+                n = min(open_end - open_start, close_end - close_start)
+                result.insert(index, (open_end - n, open_end, 1))
+                result.append((close_start, close_start + n, -1))
+                close_start += n
+                if close_start < close_end:
+                    continue
+                open_end -= n
+                if open_start < open_end:
+                    open_stack.append(((open_start, open_end), index))
+                break
+        else:
+            result.append((*match.span(), 0))
+    return result
 
 _TEX_LINE_ALIGNMENTS = {
     "\\centering": "center",
@@ -8459,21 +8498,28 @@ class Tex(StringMobject):
 
     def _labelled_isolate_spans(self, selector):
         """The isolate occurrences the Reference's parse labels
-        (string_mobject.py:210). It skips an occurrence inside or partly
-        overlapping a command token (protect level, overlap warning), and a
-        lone brace (level mismatch warning); a whitespace-only occurrence
-        draws nothing. Only the rest become parts or need native ink."""
-        commands = [match.span() for match in _TEX_COMMAND_TOKEN.finditer(self.string)]
+        (string_mobject.py:210), and that draw something. It skips an
+        occurrence that partly overlaps a command or brace token (protect
+        level), and one whose braces do not balance inside it (the
+        "Cannot handle substrings" level mismatch; a lone brace is one).
+        An occurrence made only of inkless source (whitespace, spacing
+        commands, the line break) is labelled by the Reference but draws
+        nothing. Only the rest become parts or need native ink."""
+        tokens = _tex_command_matches(self.string)
         for start, end in self.find_spans_by_selector(selector):
-            text = self.string[start:end].strip()
-            if not text or text in ("{", "}"):
+            if _TEX_INKLESS.fullmatch(self.string, start, end):
                 continue
-            if any(
-                c_start < end and start < c_end and not (start <= c_start and c_end <= end)
-                for c_start, c_end in commands
-            ):
-                continue
-            yield start, end
+            depth = 0
+            for t_start, t_end, flag in tokens:
+                if t_start < end and start < t_end and not (start <= t_start and t_end <= end):
+                    break
+                if start <= t_start and t_end <= end:
+                    depth += flag
+                    if depth < 0:
+                        break
+            else:
+                if depth == 0:
+                    yield start, end
 
     def _validate_isolate_spans(self):
         """A labelled isolate occurrence that resolves to no span-map
@@ -10585,6 +10631,14 @@ class SingleStringTex(SVGMobject):
         )
 
 
+class _OldTexPart(VMobject):
+    """One OldTex part: the glyphs of one piece, answering get_tex() as the
+    Reference's SingleStringTex piece does (old_tex_mobject.py:173)."""
+
+    def get_tex(self):
+        return self.tex_string
+
+
 class OldTex(Tex):
     """The Reference's legacy Tex interface (old_tex_mobject.py at the
     pin): joins `tex_strings` with `arg_separator` and typesets in math
@@ -10614,6 +10668,10 @@ class OldTex(Tex):
             tex_to_color_map=tex_to_color_map,
             **kwargs,
         )
+        self.break_up_by_substrings(self.tex_strings)
+        # Tex.__init__ colored through the native span map; the Reference
+        # then colors whole parts by substring (old_tex_mobject.py:192).
+        self.set_color_by_tex_to_color_map(self.tex_to_color_map)
 
     def break_up_tex_strings(self, tex_strings, substrings_to_isolate=()):
         if not substrings_to_isolate:
@@ -10624,26 +10682,88 @@ class OldTex(Tex):
             pieces.extend([p for p in _re.split(pattern, s) if p])
         return pieces
 
+    def _validate_isolate_spans(self):
+        """The Reference's OldTex splits at isolate keys and typesets each
+        piece; a piece that draws nothing is dropped from the parts, never
+        refused (break_up_by_substrings)."""
+
     def break_up_by_substrings(self, tex_strings):
+        """Reference old_tex_mobject.py:217: one part per piece, carrying
+        that piece's source as `tex_string`. With several pieces, one that
+        draws nothing (whitespace, a lone brace, a spacing command) is
+        dropped, so `eq[i]` counts the parts the Reference counts. The
+        native build already grouped the glyphs by piece through the span
+        map; this labels and prunes those groups."""
+        pieces = [str(piece).strip() for piece in tex_strings]
+        parts = list(self.submobjects)
+        if len(parts) != len(pieces):
+            raise RuntimeError(
+                f"OldTex built {len(parts)} parts for {len(pieces)} pieces"
+            )
+        for part, piece in zip(parts, pieces):
+            part.__class__ = _OldTexPart
+            part.tex_string = piece
+        if len(pieces) == 1:
+            return self
+        kept, remap = [], {}
+        for index, (part, piece) in enumerate(zip(parts, pieces)):
+            if not piece or not part.submobjects:
+                continue
+            remap[index] = len(kept)
+            kept.append(part)
+        if len(kept) != len(parts):
+            self._string_sub_paths = [
+                [remap[path[0]], *path[1:]] for path in self._string_sub_paths
+            ]
+            self.set_submobjects(kept)
+        return self
+
+    def get_parts_by_tex(self, tex, substring=True, case_sensitive=True):
+        """Reference old_tex_mobject.py:248: the parts whose own source
+        contains `tex` (or equals it with substring=False)."""
+
+        def test(tex1, tex2):
+            if not case_sensitive:
+                tex1, tex2 = tex1.lower(), tex2.lower()
+            return tex1 in tex2 if substring else tex1 == tex2
+
+        return VGroup(*(
+            part
+            for part in self.submobjects
+            if isinstance(getattr(part, "tex_string", None), str)
+            and test(tex, part.tex_string)
+        ))
+
+    def get_part_by_tex(self, tex, **kwargs):
+        parts = self.get_parts_by_tex(tex, **kwargs)
+        return parts[0] if parts else None
+
+    def set_color_by_tex(self, tex, color, **kwargs):
+        self.get_parts_by_tex(tex, **kwargs).set_color(color)
+        return self
+
+    def set_color_by_tex_to_color_map(self, tex_to_color_map, **kwargs):
+        for tex, color in list(tex_to_color_map.items()):
+            self.set_color_by_tex(tex, color, **kwargs)
         return self
 
     def index_of_part(self, part, start=0):
         return self.submobjects.index(part, start)
 
     def index_of_part_by_tex(self, tex, start=0, **kwargs):
-        for idx, submob in enumerate(self.submobjects[start:], start=start):
-            if hasattr(submob, "tex_string") and tex in submob.tex_string:
-                return idx
-        return -1
+        part = self.get_part_by_tex(tex, **kwargs)
+        return self.index_of_part(part, start)
 
     def set_bstroke(self, color=_BLACK, width=4):
         self.set_stroke(color, width, background=True)
         return self
 
     def slice_by_tex(self, start_tex=None, stop_tex=None, **kwargs):
-        start = 0 if start_tex is None else self.index_of_part_by_tex(start_tex, **kwargs)
-        stop = len(self.submobjects) if stop_tex is None else self.index_of_part_by_tex(stop_tex, **kwargs) + 1
-        return VGroup(*self.submobjects[start:stop])
+        start_index = 0 if start_tex is None else self.index_of_part_by_tex(start_tex, **kwargs)
+        if stop_tex is None:
+            return self[start_index:]
+        stop_index = self.index_of_part_by_tex(stop_tex, start=start_index, **kwargs)
+        return self[start_index:stop_index]
 
     def sort_alphabetically(self):
         self.submobjects.sort(key=lambda m: getattr(m, "tex_string", ""))
@@ -17635,23 +17755,30 @@ class ShowPartial(_NativeAnimation, _abc.ABC):
     subclass supplies ``get_bounds``.  The two native bounds vocabularies —
     creation's ``(0, alpha)`` (creation.py:52) and indication.py:179's
     sliding passing-flash window — are recognized by sampling the
-    subclass's rule; any other rule refuses precisely at play."""
+    subclass's rule; any other rule refuses precisely at play.
+
+    Any other family (a DotCloud, a Group of surfaces) plays Python-driven,
+    as the Reference plays every ShowPartial: each member reveals itself
+    through its own pointwise_become_partial (creation.py:37), so a point
+    cloud grows by its records and a plain Group member stays put."""
 
     _native_kind = "show_partial"
     _BOUNDS_PROBES = (0.125, 0.375, 0.625, 0.875)
 
     def __init__(self, mobject, should_match_start=False, **kwargs):
-        if not isinstance(mobject, (VMobject, Surface)):
+        if not isinstance(mobject, Mobject):
             raise TypeError(
                 type(self).__name__
-                + " requires a VMobject or Surface family; "
+                + " requires a Mobject family; "
                 + type(mobject).__name__
-                + " has no pointwise_become_partial plane"
+                + " has no pointwise_become_partial"
             )
         super().__init__(mobject, **kwargs)
         # Stored-but-never-read in the pinned Reference (creation.py:30);
         # kept as inert constructor surface, matching the native shelf.
         self.should_match_start = bool(should_match_start)
+        if not isinstance(mobject, (VMobject, Surface)):
+            self._native_kind = None
 
     @_abc.abstractmethod
     def get_bounds(self, alpha):

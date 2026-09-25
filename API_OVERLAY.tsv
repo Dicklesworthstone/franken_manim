@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	062b7074cf067318a8462fdb76bbcab2bde442eda3785cf4d738f71177b52351
+ledger_reviewed_digest	541071a8e69b77a69c9b15fff20f021c998aca61c30e8aa573f9ed10c0ecc4af
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1658,16 +1658,16 @@ manimlib.mobject.svg.drawings:VideoSeries	same	crates/fmn-library/src/drawings.r
 manimlib.mobject.svg.drawings:VideoSeries.__init__	same	crates/fmn-library/src/drawings.rs	crates/fmn-library/tests/drawings.rs	initializes VideoSeries with num_videos count and horizontal spacing
 manimlib.mobject.svg.old_tex_mobject:OldTex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	is the legacy multi-string TeX formula mobject using dvisvgm-style segment slicing
 manimlib.mobject.svg.old_tex_mobject:OldTex.__init__	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	initializes OldTex with TeX string expressions and alignment configuration
-manimlib.mobject.svg.old_tex_mobject:OldTex.break_up_by_substrings	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	breaks up formula mobject into submobjects corresponding to specified substrings
+manimlib.mobject.svg.old_tex_mobject:OldTex.break_up_by_substrings	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	labels each span-grouped part with its piece's source and drops pieces that draw nothing, as the Reference does
 manimlib.mobject.svg.old_tex_mobject:OldTex.break_up_tex_strings	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	tokenizes TeX input strings into individual glyph chunks
-manimlib.mobject.svg.old_tex_mobject:OldTex.get_part_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	finds the first submobject part matching the given TeX substring expression
-manimlib.mobject.svg.old_tex_mobject:OldTex.get_parts_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	finds all submobject parts matching the given TeX substring expression
-manimlib.mobject.svg.old_tex_mobject:OldTex.index_of_part	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	returns the family index of a specific submobject part
-manimlib.mobject.svg.old_tex_mobject:OldTex.index_of_part_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	returns the index of the first submobject part matching the TeX substring
+manimlib.mobject.svg.old_tex_mobject:OldTex.get_part_by_tex	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	returns the first part whose source contains the TeX substring, or None
+manimlib.mobject.svg.old_tex_mobject:OldTex.get_parts_by_tex	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	returns every part whose source contains (or equals) the TeX substring, optionally case-insensitive
+manimlib.mobject.svg.old_tex_mobject:OldTex.index_of_part	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	returns the submobject index of a specific part
+manimlib.mobject.svg.old_tex_mobject:OldTex.index_of_part_by_tex	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	returns the index of the first part matching the TeX substring, searched from start
 manimlib.mobject.svg.old_tex_mobject:OldTex.set_bstroke	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	sets background stroke width and color on all formula glyphs
-manimlib.mobject.svg.old_tex_mobject:OldTex.set_color_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	colors all submobjects matching the specified TeX substring
-manimlib.mobject.svg.old_tex_mobject:OldTex.set_color_by_tex_to_color_map	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	applies a dictionary mapping TeX substrings to corresponding colors
-manimlib.mobject.svg.old_tex_mobject:OldTex.slice_by_tex	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	extracts a sub-family slice between specified TeX substring delimiters
+manimlib.mobject.svg.old_tex_mobject:OldTex.set_color_by_tex	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	colors every whole part whose source contains the TeX substring
+manimlib.mobject.svg.old_tex_mobject:OldTex.set_color_by_tex_to_color_map	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	applies a dictionary mapping TeX substrings to part colors
+manimlib.mobject.svg.old_tex_mobject:OldTex.slice_by_tex	same	crates/fmn-python/python/manimlib_bootstrap.py	crates/fmn-python/tests/bridge.py	slices the parts from the start part up to, not including, the stop part
 manimlib.mobject.svg.old_tex_mobject:OldTex.sort_alphabetically	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	sorts formula submobjects alphabetically by their TeX strings
 manimlib.mobject.svg.old_tex_mobject:OldTexText	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	is the legacy text-mode TeX mobject rendering standard text in LaTeX font
 manimlib.mobject.svg.old_tex_mobject:OldTexText.__init__	same	crates/fmn-tex/src/lib.rs	crates/fmn-tex/tests/scribe2.rs	initializes OldTexText with text strings wrapped in text mode

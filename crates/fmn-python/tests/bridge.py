@@ -15492,12 +15492,17 @@ class _CreationBoundsReveal(creation.ShowPartial):
         return (0.0, alpha)
 
 
+# A family that is not all VMobject or Surface plays Python-driven, as the
+# Reference plays every ShowPartial. A bare Mobject has no partial form of
+# its own (mobject.py's pointwise_become_partial is a no-op), so it is
+# accepted and holds still. A non-Mobject target is still a named error.
+assert not _CreationBoundsReveal(Mobject())._native_kind
 try:
-    _CreationBoundsReveal(Mobject())
+    _CreationBoundsReveal(None)
 except TypeError as error:
     assert "pointwise_become_partial" in str(error), error
 else:
-    raise AssertionError("ShowPartial subclass accepted a non-VMobject")
+    raise AssertionError("ShowPartial subclass accepted a non-Mobject")
 
 # ShowPartial classifies a subclass's get_bounds into the two native reveal
 # vocabularies and respects the resulting bounds.
@@ -17742,13 +17747,39 @@ assert uncreate_gone_square not in uncreate_scene.get_mobjects()
 try:
     creation.Uncreate(None)
 except TypeError as error:
-    assert "requires a VMobject or Surface family" in str(error), error
+    assert "requires a Mobject family" in str(error), error
     assert "NoneType" in str(error), error
 else:
     raise AssertionError("Uncreate accepted None")
 
 uncreate_retained = creation.Uncreate(manimlib.Square(), remover=False)
 assert uncreate_retained.remover is False
+
+# A family that is not all VMobject or Surface plays ShowCreation the way the
+# Reference plays it: Python-driven, each member revealing itself through its
+# own pointwise_become_partial. A DotCloud grows by its point records
+# (point_cloud_mobject.py:99). A plain Group holds still while its surfaces
+# reveal.
+_cloud = manimlib.DotCloud([(float(x), 0.0, 0.0) for x in range(10)])
+_grow = creation.ShowCreation(_cloud, rate_func=manimlib.linear)
+assert not _grow._native_kind
+_grow.begin()
+assert _cloud.get_num_points() == 0
+_grow.interpolate(0.5)
+assert _cloud.get_num_points() == 5
+_grow.finish()
+assert _cloud.get_num_points() == 10
+_cloud_scene = InteractiveScene()
+_cloud_scene.play(creation.ShowCreation(_cloud), run_time=2.0 / 30.0)
+assert _cloud.get_num_points() == 10 and _cloud in _cloud_scene.get_mobjects()
+_undone = manimlib.DotCloud([(float(x), 1.0, 0.0) for x in range(4)])
+_cloud_scene.add(_undone)
+_cloud_scene.play(creation.Uncreate(_undone), run_time=2.0 / 30.0)
+assert _undone not in _cloud_scene.get_mobjects()
+_shells = manimlib.Group(manimlib.Sphere(), manimlib.Sphere().shift(manimlib.RIGHT))
+_shell_points = _shells.get_all_points().copy()
+_cloud_scene.play(creation.ShowCreation(_shells, lag_ratio=0.05), run_time=2.0 / 30.0)
+assert np.allclose(_shells.get_all_points(), _shell_points)
 
 # fm-5wq.4.97: one Scene.play mixing a native-kind animation with a
 # Python-authored one — the per-animation release loop yields every
@@ -20775,6 +20806,46 @@ assert _split.tex_strings == ["Prevalence", " = ", "Prior"] and len(_split) == 3
 assert all(glyph.get_fill_color().upper() == "#FFFF00" for glyph in _split[2])
 assert _old_tex_module.OldTex("x^2 + y", isolate=["y"]).tex_strings == ["x^2 + ", "y"]
 assert len(_old_tex_module.OldTex("a", "+", "b")) == 3
+# OldTex selects parts the way the Reference does (old_tex_mobject.py:248-305).
+# Each part carries its piece's source. A lookup tests substrings of that
+# source, a miss is None rather than an IndexError, and slice_by_tex stops
+# before the stop part. The formula is shadows.py's get_key_result verbatim.
+_key = _old_tex_module.OldTex(
+    "\\text{Area}\\big(\\text{Shadow}(\\text{Solid})\\big)",
+    "=",
+    "\\frac{1}{2}", "{c}", "\\cdot",
+    "(\\text{Surface area})",
+    tex_to_color_map={
+        "\\text{Shadow}": manimlib.GREY_B,
+        "\\text{Solid}": manimlib.BLUE,
+        "{c}": manimlib.RED,
+    },
+)
+assert [part.tex_string for part in _key] == [
+    "\\text{Area}\\big(", "\\text{Shadow}", "(", "\\text{Solid}", ")\\big)",
+    "=", "\\frac{1}{2}", "{c}", "\\cdot", "(\\text{Surface area})",
+]
+assert _key.get_part_by_tex("frac") is _key[6]
+assert _key[6].get_tex() == "\\frac{1}{2}"
+assert _key.get_part_by_tex("Solid") is _key[3]
+assert _key.get_part_by_tex("\\left") is None
+assert len(_key.get_parts_by_tex("text")) == 4
+assert len(_key.get_parts_by_tex("TEXT", case_sensitive=False)) == 4
+assert len(_key.get_parts_by_tex("text", substring=False)) == 0
+assert _key.index_of_part_by_tex("{c}") == 7
+assert list(_key.slice_by_tex(None, "=")) == list(_key[:5])
+assert list(_key.slice_by_tex("=", "\\cdot")) == list(_key[5:8])
+assert list(_key.slice_by_tex("=")) == list(_key[5:])
+assert {glyph.get_fill_color().upper() for glyph in _key[7]} == {"#FC6255"}
+assert _key.copy().get_part_by_tex("frac").tex_string == "\\frac{1}{2}"
+# A piece that draws nothing is dropped from the parts, as the Reference
+# drops it, so eq[i] counts the same parts. It is never refused.
+_spaced = _old_tex_module.OldTex("a", "\\,", "b", "{}", "c")
+assert [part.tex_string for part in _spaced] == ["a", "b", "c"]
+assert _spaced.get_part_by_tex("c") is _spaced[2]
+_average = _old_tex_module.OldTex("\\frac{1}{n}", "\\left(", "x", "\\right)")
+assert _average.get_part_by_tex("\\left") is _average[1]
+assert len(_average.get_part_by_tex("\\right").family_members_with_points()) == 1
 
 # fm-5wq.14: isolate follows the Reference parse's labelling rules
 # (string_mobject.py:210). It skips an occurrence inside a command token
@@ -20787,6 +20858,18 @@ assert sorted(map(tuple, np.round(_isolated_s.get_all_points(), 6))) == sorted(
     map(tuple, np.round(manimlib.Tex(r"{s} = {-b \pm \sqrt{s}}").get_all_points(), 6))
 )
 manimlib.Tex("{x}+{y}", isolate=["}"])
+# The Reference skips an isolate whose braces do not balance inside it (the
+# "Cannot handle substrings" warning). It labels inkless source such as a
+# spacing command or the line break, but draws nothing for it. Neither
+# case is refused. Sources from matrix_exp.py, quick_eigen.py and subsets.py.
+for _source, _isolate in (
+    (r"{d \over dt}{e}^{rt}=r\cdot{e}^{rt}", "^{"),
+    (r"\lambda_1, \lambda_2 \,=\, \text{roots}", r" \,"),
+    (r"z^5 &= 1 \\ z &= \sqrt[5]{1}", "\\\\ "),
+):
+    assert sorted(map(tuple, np.round(
+        manimlib.Tex(_source, isolate=[_isolate]).get_all_points(), 6
+    ))) == sorted(map(tuple, np.round(manimlib.Tex(_source).get_all_points(), 6)))
 assert len(_old_tex_module.OldTex("a", "\n   ", "b").family_members_with_points()) == 2
 # fm-5wq.22: a command keyword selects the ink the command draws, as the
 # Reference's select_unisolated_substring does: \over the fraction bar,
