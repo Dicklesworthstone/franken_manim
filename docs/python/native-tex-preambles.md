@@ -47,6 +47,11 @@ report offsets relative to that expression. Preamble failures are explicitly
 labelled `additional_preamble`. Selection uses containment: select `\half{x}`
 to include whole-call generated ink, or `x` for its literal argument. The bare
 command name `\half` alone does not contain the full expansion-site span.
+Primitive commands differ. Ink that a built-in command draws itself (the rule
+of `\frac`/`\over`, the radical of `\sqrt`, accents, and over/under lines and
+braces) belongs to the command token. So `tex[R"\over"]` selects the fraction
+bar and `tex[R"\sqrt"]` the radical sign, never argument glyphs, as in the
+Reference (fmn-tex `KEYWORD_INK_COMMANDS`).
 
 A single-use numeric macro argument can become a live readout without removing
 generated ink around it. When one argument is expanded into multiple displayed
