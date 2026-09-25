@@ -16,6 +16,7 @@ from types import ModuleType
 _STEPS = (
     ("copying", "install_mobject_copying"),
     ("point_editing", "install_point_editing"),
+    ("arrow_geometry", "install_arrow_geometry"),
     ("functional_color", "install_functional_color"),
     ("rendering", "install_scene_rendering"),
     ("camera_capture", "install_camera_capture"),
