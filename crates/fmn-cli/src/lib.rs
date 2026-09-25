@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 // Compiled into the build scripts via `include!`; here only for its tests.
+mod camera_route;
 #[cfg(test)]
 mod cargo_profile;
 mod generated;
@@ -1680,7 +1681,14 @@ fn derive_execution_plan(
     ),
     CliError,
 > {
-    derive_execution_plan_with_annex(fs, config, intent, output_format, MetalSelection::Offline)
+    derive_execution_plan_with_annex(
+        fs,
+        config,
+        intent,
+        output_format,
+        MetalSelection::Offline,
+        false,
+    )
 }
 
 fn derive_studio_execution_plan(
@@ -1701,6 +1709,7 @@ fn derive_studio_execution_plan(
         fmn_runtime::RenderIntent::Preview,
         output_format,
         MetalSelection::Studio,
+        false,
     )
 }
 
@@ -1739,6 +1748,7 @@ fn derive_execution_plan_with_annex(
     intent: fmn_runtime::RenderIntent,
     output_format: fmn_runtime::OutputPixelFormat,
     metal_selection: MetalSelection,
+    camera: bool,
 ) -> Result<
     (
         fmn_runtime::ExecutionPlan,
@@ -1747,6 +1757,12 @@ fn derive_execution_plan_with_annex(
     ),
     CliError,
 > {
+    if camera && config.render.engine != fmn_config::config::Engine::Cpu {
+        return Err(CliError::new(
+            "capability",
+            "mixed camera content requires the CPU renderer; no accelerator request is silently substituted",
+        ));
+    }
     let (topology, topology_source) = detect_topology(fs);
     let mut surface =
         fmn_runtime::SurfaceSpec::lumen(config.camera.resolution.0, config.camera.resolution.1);
@@ -1754,6 +1770,12 @@ fn derive_execution_plan_with_annex(
         && config.render.engine == fmn_config::config::Engine::Cpu
     {
         surface.working_bytes_per_pixel += 8; // one retained tile cache per active team
+        if camera {
+            // In addition to a compiled camera frame per team, the serial
+            // owner retains a preparation frame. Teams <= in-flight slots;
+            // charging an extra frame per slot conservatively covers it.
+            surface.working_bytes_per_pixel += 8;
+        }
         if output_format != fmn_runtime::OutputPixelFormat::Rgba8 {
             surface.working_bytes_per_pixel += 4; // RGBA8 conversion intermediate
         }
@@ -1792,7 +1814,13 @@ fn derive_execution_plan_with_annex(
             ));
         }
     };
-    request = request.with_engine(engine);
+    request = request.with_engine(if camera {
+        // ThreeDJob is the certified CPU kernel, including in standard mode.
+        // Keep the requested artifact mode and compression policy unchanged.
+        fmn_runtime::ExecutionEngine::CertifiedCpu
+    } else {
+        engine
+    });
     if let fmn_config::config::ThreadPolicy::Fixed(threads) = config.render.threads {
         let threads = usize::try_from(threads)
             .map_err(|_| CliError::new("config", "thread count does not fit this target"))?;
@@ -3008,6 +3036,12 @@ impl NativeStudioWorker {
                 let scene = names.into_iter().next().ok_or_else(|| {
                     CliError::new("scene", "Studio requires exactly one scene name")
                 })?;
+                if camera_route::builtin(&scene).is_some() {
+                    return Err(CliError::new(
+                        "capability",
+                        "camera registrations currently use offline render; Studio camera inspection is not yet registered",
+                    ));
+                }
                 let mut program = if let Some(scene) = fmn::builtins::tex_span_scene(&scene) {
                     BuiltinProgram::TexSpan(scene)
                 } else {
@@ -3797,12 +3831,35 @@ impl RenderSink {
         target: &RenderTarget,
         destination: PathBuf,
     ) -> Result<Self, CliError> {
+        Self::new_with_camera(fs, config, plan, target, destination, None)
+    }
+
+    fn new_with_camera(
+        fs: Arc<dyn FileSystem>,
+        config: &fmn_config::Config,
+        plan: &fmn_runtime::ExecutionPlan,
+        target: &RenderTarget,
+        destination: PathBuf,
+        camera: Option<fmn_render::Camera>,
+    ) -> Result<Self, CliError> {
+        let camera_journal = camera.as_ref().map(camera_route::descriptor);
         let (width, height) = config.camera.resolution;
         let format = target.pixel_format();
         let output_layout = FrameLayout::tight(format, width, height)
             .map_err(|error| CliError::new("config", error.to_string()))?;
         let limits = render_sink_limits(&output_layout)?;
         let frame_config = resolved_frame_config(config)?;
+        if camera.as_ref().is_some_and(|camera| {
+            plan.engine != fmn_runtime::ExecutionEngine::CertifiedCpu
+                || camera.pixel_shape() != (width, height)
+                || camera.fps() != config.camera.fps
+                || camera.background() != frame_config.background
+        }) {
+            return Err(CliError::new(
+                "config",
+                "camera policy and certified CPU identity must match the output execution plan",
+            ));
+        }
         let tiling = Tiling {
             macro_tile: plan.macro_tile,
             fine_tile: plan.fine_tile,
@@ -3925,7 +3982,7 @@ impl RenderSink {
                     } else {
                         EngineIdentity::fast()
                     };
-                    let renderer = offline_cpu::CpuRenderer::new(
+                    let renderer = offline_cpu::CpuRenderer::new_with_camera(
                         plan.clone(),
                         RetainedFrameRendererConfig {
                             frame: frame_config,
@@ -3936,11 +3993,18 @@ impl RenderSink {
                             threads: 1,
                         },
                         emitter.handle(),
+                        camera,
                     )?;
-                    (
-                        OfflineFrameRenderer::Cpu(renderer),
-                        BackendAccumulator::cpu(identity, &frame_config, tiling),
-                    )
+                    let mut backend = BackendAccumulator::cpu(identity, &frame_config, tiling);
+                    if let Some(descriptor) = &camera_journal {
+                        backend.route = "camera-cpu";
+                        backend
+                            .journal
+                            .as_mut()
+                            .ok_or_else(|| internal("missing CPU camera journal"))?
+                            .extend_from_slice(descriptor);
+                    }
+                    (OfflineFrameRenderer::Cpu(renderer), backend)
                 }
                 fmn_runtime::ExecutionEngine::Metal => {
                     #[cfg(feature = "metal")]
@@ -4261,6 +4325,7 @@ struct SubdivisionContext<'a> {
     target: &'a RenderTarget,
     naming: &'a OutputNaming,
     cancellation: Option<&'a RenderCancellation>,
+    camera: Option<&'a fmn_render::Camera>,
 }
 
 struct SubdividedRenderSink<'a> {
@@ -4308,12 +4373,13 @@ impl<'a> SubdividedRenderSink<'a> {
             play_index,
             self.context.target,
         );
-        let sink = RenderSink::new(
+        let sink = RenderSink::new_with_camera(
             Arc::clone(&self.fs),
             self.context.config,
             self.context.plan,
             self.context.target,
             destination,
+            self.context.camera.cloned(),
         )
         .map_err(subdivision_integration_error)?;
         if let Some(cancellation) = self.context.cancellation {
@@ -5323,10 +5389,11 @@ fn resolve_native_render_input(
             return Err(CliError::new(
                 "scene",
                 format!(
-                    "select a built-in scene or pass --write_all; available scenes: {}, plus {} and {} for --format wav",
+                    "select a built-in scene or pass --write_all; available scenes: {}, plus {} and {} for --format wav; camera scenes: {}",
                     fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
                     fmn::builtins::TEX_SPAN_SCENE_NAME,
                     fmn::builtins::SOUND_CUE_SCENE_NAME,
+                    camera_route::CAMERA_SCENE_NAMES.join(", "),
                 ),
             ));
         } else {
@@ -5342,14 +5409,16 @@ fn resolve_native_render_input(
             if fmn::builtins::primitive_scene(name).is_none()
                 && fmn::builtins::sound_scene(name).is_none()
                 && fmn::builtins::tex_span_scene(name).is_none()
+                && camera_route::builtin(name).is_none()
             {
                 return Err(CliError::new(
                     "scene",
                     format!(
-                        "unknown built-in scene {name:?}; available scenes: {} plus {} and {}",
+                        "unknown built-in scene {name:?}; available scenes: {} plus {} and {}; camera scenes: {}",
                         fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
                         fmn::builtins::TEX_SPAN_SCENE_NAME,
                         fmn::builtins::SOUND_CUE_SCENE_NAME,
+                        camera_route::CAMERA_SCENE_NAMES.join(", "),
                     ),
                 ));
             }
@@ -5452,6 +5521,9 @@ fn resolve_builtin_program(name: &str) -> Result<Box<dyn fmn::SceneConstruct>, C
     if let Some(scene) = fmn::builtins::sound_scene(name) {
         return Ok(Box::new(scene));
     }
+    if let Some(scene) = camera_route::builtin(name) {
+        return Ok(Box::new(scene));
+    }
     Err(CliError::new(
         "internal",
         "validated built-in scene disappeared",
@@ -5525,6 +5597,14 @@ fn execute_native_render_with_cancellation(
         compiled_command.fps = Some(bundle.fps());
         config = resolve_render_config(fs.as_ref(), &compiled_command)?;
     }
+    let camera = if matches!(
+        requested_format,
+        RequestedRenderFormat::Audio | RequestedRenderFormat::StillSvg
+    ) {
+        None
+    } else {
+        camera_route::for_input(&input, &config)?
+    };
     let video_job = match requested_format {
         RequestedRenderFormat::Native(_)
         | RequestedRenderFormat::Audio
@@ -5553,11 +5633,13 @@ fn execute_native_render_with_cancellation(
             ));
         }
     };
-    let (plan, _, _) = derive_execution_plan(
+    let (plan, _, _) = derive_execution_plan_with_annex(
         fs.as_ref(),
         &config,
         fmn_runtime::RenderIntent::Offline,
         planning_format,
+        MetalSelection::Offline,
+        camera.is_some(),
     )?;
     let process_mechanism = runner.mechanism();
     let target = match (requested_format, video_job) {
@@ -5652,6 +5734,9 @@ fn execute_native_render_with_cancellation(
         NativeRenderInput::Builtin { names } => {
             reports.reserve(names.len());
             for name in names {
+                let scene_camera = camera
+                    .as_ref()
+                    .filter(|_| camera_route::builtin(&name).is_some());
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
@@ -5681,6 +5766,7 @@ fn execute_native_render_with_cancellation(
                             target: &target,
                             naming: &naming,
                             cancellation,
+                            camera: scene_camera,
                         },
                         &name,
                         summary.segment_count(),
@@ -5822,12 +5908,13 @@ fn execute_native_render_with_cancellation(
                         &adjacent_manifest_destination(&artifact_destination)?,
                     )?;
                 }
-                let mut sink = RenderSink::new(
+                let mut sink = RenderSink::new_with_camera(
                     Arc::clone(&fs),
                     &config,
                     &plan,
                     &target,
                     artifact_destination,
+                    scene_camera.cloned(),
                 )?;
                 if let Some(cancellation) = cancellation {
                     let emitter = sink.emitter_handle().ok_or_else(|| {
@@ -6035,12 +6122,13 @@ fn execute_native_render_with_cancellation(
                     }
                     let artifact_destination =
                         subdivided_destination(&naming, &name, play_index, &target);
-                    let mut sink = RenderSink::new(
+                    let mut sink = RenderSink::new_with_camera(
                         Arc::clone(&fs),
                         &config,
                         &plan,
                         &target,
                         artifact_destination,
+                        camera.clone(),
                     )?;
                     if let Some(cancellation) = cancellation {
                         let emitter = sink.emitter_handle().ok_or_else(|| {
@@ -6094,12 +6182,13 @@ fn execute_native_render_with_cancellation(
                     &adjacent_manifest_destination(&artifact_destination)?,
                 )?;
             }
-            let mut sink = RenderSink::new(
+            let mut sink = RenderSink::new_with_camera(
                 Arc::clone(&fs),
                 &config,
                 &plan,
                 &target,
                 artifact_destination,
+                camera.clone(),
             )?;
             if let Some(cancellation) = cancellation {
                 let emitter = sink.emitter_handle().ok_or_else(|| {

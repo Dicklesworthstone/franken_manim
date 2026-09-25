@@ -21,7 +21,16 @@ impl CpuRenderer {
         config: RetainedFrameRendererConfig,
         output: EmitterHandle,
     ) -> Result<Self, CliError> {
-        NativeFramePipeline::new(plan, config, None, output)
+        Self::new_with_camera(plan, config, output, None)
+    }
+
+    pub(super) fn new_with_camera(
+        plan: ExecutionPlan,
+        config: RetainedFrameRendererConfig,
+        output: EmitterHandle,
+        camera: Option<fmn_render::Camera>,
+    ) -> Result<Self, CliError> {
+        NativeFramePipeline::new(plan, config, camera, output)
             .map(|pipeline| Self {
                 pipeline: Some(pipeline),
             })
@@ -94,7 +103,12 @@ impl super::RenderSink {
             super::OfflineFrameRenderer::Cpu(renderer) => {
                 renderer.capture_compiled(job, self.next_sequence)?;
                 self.backend.record_cpu_frame()?;
-                self.backend.route = "compiled-cpu";
+                self.backend.route =
+                    if matches!(self.backend.route, "camera-cpu" | "compiled-camera-cpu") {
+                        "compiled-camera-cpu"
+                    } else {
+                        "compiled-cpu"
+                    };
                 self.next_sequence = self
                     .next_sequence
                     .checked_add(1)

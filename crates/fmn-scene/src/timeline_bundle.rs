@@ -442,6 +442,40 @@ impl TimelineBundle {
         })
     }
 
+    /// Whether any visible captured draw requires Lumen's perspective camera.
+    ///
+    /// Inspect each stored keyframe at most once, not each reconstructed frame.
+    /// Pure endpoints share a proven topology/program law; recorded segments
+    /// inspect all their captured snapshots. Detached animation targets and
+    /// empty segments do not choose an output projection. No updater executes.
+    /// Call before consuming this bundle into worker-shareable frame jobs.
+    #[must_use]
+    pub fn requires_camera(&self) -> bool {
+        fn needs_camera(snapshot: &Snapshot) -> bool {
+            snapshot
+                .materialize()
+                .draw_plan()
+                .items()
+                .iter()
+                .any(|item| {
+                    item.key.program != fmn_mobject::ProgramKind::Vector
+                        || item.key.uniforms.depth_test
+                })
+        }
+        self.segments
+            .iter()
+            .zip(self.plan.segments())
+            .any(|(data, planned)| {
+                planned.n_frames != 0
+                    && match data {
+                        SegmentData::Pure { begin, end, .. } => {
+                            needs_camera(begin) || needs_camera(end)
+                        }
+                        SegmentData::Stateful { frames } => frames.iter().any(needs_camera),
+                    }
+            })
+    }
+
     /// Reconstruct a 0-based frame as an independent Stage.
     ///
     /// # Errors
