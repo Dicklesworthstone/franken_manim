@@ -97,6 +97,63 @@ fn spans_select_submobjects_by_source_identity() {
     assert_eq!(one.len(), 1);
 }
 
+/// The primitive kinds a needle selects, flattened over its occurrences.
+fn kinds(t: &Typeset, needle: &str) -> Vec<&'static str> {
+    t.occurrences(needle)
+        .into_iter()
+        .flatten()
+        .map(|ord| match t.subs[ord].prim {
+            fmn_tex::Prim::Glyph(_) => "glyph",
+            fmn_tex::Prim::Rule(_) => "rule",
+            fmn_tex::Prim::Path(_) => "path",
+        })
+        .collect()
+}
+
+#[test]
+fn a_command_keyword_selects_the_ink_it_draws() {
+    // fm-5wq.22: the Reference selects a fraction bar by `\over`/`\frac`
+    // and a radical by `\sqrt`; argument ink keeps its own spans.
+    let e = engine();
+    let math = |source: &str| e.typeset(Mode::Math(Style::Display), source).unwrap();
+
+    let over = math(r"a \over b");
+    assert_eq!(kinds(&over, r"\over"), ["rule"]);
+    assert_eq!(kinds(&over, "a"), ["glyph"]);
+
+    let frac = math(r"\frac{a}{b}");
+    assert_eq!(kinds(&frac, r"\frac"), ["rule"]);
+    assert_eq!(kinds(&frac, r"\frac{a}{b}").len(), 3, "the whole construct still selects all");
+
+    let root = math(r"\sqrt{x}");
+    let radical = kinds(&root, r"\sqrt");
+    assert_eq!(radical.len(), 2, "radical sign and vinculum: {radical:?}");
+    assert!(radical.contains(&"rule"));
+    assert_eq!(kinds(&root, "x"), ["glyph"]);
+
+    // Nesting: each keyword owns only its own construct's ink.
+    let nested = math(r"\frac{\sqrt{x}}{2}");
+    assert_eq!(kinds(&nested, r"\frac"), ["rule"]);
+    assert_eq!(kinds(&nested, r"\sqrt").len(), 2);
+    // An infix \over whose group opens with another command.
+    let grouped = math(r"{\sqrt{x} \over 2}");
+    assert_eq!(kinds(&grouped, r"\over"), ["rule"]);
+    assert_eq!(kinds(&grouped, r"\sqrt").len(), 2);
+
+    // Keyword boundaries: \over never matches \overline's rule.
+    let line = math(r"\overline{AB}");
+    assert!(kinds(&line, r"\over").is_empty());
+    assert_eq!(kinds(&line, r"\overline"), ["rule"]);
+
+    let hat = math(r"\hat x");
+    assert_eq!(kinds(&hat, r"\hat").len(), 1);
+    assert_eq!(kinds(&hat, "x"), ["glyph"]);
+
+    // Text mode islands follow the same rule.
+    let text = e.typeset(Mode::Text, r"so $a \over b$ here").unwrap();
+    assert_eq!(kinds(&text, r"\over"), ["rule"]);
+}
+
 #[test]
 fn textext_mode_typesets_the_mainland_contract() {
     let e = engine();
