@@ -2814,6 +2814,14 @@ class Mobject(_BridgeMobject):
         self.align_family(mobject)
         receiver_family = self.get_family()
         source_family = mobject.get_family()
+        if not self._is_bound():
+            # The detached path becomes member by member, so refuse a record
+            # schema mismatch anywhere in the family before the first member
+            # changes, as the Stage does for a bound family: a refused
+            # become (or restore) leaves the receiver exactly as it was.
+            for receiver, source in zip(receiver_family, source_family):
+                if receiver.data.dtype != source.data.dtype:
+                    raise RuntimeError("become between records of different schemas")
         self._become(mobject, match_updaters)
         if not self._is_bound():
             for receiver, source in zip(receiver_family[1:], source_family[1:]):

@@ -2434,16 +2434,13 @@ shape_restore_group.resize(1)
 shape_restore_group.save_state()
 shape_restore_group.set_field("point", 0, [4.0, 0.0, 0.0])
 shape_restore_group.add(Mobject())
-try:
-    shape_restore_group.restore()
-except RuntimeError as error:
-    assert str(error) == (
-        "become between families of different shapes "
-        "(family alignment lands with fm-cye)"
-    )
-else:
-    raise AssertionError("detached restore silently accepted family-shape drift")
-assert shape_restore_group.get_field("point", 0) == [4.0, 0.0, 0.0]
+# restore is the Reference's become(saved_state) (mobject.py:715), which
+# aligns the two families first (9a9671e2): the saved single-child family
+# is padded to the edited two-child shape, and the data returns to the
+# saved state.
+assert shape_restore_group.restore() is shape_restore_group
+assert shape_restore_group.get_field("point", 0) == [0.0, 0.0, 0.0]
+assert len(shape_restore_group.submobjects) == 2
 
 schema_restore_group = Mobject(Mobject())
 schema_restore_group.resize(1)
