@@ -681,6 +681,32 @@ mod tests {
         ));
     }
 
+    /// `item_id` names the C1--C10 class, so one class can hold several
+    /// items (C2 carries both the build and SUITE.lock). What must be
+    /// unique is an item's identity, (class, virtual path), and a repeated
+    /// identity is refused rather than silently double-counted.
+    #[test]
+    fn a_class_holds_many_items_but_an_identity_appears_once() {
+        let manifest = complete_manifest();
+        assert_eq!(
+            manifest.items.iter().filter(|item| item.item_id == 2).count(),
+            2
+        );
+        assert!(manifest.to_bytes().is_ok());
+        let mut duplicated = complete_manifest();
+        let at = duplicated
+            .items
+            .iter()
+            .position(|item| item.virtual_path.as_deref() == Some("SUITE.lock"))
+            .expect("the SUITE.lock item");
+        let suite = duplicated.items[at].clone();
+        duplicated.items.insert(at + 1, suite);
+        assert!(matches!(
+            duplicated.to_bytes(),
+            Err(ManifestError::Invalid("duplicate closure item identity"))
+        ));
+    }
+
     #[test]
     fn prominent_identity_cannot_disagree_with_the_closure() {
         let mut manifest = complete_manifest();
