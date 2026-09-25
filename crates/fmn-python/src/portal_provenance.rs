@@ -311,18 +311,30 @@ pub(crate) fn _portal_publish_manifest(
         .ok_or_else(|| PyValueError::new_err("missing numpy runtime identity"))?
         .extract()?;
 
+    // C3 in two parts, as the native CLI records it: the toolchain and the
+    // Python runtime versions are platform-neutral; the target triple and
+    // feature set are the `platform/` build record the semantic digest
+    // leaves out (fm-certified-closure-integrity-4fei).
     let c3 = ClosureItem::structural(
         3,
-        "native Rust toolchain and target; Python portal runtime",
+        "native Rust toolchain; Python portal runtime",
         &[
             StructuralField::Text(toolchain),
-            StructuralField::Text(TARGET_TRIPLE),
-            StructuralField::Text(active_target_features()),
             StructuralField::Text(CARGO_PROFILE),
             StructuralField::Text(&cpython),
             StructuralField::Text(&abi),
             StructuralField::Text(&wheel),
             StructuralField::Text(&numpy),
+        ],
+    )
+    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let c3_platform = ClosureItem::structural_at(
+        3,
+        "platform/target",
+        "compiled target triple and target-feature set",
+        &[
+            StructuralField::Text(TARGET_TRIPLE),
+            StructuralField::Text(active_target_features()),
         ],
     )
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -489,13 +501,30 @@ pub(crate) fn _portal_publish_manifest(
     };
 
     let outputs = vec![ManifestOutput {
-        virtual_path: artifact_path.to_string_lossy().into_owned(),
+        // The artifact's name in its output directory, never a host path,
+        // so manifests from two machines compare by name and digest.
+        virtual_path: artifact_path.file_name().map_or_else(
+            || artifact_path.to_string_lossy().into_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        ),
         kind: artifact_kind.to_owned(),
         digest: artifact_digest,
         certified: true,
     }];
 
-    let mut items = vec![build_item, suite_item, c3, c4, c5, c6, c7, c8, c9, c10];
+    let mut items = vec![
+        build_item,
+        suite_item,
+        c3,
+        c3_platform,
+        c4,
+        c5,
+        c6,
+        c7,
+        c8,
+        c9,
+        c10,
+    ];
     items.extend(source_items);
 
     let manifest = ProvenanceManifest::new(ManifestMode::Certified, items, identity, outputs, None)

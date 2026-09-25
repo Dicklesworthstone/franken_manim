@@ -89,3 +89,10 @@ are not an attestation of already-loaded machine code or protection against an
 adversarial host process rewriting both code and guards. Original wheel archive
 identity, complete C1-C10 input closure and cross-platform certification remain
 separate obligations. No subprocess or dependency is added.
+
+Portal manifests record C3 the way native `fmn` does: the toolchain and the
+Python runtime versions as the platform-neutral C3 item, and the target triple
+and feature set as the `platform/target` item that the semantic digest leaves
+out (docs/INPUT_CLOSURE.md §4). Each output is named by its file name in the
+output directory, never a host path, so two platforms' manifests can be
+compared with `fmn-manifest-compare`.

@@ -4909,10 +4909,20 @@ fn builtin_source_item(scene: &str) -> Result<ClosureItem, CliError> {
     .map_err(|error| internal(error.to_string()))
 }
 
+/// An output's manifest identity: its name in the output directory, never a
+/// host path, so manifests from two machines (or two directories) compare
+/// by name and digest.
+fn artifact_virtual_path(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
 fn output_manifest_entry(mode: ManifestMode, artifact: &RenderArtifactReport) -> ManifestOutput {
     match artifact {
         RenderArtifactReport::Native(report) => ManifestOutput {
-            virtual_path: report.path.to_string_lossy().into_owned(),
+            virtual_path: artifact_virtual_path(&report.path),
             kind: native_artifact_kind_name(report.kind).to_owned(),
             digest: report.digest,
             certified: mode == ManifestMode::Certified
@@ -4929,7 +4939,7 @@ fn output_manifest_entry(mode: ManifestMode, artifact: &RenderArtifactReport) ->
                 ),
         },
         RenderArtifactReport::Video(report) => ManifestOutput {
-            virtual_path: report.path.to_string_lossy().into_owned(),
+            virtual_path: artifact_virtual_path(&report.path),
             kind: "encoded_video".to_owned(),
             digest: report.artifact_digest,
             certified: false,
@@ -5011,17 +5021,29 @@ fn render_manifest(
     )
     .map_err(|error| internal(error.to_string()))?;
     let toolchain = pinned_toolchain()?;
+    // C3 in two parts: the platform-neutral toolchain belongs to the
+    // semantic closure; the target triple and feature set are the
+    // `platform/` build record, so certified platforms share one semantic
+    // digest (fm-certified-closure-integrity-4fei).
     let c3 = ClosureItem::structural(
         3,
-        "native Rust toolchain and target; Python portal absent",
+        "native Rust toolchain; Python portal absent",
         &[
             StructuralField::Text(toolchain),
-            StructuralField::Text(TARGET_TRIPLE),
-            StructuralField::Text(active_target_features()),
             StructuralField::Text(CARGO_PROFILE),
             StructuralField::Absent("CPython portal"),
             StructuralField::Absent("fmn-python wheel"),
             StructuralField::Absent("NumPy runtime"),
+        ],
+    )
+    .map_err(|error| internal(error.to_string()))?;
+    let c3_platform = ClosureItem::structural_at(
+        3,
+        "platform/target",
+        "compiled target triple and target-feature set",
+        &[
+            StructuralField::Text(TARGET_TRIPLE),
+            StructuralField::Text(active_target_features()),
         ],
     )
     .map_err(|error| internal(error.to_string()))?;
@@ -5173,6 +5195,7 @@ fn render_manifest(
             build_item,
             suite_item,
             c3,
+            c3_platform,
             c4,
             c5,
             c6,

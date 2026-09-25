@@ -14,6 +14,14 @@ use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Write
 pub const PROVENANCE_SCHEMA: Schema = Schema::new(*b"FMNP", 10, 1, 0);
 /// Canonical aggregation of the ordered C1--C10 item list.
 pub const CLOSURE_SCHEMA: Schema = Schema::new(*b"FMNP", 11, 1, 0);
+/// Canonical aggregation of the platform-neutral items only.
+pub const SEMANTIC_SCHEMA: Schema = Schema::new(*b"FMNP", 12, 1, 0);
+/// Virtual-path prefix of closure items that describe the build platform
+/// (target triple, target features). They stay in the closure digest; the
+/// semantic digest leaves them out, so two certified platforms that render
+/// the same input share one semantic digest (plan §16.7: equal semantic
+/// digest implies equal certified bits).
+pub const PLATFORM_ITEM_PREFIX: &str = "platform/";
 
 const MAX_ITEMS: usize = 4_096;
 const MAX_OUTPUTS: usize = 4_096;
@@ -151,6 +159,38 @@ impl ClosureItem {
             detail: detail.into(),
         })
     }
+
+    /// A structural item addressed by a virtual path, so one C-class can
+    /// carry several structural contributions (e.g. C3's platform-neutral
+    /// toolchain and its `platform/` target record).
+    ///
+    /// # Errors
+    /// As [`Self::structural`], or an empty path.
+    pub fn structural_at(
+        item_id: u8,
+        virtual_path: impl Into<String>,
+        detail: impl Into<String>,
+        fields: &[StructuralField<'_>],
+    ) -> Result<Self, ManifestError> {
+        let virtual_path = virtual_path.into();
+        if virtual_path.is_empty() {
+            return Err(ManifestError::Invalid(
+                "structural item has an empty virtual path",
+            ));
+        }
+        let mut item = Self::structural(item_id, detail, fields)?;
+        item.virtual_path = Some(virtual_path);
+        Ok(item)
+    }
+
+    /// Whether this item describes the build platform rather than the
+    /// render's semantic input ([`PLATFORM_ITEM_PREFIX`]).
+    #[must_use]
+    pub fn is_platform_specific(&self) -> bool {
+        self.virtual_path
+            .as_deref()
+            .is_some_and(|path| path.starts_with(PLATFORM_ITEM_PREFIX))
+    }
 }
 
 /// Redundant high-value identities rendered prominently in a manifest.
@@ -185,6 +225,30 @@ pub struct ManifestOutput {
     pub digest: Digest,
     /// Whether this output participates in the certified bit promise.
     pub certified: bool,
+}
+
+/// What [`ProvenanceManifest::compare`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManifestComparison {
+    /// Equal platform-neutral semantic digests: the same render input.
+    pub semantic_equal: bool,
+    /// Equal full closure digests (same platform as well).
+    pub closure_equal: bool,
+    /// Both manifests are certified, so their certified outputs are bound
+    /// to be bit-identical when the semantic digests agree.
+    pub certified_both: bool,
+    /// Certified output paths whose digests differ or which only one side
+    /// published.
+    pub differing_outputs: Vec<String>,
+}
+
+impl ManifestComparison {
+    /// The certified promise holds: same semantic input, both certified,
+    /// every certified output bit-identical.
+    #[must_use]
+    pub fn certified_bits_agree(&self) -> bool {
+        self.semantic_equal && self.certified_both && self.differing_outputs.is_empty()
+    }
 }
 
 /// Complete FMNP sidecar.
@@ -334,6 +398,54 @@ impl ProvenanceManifest {
         Ok(manifest)
     }
 
+    /// The platform-neutral semantic closure digest: the closure without
+    /// its [`PLATFORM_ITEM_PREFIX`] items. Two certified manifests with
+    /// equal semantic digests rendered the same input, so their certified
+    /// outputs must be bit-identical (plan §16.7).
+    ///
+    /// # Errors
+    /// Canonical serialization failure.
+    pub fn semantic_digest(&self) -> Result<Digest, ManifestError> {
+        semantic_digest(&self.items)
+    }
+
+    /// Compare two manifests the way the certified-matrix verifier does:
+    /// equal semantic digests, and then every certified output digest.
+    ///
+    /// # Errors
+    /// Canonical serialization failure.
+    pub fn compare(&self, other: &Self) -> Result<ManifestComparison, ManifestError> {
+        let semantic_equal = self.semantic_digest()? == other.semantic_digest()?;
+        let certified = |manifest: &Self| -> std::collections::BTreeMap<String, Digest> {
+            manifest
+                .outputs
+                .iter()
+                .filter(|output| output.certified)
+                .map(|output| (output.virtual_path.clone(), output.digest))
+                .collect()
+        };
+        let (left, right) = (certified(self), certified(other));
+        let mut differing_outputs: Vec<String> = left
+            .iter()
+            .filter(|(path, digest)| right.get(*path) != Some(*digest))
+            .map(|(path, _)| path.clone())
+            .collect();
+        differing_outputs.extend(
+            right
+                .keys()
+                .filter(|path| !left.contains_key(*path))
+                .cloned(),
+        );
+        differing_outputs.sort();
+        Ok(ManifestComparison {
+            semantic_equal,
+            closure_equal: self.closure_digest == other.closure_digest,
+            certified_both: self.mode == ManifestMode::Certified
+                && other.mode == ManifestMode::Certified,
+            differing_outputs,
+        })
+    }
+
     /// Human-readable rendering paired with the canonical binary document.
     #[must_use]
     pub fn to_text(&self) -> String {
@@ -341,6 +453,9 @@ impl ProvenanceManifest {
         let _ = writeln!(text, "manifest_version = \"1.0\"");
         let _ = writeln!(text, "mode = {:?}", self.mode.name());
         let _ = writeln!(text, "closure_digest = \"{}\"", self.closure_digest);
+        if let Ok(semantic) = self.semantic_digest() {
+            let _ = writeln!(text, "semantic_digest = \"{semantic}\"");
+        }
         let _ = writeln!(text, "build_id = {:?}", self.identity.build_id);
         let _ = writeln!(
             text,
@@ -548,6 +663,24 @@ fn closure_digest(items: &[ClosureItem]) -> Result<Digest, ManifestError> {
     Ok(sha256(&writer.finish()?))
 }
 
+fn semantic_digest(items: &[ClosureItem]) -> Result<Digest, ManifestError> {
+    let neutral: Vec<&ClosureItem> = items
+        .iter()
+        .filter(|item| !item.is_platform_specific())
+        .collect();
+    let mut writer = Writer::new(SEMANTIC_SCHEMA);
+    writer.put_u32(wire_count(neutral.len())?);
+    for item in neutral {
+        writer.put_u8(item.item_id);
+        writer.put_bool(item.virtual_path.is_some());
+        if let Some(path) = &item.virtual_path {
+            writer.put_str(path);
+        }
+        writer.put_digest(&item.digest);
+    }
+    Ok(sha256(&writer.finish()?))
+}
+
 fn put_identity(writer: &mut Writer, identity: &ManifestIdentity) {
     writer.put_str(&identity.build_id);
     writer.put_digest(&identity.suite_lock_digest);
@@ -677,6 +810,104 @@ mod tests {
             manifest.to_bytes(),
             Err(ManifestError::Invalid(
                 "closure items are not in canonical order"
+            ))
+        ));
+    }
+
+    /// A certified manifest as one platform writes it: C3 split into its
+    /// platform-neutral toolchain item and a `platform/target` item.
+    fn manifest_on(triple: &str, config: u64, png: &[u8]) -> ProvenanceManifest {
+        let build_id = "git:0123456789abcdef";
+        let mut items = vec![
+            ClosureItem::structural(1, "C1", &[StructuralField::U64(1)]).expect("valid C1"),
+            ClosureItem::byte_input(2, "franken_manim.build", build_id.as_bytes(), "build")
+                .expect("valid build item"),
+            ClosureItem::byte_input(2, "SUITE.lock", b"suite", "suite lock")
+                .expect("valid suite item"),
+            ClosureItem::structural(3, "toolchain", &[StructuralField::Text("nightly-test")])
+                .expect("valid C3 toolchain"),
+            ClosureItem::structural_at(
+                3,
+                "platform/target",
+                "target",
+                &[StructuralField::Text(triple)],
+            )
+            .expect("valid C3 platform"),
+            ClosureItem::structural(4, "C4", &[StructuralField::U64(config)]).expect("valid C4"),
+        ];
+        for id in 5..=10 {
+            items.push(
+                ClosureItem::structural(
+                    id,
+                    format!("C{id}"),
+                    &[StructuralField::U64(u64::from(id))],
+                )
+                .expect("valid structural item"),
+            );
+        }
+        let declared_config_digest = items
+            .iter()
+            .find(|item| item.item_id == 10)
+            .expect("C10 item")
+            .digest;
+        ProvenanceManifest::new(
+            ManifestMode::Certified,
+            items,
+            ManifestIdentity {
+                build_id: build_id.to_owned(),
+                suite_lock_digest: sha256(b"suite"),
+                toolchain: "nightly-test".to_owned(),
+                target_triple: triple.to_owned(),
+                target_features: "baseline".to_owned(),
+                engine: "certified-cpu:scalar:1".to_owned(),
+                simd_tier: "portable".to_owned(),
+                declared_config_digest,
+            },
+            vec![ManifestOutput {
+                virtual_path: "scene/frame_000000.png".to_owned(),
+                kind: "canonical_png".to_owned(),
+                digest: sha256(png),
+                certified: true,
+            }],
+            None,
+        )
+        .expect("platform manifest")
+    }
+
+    #[test]
+    fn the_semantic_digest_ignores_only_the_platform_record() {
+        let x86 = manifest_on("x86_64-unknown-linux-gnu", 7, b"png");
+        let arm = manifest_on("aarch64-apple-darwin", 7, b"png");
+        assert_ne!(x86.closure_digest, arm.closure_digest);
+        assert_eq!(x86.semantic_digest(), arm.semantic_digest());
+        let across = x86.compare(&arm).expect("compare");
+        assert!(across.semantic_equal && !across.closure_equal);
+        assert!(across.certified_bits_agree(), "{across:?}");
+        assert!(x86.to_text().contains(&format!(
+            "semantic_digest = \"{}\"",
+            x86.semantic_digest().expect("digest")
+        )));
+        // Round trip keeps the platform item and so the semantic digest.
+        let decoded =
+            ProvenanceManifest::from_bytes(&x86.to_bytes().expect("encode")).expect("decode");
+        assert_eq!(decoded.semantic_digest(), x86.semantic_digest());
+
+        // A different render input is a different semantic closure.
+        let other_config = manifest_on("aarch64-apple-darwin", 8, b"png");
+        let changed = x86.compare(&other_config).expect("compare");
+        assert!(!changed.semantic_equal && !changed.certified_bits_agree());
+
+        // Same input, different certified bits: the promise is broken and
+        // the verifier names the output.
+        let drifted = manifest_on("aarch64-apple-darwin", 7, b"other png");
+        let broken = x86.compare(&drifted).expect("compare");
+        assert!(broken.semantic_equal && !broken.certified_bits_agree());
+        assert_eq!(broken.differing_outputs, ["scene/frame_000000.png"]);
+
+        assert!(matches!(
+            ClosureItem::structural_at(3, "", "empty", &[]),
+            Err(ManifestError::Invalid(
+                "structural item has an empty virtual path"
             ))
         ));
     }

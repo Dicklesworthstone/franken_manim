@@ -30,7 +30,7 @@ items marked *(bytes)* are hashed as raw byte streams.
 |---|---|---|
 | C1 | Scene sources and every transitively loaded module: native registrations/artifacts for standalone `fmn`, or the Python file/module set loaded by the separate `fmn-python` portal | bytes, per file, ordered by virtual path |
 | C2 | Engine identity: the franken_manim commit (or release build id) and the full `SUITE.lock` contents | bytes |
-| C3 | Toolchain: the exact pinned nightly (from `SUITE.lock`), target triple, and the SIMD build tier's target-feature set; for a Python-portal run only, the CPython implementation/version, ABI tag, `fmn-python` wheel hash, and NumPy implementation/version/build identity | structural |
+| C3 | Toolchain: the exact pinned nightly (from `SUITE.lock`) and Cargo profile; for a Python-portal run only, the CPython implementation/version, ABI policy, `fmn-python` wheel version, and NumPy version. The target triple and the SIMD build tier's target-feature set form a separate C3 item at virtual path `platform/target` (§4) | structural |
 | C4 | Configuration: the fully-resolved config **bytes** after precedence (defaults → user file → CLI), not the file paths | bytes |
 | C5 | RNG seeds: the root seed and the named-substream layout version (BN-01) | structural |
 | C6 | Assets and fonts: content hash of every asset and font file actually read, keyed by virtual path (bundled fonts included — bundling is not exemption) | bytes, per file |
@@ -83,15 +83,32 @@ as a human-readable text rendering. Fields:
 manifest_version        u16.u16 (schema major.minor)
 mode                    standard | certified
 closure_digest          sha256          — §3.4, the headline value
+semantic_digest         sha256          — the closure without `platform/` items (derived)
 items[]                 (item_id, virtual_path?, digest, detail?)
+                        item_id is the C1–C10 class; one class may hold several
+                        items, and (item_id, virtual_path) is unique
 engine                  franken_manim commit/release + SUITE.lock digest
 toolchain               nightly version, target triple, target-features
 execution               engine id, SIMD tier, declared certified config
-outputs[]               (artifact virtual path, kind, sha256)
+outputs[]               (artifact name in its output directory — never a host
+                        path — kind, sha256)
                         kind ∈ {raw_frames, canonical_png, wav, encoded*}
                         (*encoded artifacts are listed, marked uncertified)
 journal_ref?            replay-journal id when the Studio/journal is live
 ```
+
+**Semantic digest and the cross-platform check.** Items whose virtual path
+begins with `platform/` describe the build platform, not the render's input:
+today the target triple and target-feature set (C3 `platform/target`). They
+stay in the closure digest, so a manifest still names the exact executable.
+The *semantic digest* is the same canonical aggregation over every other item
+(schema `FMNP` 12), so two certified platforms that render the same input
+share it. The certified promise is checkable from manifests alone: equal
+semantic digests, both certified, imply equal certified output digests.
+`fmn_output::ProvenanceManifest::compare` reports exactly that
+(`certified_bits_agree`), and `fmn-manifest-compare A.fmnp B.fmnp` exits 0
+when it holds, 1 when the input matches but a certified output differs (a
+determinism failure), and 2 when the inputs differ (not comparable).
 
 Two manifests with equal `closure_digest` and equal certified platform MUST
 list identical `outputs[]` digests for certified artifact kinds. That

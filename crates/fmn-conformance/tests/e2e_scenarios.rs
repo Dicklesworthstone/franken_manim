@@ -95,7 +95,7 @@ use fmn_output::sinks::{
     NativeArtifactKind, NativeArtifactReport, PngSink, PngSinkConfig, PngTarget, SinkLimits,
     Y4mSink, Y4mSinkConfig,
 };
-use fmn_output::{FrameSink, ManifestMode, ProvenanceManifest, SinkWrite};
+use fmn_output::{ClosureItem, FrameSink, ManifestMode, ProvenanceManifest, SinkWrite};
 use fmn_platform::fs::FileSystem;
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::FrameArena;
@@ -1195,6 +1195,84 @@ fn failure_cli_certified_metal_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
     Ok(RunOutcome::ok()
         .exit_code(3)
         .with_counter("cli_certified_metal_refused", 1))
+}
+
+/// fm-certified-closure-integrity-4fei: the certified promise, checked from
+/// manifests alone. Two certified renders of one input at different thread
+/// counts share a semantic digest and agree on every certified output; a
+/// render of a different input (another resolution) is not comparable.
+fn determinism_certified_manifest_compare_run(
+    ctx: &mut RunCtx,
+) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("certified_manifest_compare")?;
+    let render = |name: &str, threads: &str, resolution: &str| {
+        let out = dir.join(name);
+        let out_text = out
+            .to_str()
+            .ok_or_else(|| fail("certified compare path is not UTF-8"))?
+            .to_owned();
+        let output = fmn_cli::run([
+            "--robot",
+            "--reproducible",
+            "--format",
+            "png_sequence",
+            "--resolution",
+            resolution,
+            "--fps",
+            "8",
+            "--threads",
+            threads,
+            "--video_dir",
+            out_text.as_str(),
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ]);
+        if output.code != 0 {
+            return Err(fail(format!(
+                "certified render {name} failed: code={} stdout={:?} stderr={:?}",
+                output.code, output.stdout, output.stderr
+            )));
+        }
+        let bytes = std::fs::read(out.join("circle_shift.v1.manifest").join("manifest.fmnp"))
+            .map_err(|error| fail(format!("read {name} manifest: {error}")))?;
+        ProvenanceManifest::from_bytes(&bytes)
+            .map_err(|error| fail(format!("decode {name} manifest: {error}")))
+    };
+    let one = render("threads1", "1", "96x54")?;
+    let four = render("threads4", "4", "96x54")?;
+    let other = render("other_input", "1", "80x45")?;
+    let same = one
+        .compare(&four)
+        .map_err(|error| fail(format!("compare: {error}")))?;
+    let different = one
+        .compare(&other)
+        .map_err(|error| fail(format!("compare: {error}")))?;
+    let has_platform_record = one.items.iter().any(ClosureItem::is_platform_specific);
+    ctx.event(
+        LogEvent::new("e2e.determinism.manifest")
+            .field("same_input_agree", truth(same.certified_bits_agree()))
+            .field("same_input_semantic_equal", truth(same.semantic_equal))
+            .field(
+                "other_input_semantic_equal",
+                truth(different.semantic_equal),
+            )
+            .field("platform_record", truth(has_platform_record)),
+    );
+    let agree = same.certified_bits_agree();
+    let distinguished = !different.semantic_equal && !different.certified_bits_agree();
+    ctx.counter("certified_manifest_agree", u64::from(agree));
+    ctx.counter(
+        "certified_manifest_input_distinguished",
+        u64::from(distinguished),
+    );
+    if !agree || !distinguished || !has_platform_record {
+        return Err(fail(format!(
+            "certified manifest comparison drifted: same={same:?} other={different:?} platform_record={has_platform_record}"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("certified_manifest_agree", 1)
+        .with_counter("certified_manifest_input_distinguished", 1))
 }
 
 /// fm-inr.1: caller-authored baseline qualification bits are not authority.
@@ -5076,6 +5154,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("contract_named", "true"),
                 FieldPred::str_eq("stderr_empty", "true"),
                 FieldPred::str_eq("output_absent", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "determinism.certified_manifest_compare.v1",
+        ScenarioClass::DeterminismDrill,
+        Surface::CliInProcess,
+        Invocation::new(determinism_certified_manifest_compare_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("certified_manifest_agree", 1),
+            counter_eq("certified_manifest_input_distinguished", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.determinism.manifest",
+            vec![
+                FieldPred::str_eq("same_input_agree", "true"),
+                FieldPred::str_eq("other_input_semantic_equal", "false"),
+                FieldPred::str_eq("platform_record", "true"),
             ],
         )],
     ));

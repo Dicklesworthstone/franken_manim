@@ -71,8 +71,9 @@ pub use negotiate::{
     WireFormat,
 };
 pub use provenance::{
-    CLOSURE_SCHEMA, ClosureItem, ManifestError, ManifestIdentity, ManifestMode, ManifestOutput,
-    PROVENANCE_SCHEMA, ProvenanceManifest, StructuralField,
+    CLOSURE_SCHEMA, ClosureItem, ManifestComparison, ManifestError, ManifestIdentity, ManifestMode,
+    ManifestOutput, PLATFORM_ITEM_PREFIX, PROVENANCE_SCHEMA, ProvenanceManifest, SEMANTIC_SCHEMA,
+    StructuralField,
 };
 pub use sinks::{
     FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegSoundtrack, GifSink, GifSinkConfig,
