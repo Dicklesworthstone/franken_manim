@@ -40,3 +40,12 @@ jobs:
         run: cargo test --locked -p fmn --tests
       - name: Check the native export crates
         run: cargo clippy --locked -p fmn-scene -p fmn --all-targets -- -D warnings
+      - name: Check export source formatting
+        if: always()
+        run: |
+          rustfmt --check --edition 2024 \
+            crates/fmn-scene/src/recording.rs \
+            crates/fmn-scene/tests/recorded_bundle.rs \
+            crates/fmn/src/exporting.rs \
+            crates/fmn/tests/native_bundle_export.rs \
+            crates/fmn/examples/export_scene.rs

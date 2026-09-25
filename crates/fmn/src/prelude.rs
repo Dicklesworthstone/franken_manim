@@ -5,8 +5,10 @@
 //! `fmn::library`, `fmn::scene`, and the other named modules.
 
 pub use crate::{
-    CompletedScene, Error, ErrorKind, RenderError, RenderFormat, RenderOptions, RenderReport,
-    SceneConstruct, Stage, render, render_with_fs, run_scene,
+    BundleExportError, BundleExportOptions, BundleExportReport, CompletedScene, Error, ErrorKind,
+    RenderError, RenderFormat, RenderOptions, RenderReport, SceneBundleExport, SceneConstruct,
+    Stage, export_bundle, export_bundle_bytes, export_bundle_with_fs, render, render_with_fs,
+    run_scene,
 };
 pub use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationGroup, FramePacket, IntoAnimation, IntoAnimations,

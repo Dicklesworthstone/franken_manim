@@ -63,8 +63,14 @@ use fmn_scene::{
 };
 use fmn_tex::TexError;
 
+pub mod exporting;
 pub mod prelude;
 pub mod rendering;
+
+pub use exporting::{
+    BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport, export_bundle,
+    export_bundle_bytes, export_bundle_with_fs,
+};
 
 pub use rendering::{
     RenderError, RenderFormat, RenderOptions, RenderReport, render, render_with_fs,
