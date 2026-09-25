@@ -207,8 +207,76 @@ class NativeCopyingTests(unittest.TestCase):
         self.assertTrue(all(a is b for a, b in zip(before, after)))
 
 
+    def test_restore_rebuilds_removed_children_and_remaps_named_members(self):
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                scene, root = self.root(bound)
+                root[0].set_x(-2.)
+                root[1].set_x(2.)
+                root.named_child = root[1]
+                root.save_state()
+                saved = root.saved_state
+                survivor = root[0]
+                expected = [child.get_points().copy() for child in saved]
+                root.remove(root[1])
+                survivor.shift(m.UP)
+                self.assertIs(root.restore(), root)
+                self.assertIs(root.saved_state, saved)
+                self.assertEqual(len(root), 2)
+                self.assertIs(root[0], survivor)
+                self.assertIs(root.named_child, root[1])
+                for child, points in zip(root, expected):
+                    np.testing.assert_array_equal(child.get_points(), points)
+                self.assertEqual(root._is_bound(), bound)
+                if bound:
+                    self.assertIn(root, scene.mobjects)
+
+    def test_restore_aligns_nested_families_before_restoring_native_records(self):
+        root = m.Group(m.Group(m.Square().set_x(-2.), m.Square().set_x(2.)))
+        root.save_state()
+        expected = [member.get_points().copy() for member in root.saved_state.get_family()]
+        root[0].remove(root[0][1])
+        root[0][0].scale(0.5)
+        root.restore()
+        self.assertEqual(len(root[0]), 2)
+        self.assertEqual(len(root.get_family()), len(expected))
+        for member, points in zip(root.get_family(), expected):
+            np.testing.assert_array_equal(member.get_points(), points)
+        self.assertTrue(all(not member._is_bound() for member in root.get_family()))
+
+    def test_restore_after_growth_matches_become_without_replacing_live_updaters(self):
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                scene, root = self.root(bound)
+                root.save_state()
+                callback = lambda obj, dt: None
+                root.add_updater(callback, call=False)
+                root.add(DataSquare().set_x(4.))
+                expected = root.copy()
+                expected.become(root.saved_state.copy())
+                self.assertIs(root.restore(), root)
+                self.assertTrue(root.looks_identical(expected))
+                self.assertEqual(root.updaters, [callback])
+
+    def test_detached_restore_preserves_authored_become_dispatch(self):
+        calls = []
+
+        class AuthoredSquare(m.Square):
+            def become(self, target, match_updaters=False):
+                calls.append((self, target, match_updaters))
+                return super().become(target, match_updaters=match_updaters)
+
+        square = AuthoredSquare()
+        square.save_state()
+        square.shift(m.RIGHT)
+        saved = square.saved_state
+        self.assertIs(square.restore(), square)
+        self.assertEqual(calls, [(square, saved, False)])
+        np.testing.assert_array_equal(square.get_points(), saved.get_points())
+
+
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(NativeCopyingTests)
-assert suite.countTestCases() == 15
+assert suite.countTestCases() == 19
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise AssertionError("native mobject array-copy acceptance failed")

@@ -54,8 +54,32 @@ def _array_copies(np, projections, family_map):
     return prepared
 
 
+def _install_mobject_restoration(g):
+    """Use the existing aligned become protocol in both proxy states.
+
+    The old detached shortcut restored paired nursery roots directly and
+    refused any family edit made after save_state. Mobject.become already
+    owns family alignment, record/schema validation, named-child remapping
+    and owner checks. Restoration must not maintain a second partial copy
+    protocol or bypass an authored become override.
+    """
+    Mobject = g.get("Mobject")
+    if Mobject is None:
+        return  # Reduced copier-only embedding tables have no public class.
+
+    @wraps(Mobject.restore)
+    def restore(self):
+        saved_state = getattr(self, "saved_state", None)
+        if saved_state is None:
+            raise Exception("Trying to restore without having saved")
+        self.become(saved_state)
+        return self
+
+    Mobject.restore = restore
+
+
 def install_mobject_copying(native):
-    """Complete the common copier without replacing public classes or methods."""
+    """Complete copying and restoration without replacing public classes."""
     g = vars(native)
     if g.get("_FMN_MOBJECT_COPYING_INSTALLED", False):
         return
@@ -85,5 +109,6 @@ def install_mobject_copying(native):
             namespace[name] = value
         return result
 
+    _install_mobject_restoration(g)
     g["_copy_mobject_graph"] = copy_graph
     g["_FMN_MOBJECT_COPYING_INSTALLED"] = True
