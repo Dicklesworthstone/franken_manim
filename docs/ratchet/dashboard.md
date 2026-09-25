@@ -5,12 +5,12 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `82588865c453`.**
+**Computed against franken_markdown `e911be2ad4ff`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
 | **Parse** | 99.994 % | 99.989 % |
-| **Parse + layout** | 99.797 % | 99.644 % |
+| **Parse + layout** | 99.994 % | 99.989 % |
 
 ## Pending constructs (parse plane)
 
@@ -22,11 +22,6 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 
 | Construct | Occurrences blocked | Tracked at |
 |---|---|---|
-| `char:U+1D53C` | 16 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
-| `char:U+1D4AA` | 14 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
-| `char:U+1D4A9` | 3 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
-| `char:U+1D49E` | 1 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
-| `char:U+1D4AE` | 1 | franken_markdown br-…-4vjj (Noto math-alphanumeric subset) |
 
 ## Trend (by franken_markdown rev)
 
@@ -40,6 +35,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 | `b30516ea9522` | 99.977 | 99.957 | 99.780 | 99.612 |
 | `0e727c336281` | 99.989 | 99.978 | 99.791 | 99.633 |
 | `82588865c453` | 99.994 | 99.989 | 99.797 | 99.644 |
+| `e911be2ad4ff` | 99.994 | 99.989 | 99.994 | 99.989 |
 
 ## How this is enforced
 

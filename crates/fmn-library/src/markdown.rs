@@ -116,6 +116,11 @@ fn inlines_to_markup(inlines: &[franken_markdown::ast::Inline], out: &mut String
             Inline::SoftBreak => out.push(' '),
             Inline::HardBreak => out.push('\n'),
             Inline::Html(html) => escape(html, out),
+            // No TeX engine here: math and footnote references stay the
+            // literal source text they were before the parser knew them.
+            Inline::Math(source) => escape(&format!("${source}$"), out),
+            Inline::DisplayMath(source) => escape(&format!("$${source}$$"), out),
+            Inline::FootnoteRef { id } => escape(&format!("[^{id}]"), out),
         }
     }
 }
@@ -300,6 +305,12 @@ impl<'a> Markdown<'a> {
                         })?
                         .scaled_about(self.font_size / crate::text::DEFAULT_FONT_SIZE, [0.0; 3])
                 }
+                // Body-size literal source: the paragraph it was before the
+                // parser recognised `$$…$$`.
+                franken_markdown::ast::Block::MathBlock(_) => {
+                    let raw = other_source_snippet(&spanned_block.node);
+                    self.layout_text_block(book, raw, 1.0)?.vmob
+                }
                 other => {
                     let raw = other_source_snippet(other);
                     self.layout_text_block(book, raw, 0.9)?.vmob
@@ -358,6 +369,10 @@ fn block_kind(block: &franken_markdown::ast::Block) -> &'static str {
         Block::Table(_) => "table",
         Block::HtmlBlock(_) => "html",
         Block::ThematicBreak => "rule",
+        Block::MathBlock(_) => "math",
+        Block::FootnoteDefinition { .. } => "footnote",
+        Block::DefinitionList(_) => "definitions",
+        Block::PageBreak => "pagebreak",
     }
 }
 
@@ -395,6 +410,16 @@ fn validate_tree(root: &franken_markdown::ast::Block) -> Result<(), TextMobjectE
                 for row in std::iter::once(&table.head).chain(table.rows.iter()) {
                     for cell in row {
                         inlines.extend(cell.iter().map(|value| (value, 0usize)));
+                    }
+                }
+            }
+            Block::FootnoteDefinition {
+                blocks: children, ..
+            } => blocks.extend(children.iter().map(|child| (child, depth + 1))),
+            Block::DefinitionList(items) => {
+                for item in items {
+                    for run in item.terms.iter().chain(item.definitions.iter()) {
+                        inlines.extend(run.iter().map(|value| (value, 0usize)));
                     }
                 }
             }
@@ -491,6 +516,35 @@ fn other_source_snippet(block: &franken_markdown::ast::Block) -> String {
             result
         }
         franken_markdown::ast::Block::ThematicBreak => "———".to_string(),
+        // Literal source, as these read before the parser knew them.
+        franken_markdown::ast::Block::MathBlock(source) => {
+            let mut result = String::new();
+            escape(&format!("$${source}$$"), &mut result);
+            result
+        }
+        franken_markdown::ast::Block::FootnoteDefinition { id, blocks } => {
+            let mut result = String::new();
+            escape(&format!("[^{id}]: "), &mut result);
+            for block in blocks {
+                block_to_markup(block, "", &mut result);
+            }
+            result
+        }
+        franken_markdown::ast::Block::DefinitionList(items) => {
+            let mut result = String::new();
+            for item in items {
+                for term in &item.terms {
+                    inlines_to_markup(term, &mut result);
+                    result.push('\n');
+                }
+                for definition in &item.definitions {
+                    result.push_str(": ");
+                    inlines_to_markup(definition, &mut result);
+                    result.push('\n');
+                }
+            }
+            result
+        }
         _ => String::new(),
     }
 }
@@ -506,6 +560,33 @@ mod tests {
 
     const SAMPLE: &str =
         "# Title\n\nA paragraph with *emphasis*.\n\n```rust\nfn main() {}\n```\n\n- one\n- two\n";
+
+    /// The parser recognises `$…$`, `$$…$$` and footnotes. This mobject has
+    /// no TeX engine, so they lay out exactly as the escaped source text did
+    /// before the parser knew them.
+    #[test]
+    fn math_and_footnote_syntax_stays_literal_source_text() {
+        let points = |source: &str, index: usize| {
+            let md = Markdown::new(source).build(&book()).expect("builds");
+            let mut out = Vec::new();
+            let mut pending = vec![&md.blocks[index].vmob];
+            while let Some(member) = pending.pop() {
+                out.extend(member.points().iter().copied());
+                pending.extend(member.children());
+            }
+            (md.blocks[index].kind, out)
+        };
+        let (kind, inline) = points("Area $a^2$ and a note[^n].\n\n[^n]: the note\n", 0);
+        assert_eq!(kind, "paragraph");
+        assert_eq!(inline, points(r"Area \$a^2\$ and a note\[^n\].", 0).1);
+        assert_eq!(
+            points("Area $a^2$ and a note[^n].\n\n[^n]: the note\n", 1).0,
+            "footnote"
+        );
+        let (kind, block) = points("$$x+1$$\n", 0);
+        assert_eq!(kind, "math");
+        assert_eq!(block, points(r"\$\$x+1\$\$", 0).1);
+    }
 
     #[test]
     fn blocks_map_to_children_in_source_order() {

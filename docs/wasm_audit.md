@@ -1,6 +1,22 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run again 2026-09-24 against `Cargo.lock` `6ce5886a`, at `acd19004`.
+**Status:** re-run 2026-09-25 against `Cargo.lock` `1947c1f5` and `SUITE.lock`
+`33ee2568`, for the franken_markdown repin from `82588865` to `e911be2a`
+(fm-fmd-repin-g2-truth-y3gr). **The release package gate still FAILS at its size
+budget** (fm-8j70), so this audit does not claim a passing package.
+
+- The lock change moves only `fmd-font` (0.1.0 to 0.3.2), `fmd-math` (0.1.0 to
+  0.1.1) and `franken_markdown` (0.3.5 to 0.4.5) to the new rev, adding no
+  packages. None of the three is in any wasm graph. **VERIFIED (mechanical):** the
+  path-normalized output of `cargo tree -p fmn-wasm --target wasm32-unknown-unknown
+  --edges normal --locked` is identical before and after (130 lines, with no fmd
+  crate), and `wasm-smoke/Cargo.lock` is unchanged.
+- `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown` exited 0.
+  `wasm-smoke/run.sh` exited 0 with the unchanged Node digest `1f248a71347b82aa`.
+- `scripts/check_wasm_package.sh` was not re-run: the wasm graph is unchanged, and
+  the gate has stopped at the fm-8j70 size budget since `b492564b`.
+
+Earlier re-run, 2026-09-24, against `Cargo.lock` `6ce5886a`, at `acd19004`.
 The measurements ran on that commit's pre-rebase twin `86f2896d`; the only
 commits rebased beneath it, f1d4afd5 and 92d3b889, touch `crates/fmn` and CI,
 which are outside every wasm graph. **The release package gate still FAILS at
@@ -54,8 +70,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `d38bb18884f060d3867dfbb26b1c985e90ddf8ce716589dd13d2e68aa404b3d3`
-- `Cargo.lock` SHA-256: `6ce5886ad19ccd5c11fe29bfcc6818b9d83317740cc87e8f5b66378ddba28a11`
+- `SUITE.lock` SHA-256: `33ee2568be5910d5bcef1b1cd6a266862d6b0f63c48b77fa0c1c7a9c516b8186`
+- `Cargo.lock` SHA-256: `1947c1f59f0a8aacc89e4ed17e88aa07da1efd0d0714b2e933cd57bc838d56da`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `01f3e42a699383d33b42379bab14661069b40496b869cfbbd7d35b7e58fde53b`
 
 Method labels are deliberately narrow:

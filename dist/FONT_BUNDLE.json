@@ -4,7 +4,7 @@
   "hash_convention": "sha256 (fmn-hash, FIPS 180-4; lowercase hex via Digest::to_hex) over the exact bundled TTF bytes of fmd-font's ALL_FACES at the SUITE.lock pin — the same identity the §16.7 input closure and the typeset cache fingerprint key against",
   "suite_lock": {
     "repo": "franken_markdown",
-    "rev": "82588865c453b175cb1263b36e30f5b9b1941a2e"
+    "rev": "e911be2ad4ff0bb3d76c3d0a57947161053e6580"
   },
   "faces": [
     {
@@ -83,8 +83,8 @@
       "name": "noto-sans-math-symbols",
       "family": "Noto Sans Math",
       "version": null,
-      "byte_len": 57420,
-      "sha256": "d981771565f6cc5b77888317d207ed17cf73618ef9ec9a2390a0780f4d845c73",
+      "byte_len": 72908,
+      "sha256": "634b9964bd8af7e88520e82efe0967cf8cc280720e04158e05246144571b9e4d",
       "license": "licenses/fonts/noto-sans-math-OFL.txt"
     }
   ],

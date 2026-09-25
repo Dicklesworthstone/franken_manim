@@ -166,6 +166,10 @@ fn kind(block: &Block) -> &'static str {
         Block::Table(_) => "table",
         Block::ThematicBreak => "rule",
         Block::HtmlBlock(_) => "literal",
+        Block::MathBlock(_) => "math",
+        Block::FootnoteDefinition { .. } => "footnote",
+        Block::DefinitionList(_) => "definitions",
+        Block::PageBreak => "pagebreak",
     }
 }
 
@@ -481,6 +485,75 @@ impl<'a> Composer<'a> {
                 budget.output(&rule)?;
                 Ok(rule)
             }
+            // A `$$…$$` block the parser recognises renders as a math fence.
+            Block::MathBlock(source) => self.block(
+                book,
+                engine,
+                &Block::CodeBlock {
+                    lang: Some("math".to_owned()),
+                    code: source.clone(),
+                },
+                protected,
+                budget,
+                depth + 1,
+                width,
+            ),
+            // A footnote definition is a quoted note under its `[^id]:` label.
+            Block::FootnoteDefinition { id, blocks } => {
+                let mut children = vec![Block::Paragraph(vec![Inline::Text(format!("[^{id}]:"))])];
+                children.extend(blocks.iter().cloned());
+                self.block(
+                    book,
+                    engine,
+                    &Block::BlockQuote(children),
+                    protected,
+                    budget,
+                    depth + 1,
+                    width,
+                )
+            }
+            // Each term in bold, its definitions as a bulleted list beneath.
+            Block::DefinitionList(items) => {
+                let mut parts = Vec::new();
+                for item in items {
+                    for term in &item.terms {
+                        parts.push(self.block(
+                            book,
+                            engine,
+                            &Block::Paragraph(vec![Inline::Strong(term.clone())]),
+                            protected,
+                            budget,
+                            depth + 1,
+                            width,
+                        )?);
+                    }
+                    let definitions = franken_markdown::ast::List {
+                        ordered: false,
+                        start: 1,
+                        tight: true,
+                        items: item
+                            .definitions
+                            .iter()
+                            .map(|definition| franken_markdown::ast::ListItem {
+                                task: None,
+                                blocks: vec![Block::Paragraph(definition.clone())],
+                            })
+                            .collect(),
+                    };
+                    parts.push(self.block(
+                        book,
+                        engine,
+                        &Block::List(definitions),
+                        protected,
+                        budget,
+                        depth + 1,
+                        width,
+                    )?);
+                }
+                Ok(stack(parts, self.block_gap * 0.5))
+            }
+            // A canvas has no pages.
+            Block::PageBreak => Ok(VMobject::new()),
             Block::HtmlBlock(source) => Ok(self
                 .text_box(book, source, Face::default(), self.font_size, budget)?
                 .geometry),
@@ -587,36 +660,14 @@ impl<'a> Composer<'a> {
                                     .ok_or(MathDocumentError::Invalid(
                                         "missing protected math island",
                                     ))?;
-                            let engine = engine.ok_or(MathDocumentError::Unsupported(
-                                "Markdown mathematics requires build_with_math",
-                            ))?;
-                            budget.input(&island.source)?;
-                            let mut builder = Tex::new(&island.source).font_size(size);
-                            if island.display {
-                                builder = builder.display();
-                            }
-                            let built = builder.build(engine)?;
-                            let scale = crate::tex::calibrate(
+                            self.math_box(
                                 engine,
+                                &island.source,
+                                island.display,
                                 size,
-                                DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
+                                budget,
+                                boxes,
                             )?;
-                            let geometry = built.vmob.map_style_deep(|s| s.color(self.color));
-                            budget.output(&geometry)?;
-                            if island.display {
-                                boxes.push(InlineBox::line_break());
-                            }
-                            boxes.push(InlineBox {
-                                geometry,
-                                advance: built.typeset.layout.width * scale,
-                                height: built.typeset.layout.height * scale,
-                                depth: built.typeset.layout.depth * scale,
-                                space: false,
-                                hard_break: false,
-                            });
-                            if island.display {
-                                boxes.push(InlineBox::line_break());
-                            }
                             rest = &tail[n + 1..];
                         } else {
                             let end = if protected.islands.is_empty() {
@@ -694,7 +745,58 @@ impl<'a> Composer<'a> {
                 }
                 Inline::SoftBreak => boxes.push(self.text_box(book, " ", face, size, budget)?),
                 Inline::HardBreak => boxes.push(InlineBox::line_break()),
+                // The parser's own math nodes, for any `$…$` the island
+                // protection left in place: typeset exactly as an island.
+                Inline::Math(source) => {
+                    self.math_box(engine, source, false, size, budget, boxes)?
+                }
+                Inline::DisplayMath(source) => {
+                    self.math_box(engine, source, true, size, budget, boxes)?
+                }
+                Inline::FootnoteRef { id } => {
+                    self.words(book, &format!("[^{id}]"), face, size, budget, boxes)?
+                }
             }
+        }
+        Ok(())
+    }
+
+    /// One mathematics island as an inline box: text style inline, or
+    /// display style on its own line.
+    fn math_box(
+        &self,
+        engine: Option<&TexEngine>,
+        source: &str,
+        display: bool,
+        size: f64,
+        budget: &mut Budget,
+        boxes: &mut Vec<InlineBox>,
+    ) -> Result<(), MathDocumentError> {
+        let engine = engine.ok_or(MathDocumentError::Unsupported(
+            "Markdown mathematics requires build_with_math",
+        ))?;
+        budget.input(source)?;
+        let mut builder = Tex::new(source).font_size(size);
+        if display {
+            builder = builder.display();
+        }
+        let built = builder.build(engine)?;
+        let scale = crate::tex::calibrate(engine, size, DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT)?;
+        let geometry = built.vmob.map_style_deep(|s| s.color(self.color));
+        budget.output(&geometry)?;
+        if display {
+            boxes.push(InlineBox::line_break());
+        }
+        boxes.push(InlineBox {
+            geometry,
+            advance: built.typeset.layout.width * scale,
+            height: built.typeset.layout.height * scale,
+            depth: built.typeset.layout.depth * scale,
+            space: false,
+            hard_break: false,
+        });
+        if display {
+            boxes.push(InlineBox::line_break());
         }
         Ok(())
     }
@@ -758,6 +860,12 @@ fn plain_inlines(
                     "Markdown table images require explicit scene assets",
                 ));
             }
+            Inline::Math(_) | Inline::DisplayMath(_) => {
+                return Err(MathDocumentError::Unsupported(
+                    "Markdown math in table cells is not yet supported; use a native TexMatrix",
+                ));
+            }
+            Inline::FootnoteRef { id } => out.push_str(&format!("[^{id}]")),
         }
     }
     Ok(out)
