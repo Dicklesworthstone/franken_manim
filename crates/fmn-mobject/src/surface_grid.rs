@@ -10,7 +10,12 @@ use super::{Entry, Mob, Placement, Stage};
 use crate::{RecordBuffer, RenderPrimitive, StageError};
 
 /// Maximum number of records in an aligned UV surface.
-pub const MAX_SURFACE_GRID_POINTS: usize = 65_536;
+///
+/// Surface grids have a separate resource contract from one-dimensional
+/// curve and field sampling: a 301-by-301 chart has 90,601 vertices. This
+/// ceiling admits such charts, while bounding the component-wise maximum
+/// used by alignment as well as explicit regridding (fm-1rb8).
+pub const MAX_SURFACE_GRID_POINTS: usize = 262_144;
 
 /// A validated, prepared surface update. Preparation never changes a live entry.
 /// Alignment preserves placement; geometry replacement bakes it. Materials,
@@ -34,7 +39,7 @@ fn grid_count(resolution: (usize, usize)) -> Result<usize, StageError> {
     u.checked_mul(v)
         .filter(|&count| count <= MAX_SURFACE_GRID_POINTS)
         .ok_or(StageError::SurfaceGrid(
-            "UV grid exceeds the 65536-point budget",
+            "UV grid exceeds the 262144-point budget",
         ))
 }
 
@@ -59,13 +64,16 @@ fn resolution(entry: &Entry) -> Result<(usize, usize), StageError> {
     Ok(resolution)
 }
 
-// Exact integer stations preserve existing knots and endpoints. The budget
-// above bounds these products, independently of pointer width.
-#[allow(clippy::cast_precision_loss)]
+// Exact integer stations preserve existing knots and endpoints. A legal
+// skinny grid can have 131,072 stations along one axis, so multiplying two
+// axis indices in usize would overflow on wasm32. Widen BEFORE multiplying;
+// the grid budget bounds this product below 2^36, exactly representable in
+// both u64 and f64. The resulting indices still fit either pointer width.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn station(index: usize, old: usize, new: usize) -> (usize, usize, f64) {
-    let numerator = index * (old - 1);
-    let denominator = new - 1;
-    let low = numerator / denominator;
+    let numerator = index as u64 * (old - 1) as u64;
+    let denominator = (new - 1) as u64;
+    let low = (numerator / denominator) as usize;
     (
         low,
         (low + 1).min(old - 1),
@@ -347,5 +355,155 @@ impl Stage {
             self.apply_surface_grid_update(b, update)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dense_grid_tests {
+    use super::*;
+    use crate::{Mobject, RecordSchema};
+
+    fn surface(shape: (usize, usize)) -> Mobject {
+        let schema = RecordSchema::new(
+            &[("point", 3), ("d_normal_point", 3), ("temperature", 1)],
+            &["point"],
+            &["point", "d_normal_point"],
+        )
+        .expect("surface schema");
+        let mut buffer = RecordBuffer::new(schema, shape.0 * shape.1).expect("bounded grid");
+        for u in 0..shape.0 {
+            for v in 0..shape.1 {
+                #[allow(clippy::cast_precision_loss)]
+                let (x, y) = (
+                    u as f32 / (shape.0 - 1) as f32,
+                    v as f32 / (shape.1 - 1) as f32,
+                );
+                let row = u * shape.1 + v;
+                buffer.write(row, "point", &[x, y, x + y]);
+                buffer.write(row, "d_normal_point", &[x, y, x + y + 1.0]);
+                buffer.write(row, "temperature", &[x + 2.0 * y]);
+            }
+        }
+        Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::SurfaceGrid {
+            resolution: shape,
+        })
+    }
+
+    #[test]
+    fn dense_grid_limits_are_checked_before_resampling() {
+        assert_eq!(grid_count((301, 301)), Ok(90_601));
+        assert_eq!(grid_count((512, 512)), Ok(MAX_SURFACE_GRID_POINTS));
+        assert_eq!(grid_count((2, 131_072)), Ok(MAX_SURFACE_GRID_POINTS));
+        for shape in [(513, 512), (2, 131_073), (usize::MAX, 2), (2, usize::MAX)] {
+            assert!(grid_count(shape).is_err(), "{shape:?}");
+        }
+        // Construction may admit empty/strip grids, but alignment still
+        // requires actual two-dimensional topology.
+        for shape in [(0, 301), (301, 0), (1, 301), (301, 1)] {
+            assert!(grid_count(shape).is_err(), "{shape:?}");
+        }
+    }
+
+    #[test]
+    fn skinny_grid_stations_do_not_depend_on_pointer_width() {
+        assert!(131_070_u64 * 131_071 > u64::from(u32::MAX));
+        assert_eq!(station(131_070, 131_072, 131_071), (131_071, 131_071, 0.0));
+        assert_eq!(station(65_535, 131_072, 131_071), (65_535, 65_536, 0.5));
+        assert_eq!(station(0, 131_072, 131_071), (0, 1, 0.0));
+        assert_eq!(station(1, 131_072, 131_071), (1, 2, 1.0 / 131_070.0));
+    }
+
+    #[test]
+    fn widened_stations_preserve_all_previously_admitted_bits() {
+        for old in [2, 3, 101, 256, 32_768] {
+            for new in [2, 3, 101, 256, 32_768] {
+                for index in 0..new {
+                    let numerator = index * (old - 1);
+                    let low = numerator / (new - 1);
+                    #[allow(clippy::cast_precision_loss)]
+                    let fraction = (numerator % (new - 1)) as f64 / (new - 1) as f64;
+                    let actual = station(index, old, new);
+                    assert_eq!((actual.0, actual.1), (low, (low + 1).min(old - 1)));
+                    assert_eq!(actual.2.to_bits(), fraction.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn dense_alignment_interpolates_geometry_normals_and_custom_records() {
+        let mut stage = Stage::new();
+        let coarse = stage.add(surface((2, 2)));
+        let dense = stage.add(surface((301, 301)));
+        let before = stage.get(dense).unwrap().buffer.snapshot_clone();
+        stage
+            .align_surface_points(coarse, dense)
+            .expect("dense alignment");
+        let aligned = stage.get(coarse).unwrap();
+        assert_eq!(resolution(aligned).unwrap(), (301, 301));
+        let points = aligned.buffer.read_column("point").unwrap();
+        let normals = aligned.buffer.read_column("d_normal_point").unwrap();
+        let temperature = aligned.buffer.read_column("temperature").unwrap();
+        assert_eq!(temperature.len(), 90_601);
+        for u in 0..301 {
+            for v in 0..301 {
+                let row = u * 301 + v;
+                let (x, y) = (u as f64 / 300.0, v as f64 / 300.0);
+                for (actual, expected) in
+                    points[3 * row..3 * row + 3].iter().zip([x, y, x + y])
+                {
+                    assert!((f64::from(*actual) - expected).abs() < 1e-6);
+                }
+                assert!((f64::from(normals[3 * row + 2]) - (x + y + 1.0)).abs() < 1e-6);
+                assert!((f64::from(temperature[row]) - (x + 2.0 * y)).abs() < 1e-6);
+            }
+        }
+        for key in ["point", "d_normal_point", "temperature"] {
+            assert!(stage.get(dense).unwrap().buffer.column_eq(&before, key));
+        }
+        stage
+            .resample_surface_grid(coarse, (2, 2))
+            .expect("coarsen");
+        let original = stage.add(surface((2, 2)));
+        for key in ["point", "d_normal_point", "temperature"] {
+            assert!(
+                stage
+                    .get(coarse)
+                    .unwrap()
+                    .buffer
+                    .column_eq(&stage.get(original).unwrap().buffer, key)
+            );
+        }
+    }
+
+    #[test]
+    fn individually_legal_charts_cannot_bypass_the_alignment_product_limit() {
+        let mut stage = Stage::new();
+        let a = stage.add(surface((512, 2)));
+        let b = stage.add(surface((2, 513)));
+        let before_a = stage.get(a).unwrap().buffer.snapshot_clone();
+        let before_b = stage.get(b).unwrap().buffer.snapshot_clone();
+        assert!(stage.align_surface_points(a, b).is_err());
+        assert_eq!(resolution(stage.get(a).unwrap()).unwrap(), (512, 2));
+        assert_eq!(resolution(stage.get(b).unwrap()).unwrap(), (2, 513));
+        for key in ["point", "d_normal_point", "temperature"] {
+            assert!(stage.get(a).unwrap().buffer.column_eq(&before_a, key));
+            assert!(stage.get(b).unwrap().buffer.column_eq(&before_b, key));
+        }
+    }
+
+    #[test]
+    fn maximum_skinny_chart_refines_without_losing_its_last_knot() {
+        let mut stage = Stage::new();
+        let mob = stage.add(surface((131_071, 2)));
+        stage
+            .resample_surface_grid(mob, (131_072, 2))
+            .expect("skinny refinement");
+        let entry = stage.get(mob).unwrap();
+        assert_eq!(entry.buffer.len(), MAX_SURFACE_GRID_POINTS);
+        let points = entry.buffer.read_column("point").unwrap();
+        assert_eq!(&points[..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(&points[points.len() - 3..], &[1.0, 1.0, 2.0]);
     }
 }

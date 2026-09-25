@@ -136,14 +136,14 @@ fn begin_state_snapshots_keep_the_original_grid_and_records() {
 #[test]
 fn excessive_common_grid_refuses_before_changing_either_side() {
     let mut stage = Stage::new();
-    let a = grid(&mut stage, (257, 2));
-    let b = grid(&mut stage, (2, 257));
+    let a = grid(&mut stage, (513, 2));
+    let b = grid(&mut stage, (2, 513));
     assert!(matches!(
         stage.align_points(a, b),
         Err(StageError::SurfaceGrid(_))
     ));
-    assert_grid(&stage, a, (257, 2));
-    assert_grid(&stage, b, (2, 257));
+    assert_grid(&stage, a, (513, 2));
+    assert_grid(&stage, b, (2, 513));
 }
 
 #[test]
