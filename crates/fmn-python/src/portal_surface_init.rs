@@ -20,7 +20,9 @@ fn _initialize_surface_grid(
     let count = nu
         .checked_mul(nv)
         .filter(|&n| nu <= limit && nv <= limit && n <= limit)
-        .ok_or_else(|| PyValueError::new_err("surface initialization exceeds its UV-grid budget"))?;
+        .ok_or_else(|| {
+            PyValueError::new_err("surface initialization exceeds its UV-grid budget")
+        })?;
     let schema = parse_schema(target)?;
     for (key, width) in [("point", 3), ("d_normal_point", 3), ("rgba", 4)] {
         if !schema
@@ -161,19 +163,23 @@ mod tests {
 
     #[test]
     fn authored_surface_lifecycle_and_native_rendering() {
-        crate::with_python_test_module("authored surface initialization", |py, _module, globals| {
-            let code = std::ffi::CString::new(include_str!("../tests/native_surface_lifecycle.py"))
-                .unwrap();
-            py.run(code.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py))
-                .unwrap();
-            globals
-                .get_item("run_native_surface_lifecycle")
-                .unwrap()
-                .unwrap()
-                .call0()
-                .inspect_err(|error| error.print(py))
-                .unwrap();
-        });
+        crate::with_python_test_module(
+            "authored surface initialization",
+            |py, _module, globals| {
+                let code =
+                    std::ffi::CString::new(include_str!("../tests/native_surface_lifecycle.py"))
+                        .unwrap();
+                py.run(code.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .unwrap();
+                globals
+                    .get_item("run_native_surface_lifecycle")
+                    .unwrap()
+                    .unwrap()
+                    .call0()
+                    .inspect_err(|error| error.print(py))
+                    .unwrap();
+            },
+        );
     }
 }

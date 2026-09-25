@@ -276,12 +276,14 @@ pub struct TexText<'a> {
 }
 
 impl<'a> TexText<'a> {
-    /// A `TexText` with the Reference's defaults.
+    /// A `TexText` with the Reference's defaults, including its
+    /// `alignment="\centering"`: `\\`-split lines center.
     #[must_use]
     pub fn new(source: &'a str) -> Self {
         Self {
             inner: Tex {
                 mode: Mode::Text,
+                align: LineAlign::Center,
                 ..Tex::new(source)
             },
         }
@@ -301,9 +303,8 @@ impl<'a> TexText<'a> {
         self
     }
 
-    /// The `alignment=` surface: how the `\\`-split lines align. Left is
-    /// fmd-math's default; the Reference's own default is `\centering`
-    /// ([`LineAlign::Center`]), which the Python portal passes.
+    /// The `alignment=` surface: how the `\\`-split lines align. The
+    /// default is the Reference's `\centering` ([`LineAlign::Center`]).
     #[must_use]
     pub fn line_align(mut self, align: LineAlign) -> Self {
         self.inner.align = align;
@@ -680,6 +681,45 @@ mod tests {
             dump, expected,
             "golden drift (see tests/goldens/tex_zero.txt)"
         );
+    }
+
+    /// The Reference's TexText default is `alignment="\centering"`: each
+    /// `\\`-split line centers on the widest. `line_align(Left)` keeps
+    /// fmd-math's flush-left block.
+    #[test]
+    fn textext_centers_its_lines_by_default() {
+        let line_centers = |m: &TexMobject| {
+            let mut lines: Vec<(f64, f64, f64)> = Vec::new();
+            for glyph in m.vmob.children() {
+                let xs = glyph.points().iter().map(|p| p[0]);
+                let (lo, hi) = xs.fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(x), h.max(x)));
+                let y =
+                    glyph.points().iter().map(|p| p[1]).sum::<f64>() / glyph.points().len() as f64;
+                match lines.iter_mut().find(|line| (line.2 - y).abs() < 0.2) {
+                    Some(line) => {
+                        line.0 = line.0.min(lo);
+                        line.1 = line.1.max(hi);
+                    }
+                    None => lines.push((lo, hi, y)),
+                }
+            }
+            lines
+                .iter()
+                .map(|(lo, hi, _)| (lo + hi) / 2.0)
+                .collect::<Vec<_>>()
+        };
+        // One glyph on both lines, so side bearings cancel: the center
+        // environment centers boxes, not ink.
+        let centered = TexText::new(r"aaaa\\aa").build(&engine()).expect("builds");
+        let centers = line_centers(&centered);
+        assert_eq!(centers.len(), 2);
+        assert!((centers[0] - centers[1]).abs() < 1e-3, "{centers:?}");
+        let flush = TexText::new(r"aaaa\\aa")
+            .line_align(LineAlign::Left)
+            .build(&engine())
+            .expect("builds");
+        let centers = line_centers(&flush);
+        assert!((centers[0] - centers[1]).abs() > 0.1, "{centers:?}");
     }
 
     #[test]
