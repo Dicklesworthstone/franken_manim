@@ -16,6 +16,7 @@ pub mod camera_rig;
 pub mod events;
 pub mod interactive;
 pub mod journal;
+pub mod recording;
 pub mod runtime;
 pub mod timeline_bundle;
 
