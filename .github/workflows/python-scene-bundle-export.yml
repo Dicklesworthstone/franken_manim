@@ -52,6 +52,15 @@ jobs:
         run: cargo test --locked -p fmn-python portal_studio -- --nocapture
       - name: Existing capture boundary regressions
         run: cargo test --locked -p fmn-python portal_recording -- --nocapture
+      - name: Build the standalone consumer and matching installed wheel
+        run: |
+          cargo build --locked -p fmn-cli --features cli,batch
+          maturin build --locked --profile dev --out "${RUNNER_TEMP}/bundle-wheels"
+          python -m pip install --force-reinstall --no-deps "${RUNNER_TEMP}"/bundle-wheels/*.whl
+      - name: Python console to standalone native replay
+        env:
+          FMN_TEST_BIN: ${{ github.workspace }}/target/portable/debug/fmn
+        run: python crates/fmn-python/tests/bundle_cli_native.py
       - name: Check export sources without modifying the repository
         run: |
           rustfmt --edition 2024 --check --config skip_children=true crates/fmn-python/src/portal_studio/bundle.rs

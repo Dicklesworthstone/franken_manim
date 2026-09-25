@@ -81,6 +81,7 @@ def main():
     from .scene_controls import try_scene_cli
     from .studio import try_studio_cli
     from .project_editor import try_edit_cli
+    from .bundle_cli import try_bundle_cli
 
     arguments = list(sys.argv[1:])
     result = try_edit_cli(_native, arguments)
@@ -89,6 +90,9 @@ def main():
     if "--audit-parity" in _tokens(arguments)[2]:
         return _emit_parity_audit(_native)
     result = try_studio_cli(_native, arguments)
+    if result is not None:
+        return result
+    result = try_bundle_cli(_native, arguments)
     if result is not None:
         return result
     result = try_render_cli(_native, arguments)
