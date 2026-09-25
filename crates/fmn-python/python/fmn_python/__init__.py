@@ -58,6 +58,10 @@ def _ensure_exclusive_manimlib_namespace():
 
 
 def __getattr__(name):
+    if name in {"BundleExportSession", "BundleExportResult", "export_bundle"}:
+        from . import bundle_export
+
+        return getattr(bundle_export, name)
     if name in {"PairedRenderSession", "PairedRenderResult", "paired_render_session", "render_scene_with_still"}:
         from . import paired_output
 

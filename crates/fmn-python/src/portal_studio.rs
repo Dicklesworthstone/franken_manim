@@ -12,9 +12,11 @@ use fmn_studio::{
 };
 use std::time::Duration;
 
+pub(super) mod bundle;
 pub(super) mod live;
 
 pub(super) struct Capture {
+    bundle: Option<bundle::BundleCapture>,
     renderer: RetainedFrameRenderer,
     camera: Camera,
     rgba: FrameBuffer,
@@ -122,6 +124,7 @@ impl Capture {
         );
         Ok((
             Self {
+                bundle: None,
                 renderer,
                 camera,
                 rgba,
@@ -138,7 +141,10 @@ impl Capture {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.recorded.frame_count() == 0
+        self.bundle.as_ref().map_or_else(
+            || self.recorded.frame_count() == 0,
+            bundle::BundleCapture::is_empty,
+        )
     }
 
     pub(super) fn bind_camera(
@@ -158,6 +164,9 @@ impl Capture {
                 .map_err(camera_error)?;
         }
         self.light = light_mob;
+        if let Some(bundle) = &mut self.bundle {
+            bundle.validate_camera(&self.camera)?;
+        }
         Ok(())
     }
 
@@ -169,6 +178,12 @@ impl Capture {
         // ordinary samples and updaters, but only the completed callback's
         // final state replaces the live view. Intermediate/failed callback
         // captures cannot publish a partial edit or grow recorded history.
+        if self.bundle.is_some() && self.live {
+            return Err(fmn_scene::IntegrationError::new(
+                "fmtl-recording",
+                "live Studio input cannot share a bundle export",
+            ));
+        }
         if self.live && !self.live_refresh {
             return Ok(());
         }
@@ -195,6 +210,9 @@ impl Capture {
             self.camera
                 .set_light_source_position(stage.get_center(light))
                 .map_err(camera_error)?;
+        }
+        if let Some(bundle) = &mut self.bundle {
+            return bundle.capture(packet, &stage, &self.camera);
         }
         self.renderer
             .render_with_camera(&stage, &self.camera)
@@ -309,7 +327,7 @@ pub(super) fn finish(slf: &Bound<'_, PyScene>) -> PyResult<Recording> {
         let slot = render
             .lock()
             .map_err(|_| PyRuntimeError::new_err("Studio generation lock poisoned"))?;
-        if !matches!(slot.as_ref(), Some(PortalRenderSession::Preview(_))) {
+        if !matches!(slot.as_ref(), Some(PortalRenderSession::Preview(c)) if c.bundle.is_none()) {
             return Err(PyRuntimeError::new_err("no Studio capture is active"));
         }
     }
