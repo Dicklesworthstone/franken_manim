@@ -22,13 +22,17 @@ class ShiftOne(Animation):
 def detached_swap_wait():
     left, right = Square().shift(2 * LEFT), Square().shift(2 * RIGHT)
     animation = Swap(left, right, path_arc=0, rate_func=linear, run_time=.1)
-    assert turn_animation_into_updater(animation) is left
+    root = turn_animation_into_updater(animation)
+    assert root is animation.mobject
+    assert all(any(member is operand for member in root.get_family())
+               for operand in (left, right))
+    assert len(root.updaters) == 1
     assert animation.total_time == 0
     scene = Scene()
-    scene.add(left, right)
+    scene.add(root)
     scene.wait(.3)
     np.testing.assert_allclose(left.get_center(), 2 * RIGHT, atol=1e-5)
-    assert not left.updaters
+    assert not root.updaters
 
 
 def detached_mixed_group():
@@ -69,26 +73,27 @@ def deferred_same_object_succession():
 
 def cancellation_before_adoption():
     left, right = Square().shift(2 * LEFT), Square().shift(2 * RIGHT)
-    cycle_animation(Swap(left, right, path_arc=0, rate_func=linear))
-    left.clear_updaters()
+    root = cycle_animation(Swap(left, right, path_arc=0, rate_func=linear))
+    root.clear_updaters()
+    assert not root.updaters
     scene = Scene()
-    scene.add(left, right)
+    scene.add(root)
     scene.wait(.2)
     np.testing.assert_allclose(left.get_center(), 2 * LEFT, atol=1e-5)
 
 
-def foreign_pending_participant():
+def foreign_participant_after_adoption():
     left, right = Square(), Square()
-    turn_animation_into_updater(Swap(left, right))
+    root = turn_animation_into_updater(Swap(left, right))
     Scene().add(left)
     Scene().add(right)
     try:
-        left.update(0.)
+        root.update(0.)
     except (ValueError, RuntimeError) as error:
         assert 'multiple Scenes' in str(error)
     else:
-        raise AssertionError('foreign pending participant must be refused')
-    assert not left.updaters
+        raise AssertionError('foreign participant must be refused after adoption')
+    assert not root.updaters
 
 
 def nested_group_context():
@@ -137,8 +142,8 @@ def rendered_background_motion():
         def construct(self):
             visible = Square(side_length=.7, fill_opacity=1, stroke_width=0, color='#FFFFFF').shift(2 * LEFT)
             invisible = Square(side_length=.3, fill_opacity=0, stroke_width=0).shift(2 * RIGHT)
-            turn_animation_into_updater(Swap(visible, invisible, path_arc=0, rate_func=linear, run_time=.5))
-            self.add(visible, invisible)
+            root = turn_animation_into_updater(Swap(visible, invisible, path_arc=0, rate_func=linear, run_time=.5))
+            self.add(root)
             self.wait(.75)
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / 'background.y4m'
@@ -160,7 +165,7 @@ def rendered_background_motion():
 
 
 for case in (detached_swap_wait, detached_mixed_group, deferred_same_object_succession,
-             cancellation_before_adoption, foreign_pending_participant, nested_group_context,
+             cancellation_before_adoption, foreign_participant_after_adoption, nested_group_context,
              rendered_background_motion):
     case()
 print('deferred/native composition acceptance: 7 cases passed')

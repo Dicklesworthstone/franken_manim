@@ -173,5 +173,186 @@ class PersistentSceneOwnership(unittest.TestCase):
         self.assertEqual(self.root.updaters, [])
 
 
+class PersistentPhaseOwnership(unittest.TestCase):
+    setUp = PersistentSceneOwnership.setUp
+    attach = PersistentSceneOwnership.attach
+
+    def split_owners(self):
+        self.left._scene, self.right._scene = self.owner, self.foreign
+
+    def test_interpolation_cannot_pass_foreign_operands_to_helper_updates(self):
+        self.attach()
+        interpolate = self.animation.interpolate
+        def change_owner(alpha):
+            interpolate(alpha)
+            self.split_owners()
+        self.animation.interpolate = change_owner
+        self.animation.events.clear()
+        with self.assertRaises(self.native._ForeignStageError):
+            self.root.update(.5)
+        self.assertFalse(any(event[0] == "helpers" for event in self.animation.events))
+        self.assertEqual(self.animation.total_time, 0.)
+        self.assertEqual(self.root.updaters, [])
+        self.assertFalse(self.root.animating)
+
+    def test_helper_updates_cannot_commit_a_foreign_owned_tick(self):
+        self.attach()
+        self.animation.update_mobjects = lambda dt: self.split_owners()
+        with self.assertRaises(self.native._ForeignStageError):
+            self.root.update(.5)
+        self.assertEqual(self.animation.total_time, 0.)
+        self.assertEqual(self.root.updaters, [])
+        self.assertFalse(self.root.animating)
+
+    def test_duration_hook_cannot_change_ownership_before_interpolation(self):
+        self.attach()
+        def duration():
+            self.split_owners()
+            return 1.
+        self.animation.get_run_time = duration
+        self.animation.events.clear()
+        with self.assertRaises(self.native._ForeignStageError):
+            self.root.update(.5)
+        self.assertEqual(self.animation.events, [])
+        self.assertEqual(self.animation.total_time, 0.)
+
+    def test_duration_hook_cannot_change_ownership_before_finish(self):
+        self.attach()
+        self.root.update(1.)
+        def duration():
+            self.split_owners()
+            return 1.
+        self.animation.get_run_time = duration
+        self.animation.events.clear()
+        with self.assertRaises(self.native._ForeignStageError):
+            self.root.update(0.)
+        self.assertEqual(self.animation.events, [])
+        self.assertEqual(self.root.updaters, [])
+
+    def test_finish_owner_change_restores_transients_without_repeating_finish(self):
+        locks = self.root.locked_data_keys = {"existing"}
+        self.attach()
+        self.root.update(1.)
+        finish = self.animation.finish
+        def change_owner():
+            finish()
+            self.root.locked_data_keys = {"temporary"}
+            self.split_owners()
+        self.animation.finish = change_owner
+        with self.assertRaises(self.native._ForeignStageError):
+            self.root.update(0.)
+        self.root.update(0.)
+        self.assertEqual(self.animation.events.count(("finish",)), 1)
+        self.assertIs(self.root.locked_data_keys, locks)
+        self.assertEqual(locks, {"existing"})
+        self.assertEqual(self.root.updaters, [])
+
+    def test_authored_failure_keeps_precedence_over_new_ownership_conflict(self):
+        self.attach()
+        failure = RuntimeError("authored interpolation failed")
+        def fail(alpha):
+            self.split_owners()
+            raise failure
+        self.animation.interpolate = fail
+        with self.assertRaises(RuntimeError) as caught:
+            self.root.update(.5)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(self.animation.total_time, 0.)
+        self.assertEqual(self.root.updaters, [])
+
+    def test_callback_cancellation_remains_boundary_safe(self):
+        self.attach()
+        updater, = self.root.updaters
+        def cancel(alpha):
+            self.root.remove_updater(updater)
+        self.animation.interpolate = cancel
+        self.root.update(.5)
+        controller = updater._fmn_persistent_controller
+        self.assertTrue(controller.closed)
+        self.assertEqual(controller.nodes, ())
+        self.assertEqual(controller.groups, ())
+        self.assertEqual(self.animation.total_time, 0.)
+        self.assertFalse(self.root.animating)
+
+    def test_completion_releases_frozen_participant_references(self):
+        self.attach()
+        controller = self.root.updaters[0]._fmn_persistent_controller
+        self.assertEqual(controller.nodes, (self.animation,))
+        self.root.update(1.).update(0.)
+        self.assertEqual(controller.nodes, ())
+        self.assertEqual(controller.groups, ())
+        self.assertIsNone(controller.driver)
+
+    def group(self):
+        # The existing fixture's group is an authored callback container, not
+        # a replacement native timeline. Only ownership traversal is tested.
+        self.native.Mobject._is_bound = lambda mob: mob._scene is not None
+        self.native._fmn_ensure_composition_root = lambda animation: animation.mobject
+        self.root._scene = self.owner
+        group = self.native.AnimationGroup(self.root)
+        group.animations = [self.animation]
+        self.native.turn_animation_into_updater(group)
+        return group
+
+    def test_ownership_follows_frozen_children_not_edited_composition_list(self):
+        group = self.group()
+        group.animations[:] = [group]
+        self.root.update(.5)
+        self.animation._target_attr = "target_mobject"
+        target = self.native.Mobject()
+        target._scene = self.foreign
+        self.animation.target_mobject = target
+        with self.assertRaisesRegex(self.native._ForeignStageError, "multiple Scenes"):
+            self.root.update(0.)
+        self.assertNotIn("_composition_scene", group.__dict__)
+        self.assertEqual(self.root.updaters, [])
+
+    def test_new_unused_composition_child_does_not_change_frozen_execution(self):
+        group = self.group()
+        other = self.native.Mobject()
+        other._scene = self.foreign
+        group.animations[:] = [self.native.PerMember(other)]
+        self.root.update(.5).update(0.)
+        self.assertEqual(group.total_time, .5)
+        self.assertEqual(other.value, 0.)
+        self.assertNotIn("_composition_scene", group.__dict__)
+
+    def test_each_already_visited_family_is_only_walked_once_per_check(self):
+        self.root._scene = self.owner
+        self.animation._native_extra_mobjects = (self.left, self.left)
+        self.animation._target_attr = "target_mobject"
+        self.animation.target_mobject = self.left
+        visits = []
+        get_family = self.left.get_family
+        def observe():
+            visits.append(self.left)
+            return get_family()
+        self.left.get_family = observe
+        self.assertIs(adapter._scene_for(vars(self.native), self.animation, self.root), self.owner)
+        self.assertEqual(visits, [self.left])
+
+    def test_native_factory_owner_change_is_rejected_before_driver_begin(self):
+        self.native.Mobject._is_bound = lambda mob: mob._scene is not None
+        self.root._scene = self.owner
+        events = []
+        class Driver:
+            def get_run_time(self):
+                return 1.
+            def begin(self):
+                events.append("begin")
+        def factory(scene):
+            self.assertIs(scene, self.owner)
+            self.split_owners()
+            return Driver()
+        controller = adapter._PersistentAnimation(
+            vars(self.native), self.animation, self.root, False, factory)
+        with self.assertRaises(self.native._ForeignStageError):
+            controller.start()
+        self.assertEqual(events, [])
+        self.assertEqual(controller.nodes, ())
+        self.assertEqual(self.root.updaters, [])
+        self.assertFalse(self.root.animating)
+
+
 if __name__ == "__main__":
     unittest.main()

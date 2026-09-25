@@ -79,6 +79,10 @@ def _scene_for(g, animation, anchor, nodes=None, expected_scene=None):
             objects.append(target)
     scene, seen = expected_scene, set()
     for obj in objects:
+        # The anchor's family normally already contains each leaf. Avoid
+        # walking it again for duplicate operands at every callback boundary.
+        if id(obj) in seen:
+            continue
         for member in obj.get_family():
             if id(member) in seen:
                 continue
@@ -162,10 +166,18 @@ class _PersistentAnimation:
         self.anchor.remove_updater(self.update)
 
     def call(self, method, *args):
-        if not self.needs_scene:
-            return getattr(self.driver, method)(*args)
-        with _composition_context(self.g, self.animation, self.scene, self.groups):
-            return getattr(self.driver, method)(*args)
+        # Authored hooks (including duration lookup and native lowering) can
+        # adopt participants between phases. Never hand a foreign-owned
+        # family to the next phase or commit that tick's elapsed time.
+        self.check_scene()
+        if self.needs_scene:
+            with _composition_context(self.g, self.animation, self.scene, self.groups):
+                result = getattr(self.driver, method)(*args)
+        else:
+            result = getattr(self.driver, method)(*args)
+        if not self.closed:
+            self.check_scene()
+        return result
 
     def cancel(self, original=None):
         if self.closed:
@@ -249,8 +261,6 @@ class _PersistentAnimation:
             self.driver, = self.execution.wrap((self.driver,))
         self.begun = True
         self.call("begin")
-        if not self.closed:
-            self.check_scene()
         return not self.closed
 
     def start(self):
