@@ -1896,9 +1896,13 @@ fn studio_inspect_serves_real_tex_span_entries_for_the_tex_span_scene() {
         ),
         "{response}"
     );
-    // The fraction bar is a rule spanning the whole formula.
+    // The fraction bar is ink the `\frac` keyword draws, so it maps to that
+    // command token (0..5), not to the whole construct.
     assert!(
-        response.contains("\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":11"),
+        response.contains(
+            "\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":5,\
+             \"source_bytes\":11,\"excerpt\":\"\\\\frac\""
+        ),
         "{response}"
     );
     // The text glyphs carry their per-character byte ranges.

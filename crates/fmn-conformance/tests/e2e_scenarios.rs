@@ -1899,7 +1899,7 @@ fn studio_subprocess_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
     studio_contains(&initial, "\"scene_time\":0.03333333333333333")?;
     for span in [
         "\"source_span\":{\"kind\":\"math_glyph\",\"start\":6,\"end\":7,\"source_bytes\":11,\"excerpt\":\"x\"",
-        "\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":11",
+        "\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":5,\"source_bytes\":11,\"excerpt\":\"\\\\frac\"",
         "\"source_span\":{\"kind\":\"text_glyph\",\"start\":0,\"end\":1,\"source_bytes\":5,\"excerpt\":\"h\"",
     ] {
         studio_contains(&initial, span)?;
