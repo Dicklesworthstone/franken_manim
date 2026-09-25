@@ -40,9 +40,10 @@ def install_live_rates(native: Any) -> None:
             return True
         if isinstance(animation, Transform) and animation._target_attr is not None:
             return True
-        if isinstance(animation, Group) and animation._native_kind in {
-            "animation_group", "lagged_start", "succession",
-        }:
+        # Specialized group kinds (for example ShowCreationThenFadeOut)
+        # already use the same complete composition driver. Their native
+        # lowering tag is not a statement about callback capability.
+        if isinstance(animation, Group):
             return True
         # These families have complete Python lifecycle implementations over
         # native geometry. Their stock catalog rates still take the native
@@ -50,7 +51,7 @@ def install_live_rates(native: Any) -> None:
         # ShowPartial includes creation, uncreation and passing flashes, and
         # DrawBorderThenFill includes Write. Treating these as unsupported
         # silently sampled even a mixed Transform/Write play at 30 Hz.
-        for name in ("Rotating", "MoveAlongPath", "ShowPartial", "DrawBorderThenFill"):
+        for name in ("Rotating", "MoveAlongPath", "ShowPartial", "DrawBorderThenFill", "VFadeIn"):
             cls = g.get(name)
             if cls is not None and isinstance(animation, cls):
                 return True
