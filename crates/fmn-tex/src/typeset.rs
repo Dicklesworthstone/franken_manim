@@ -218,6 +218,67 @@ pub enum Prim {
     Path(usize),
 }
 
+/// Built-in commands whose own ink (fraction bar, radical, accent, over or
+/// under line or brace) fmd-math spans over the whole construct. The
+/// Reference selects that ink by the keyword alone: its
+/// `select_unisolated_substring` counts `\frac`, `\over`, `\sqrt` or `\hat`
+/// as one symbol. So [`Typeset::new`] re-spans the command's own ink to the
+/// keyword token, and argument ink keeps its own spans. Macro calls are
+/// untouched: their ink keeps the call-site span.
+pub const KEYWORD_INK_COMMANDS: &[&str] = &[
+    "frac", "dfrac", "tfrac", "cfrac", "sqrt", "over", "overline", "underline", "hat",
+    "widehat", "check", "tilde", "widetilde", "acute", "grave", "dot", "ddot", "breve",
+    "bar", "vec", "overbrace", "underbrace", "overrightarrow", "overleftarrow",
+];
+
+/// The keyword token that owns a primitive drawn by one of
+/// [`KEYWORD_INK_COMMANDS`], if its span is that command's whole construct:
+/// a top-level infix `\over` (whose group span can begin with another
+/// command, as in `{\sqrt{x} \over 2}`), else a prefix command at the span's
+/// start.
+fn keyword_ink_span(source: &str, span: Span) -> Option<Span> {
+    let text = source.get(span.start..span.end)?;
+    let token_at = |offset: usize| -> Option<&str> {
+        let name = text.get(offset + 1..)?;
+        let len = name.bytes().take_while(u8::is_ascii_alphabetic).count();
+        (text.as_bytes().get(offset) == Some(&b'\\') && len > 0).then(|| &name[..len])
+    };
+    if let Some(infix) = infix_over(text, &token_at) {
+        let start = span.start + infix;
+        return Some(Span::new(start, start + "\\over".len()));
+    }
+    let name = token_at(0)?;
+    (name != "over" && KEYWORD_INK_COMMANDS.contains(&name) && text.len() > 1 + name.len())
+        .then(|| Span::new(span.start, span.start + 1 + name.len()))
+}
+
+/// The byte offset of a `\over` at brace depth 0 in `text`.
+fn infix_over<'a>(text: &'a str, token_at: &dyn Fn(usize) -> Option<&'a str>) -> Option<usize> {
+    let mut depth = 0_i32;
+    let mut index = 0;
+    let bytes = text.as_bytes();
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            b'\\' => {
+                if let Some(name) = token_at(index) {
+                    if depth == 0 && name == "over" {
+                        return Some(index);
+                    }
+                    index += name.len();
+                } else {
+                    // A control symbol (\{, \\, \,): skip its character.
+                    index += 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// One submobject: a primitive plus its source span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sub {
@@ -246,7 +307,18 @@ impl Typeset {
     /// [`TypesetError::SizeOverflow`] if the primitive counts cannot be
     /// aggregated, or [`TypesetError::AllocationFailed`] if the canonical
     /// submobject table cannot be reserved.
-    pub fn new(source: String, layout: Layout) -> Result<Self, TypesetError> {
+    pub fn new(source: String, mut layout: Layout) -> Result<Self, TypesetError> {
+        let spans = layout
+            .glyphs
+            .iter_mut()
+            .map(|glyph| &mut glyph.span)
+            .chain(layout.rules.iter_mut().map(|rule| &mut rule.span))
+            .chain(layout.paths.iter_mut().map(|path| &mut path.span));
+        for span in spans {
+            if let Some(keyword) = keyword_ink_span(&source, *span) {
+                *span = keyword;
+            }
+        }
         let sub_count = primitive_count(&layout)?;
         let mut subs = Vec::new();
         reserve_exact(&mut subs, sub_count, "submobject table")?;

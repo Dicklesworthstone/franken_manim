@@ -47,7 +47,8 @@ pub use memory_cache::{
 };
 pub use preamble::{LineAlign, TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES};
 pub use typeset::{
-    Prim, Sub, TYPESET_DOCUMENT_LIMIT_BYTES, TYPESET_FORMAT_VERSION, Typeset, TypesetError,
+    KEYWORD_INK_COMMANDS, Prim, Sub, TYPESET_DOCUMENT_LIMIT_BYTES, TYPESET_FORMAT_VERSION, Typeset,
+    TypesetError,
 };
 
 // The math surface consumers need alongside the engine: placed-layout

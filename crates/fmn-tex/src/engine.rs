@@ -32,7 +32,7 @@
 
 use crate::error::{PreflightError, TexError};
 use crate::memory_cache::{MemoryCache, TypesetCacheStats};
-use crate::typeset::{Prim, TYPESET_FORMAT_VERSION, Typeset};
+use crate::typeset::{KEYWORD_INK_COMMANDS, Prim, TYPESET_FORMAT_VERSION, Typeset};
 use fmd_math::{Layout, MacroSet, PathContour, Style};
 use fmn_cache::{CacheKey, KeyBuilder, Namespace};
 use fmn_config::{Config, PackRegistry};
@@ -506,6 +506,10 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
         material.push(0x1e);
     }
     material.extend_from_slice(&macros.canonical_bytes());
+    // Typeset::new re-spans keyword ink after layout, so the probes above
+    // cannot see that policy; fold it in so a change cold-starts the cache.
+    material.extend_from_slice(b"keyword-ink:");
+    material.extend_from_slice(KEYWORD_INK_COMMANDS.join(",").as_bytes());
     CacheKey::of_content(&material)
 }
 
