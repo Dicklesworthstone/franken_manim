@@ -291,8 +291,28 @@ def install_indication(native: Any) -> None:
 
 
 def _install_transform_indications(g):
-    del g
-    return ()
+    """Defer state-derived targets until the shared Transform actually begins.
+
+    Native grow/indication specs freeze their source while the whole play is
+    lowered. That is too early for a later Succession member, and bypasses the
+    public create_target/create_starting_mobject protocol. These classes already
+    implement that protocol; use it rather than manufacturing another target or
+    interpolation kernel. Grow anchors stay construction-time values, while
+    shape, placement and paint are taken from the live source at each begin.
+    """
+    families = tuple(g[name] for name in (
+        "GrowFromPoint", "Indicate", "TurnInsideOut",
+    ) if name in g)
+    if families:
+        previous_requires = g["_requires_python_animation"]
+
+        def requires(animation):
+            # A replay retains target_mobject from the previous invocation.
+            # Never use its presence to decide that a deferred target is final.
+            return isinstance(animation, families) or previous_requires(animation)
+
+        g["_requires_python_animation"] = requires
+    return families
 
 
 def _install_wave(g):
