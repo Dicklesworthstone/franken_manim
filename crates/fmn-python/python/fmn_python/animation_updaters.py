@@ -65,10 +65,10 @@ def _animation_tree(g, animation):
             stack.extend((child, False) for child in reversed(node.animations))
 
 
-def _scene_for(g, animation, anchor):
+def _scene_for(g, animation, anchor, nodes=None, expected_scene=None):
     """Resolve ownership without invoking create_target or changing draw roots."""
     objects = [anchor]
-    for node in _animation_tree(g, animation):
+    for node in _animation_tree(g, animation) if nodes is None else nodes:
         obj = getattr(node, "mobject", None)
         if isinstance(obj, g["Mobject"]):
             objects.append(obj)
@@ -77,7 +77,7 @@ def _scene_for(g, animation, anchor):
         target = getattr(node, target_name, None) if target_name else None
         if isinstance(target, g["Mobject"]):
             objects.append(target)
-    scene, seen = None, set()
+    scene, seen = expected_scene, set()
     for obj in objects:
         for member in obj.get_family():
             if id(member) in seen:
@@ -147,7 +147,7 @@ class _PersistentAnimation:
         self.driver_factory = driver_factory
         self.needs_scene = driver_factory is not None or isinstance(animation, g["AnimationGroup"])
         self.scene = None
-        self.groups = ()
+        self.nodes = self.groups = ()
         self.closed = self.busy = self.begun = False
         self.cleanup_pending = False
         self.execution = _Execution(g)
@@ -206,21 +206,30 @@ class _PersistentAnimation:
         finally:
             self.execution.release()
             self.driver = None
+            self.nodes = self.groups = ()
         if first is not None and original is None:
             raise first
 
+    def check_scene(self):
+        # Detached callback animations are legal, but their operands cannot
+        # belong to different Scenes. Once an owner is observed, keep the
+        # execution attached to it, including native handles frozen at begin.
+        self.scene = _scene_for(self.g, self.animation, self.anchor,
+                                self.nodes, self.scene)
+
     def activate(self):
-        if self.needs_scene:
-            self.scene = _scene_for(self.g, self.animation, self.anchor)
-            if self.scene is None:
-                return False
-            # Drivers freeze their child timeline at begin. Cache that same
-            # group set for context/abort, even if authored code later edits
-            # the animation list; do not rewalk a mutable graph every tick.
-            self.groups = tuple(node for node in _animation_tree(self.g, self.animation)
-                                if isinstance(node, self.g["AnimationGroup"]))
-            if not self.anchor._is_bound():
-                self.scene._adopt(self.anchor)
+        nodes = tuple(_animation_tree(self.g, self.animation))
+        scene = _scene_for(self.g, self.animation, self.anchor, nodes)
+        if self.needs_scene and scene is None:
+            return False
+        self.scene = scene
+        # Drivers freeze their child timeline at begin. Validate those same
+        # leaves on subsequent ticks, not a later edited animation list.
+        self.nodes = nodes
+        self.groups = tuple(node for node in nodes
+                            if isinstance(node, self.g["AnimationGroup"]))
+        if self.needs_scene and not self.anchor._is_bound():
+            self.scene._adopt(self.anchor)
         self.animation._ensure_runtime_defaults()
         if self.driver_factory is not None:
             self.driver = self.driver_factory(self.scene)
@@ -240,6 +249,8 @@ class _PersistentAnimation:
             self.driver, = self.execution.wrap((self.driver,))
         self.begun = True
         self.call("begin")
+        if not self.closed:
+            self.check_scene()
         return not self.closed
 
     def start(self):
@@ -278,6 +289,9 @@ class _PersistentAnimation:
                     return
             if not self.begun and not self.activate():
                 return
+            # Check before interpolation, helper updates AND endpoint finish.
+            # Detached participants may have been adopted since registration.
+            self.check_scene()
             elapsed = float(self.animation.total_time)
             if not math.isfinite(elapsed):
                 raise ValueError("animation updater dt and total_time must be finite")
@@ -300,6 +314,7 @@ class _PersistentAnimation:
                                 group._composition_driver = None
                     self.driver = None
                     self.execution.release()
+                    self.nodes = self.groups = ()
                 return
             following = elapsed + delta
             if not math.isfinite(following):

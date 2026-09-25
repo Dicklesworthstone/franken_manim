@@ -70,6 +70,7 @@ python3 crates/fmn-python/tests/test_runtime_identity.py
 python3 crates/fmn-python/tests/test_runtime_provenance_protocol.py
 python3 crates/fmn-python/tests/test_reproducible_batch_protocol.py
 python3 crates/fmn-python/tests/test_reproducible_batch_cli_protocol.py
+python3 crates/fmn-python/tests/test_persistent_scene_ownership.py
 
 # These unittest suites include native geometry/clock and failure-recovery cases.
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed.py
