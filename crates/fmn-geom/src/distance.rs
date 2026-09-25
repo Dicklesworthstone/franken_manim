@@ -110,21 +110,29 @@ pub fn solve_cubic_real(a3: f64, a2: f64, a1: f64, a0: f64, out: &mut [f64; 3]) 
     // the division by `a3` both moved the roots, and Newton on what was actually
     // asked recovers what those steps cost.
     for root in out.iter_mut().take(n) {
-        for _ in 0..3 {
-            let f = ((a3 * *root + a2) * *root + a1) * *root + a0;
-            let df = (3.0 * a3 * *root + 2.0 * a2) * *root + a1;
-            if df == 0.0 {
-                break;
-            }
-            let step = f / df;
-            if !step.is_finite() {
-                break;
-            }
-            *root -= step;
-        }
+        *root = polish_cubic_root(a3, a2, a1, a0, *root);
     }
     sort_prefix(out, n);
     n
+}
+
+/// A fixed three Newton steps on `a3 t³ + a2 t² + a1 t + a0` from `root`.
+///
+/// Fixed, not convergence-tested, for the reason [`solve_cubic_real`] gives.
+fn polish_cubic_root(a3: f64, a2: f64, a1: f64, a0: f64, mut root: f64) -> f64 {
+    for _ in 0..3 {
+        let f = ((a3 * root + a2) * root + a1) * root + a0;
+        let df = (3.0 * a3 * root + 2.0 * a2) * root + a1;
+        if df == 0.0 {
+            break;
+        }
+        let step = f / df;
+        if !step.is_finite() {
+            break;
+        }
+        root -= step;
+    }
+    root
 }
 
 /// Real roots of `a2 t² + a1 t + a0`, ascending.
@@ -176,6 +184,19 @@ fn sort_prefix(out: &mut [f64; 3], n: usize) {
 /// squared distance plus the two endpoints, and the endpoints are always tested
 /// because a curve's nearest point to an outside query is very often one of them
 /// and no interior root reports it.
+///
+/// **Nearly straight segments** (GH #1) are where the closed-form cubic is
+/// ill-conditioned: `set_points_as_corners` puts each handle at its chord's
+/// midpoint, storage rounds it off the line by an ulp, and `C` becomes tiny but
+/// not zero. Then `a3 = 2 C·C` is far below the other coefficients yet above
+/// the relative degeneracy test, the monic form divides by it, and the roots in
+/// `[0, 1]` come back as cancellation noise — the solve silently reports only
+/// the endpoints, and a stroke loses its middle wherever a segment is longer
+/// than the stroke is wide. There the in-range stationary points are those of
+/// the quadratic `a2 t² + a1 t + a0` perturbed by `a3 t³`, so the deflated
+/// quadratic's roots, Newton-polished on the full cubic, are candidates too.
+/// Adding candidates cannot make the answer worse: each is judged by its actual
+/// squared distance, and ties keep the incumbent.
 #[must_use]
 pub fn nearest_on_quadratic(a0: Vec3, h: Vec3, a1: Vec3, p: Vec3) -> Nearest {
     let b = vec::scale(vec::sub(h, a0), 2.0);
@@ -206,7 +227,12 @@ pub fn nearest_on_quadratic(a0: Vec3, h: Vec3, a1: Vec3, p: Vec3) -> Nearest {
         best_t = 1.0;
         best_d2 = end_d2;
     }
-    for &t in roots.iter().take(n) {
+    let mut deflated = [0.0f64; 3];
+    let m = solve_quadratic_real(a2, a1c, a0c, &mut deflated);
+    for t in deflated.iter_mut().take(m) {
+        *t = polish_cubic_root(a3, a2, a1c, a0c, *t);
+    }
+    for &t in roots.iter().take(n).chain(deflated.iter().take(m)) {
         if !(0.0..=1.0).contains(&t) {
             continue;
         }
@@ -352,6 +378,56 @@ mod tests {
                 // And the reported point is the reported parameter's point.
                 let at = crate::bezier::quadratic_point(a0, h, a1, got.t);
                 assert!(space_ops::get_norm(vec::sub(at, got.point)) < 1e-12);
+            }
+        }
+    }
+
+    /// GH #1: `set_points_as_corners` segments whose midpoint handle was
+    /// rounded to `f32` storage. `C` is ~1e-8 against a chord of ~0.1, so the
+    /// closed-form cubic lost every interior root and the nearest point
+    /// collapsed to an endpoint — half a chord away from a query on the line.
+    #[test]
+    fn a_rounded_midpoint_handle_still_finds_the_interior_nearest_point() {
+        let segments: [[Vec3; 3]; 3] = [
+            [
+                [0.440_766_543_149_948_1, 1.937_205_195_426_941, 0.0],
+                [0.459_930_300_712_585_45, 1.850_354_909_896_850_6, 0.0],
+                [0.479_094_088_077_545_17, 1.763_504_743_576_049_8, 0.0],
+            ],
+            [
+                [2.395_470_380_783_081, 2.271_468_400_955_2, 0.0],
+                [2.414_634_227_752_685_5, 2.165_081_977_844_238_3, 0.0],
+                [2.433_797_836_303_711, 2.058_695_793_151_855_5, 0.0],
+            ],
+            [
+                [3.966_898_918_151_855_5, 0.563_384_294_509_887_7, 0.0],
+                [3.986_062_765_121_46, 0.519_783_735_275_268_6, 0.0],
+                [4.005_226_612_091_064_5, 0.476_183_146_238_327, 0.0],
+            ],
+        ];
+        for [a0, h, a1] in segments {
+            let chord = space_ops::get_norm(vec::sub(a1, a0));
+            let normal = [-(a1[1] - a0[1]) / chord, (a1[0] - a0[0]) / chord, 0.0];
+            for k in 1..10 {
+                let t = f64::from(k) / 10.0;
+                for offset in [0.0, 0.01, -0.02] {
+                    let on = crate::bezier::quadratic_point(a0, h, a1, t);
+                    let p = vec::add(on, vec::scale(normal, offset));
+                    let got = nearest_on_quadratic(a0, h, a1, p);
+                    let (_, brute_d) = brute(a0, h, a1, p, 20_000);
+                    assert!(
+                        got.distance <= brute_d + 1e-12,
+                        "t={t} offset={offset}: closed form {} vs brute force {brute_d} \
+                         on {a0:?}{h:?}{a1:?}",
+                        got.distance
+                    );
+                    assert!(
+                        (got.distance - offset.abs()).abs() < 1e-7,
+                        "t={t} offset={offset}: distance {} (chord {chord})",
+                        got.distance
+                    );
+                    assert!((got.t - t).abs() < 1e-6, "t={t}: got {}", got.t);
+                }
             }
         }
     }

@@ -985,6 +985,38 @@ mod tests {
         assert!(coverage > 0.99, "{coverage}");
     }
 
+    /// GH #1: a `set_points_as_corners` segment with no semantic line hint
+    /// takes the curve route, and its f32-rounded midpoint handle left the
+    /// nearest-point cubic ill-conditioned: the interior of a segment longer
+    /// than the stroke is wide read as uncovered. Width 7 at 1280×720's
+    /// 90 px/unit, sampled along the whole centerline, must be solid ink —
+    /// through both the unprepared and the prepared (engine) kernels.
+    #[test]
+    fn a_rounded_corner_polyline_segment_is_covered_along_its_whole_length() {
+        let segments = [Segment {
+            p0: [0.440_766_543_149_948_1, 1.937_205_195_426_941, 0.0],
+            p1: [0.459_930_300_712_585_45, 1.850_354_909_896_850_6, 0.0],
+            p2: [0.479_094_088_077_545_17, 1.763_504_743_576_049_8, 0.0],
+            s0: 0.0,
+            s1: 1.0,
+        }];
+        let map = ScreenMap::y_up(90.0, [640.0, 360.0]);
+        let style = flat_stroke_style(7.0);
+        let translate = [0.0, 0.0];
+        let (backing, slab) = prepared(&segments, &style, map, translate, false);
+        let prepared = PreparedStroke::from_parts(&backing, slab);
+        let [a, _, b] = [segments[0].p0, segments[0].p1, segments[0].p2];
+        for k in 0..=64 {
+            let t = f64::from(k) / 64.0;
+            let object = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+            let screen = map.to_pixel(object[0], object[1]);
+            let direct = stroke_coverage(&segments, &style, map, translate, screen);
+            assert_eq!(direct, 1.0, "centerline t={t} uncovered: {direct}");
+            let (engine, _) = prepared.shade(&segments, &[], &style, map, translate, screen);
+            assert_eq!(engine, 1.0, "prepared centerline t={t} uncovered: {engine}");
+        }
+    }
+
     #[test]
     fn the_width_conversion_is_the_references_own() {
         let map = ScreenMap {
