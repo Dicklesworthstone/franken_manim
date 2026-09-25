@@ -3853,6 +3853,14 @@ class VMobject(Mobject):
     def get_anti_alias_width(self):
         return float(self.uniforms["anti_alias_width"])
 
+    def use_winding_fill(self, value=True, recurse=True):
+        # C-7: the Reference body is a no-op kept "because some old scene
+        # call it". Record the typed uniform, which selects nothing: Lumen
+        # has one analytic nonzero-winding fill, as the Reference has one.
+        for mob in _family_preorder(self) if recurse else [self]:
+            mob.uniforms["use_winding_fill"] = bool(value)
+        return self
+
     def set_style(
         self,
         fill_color=None,
@@ -23272,6 +23280,36 @@ def _install_mobject_functions():
 
 
 _install_mobject_functions()
+
+
+def _install_debug_functions():
+    """manimlib/utils/debug.py, Reference-verbatim over the bound surfaces."""
+
+    def print_family(mobject, n_tabs=0):
+        """For debugging purposes"""
+        log = _importlib.import_module("logging").getLogger("manimgl")
+        log.debug("\t" * n_tabs + str(mobject) + " " + str(id(mobject)))
+        for submob in mobject.submobjects:
+            print_family(submob, n_tabs + 1)
+
+    def index_labels(mobject, label_height=0.15):
+        labels = VGroup()
+        for n, submob in enumerate(mobject):
+            label = Integer(n)
+            label.set_height(label_height)
+            label.move_to(submob)
+            label.set_backstroke("#000000", 5)  # BLACK
+            labels.add(label)
+        return labels
+
+    module = _ensure_module("manimlib.utils.debug")
+    for name, function in {"print_family": print_family, "index_labels": index_labels}.items():
+        setattr(module, name, function)
+        if not hasattr(_FMN_MODULE, name):
+            setattr(_FMN_MODULE, name, function)
+
+
+_install_debug_functions()
 
 
 def _install_vector_field_functions():

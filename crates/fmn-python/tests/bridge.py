@@ -20742,6 +20742,61 @@ else:
 assert manimlib.merge_dicts_recursively is _dict_ops.merge_dicts_recursively
 assert manimlib.get_full_raster_image_path is _image_utils.get_full_raster_image_path
 
+# Reference utils/debug.py and VMobject.use_winding_fill, which corpus scenes
+# call (moser_reboot, gauss_int, antp). index_labels puts one Integer per
+# submobject, centred on it with a black backstroke; print_family logs the
+# family at debug level; use_winding_fill is the Reference's no-op.
+import logging as _logging  # noqa: E402
+
+_debug = importlib.import_module("manimlib.utils.debug")
+_row = manimlib.VGroup(*(manimlib.Square().shift(3 * i * manimlib.RIGHT) for i in range(3)))
+_labels = _debug.index_labels(_row, label_height=0.2)
+assert isinstance(_labels, manimlib.VGroup)
+assert [label.get_value() for label in _labels] == [0, 1, 2]
+for _label, _submob in zip(_labels, _row):
+    assert np.allclose(_label.get_center(), _submob.get_center())
+    assert np.isclose(_label.get_height(), 0.2)
+    for _leaf in _label.family_members_with_points():
+        assert np.isclose(_leaf.get_stroke_width(), 5)
+        assert np.allclose(_color_utils.color_to_rgb(_leaf.get_stroke_color()), 0)
+        assert bool(_leaf.uniforms["stroke_behind"])
+assert manimlib.index_labels is _debug.index_labels
+
+
+class _CollectLog(_logging.Handler):
+    def __init__(self):
+        super().__init__(_logging.DEBUG)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+_manimgl_log, _collect = _logging.getLogger("manimgl"), _CollectLog()
+_saved_level = _manimgl_log.level
+_manimgl_log.addHandler(_collect)
+_manimgl_log.setLevel(_logging.DEBUG)
+try:
+    _debug.print_family(_row)
+finally:
+    _manimgl_log.removeHandler(_collect)
+    _manimgl_log.setLevel(_saved_level)
+assert len(_collect.messages) == 4
+assert _collect.messages[0].endswith(" " + str(id(_row)))
+assert all(message.startswith("\t") and not message.startswith("\t\t")
+           for message in _collect.messages[1:])
+assert _collect.messages[2].endswith(" " + str(id(_row[1])))
+
+_winding = manimlib.VGroup(manimlib.Circle(), manimlib.Square())
+_winding_data = [member.data.copy() for member in _winding.get_family()]
+assert _winding.use_winding_fill(False) is _winding
+assert not any(bool(member.uniforms["use_winding_fill"]) for member in _winding.get_family())
+_winding.use_winding_fill(True, recurse=False)
+assert bool(_winding.uniforms["use_winding_fill"])
+assert not bool(_winding[0].uniforms["use_winding_fill"])
+for _member, _data in zip(_winding.get_family(), _winding_data):
+    np.testing.assert_array_equal(_member.data, _data)
+
 # fm-5wq.14: Reference color_to_rgb takes colour.Color, i.e. anything with
 # get_rgb(); both the Python and the native colour parsers accept it (54
 # corpus scenes pass Color objects). The re-exported Color names its missing
