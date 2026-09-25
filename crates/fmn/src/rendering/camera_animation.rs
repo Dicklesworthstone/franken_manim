@@ -6,7 +6,9 @@ use fmn_anim::FramePacket;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_scene::{CameraRig, CaptureReason, IntegrationError, RuntimeConfig, Scene};
 
-use super::{CameraConfig, NativeFramePipeline, RenderError, RenderOptions, RenderReport, RenderSink};
+use super::{
+    CameraConfig, NativeFramePipeline, RenderError, RenderOptions, RenderReport, RenderSink,
+};
 use crate::{ProgramAdapter, SceneConstruct};
 
 /// Render ordinary native animation with a snapshot-native camera rig.
@@ -70,15 +72,20 @@ where
     }
     let mut sink = RigSink { inner, rig, base };
     sink.sync_camera(scene.stage())?;
-    let mut adapter = ProgramAdapter { program: &mut program, front_door_error: None };
+    let mut adapter = ProgramAdapter {
+        program: &mut program,
+        front_door_error: None,
+    };
     let run = scene.run(&mut adapter, &mut sink);
     if let Some(error) = sink.inner.failure.take() {
         // Admission can observe only a closed stream; join to recover its
         // original worker-stage failure, never claim successful publication.
         if matches!(&error, RenderError::Pipeline(_)) {
-            if let Some(emitter) = &sink.inner.emitter { emitter.cancel(); }
+            if let Some(emitter) = &sink.inner.emitter {
+                emitter.cancel();
+            }
             if let Some(pipeline) = sink.inner.pipeline.take() {
-                if let Err(root) = pipeline.finish() { return Err(root); }
+                pipeline.finish()?;
             }
         }
         return Err(error);
@@ -87,15 +94,31 @@ where
         return Err(RenderError::Scene(error));
     }
     let scene_report = run.map_err(|error| RenderError::Scene(error.into()))?;
-    if sink.inner.next_sequence == 0 { sink.render_stage(scene.stage())?; }
-    let frame_pipeline = sink.inner.pipeline.take().map(NativeFramePipeline::finish).transpose()?;
-    let emission = sink.inner.emitter.take().ok_or(RenderError::InvalidOptions(
-        "render emitter was already finalized",
-    ))?.finish().map_err(RenderError::Drain)?;
+    if sink.inner.next_sequence == 0 {
+        sink.render_stage(scene.stage())?;
+    }
+    let frame_pipeline = sink
+        .inner
+        .pipeline
+        .take()
+        .map(NativeFramePipeline::finish)
+        .transpose()?;
+    let emission = sink
+        .inner
+        .emitter
+        .take()
+        .ok_or(RenderError::InvalidOptions(
+            "render emitter was already finalized",
+        ))?
+        .finish()
+        .map_err(RenderError::Drain)?;
     let artifact = sink.inner.receipt.take().map_err(RenderError::Receipt)?;
     Ok(RenderReport {
-        scene: scene_report, artifact, emission,
-        execution_plan: sink.inner.plan.clone(), frame_pipeline,
+        scene: scene_report,
+        artifact,
+        emission,
+        execution_plan: sink.inner.plan.clone(),
+        frame_pipeline,
     })
 }
 
@@ -107,11 +130,17 @@ struct RigSink {
 
 impl RigSink {
     fn sync_camera(&mut self, stage: &fmn_mobject::Stage) -> Result<(), RenderError> {
-        let config = self.rig.sample(stage, &self.base)
+        let config = self
+            .rig
+            .sample(stage, &self.base)
             .map_err(|error| RenderError::Scene(error.into()))?;
-        self.inner.pipeline.as_mut().ok_or(RenderError::InvalidOptions(
-            "camera frame pipeline was already finalized",
-        ))?.update_camera(config)
+        self.inner
+            .pipeline
+            .as_mut()
+            .ok_or(RenderError::InvalidOptions(
+                "camera frame pipeline was already finalized",
+            ))?
+            .update_camera(config)
     }
 
     fn render_stage(&mut self, stage: &fmn_mobject::Stage) -> Result<(), RenderError> {
@@ -125,10 +154,11 @@ impl fmn_scene::SceneSink for RigSink {
         if let Some(error) = &self.inner.failure {
             return Err(IntegrationError::new("native-camera", error.to_string()));
         }
-        self.render_stage(&packet.materialize_stage()).map_err(|error| {
-            let message = error.to_string();
-            self.inner.failure = Some(error);
-            IntegrationError::new("native-camera", message)
-        })
+        self.render_stage(&packet.materialize_stage())
+            .map_err(|error| {
+                let message = error.to_string();
+                self.inner.failure = Some(error);
+                IntegrationError::new("native-camera", message)
+            })
     }
 }

@@ -64,6 +64,8 @@ fn native_pcm_budget_is_enforced_without_external_fallback() {
     let wav = encode_wav(1, 48_000, SampleFormat::F32, &[0.25; 2]);
     assert!(matches!(
         decoder.decode(&wav),
-        Err(AudioDecodeError::Native(fmn_codec::WavError::TooLarge { .. }))
+        Err(AudioDecodeError::Native(
+            fmn_codec::WavError::TooLarge { .. }
+        ))
     ));
 }

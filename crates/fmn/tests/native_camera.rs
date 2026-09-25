@@ -60,18 +60,25 @@ fn mixed_surface_and_vector_scene_uses_the_real_camera_pose() {
         assert_eq!(report.artifact.frame_count, 1);
         let image = pixels(&fs, directory, 0);
         let colored = image
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|pixel| pixel[2] > 30 && pixel[2] > pixel[0])
             .count();
         let white = image
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|pixel| pixel[0] > 180 && pixel[1] > 180 && pixel[2] > 180)
             .count();
         assert!(colored > 20, "surface pixels reached the output");
         assert!(white > 3, "vector pixels share the camera painter sequence");
         images.push(image);
     }
-    assert_ne!(images[0], images[1], "camera pose changes the rendered scene");
+    assert_ne!(
+        images[0], images[1],
+        "camera pose changes the rendered scene"
+    );
 }
 
 #[test]

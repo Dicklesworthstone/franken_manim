@@ -31,8 +31,8 @@ use fmn_output::{
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::{
-    Camera, CameraError, EngineIdentity, FrameConfig,
-    RetainedFrameRendererConfig, RetainedFrameRendererError, ScreenMap, Tiling, Viewport,
+    Camera, CameraError, EngineIdentity, FrameConfig, RetainedFrameRendererConfig,
+    RetainedFrameRendererError, ScreenMap, Tiling, Viewport,
 };
 use fmn_runtime::{
     ExecutionEngine, FrameStreamError, OutputPixelFormat, PipelineStats, PlanError, PlanRequest,
@@ -42,11 +42,11 @@ use fmn_scene::{CaptureReason, IntegrationError, RuntimeConfig, SceneRunReport, 
 
 use crate::SceneConstruct;
 
-mod pipeline;
 mod camera_animation;
 mod compiled;
-pub use compiled::{render_bundle, render_bundle_with_fs};
+mod pipeline;
 pub use camera_animation::{render_camera, render_camera_with_fs};
+pub use compiled::{render_bundle, render_bundle_with_fs};
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
 
 pub use fmn_output::{EmitterReport, NativeArtifactReport};
@@ -299,9 +299,7 @@ pub fn render_with_fs<P: SceneConstruct + ?Sized>(
                 emitter.cancel();
             }
             if let Some(pipeline) = sink.pipeline.take() {
-                if let Err(root) = pipeline.finish() {
-                    return Err(root);
-                }
+                pipeline.finish()?;
             }
         }
         return Err(error);
@@ -311,8 +309,11 @@ pub fn render_with_fs<P: SceneConstruct + ?Sized>(
         sink.render_stage(completed.scene().stage())?;
     }
     // Joining all raster/conversion work is a prerequisite to publication.
-    let frame_pipeline = sink.pipeline.take()
-        .map(NativeFramePipeline::finish).transpose()?;
+    let frame_pipeline = sink
+        .pipeline
+        .take()
+        .map(NativeFramePipeline::finish)
+        .transpose()?;
     let emission = sink
         .emitter
         .take()
@@ -420,19 +421,28 @@ impl RenderSink {
         let retained_frames = if options.camera.is_some() {
             // Live-camera preparation plus the largest compiled-camera mode:
             // one retained raw preparation frame on each active render team.
-            plan.render_teams.len().checked_add(1)
-                .ok_or(RenderError::InvalidOptions("retained frame count overflowed"))?
+            plan.render_teams
+                .len()
+                .checked_add(1)
+                .ok_or(RenderError::InvalidOptions(
+                    "retained frame count overflowed",
+                ))?
         } else {
             plan.render_teams.len()
         };
-        let retained_bytes = u64::try_from(retained_frames).ok()
-            .and_then(|count| u64::from(width).checked_mul(u64::from(height))?
-                .checked_mul(8)?.checked_mul(count));
+        let retained_bytes = u64::try_from(retained_frames).ok().and_then(|count| {
+            u64::from(width)
+                .checked_mul(u64::from(height))?
+                .checked_mul(8)?
+                .checked_mul(count)
+        });
         let planned = u64::try_from(plan.estimated_in_flight_bytes)
             .ok()
             .and_then(|bytes| bytes.checked_add(retained_bytes?))
             .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
-            .ok_or(RenderError::InvalidOptions("render memory budget overflowed"))?;
+            .ok_or(RenderError::InvalidOptions(
+                "render memory budget overflowed",
+            ))?;
         if planned > options.max_resident_bytes {
             return Err(RenderError::InvalidOptions(
                 "render plan exceeds max_resident_bytes",
@@ -544,16 +554,16 @@ impl RenderSink {
             vec![binding],
         )
         .map_err(RenderError::Emitter)?;
-        let pipeline = match NativeFramePipeline::new(
-            plan.clone(), renderer_config, camera, emitter.handle(),
-        ) {
-            Ok(pipeline) => pipeline,
-            Err(error) => {
-                emitter.cancel();
-                let _ = emitter.finish();
-                return Err(error);
-            }
-        };
+        let pipeline =
+            match NativeFramePipeline::new(plan.clone(), renderer_config, camera, emitter.handle())
+            {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    emitter.cancel();
+                    let _ = emitter.finish();
+                    return Err(error);
+                }
+            };
         Ok(Self {
             pipeline: Some(pipeline),
             emitter: Some(emitter),
@@ -569,7 +579,9 @@ impl RenderSink {
         if self.next_sequence >= self.max_frames {
             return Err(RenderError::InvalidOptions("scene exceeded max_frames"));
         }
-        self.pipeline.as_mut().ok_or(RenderError::Pipeline(FrameStreamError::Closed))?
+        self.pipeline
+            .as_mut()
+            .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?
             .capture(stage, self.next_sequence)?;
         self.next_sequence += 1;
         Ok(())
@@ -577,7 +589,11 @@ impl RenderSink {
 }
 
 impl SceneSink for RenderSink {
-    fn capture(&mut self, _reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        _reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         if let Some(error) = &self.failure {
             return Err(IntegrationError::new("native-render", error.to_string()));
         }

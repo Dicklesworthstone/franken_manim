@@ -26,9 +26,19 @@ fn render(root: &Path, format: &str, threads: &str) -> String {
     }
     let output = command
         .args([
-            "--robot", "--format", format,
-            "--resolution", "32x24", "--fps", "8", "--threads", threads,
-            "--video_dir", root.to_str().unwrap(), "@builtin", "circle_shift.v1",
+            "--robot",
+            "--format",
+            format,
+            "--resolution",
+            "32x24",
+            "--fps",
+            "8",
+            "--threads",
+            threads,
+            "--video_dir",
+            root.to_str().unwrap(),
+            "@builtin",
+            "circle_shift.v1",
         ])
         .env("PATH", "")
         .env_remove("PYTHONPATH")
@@ -36,8 +46,15 @@ fn render(root: &Path, format: &str, threads: &str) -> String {
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-    assert!(stdout.contains("\"frame_pipeline\":{\"submitted\":"), "{stdout}");
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("\"frame_pipeline\":{\"submitted\":"),
+        "{stdout}"
+    );
     assert!(stdout.contains("\"outstanding_slots\":0"), "{stdout}");
     assert!(stdout.contains("\"render_team_frames\":["), "{stdout}");
     stdout
@@ -52,7 +69,10 @@ fn artifacts(root: &Path, format: &str) -> Vec<Vec<u8>> {
             .collect();
         paths.sort();
         assert!(!paths.is_empty());
-        paths.iter().map(|path| std::fs::read(path).unwrap()).collect()
+        paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect()
     } else {
         vec![std::fs::read(root.join(format!("circle_shift.{format}"))).unwrap()]
     }
@@ -80,15 +100,29 @@ fn certified_gif_remains_a_capability_refusal_without_output_side_effects() {
     let root = root();
     let output = Command::new(env!("CARGO_BIN_EXE_fmn"))
         .args([
-            "--robot", "--reproducible", "--format", "gif",
-            "--resolution", "32x24", "--fps", "8", "--threads", "4",
-            "--video_dir", root.to_str().unwrap(), "@builtin", "circle_shift.v1",
+            "--robot",
+            "--reproducible",
+            "--format",
+            "gif",
+            "--resolution",
+            "32x24",
+            "--fps",
+            "8",
+            "--threads",
+            "4",
+            "--video_dir",
+            root.to_str().unwrap(),
+            "@builtin",
+            "circle_shift.v1",
         ])
         .env("PATH", "")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(4));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("native GIF is outside the certified artifact set"), "{stdout}");
+    assert!(
+        stdout.contains("native GIF is outside the certified artifact set"),
+        "{stdout}"
+    );
     assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
 }

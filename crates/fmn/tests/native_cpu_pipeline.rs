@@ -1,18 +1,18 @@
 //! Shared front-door adapter: all negotiated CPU formats and real render teams.
 
-use std::sync::{Arc, Mutex};
 use fmn::rendering::{NativeFramePipeline, RenderError};
 use fmn_core::color::LinearRgba;
-use fmn_frame::convert::{rgba16f_to_rgba8, rgba_to_nv12, rgba_to_p010, swap_rb8};
+use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_output::{EmitterConfig, OrderedEmitter, SinkBinding, SinkWrite};
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::{
-    EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig,
-    ScreenMap, Tiling, Viewport,
+    EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
+    Tiling, Viewport,
 };
 use fmn_runtime::{ExecutionPlan, OutputPixelFormat, PlanRequest, RenderIntent, SurfaceSpec};
+use std::sync::{Arc, Mutex};
 
 fn plan(format: OutputPixelFormat) -> ExecutionPlan {
     let mut surface = SurfaceSpec::lumen(32, 24);
@@ -23,21 +23,36 @@ fn plan(format: OutputPixelFormat) -> ExecutionPlan {
     // single-core CI host, without spawning workstation-sized worker pools.
     let topology = HardwareTopology::from_group_sizes(&[2, 2]).unwrap();
     ExecutionPlan::derive(
-        PlanRequest::certified(RenderIntent::Offline, surface, format)
-            .with_max_frames_in_flight(3),
+        PlanRequest::certified(RenderIntent::Offline, surface, format).with_max_frames_in_flight(3),
         &topology,
         None,
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 fn config(plan: &ExecutionPlan) -> RetainedFrameRendererConfig {
     RetainedFrameRendererConfig {
         frame: FrameConfig::new(
-            Viewport { width: 32, height: 24 },
-            ScreenMap { scale: 4.0, origin: [16.0, 12.0], y_up: true },
-            LinearRgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            Viewport {
+                width: 32,
+                height: 24,
+            },
+            ScreenMap {
+                scale: 4.0,
+                origin: [16.0, 12.0],
+                y_up: true,
+            },
+            LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
         ),
-        tiling: Tiling { macro_tile: plan.macro_tile, fine_tile: plan.fine_tile },
+        tiling: Tiling {
+            macro_tile: plan.macro_tile,
+            fine_tile: plan.fine_tile,
+        },
         engine: EngineIdentity::certified(),
         threads: 1,
     }
@@ -45,7 +60,11 @@ fn config(plan: &ExecutionPlan) -> RetainedFrameRendererConfig {
 
 fn shape() -> Mobject {
     let mut records = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
-    records.write_range("point", 0, &[-1.5, -1.0, 0.0, 0.0, 1.25, 0.0, 1.5, -1.0, 0.0]);
+    records.write_range(
+        "point",
+        0,
+        &[-1.5, -1.0, 0.0, 0.0, 1.25, 0.0, 1.5, -1.0, 0.0],
+    );
     records.write_range("fill_rgba", 0, &[0.2, 0.6, 1.0, 1.0].repeat(3));
     Mobject::from_buffer(records)
 }
@@ -59,10 +78,15 @@ fn convert_reference(frame: &FrameBuffer, format: PixelFormat) -> Vec<u8> {
     let mut output = FrameBuffer::new(FrameLayout::tight(format, 32, 24).unwrap());
     match format {
         PixelFormat::Bgra8 => swap_rb8(&rgba, &mut output),
-        PixelFormat::Nv12 => rgba_to_nv12(&rgba, &mut output, ColorRange::Limited, ChromaSiting::Left),
-        PixelFormat::P010 => rgba_to_p010(&rgba, &mut output, ColorRange::Limited, ChromaSiting::Left),
+        PixelFormat::Nv12 => {
+            rgba_to_nv12(&rgba, &mut output, ColorRange::Limited, ChromaSiting::Left)
+        }
+        PixelFormat::P010 => {
+            rgba_to_p010(&rgba, &mut output, ColorRange::Limited, ChromaSiting::Left)
+        }
         _ => panic!("not a converted CPU format"),
-    }.unwrap();
+    }
+    .unwrap();
     output.as_bytes().to_vec()
 }
 
@@ -80,13 +104,26 @@ fn all_cpu_formats_match_serial_lumen_on_multiple_render_teams() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let output = received.clone();
         let emitter = OrderedEmitter::new(
-            EmitterConfig::new(FrameLayout::tight(format, 32, 24).unwrap(), plan.frames_in_flight, 0).unwrap(),
-            vec![SinkBinding::reliable("record", move |sequence, frame: &FrameBuffer| {
-                output.lock().unwrap().push((sequence, frame.as_bytes().to_vec()));
-                Ok(SinkWrite::Consumed)
-            })],
-        ).unwrap();
-        let mut pipeline = NativeFramePipeline::new(plan.clone(), config, None, emitter.handle()).unwrap();
+            EmitterConfig::new(
+                FrameLayout::tight(format, 32, 24).unwrap(),
+                plan.frames_in_flight,
+                0,
+            )
+            .unwrap(),
+            vec![SinkBinding::reliable(
+                "record",
+                move |sequence, frame: &FrameBuffer| {
+                    output
+                        .lock()
+                        .unwrap()
+                        .push((sequence, frame.as_bytes().to_vec()));
+                    Ok(SinkWrite::Consumed)
+                },
+            )],
+        )
+        .unwrap();
+        let mut pipeline =
+            NativeFramePipeline::new(plan.clone(), config, None, emitter.handle()).unwrap();
         let mut serial = RetainedFrameRenderer::new(config).unwrap();
         let mut stage = Stage::new();
         let mob = stage.add(shape());
@@ -99,7 +136,10 @@ fn all_cpu_formats_match_serial_lumen_on_multiple_render_teams() {
             stage.shift(mob, [0.1, 0.0, 0.0]);
             if sequence % 4 == 3 {
                 let barrier = pipeline.flush().unwrap();
-                assert_eq!((barrier.submitted, barrier.emitted), (sequence + 1, sequence + 1));
+                assert_eq!(
+                    (barrier.submitted, barrier.emitted),
+                    (sequence + 1, sequence + 1)
+                );
                 assert_eq!(barrier.outstanding_slots, 0);
                 assert_eq!(emitter.stats().published, sequence + 1);
             }
@@ -129,9 +169,17 @@ fn incompatible_ring_capacity_or_identity_is_refused_before_work() {
         }
         let capacity = if wrong_ring { 1 } else { plan.frames_in_flight };
         let emitter = OrderedEmitter::new(
-            EmitterConfig::new(FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(), capacity, 0).unwrap(),
-            vec![SinkBinding::reliable("unused", |_, _: &FrameBuffer| Ok(SinkWrite::Consumed))],
-        ).unwrap();
+            EmitterConfig::new(
+                FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(),
+                capacity,
+                0,
+            )
+            .unwrap(),
+            vec![SinkBinding::reliable("unused", |_, _: &FrameBuffer| {
+                Ok(SinkWrite::Consumed)
+            })],
+        )
+        .unwrap();
         let error = NativeFramePipeline::new(plan, config, None, emitter.handle());
         assert!(matches!(error, Err(RenderError::InvalidOptions(_))));
         assert_eq!(emitter.stats().reserved, 0);
@@ -145,11 +193,22 @@ fn negotiated_layout_mismatch_fails_closed_without_freezing() {
     let plan = plan(OutputPixelFormat::Rgba8);
     let config = config(&plan);
     let emitter = OrderedEmitter::new(
-        EmitterConfig::new(FrameLayout::tight(PixelFormat::Bgra8, 32, 24).unwrap(), plan.frames_in_flight, 0).unwrap(),
-        vec![SinkBinding::reliable("unused", |_, _: &FrameBuffer| Ok(SinkWrite::Consumed))],
-    ).unwrap();
+        EmitterConfig::new(
+            FrameLayout::tight(PixelFormat::Bgra8, 32, 24).unwrap(),
+            plan.frames_in_flight,
+            0,
+        )
+        .unwrap(),
+        vec![SinkBinding::reliable("unused", |_, _: &FrameBuffer| {
+            Ok(SinkWrite::Consumed)
+        })],
+    )
+    .unwrap();
     let mut pipeline = NativeFramePipeline::new(plan, config, None, emitter.handle()).unwrap();
-    assert!(matches!(pipeline.capture(&Stage::new(), 0), Err(RenderError::InvalidOptions(_))));
+    assert!(matches!(
+        pipeline.capture(&Stage::new(), 0),
+        Err(RenderError::InvalidOptions(_))
+    ));
     assert!(pipeline.finish().is_err());
     let failure = emitter.finish().unwrap_err();
     assert_eq!(failure.report.stats.outstanding, 0);
@@ -158,8 +217,8 @@ fn negotiated_layout_mismatch_fails_closed_without_freezing() {
 
 #[test]
 fn drain_barriers_never_grant_artifact_publication() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use fmn_output::{FrameSink, SinkFailure};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct CommitWitness(Arc<AtomicBool>);
     impl FrameSink for CommitWitness {
@@ -175,9 +234,18 @@ fn drain_barriers_never_grant_artifact_publication() {
     let config = config(&plan);
     let committed = Arc::new(AtomicBool::new(false));
     let emitter = OrderedEmitter::new(
-        EmitterConfig::new(FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(), plan.frames_in_flight, 0).unwrap(),
-        vec![SinkBinding::reliable("commit-witness", CommitWitness(committed.clone()))],
-    ).unwrap();
+        EmitterConfig::new(
+            FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(),
+            plan.frames_in_flight,
+            0,
+        )
+        .unwrap(),
+        vec![SinkBinding::reliable(
+            "commit-witness",
+            CommitWitness(committed.clone()),
+        )],
+    )
+    .unwrap();
     let mut pipeline = NativeFramePipeline::new(plan, config, None, emitter.handle()).unwrap();
     let mut stage = Stage::new();
     let mob = stage.add(shape());

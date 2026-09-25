@@ -1,10 +1,10 @@
 //! Native output for compiled timelines, with reconstruction on render teams.
 
-use std::sync::Arc;
 use fmn_anim::RationalFrameClock;
 use fmn_platform::fs::{FileSystem, StdFs};
-use fmn_scene::timeline_bundle::TimelineBundle;
 use fmn_scene::SceneRunReport;
+use fmn_scene::timeline_bundle::TimelineBundle;
+use std::sync::Arc;
 
 use super::{NativeFramePipeline, RenderError, RenderOptions, RenderReport, RenderSink};
 
@@ -40,22 +40,31 @@ pub fn render_bundle(bytes: &[u8], options: RenderOptions) -> Result<RenderRepor
 /// # Errors
 /// Returns the same typed failures as [`render_bundle`].
 pub fn render_bundle_with_fs(
-    bytes: &[u8], options: RenderOptions, fs: Arc<dyn FileSystem>,
+    bytes: &[u8],
+    options: RenderOptions,
+    fs: Arc<dyn FileSystem>,
 ) -> Result<RenderReport, RenderError> {
     let bundle = TimelineBundle::from_bytes(bytes).map_err(RenderError::Bundle)?;
     if bundle.fps() != options.config.camera.fps {
-        return Err(RenderError::InvalidOptions("compiled frame rate must match export configuration"));
+        return Err(RenderError::InvalidOptions(
+            "compiled frame rate must match export configuration",
+        ));
     }
     if bundle.frame_count() == 0 {
-        return Err(RenderError::InvalidOptions("compiled artifact has no frames to render"));
+        return Err(RenderError::InvalidOptions(
+            "compiled artifact has no frames to render",
+        ));
     }
     if u64::from(bundle.frame_count()) > options.max_frames {
-        return Err(RenderError::InvalidOptions("compiled artifact exceeds max_frames"));
+        return Err(RenderError::InvalidOptions(
+            "compiled artifact exceeds max_frames",
+        ));
     }
     let shared = bundle.into_shared().map_err(RenderError::Bundle)?;
     let mut clock = RationalFrameClock::new(shared.fps())
         .map_err(|error| RenderError::Scene(fmn_anim::AnimError::Clock(error).into()))?;
-    clock.advance_frames(i64::from(shared.frame_count()))
+    clock
+        .advance_frames(i64::from(shared.frame_count()))
         .map_err(|error| RenderError::Scene(fmn_anim::AnimError::Clock(error).into()))?;
     let scene = SceneRunReport {
         ended_early: false,
@@ -71,18 +80,35 @@ pub fn render_bundle_with_fs(
         ))?;
         if let Err(error) = pipeline.capture_compiled(job, u64::from(index)) {
             if matches!(&error, RenderError::Pipeline(_)) {
-                if let Some(emitter) = &sink.emitter { emitter.cancel(); }
+                if let Some(emitter) = &sink.emitter {
+                    emitter.cancel();
+                }
                 if let Some(pipeline) = sink.pipeline.take() {
-                    if let Err(root) = pipeline.finish() { return Err(root); }
+                    pipeline.finish()?;
                 }
             }
             return Err(error);
         }
     }
-    let frame_pipeline = sink.pipeline.take().map(NativeFramePipeline::finish).transpose()?;
-    let emission = sink.emitter.take().ok_or(RenderError::InvalidOptions(
-        "compiled emitter was already finalized",
-    ))?.finish().map_err(RenderError::Drain)?;
+    let frame_pipeline = sink
+        .pipeline
+        .take()
+        .map(NativeFramePipeline::finish)
+        .transpose()?;
+    let emission = sink
+        .emitter
+        .take()
+        .ok_or(RenderError::InvalidOptions(
+            "compiled emitter was already finalized",
+        ))?
+        .finish()
+        .map_err(RenderError::Drain)?;
     let artifact = sink.receipt.take().map_err(RenderError::Receipt)?;
-    Ok(RenderReport { scene, artifact, emission, execution_plan: sink.plan.clone(), frame_pipeline })
+    Ok(RenderReport {
+        scene,
+        artifact,
+        emission,
+        execution_plan: sink.plan.clone(),
+        frame_pipeline,
+    })
 }

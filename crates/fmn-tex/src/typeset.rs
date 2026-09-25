@@ -226,9 +226,30 @@ pub enum Prim {
 /// keyword token, and argument ink keeps its own spans. Macro calls are
 /// untouched: their ink keeps the call-site span.
 pub const KEYWORD_INK_COMMANDS: &[&str] = &[
-    "frac", "dfrac", "tfrac", "cfrac", "sqrt", "over", "overline", "underline", "hat",
-    "widehat", "check", "tilde", "widetilde", "acute", "grave", "dot", "ddot", "breve",
-    "bar", "vec", "overbrace", "underbrace", "overrightarrow", "overleftarrow",
+    "frac",
+    "dfrac",
+    "tfrac",
+    "cfrac",
+    "sqrt",
+    "over",
+    "overline",
+    "underline",
+    "hat",
+    "widehat",
+    "check",
+    "tilde",
+    "widetilde",
+    "acute",
+    "grave",
+    "dot",
+    "ddot",
+    "breve",
+    "bar",
+    "vec",
+    "overbrace",
+    "underbrace",
+    "overrightarrow",
+    "overleftarrow",
 ];
 
 /// The keyword token that owns a primitive drawn by one of

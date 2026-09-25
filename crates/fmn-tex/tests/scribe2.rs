@@ -123,7 +123,11 @@ fn a_command_keyword_selects_the_ink_it_draws() {
 
     let frac = math(r"\frac{a}{b}");
     assert_eq!(kinds(&frac, r"\frac"), ["rule"]);
-    assert_eq!(kinds(&frac, r"\frac{a}{b}").len(), 3, "the whole construct still selects all");
+    assert_eq!(
+        kinds(&frac, r"\frac{a}{b}").len(),
+        3,
+        "the whole construct still selects all"
+    );
 
     let root = math(r"\sqrt{x}");
     let radical = kinds(&root, r"\sqrt");

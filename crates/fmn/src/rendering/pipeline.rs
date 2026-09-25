@@ -1,16 +1,16 @@
 //! Owned Lumen jobs between the serial scene owner and the existing runtime.
 
-use std::fmt;
 use std::cell::RefCell;
+use std::fmt;
 use std::sync::Mutex;
 
-use fmn_frame::convert::{rgba16f_to_rgba8, rgba_to_nv12, rgba_to_p010, swap_rb8};
+use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
 use fmn_render::{
-    Camera, CameraConfig, EngineIdentity, FrameArena, OwnedVectorFrame, PixelTileCache, PreparedCameraFrame,
-    RetainedFrameRenderer, RetainedFrameRendererConfig, RetainedFrameRendererError,
-    VectorFrameCompiler, Viewport,
+    Camera, CameraConfig, EngineIdentity, FrameArena, OwnedVectorFrame, PixelTileCache,
+    PreparedCameraFrame, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    RetainedFrameRendererError, VectorFrameCompiler, Viewport,
 };
 use fmn_runtime::{
     ExecutionEngine, ExecutionPlan, FrameStream, FrameStreamError, OutputPixelFormat,
@@ -67,6 +67,11 @@ impl std::error::Error for NativeFrameError {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "each frame moves once through a bounded queue holding about one job per worker; \
+              boxing the camera frame would add a heap allocation per frame (PG-6)"
+)]
 pub(super) enum NativeFrame {
     Camera(PreparedCameraFrame),
     Vector(OwnedVectorFrame),
@@ -100,7 +105,9 @@ pub(super) struct NativeFrameStages {
 impl NativeFrameStages {
     pub fn new(render_teams: usize) -> Self {
         Self {
-            workers: (0..render_teams).map(|_| Mutex::new(VectorWorker::default())).collect(),
+            workers: (0..render_teams)
+                .map(|_| Mutex::new(VectorWorker::default()))
+                .collect(),
         }
     }
 }
@@ -123,56 +130,98 @@ impl PipelineStages for NativeFrameStages {
         team: &TeamPlan,
     ) -> Result<Self::Rasterized, Self::Error> {
         let frame = match job.frame {
-            NativeFrame::Camera(frame) => frame.render(team.threads())
+            NativeFrame::Camera(frame) => frame
+                .render(team.threads())
                 .map_err(NativeFrameError::Renderer)?,
-            NativeFrame::Compiled { job, config, camera } => {
+            NativeFrame::Compiled {
+                job,
+                config,
+                camera,
+            } => {
                 // Reconstruction is inside the render-team worker, not the
                 // serial source or prepare stage. It returns a local Stage
                 // which is compiled here and dropped before conversion.
-                let stage = COMPILED_ENDPOINTS.with(|cache| cache.borrow_mut().materialize(&job))
+                let stage = COMPILED_ENDPOINTS
+                    .with(|cache| cache.borrow_mut().materialize(&job))
                     .map_err(NativeFrameError::Bundle)?;
                 let TeamRole::Render(index) = team.role else {
-                    return Err(NativeFrameError::WorkerState("compiled frame requires a render team"));
+                    return Err(NativeFrameError::WorkerState(
+                        "compiled frame requires a render team",
+                    ));
                 };
-                let mut worker = self.workers.get(index)
-                    .ok_or(NativeFrameError::WorkerState("compiled frame has no worker state"))?
-                    .lock().map_err(|_| NativeFrameError::WorkerState("compiled worker state was poisoned"))?;
+                let mut worker = self
+                    .workers
+                    .get(index)
+                    .ok_or(NativeFrameError::WorkerState(
+                        "compiled frame has no worker state",
+                    ))?
+                    .lock()
+                    .map_err(|_| {
+                        NativeFrameError::WorkerState("compiled worker state was poisoned")
+                    })?;
                 if let Some(camera) = camera {
                     if worker.compiled_camera.is_none() {
-                        worker.compiled_camera = Some(RetainedFrameRenderer::new(config)
-                            .map_err(NativeFrameError::Renderer)?);
+                        worker.compiled_camera = Some(
+                            RetainedFrameRenderer::new(config)
+                                .map_err(NativeFrameError::Renderer)?,
+                        );
                     }
-                    worker.compiled_camera.as_mut()
-                        .ok_or(NativeFrameError::WorkerState("missing compiled camera renderer"))?
+                    worker
+                        .compiled_camera
+                        .as_mut()
+                        .ok_or(NativeFrameError::WorkerState(
+                            "missing compiled camera renderer",
+                        ))?
                         .prepare_with_camera(&stage, &camera)
                         .map_err(NativeFrameError::Renderer)?
-                        .render(team.threads()).map_err(NativeFrameError::Renderer)?
+                        .render(team.threads())
+                        .map_err(NativeFrameError::Renderer)?
                 } else {
                     if worker.compiled_vector.is_none() {
-                        worker.compiled_vector = Some(VectorFrameCompiler::new(config)
-                            .map_err(NativeFrameError::Renderer)?);
+                        worker.compiled_vector = Some(
+                            VectorFrameCompiler::new(config).map_err(NativeFrameError::Renderer)?,
+                        );
                     }
-                    let VectorWorker { compiled_vector, arena, cache, .. } = &mut *worker;
-                    compiled_vector.as_mut()
-                        .ok_or(NativeFrameError::WorkerState("missing compiled vector compiler"))?
-                        .capture(&stage, 0).map_err(NativeFrameError::Renderer)?
+                    let VectorWorker {
+                        compiled_vector,
+                        arena,
+                        cache,
+                        ..
+                    } = &mut *worker;
+                    compiled_vector
+                        .as_mut()
+                        .ok_or(NativeFrameError::WorkerState(
+                            "missing compiled vector compiler",
+                        ))?
+                        .capture(&stage, 0)
+                        .map_err(NativeFrameError::Renderer)?
                         .render_cached(team.threads(), arena, cache)
-                        .map_err(NativeFrameError::Renderer)?.0
+                        .map_err(NativeFrameError::Renderer)?
+                        .0
                 }
             }
             NativeFrame::Vector(frame) => {
                 let TeamRole::Render(index) = team.role else {
-                    return Err(NativeFrameError::WorkerState("rasterization requires a render team"));
+                    return Err(NativeFrameError::WorkerState(
+                        "rasterization requires a render team",
+                    ));
                 };
-                let worker = self.workers.get(index).ok_or(NativeFrameError::WorkerState(
-                    "render team has no retained worker state",
-                ))?;
-                let mut worker = worker.lock().map_err(|_| NativeFrameError::WorkerState(
-                    "render worker scratch was poisoned by an earlier panic",
-                ))?;
+                let worker = self
+                    .workers
+                    .get(index)
+                    .ok_or(NativeFrameError::WorkerState(
+                        "render team has no retained worker state",
+                    ))?;
+                let mut worker = worker.lock().map_err(|_| {
+                    NativeFrameError::WorkerState(
+                        "render worker scratch was poisoned by an earlier panic",
+                    )
+                })?;
                 let VectorWorker { arena, cache, .. } = &mut *worker;
-                frame.render_cached(team.threads(), arena, cache)
-                    .map_err(NativeFrameError::Renderer)?.0
+                frame
+                    .render_cached(team.threads(), arena, cache)
+                    .map_err(NativeFrameError::Renderer)?
+                    .0
             }
         };
         Ok((frame, job.output))
@@ -190,20 +239,30 @@ impl PipelineStages for NativeFrameStages {
             }
             PixelFormat::Bgra8 | PixelFormat::Nv12 | PixelFormat::P010 => {
                 let layout = FrameLayout::tight(
-                    PixelFormat::Rgba8, frame.layout().width(), frame.layout().height(),
-                ).map_err(NativeFrameError::Frame)?;
+                    PixelFormat::Rgba8,
+                    frame.layout().width(),
+                    frame.layout().height(),
+                )
+                .map_err(NativeFrameError::Frame)?;
                 let mut scratch = FrameBuffer::new(layout);
                 rgba16f_to_rgba8(&frame, &mut scratch).map_err(NativeFrameError::Frame)?;
                 match format {
                     PixelFormat::Bgra8 => swap_rb8(&scratch, output.frame_mut()),
                     PixelFormat::Nv12 => rgba_to_nv12(
-                        &scratch, output.frame_mut(), ColorRange::Limited, ChromaSiting::Left,
+                        &scratch,
+                        output.frame_mut(),
+                        ColorRange::Limited,
+                        ChromaSiting::Left,
                     ),
                     PixelFormat::P010 => rgba_to_p010(
-                        &scratch, output.frame_mut(), ColorRange::Limited, ChromaSiting::Left,
+                        &scratch,
+                        output.frame_mut(),
+                        ColorRange::Limited,
+                        ChromaSiting::Left,
                     ),
                     _ => unreachable!("conversion format was checked above"),
-                }.map_err(NativeFrameError::Frame)?;
+                }
+                .map_err(NativeFrameError::Frame)?;
             }
             PixelFormat::Rgba16F => {
                 return Err(NativeFrameError::WorkerState(
@@ -214,7 +273,6 @@ impl PipelineStages for NativeFrameStages {
         Ok(output)
     }
 }
-
 
 /// Shared CPU capture-to-output pipeline for native front doors.
 ///
@@ -239,7 +297,10 @@ pub struct NativeFramePipeline {
 
 enum NativeCompiler {
     Vector(VectorFrameCompiler),
-    Camera { renderer: Box<RetainedFrameRenderer>, camera: Camera },
+    Camera {
+        renderer: Box<RetainedFrameRenderer>,
+        camera: Camera,
+    },
 }
 
 impl NativeFramePipeline {
@@ -265,50 +326,75 @@ impl NativeFramePipeline {
             ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
             ExecutionEngine::FastCpu => EngineIdentity::fast(),
             ExecutionEngine::Metal | ExecutionEngine::Cuda => {
-                return Err(RenderError::Capability("native frame pipeline requires a CPU execution plan"));
+                return Err(RenderError::Capability(
+                    "native frame pipeline requires a CPU execution plan",
+                ));
             }
         };
         if config.engine != expected_engine
             || config.tiling.fine_tile != plan.fine_tile
             || config.tiling.macro_tile != plan.macro_tile
         {
-            return Err(RenderError::InvalidOptions("renderer identity and tiles must match the execution plan"));
+            return Err(RenderError::InvalidOptions(
+                "renderer identity and tiles must match the execution plan",
+            ));
         }
-        if plan.frames_in_flight == 0 || plan.render_teams.is_empty()
-            || plan.render_teams.iter().enumerate().any(|(index, team)| {
-                team.role != TeamRole::Render(index) || team.threads() == 0
-            })
+        if plan.frames_in_flight == 0
+            || plan.render_teams.is_empty()
+            || plan
+                .render_teams
+                .iter()
+                .enumerate()
+                .any(|(index, team)| team.role != TeamRole::Render(index) || team.threads() == 0)
         {
-            return Err(RenderError::InvalidOptions("frame pipeline requires nonempty indexed render teams"));
+            return Err(RenderError::InvalidOptions(
+                "frame pipeline requires nonempty indexed render teams",
+            ));
         }
         let output_format = match plan.output_format {
             OutputPixelFormat::Rgba8 => PixelFormat::Rgba8,
             OutputPixelFormat::Bgra8 => PixelFormat::Bgra8,
             OutputPixelFormat::Nv12 => PixelFormat::Nv12,
             OutputPixelFormat::P010 => PixelFormat::P010,
-            OutputPixelFormat::Rgba16F => return Err(RenderError::Capability(
-                "RGBA16F is a renderer intermediate, not a native output format",
-            )),
+            OutputPixelFormat::Rgba16F => {
+                return Err(RenderError::Capability(
+                    "RGBA16F is a renderer intermediate, not a native output format",
+                ));
+            }
         };
         let viewport = config.frame.viewport;
         if camera.as_ref().is_some_and(|camera| {
             camera.pixel_shape() != (viewport.width, viewport.height)
                 || plan.engine != ExecutionEngine::CertifiedCpu
         }) {
-            return Err(RenderError::InvalidOptions("camera dimensions and certified CPU identity must match the plan"));
+            return Err(RenderError::InvalidOptions(
+                "camera dimensions and certified CPU identity must match the plan",
+            ));
         }
         let compiler = match camera {
             Some(camera) => NativeCompiler::Camera {
-                renderer: Box::new(RetainedFrameRenderer::new(config).map_err(RenderError::Renderer)?),
+                renderer: Box::new(
+                    RetainedFrameRenderer::new(config).map_err(RenderError::Renderer)?,
+                ),
                 camera,
             },
-            None => NativeCompiler::Vector(VectorFrameCompiler::new(config).map_err(RenderError::Renderer)?),
+            None => NativeCompiler::Vector(
+                VectorFrameCompiler::new(config).map_err(RenderError::Renderer)?,
+            ),
         };
         let stages = NativeFrameStages::new(plan.render_teams.len());
         let stream = FrameStream::new(plan, stages, |_, output| {
             output.publish().map_err(NativeFrameError::Emitter)
-        }).map_err(RenderError::Pipeline)?;
-        Ok(Self { compiler, stream: Some(stream), output, output_format, viewport, renderer_config: config })
+        })
+        .map_err(RenderError::Pipeline)?;
+        Ok(Self {
+            compiler,
+            stream: Some(stream),
+            output,
+            output_format,
+            viewport,
+            renderer_config: config,
+        })
     }
 
     /// Apply a camera pose and light update to subsequent captures only.
@@ -325,13 +411,17 @@ impl NativeFramePipeline {
     /// Refuses non-camera pipelines, cancelled streams, invalid camera values,
     /// or changes to immutable capture policy.
     pub fn update_camera(&mut self, config: CameraConfig) -> Result<(), RenderError> {
-        let stream = self.stream.as_ref()
+        let stream = self
+            .stream
+            .as_ref()
             .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?;
         if stream.cancellation_token().is_cancelled() {
             return Err(RenderError::Pipeline(FrameStreamError::Closed));
         }
         let NativeCompiler::Camera { camera, .. } = &mut self.compiler else {
-            return Err(RenderError::InvalidOptions("camera updates require a camera pipeline"));
+            return Err(RenderError::InvalidOptions(
+                "camera updates require a camera pipeline",
+            ));
         };
         let candidate = Camera::new(config).map_err(RenderError::Camera)?;
         if candidate.pixel_shape() != camera.pixel_shape()
@@ -340,12 +430,15 @@ impl NativeFramePipeline {
             || candidate.samples() != camera.samples()
             || candidate.max_allowable_norm() != camera.max_allowable_norm()
         {
-            return Err(RenderError::InvalidOptions("camera updates must preserve capture policy"));
+            return Err(RenderError::InvalidOptions(
+                "camera updates must preserve capture policy",
+            ));
         }
         let mut next = camera.clone();
         let from = camera.frame();
         let to = candidate.frame();
-        if from.center() != to.center() || from.shape() != to.shape()
+        if from.center() != to.center()
+            || from.shape() != to.shape()
             || from.orientation() != to.orientation()
             || from.field_of_view() != to.field_of_view()
             || from.euler_axes() != to.euler_axes()
@@ -368,25 +461,41 @@ impl NativeFramePipeline {
     /// # Errors
     /// Refuses invalid scene data, closed/cancelled work, or output admission.
     /// A closed stream's detailed stage error is recovered by `finish`.
-    pub fn capture(&mut self, stage: &fmn_mobject::Stage, sequence: u64) -> Result<(), RenderError> {
-        let stream = self.stream.as_mut().ok_or(RenderError::Pipeline(FrameStreamError::Closed))?;
+    pub fn capture(
+        &mut self,
+        stage: &fmn_mobject::Stage,
+        sequence: u64,
+    ) -> Result<(), RenderError> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?;
         let permit = stream.reserve().map_err(RenderError::Pipeline)?;
-        let output = self.output.reserve(sequence).map_err(RenderError::Emitter)?;
+        let output = self
+            .output
+            .reserve(sequence)
+            .map_err(RenderError::Emitter)?;
         let layout = output.frame().layout();
         if layout.format() != self.output_format
-            || layout.width() != self.viewport.width || layout.height() != self.viewport.height
+            || layout.width() != self.viewport.width
+            || layout.height() != self.viewport.height
         {
-            return Err(RenderError::InvalidOptions("output ring layout must match the frame execution plan"));
+            return Err(RenderError::InvalidOptions(
+                "output ring layout must match the frame execution plan",
+            ));
         }
         let frame = match &mut self.compiler {
-            NativeCompiler::Vector(compiler) => NativeFrame::Vector(
-                compiler.capture(stage, 0).map_err(RenderError::Renderer)?,
-            ),
+            NativeCompiler::Vector(compiler) => {
+                NativeFrame::Vector(compiler.capture(stage, 0).map_err(RenderError::Renderer)?)
+            }
             NativeCompiler::Camera { renderer, camera } => NativeFrame::Camera(
-                renderer.prepare_with_camera(stage, camera).map_err(RenderError::Renderer)?,
+                renderer
+                    .prepare_with_camera(stage, camera)
+                    .map_err(RenderError::Renderer)?,
             ),
         };
-        permit.submit(sequence, NativeFrameJob { frame, output })
+        permit
+            .submit(sequence, NativeFrameJob { frame, output })
             .map_err(|_| RenderError::Pipeline(FrameStreamError::Closed))
     }
 
@@ -407,22 +516,40 @@ impl NativeFramePipeline {
     /// # Errors
     /// Refuses closed output, incompatible layouts or invalid admission order.
     /// Worker reconstruction/render errors are retained by `finish`.
-    pub fn capture_compiled(&mut self, job: TimelineFrameJob, sequence: u64) -> Result<(), RenderError> {
-        let stream = self.stream.as_mut().ok_or(RenderError::Pipeline(FrameStreamError::Closed))?;
+    pub fn capture_compiled(
+        &mut self,
+        job: TimelineFrameJob,
+        sequence: u64,
+    ) -> Result<(), RenderError> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?;
         let permit = stream.reserve().map_err(RenderError::Pipeline)?;
-        let output = self.output.reserve(sequence).map_err(RenderError::Emitter)?;
+        let output = self
+            .output
+            .reserve(sequence)
+            .map_err(RenderError::Emitter)?;
         let layout = output.frame().layout();
         if layout.format() != self.output_format
-            || layout.width() != self.viewport.width || layout.height() != self.viewport.height
+            || layout.width() != self.viewport.width
+            || layout.height() != self.viewport.height
         {
-            return Err(RenderError::InvalidOptions("output ring layout must match the frame execution plan"));
+            return Err(RenderError::InvalidOptions(
+                "output ring layout must match the frame execution plan",
+            ));
         }
         let camera = match &self.compiler {
             NativeCompiler::Camera { camera, .. } => Some(camera.clone()),
             NativeCompiler::Vector(_) => None,
         };
-        let frame = NativeFrame::Compiled { job, config: self.renderer_config, camera };
-        permit.submit(sequence, NativeFrameJob { frame, output })
+        let frame = NativeFrame::Compiled {
+            job,
+            config: self.renderer_config,
+            camera,
+        };
+        permit
+            .submit(sequence, NativeFrameJob { frame, output })
             .map_err(|_| RenderError::Pipeline(FrameStreamError::Closed))
     }
 
@@ -437,10 +564,15 @@ impl NativeFramePipeline {
     /// Refuses cancellation or a failed stage. Call `finish` to recover the
     /// original stage failure and its joined resource counters.
     pub fn flush(&mut self) -> Result<fmn_runtime::BarrierContext, RenderError> {
-        let result = self.stream.as_mut()
+        let result = self
+            .stream
+            .as_mut()
             .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?
-            .flush().map_err(RenderError::Pipeline);
-        if result.is_err() { self.output.cancel(); }
+            .flush()
+            .map_err(RenderError::Pipeline);
+        if result.is_err() {
+            self.output.cancel();
+        }
         result
     }
 
@@ -449,9 +581,14 @@ impl NativeFramePipeline {
     /// # Errors
     /// Preserves the original stage failure and its final resource counters.
     pub fn finish(mut self) -> Result<PipelineStats, RenderError> {
-        let stream = self.stream.take().ok_or(RenderError::Pipeline(FrameStreamError::Closed))?;
+        let stream = self
+            .stream
+            .take()
+            .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?;
         let result = stream.finish().map_err(RenderError::Pipeline);
-        if result.is_err() { self.output.cancel(); }
+        if result.is_err() {
+            self.output.cancel();
+        }
         result
     }
 }

@@ -68,12 +68,11 @@ impl CpuRenderer {
         // Source admission may only see Closed. Recover the actual failing
         // raster/conversion/emit stage before the outer scene hides it behind
         // IntegrationError. A geometric preparation error stays geometric.
-        if matches!(&error, RenderError::Pipeline(_)) {
-            if let Some(pipeline) = self.pipeline.take() {
-                if let Err(root) = pipeline.finish() {
-                    error = root;
-                }
-            }
+        if matches!(&error, RenderError::Pipeline(_))
+            && let Some(pipeline) = self.pipeline.take()
+            && let Err(root) = pipeline.finish()
+        {
+            error = root;
         }
         Err(IntegrationError::new("lumen", error.to_string()))
     }

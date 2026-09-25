@@ -1,7 +1,5 @@
 //! Public camera export must use the bounded pipeline without revising pixels.
 
-use std::path::Path;
-use std::sync::Arc;
 use fmn::prelude::*;
 use fmn_anim::FramePacket;
 use fmn_codec::{PngLimits, decode_png};
@@ -10,10 +8,12 @@ use fmn_frame::convert::rgba16f_to_rgba8;
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_render::{
-    Camera, EngineIdentity, FrameConfig, RetainedFrameRenderer,
-    RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
+    Camera, EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    ScreenMap, Tiling, Viewport,
 };
 use fmn_scene::{CaptureReason, IntegrationError, RuntimeConfig, SceneSink};
+use std::path::Path;
+use std::sync::Arc;
 
 fn options(path: &str, format: RenderFormat, window: usize, threads: u32) -> RenderOptions {
     let mut options = RenderOptions::new(path).unwrap();
@@ -25,7 +25,10 @@ fn options(path: &str, format: RenderFormat, window: usize, threads: u32) -> Ren
     options.config.render.threads = ThreadPolicy::Fixed(threads);
     options.frames_in_flight = window;
     let mut camera = options.camera_config().unwrap();
-    camera.frame.set_euler_angles(Some(0.4), Some(0.7), None).unwrap();
+    camera
+        .frame
+        .set_euler_angles(Some(0.4), Some(0.7), None)
+        .unwrap();
     options.camera = Some(camera);
     options
 }
@@ -37,10 +40,15 @@ impl SceneConstruct for Moving {
         let circle = stage.add(Circle::new().radius(0.3).color(WHITE))?;
         stage.set_fill(circle, Some(WHITE), Some(1.0), None, true);
         stage.shift(circle, [-1.5, 0.0, 0.0]);
-        stage.play(cube.animate().set_anim_args(AnimateArgs {
-            run_time: Some(0.4), rate_func: Some(fmn::core::rate::linear),
-            ..AnimateArgs::default()
-        })?.shift(RIGHT)?)?;
+        stage.play(
+            cube.animate()
+                .set_anim_args(AnimateArgs {
+                    run_time: Some(0.4),
+                    rate_func: Some(fmn::core::rate::linear),
+                    ..AnimateArgs::default()
+                })?
+                .shift(RIGHT)?,
+        )?;
         Ok(())
     }
 }
@@ -61,7 +69,9 @@ struct SerialReference {
 impl SceneSink for SerialReference {
     fn capture(&mut self, _: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
         // Deliberately bypass FrameStream and PreparedCameraFrame's owned path.
-        self.renderer.render_with_camera(&packet.materialize_stage(), &self.camera).unwrap();
+        self.renderer
+            .render_with_camera(&packet.materialize_stage(), &self.camera)
+            .unwrap();
         let mut output = FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba8, 48, 32).unwrap());
         rgba16f_to_rgba8(self.renderer.frame(), &mut output).unwrap();
         self.frames.push(output.as_bytes().to_vec());
@@ -79,7 +89,10 @@ fn queued_camera_pixels_equal_serial_capture_at_every_window() {
         let runtime = RuntimeConfig::from_config(&options.config);
         let seed = options.config.determinism.seed;
         let report = render_with_fs(&mut Moving, options, fs.clone()).unwrap();
-        let stats = report.frame_pipeline.as_ref().expect("camera pipeline was bypassed");
+        let stats = report
+            .frame_pipeline
+            .as_ref()
+            .expect("camera pipeline was bypassed");
         // Exact f64 0.4 is above 2/5, so four samples do not cover it.
         assert_eq!(report.artifact.frame_count, 5);
         assert_eq!(stats.submitted, 5);
@@ -87,30 +100,47 @@ fn queued_camera_pixels_equal_serial_capture_at_every_window() {
         assert_eq!(stats.outstanding_slots, 0);
         assert!(stats.max_in_flight <= report.execution_plan.frames_in_flight);
         assert!(report.execution_plan.frames_in_flight <= window);
-        let pixels: Vec<Vec<u8>> = (0..5).map(|sequence| {
-            let bytes = fs.read(&Path::new("/frames").join(format!("frame_{sequence:06}.png"))).unwrap();
-            decode_png(&bytes, &PngLimits::default()).unwrap().rgba
-        }).collect();
+        let pixels: Vec<Vec<u8>> = (0..5)
+            .map(|sequence| {
+                let bytes = fs
+                    .read(&Path::new("/frames").join(format!("frame_{sequence:06}.png")))
+                    .unwrap();
+                decode_png(&bytes, &PngLimits::default()).unwrap().rgba
+            })
+            .collect();
         assert_ne!(pixels[0], pixels[4], "animation must move the visible cube");
         let mut reference = SerialReference {
             renderer: RetainedFrameRenderer::new(RetainedFrameRendererConfig {
                 frame: FrameConfig::new(
-                    Viewport { width: 48, height: 32 },
-                    ScreenMap { scale: 8.0, origin: [24.0, 16.0], y_up: true },
+                    Viewport {
+                        width: 48,
+                        height: 32,
+                    },
+                    ScreenMap {
+                        scale: 8.0,
+                        origin: [24.0, 16.0],
+                        y_up: true,
+                    },
                     camera.background(),
                 ),
                 tiling: Tiling {
                     macro_tile: report.execution_plan.macro_tile,
                     fine_tile: report.execution_plan.fine_tile,
                 },
-                engine: EngineIdentity::certified(), threads: 1,
-            }).unwrap(),
-            camera, frames: Vec::new(),
+                engine: EngineIdentity::certified(),
+                threads: 1,
+            })
+            .unwrap(),
+            camera,
+            frames: Vec::new(),
         };
         fmn::run_scene(&mut Moving, runtime, seed, &mut reference).unwrap();
         assert_eq!(pixels, reference.frames);
-        if let Some(expected) = &expected { assert_eq!(&pixels, expected); }
-        else { expected = Some(pixels); }
+        if let Some(expected) = &expected {
+            assert_eq!(&pixels, expected);
+        } else {
+            expected = Some(pixels);
+        }
     }
 }
 
@@ -121,13 +151,19 @@ fn native_gif_and_y4m_are_window_independent() {
         for window in [1, 2, 4] {
             let fs = Arc::new(VirtualFs::new());
             let report = render_with_fs(
-                &mut Moving, options("/movie", format, window, 4), fs.clone(),
-            ).unwrap();
+                &mut Moving,
+                options("/movie", format, window, 4),
+                fs.clone(),
+            )
+            .unwrap();
             assert_eq!(report.frame_pipeline.unwrap().emitted, 5);
             assert_eq!(report.artifact.frame_count, 5);
             let bytes = fs.read(Path::new("/movie")).unwrap();
-            if let Some(expected) = &expected { assert_eq!(&bytes, expected); }
-            else { expected = Some(bytes); }
+            if let Some(expected) = &expected {
+                assert_eq!(&bytes, expected);
+            } else {
+                expected = Some(bytes);
+            }
         }
     }
 }
@@ -138,12 +174,17 @@ fn failed_scene_cancels_camera_workers_before_immediate_retry() {
         let fs = Arc::new(VirtualFs::new());
         let mut limited = options("/retry", RenderFormat::PngSequence, window, 4);
         limited.max_frames = 1;
-        assert!(matches!(render_with_fs(&mut Moving, limited, fs.clone()),
-            Err(RenderError::InvalidOptions("scene exceeded max_frames"))));
+        assert!(matches!(
+            render_with_fs(&mut Moving, limited, fs.clone()),
+            Err(RenderError::InvalidOptions("scene exceeded max_frames"))
+        ));
         assert!(!fs.exists(Path::new("/retry")));
         let report = render_with_fs(
-            &mut Static, options("/retry", RenderFormat::PngSequence, window, 4), fs.clone(),
-        ).unwrap();
+            &mut Static,
+            options("/retry", RenderFormat::PngSequence, window, 4),
+            fs.clone(),
+        )
+        .unwrap();
         assert_eq!(report.frame_pipeline.unwrap().emitted, 1);
         assert_eq!(report.artifact.frame_count, 1);
     }
@@ -161,13 +202,20 @@ fn unwinding_scene_joins_camera_pipeline_and_aborts_artifact() {
     }
     let fs = Arc::new(VirtualFs::new());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = render_with_fs(&mut Panicking,
-            options("/panic", RenderFormat::PngSequence, 4, 4), fs.clone());
+        let _ = render_with_fs(
+            &mut Panicking,
+            options("/panic", RenderFormat::PngSequence, 4, 4),
+            fs.clone(),
+        );
     }));
     assert!(result.is_err());
     assert!(!fs.exists(Path::new("/panic")));
-    render_with_fs(&mut Static,
-        options("/panic", RenderFormat::PngSequence, 4, 4), fs).unwrap();
+    render_with_fs(
+        &mut Static,
+        options("/panic", RenderFormat::PngSequence, 4, 4),
+        fs,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -177,7 +225,9 @@ fn cached_affine_exports_use_the_shared_frame_pipeline() {
     options.camera = None;
     struct Empty;
     impl SceneConstruct for Empty {
-        fn construct(&mut self, _: &mut Stage<'_>) -> fmn::Result<()> { Ok(()) }
+        fn construct(&mut self, _: &mut Stage<'_>) -> fmn::Result<()> {
+            Ok(())
+        }
     }
     let report = render_with_fs(&mut Empty, options, fs).unwrap();
     let stats = report.frame_pipeline.expect("affine pipeline was bypassed");

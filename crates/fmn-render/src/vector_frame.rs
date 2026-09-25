@@ -140,11 +140,26 @@ mod tests {
     fn config() -> RetainedFrameRendererConfig {
         RetainedFrameRendererConfig {
             frame: FrameConfig::new(
-                Viewport { width: 32, height: 24 },
-                ScreenMap { scale: 4.0, origin: [16.0, 12.0], y_up: true },
-                LinearRgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                Viewport {
+                    width: 32,
+                    height: 24,
+                },
+                ScreenMap {
+                    scale: 4.0,
+                    origin: [16.0, 12.0],
+                    y_up: true,
+                },
+                LinearRgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
             ),
-            tiling: Tiling { macro_tile: 16, fine_tile: 8 },
+            tiling: Tiling {
+                macro_tile: 16,
+                fine_tile: 8,
+            },
             engine: EngineIdentity::certified(),
             threads: 1,
         }
@@ -152,7 +167,11 @@ mod tests {
 
     fn vector() -> Mobject {
         let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
-        buffer.write_range("point", 0, &[-1.5, -1.0, 0.0, 0.0, 1.25, 0.0, 1.5, -1.0, 0.0]);
+        buffer.write_range(
+            "point",
+            0,
+            &[-1.5, -1.0, 0.0, 0.0, 1.25, 0.0, 1.5, -1.0, 0.0],
+        );
         buffer.write_range("fill_rgba", 0, &[0.1, 0.3, 1.0, 0.8].repeat(3));
         Mobject::from_buffer(buffer)
     }
@@ -170,9 +189,13 @@ mod tests {
         };
         drop(compiler);
         std::thread::spawn(move || {
-            let (pixels, _) = frame.render_cached(2, &mut FrameArena::new(), &mut PixelTileCache::new()).unwrap();
+            let (pixels, _) = frame
+                .render_cached(2, &mut FrameArena::new(), &mut PixelTileCache::new())
+                .unwrap();
             assert_eq!(pixels.layout().width(), 32);
-        }).join().unwrap();
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
@@ -196,7 +219,9 @@ mod tests {
             let mut arena = FrameArena::new();
             let mut cache = PixelTileCache::new();
             for index in [4, 1, 3, 0, 2, 2] {
-                let (pixels, _) = frames[index].render_cached(threads, &mut arena, &mut cache).unwrap();
+                let (pixels, _) = frames[index]
+                    .render_cached(threads, &mut arena, &mut cache)
+                    .unwrap();
                 assert_eq!(pixels.as_bytes(), expected[index]);
             }
         }
@@ -224,11 +249,17 @@ mod tests {
     fn camera_content_and_zero_teams_are_not_silently_accepted() {
         let mut invalid = config();
         invalid.threads = 0;
-        assert!(matches!(VectorFrameCompiler::new(invalid), Err(RetainedFrameRendererError::InvalidThreads)));
+        assert!(matches!(
+            VectorFrameCompiler::new(invalid),
+            Err(RetainedFrameRendererError::InvalidThreads)
+        ));
         let mut stage = Stage::new();
         let mob = stage.add(vector().with_render_primitive(RenderPrimitive::DotCloud));
         stage.add_to_scene(mob).unwrap();
         let mut compiler = VectorFrameCompiler::new(config()).unwrap();
-        assert!(matches!(compiler.capture(&stage, 0), Err(RetainedFrameRendererError::CameraRequired { .. })));
+        assert!(matches!(
+            compiler.capture(&stage, 0),
+            Err(RetainedFrameRendererError::CameraRequired { .. })
+        ));
     }
 }

@@ -39,7 +39,9 @@ fn gif_and_y4m_preserve_existing_files() {
         let fs = Arc::new(VirtualFs::new());
         fs.insert("/movie", b"foreign generation".to_vec());
         let result = render_with_fs(
-            &mut Movie { competing_writer: None },
+            &mut Movie {
+                competing_writer: None,
+            },
             options(format),
             fs.clone(),
         );
@@ -53,11 +55,16 @@ fn gif_and_y4m_preserve_competing_publications_after_capture() {
     for format in [RenderFormat::Gif, RenderFormat::Y4m] {
         let fs = Arc::new(VirtualFs::new());
         let result = render_with_fs(
-            &mut Movie { competing_writer: Some(fs.clone()) },
+            &mut Movie {
+                competing_writer: Some(fs.clone()),
+            },
             options(format),
             fs.clone(),
         );
-        assert!(result.is_err(), "{format:?} must atomically refuse the competing writer");
+        assert!(
+            result.is_err(),
+            "{format:?} must atomically refuse the competing writer"
+        );
         assert_eq!(fs.read(Path::new("/movie")).unwrap(), b"foreign generation");
     }
 }
@@ -67,10 +74,13 @@ fn no_clobber_allows_new_complete_files() {
     for format in [RenderFormat::Gif, RenderFormat::Y4m] {
         let fs = Arc::new(VirtualFs::new());
         let result = render_with_fs(
-            &mut Movie { competing_writer: None },
+            &mut Movie {
+                competing_writer: None,
+            },
             options(format),
             fs.clone(),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.artifact.frame_count, 2);
         assert_eq!(result.emission.stats.emitted, 2);
         assert!(fs.exists(Path::new("/movie")));

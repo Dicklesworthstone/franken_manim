@@ -105,11 +105,14 @@ impl<F: Send + 'static, E: Send + 'static> FrameStream<F, E> {
                     requests,
                     cancellation: worker_cancel.clone(),
                 };
-                FramePipeline::with_cancellation(&plan, &stages, worker_cancel)
-                    .run(source, emit, |(), context| {
+                FramePipeline::with_cancellation(&plan, &stages, worker_cancel).run(
+                    source,
+                    emit,
+                    |(), context| {
                         let _ = barrier_sender.send(context);
                         Ok(())
-                    })
+                    },
+                )
             })
             .map_err(FrameStreamError::Spawn)?;
         Ok(Self {
@@ -298,7 +301,9 @@ impl<F> Iterator for Source<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OutputPixelFormat, PipelineError, PlanRequest, RenderIntent, SurfaceSpec, TeamPlan};
+    use crate::{
+        OutputPixelFormat, PipelineError, PlanRequest, RenderIntent, SurfaceSpec, TeamPlan,
+    };
     use fmn_platform::topology::HardwareTopology;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -335,7 +340,7 @@ mod tests {
                 assert!(!self.panic, "deliberate raster panic");
                 return Err("deliberate raster failure".into());
             }
-            if frame.value % 3 == 0 {
+            if frame.value.is_multiple_of(3) {
                 thread::sleep(Duration::from_millis(2));
             }
             Ok(frame)
@@ -481,24 +486,41 @@ mod tests {
             let observed = Arc::new(Mutex::new(Vec::new()));
             let received = observed.clone();
             let mut stream = FrameStream::new(
-                plan(slots), Stages { fail: None, panic: false },
+                plan(slots),
+                Stages {
+                    fail: None,
+                    panic: false,
+                },
                 move |sequence, frame| {
                     received.lock().unwrap().push((sequence, frame.value));
                     Ok(())
                 },
-            ).unwrap();
+            )
+            .unwrap();
             let empty = stream.flush().unwrap();
-            assert_eq!((empty.submitted, empty.emitted, empty.outstanding_slots), (0, 0, 0));
+            assert_eq!(
+                (empty.submitted, empty.emitted, empty.outstanding_slots),
+                (0, 0, 0)
+            );
             for range in [0..2, 2..5] {
                 let count = range.end;
                 for sequence in range {
-                    assert!(stream.reserve().unwrap().submit(sequence, tracked(sequence, &alive)).is_ok());
+                    assert!(
+                        stream
+                            .reserve()
+                            .unwrap()
+                            .submit(sequence, tracked(sequence, &alive))
+                            .is_ok()
+                    );
                 }
                 let barrier = stream.flush().unwrap();
                 assert_eq!((barrier.submitted, barrier.emitted), (count, count));
                 assert_eq!(barrier.outstanding_slots, 0);
                 assert_eq!(alive.load(Ordering::SeqCst), 0);
-                assert_eq!(*observed.lock().unwrap(), (0..count).map(|n| (n, n)).collect::<Vec<_>>());
+                assert_eq!(
+                    *observed.lock().unwrap(),
+                    (0..count).map(|n| (n, n)).collect::<Vec<_>>()
+                );
             }
             let stats = stream.finish().unwrap();
             assert_eq!((stats.submitted, stats.emitted, stats.barriers), (5, 5, 3));
@@ -511,13 +533,22 @@ mod tests {
         for panic in [false, true] {
             let alive = Arc::new(AtomicUsize::new(0));
             let mut stream = stream(4, Some(0), panic);
-            assert!(stream.reserve().unwrap().submit(0, tracked(0, &alive)).is_ok());
+            assert!(
+                stream
+                    .reserve()
+                    .unwrap()
+                    .submit(0, tracked(0, &alive))
+                    .is_ok()
+            );
             assert!(matches!(stream.flush(), Err(FrameStreamError::Closed)));
             let Err(FrameStreamError::Pipeline(failure)) = stream.finish() else {
                 panic!("flush lost the original worker failure");
             };
             if panic {
-                assert!(matches!(failure.error, PipelineError::CallbackPanicked { .. }));
+                assert!(matches!(
+                    failure.error,
+                    PipelineError::CallbackPanicked { .. }
+                ));
             } else {
                 assert!(matches!(failure.error, PipelineError::Stage { .. }));
             }
@@ -532,10 +563,21 @@ mod tests {
     fn flush_preserves_emit_failure_and_refuses_idle_cancellation() {
         let alive = Arc::new(AtomicUsize::new(0));
         let mut failed = FrameStream::new(
-            plan(4), Stages { fail: None, panic: false },
+            plan(4),
+            Stages {
+                fail: None,
+                panic: false,
+            },
             |_, _| Err("emit refused the frame".to_owned()),
-        ).unwrap();
-        assert!(failed.reserve().unwrap().submit(0, tracked(0, &alive)).is_ok());
+        )
+        .unwrap();
+        assert!(
+            failed
+                .reserve()
+                .unwrap()
+                .submit(0, tracked(0, &alive))
+                .is_ok()
+        );
         assert!(matches!(failed.flush(), Err(FrameStreamError::Closed)));
         let Err(FrameStreamError::Pipeline(failure)) = failed.finish() else {
             panic!("emit failure was lost");
