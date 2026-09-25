@@ -54,6 +54,53 @@ def _array_copies(np, projections, family_map):
     return prepared
 
 
+def _install_family_preorder(g):
+    """Keep identity-preorder semantics without a Python recursion limit.
+
+    The live graph can be a DAG, not just a tree. Check the active path before
+    the seen set so a back-edge is still rejected, but shared descendants are
+    visited only once. Retain each live child iterator, rather than snapshotting
+    or reversing child lists, to preserve authored iteration and exception order.
+    """
+    Mobject = g.get("_BridgeMobject")
+    if Mobject is None:
+        return  # A reduced copier table owns its supplied family traversal.
+    cycle_error = g["_FamilyCycleError"]
+
+    @wraps(g["_family_preorder"])
+    def family_preorder(root):
+        result, seen, visiting = [], set(), set()
+
+        def enter(member):
+            marker = id(member)
+            if marker in visiting:
+                raise cycle_error("submobjects would create a family cycle")
+            if marker in seen:
+                return False
+            if not isinstance(member, Mobject):
+                raise TypeError("submobjects must be Mobject instances")
+            visiting.add(marker)
+            seen.add(marker)
+            result.append(member)
+            return True
+
+        enter(root)
+        stack = [(id(root), iter(root.submobjects))]
+        while stack:
+            marker, children = stack[-1]
+            try:
+                child = next(children)
+            except StopIteration:
+                visiting.remove(marker)
+                stack.pop()
+                continue
+            if enter(child):
+                stack.append((id(child), iter(child.submobjects)))
+        return result
+
+    g["_family_preorder"] = family_preorder
+
+
 def _install_mobject_restoration(g):
     """Use the existing aligned become protocol in both proxy states.
 
@@ -83,6 +130,7 @@ def install_mobject_copying(native):
     g = vars(native)
     if g.get("_FMN_MOBJECT_COPYING_INSTALLED", False):
         return
+    _install_family_preorder(g)
     original, family, np = g["_copy_mobject_graph"], g["_family_preorder"], g["_np"]
 
     @wraps(original)
