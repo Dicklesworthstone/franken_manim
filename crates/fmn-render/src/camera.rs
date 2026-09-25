@@ -12,6 +12,9 @@
 //! them exactly. The rasterizer consumes [`ClipPoint`]; there is deliberately
 //! no second generic "projection" abstraction beside the camera.
 
+mod capture;
+pub use capture::{CameraSample, CameraSampleError};
+
 use fmn_core::AaPolicy;
 use fmn_core::color::{LinearRgba, Srgb};
 use fmn_core::constants::{
