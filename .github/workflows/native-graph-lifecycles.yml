@@ -53,7 +53,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/graph-lifecycle-wheel 2>&1 | tee /tmp/graph-lifecycle-build.log
           python -m venv target/graph-lifecycle-venv
           target/graph-lifecycle-venv/bin/python -m pip install 'numpy==2.5.2' target/graph-lifecycle-wheel/*.whl
-          for suite in native_curve_lifecycle live_curves graph_admission native_graph_sampling graph_callback_snapshots live_graphing live_implicit native_geometry_lifecycle native_polygon_lifecycle copying_semantics creation_semantics movement_semantics; do
+          for suite in native_curve_lifecycle native_implicit_lifecycle live_curves graph_admission native_graph_sampling graph_callback_snapshots live_graphing live_implicit native_geometry_lifecycle native_polygon_lifecycle copying_semantics creation_semantics movement_semantics; do
             target/graph-lifecycle-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/graph-lifecycle-$suite.log"
           done
           python scripts/test_python_helper_aliases.py

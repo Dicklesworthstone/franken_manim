@@ -37,6 +37,7 @@ python3 crates/fmn-python/tests/coordinate_labels.py
 python3 crates/fmn-python/tests/native_surface_sampling.py
 python3 crates/fmn-python/tests/native_graph_sampling.py
 python3 crates/fmn-python/tests/live_implicit.py
+python3 crates/fmn-python/tests/native_implicit_lifecycle.py
 python3 crates/fmn-python/tests/live_curves.py
 python3 crates/fmn-python/tests/native_curve_lifecycle.py
 python3 crates/fmn-python/tests/native_geometry_lifecycle.py

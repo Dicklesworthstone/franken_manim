@@ -297,9 +297,16 @@ def install_implicit_regeneration(native):
             before = self.data.copy()
             owner, bound = vars(self).get("_scene"), self._is_bound()
             family = tuple(self.get_family())
-            candidate = Implicit(function, x_range=options[0], y_range=options[1],
-                                 min_depth=options[2], max_quads=options[3],
-                                 use_smoothing=options[4])
+            # Public construction now dispatches this same init_points hook.
+            # Use the native candidate builder directly, not a recursive public
+            # constructor. Chisel retains sole ownership of contour extraction.
+            candidate = g["_native_shell_factory"]()
+            specs = candidate._build_implicit_function(
+                g["_native_shell_factory"], function, options[0], options[1],
+                options[2], options[3], options[4],
+            )
+            if specs:
+                raise RuntimeError("native implicit extraction unexpectedly returned children")
             idle(self)
             current_identity = identity(self.func)
             if (current_identity[0] is not function_identity[0]
@@ -307,6 +314,7 @@ def install_implicit_regeneration(native):
                     or controls(self) != options
                     or vars(self).get("_scene") is not owner or self._is_bound() != bound
                     or tuple(self.get_family()) != family
+                    or tuple(self.pointlike_data_keys) != ("point",)
                     or not np.array_equal(self.data, before)):
                 raise RuntimeError("implicit graph changed during sampling; candidate was not published")
             points = candidate.get_points()
@@ -315,6 +323,11 @@ def install_implicit_regeneration(native):
             # The existing set_points protocol preserves record styles and
             # generation semantics, including empty-to-visible recovery.
             self.set_points(points)
+            if len(before) == 0:
+                # Retain native initial normals and pre-quantization joints;
+                # custom records and paint still belong to the live object.
+                for key in ("base_normal", "joint_angle"):
+                    self.data[key][:] = candidate.data[key]
         return None
 
     _bind_method(Implicit, "init_points", init_points)

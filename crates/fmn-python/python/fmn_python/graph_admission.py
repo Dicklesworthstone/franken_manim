@@ -10,6 +10,7 @@ import functools
 import inspect
 import itertools
 import math
+import operator
 
 from .sampling_callbacks import FirstFailure, point_sample, scalar_sample
 
@@ -87,12 +88,24 @@ def install_graph_admission(native):
             for parameter in signature.parameters.values():
                 if parameter.kind == inspect.Parameter.VAR_KEYWORD and parameter.name in bound.arguments:
                     _controls(bound.arguments[parameter.name], implicit)
-            if implicit:
-                return original(*bound.args, **bound.kwargs)
             bound.apply_defaults()
             values = bound.arguments
             style = dict(values["kwargs"])
-            if cls is g["ParametricCurve"]:
+            if implicit:
+                function = values["func"]
+                if not callable(function):
+                    raise TypeError("func must be callable")
+                joint_type = values["joint_type"]
+                if joint_type not in g["VMobject"].joint_type_map:
+                    raise ValueError(f"unknown VMobject joint type: {joint_type}")
+                self.func = function
+                self.x_range = values["x_range"]
+                self.y_range = values["y_range"]
+                self.min_depth = operator.index(values["min_depth"])
+                self.max_quads = operator.index(values["max_quads"])
+                self.use_smoothing = bool(values["use_smoothing"])
+                style["joint_type"] = joint_type
+            elif cls is g["ParametricCurve"]:
                 function = values["t_func"]
                 if not callable(function):
                     raise TypeError("t_func must be callable")
@@ -119,8 +132,8 @@ def install_graph_admission(native):
                 self.t_func = parametric_function
             # The recipe is ready before init_data/init_points. The existing
             # engine dispatcher owns MRO, custom dtypes and all four hooks;
-            # curve_regeneration installs the native sampling implementation
-            # of init_points before any public constructor is exposed.
+            # graphing/curve_regeneration install native implementations of
+            # init_points before any public constructor is exposed.
             g["_init_native_vmobject"](self, style)
         return initialize
 
