@@ -60,8 +60,7 @@ use font::OutlineCommand;
 /// [`TextError::FontUnavailable`] if the glyph's family left the book;
 /// [`TextError::Outline`] on a decode failure.
 pub fn glyph_quadpath(book: &FontBook, glyph: &PlacedTextGlyph) -> Result<QuadPath, TextError> {
-    let family = book.family(&glyph.face.family)?;
-    let face = family.face(glyph.face.key);
+    let face = book.resolve_face(&glyph.face.family, glyph.face.key)?;
     let commands = face.glyph_commands(glyph.gid, glyph.ch)?;
     let upm = f64::from(face.font.units_per_em.max(1));
     let s = glyph.size / upm;

@@ -25,6 +25,13 @@ missing font silently substitutes.
   (`font family 'X' is not available; bundled families: …`), never a
   silent substitution. User TTFs load from bytes under the capability
   doctrine; the family-name lookup tolerates the bundled aliases only.
+- **Per-character coverage falls back through a fixed, bundled chain.** A
+  character the selected face has no glyph for (U+2212 MINUS SIGN, `×`,
+  `→`, `½` in the Computer Modern subset) is drawn from Computer Modern,
+  then the Noto Sans Math symbol face, then IBM Plex Sans — the first
+  that covers it — and the glyph records the face it came from. Like
+  Pango's fallback, but compiled in, so identical on every machine. Only
+  a character no bundled face covers is a named `UnmappedChar` error.
 - **Line metrics are fixed constants** (1.2 em baseline skip ×
   `line_spacing`, greedy breaking with manim's width semantics;
   least-badness is an explicit option), not Pango's font-derived leading.

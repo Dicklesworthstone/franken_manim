@@ -12,7 +12,8 @@ use fmn_core::color::Srgb;
 /// Which face a glyph resolved to: a family in the book plus the variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FaceSel {
-    /// Canonical family name (resolvable via [`FontBook::family`]).
+    /// Canonical family name (resolvable via [`FontBook::resolve_face`];
+    /// a per-character fallback glyph names the bundled face it came from).
     pub family: String,
     /// Bold/italic variant.
     pub key: FaceKey,
@@ -81,8 +82,8 @@ const SUB_SHIFT: f64 = -0.15;
 /// # Errors
 ///
 /// [`TextError::FontUnavailable`] for an unknown requested family;
-/// [`TextError::UnmappedChar`] for a character the selected family (and
-/// the default fallback) cannot render.
+/// [`TextError::UnmappedChar`] for a character neither the selected family
+/// nor any face of the bundled [`FontBook::glyph_fallback`] chain can render.
 pub fn shape(
     book: &FontBook,
     chars: &[StyledChar],
@@ -125,13 +126,18 @@ pub fn shape(
             });
             continue;
         }
-        let gid = face.font.glyph_index(sc.ch);
-        if gid == 0 {
-            return Err(TextError::UnmappedChar {
-                ch: sc.ch,
-                span: sc.span,
-            });
-        }
+        let (family_name, gid) = match face.font.glyph_index(sc.ch) {
+            0 => {
+                let (fallback, gid) = book.glyph_fallback(&family_name, key, sc.ch).ok_or(
+                    TextError::UnmappedChar {
+                        ch: sc.ch,
+                        span: sc.span,
+                    },
+                )?;
+                (fallback.to_owned(), gid)
+            }
+            gid => (family_name, gid),
+        };
         let sel = FaceSel {
             family: family_name,
             key,
@@ -195,10 +201,9 @@ fn emit_run(
     if run.is_empty() {
         return;
     }
-    let Ok(family) = book.family(&face_sel.family) else {
-        return; // resolve_family validated already; unreachable in practice
+    let Ok(face) = book.resolve_face(&face_sel.family, face_sel.key) else {
+        return; // shape() resolved it already; unreachable in practice
     };
-    let face = family.face(face_sel.key);
     // Optional ligature substitution: (gid, covered char count) pairs.
     let gids: Vec<u16> = run.iter().map(|&(_, gid)| gid).collect();
     let shaped: Vec<(u16, usize)> = if ligatures {

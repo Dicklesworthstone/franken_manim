@@ -80,7 +80,100 @@ fn unmapped_characters_are_named_errors() {
     }
 }
 
-// ── Font policy (D-08) ──────────────────────────────────────────────────
+/// GH #2: bundled Computer Modern has no U+2212 MINUS SIGN. The character
+/// is drawn from the bundled fallback chain (the Noto Sans Math symbol
+/// face), keeps its span and submobject slot, and is a real, wider glyph
+/// than the ASCII hyphen-minus beside it.
+#[test]
+fn characters_missing_from_the_selected_face_fall_back_to_bundled_faces() {
+    let book = book();
+    let text = "-2.6 GW and \u{2212}2.6 GW";
+    let l = plain(&book, text);
+    let minus_at = text.find('\u{2212}').unwrap();
+    let minus = l
+        .glyphs
+        .iter()
+        .find(|g| g.ch == '\u{2212}')
+        .expect("U+2212 is laid out");
+    assert_eq!(minus.face.family, fmn_text::MATH_FAMILY);
+    assert_eq!(minus.span, (minus_at, minus_at + '\u{2212}'.len_utf8()));
+    let hyphen = &l.glyphs[0];
+    assert_eq!(hyphen.ch, '-');
+    assert_eq!(hyphen.face.family, fmn_text::DEFAULT_FAMILY);
+    // Every other glyph stays in the selected face.
+    assert!(
+        l.glyphs
+            .iter()
+            .filter(|g| g.ch != '\u{2212}')
+            .all(|g| g.face.family == fmn_text::DEFAULT_FAMILY)
+    );
+    // The fallback glyph has a real outline and advance, resolvable through
+    // the book, and the true minus is wider than the hyphen.
+    let minus_path = glyph_quadpath(&book, minus).expect("fallback outline");
+    let hyphen_path = glyph_quadpath(&book, hyphen).expect("hyphen outline");
+    let width = |p: &fmn_geom::QuadPath| {
+        let xs = p.points().iter().map(|v| v[0]);
+        xs.clone().fold(f64::NEG_INFINITY, f64::max) - xs.fold(f64::INFINITY, f64::min)
+    };
+    assert!(!minus_path.points().is_empty());
+    assert!(
+        width(&minus_path) > width(&hyphen_path),
+        "true minus {} vs hyphen {}",
+        width(&minus_path),
+        width(&hyphen_path)
+    );
+    // The math axis: the minus sits clearly above the baseline.
+    let mid_y = {
+        let ys: Vec<f64> = minus_path.points().iter().map(|v| v[1]).collect();
+        let lo = ys.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (lo + hi) / 2.0 - minus.y
+    };
+    assert!((0.2..0.35).contains(&mid_y), "minus centre {mid_y} em");
+    // Identical text laid out twice is identical (the chain is compiled in).
+    assert_eq!(plain(&book, text), l);
+}
+
+#[test]
+fn fallback_applies_to_explicit_families_and_is_not_selectable() {
+    let book = book();
+    // Explicit family (t2f) without the character: the chain still covers it,
+    // and the covering face is recorded.
+    let mut req = TextRequest::plain("a\u{2212}b");
+    let binding = [("a\u{2212}b", "CM Typewriter")];
+    req.maps = StyleMaps {
+        t2f: &binding,
+        ..StyleMaps::default()
+    };
+    let l = lay(&book, &req);
+    let families: Vec<&str> = l.glyphs.iter().map(|g| g.face.family.as_str()).collect();
+    assert_eq!(
+        families,
+        [
+            fmn_text::MONO_FAMILY,
+            fmn_text::MATH_FAMILY,
+            fmn_text::MONO_FAMILY
+        ]
+    );
+    // The chain's last resort: U+00BD VULGAR FRACTION ONE HALF is in neither
+    // the Computer Modern subset nor the math symbol face, only Plex Sans.
+    let half = plain(&book, "1\u{00BD}");
+    assert_eq!(half.glyphs[0].face.family, fmn_text::DEFAULT_FAMILY);
+    assert_eq!(half.glyphs[1].face.family, fmn_text::SANS_FAMILY);
+    assert!(glyph_quadpath(&book, &half.glyphs[1]).is_ok());
+    // The math face stays a coverage face, never a selectable family.
+    assert!(book.family(fmn_text::MATH_FAMILY).is_err());
+    let mut book = book;
+    let conflict = book
+        .add_family(
+            fmn_text::MATH_FAMILY,
+            fmd_font::bundled::CM_TYPEWRITER.to_vec(),
+        )
+        .unwrap_err();
+    assert!(matches!(conflict, TextError::FontFamilyConflict { .. }));
+}
+
+// ── Font policy (D-08)──────────────────────────────────────────────────
 
 #[test]
 fn missing_family_is_a_named_capability_error_not_a_substitution() {

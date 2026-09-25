@@ -497,8 +497,8 @@ fn place(
                         line: line_ix,
                         fill: g.fill,
                     });
-                    let family = book.family(&g.face.family)?;
-                    let m = glyph_metrics(family.face(g.face.key), g.gid);
+                    let face = book.resolve_face(&g.face.family, g.face.key)?;
+                    let m = glyph_metrics(face, g.gid);
                     layout.height = layout.height.max(y + m.height * g.size);
                     layout.depth = layout.depth.max(-(y - m.depth * g.size));
                     if g.underline || g.strike {
