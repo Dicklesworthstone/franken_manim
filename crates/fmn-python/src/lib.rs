@@ -2403,10 +2403,26 @@ impl BridgeMobject {
         let temp = match other_location {
             (Some(other_engine), Some(other_mob)) => {
                 let scene = other_engine.borrow();
-                scene
-                    .stage()
-                    .copy_into(other_mob, &mut nursery.stage)
-                    .map_err(stage_error)?
+                // A childless nursery root keeps its family in Python, and
+                // Python.become pairs those members itself, so the root takes
+                // only the source root's entry. A Scene-owned source (adopted
+                // because a receiver member is Scene-bound) otherwise brings
+                // its whole Stage subtree and can never match the root's shape.
+                let childless = nursery
+                    .stage
+                    .get(root)
+                    .is_some_and(|entry| entry.submobjects().is_empty());
+                if childless {
+                    scene
+                        .stage()
+                        .copy_entry_into(other_mob, &mut nursery.stage)
+                        .map_err(stage_error)?
+                } else {
+                    scene
+                        .stage()
+                        .copy_into(other_mob, &mut nursery.stage)
+                        .map_err(stage_error)?
+                }
             }
             _ => {
                 let other_cell = other.borrow();

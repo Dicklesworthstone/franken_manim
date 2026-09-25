@@ -9757,6 +9757,33 @@ assert partly_bound.become(partly_bound_target) is partly_bound
 assert len(partly_bound) == 4
 assert np.allclose(partly_bound.get_all_points(), partly_bound_target.get_all_points())
 
+# The same with a member bound directly, and sources whose members have their
+# own families: a bound Line becoming a DashedLine (some1, subsets and
+# inscribed_rect rebuild such groups in updaters). The detached root takes
+# only the adopted source root's record; its members pair in Python.
+for partly_source in (
+    lambda: manimlib.VGroup(geometry.Line([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), geometry.Dot()),
+    lambda: manimlib.VGroup(
+        geometry.DashedLine([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), geometry.Dot([0.0, 1.0, 0.0])
+    ),
+    lambda: manimlib.VGroup(manimlib.VGroup(geometry.Dot(), geometry.Dot()), geometry.Dot()),
+):
+    member_bound_scene = Scene()
+    member_bound = manimlib.VGroup(geometry.Line([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]), geometry.Dot())
+    member_bound_scene.add(member_bound[0])
+    bound_member = member_bound[0]
+    member_source = partly_source()
+    member_source.set_fill(opacity=0.5)
+    assert member_bound.become(member_source) is member_bound
+    assert not member_bound._is_bound() and member_bound[0] is bound_member
+    assert bound_member._is_bound() and bound_member in member_bound_scene.mobjects
+    assert [len(part.submobjects) for part in member_bound.get_family()] == [
+        len(part.submobjects) for part in member_source.get_family()
+    ]
+    for received, sourced in zip(member_bound.get_family(), member_source.get_family()):
+        np.testing.assert_allclose(received.get_points(), sourced.get_points())
+    assert np.isclose(member_bound.get_fill_opacity(), 0.5)
+
 named_source = manimlib.VGroup(geometry.Dot(), geometry.Dot())
 named_source.focus = named_source.submobjects[1]
 named_receiver = manimlib.VGroup(geometry.Dot())
