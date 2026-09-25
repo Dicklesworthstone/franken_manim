@@ -21497,6 +21497,8 @@ def _install_schema_surface():
         cls.__module__ = module_name
         setattr(_ensure_module(module_name), name, cls)
         classes_by_name.setdefault(name, cls)
+    # event_handler/__init__.py re-exports the class beside its singleton.
+    _ensure_module("manimlib.event_handler").EventDispatcher = EventDispatcher
     _ensure_module("manimlib.event_handler").EVENT_DISPATCHER = EventDispatcher()
 
     special_functions = {

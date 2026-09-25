@@ -13938,6 +13938,8 @@ event_listener_mod = importlib.import_module(
     "manimlib.event_handler.event_listner"
 )
 assert isinstance(event_handler.EVENT_DISPATCHER, event_dispatcher_mod.EventDispatcher)
+# event_handler/__init__.py re-exports the class itself.
+assert event_handler.EventDispatcher is event_dispatcher_mod.EventDispatcher
 assert str(inspect.signature(event_listener_mod.EventListener)) == (
     "(mobject, event_type, event_callback)"
 )

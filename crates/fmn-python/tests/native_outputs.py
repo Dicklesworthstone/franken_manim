@@ -2,6 +2,7 @@
 
 import contextlib
 import hashlib
+import importlib.machinery
 import io
 import json
 import os

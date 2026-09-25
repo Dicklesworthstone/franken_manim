@@ -16,9 +16,11 @@ from manimlib.mobject.interactive import Button as QualifiedButton
 
 @contextmanager
 def isolated_dispatcher():
+    # event_handler/__init__.py exports EventDispatcher; the top-level
+    # manimlib namespace does not.
     module = importlib.import_module("manimlib.event_handler")
     previous = module.EVENT_DISPATCHER
-    module.EVENT_DISPATCHER = m.EventDispatcher()
+    module.EVENT_DISPATCHER = module.EventDispatcher()
     try:
         yield module.EVENT_DISPATCHER
     finally:
@@ -157,7 +159,7 @@ def test_scene_membership_prevents_cross_scene_control_delivery():
 
 
 def test_standalone_dispatch_contract_remains_unchanged():
-    dispatcher = m.EventDispatcher()
+    dispatcher = importlib.import_module("manimlib.event_handler").EventDispatcher()
     shape, seen = m.Square(), []
     listener = m.EventListener(shape, m.EventType.MouseDragEvent,
                                lambda mob, data: seen.append(mob))
