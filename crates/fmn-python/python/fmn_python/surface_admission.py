@@ -15,7 +15,10 @@ import operator
 
 from .sampling_callbacks import FirstFailure, point_sample, F32_MAX as _F32_MAX
 
-_MAX_SAMPLES = 65_536
+# Marionette's MAX_SURFACE_GRID_POINTS, which Atlas samples under as
+# fmn_library::solids::SURFACE_SAMPLING_BUDGET. Every UV-grid mirror in this
+# package imports it; curves, fields and wireframe output keep 65536.
+GRID_BUDGET = 262_144
 
 
 def _pair(value, name):
@@ -27,9 +30,9 @@ def _pair(value, name):
 
 def grid_shape(value, *, copies=1):
     shape = tuple(operator.index(v) for v in _pair(value, "surface resolution"))
-    if (any(v < 0 or v > _MAX_SAMPLES for v in shape)
-            or math.prod(shape) * copies > _MAX_SAMPLES):
-        raise ValueError("surface construction exceeds its 65536-point aggregate UV-grid budget")
+    if (any(v < 0 or v > GRID_BUDGET for v in shape)
+            or math.prod(shape) * copies > GRID_BUDGET):
+        raise ValueError(f"surface construction exceeds its {GRID_BUDGET}-point aggregate UV-grid budget")
     return shape
 
 

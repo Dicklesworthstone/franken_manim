@@ -111,26 +111,55 @@ class SurfaceAdmissionTests(unittest.TestCase):
                         m.Disk3D, m.Square3D,
                         lambda **kwargs: m.Line3D((0, 0, 0), (1, 1, 1), **kwargs)]
         for constructor in constructors:
-            for shape in ((2**62, 2), (0, 2**62), (257, 256), (-1, 2), (2.5, 2)):
+            for shape in ((2**62, 2), (0, 2**62), (513, 512), (-1, 2), (2.5, 2)):
                 with self.subTest(constructor=constructor, shape=shape):
                     with self.assertRaises((ValueError, TypeError)):
                         constructor(resolution=shape)
 
     def test_cube_budget_is_for_all_six_faces(self):
-        self.assertEqual(grid_shape((1, 10922), copies=6), (1, 10922))
+        # 6 * 43690 <= 262144 < 6 * 43691.
+        self.assertEqual(grid_shape((1, 43690), copies=6), (1, 43690))
         with self.assertRaises(ValueError):
-            grid_shape((1, 10923), copies=6)
+            grid_shape((1, 43691), copies=6)
         with self.assertRaisesRegex(ValueError, 'aggregate'):
-            m.Cube(square_resolution=(129, 85))
+            m.Cube(square_resolution=(209, 210))
         cube = m.Cube(square_resolution=(3, 4))
         self.assertEqual([face.get_num_points() for face in cube], [12] * 6)
 
     def test_grid_budget_boundary_is_exact(self):
-        self.assertEqual(grid_shape((256, 256)), (256, 256))
-        self.assertEqual(grid_shape((0, 65536)), (0, 65536))
-        for shape in ((256, 257), (0, 65537)):
+        # Atlas's 262144-point UV budget (fm-1rb8): 301x301 is admitted.
+        self.assertEqual(grid_shape((301, 301)), (301, 301))
+        self.assertEqual(grid_shape((512, 512)), (512, 512))
+        self.assertEqual(grid_shape((0, 262144)), (0, 262144))
+        for shape in ((512, 513), (0, 262145), (1000, 1000)):
             with self.assertRaises(ValueError):
                 grid_shape(shape)
+
+    def test_reference_dense_grid_constructs_aligns_meshes_and_renders(self):
+        # _2025/laplace get_complex_graph authors resolution=(301, 301).
+        domain = dict(u_range=(-2, 2), v_range=(-2, 2))
+        dense = m.ParametricSurface(
+            lambda u, v: (u, v, np.sin(3 * u) * np.cos(3 * v) / 4), resolution=(301, 301), **domain)
+        self.assertEqual((dense.resolution, dense.get_num_points()), ((301, 301), 301 * 301))
+        mesh = m.SurfaceMesh(dense, resolution=(21, 11))
+        self.assertEqual(len(mesh), 32)
+        coarse = m.ParametricSurface(lambda u, v: (u, v, 0), resolution=(101, 101), **domain)
+
+        class Morph(m.Scene):
+            def construct(self):
+                self.camera.frame.set_euler_angles(phi=.7)
+                self.add(coarse, mesh)
+                self.play(m.Transform(coarse, dense), run_time=.5, rate_func=m.linear)
+        with tempfile.TemporaryDirectory(prefix='fmn-dense-surface-') as directory:
+            path = Path(directory) / 'morph.y4m'
+            result = Morph().render(path, format='y4m', resolution=(96, 54), fps=8)
+            self.assertEqual(result.frame_count, 4)
+            payload = path.read_bytes().split(b'\n', 1)[1]
+        frame_size = 96 * 54 * 3 // 2
+        frames = [payload[i + 6:i + 6 + frame_size] for i in range(0, len(payload), frame_size + 6)]
+        self.assertNotEqual(frames[0], frames[-1])
+        self.assertEqual((coarse.resolution, coarse.get_num_points()), ((301, 301), 301 * 301))
+        np.testing.assert_allclose(coarse.get_points(), dense.get_points(), atol=1e-5)
 
     def test_shape_iterables_are_read_only_to_the_admission_bound(self):
         reads = []

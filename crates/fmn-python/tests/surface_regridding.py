@@ -228,7 +228,7 @@ class SurfaceRegriddingTests(unittest.TestCase):
     def test_invalid_shapes_are_bounded_before_uv_callbacks(self):
         obj = surface(); before = obj.data.copy(); calls = []
         obj.passed_uv_func = lambda u, v: calls.append((u, v)) or (u, v, 0)
-        for shape in ((0, 3), (1, 3), (-1, 4), (257, 257), (3.5, 4), (2,), (2, 3, 4), itertools.repeat(2)):
+        for shape in ((0, 3), (1, 3), (-1, 4), (513, 513), (3.5, 4), (2,), (2, 3, 4), itertools.repeat(2)):
             with self.subTest(shape=shape):
                 with self.assertRaises((TypeError, ValueError)):
                     obj.set_resolution(shape)

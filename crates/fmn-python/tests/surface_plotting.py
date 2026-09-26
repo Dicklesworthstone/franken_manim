@@ -258,14 +258,14 @@ class SurfacePlottingTests(unittest.TestCase):
         chart = axes()
         calls = []
         with self.assertRaises((TypeError, ValueError)):
-            chart.get_graph(lambda u, v: calls.append(1), resolution=(257, 257))
+            chart.get_graph(lambda u, v: calls.append(1), resolution=(513, 513))
         self.assertEqual(calls, [])
         with self.assertRaises(TypeError):
             chart.get_parametric_surface(3, **DOMAIN)
 
     def test_direct_parametric_constructor_preflights_grid_and_preserves_subclass_recipe(self):
         calls = []
-        for shape in ((257, 257), (-1, 2), (2.5, 3), (2, 3, 4)):
+        for shape in ((513, 513), (-1, 2), (2.5, 3), (2, 3, 4)):
             with self.subTest(shape=shape), self.assertRaises((ValueError, TypeError)):
                 m.ParametricSurface(lambda u, v: calls.append((u, v)), resolution=shape)
         self.assertEqual(calls, [])
@@ -288,7 +288,7 @@ class SurfacePlottingTests(unittest.TestCase):
                         dict(v_range=itertools.repeat(1))):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 _sampling_options(options)
-        self.assertEqual(_sampling_options(dict(resolution=(256, 256)))["resolution"], (256, 256))
+        self.assertEqual(_sampling_options(dict(resolution=(512, 512)))["resolution"], (512, 512))
 
     def test_live_chart_plot_and_mesh_render_match_independent_world_recipe(self):
         samples = []

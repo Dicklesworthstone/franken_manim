@@ -189,9 +189,10 @@ pub use probability::{ProbabilityError, SampleSpace};
 pub use solids::{
     CUBE_SHADING, Cone, Cube, Cylinder, Disk3D, Dodecahedron, Line3D, MESH_NORMAL_NUDGE,
     MESH_RESOLUTION, MeshError, ParametricSurface, Prism, Prismify, SGroup, SURFACE_COLOR,
-    SURFACE_EPSILON, SURFACE_NORMAL_NUDGE, SURFACE_RESOLUTION, SURFACE_SHADING, Sphere, Square3D,
-    Surface, SurfaceMesh, SurfaceSpec, TexturedGeometry, TexturedSurface, Torus, VCube, VGroup3D,
-    VPrism, compute_triangle_indices, surface_schema, textured_surface_schema,
+    SURFACE_EPSILON, SURFACE_NORMAL_NUDGE, SURFACE_RESOLUTION, SURFACE_SAMPLING_BUDGET,
+    SURFACE_SHADING, Sphere, Square3D, Surface, SurfaceMesh, SurfaceSpec, TexturedGeometry,
+    TexturedSurface, Torus, VCube, VGroup3D, VPrism, compute_triangle_indices, surface_schema,
+    textured_surface_schema,
 };
 pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};
 pub use style::{Style, VStyle};

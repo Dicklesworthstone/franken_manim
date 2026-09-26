@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from .surface_admission import GRID_BUDGET
+
 
 def install_surface_alignment(native):
     g = vars(native)
@@ -43,8 +45,8 @@ def install_surface_alignment(native):
         if a is None:  # Both are unstructured meshes, not sampled UV grids.
             return original_align(self, other)
         shape = (max(a[0], b[0]), max(a[1], b[1]))
-        if shape[0] * shape[1] > 65_536:
-            raise ValueError("surface alignment exceeds its 65536-point UV-grid budget")
+        if shape[0] * shape[1] > GRID_BUDGET:
+            raise ValueError(f"surface alignment exceeds its {GRID_BUDGET}-point UV-grid budget")
         # Allocate derived Python indices before native publication. Invoke the
         # shipped constructor on inert holders, not callbacks on either object.
         # Independent arrays prevent one endpoint's face ordering affecting its peer.

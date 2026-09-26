@@ -14,11 +14,12 @@ fn grid(entry: &fmn_mobject::Entry) -> PyResult<Option<(usize, usize)>> {
     if nu < 2
         || nv < 2
         || nu.checked_mul(nv) != Some(entry.buffer.len())
-        || entry.buffer.len() > fmn_library::SamplingBudget::DEFAULT.max_samples()
+        || entry.buffer.len() > fmn_library::SURFACE_SAMPLING_BUDGET.max_samples()
     {
-        return Err(PyValueError::new_err(
-            "surface topology is inconsistent or exceeds the 65536-point budget",
-        ));
+        return Err(PyValueError::new_err(format!(
+            "surface topology is inconsistent or exceeds the {}-point budget",
+            fmn_library::SURFACE_SAMPLING_BUDGET.max_samples()
+        )));
     }
     for key in ["point", "d_normal_point"] {
         if !entry

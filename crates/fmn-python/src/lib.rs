@@ -5875,7 +5875,8 @@ impl BridgeMobject {
         joint_code: f64,
     ) -> PyResult<Bound<'py, PyList>> {
         let source_resolution = source.getattr("resolution")?.extract::<(usize, usize)>()?;
-        let budget = fmn_library::SamplingBudget::DEFAULT.max_samples();
+        // The source is a dense UV chart; Atlas bounds the wire output itself.
+        let budget = fmn_library::SURFACE_SAMPLING_BUDGET.max_samples();
         let count = source_resolution
             .0
             .checked_mul(source_resolution.1)

@@ -71,7 +71,7 @@ fn _build_textured_surface<'py>(
                 nu >= 2
                     && nv >= 2
                     && count == entry.buffer.len()
-                    && count <= fmn_library::SamplingBudget::DEFAULT.max_samples()
+                    && count <= fmn_library::SURFACE_SAMPLING_BUDGET.max_samples()
             })
             .ok_or_else(|| {
                 PyValueError::new_err(

@@ -11,14 +11,18 @@ import itertools
 import math
 import operator
 
+from .surface_admission import GRID_BUDGET
+
 _KEY = "_fmn_surface_wire"
 _BUSY = "_fmn_mesh_regenerating"
+# Atlas's wireframe output budget (lines and wire samples); the source grid
+# is a dense UV chart bounded by GRID_BUDGET instead.
 _BUDGET = 65_536
 
 
-def _resolution(values):
+def _resolution(values, bound=_BUDGET):
     shape = tuple(operator.index(v) for v in itertools.islice(iter(values), 3))
-    if len(shape) != 2 or any(v < 0 for v in shape) or any(v > _BUDGET for v in shape):
+    if len(shape) != 2 or any(v < 0 for v in shape) or any(v > bound for v in shape):
         raise ValueError("SurfaceMesh resolution requires two nonnegative bounded line counts")
     return shape
 
@@ -39,9 +43,9 @@ def install_surface_mesh(native):
             raise ValueError("SurfaceMesh normal_nudge must be finite")
         if not isinstance(source, Surface):
             raise TypeError("SurfaceMesh source must be a Surface")
-        source_shape = _resolution(source.resolution)
+        source_shape = _resolution(source.resolution, GRID_BUDGET)
         count = source_shape[0] * source_shape[1]
-        if (count > _BUDGET or count != source.n_records()
+        if (count > GRID_BUDGET or count != source.n_records()
                 or shape[0] * source_shape[1] + shape[1] * source_shape[0] > _BUDGET):
             raise ValueError("SurfaceMesh source topology or wire samples exceed the native budget")
         # The triangle-grid seam deliberately refuses singleton/strip grids;

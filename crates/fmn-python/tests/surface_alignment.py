@@ -265,7 +265,7 @@ class SurfaceAlignmentTests(unittest.TestCase):
                 elif bad == 'numeric':
                     right.data['rgba'][0, 0] = np.nan
                 else:
-                    left, right = surface((257, 2)), surface((2, 257))
+                    left, right = surface((513, 2)), surface((2, 513))
                 before = [obj.data.copy() for obj in (left, right)]
                 shapes = [obj.resolution for obj in (left, right)]
                 with self.assertRaises((TypeError, ValueError)):

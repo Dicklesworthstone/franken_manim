@@ -15,7 +15,7 @@ fn _initialize_surface_grid(
             "surface initialization requires a detached target",
         ));
     }
-    let limit = fmn_library::SamplingBudget::DEFAULT.max_samples();
+    let limit = fmn_library::SURFACE_SAMPLING_BUDGET.max_samples();
     let (nu, nv) = resolution;
     let count = nu
         .checked_mul(nv)

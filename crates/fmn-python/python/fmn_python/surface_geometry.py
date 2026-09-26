@@ -11,13 +11,15 @@ import math
 import operator
 from types import SimpleNamespace
 
+from .surface_admission import GRID_BUDGET
+
 _METADATA = ("u_range", "v_range", "epsilon", "normal_nudge", "preferred_creation_axis")
 
 
 def _controls(surface):
     resolution = tuple(operator.index(v) for v in itertools.islice(iter(surface.resolution), 3))
-    if len(resolution) != 2 or any(v < 2 for v in resolution) or math.prod(resolution) > 65_536:
-        raise ValueError("surface regeneration requires a UV grid of 2..65536 points with both axes >= 2")
+    if len(resolution) != 2 or any(v < 2 for v in resolution) or math.prod(resolution) > GRID_BUDGET:
+        raise ValueError(f"surface regeneration requires a UV grid of 2..{GRID_BUDGET} points with both axes >= 2")
     domains = []
     for name in ("u_range", "v_range"):
         pair = tuple(float(v) for v in itertools.islice(iter(getattr(surface, name)), 3))
@@ -108,7 +110,7 @@ def install_surface_geometry(native):
         if isinstance(self, Geometry):
             raise TypeError("indexed TexturedGeometry is not a UV-grid surface")
         shape = tuple(operator.index(v) for v in itertools.islice(iter(self.resolution), 3))
-        if requested is None and len(shape) == 2 and 0 in shape and all(0 <= v <= 65_536 for v in shape):
+        if requested is None and len(shape) == 2 and 0 in shape and all(0 <= v <= GRID_BUDGET for v in shape):
             # Empty Surface construction calls this hook through _engine_init.
             # There are no samples to regenerate, and no triangle grid to copy.
             if self.n_records():
