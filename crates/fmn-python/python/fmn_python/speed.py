@@ -258,6 +258,11 @@ def install_speed(native: Any) -> None:
     def set_rate(self, value):
         # Scene.play can override a group's easing by attribute assignment.
         # Keep the speed map instead of silently replacing it with that curve.
+        # Assigning the composite back to itself is a no-op: update_rate_info
+        # does `self.rate_func = rate_func or self.rate_func`, and storing the
+        # curve as its own easing recursed forever.
+        if value is self._speed_curve:
+            return
         self._speed_curve.easing = _rate(g, value)
 
     # Existing qualified imports retain their identity. Making the wrapper a

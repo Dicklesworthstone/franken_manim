@@ -148,7 +148,8 @@ def install_speed_updaters(native):
         signature = inspect.signature(update_function)
         if "dt" not in signature.parameters:
             signature.bind(mobject)
-            return mobject.add_updater(update_function, index=index, call_updater=call_updater)
+            # The Reference Mobject.add_updater names this flag `call`.
+            return mobject.add_updater(update_function, index=index, call=call_updater)
         signature.bind(mobject, 0.0)
         anchor = weakref.ref(mobject)
 
@@ -163,7 +164,7 @@ def install_speed_updaters(native):
                     delta = scope.dt
             return update_function(current, delta)
 
-        return mobject.add_updater(update, index=index, call_updater=call_updater)
+        return mobject.add_updater(update, index=index, call=call_updater)
 
     methods = {
         "__init__": speed_init, "begin": begin, "interpolate": interpolate,

@@ -19,12 +19,14 @@ class Mobject:
     def __init__(self, scene):
         self._scene, self.updaters = scene, []
 
-    def add_updater(self, function, index=None, call_updater=False):
+    # Models the portal Mobject.add_updater(updater, index=None, call=True);
+    # the Reference names the immediate-call flag `call`.
+    def add_updater(self, function, index=None, call=False):
         if index is None:
             self.updaters.append(function)
         else:
             self.updaters.insert(index, function)
-        if call_updater:
+        if call:
             function(self, 0.0)
         return self
 
