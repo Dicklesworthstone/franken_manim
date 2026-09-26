@@ -7058,6 +7058,35 @@ assert np.array_equal(vector_tracker.get_value(), [4.0, 2.0])
 vector_middle = [sample for sample in vector_samples if 0.0 < sample[0] < 4.0]
 assert vector_middle and all(np.isclose(s[0] + s[1] / 2.0, 5.0) for s in vector_middle)
 
+# set_submobjects commits only the difference when a request grows or trims
+# the current prefix (ShowIncreasingSubsets does so every frame), and must
+# reach exactly the state Reference remove-all-then-add leaves: requested
+# order, identity deduplication, and this parent moved to the end of every
+# kept child's parents.
+prefix_parent, prefix_other = manimlib.VGroup(), manimlib.VGroup()
+prefix_kids = [geometry.Dot() for _ in range(4)]
+prefix_parent.add(prefix_kids[0])
+prefix_other.add(prefix_kids[0])
+assert prefix_kids[0].parents == [prefix_parent, prefix_other]
+prefix_parent.set_submobjects([prefix_kids[0], prefix_kids[1], prefix_kids[1], prefix_kids[2]])
+assert prefix_parent.submobjects == prefix_kids[:3]
+assert prefix_kids[0].parents == [prefix_other, prefix_parent]
+assert prefix_kids[2].parents == [prefix_parent]
+prefix_parent.set_submobjects(prefix_kids[:1])
+assert prefix_parent.submobjects == prefix_kids[:1]
+assert prefix_parent not in prefix_kids[1].parents and prefix_parent not in prefix_kids[2].parents
+try:
+    prefix_parent.set_submobjects([prefix_kids[0], prefix_kids[3], "not a mobject"])
+except TypeError:
+    pass
+else:
+    raise AssertionError("set_submobjects accepted a non-Mobject child")
+assert prefix_parent.submobjects == [prefix_kids[0], prefix_kids[3]]
+wide_parent = manimlib.VGroup(*(geometry.Dot() for _ in range(300)))
+wide_members = list(wide_parent.submobjects)
+wide_parent.clear()
+assert wide_parent.submobjects == [] and all(wide_parent not in dot.parents for dot in wide_members)
+
 # Scene.finish_animations runs one final zero-dt updater traversal.  The
 # display root intentionally precedes the derived root, so the ordinary frame
 # leaves it one update behind after the source lands on its endpoint.  The

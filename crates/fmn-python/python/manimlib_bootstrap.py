@@ -341,9 +341,13 @@ class _LiveSubmobjects(list):
         # Maintain the Reference's parent back-edges (mobject.py:465/480):
         # every child newly placed under this owner records it and every
         # child detached here drops it. Identity membership keeps shared
-        # descendants (legal multi-parent graphs) coherent.
-        added = [child for child in candidate if child not in self]
-        removed = [child for child in self if child not in candidate]
+        # descendants (legal multi-parent graphs) coherent; identity sets
+        # keep a commit linear in the family width (Mobject defines no
+        # __eq__, so list membership was identity already).
+        previous = {id(child) for child in self}
+        requested = {id(child) for child in candidate}
+        added = [child for child in candidate if id(child) not in previous]
+        removed = [child for child in self if id(child) not in requested]
         list.clear(self)
         list.extend(self, candidate)
         for child in added:
@@ -829,9 +833,11 @@ class Mobject(_BridgeMobject):
         # foreign stages and cycles before corrupting its graph.
         if self in mobjects:
             raise Exception("Mobject cannot contain self")
+        present = {id(child) for child in self.submobjects}
         for mobject in mobjects:
-            if mobject not in self.submobjects:
+            if id(mobject) not in present:
                 self.submobjects.append(mobject)
+                present.add(id(mobject))
         # Reference add (mobject.py:467) closes with note_changed_family.
         self.note_changed_family()
         return self
@@ -1374,9 +1380,40 @@ class Mobject(_BridgeMobject):
         # Python error, and add owns Reference identity deduplication.
         if self.submobjects == submobject_list:
             return self
+        requested = list(submobject_list)
+        live = self.submobjects
+        if (isinstance(live, _LiveSubmobjects) and self not in requested
+                and all(isinstance(mob, _BridgeMobject) for mob in requested)):
+            # ShowIncreasingSubsets and friends grow or trim a prefix every
+            # frame; clear-then-add would re-commit the whole family once per
+            # child. Committing only the difference reaches the same state:
+            # kept children end with this parent last in their parents, as
+            # remove-then-add leaves them, and a failing added child keeps the
+            # same attached prefix.
+            current = list(live)
+            count = len(current)
+            if len(requested) >= count and all(a is b for a, b in zip(current, requested)):
+                self._reparent_last(current)
+                return self.add(*requested[count:])
+            if (len(requested) < count
+                    and len({id(mob) for mob in requested}) == len(requested)
+                    and all(a is b for a, b in zip(requested, current))):
+                live._commit(requested)
+                self._reparent_last(requested)
+                self.note_changed_family()
+                return self
         self.clear()
-        self.add(*submobject_list)
+        self.add(*requested)
         return self
+
+    def _reparent_last(self, children):
+        # Remove-then-add moves this parent to the end of each re-added
+        # child's parents list.
+        for child in children:
+            parents = child.parents
+            if parents and parents[-1] is not self and self in parents:
+                parents.remove(self)
+                parents.append(self)
 
     def reverse_submobjects(self):
         self.submobjects.reverse()
@@ -2092,11 +2129,31 @@ class Mobject(_BridgeMobject):
         # live graph is kept coherent immediately.
         family = self.get_family(recurse)
         for parent in family:
+            live = parent.submobjects
+            if not isinstance(live, _LiveSubmobjects):
+                for child in to_remove:
+                    if not isinstance(child, _BridgeMobject):
+                        raise TypeError("submobjects must be Mobject instances")
+                    if child in live:
+                        live.remove(child)
+                parent.note_changed_family()
+                continue
+            # One commit per parent: removing present, distinct children cannot
+            # be refused, so it equals removing them one at a time, without
+            # re-committing the family once per child (clear() of a wide group).
+            present = {id(child) for child in live}
+            doomed = set()
+            failure = None
             for child in to_remove:
                 if not isinstance(child, _BridgeMobject):
-                    raise TypeError("submobjects must be Mobject instances")
-                if child in parent.submobjects:
-                    parent.submobjects.remove(child)
+                    failure = TypeError("submobjects must be Mobject instances")
+                    break
+                if id(child) in present:
+                    doomed.add(id(child))
+            if doomed:
+                live._commit([child for child in live if id(child) not in doomed])
+            if failure is not None:
+                raise failure
             # Reference remove (mobject.py:479) reassembles each visited
             # parent; the live graph is already coherent so this only
             # honors the observable notification contract.
