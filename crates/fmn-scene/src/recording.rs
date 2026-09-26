@@ -16,7 +16,7 @@ use fmn_anim::timeline::{TIMELINE_SCHEMA, TimelineError, TimelinePlan};
 use fmn_anim::{FramePacket, RationalFrameClock, SegmentKind};
 use fmn_hash::serial::{Limits, Writer};
 use fmn_hash::{Digest, SerialError, sha256};
-use fmn_mobject::Stage;
+use fmn_mobject::{RenderSnapshotError, Snapshot, Stage};
 
 use crate::timeline_bundle::{
     BundleError, BundleExportLimits, BundleReadError, TIMELINE_BUNDLE_SCHEMA, TimelineBundle,
@@ -29,6 +29,8 @@ use crate::{CaptureReason, IntegrationError, LifecycleEvent, LifecyclePhase, Sce
 pub enum RecordingError {
     /// Capture, allocation, frame-work or container-size refusal.
     Bundle(BundleError),
+    /// A render-only frame could not be projected safely.
+    Projection(RenderSnapshotError),
     /// The recorded schedule did not satisfy the shared clock/plan contract.
     Plan(TimelineError),
     /// The finished artifact did not satisfy the production reader.
@@ -48,6 +50,7 @@ impl std::fmt::Display for RecordingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Bundle(error) => error.fmt(f),
+            Self::Projection(error) => error.fmt(f),
             Self::Plan(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
             Self::OutputLimit { needed, limit } => write!(
@@ -63,6 +66,7 @@ impl std::error::Error for RecordingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Bundle(error) => Some(error),
+            Self::Projection(error) => Some(error),
             Self::Plan(error) => Some(error),
             Self::Decode(error) => Some(error),
             Self::OutputLimit { .. } | Self::Unsupported(_) => None,
@@ -122,10 +126,15 @@ pub struct SceneBundleRecorder {
     segments: Vec<RecordedSegment>,
     active: Option<ActiveSegment>,
     failure: Option<RecordingError>,
+    render_only: bool,
 }
 
 impl SceneBundleRecorder {
-    /// Construct an empty recorder at the Scene's effective frame rate.
+    /// Construct a full-state recorder at the Scene's effective frame rate.
+    ///
+    /// Retains the existing complete-arena snapshot contract. Portable picture
+    /// exports can select [`Self::new_render_only`] instead; this constructor
+    /// never drops authoring state or renumbers live snapshot identities.
     ///
     /// # Errors
     /// Refuses a zero frame rate before any scene work.
@@ -141,7 +150,33 @@ impl SceneBundleRecorder {
             segments: Vec::new(),
             active: None,
             failure: None,
+            render_only: false,
         })
+    }
+
+    /// Record only each captured frame's rooted render state.
+    ///
+    /// Unrooted animation copies and saved states do not consume every frame's
+    /// byte budget. The shared FMNA codec, FMTL reader, rational clock and
+    /// sticky failure/publication rules are unchanged. This mode must not be
+    /// used to implement undo or reconstruct a live scene for further editing:
+    /// handles are canonicalized and executable/restoration metadata is absent.
+    /// It does not reclaim the source arena or avoid the initial FramePacket.
+    ///
+    /// # Errors
+    /// As [`Self::new`]. Per-frame projection failures are reported by capture.
+    pub fn new_render_only(fps: u32, limits: BundleExportLimits) -> Result<Self, RecordingError> {
+        let mut recorder = Self::new(fps, limits)?;
+        recorder.render_only = true;
+        Ok(recorder)
+    }
+
+    fn encode_snapshot(&self, snapshot: &Snapshot) -> Result<Vec<u8>, RecordingError> {
+        if self.render_only {
+            snapshot.to_render_bytes().map_err(RecordingError::Projection)
+        } else {
+            snapshot.to_bytes().map_err(RecordingError::from)
+        }
     }
 
     /// Captures admitted so far. This is output order, not the Scene clock.
@@ -170,8 +205,10 @@ impl SceneBundleRecorder {
                 "terminal still requires an idle empty recording",
             ))
         } else {
-            self.admit_frame()
-                .and_then(|()| self.capture_snapshot(stage.snapshot().to_bytes()))
+            self.admit_frame().and_then(|()| {
+                let bytes = self.encode_snapshot(&stage.snapshot());
+                self.capture_snapshot(bytes)
+            })
         };
         self.retain_failure(result)
     }
@@ -249,7 +286,7 @@ impl SceneBundleRecorder {
 
     fn capture_snapshot(
         &mut self,
-        bytes: Result<Vec<u8>, SerialError>,
+        bytes: Result<Vec<u8>, RecordingError>,
     ) -> Result<(), RecordingError> {
         self.admit_frame()?;
         let bytes = bytes?;
@@ -477,7 +514,8 @@ impl SceneSink for SceneBundleRecorder {
                     ));
                 }
             }
-            self.capture_snapshot(packet.state().to_bytes())
+            let bytes = self.encode_snapshot(packet.state());
+            self.capture_snapshot(bytes)
         })();
         self.retain_failure(result)
     }
