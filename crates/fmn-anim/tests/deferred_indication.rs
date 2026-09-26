@@ -10,11 +10,9 @@ fn line(stage: &mut Stage) -> Mob {
     let mob = stage.add(Mobject::new());
     let entry = stage.get_mut(mob).unwrap();
     entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
-    entry.buffer.write_range(
-        "point",
-        0,
-        &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 4.0, 0.0, 0.0],
-    );
+    entry
+        .buffer
+        .write_range("point", 0, &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 4.0, 0.0, 0.0]);
     entry
         .buffer
         .write_range("fill_rgba", 0, &[0.2, 0.4, 0.6, 0.25].repeat(3));
@@ -31,7 +29,12 @@ fn assert_xs(stage: &Stage, mob: Mob, expected: &[f64]) {
 }
 
 fn paint(stage: &Stage, mob: Mob) -> Vec<f32> {
-    stage.get(mob).unwrap().buffer.read_column("fill_rgba").unwrap()
+    stage
+        .get(mob)
+        .unwrap()
+        .buffer
+        .read_column("fill_rgba")
+        .unwrap()
 }
 
 #[test]
@@ -103,12 +106,9 @@ fn succession_indicate_and_inside_out_resolve_after_predecessor() {
             indicate(&mut stage, mob, 1.5, None).unwrap()
         };
         second.state_mut().config.rate_func = RateFunc::linear();
-        let mut sequence = Succession::with_lag_ratio(
-            &mut stage,
-            vec![Box::new(first), Box::new(second)],
-            1.0,
-        )
-        .unwrap();
+        let mut sequence =
+            Succession::with_lag_ratio(&mut stage, vec![Box::new(first), Box::new(second)], 1.0)
+                .unwrap();
         sequence.state_mut().config.rate_func = RateFunc::linear();
         sequence.begin(&mut stage).unwrap();
         sequence.interpolate(&mut stage, 0.75);

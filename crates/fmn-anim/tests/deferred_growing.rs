@@ -4,8 +4,8 @@
 use fmn_anim::animation::Animation;
 use fmn_anim::transform::StartPrep;
 use fmn_anim::{
-    AnimError, RateFunc, Succession, Transform, grow_arrow, grow_from_center,
-    grow_from_edge, grow_from_point,
+    AnimError, RateFunc, Succession, Transform, grow_arrow, grow_from_center, grow_from_edge,
+    grow_from_point,
 };
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Stage};
@@ -14,11 +14,9 @@ fn line(stage: &mut Stage) -> Mob {
     let mob = stage.add(Mobject::new());
     let entry = stage.get_mut(mob).unwrap();
     entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
-    entry.buffer.write_range(
-        "point",
-        0,
-        &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 4.0, 0.0, 0.0],
-    );
+    entry
+        .buffer
+        .write_range("point", 0, &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 4.0, 0.0, 0.0]);
     entry
         .buffer
         .write_range("fill_rgba", 0, &[0.2, 0.4, 0.6, 0.75].repeat(3));
@@ -60,7 +58,12 @@ fn grow_samples_live_geometry_and_paint_only_at_begin() {
     grow.finish(&mut stage);
     assert_xs(&stage, mob, &[2.0, 6.0, 10.0]);
     assert_eq!(
-        stage.get(mob).unwrap().buffer.read_column("fill_rgba").unwrap(),
+        stage
+            .get(mob)
+            .unwrap()
+            .buffer
+            .read_column("fill_rgba")
+            .unwrap(),
         paint,
     );
 }
@@ -110,12 +113,8 @@ fn succession_grow_observes_the_completed_predecessor() {
     let first = Transform::new(mob, target);
     let mut grow = grow_from_center(&mut stage, mob, None).unwrap();
     grow.state_mut().config.rate_func = RateFunc::linear();
-    let mut sequence = Succession::with_lag_ratio(
-        &mut stage,
-        vec![Box::new(first), Box::new(grow)],
-        1.0,
-    )
-    .unwrap();
+    let mut sequence =
+        Succession::with_lag_ratio(&mut stage, vec![Box::new(first), Box::new(grow)], 1.0).unwrap();
     sequence.state_mut().config.rate_func = RateFunc::linear();
     sequence.begin(&mut stage).unwrap();
     sequence.interpolate(&mut stage, 0.75);
