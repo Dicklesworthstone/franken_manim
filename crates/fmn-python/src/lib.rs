@@ -7541,16 +7541,23 @@ fn scene_root_handle(scene: &Bound<'_, PyScene>, object: &Bound<'_, PyAny>) -> O
 /// order. A suspended parent prunes its entire subtree even when descendants
 /// are not individually marked suspended. The explicit stack keeps a valid
 /// deeply nested family from consuming the scene worker's call stack.
-fn collect_update_targets(stage: &Stage, root: Mob, targets: &mut Vec<Mob>) {
+/// `seen` mirrors `targets` membership, so a mobject reachable through
+/// several roots or parents costs one hash probe, not a scan of `targets`.
+fn collect_update_targets(
+    stage: &Stage,
+    root: Mob,
+    targets: &mut Vec<Mob>,
+    seen: &mut HashSet<Mob>,
+) {
     let mut stack = vec![(root, false)];
     while let Some((mob, visited)) = stack.pop() {
         if visited {
-            if !targets.contains(&mob) {
+            if seen.insert(mob) {
                 targets.push(mob);
             }
             continue;
         }
-        if stage.is_updating_suspended(mob) || targets.contains(&mob) {
+        if stage.is_updating_suspended(mob) || seen.contains(&mob) {
             continue;
         }
         stack.push((mob, true));
@@ -7572,8 +7579,9 @@ fn update_targets(scene: &Bound<'_, PyScene>) -> Vec<Mob> {
     let scene_cell = scene.borrow();
     let runtime = scene_cell.engine.borrow();
     let mut targets = Vec::new();
+    let mut seen = HashSet::new();
     for &root in runtime.stage().roots() {
-        collect_update_targets(runtime.stage(), root, &mut targets);
+        collect_update_targets(runtime.stage(), root, &mut targets, &mut seen);
     }
     targets
 }
@@ -7631,8 +7639,9 @@ fn run_resumed_python_updaters(scene: &Bound<'_, PyScene>, roots: &[Mob]) -> PyR
         let scene_cell = scene.borrow();
         let runtime = scene_cell.engine.borrow();
         let mut targets = Vec::new();
+        let mut seen = HashSet::new();
         for &root in roots {
-            collect_update_targets(runtime.stage(), root, &mut targets);
+            collect_update_targets(runtime.stage(), root, &mut targets, &mut seen);
         }
         targets
     };
