@@ -182,4 +182,27 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn authored_solid_lifecycle_and_native_rendering() {
+        crate::with_python_test_module(
+            "authored solid initialization",
+            |py, _module, globals| {
+                let code =
+                    std::ffi::CString::new(include_str!("../tests/native_solid_lifecycle.py"))
+                        .unwrap();
+                py.run(code.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .unwrap();
+                globals
+                    .get_item("run_native_solid_lifecycle")
+                    .unwrap()
+                    .unwrap()
+                    .call0()
+                    .inspect_err(|error| error.print(py))
+                    .unwrap();
+            },
+        );
+    }
+
 }

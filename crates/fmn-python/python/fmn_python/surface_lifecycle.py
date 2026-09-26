@@ -107,14 +107,21 @@ def install_surface_lifecycle(native):
             prepare = g.get("_fmn_prepare_surface_function")
             if prepare is not None:
                 function, verify = prepare(function)
-            candidate = Surface.__new__(Surface)
-            g["_install_live_state"](candidate)
-            specs = candidate._build_parametric_surface(
-                g["_native_surface_shell_factory"], function,
-                options["u_range"], options["v_range"], options["resolution"],
-                options["epsilon"], options["normal_nudge"])
-            if specs:
-                raise RuntimeError("a UV surface sampler returned unexpected children")
+            def sample():
+                candidate = Surface.__new__(Surface)
+                g["_install_live_state"](candidate)
+                specs = candidate._build_parametric_surface(
+                    g["_native_surface_shell_factory"], function,
+                    options["u_range"], options["v_range"], options["resolution"],
+                    options["epsilon"], options["normal_nudge"])
+                if specs:
+                    raise RuntimeError("a UV surface sampler returned unexpected children")
+                return candidate
+
+            # Stock solids keep their specialized Atlas kernels; authored UV
+            # overrides use this same bounded sampler and publication contract.
+            build_solid = g.get("_fmn_build_solid_candidate")
+            candidate = sample() if build_solid is None else build_solid(self, options, sample)
             if verify is not None:
                 verify()
             idle(self)

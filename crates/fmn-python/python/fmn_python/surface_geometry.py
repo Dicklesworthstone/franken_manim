@@ -173,14 +173,22 @@ def install_surface_geometry(native):
                     except BaseException as error:
                         failure = error
                         raise
-                # Bypass Python constructors, not Atlas: its existing native
-                # sampler owns the finite-difference normal convention and grid.
-                candidate = Surface.__new__(Surface)
-                g["_install_live_state"](candidate)
-                shape, u_range, v_range, epsilon, nudge = controls
-                specs = candidate._build_parametric_surface(g["_native_surface_shell_factory"],
-                            sample, u_range, v_range, shape, epsilon, nudge)
-                g["_hang_native_children"](candidate, specs)
+                def sample_candidate():
+                    # Bypass Python constructors, not Atlas: its native sampler
+                    # owns the finite-difference normal convention and grid.
+                    result = Surface.__new__(Surface)
+                    g["_install_live_state"](result)
+                    shape, u_range, v_range, epsilon, nudge = controls
+                    specs = result._build_parametric_surface(g["_native_surface_shell_factory"],
+                                sample, u_range, v_range, shape, epsilon, nudge)
+                    g["_hang_native_children"](result, specs)
+                    return result
+                build_solid = g.get("_fmn_build_solid_candidate")
+                sample_options = dict(resolution=controls[0], u_range=controls[1],
+                    v_range=controls[2], epsilon=controls[3], normal_nudge=controls[4],
+                    preferred_creation_axis=self.preferred_creation_axis)
+                candidate = (sample_candidate() if build_solid is None else
+                             build_solid(self, sample_options, sample_candidate))
             if verify_sampling is not None:
                 verify_sampling()
             idle(self)

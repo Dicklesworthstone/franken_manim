@@ -34,6 +34,7 @@ _STEPS = (
     ("plane_lifecycle", "install_plane_lifecycle"),
     ("surface_geometry", "install_surface_geometry"),
     ("surface_lifecycle", "install_surface_lifecycle"),
+    ("solid_lifecycle", "install_solid_lifecycle"),
     ("surface_mesh", "install_surface_mesh"),
     ("surface_plotting", "install_surface_plotting"),
     ("svg_ingress", "install_svg_ingress"),
