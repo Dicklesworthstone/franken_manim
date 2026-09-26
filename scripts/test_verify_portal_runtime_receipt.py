@@ -46,6 +46,7 @@ class PortalRuntimeReceiptTests(unittest.TestCase):
                 "status_rows": 3,
                 "reviewed_implemented": 2,
                 "runtime_placeholders": 0,
+                "trivial_bodies": 0,
                 "missing_reviewed": 0,
                 "contradictions": 0,
             },
@@ -160,6 +161,7 @@ class PortalRuntimeReceiptTests(unittest.TestCase):
     def test_success_envelope_cannot_hide_audit_failures(self) -> None:
         for field, value in (
             ("runtime_placeholders", 1),
+            ("trivial_bodies", 1),
             ("missing_reviewed", 1),
             ("contradictions", 1),
         ):

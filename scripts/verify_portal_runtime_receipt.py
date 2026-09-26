@@ -39,6 +39,7 @@ AUDIT_COUNT_KEYS = frozenset(
         "status_rows",
         "reviewed_implemented",
         "runtime_placeholders",
+        "trivial_bodies",
         "missing_reviewed",
         "contradictions",
     }
@@ -252,6 +253,8 @@ def _validate_report(
     }
     if normalized_counts["runtime_placeholders"] != 0:
         raise _failed("successful audit reports runtime placeholders")
+    if normalized_counts["trivial_bodies"] != 0:
+        raise _failed("successful audit reports trivial stub bodies")
     if normalized_counts["missing_reviewed"] != 0:
         raise _failed("successful audit reports missing reviewed symbols")
     if normalized_counts["contradictions"] != 0:
