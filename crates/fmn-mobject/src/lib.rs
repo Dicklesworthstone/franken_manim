@@ -37,6 +37,7 @@ pub mod persist;
 pub mod placement;
 pub mod positional;
 pub mod record;
+pub mod render_snapshot;
 pub mod shape;
 pub mod stage;
 pub mod uniforms;
@@ -58,6 +59,7 @@ pub use persist::{
 pub use placement::Placement;
 pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordError, RecordSchema, RecordView};
+pub use render_snapshot::{RenderSnapshotError, RenderSnapshotLimits};
 pub use shape::ShapeTag;
 pub use stage::{CopyMap, Entry, Mob, Snapshot, Stage, UpdaterFn, UpdaterId, UpdaterSlot};
 pub use uniforms::{JointType, Uniforms};
