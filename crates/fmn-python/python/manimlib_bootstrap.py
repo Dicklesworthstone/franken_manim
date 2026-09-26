@@ -7335,10 +7335,14 @@ class NumberPlane(Axes):
 
 
 class ComplexPlane(NumberPlane):
-    # Reference ComplexPlane: complex numbers map through the 2D grid.
+    # Reference ComplexPlane: complex numbers map through the 2D grid,
+    # coords_to_point(np.real(number), np.imag(number)), so an array of
+    # numbers maps to an array of points (zeta's partial-sum paths).
     def number_to_point(self, number):
-        number = complex(number)
-        return self.coords_to_point(number.real, number.imag)
+        if _np.ndim(number) == 0:
+            number = complex(number)
+            return self.coords_to_point(number.real, number.imag)
+        return self.coords_to_point(_np.real(number), _np.imag(number))
 
     def n2p(self, number):
         return self.number_to_point(number)

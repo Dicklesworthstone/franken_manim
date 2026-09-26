@@ -10176,6 +10176,12 @@ fn apply_axis_config_key(
 ) -> PyResult<bool> {
     match key {
         "color" => config.color = Some(srgb_from_py(value)?),
+        // VMobject.__init__: `stroke_color or color`, so None defers to color.
+        "stroke_color" => {
+            if !value.is_none() {
+                config.stroke_color = Some(srgb_from_py(value)?);
+            }
+        }
         "stroke_width" => config.stroke_width = Some(value.extract()?),
         "stroke_opacity" => config.stroke_opacity = Some(value.extract()?),
         "unit_size" => config.unit_size = Some(value.extract()?),

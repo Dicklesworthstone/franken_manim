@@ -496,6 +496,15 @@ impl NumberLine {
         self
     }
 
+    /// `stroke_color=`: the stroke alone, which the line's ticks match.
+    /// `VMobject.__init__` resolves `stroke_color or color`, so this wins
+    /// over [`NumberLine::color`] for the stroke whichever is set first.
+    #[must_use]
+    pub fn stroke_color(mut self, color: Srgb) -> Self {
+        self.style.stroke_color = color;
+        self
+    }
+
     /// Replace the line's style wholesale.
     #[must_use]
     pub fn style(mut self, style: Style) -> Self {
@@ -902,6 +911,9 @@ impl NumberLine {
 pub struct AxisConfig {
     /// `color=`.
     pub color: Option<Srgb>,
+    /// `stroke_color=`: overrides `color` for the stroke
+    /// (`stroke_color or color`), applied after it.
+    pub stroke_color: Option<Srgb>,
     /// `stroke_width=`.
     pub stroke_width: Option<f64>,
     /// `stroke_opacity=`.
@@ -940,6 +952,7 @@ impl AxisConfig {
     pub fn merge(self, over: Self) -> Self {
         Self {
             color: over.color.or(self.color),
+            stroke_color: over.stroke_color.or(self.stroke_color),
             stroke_width: over.stroke_width.or(self.stroke_width),
             stroke_opacity: over.stroke_opacity.or(self.stroke_opacity),
             unit_size: over.unit_size.or(self.unit_size),
@@ -965,6 +978,9 @@ impl AxisConfig {
     pub fn apply(self, mut line: NumberLine) -> NumberLine {
         if let Some(v) = self.color {
             line = line.color(v);
+        }
+        if let Some(v) = self.stroke_color {
+            line = line.stroke_color(v);
         }
         if let Some(v) = self.stroke_width {
             line = line.stroke_width(v);
@@ -1935,6 +1951,40 @@ mod tests {
         assert!((line.effective_unit_size() - 2.0).abs() < 1e-15);
         assert_vec3_near(line.n2p(5.0), [5.0, 0.0, 0.0], 1e-12, "n2p(5)");
         assert_vec3_near(line.n2p(0.0), [-5.0, 0.0, 0.0], 1e-12, "n2p(0)");
+    }
+
+    #[test]
+    fn stroke_color_wins_over_color_for_the_stroke_in_either_order() {
+        // VMobject.__init__: `stroke_color or color` for the stroke, `color`
+        // for the fill, however the axis config dicts merged.
+        let red = Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+        };
+        let blue = Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+        };
+        let color = AxisConfig {
+            color: Some(red),
+            ..AxisConfig::default()
+        };
+        let stroke = AxisConfig {
+            stroke_color: Some(blue),
+            ..AxisConfig::default()
+        };
+        for config in [
+            color.clone().merge(stroke.clone()),
+            stroke.clone().merge(color.clone()),
+        ] {
+            let line = config.apply(NumberLine::new([-2.0, 2.0, 1.0]));
+            assert_eq!(line.style.stroke_color, blue);
+            assert_eq!(line.style.fill_color, red);
+        }
+        let only_color = color.apply(NumberLine::new([-2.0, 2.0, 1.0]));
+        assert_eq!(only_color.style.stroke_color, red);
     }
 
     #[test]

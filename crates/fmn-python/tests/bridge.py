@@ -12499,6 +12499,27 @@ assert len(bare_line.get_tick_marks()) == 2
 label = tick_line.get_number_mobject(1.0, font_size=24)
 assert isinstance(label, manimlib.DecimalNumber)
 assert np.isclose(label.get_value(), 1.0)
+
+# NumberLine forwards VMobject's stroke_color, which wins over color for the
+# stroke (`stroke_color or color`) and which the ticks match; None defers
+# to color (subsets, laplace shm and print_gallery pass it).
+stroked_line = manimlib.NumberLine((-2, 2), stroke_color=manimlib.RED, color=manimlib.BLUE)
+assert stroked_line.get_stroke_color() == manimlib.RED
+assert stroked_line.get_fill_color() == manimlib.BLUE
+assert all(
+    tick.get_stroke_color() == manimlib.RED for tick in stroked_line.get_tick_marks()
+)
+assert manimlib.NumberLine((-2, 2), stroke_color=None, color=manimlib.BLUE).get_stroke_color() \
+    == manimlib.BLUE
+
+# ComplexPlane.n2p is the Reference's
+# coords_to_point(np.real(number), np.imag(number)), so an array of
+# numbers maps to an array of points (zeta's partial-sum paths).
+complex_plane = manimlib.ComplexPlane()
+complex_numbers = np.array([1 + 1j, 2.0, -1.5j])
+complex_points = complex_plane.n2p(complex_numbers)
+assert complex_points.shape == (3, 3)
+assert np.allclose(complex_points, [complex_plane.n2p(z) for z in complex_numbers])
 assert issubclass(manimlib.UnitInterval, manimlib.NumberLine)
 unit = manimlib.UnitInterval()
 assert np.allclose(unit.x_range[:2], [0.0, 1.0])
