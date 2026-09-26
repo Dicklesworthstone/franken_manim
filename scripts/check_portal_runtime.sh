@@ -33,6 +33,8 @@ python3 crates/fmn-python/tests/surface_regridding.py
 python3 crates/fmn-python/tests/surface_admission.py
 python3 crates/fmn-python/tests/graph_admission.py
 python3 crates/fmn-python/tests/coordinate_mapping.py
+python3 crates/fmn-python/tests/number_line_lifecycle.py
+python3 crates/fmn-python/tests/string_lifecycle.py
 python3 crates/fmn-python/tests/coordinate_lifecycle.py
 python3 crates/fmn-python/tests/plane_lifecycle.py
 python3 crates/fmn-python/tests/coordinate_labels.py

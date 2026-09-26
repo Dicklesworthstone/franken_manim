@@ -57,7 +57,7 @@ def install_text_authoring(native):
     if g.get("_FMN_TEXT_AUTHORING_INSTALLED", False):
         return
     Markup = g["MarkupText"]
-    build = g["_build_styled_text"]
+    from .string_lifecycle import initialize_string
     previous = Markup.__init__
     signature = inspect.signature(previous)
 
@@ -116,7 +116,6 @@ def install_text_authoring(native):
         base_color = style.pop("base_color", "#FFFFFF")
         protect = style.pop("protect", ())
         g["_preflight_vmobject_style_kwargs"](style)
-        g["_install_live_state"](self)
         self.text = self.string = source
         self.font_size, self.font = options["font_size"], font
         self.weight, self.slant = p["weight"], p["slant"]
@@ -127,10 +126,8 @@ def install_text_authoring(native):
         self.use_labelled_svg, self.base_color, self.protect = labelled, base_color, protect
         for name, value in maps.items():
             setattr(self, name, value)
-        specs = build(self, g["_native_shell_factory"], source, type(self)._native_markup,
-                      type(self)._hoist_descendant_records, options)
-        g["_hang_native_children"](self, specs)
-        g["_apply_vmobject_style_kwargs"](self, style)
+        self._fmn_text_options = options
+        initialize_string(g, self, style)
         if gradient:
             self.set_color_by_gradient(*gradient)
         # Existing selectors retain regex/Unicode/byte-span behavior and win
