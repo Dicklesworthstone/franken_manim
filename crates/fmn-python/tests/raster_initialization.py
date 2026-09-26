@@ -66,18 +66,21 @@ class RasterInitializationTests(unittest.TestCase):
         calls = []
         updater = lambda mob, dt: calls.append(dt)
         obj.add_updater(updater)
+        # add_updater's default call=True runs one dt=0 pass at registration
+        # (BN-07 C-5); initialization itself must not run any updater.
+        self.assertEqual(calls, [0.])
         before = obj.get_points().copy()
         m._initialize_raster_image(obj, resource())
         np.testing.assert_allclose(obj.get_points(), before, atol=1e-7)
         self.assertIs(obj.submobjects[0], decoration)
         self.assertIn(updater, obj.updaters)
-        self.assertEqual(calls, [])
+        self.assertEqual(calls, [0.])
         snapshot = obj._engine_state()['snapshot']
         obj.set_z_index(7)
         self.assertEqual(obj._engine_state()['snapshot'], snapshot)
         obj.set_z_index(8)
         self.assertNotEqual(obj._engine_state()['snapshot'], snapshot)
-        self.assertEqual(obj.uniforms['fixed_in_frame'], 1)
+        self.assertEqual(obj.uniforms['is_fixed_in_frame'], 1)
 
     def test_copy_and_old_capture_keep_the_original_pixels(self):
         obj = raw()
