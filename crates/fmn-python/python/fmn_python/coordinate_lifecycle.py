@@ -114,7 +114,10 @@ def install_axes_lifecycle(native):
         depth = _length(depth, "depth")
         z_config = _config(z_axis_config, "z_axis_config")
         original_common = _config(kwargs.get("axis_config"), "axis_config")
-        normal = g["_vec3"](g["_DOWN"] if z_normal is None else z_normal)
+        try:
+            normal = g["_vec3"](g["_DOWN"] if z_normal is None else z_normal)
+        except (TypeError, ValueError, IndexError) as error:
+            raise TypeError("ThreeDAxes z_normal must be a 3-vector; got " + repr(z_normal)) from error
         if not all(math.isfinite(v) for v in normal):
             raise ValueError("z_normal must be finite")
         super(ThreeD, self).__init__(x_range, y_range, **kwargs)
