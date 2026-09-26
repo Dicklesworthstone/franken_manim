@@ -200,7 +200,7 @@ _2020/hamming.py	ListOfRelevantMathTopics	scene_code_error	TypeError
 _2020/hamming.py	LogTitle	ok	
 _2020/hamming.py	LouisPasteurQuote	ok	
 _2020/hamming.py	MatrixProduct	scene_code_error	AttributeError
-_2020/hamming.py	MillionRatio	timeout	
+_2020/hamming.py	MillionRatio	ok	
 _2020/hamming.py	MultiplePerspectives	missing_asset	OSError
 _2020/hamming.py	OddNumberCountTo101	ok	
 _2020/hamming.py	OneGroupPerParityBit	ok	
@@ -295,7 +295,7 @@ _2020/med_test.py	ReframeWhatTestsDo	missing_asset	OSError
 _2020/med_test.py	RuleOfThumb	capability_refusal	NotImplementedError
 _2020/med_test.py	SamplePopulation10PercentPrevalence	missing_asset	OSError
 _2020/med_test.py	SamplePopulationBreastCancer	missing_asset	OSError
-_2020/med_test.py	SamplePopulationOneInThousandPrevalence	timeout	
+_2020/med_test.py	SamplePopulationOneInThousandPrevalence	scene_code_error	TypeError
 _2020/med_test.py	ShowContrastingMethods	ok	
 _2020/med_test.py	Thumbnail1	missing_asset	OSError
 _2020/med_test.py	Thumbnail2	ok	
@@ -460,13 +460,13 @@ _2020/sir.py	WhyChooseJustOne	missing_asset	OSError
 _2020/sir.py	WideSpreadTesting	scene_code_error	AttributeError
 _2020/surface_play.py	EarthMorph	missing_asset	OSError
 _2020/telestration_contribution.py	TelestrationContribution	missing_asset	OSError
-_2021/bertrands_paradox.py	CenterPoint	timeout	
+_2021/bertrands_paradox.py	CenterPoint	ok	
 _2021/bertrands_paradox.py	ChordsInSpaceWithCircle	timeout	
-_2021/bertrands_paradox.py	CoinFlips	timeout	
-_2021/bertrands_paradox.py	CompareFirstTwoMethods	timeout	
+_2021/bertrands_paradox.py	CoinFlips	ok	
+_2021/bertrands_paradox.py	CompareFirstTwoMethods	ok	
 _2021/bertrands_paradox.py	CorrectionInsert	ok	
 _2021/bertrands_paradox.py	NonTransitive	ok	
-_2021/bertrands_paradox.py	PairOfPoints	timeout	
+_2021/bertrands_paradox.py	PairOfPoints	ok	
 _2021/bertrands_paradox.py	PortionOfRadialLineInTriangle	ok	
 _2021/bertrands_paradox.py	RadialPoint	scene_code_error	TypeError
 _2021/bertrands_paradox.py	RandomChordScene	scene_code_error	Exception
@@ -917,7 +917,7 @@ _2022/convolutions/discrete.py	ImageConvolution	missing_asset	OSError
 _2022/convolutions/discrete.py	MovingAverageExample	ok	
 _2022/convolutions/discrete.py	MovingAverageFast	ok	
 _2022/convolutions/discrete.py	MovingAverageFast2	ok	
-_2022/convolutions/discrete.py	PolynomialSystem	timeout	
+_2022/convolutions/discrete.py	PolynomialSystem	ok	
 _2022/convolutions/discrete.py	RootsOfUnity	portal_exception	RuntimeError
 _2022/convolutions/discrete.py	SharpenFilter	missing_asset	OSError
 _2022/convolutions/discrete.py	SimpleExample	ok	
@@ -1026,7 +1026,7 @@ _2022/puzzles/subsets.py	RootOfUnityRearranging	ok
 _2022/puzzles/subsets.py	RotationAnnotation	missing_asset	OSError
 _2022/puzzles/subsets.py	RotationalSum	portal_exception	TypeError
 _2022/puzzles/subsets.py	Roughly2	ok	
-_2022/puzzles/subsets.py	ShowHypercubeConstruction	timeout	
+_2022/puzzles/subsets.py	ShowHypercubeConstruction	ok	
 _2022/puzzles/subsets.py	SimpleQuestionTitle	ok	
 _2022/puzzles/subsets.py	SimpleRect	ok	
 _2022/puzzles/subsets.py	SpecifyEmptySet	missing_asset	OSError
@@ -1222,7 +1222,7 @@ _2023/clt/dice_sims.py	LargerUSimulation	timeout
 _2023/clt/dice_sims.py	SimulationWithExpDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithExpDistribution15Dice	timeout	
 _2023/clt/dice_sims.py	SimulationWithExpDistribution2	timeout	
-_2023/clt/dice_sims.py	SimulationWithExpDistribution2Dice	timeout	
+_2023/clt/dice_sims.py	SimulationWithExpDistribution2Dice	ok	
 _2023/clt/dice_sims.py	SimulationWithExpDistribution5Dice	timeout	
 _2023/clt/dice_sims.py	SimulationWithRandomDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithSteepUShapedDistribution	timeout	
@@ -1410,7 +1410,7 @@ _2023/gauss_int/herschel.py	RescaleG	ok
 _2023/gauss_int/herschel.py	ShowPointR0	ok	
 _2023/gauss_int/herschel.py	ShowXYCoordinate	ok	
 _2023/gauss_int/herschel.py	TalkAboutSignOfConstant3D	ok	
-_2023/gauss_int/herschel.py	TwoDGaussianAsADistribution	timeout	
+_2023/gauss_int/herschel.py	TwoDGaussianAsADistribution	scene_code_error	NameError
 _2023/gauss_int/herschel.py	TwoProperties	ok	
 _2023/gauss_int/herschel.py	VariableC	ok	
 _2023/gauss_int/herschel.py	VariableCWithF	ok	
@@ -1497,7 +1497,7 @@ _2023/moser_reboot/main.py	SimpleRect	ok
 _2023/moser_reboot/main.py	SimpleVLine	ok	
 _2023/moser_reboot/main.py	VEquation	ok	
 _2023/moser_reboot/main.py	WhyThePowersOfTwo	missing_asset	OSError
-_2023/numberphile/prime_race.py	LongRaceGraph	timeout	
+_2023/numberphile/prime_race.py	LongRaceGraph	ok	
 _2023/numberphile/prime_race.py	PrimeRace	timeout	
 _2023/numberphile/prime_race.py	RaceGraph	ok	
 _2023/optics_puzzles/adding_waves.py	AddTwoRotatingVectors	ok	
@@ -1639,7 +1639,7 @@ _2023/optics_puzzles/ior_annotations.py	LookAtScrolling	missing_asset	OSError
 _2023/optics_puzzles/ior_annotations.py	MissingDetails	ok	
 _2023/optics_puzzles/ior_annotations.py	NewQuestion	ok	
 _2023/optics_puzzles/ior_annotations.py	PiCreaturesReactingToEquation	missing_asset	OSError
-_2023/optics_puzzles/ior_annotations.py	PreviewQuarterBehindReason	timeout	
+_2023/optics_puzzles/ior_annotations.py	PreviewQuarterBehindReason	ok	
 _2023/optics_puzzles/ior_annotations.py	QuestionsFromPatrons	ok	
 _2023/optics_puzzles/ior_annotations.py	ReactToStandardExplanation	missing_asset	OSError
 _2023/optics_puzzles/ior_annotations.py	RightLeftArrow	ok	
@@ -2199,7 +2199,7 @@ _2025/colliding_blocks_v2/supplements.py	ReferenceSmallAngleApproximations	missi
 _2025/colliding_blocks_v2/supplements.py	RewindArrows	ok	
 _2025/colliding_blocks_v2/supplements.py	ShowMassRatioToCountChart	ok	
 _2025/colliding_blocks_v2/supplements.py	ShowPastVideos	portal_exception	ValueError
-_2025/colliding_blocks_v2/supplements.py	ShowSimpleWeb	timeout	
+_2025/colliding_blocks_v2/supplements.py	ShowSimpleWeb	ok	
 _2025/colliding_blocks_v2/supplements.py	SimpleArrow	ok	
 _2025/colliding_blocks_v2/supplements.py	SimplifyingMessiness	ok	
 _2025/colliding_blocks_v2/supplements.py	StareAtDiagram	missing_asset	OSError
@@ -2478,7 +2478,7 @@ _2025/laplace/derivatives.py	DerivativeFormula	missing_asset	OSError
 _2025/laplace/derivatives.py	ForcedOscillatorEquation	ok	
 _2025/laplace/derivatives.py	FromPropertyToLaplaceTransform	ok	
 _2025/laplace/derivatives.py	IntegrateByParts	ok	
-_2025/laplace/derivatives.py	MoveAroundPolesSeeDynamics	portal_exception	ValueError
+_2025/laplace/derivatives.py	MoveAroundPolesSeeDynamics	timeout	
 _2025/laplace/derivatives.py	PartialFractionDecomposition	ok	
 _2025/laplace/derivatives.py	PreviewStrategy	ok	
 _2025/laplace/derivatives.py	ShowSolutionPoles	portal_exception	ValueError
@@ -2514,7 +2514,7 @@ _2025/laplace/main_equations.py	RealExtension	ok
 _2025/laplace/main_equations.py	SetSToMinus1	ok	
 _2025/laplace/main_equations.py	SimpleCosGraph	ok	
 _2025/laplace/main_equations.py	SimpleExpToPole	ok	
-_2025/laplace/main_equations.py	SimplePolesOverImaginaryLine	portal_exception	ValueError
+_2025/laplace/main_equations.py	SimplePolesOverImaginaryLine	ok	
 _2025/laplace/main_equations.py	SimpleToComplex	scene_code_error	TypeError
 _2025/laplace/main_equations.py	TranslateDifferentialEquationAndInvert	ok	
 _2025/laplace/main_equations.py	TranslateToNewLanguage	portal_exception	ValueError
@@ -2667,7 +2667,7 @@ _2026/hairy_ball/spheres.py	SimpleRightwardFlow	timeout
 _2026/hairy_ball/spheres.py	SingleNullPointHairyBall	ok	
 _2026/hairy_ball/spheres.py	SingleNullPointHairyBallRevealed	ok	
 _2026/hairy_ball/spheres.py	StereographicProjection	timeout	
-_2026/hairy_ball/spheres.py	SurfaceFoldedOverSelf	timeout	
+_2026/hairy_ball/spheres.py	SurfaceFoldedOverSelf	ok	
 _2026/hairy_ball/spheres.py	TeddyHeadSwirl	missing_asset	OSError
 _2026/hairy_ball/spheres.py	UnitNormals	ok	
 _2026/hairy_ball/supplements.py	AimingForRediscovery	missing_asset	OSError
