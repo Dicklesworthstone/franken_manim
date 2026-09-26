@@ -147,6 +147,8 @@ pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use pyo3::prelude::*;
+
     #[test]
     fn production_raster_initialization_admission() {
         crate::with_python_test_module("image initialization", |py, _module, globals| {
