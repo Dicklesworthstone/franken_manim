@@ -42,7 +42,9 @@ class NativeSurfaceSamplingTests(unittest.TestCase):
     def test_raw_native_admission_precedes_callbacks(self):
         obj = m.Surface(resolution=(2, 2))
         before = obj.data.copy()
-        for options in ({'shape': (2**62, 2)}, {'shape': (0, 2**62)}, {'shape': (257, 256)},
+        # (513, 512) is one row past the surface sampling budget, Marionette's
+        # 262144-record ceiling since fm-1rb8 (0725c122) raised it from 65536.
+        for options in ({'shape': (2**62, 2)}, {'shape': (0, 2**62)}, {'shape': (513, 512)},
                         {'epsilon': 0.}, {'nudge': -1.}):
             calls = []
             with self.assertRaises(ValueError):
