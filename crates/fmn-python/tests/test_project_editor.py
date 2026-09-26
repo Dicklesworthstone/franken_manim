@@ -574,7 +574,7 @@ class ProjectEditCliTests(unittest.TestCase):
     def test_production_dispatcher_routes_edit_before_other_commands(self):
         import fmn_python.__main__ as main
         modules = {}
-        for name in ('console_rendering', 'scene_controls', 'studio'):
+        for name in ('console_rendering', 'scene_controls', 'studio', 'bundle_cli'):
             module = ModuleType('fmn_python.' + name)
             modules[module.__name__] = module
         def uncalled(*args):
@@ -583,6 +583,7 @@ class ProjectEditCliTests(unittest.TestCase):
         modules['fmn_python.console_rendering'].try_render_cli = uncalled
         modules['fmn_python.scene_controls'].try_scene_cli = uncalled
         modules['fmn_python.studio'].try_studio_cli = uncalled
+        modules['fmn_python.bundle_cli'].try_bundle_cli = uncalled
         with patch.dict(sys.modules, modules), \
                 patch.object(main, '_ensure_exclusive_manimlib_namespace'), \
                 patch('sys.argv', ['fmn-python', 'edit', '--help', '--robot']):
