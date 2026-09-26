@@ -332,6 +332,27 @@ pub(crate) fn set_family_rgb(stage: &mut Stage, mob: Mob, rgb: [f32; 3]) {
     }
 }
 
+/// Deferred mutations of a fresh live-source copy. These are target recipes,
+/// not already-copied mobjects: Succession and replay resolve them at begin.
+#[derive(Debug, Clone)]
+pub(crate) enum TargetPrep {
+    Indicate { scale: f64, color: [f32; 3] },
+    ReversePoints,
+}
+
+impl TargetPrep {
+    fn apply(&self, stage: &mut Stage, target: Mob) -> Result<(), AnimError> {
+        match *self {
+            Self::Indicate { scale, color } => {
+                stage.scale(target, scale);
+                set_family_rgb(stage, target, color);
+            }
+            Self::ReversePoints => stage.reverse_family_points(target)?,
+        }
+        Ok(())
+    }
+}
+
 /// The Transform animation (transform.py:24): align, then lerp fields
 /// from the starting copy to an aligned target copy through the path
 /// function.
@@ -343,6 +364,7 @@ pub struct Transform {
     path: PathFunc,
     replace_in_scene: bool,
     start_prep: Option<StartPrep>,
+    target_prep: Option<TargetPrep>,
 }
 
 impl Transform {
@@ -360,6 +382,7 @@ impl Transform {
             path: PathFunc::Straight,
             replace_in_scene: false,
             start_prep: None,
+            target_prep: None,
         }
     }
 
@@ -368,6 +391,14 @@ impl Transform {
     #[must_use]
     pub fn with_start_prep(mut self, prep: StartPrep) -> Self {
         self.start_prep = Some(prep);
+        self
+    }
+
+    /// Prepare a private target at begin, before family alignment. Used by
+    /// the indication family without adding a second interpolation mechanism.
+    #[must_use]
+    pub(crate) fn with_target_prep(mut self, prep: TargetPrep) -> Self {
+        self.target_prep = Some(prep);
         self
     }
 
@@ -440,13 +471,17 @@ impl Animation for Transform {
         // A self-target is a live begin-time recipe (used by the grow family),
         // not an endpoint that may alias interpolation's destination. Freeze
         // it before taking/preparing the starting copy, on every begin/replay.
-        let mut target_copy = if self.target != mobject
+        let mut target_copy = if self.target_prep.is_none()
+            && self.target != mobject
             && stage.is_aligned_with(mobject, self.target)
         {
             self.target
         } else {
             stage.copy_family(self.target)?
         };
+        if let Some(prep) = &self.target_prep {
+            prep.apply(stage, target_copy)?;
+        }
         stage.align_data_and_family(mobject, target_copy)?;
         // A pair whose object-space geometric columns differ cannot be represented by
         // placement interpolation alone. Bake each side once into world-space

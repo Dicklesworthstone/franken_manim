@@ -45,7 +45,7 @@ use crate::animation::{AnimConfig, AnimError, AnimState, Animation, AnimationSig
 use crate::composition::{AnimationGroup, Succession};
 use crate::creation::match_style_from;
 use crate::movement::Homotopy;
-use crate::transform::{Transform, set_family_rgb};
+use crate::transform::{TargetPrep, Transform};
 
 /// The Reference's `YELLOW` (`#FFFF00`), the indication default color.
 pub const INDICATION_YELLOW: [f32; 3] = [1.0, 1.0, 0.0];
@@ -65,7 +65,8 @@ pub fn focus_on(starting_dot: Mob, focus_dot: Mob, remover: bool) -> Transform {
 
 /// `Indicate` (indication.py:73): transform onto a copy scaled by
 /// `scale_factor` and recolored, under `there_and_back`. Reference
-/// defaults: `scale_factor = 1.2`, `color = YELLOW`.
+/// defaults: `scale_factor = 1.2`, `color = YELLOW`. Geometry, placement and
+/// paint are sampled when the animation begins, including on replay.
 ///
 /// # Errors
 /// [`AnimError::StaleHandle`] / [`AnimError::Stage`].
@@ -75,10 +76,13 @@ pub fn indicate(
     scale_factor: f64,
     color: Option<[f32; 3]>,
 ) -> Result<Transform, AnimError> {
-    let target = stage.copy_family(mobject)?;
-    stage.scale(target, scale_factor);
-    set_family_rgb(stage, target, color.unwrap_or(INDICATION_YELLOW));
-    let mut t = Transform::new(mobject, target);
+    if !stage.contains(mobject) {
+        return Err(AnimError::StaleHandle(mobject));
+    }
+    let mut t = Transform::new(mobject, mobject).with_target_prep(TargetPrep::Indicate {
+        scale: scale_factor,
+        color: color.unwrap_or(INDICATION_YELLOW),
+    });
     t.state_mut().config.name = "Indicate".to_owned();
     t.state_mut().config.rate_func = RateFunc::Base(rate::there_and_back);
     Ok(t)
@@ -115,7 +119,7 @@ pub fn circle_indicate(pre_circle: Mob, circle: Mob, remover: bool) -> Transform
 
 /// `TurnInsideOut` (indication.py:401): transform onto a points-reversed
 /// copy along a `path_arc` (default 90°). C-1's ruling applies — see the
-/// module docs.
+/// module docs. The reversed target is rebuilt from the live source at begin.
 ///
 /// # Errors
 /// [`AnimError::StaleHandle`] / [`AnimError::Stage`].
@@ -124,9 +128,12 @@ pub fn turn_inside_out(
     mobject: Mob,
     path_arc: f64,
 ) -> Result<Transform, AnimError> {
-    let target = stage.copy_family(mobject)?;
-    stage.reverse_family_points(target)?;
-    let mut t = Transform::new(mobject, target).with_path_arc(path_arc, [0.0, 0.0, 1.0]);
+    if !stage.contains(mobject) {
+        return Err(AnimError::StaleHandle(mobject));
+    }
+    let mut t = Transform::new(mobject, mobject)
+        .with_target_prep(TargetPrep::ReversePoints)
+        .with_path_arc(path_arc, [0.0, 0.0, 1.0]);
     t.state_mut().config.name = "TurnInsideOut".to_owned();
     Ok(t)
 }
@@ -486,8 +493,8 @@ pub fn apply_wave(stage: &Stage, mobject: Mob, direction: Vec3, amplitude: f64) 
 /// building `SurroundingRectangle(mobject, buff)` / `Underline`, the
 /// `insert_n_curves(100)` resample, the null-curve strip, and the
 /// `stroke_width = 4.0` / `color = YELLOW` styling — lives with the
-/// geometry tier that owns those types (the `focus_on` doctrine: Choreo
-/// wires, the library draws).
+/// geometry tier that owns those types (the `focus_on` doctrine:
+/// Choreo wires, the library draws).
 #[must_use]
 pub fn flash_around(path: Mob, time_width: f64, taper_width: f64) -> VShowPassingFlash {
     let mut flash = VShowPassingFlash::new(path)
