@@ -63,6 +63,10 @@ def install_decimal_authoring(native):
             raise ValueError("decimal-number spacing must be finite and f32-representable")
         if not np.isfinite(self.edge_to_fix).all():
             raise ValueError("decimal-number fixed edge must have finite components")
+        for name, index in (("stroke width", 11), ("fill opacity", 12), ("fill border width", 13)):
+            value = params[index]
+            if not math.isfinite(value) or abs(value) > 3.4028234663852886e38:
+                raise ValueError("decimal-number " + name + " must be finite and f32-representable")
         unit = params[6]
         if unit is not None and len(unit.removeprefix("^")) > _MAX_CHARACTERS:
             raise ValueError("decimal-number unit exceeds the 4096-character limit")
@@ -253,7 +257,9 @@ def install_decimal_authoring(native):
             scratch = build(self, parts, texts)
         # Authored glyphs may be Text/VGroup roots with ink in descendants.
         # Never select this readout's own background rectangle as the donor.
-        donor = next((member for child in self.submobjects
+        previous = getattr(self, "_fmn_decimal_children", tuple(self.submobjects))
+        background = getattr(self, "_fmn_decimal_background_child", None)
+        donor = next((member for child in previous if child is not background
                       for member in child.family_members_with_points()), None)
         if donor is not None:
             style = donor.get_style()
@@ -262,10 +268,69 @@ def install_decimal_authoring(native):
         # All value/format/resource/typography validation and glyph styling
         # finish before the first write to the live receiver. Replace the exact
         # child list: become's family padding leaves stale glyphs after shrink.
-        self.set_data(scratch.data.copy())
-        self.set_submobjects(list(scratch.submobjects))
+        publish(self, scratch, previous)
         self.number, self.num_string = number, text
         self._complex_imag_mode = len(parts) == 1 and parts[0][2]
+
+    def copy_root(receiver, candidate):
+        # set_data would replace the declared dtype, invalidating custom lanes.
+        # Resize through the public protocol, then copy only native columns.
+        receiver.set_points(candidate.get_points())
+        source, destination = candidate.data, receiver.data
+        for name in source.dtype.names:
+            if name != "point" and name in destination.dtype.names:
+                destination[name][:] = source[name]
+
+    def publish(self, candidate, previous):
+        claimed = {id(child) for child in previous}
+        retained = [child for child in self.submobjects if id(child) not in claimed]
+        children = list(candidate.submobjects)
+        root_owned = getattr(self, "_fmn_decimal_root_generated", bool(self.has_points()))
+        background = None
+        if candidate.has_points():
+            if root_owned or not self.has_points():
+                copy_root(self, candidate)
+                root_owned = True
+            else:
+                # A subclass may draw on its own root in init_points. Keep it:
+                # only this decorated case needs a separate background child.
+                background = VMobject()
+                copy_root(background, candidate)
+                children.insert(0, background)
+        elif root_owned:
+            self.clear_points()
+            root_owned = False
+        self.set_submobjects([*retained, *children])
+        # The shared copier remaps family references inside object ndarrays;
+        # plain Python containers intentionally retain shallow-copy semantics.
+        owned = np.empty(len(children), dtype=object)
+        for index, child in enumerate(children):
+            owned[index] = child
+        self._fmn_decimal_children = owned
+        self._fmn_decimal_root_generated = root_owned
+        self._fmn_decimal_background_child = background
+
+    def init_colors(self):
+        # Reference numbers call init_colors again after creating the digits.
+        # Its background is a child; our ordinary native readout stores it on
+        # the root. Preserve that native background while styling the glyphs.
+        background = self if getattr(self, "_fmn_decimal_root_generated", False) else getattr(
+            self, "_fmn_decimal_background_child", None,
+        )
+        saved = None if background is None else background.get_style()
+        # Native text_config may supply colored glyphs. Only explicit readout
+        # colors override them, as on the pre-existing number builder route.
+        style = getattr(self, "_fmn_decimal_style", None)
+        if style is None:
+            # Native Matrix cells may be reclassified without this constructor.
+            params = self._decimal_params
+            style = dict(stroke_width=params[11], fill_opacity=params[12], fill_border_width=params[13])
+            if params[10] is not None:
+                style["color"] = params[10]
+        g["_apply_vmobject_style_kwargs"](self, dict(style))
+        if saved is not None:
+            background.set_style(**saved, recurse=False)
+        return self
 
     @wraps(previous_init)
     def decimal_init(self, *args, **kwargs):
@@ -289,12 +354,26 @@ def install_decimal_authoring(native):
             float(config["fill_opacity"]), float(config["fill_border_width"]),
         )
         validate_format(self)
-        g["_install_live_state"](self)
-        self._engine_init()
+        self.number = number
+        self._fmn_decimal_children = np.empty(0, dtype=object)
+        self._fmn_decimal_root_generated = False
+        self._fmn_decimal_background_child = None
+        options = dict(config["kwargs"])
+        options.update(stroke_width=config["stroke_width"], fill_opacity=config["fill_opacity"],
+                       fill_border_width=config["fill_border_width"])
+        if config["color"] is not None:
+            options.setdefault("fill_color", config["color"])
+            options.setdefault("stroke_color", config["color"])
+        self._fmn_decimal_style = dict(options)
+        # Match the native shelf's white default, not generic VMobject gray.
+        options.setdefault("fill_color", g["WHITE"])
+        options.setdefault("stroke_color", g["WHITE"])
+        g["_init_native_vmobject"](self, options)
         self.set_submobjects_from_number(number)
-        g["_apply_vmobject_style_kwargs"](self, config["kwargs"])
+        self.init_colors()
 
-    for name, method in (("__init__", decimal_init), ("get_num_string", get_num_string),
+    for name, method in (("__init__", decimal_init), ("init_colors", init_colors),
+                         ("get_num_string", get_num_string),
                          ("char_to_mob", char_to_mob),
                          ("set_submobjects_from_number", set_submobjects_from_number)):
         method.__name__ = name
