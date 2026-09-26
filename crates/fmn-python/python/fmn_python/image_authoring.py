@@ -86,6 +86,20 @@ def install_image_authoring(native):
     if g.get("_FMN_IMAGE_AUTHORING_INSTALLED", False):
         return
     Image, np = g["ImageMobject"], g["_np"]
+    initializer = g.get("_initialize_raster_image")
+    if not callable(initializer):
+        raise ImportError("native image initialization seam is missing")
+    # Invocation state is not a copied/pickled image attribute. No proxy is
+    # retained here, and every constructor path releases its prepared resource.
+    constructing = {}
+
+    def image_resource(self):
+        pending = constructing.get(id(self))
+        return pending if pending is not None else g["_read_raster_image"](self)
+
+    def dimensions(self):
+        pending = constructing.get(id(self))
+        return pending.size if pending is not None else self._image_dimensions()
 
     def initialize(self, filename, height=4.0, **kwargs):
         if self._is_bound():
@@ -108,18 +122,24 @@ def install_image_authoring(native):
             width, pixel_height = raster.size
             if height * width / pixel_height > np.finfo(np.float32).max:
                 raise ValueError("image aspect ratio produces an unrepresentable scene width")
-            # Every conversion and decode has succeeded before installation.
-            g["_install_live_state"](self)
-            specs = g["_build_raster_image"](self, raster, g["_native_shell_factory"], height, opacity, z_index)
-            g["_hang_native_children"](self, specs)
-            vars(self).update(height=height, opacity=opacity, image_path=path,
-                              pixel_width=width, pixel_height=pixel_height)
-            if fixed:
-                self.fix_in_frame()
-            if depth:
-                self.apply_depth_test()
-            if color is not None:
-                self.set_color(color)
+            # Every conversion and decode succeeds before native initialization.
+            # Mobject owns live state and the one native data/points/uniforms
+            # hook sequence. Pass seeds through its ordinary constructor; an
+            # inherited _install_live_state must not reset the requested alpha.
+            constructing[id(self)] = raster
+            try:
+                super(Image, self).__init__(
+                    height=height, opacity=opacity, color=g["_WHITE"] if color is None else color,
+                    image_path=path, _fmn_image_z_index=z_index,
+                    _fmn_image_fixed=fixed, _fmn_image_depth=depth,
+                )
+                # An authored init_data can supply all six records instead of
+                # calling super(). Admit that actual table, never replace it
+                # with the canonical quad after the authored hooks have run.
+                self.init_colors()
+                initializer(self, raster)
+            finally:
+                constructing.pop(id(self), None)
 
     def from_pixel_array(cls, pixels, height=4.0, **kwargs):
         """Construct from uint8 grayscale, gray-alpha, RGB or RGBA samples."""
@@ -155,31 +175,58 @@ def install_image_authoring(native):
             vars(self).update(image_path=None, pixel_width=width, pixel_height=height)
         return self
 
+    def init_data(self):
+        super(Image, self).init_data()
+        raster = image_resource(self)
+        candidate = g["_native_shell_factory"]()
+        specs = g["_build_raster_image"](
+            candidate, raster, g["_native_shell_factory"], 2.0, float(self.opacity), 0,
+        )
+        if specs:
+            raise RuntimeError("a native image quad unexpectedly returned children")
+        # Reference init_data starts from a 2x2 quad. Its vertices and UV order
+        # still come from Atlas; native positional math normalizes its aspect.
+        candidate.set_width(2.0, stretch=True)
+        values = candidate.data.copy()
+        self.resize_points(len(values))
+        for key in ("point", "im_coords", "opacity"):
+            self.data[key][:] = values[key]
+        if id(self) in constructing:
+            initializer(self, raster)
+        return self
+
     def init_points(self):
         """Reapply configured height and the current raster's aspect ratio."""
-        width, pixel_height = self._image_dimensions()
+        width, pixel_height = dimensions(self)
         height = float(self.height)
         scene_width = height * width / pixel_height
         if (not math.isfinite(height) or height <= 0
                 or not math.isfinite(scene_width)
                 or max(height, scene_width) > np.finfo(np.float32).max):
             raise ValueError("image dimensions must produce positive finite f32-representable extents")
-        # The original width-then-height formula assumed an untouched 2x2
-        # constructor quad. Existing quads may already be sized/transformed.
-        # Native positional operations own both extents and the center.
         self.set_height(height)
         self.set_width(scene_width, stretch=True)
         return self
 
+    def init_uniforms(self):
+        super(Image, self).init_uniforms()
+        self.set_z_index(getattr(self, "_fmn_image_z_index", 0))
+        if getattr(self, "_fmn_image_fixed", False):
+            self.fix_in_frame()
+        if getattr(self, "_fmn_image_depth", False):
+            self.apply_depth_test()
+        return self
+
     def get_pixel_array(self):
         """Return a writable, detached RGBA8 copy of the native image pixels."""
-        raster = g["_read_raster_image"](self)
+        raster = image_resource(self)
         width, height = raster.size
         return np.frombuffer(raster.pixels(), dtype=np.uint8).reshape(height, width, 4).copy()
 
     for name, function in (("__init__", initialize), ("set_image", set_image),
                            ("set_pixel_array", set_pixel_array), ("get_pixel_array", get_pixel_array),
-                           ("init_points", init_points)):
+                           ("init_data", init_data), ("init_points", init_points),
+                           ("init_uniforms", init_uniforms)):
         _method(Image, name, function)
     for name, function in (("from_bytes", from_bytes), ("from_pixel_array", from_pixel_array)):
         function.__name__ = name
@@ -191,10 +238,10 @@ def install_image_authoring(native):
     # running these setters. Reading dimensions must follow that actual image.
     # Retained dictionary entries from earlier pickles are harmless projections.
     def pixel_width(self):
-        return self._image_dimensions()[0]
+        return dimensions(self)[0]
 
     def pixel_height(self):
-        return self._image_dimensions()[1]
+        return dimensions(self)[1]
 
     Image.pixel_width = property(pixel_width, doc="Native raster width in pixels (read-only).")
     Image.pixel_height = property(pixel_height, doc="Native raster height in pixels (read-only).")

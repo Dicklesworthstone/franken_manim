@@ -26,6 +26,8 @@ print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
 
+python3 crates/fmn-python/tests/raster_initialization.py
+python3 crates/fmn-python/tests/raster_lifecycle.py
 python3 crates/fmn-python/tests/live_surface_mesh.py
 python3 crates/fmn-python/tests/calculus_area.py
 python3 crates/fmn-python/tests/surface_plotting.py

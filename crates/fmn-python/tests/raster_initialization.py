@@ -72,7 +72,11 @@ class RasterInitializationTests(unittest.TestCase):
         self.assertIs(obj.submobjects[0], decoration)
         self.assertIn(updater, obj.updaters)
         self.assertEqual(calls, [])
-        self.assertEqual(obj.z_index, 7)
+        snapshot = obj._engine_state()['snapshot']
+        obj.set_z_index(7)
+        self.assertEqual(obj._engine_state()['snapshot'], snapshot)
+        obj.set_z_index(8)
+        self.assertNotEqual(obj._engine_state()['snapshot'], snapshot)
         self.assertEqual(obj.uniforms['fixed_in_frame'], 1)
 
     def test_copy_and_old_capture_keep_the_original_pixels(self):

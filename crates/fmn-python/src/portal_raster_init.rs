@@ -103,17 +103,36 @@ fn _initialize_raster_image(
                 "image placement must produce finite record coordinates",
             ));
         }
-        let value = Mobject::from_buffer(entry.buffer.snapshot_clone())
-            .with_uniforms(*entry.uniforms())
-            .with_z_index(preparation.z_index(copy))
+        // Admission is a metadata-only operation. The private baked copy
+        // above proves representability; it is NOT the data to publish. Keep
+        // the original object-space records and affine placement bit-for-bit.
+        let original = stage
+            .get(mob)
+            .ok_or_else(|| StaleHandleError::new_err("image target is stale"))?;
+        let placement = original.placement();
+        let scratch = original.buffer.snapshot_clone();
+        let value = Mobject::from_buffer(scratch.snapshot_clone())
+            .with_uniforms(*original.uniforms())
+            .with_z_index(stage.z_index(mob))
             .with_image_resource(image.resource.clone());
         let candidate = stage.add(value);
-        // Same-schema assignment retains live same-size views, native root
-        // identity, saved state and updater ownership. Python owns its separate
-        // detached child graph, which never enters this root-only operation.
+        if let Err(error) = stage.set_placement(candidate, placement) {
+            let _ = stage.delete(candidate);
+            return Err(stage_error(error));
+        }
+        // Generic become intentionally replaces storage even at equal sizes
+        // (V6). Run that existing metadata transfer against private scratch
+        // storage, then put back the exact original RecordBuffer. No Python
+        // callback or proxy observation occurs while this Stage is borrowed.
+        // This preserves live views without changing become/copy semantics.
+        let retained = std::mem::replace(
+            &mut stage.get_mut(mob).expect("prechecked image target").buffer,
+            scratch,
+        );
         let result = stage
             .become_mobject(mob, candidate, false)
             .map_err(stage_error);
+        stage.get_mut(mob).expect("prechecked image target").buffer = retained;
         let cleanup = stage.delete(candidate).map_err(stage_error);
         result?;
         cleanup?;
@@ -136,6 +155,24 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("native image initialization admission");
+        });
+    }
+
+    #[test]
+    fn production_raster_subclass_lifecycle() {
+        crate::with_python_test_module("image subclass lifecycle", |py, _module, globals| {
+            let source =
+                std::ffi::CString::new(include_str!("../tests/raster_lifecycle.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("native image lifecycle definitions");
+            globals
+                .get_item("run_raster_lifecycle")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .expect("native image subclass lifecycle");
         });
     }
 }
