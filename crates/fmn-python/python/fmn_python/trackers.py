@@ -56,10 +56,29 @@ def install_tracker_interpolation(native: Any) -> None:
             )
         return value
 
+    def interpolate_vector(self, mobject1, mobject2, alpha):
+        # Reference Mobject.interpolate blends the "value" uniform with
+        # interpolate(start, end, alpha); the endpoints stay exact.
+        start = np.asarray(mobject1.get_value(), dtype=self.value_type)
+        end = np.asarray(mobject2.get_value(), dtype=self.value_type)
+        if alpha == 0.0:
+            value = start
+        elif alpha == 1.0:
+            value = end
+        else:
+            value = (1.0 - alpha) * start + alpha * end
+        vector = self._vector_value()
+        vector[:] = value
+        self._set_tracker_value(float(vector[0]))
+
     @wraps(original)
     def interpolate(self, mobject1, mobject2, alpha, path_func=None):
         if not isinstance(self, ValueTracker) or "value" in getattr(self, "locked_uniform_keys", ()):
             return original(self, mobject1, mobject2, alpha, path_func)
+        if self._vector_value() is not None:
+            result = original(self, mobject1, mobject2, alpha, path_func)
+            interpolate_vector(self, mobject1, mobject2, float(alpha))
+            return result
         kind = self._tracker_kind
         if kind not in (0, 1, 2):
             raise ValueError("Unknown native tracker encoding")

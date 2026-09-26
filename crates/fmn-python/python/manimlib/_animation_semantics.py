@@ -66,6 +66,15 @@ def install(native, subsystems=True):
     def requires_python_animation(animation):
         if not getattr(animation, "_native_kind", None):
             return True
+        # Choreo's tracker lane is scalar; a vector ValueTracker keeps its
+        # value in the "value" uniform, which only the Python path blends.
+        # Reduced installer tables carry no ValueTracker at all.
+        tracker = g.get("ValueTracker")
+        if tracker is not None and isinstance(animation, Transform) and any(
+            isinstance(member, tracker) and member._vector_value() is not None
+            for member in animation.mobject.get_family()
+        ):
+            return True
         # Consult the live path, not a constructor-time flag: scene authors
         # may replace it between plays or install it on an animation instance.
         if (

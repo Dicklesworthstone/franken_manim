@@ -7002,6 +7002,41 @@ assert np.allclose(
 )
 assert complex_tracker.get_value() == 5.0 + 6.0j
 
+# A vector value makes a vector tracker, as the Reference stores it in the
+# "value" uniform (colliding_blocks' 4-d state, clt's (a, b) bounds).
+# set_value assigns into it and broadcasts scalars; one component stays a
+# scalar tracker; copies are independent; .animate blends componentwise.
+vector_tracker = manimlib.ValueTracker(np.array([0.0, 10.0]))
+assert isinstance(vector_tracker.get_value(), np.ndarray)
+assert list(vector_tracker.set_value([1, 2]).get_value()) == [1.0, 2.0]
+vector_tracker.increment_value(1)
+assert list(vector_tracker.get_value()) == [2.0, 3.0]
+assert list(vector_tracker.set_value(0).get_value()) == [0.0, 0.0]
+vector_copy = vector_tracker.copy()
+vector_copy.set_value([9, 9])
+assert list(vector_tracker.get_value()) == [0.0, 0.0]
+single_tracker = manimlib.ValueTracker(np.array([3.5]))
+assert single_tracker.get_value() == 3.5 and not isinstance(single_tracker.get_value(), np.ndarray)
+try:
+    manimlib.ValueTracker(1.0).set_value([1, 2])
+except ValueError:
+    pass
+else:
+    raise AssertionError("a scalar tracker took a two-component value")
+vector_tracker.set_value([0.0, 10.0])
+vector_samples = []
+vector_tracker.add_updater(
+    lambda mob: vector_samples.append(np.array(mob.get_value())), call=False
+)
+Scene().play(
+    vector_tracker.animate.set_value(np.array([4.0, 2.0])),
+    run_time=4.0 / 30.0,
+    rate_func=manimlib.linear,
+)
+assert np.array_equal(vector_tracker.get_value(), [4.0, 2.0])
+vector_middle = [sample for sample in vector_samples if 0.0 < sample[0] < 4.0]
+assert vector_middle and all(np.isclose(s[0] + s[1] / 2.0, 5.0) for s in vector_middle)
+
 # Scene.finish_animations runs one final zero-dt updater traversal.  The
 # display root intentionally precedes the derived root, so the ordinary frame
 # leaves it one update behind after the source lands on its endpoint.  The

@@ -701,8 +701,13 @@ def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
         new.__dict__.update(attributes)
 
         extras = old.uniforms._extras
+        # Reference Mobject.copy copies every ndarray uniform, so writing a
+        # copy's array in place (a vector ValueTracker) leaves the source.
         new.uniforms._extras = (
-            _copy.deepcopy(extras, memo) if deep else dict(extras)
+            _copy.deepcopy(extras, memo) if deep else {
+                key: value.copy() if isinstance(value, _np.ndarray) else value
+                for key, value in extras.items()
+            }
         )
         # Function objects remain shared even under deepcopy, while the list is
         # independent, matching manim's updater copy rule.
@@ -13340,8 +13345,21 @@ class ValueTracker(Mobject):
                 type(self).__name__
                 + " holds a scalar; use ComplexValueTracker for complex values"
             )
-        self._init_value_tracker(type(self)._tracker_kind, float(value), 0.0)
+        # Reference: uniforms["value"] = np.array(listify(value)). One
+        # component is a scalar tracker in engine state; more make a vector
+        # tracker (colliding_blocks' 4-d state, clt's (a, b) bounds), whose
+        # value lives in that uniform as the Reference keeps it.
+        components = _np.array(value, dtype=self.value_type).reshape(-1)
+        if len(components) == 0:
+            raise ValueError(type(self).__name__ + " needs at least one value")
+        if len(components) > 1 and type(self)._tracker_kind != 0:
+            raise TypeError(
+                type(self).__name__ + " holds a scalar; a vector value needs ValueTracker"
+            )
+        self._init_value_tracker(type(self)._tracker_kind, float(components[0]), 0.0)
         self.init_uniforms()
+        if len(components) > 1:
+            self.uniforms["value"] = components
 
     def init_uniforms(self):
         # Reference override (value_tracker.py:31): a typed "value"
@@ -13353,7 +13371,19 @@ class ValueTracker(Mobject):
             dtype=self.value_type,
         )
 
+    def _vector_value(self):
+        # The live vector of a vector tracker, else None. As in the
+        # Reference, more than one component in the uniform is a vector.
+        uniforms = getattr(self, "uniforms", None)
+        if isinstance(uniforms, _LiveUniforms) and "value" in uniforms:
+            value = uniforms["value"]
+            if isinstance(value, _np.ndarray) and len(value) > 1:
+                return value
+        return None
+
     def _refresh_value_uniform(self):
+        if self._vector_value() is not None:
+            return
         if isinstance(getattr(self, "uniforms", None), _LiveUniforms) and (
             "value" in self.uniforms
         ):
@@ -13363,9 +13393,26 @@ class ValueTracker(Mobject):
             )
 
     def get_value(self):
+        vector = self._vector_value()
+        if vector is not None:
+            return vector
         return self.value_type(self._tracker_value())
 
     def set_value(self, value):
+        vector = self._vector_value()
+        if vector is not None:
+            # Reference set_value: uniforms["value"][:] = value.
+            vector[:] = value
+            self._set_tracker_value(float(vector[0]))
+            return self
+        if not isinstance(value, (int, float)):
+            components = _np.asarray(value, dtype=self.value_type).reshape(-1)
+            if len(components) != 1:
+                raise ValueError(
+                    f"could not broadcast a {len(components)}-component value into a scalar "
+                    + type(self).__name__
+                )
+            value = components[0]
         self._set_tracker_value(float(value))
         self._refresh_value_uniform()
         return self
