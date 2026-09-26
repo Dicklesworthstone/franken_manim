@@ -8,6 +8,8 @@ use fmn_codec::WavAudio;
 
 use crate::sound::{SoundCue, SoundError};
 
+mod envelope;
+
 impl SoundCue {
     /// Keep the half-open source-frame range `[start, end)`.
     ///
