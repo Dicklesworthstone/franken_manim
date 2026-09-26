@@ -23124,3 +23124,19 @@ except (ValueError, KeyError) as _field_error:
         raise AssertionError("the record view accepted an unknown field")
 else:
     raise AssertionError("set_rgba_array_by_color accepted an unknown field")
+
+
+# ------------------------------- Mobject.z_index reads the engine's sort key
+# The Reference keeps `z_index` as a plain attribute (mobject.py:96) that
+# set_z_index assigns across the family (:1240). Every portal Mobject reads it
+# from the engine, including classes that assign self.z_index while building.
+_z_parent = manimlib.VGroup(manimlib.Square(), manimlib.Circle())
+assert _z_parent.z_index == 0 and _z_parent[0].z_index == 0
+assert _z_parent.set_z_index(4) is _z_parent
+assert [mob.z_index for mob in _z_parent.get_family()] == [4, 4, 4]
+_z_parent.set_z_index(9, recurse=False)
+assert [mob.z_index for mob in _z_parent.get_family()] == [9, 4, 4]
+_z_surface = manimlib.Surface(resolution=(3, 3), z_index=2)
+assert _z_surface.z_index == 2
+_z_surface.set_z_index(5)
+assert _z_surface.z_index == 5

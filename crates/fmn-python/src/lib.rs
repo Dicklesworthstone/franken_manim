@@ -4461,6 +4461,12 @@ impl BridgeMobject {
         })
     }
 
+    /// This entry's own sort key, the Reference's `mobject.z_index`.
+    fn _get_z_index(slf: &Bound<'_, Self>) -> PyResult<i32> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.z_index(mob))
+    }
+
     /// `space_ops.rotate_vector` over the ONE rotation implementation
     /// (fmn-geom's scipy-exact quaternion `rotation_matrix`, the same
     /// kernel `Stage::rotate` composes).

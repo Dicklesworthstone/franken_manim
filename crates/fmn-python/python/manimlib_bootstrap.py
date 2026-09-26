@@ -741,9 +741,20 @@ def _array_is_constant(arr):
     return arr.shape[0] == 0 or bool((arr == arr[0]).all())
 
 
+class _NativeZIndex:
+    """The Reference's `mobject.z_index` attribute (mobject.py:96, :1240),
+    read from the engine's sort key. Non-data, so a class that assigns
+    `self.z_index` during construction (before its native state exists)
+    keeps that value until `set_z_index` writes the engine."""
+
+    def __get__(self, obj, owner=None):
+        return self if obj is None else obj._get_z_index()
+
+
 class Mobject(_BridgeMobject):
     dim = 3
     data_dtype = [("point", 3), ("rgba", 4)]
+    z_index = _NativeZIndex()
     aligned_data_keys = ["point"]
     pointlike_data_keys = ["point"]
     render_primitive = 5  # moderngl.TRIANGLE_STRIP, without importing a renderer
@@ -1421,9 +1432,11 @@ class Mobject(_BridgeMobject):
 
     def set_z_index(self, z_index, recurse=True):
         # State-real: the engine's scene-list sort key (§8.5), written per
-        # family member in both proxy states.
+        # family member in both proxy states. The Reference also assigns
+        # `mob.z_index`; drop any instance value so `z_index` reads the engine.
         for mob in _family_preorder(self) if recurse else [self]:
             mob._set_z_index(int(z_index))
+            vars(mob).pop("z_index", None)
         return self
 
     def sort(self, point_to_num_func=lambda p: p[0], submob_func=None):
