@@ -15,6 +15,18 @@ _INTERNAL = frozenset({
 })
 
 
+class FamilyRefs(tuple):
+    """Generated family members recorded on their owner.
+
+    The copier remaps these to the copy's own members, as it does object
+    ndarray slots. Use this, not an object ndarray, for family references: an
+    ndarray is invisible to the cycle collector, so owner -> array -> child ->
+    parents -> owner could never be freed. A tuple is collected, deep-copied
+    through the memo, and pickled by reference to this module.
+    """
+    __slots__ = ()
+
+
 def _array_copies(np, projections, family_map):
     """One memo keeps repeated array identities coherent across the family.
 
@@ -145,15 +157,19 @@ def install_mobject_copying(native):
         # Freeze attribute references, not native record views. Existing members
         # already in the caller's memo must not have their copies overwritten.
         attributes = [(member, tuple((name, value) for name, value in vars(member).items()
-                                     if name not in _INTERNAL and isinstance(value, np.ndarray)))
+                                     if name not in _INTERNAL
+                                     and isinstance(value, (np.ndarray, FamilyRefs))))
                       for member in members if id(member) not in memo]
         result = original(root, deep, memo, detach_bound=detach_bound)
         family_map = {id(member): memo[id(member)] for member in members}
         projections = [(vars(family_map[id(member)]), name, value)
                        for member, values in attributes for name, value in values]
+        references = [(namespace, name, FamilyRefs(family_map.get(id(item), item) for item in value))
+                      for namespace, name, value in projections if isinstance(value, FamilyRefs)]
+        arrays = [projection for projection in projections if not isinstance(projection[2], FamilyRefs)]
         # Finish every array before publishing attributes onto the copy. The
         # source dictionaries are never cleared, stashed or temporarily edited.
-        for namespace, name, value in _array_copies(np, projections, family_map):
+        for namespace, name, value in [*_array_copies(np, arrays, family_map), *references]:
             namespace[name] = value
         return result
 

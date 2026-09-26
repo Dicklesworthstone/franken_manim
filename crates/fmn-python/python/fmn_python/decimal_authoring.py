@@ -11,6 +11,8 @@ from functools import wraps
 import inspect
 import math
 
+from .copying import FamilyRefs
+
 _MAX_CHARACTERS = 4096
 
 
@@ -301,12 +303,9 @@ def install_decimal_authoring(native):
             self.clear_points()
             root_owned = False
         self.set_submobjects([*retained, *children])
-        # The shared copier remaps family references inside object ndarrays;
-        # plain Python containers intentionally retain shallow-copy semantics.
-        owned = np.empty(len(children), dtype=object)
-        for index, child in enumerate(children):
-            owned[index] = child
-        self._fmn_decimal_children = owned
+        # The shared copier remaps FamilyRefs to the copy's own members; plain
+        # Python containers intentionally retain shallow-copy semantics.
+        self._fmn_decimal_children = FamilyRefs(children)
         self._fmn_decimal_root_generated = root_owned
         self._fmn_decimal_background_child = background
 
@@ -355,7 +354,7 @@ def install_decimal_authoring(native):
         )
         validate_format(self)
         self.number = number
-        self._fmn_decimal_children = np.empty(0, dtype=object)
+        self._fmn_decimal_children = FamilyRefs()
         self._fmn_decimal_root_generated = False
         self._fmn_decimal_background_child = None
         options = dict(config["kwargs"])
