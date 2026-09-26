@@ -14,78 +14,83 @@ def native_swap_midpoint_and_finish():
     scene, left, right = setup_scene()
     roots = list(scene.mobjects)
     animation = Swap(left, right, path_arc=0, rate_func=linear, run_time=1)
-    assert turn_animation_into_updater(animation) is left
-    left.update(.5)
-    left.update(0)
+    # As in the Reference, the updater lives on Swap's public group root
+    # (animation.mobject), not on an operand.
+    group = turn_animation_into_updater(animation)
+    assert group is animation.mobject
+    assert all(any(member is operand for member in group.get_family()) for operand in (left, right))
+    group.update(.5)
+    group.update(0)
     np.testing.assert_allclose(left.get_center(), (0, 0, 0), atol=1e-5)
     np.testing.assert_allclose(right.get_center(), (0, 0, 0), atol=1e-5)
-    left.update(.5)
-    left.update(0)
+    group.update(.5)
+    group.update(0)
     np.testing.assert_allclose(left.get_center(), 2 * RIGHT, atol=1e-5)
     np.testing.assert_allclose(right.get_center(), 2 * LEFT, atol=1e-5)
-    assert not left.updaters
+    assert not group.updaters
     assert all(any(root is actual for actual in scene.mobjects) for root in roots)
 
 
 def native_swap_cycles():
     _, left, right = setup_scene()
-    cycle_animation(Swap(left, right, path_arc=0, rate_func=linear, run_time=1))
-    left.update(2.25)
-    left.update(0)
+    group = cycle_animation(Swap(left, right, path_arc=0, rate_func=linear, run_time=1))
+    group.update(2.25)
+    group.update(0)
     np.testing.assert_allclose(left.get_center(), LEFT, atol=1e-5)
     np.testing.assert_allclose(right.get_center(), RIGHT, atol=1e-5)
-    assert left.updaters
-    left.clear_updaters()
+    assert group.updaters
+    group.clear_updaters()
 
 
 def explicit_removal_keeps_current_pose():
     _, left, right = setup_scene()
-    cycle_animation(Swap(left, right, path_arc=0, rate_func=linear))
-    left.update(.25)
-    left.update(0)
+    group = cycle_animation(Swap(left, right, path_arc=0, rate_func=linear))
+    group.update(.25)
+    group.update(0)
     expected = left.get_points().copy(), right.get_points().copy()
-    left.clear_updaters()
-    left.update(2)
+    group.clear_updaters()
+    group.update(2)
     np.testing.assert_array_equal(left.get_points(), expected[0])
     np.testing.assert_array_equal(right.get_points(), expected[1])
-    assert not left.updaters
+    assert not group.updaters
 
 
 def copied_updaters_do_not_control_the_source():
     _, left, right = setup_scene()
     animation = Swap(left, right, path_arc=0, rate_func=linear)
-    cycle_animation(animation)
-    duplicate = left.copy()
+    group = cycle_animation(animation)
+    duplicate = group.copy()
     duplicate.update(5)
     duplicate.clear_updaters()
     assert animation.total_time == 0
-    assert left.updaters
-    left.clear_updaters()
+    assert group.updaters
+    group.clear_updaters()
 
 
 def wait_drives_native_background_effect():
     scene, left, right = setup_scene()
-    turn_animation_into_updater(Swap(left, right, path_arc=0, rate_func=linear, run_time=.1))
+    group = turn_animation_into_updater(Swap(left, right, path_arc=0, rate_func=linear, run_time=.1))
+    scene.add(group)  # the Scene updates its roots; the updater is on the group
     scene.wait(.3)
     np.testing.assert_allclose(left.get_center(), 2 * RIGHT, atol=1e-5)
     np.testing.assert_allclose(right.get_center(), 2 * LEFT, atol=1e-5)
-    assert not left.updaters
+    assert not group.updaters
 
 
 def invalid_dt_recovers():
     _, left, right = setup_scene()
-    turn_animation_into_updater(Swap(left, right, path_arc=0, rate_func=linear))
+    group = turn_animation_into_updater(Swap(left, right, path_arc=0, rate_func=linear))
     try:
-        left.update(float("nan"))
+        group.update(float("nan"))
     except ValueError:
         pass
     else:
         raise AssertionError("nonfinite updater dt must fail")
-    assert not left.updaters
-    assert not left._is_updating_suspended()
-    turn_animation_into_updater(Swap(left, right, path_arc=0, rate_func=linear))
-    left.update(1)
-    left.update(0)
+    assert not group.updaters
+    assert not group._is_updating_suspended() and not left._is_updating_suspended()
+    group = turn_animation_into_updater(Swap(left, right, path_arc=0, rate_func=linear))
+    group.update(1)
+    group.update(0)
     np.testing.assert_allclose(left.get_center(), 2 * RIGHT, atol=1e-5)
 
 
