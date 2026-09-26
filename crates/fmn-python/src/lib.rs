@@ -2107,6 +2107,42 @@ impl BridgeMobject {
         })?
     }
 
+    /// The scalar case of `set_rgba_array_by_color` on this record's own
+    /// rows: `data[field][:, :3] = rgb` and/or `data[field][:, 3] = alpha`,
+    /// without materializing a record view per family member. Returns false,
+    /// writing nothing, unless `field` is a four-lane column, so the caller
+    /// keeps the view path and its exact errors for anything else.
+    #[pyo3(signature = (field, rgb, alpha))]
+    fn _fill_rgba_lanes(
+        slf: &Bound<'_, Self>,
+        field: &str,
+        rgb: Option<[f64; 3]>,
+        alpha: Option<f64>,
+    ) -> PyResult<bool> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_buffer(slf, |buffer| {
+            if buffer.schema().field_width(field) != Some(4) {
+                return false;
+            }
+            let mut column = buffer.read_column(field).expect("four-lane field exists");
+            for lanes in column.as_chunks_mut::<4>().0 {
+                if let Some(rgb) = rgb {
+                    #[allow(clippy::cast_possible_truncation)]
+                    for (lane, value) in lanes.iter_mut().zip(rgb) {
+                        *lane = value as f32;
+                    }
+                }
+                if let Some(alpha) = alpha {
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        lanes[3] = alpha as f32;
+                    }
+                }
+            }
+            buffer.write_range(field, 0, &column)
+        })
+    }
+
     #[pyo3(signature = (writable = true))]
     fn _data_array<'py>(slf: &Bound<'py, Self>, writable: bool) -> PyResult<Bound<'py, PyAny>> {
         crossing::record(CrossingClass::Other);
@@ -8324,10 +8360,23 @@ impl PyScene {
             proxies.insert(*mob, proxy);
         }
         for (mob, _, children) in &graph {
+            let submobjects = proxies[mob].getattr("submobjects")?;
+            // Re-projecting a list that already holds exactly these proxies
+            // in this order clears and re-extends the same items with no
+            // back-edge change. Skip that call: this walk covers the whole
+            // scene family, so unchanged lists would otherwise cost one
+            // Python call per member on every `Scene.mobjects` read.
+            if let Ok(current) = submobjects.cast::<PyList>()
+                && current.len() == children.len()
+                && current
+                    .iter()
+                    .zip(children)
+                    .all(|(item, child)| item.is(&proxies[child]))
+            {
+                continue;
+            }
             let children = PyList::new(py, children.iter().map(|child| &proxies[child]))?;
-            proxies[mob]
-                .getattr("submobjects")?
-                .call_method1("_replace_projection", (children,))?;
+            submobjects.call_method1("_replace_projection", (children,))?;
         }
         Ok(roots
             .into_iter()

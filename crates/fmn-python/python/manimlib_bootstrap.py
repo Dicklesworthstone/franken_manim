@@ -1937,10 +1937,33 @@ class Mobject(_BridgeMobject):
     def set_rgba_array_by_color(
         self, color=None, opacity=None, name="rgba", recurse=True
     ):
+        colors = None
+        if color is not None:
+            colors = _np.array([_color_to_rgb(c) for c in _listify(color)])
+        # One colour and a scalar opacity write the same lanes into every
+        # row of every member. Members with records whose class keeps the
+        # base record view take the native lane fill, not a view each.
+        lanes = None
+        if (colors is None or len(colors) == 1) and (
+            opacity is None or isinstance(opacity, (float, int, _np.floating))
+        ):
+            lanes = (
+                None if colors is None else tuple(float(v) for v in colors[0]),
+                None if opacity is None else float(opacity),
+            )
         for mob in _family_preorder(self) if recurse else [self]:
+            kind = type(mob)
+            if (
+                lanes is not None
+                and kind._style_data is Mobject._style_data
+                and kind.data is Mobject.data
+                and mob.n_records() > 0
+                and mob._fill_rgba_lanes(name, *lanes)
+            ):
+                continue
             data = mob._style_data()
             if color is not None:
-                rgbs = _np.array([_color_to_rgb(c) for c in _listify(color)])
+                rgbs = colors
                 if 1 < len(rgbs):
                     rgbs = _resize_with_interpolation(rgbs, len(data))
                 data[name][:, :3] = rgbs

@@ -23018,3 +23018,88 @@ with contextlib.redirect_stdout(_quiet_capture):
     _quiet.print_file_ready_message("out.mp4")
 _check("quiet suppresses file ready message",
        _quiet_capture.getvalue() == "")
+
+
+# ------------------- set_rgba_array_by_color: native lane fill equals the view
+# One colour and a scalar opacity fill lanes natively on members with records
+# whose class keeps the base record view. It must be bit-identical to the
+# Reference's per-member view assignment. Point-free members, gradients,
+# array opacities, overriding classes and unknown fields keep the view path.
+def _fill_family():
+    group = manimlib.VGroup(
+        manimlib.Square(), manimlib.VGroup(manimlib.Circle(), manimlib.Dot())
+    )
+    return group
+
+
+def _view_fill(root, name, rgb, opacity):
+    for member in root.get_family():
+        rows = member._style_data()
+        if rgb is not None:
+            rows[name][:, :3] = np.array([rgb])
+        if opacity is not None:
+            rows[name][:, 3] = opacity
+
+
+def _style_rows(root, name):
+    return [member._style_data()[name].copy() for member in root.get_family()]
+
+
+_fill_scene = Scene()
+for _bound in (False, True):
+    for _name, _color, _opacity in (
+        ("fill_rgba", manimlib.GREEN_D, None),
+        ("fill_rgba", "#3c6e8f", 0.25),
+        ("stroke_rgba", manimlib.RED, np.float32(0.7)),
+        ("fill_rgba", None, 1),
+        ("stroke_rgba", [manimlib.BLUE], True),
+    ):
+        _fast, _slow = _fill_family(), _fill_family()
+        if _bound:
+            _fill_scene.add(_fast, _slow)
+        _rgb = None if _color is None else tuple(
+            float(v) for v in manimlib.color_to_rgb(
+                _color[0] if isinstance(_color, list) else _color))
+        _fast.set_rgba_array_by_color(_color, _opacity, _name)
+        _view_fill(_slow, _name, _rgb, None if _opacity is None else float(_opacity))
+        assert len(_fast.get_family()) == len(_slow.get_family())
+        for _a, _b in zip(_style_rows(_fast, _name), _style_rows(_slow, _name)):
+            assert _a.dtype == _b.dtype and np.array_equal(_a, _b), (_bound, _name, _a, _b)
+        # The point-free root keeps its constructor-style defaults row.
+        assert _fast.n_records() == 0 and "_data_defaults" in vars(_fast)
+
+# A gradient and an array opacity still interpolate per member (view path).
+_grad = manimlib.Square()
+_grad.set_fill([manimlib.RED, manimlib.BLUE], opacity=[0.0, 1.0])
+_grad_rows = _grad.data["fill_rgba"]
+assert not np.array_equal(_grad_rows[0], _grad_rows[-1])
+assert np.isclose(_grad_rows[0, 3], 0.0) and np.isclose(_grad_rows[-1, 3], 1.0)
+
+# A class that owns its style rows is never bypassed.
+_style_calls = []
+
+
+class _OwnedStyleSquare(manimlib.Square):
+    def _style_data(self):
+        _style_calls.append(self)
+        return super()._style_data()
+
+
+_owned = _OwnedStyleSquare()
+_style_calls.clear()  # construction styles itself through the override too
+_owned.set_fill(manimlib.YELLOW, 0.5)
+assert _style_calls == [_owned], _style_calls
+assert np.allclose(_owned.data["fill_rgba"][:, 3], 0.5)
+
+# An unknown field fails exactly as the view assignment does.
+try:
+    manimlib.Square().set_rgba_array_by_color(manimlib.RED, name="no_such_field")
+except (ValueError, KeyError) as _field_error:
+    try:
+        manimlib.Square().data["no_such_field"]
+    except (ValueError, KeyError) as _view_error:
+        assert type(_field_error) is type(_view_error), (_field_error, _view_error)
+    else:
+        raise AssertionError("the record view accepted an unknown field")
+else:
+    raise AssertionError("set_rgba_array_by_color accepted an unknown field")
