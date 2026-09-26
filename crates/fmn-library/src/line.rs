@@ -13,7 +13,7 @@
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
-    DEFAULT_LIGHT_COLOR, LEFT, MED_SMALL_BUFF, ORIGIN, OUT, PI, RIGHT, UP, UR,
+    DEFAULT_LIGHT_COLOR, LEFT, MED_SMALL_BUFF, ORIGIN, OUT, PI, RIGHT, TAU, UP, UR,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::{ArcLengthTable, GeomError, QuadPath, space_ops};
@@ -674,7 +674,14 @@ impl Arrow {
             // Re-solving a radius from the shortened sweep makes the tip's
             // chord longer and misses the caller's endpoint.
             let r = arc_radius.expect("a curved arrow retains its source radius");
-            let arc: Vec<Vec3> = QuadPath::try_arc(0.0, path_arc, 1.0, ORIGIN, None)?
+            // A sweep past a full turn means the tip outran the arc: the
+            // arrow is degenerate (a zero-length arrow, such as monster.py's
+            // permutation arrow from a fixed point to itself, sits at a
+            // radius of about 1e-8). BN-09's density would ask for millions
+            // of components there. Trace it as the Reference does every
+            // stem, with quadratic_bezier_points_for_arc's fixed 8.
+            let components = (path_arc.abs() > TAU).then_some(8);
+            let arc: Vec<Vec3> = QuadPath::try_arc(0.0, path_arc, 1.0, ORIGIN, components)?
                 .points()
                 .to_vec();
             let outer: Vec<Vec3> = arc.iter().map(|p| scale(*p, r + width / 2.0)).collect();
@@ -1173,6 +1180,42 @@ mod tests {
         let short = Arrow::new([0.0; 3], [0.2, 0.0, 0.0]).buff(0.0);
         let (_, _, tip_length) = short.key_dimensions(0.2);
         assert!(tip_length <= 0.5 * 0.2 + 1e-12, "tip length {tip_length}");
+    }
+
+    #[test]
+    fn a_zero_length_curved_arrow_is_a_speck_not_a_budget_refusal() {
+        // monster.py draws permutation arrows with path_arc=PI/2 from each
+        // mobject to its image, so a fixed point asks for an arrow from a
+        // point to itself. The tip outruns the ~1e-8 arc, the stem sweep
+        // passes a full turn, and the stem traces the Reference's fixed 8
+        // components instead of refusing millions.
+        // Structural fixture against the pinned Reference (Arrow(p, p,
+        // path_arc=PI/2, buff=b)): 43 points reaching 0.108253 from p at
+        // buff 0.25 and 0.043301 at buff 0.1, the negative-length tip's size.
+        let start = [1.0, 2.0, 0.0];
+        for (buff, reference_reach) in [(MED_SMALL_BUFF, 0.108_253), (0.1, 0.043_301)] {
+            let arrow = Arrow::new(start, start)
+                .path_arc(PI / 2.0)
+                .buff(buff)
+                .build()
+                .expect("a degenerate curved arrow still builds");
+            assert_eq!(arrow.points().len(), 43);
+            assert!(arrow.points().iter().flatten().all(|v| v.is_finite()));
+            let reach = arrow
+                .points()
+                .iter()
+                .map(|p| space_ops::get_norm(sub(*p, start)))
+                .fold(0.0f64, f64::max);
+            assert!(
+                close(reach, reference_reach, 1e-5),
+                "buff {buff}: reach {reach}"
+            );
+        }
+        // An ordinary curved arrow keeps BN-09's density.
+        Arrow::new([0.0; 3], [4.0, 0.0, 0.0])
+            .path_arc(PI / 2.0)
+            .build()
+            .expect("an ordinary curved arrow builds");
     }
 
     #[test]
