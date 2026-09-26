@@ -64,6 +64,7 @@ def install_arrow_geometry(native):
         function.__qualname__ = Arrow.__qualname__ + "." + name
         function.__module__ = Arrow.__module__
         setattr(Arrow, name, function)
+    _install_curved_arrows(g)
     g["_FMN_ARROW_GEOMETRY_INSTALLED"] = True
 
 
@@ -120,3 +121,40 @@ def _install_stroke_arrow(g):
 
     _bind(Stroke, "__init__", initialize)
     _bind(Stroke, "init_points", points)
+
+
+def _install_curved_arrows(g):
+    """Keep Arc construction, endpoint fitting and tip creation cooperative.
+
+    The Reference fits the *hook-authored* Arc only after all initialization
+    phases, then adds tips through the public TipableVMobject protocol. A
+    detached _build_curved_arrow tree skips those hooks and discards custom
+    record schemas and children. Reuse the existing native-backed Arc and
+    endpoint/tip operations instead; no path or tip geometry is computed here.
+    """
+    Between = g["ArcBetweenPoints"]
+    Curved, Double = g["CurvedArrow"], g["CurvedDoubleArrow"]
+
+    def between_init(self, start, end, angle=g["_math"].tau / 4, **kwargs):
+        # Do not discard start_angle/radius/arc_center: although fitting
+        # cancels them for an ordinary Arc, authored init_points can read
+        # or change them. super() also preserves later base monkeypatches.
+        super(Between, self).__init__(angle=angle, **kwargs)
+        if angle == 0:
+            self.set_points_as_corners([g["_LEFT"], g["_RIGHT"]])
+        self.put_start_and_end_on(start, end)
+
+    def curved_init(self, start_point, end_point, **kwargs):
+        super(Curved, self).__init__(start_point, end_point, **kwargs)
+        self.add_tip()
+
+    def double_init(self, start_point, end_point, **kwargs):
+        super(Double, self).__init__(start_point, end_point, **kwargs)
+        self.add_tip(at_start=True)
+
+    for cls, function in ((Between, between_init), (Curved, curved_init),
+                          (Double, double_init)):
+        function.__name__ = "__init__"
+        function.__qualname__ = cls.__qualname__ + ".__init__"
+        function.__module__ = cls.__module__
+        cls.__init__ = function
