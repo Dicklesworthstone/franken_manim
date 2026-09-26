@@ -144,7 +144,7 @@ _2020/covid.py	RescaleToLogarithmic	scene_code_error	TypeError
 _2020/covid.py	SARSvs1918	missing_asset	OSError
 _2020/covid.py	ShowLogisticCurve	scene_code_error	TypeError
 _2020/covid.py	ShowVaryingBaseFactor	ok	
-_2020/covid.py	ShowVaryingExpCurve	scene_code_error	TypeError
+_2020/covid.py	ShowVaryingExpCurve	ok	
 _2020/covid.py	ShowVaryingExpFactor	ok	
 _2020/covid.py	SneezingOnNeighbors	missing_asset	OSError
 _2020/covid.py	SubtltyOfGrowthFactorShift	scene_code_error	NameError
@@ -232,7 +232,7 @@ _2020/hamming.py	WhatAboutTwoErrors	missing_asset	OSError
 _2020/hamming.py	WhatCDsActuallyUse	ok	
 _2020/hamming.py	WhatIfTheresAndArrowInECCBits	missing_asset	OSError
 _2020/hamming.py	WhyPointToError	scene_code_error	TypeError
-_2020/ldm.py	ComplexExponentialPlay	scene_code_error	TypeError
+_2020/ldm.py	ComplexExponentialPlay	scene_code_error	AttributeError
 _2020/ldm.py	ComplexMultiplication	scene_code_error	AttributeError
 _2020/ldm.py	ComplexNumberPreview	scene_code_error	AttributeError
 _2020/ldm.py	CosGraphs	scene_code_error	TypeError
@@ -240,8 +240,8 @@ _2020/ldm.py	CosSquare	scene_code_error	TypeError
 _2020/ldm.py	CosWave	scene_code_error	TypeError
 _2020/ldm.py	EtoILimit	ok	
 _2020/ldm.py	EulersFormula	ok	
-_2020/ldm.py	ExpMeaning	scene_code_error	TypeError
-_2020/ldm.py	ExpMeaningWithoutCircle	scene_code_error	TypeError
+_2020/ldm.py	ExpMeaning	scene_code_error	AttributeError
+_2020/ldm.py	ExpMeaningWithoutCircle	scene_code_error	AttributeError
 _2020/ldm.py	HarmonicSum	scene_code_error	TypeError
 _2020/ldm.py	ImaginaryInterestRates	scene_code_error	TypeError
 _2020/ldm.py	ItoTheI	ok	
@@ -317,10 +317,10 @@ _2020/monster.py	AskAboutFavoriteMegaNumber	missing_asset	OSError
 _2020/monster.py	AskWhatTheMonsterActsOn	missing_asset	OSError
 _2020/monster.py	AutQ8	ok	
 _2020/monster.py	ButWhy	missing_asset	OSError
-_2020/monster.py	ClassificationOfSimpleGroups	scene_code_error	ValueError
+_2020/monster.py	ClassificationOfSimpleGroups	scene_code_error	TypeError
 _2020/monster.py	CommentOnNontrivialFactFromGroupDecomposition	missing_asset	OSError
 _2020/monster.py	CubeRotations	scene_code_error	AttributeError
-_2020/monster.py	EightShufflingsOfOrderThree	scene_code_error	ValueError
+_2020/monster.py	EightShufflingsOfOrderThree	scene_code_error	IndexError
 _2020/monster.py	ElementsAsAbstractions	missing_asset	OSError
 _2020/monster.py	FrustratedAtGroups	missing_asset	OSError
 _2020/monster.py	GroupsBeyondActions	scene_code_error	TypeError
@@ -337,8 +337,8 @@ _2020/monster.py	MonsterQuotes	missing_asset	OSError
 _2020/monster.py	MonstrousMoonshine	scene_code_error	TypeError
 _2020/monster.py	MultiplicationTable	ok	
 _2020/monster.py	NotGroupsGroupAction	ok	
-_2020/monster.py	PermutationGroups	scene_code_error	ValueError
-_2020/monster.py	QuadrupletShufflings	scene_code_error	ValueError
+_2020/monster.py	PermutationGroups	scene_code_error	TypeError
+_2020/monster.py	QuadrupletShufflings	ok	
 _2020/monster.py	QuinticImpliesCyclicDecomposition	portal_exception	TypeError
 _2020/monster.py	RAddToRMult	scene_code_error	Exception
 _2020/monster.py	S4WithMultipleChildren	missing_asset	OSError
@@ -637,8 +637,8 @@ _2021/newton_fractal.py	DefineBoundary	ok
 _2021/newton_fractal.py	DontWorryAboutDetails	missing_asset	OSError
 _2021/newton_fractal.py	EquationToFrame	ok	
 _2021/newton_fractal.py	ExamplePixels	scene_code_error	
-_2021/newton_fractal.py	FactorPolynomial	scene_code_error	TypeError
-_2021/newton_fractal.py	FasterNewtonExample	scene_code_error	TypeError
+_2021/newton_fractal.py	FactorPolynomial	ok	
+_2021/newton_fractal.py	FasterNewtonExample	ok	
 _2021/newton_fractal.py	FractalDimensionWords	ok	
 _2021/newton_fractal.py	FromTwoToThree	ok	
 _2021/newton_fractal.py	FunPartWords	ok	
@@ -660,8 +660,8 @@ _2021/newton_fractal.py	PlayingInFigma	scene_code_error	Exception
 _2021/newton_fractal.py	PragmaticOrigins	scene_code_error	
 _2021/newton_fractal.py	QuinticAppletPlay	scene_code_error	Exception
 _2021/newton_fractal.py	RasterizingBezier	missing_asset	OSError
-_2021/newton_fractal.py	RealNewtonsMethod	scene_code_error	TypeError
-_2021/newton_fractal.py	RealNewtonsMethodHigherGraph	scene_code_error	TypeError
+_2021/newton_fractal.py	RealNewtonsMethod	portal_exception	ValueError
+_2021/newton_fractal.py	RealNewtonsMethodHigherGraph	scene_code_error	ValueError
 _2021/newton_fractal.py	RepeatedNewton	scene_code_error	AttributeError
 _2021/newton_fractal.py	RepeatedNewtonCubic	scene_code_error	AttributeError
 _2021/newton_fractal.py	RepeatedNewtonQuadratic	scene_code_error	AttributeError
@@ -676,7 +676,7 @@ _2021/newton_fractal.py	ThinkAboutWhatPropertyMeans	missing_asset	OSError
 _2021/newton_fractal.py	ThreeRootFractal	scene_code_error	AttributeError
 _2021/newton_fractal.py	ThreeRootFractalWithLabels	scene_code_error	AttributeError
 _2021/newton_fractal.py	Thumbnail2	scene_code_error	AttributeError
-_2021/newton_fractal.py	TransitionToComplexPlane	scene_code_error	TypeError
+_2021/newton_fractal.py	TransitionToComplexPlane	portal_exception	TypeError
 _2021/newton_fractal.py	TwoRootFractal	scene_code_error	AttributeError
 _2021/newton_fractal.py	TwoRootFractalWithLabels	scene_code_error	AttributeError
 _2021/newton_fractal.py	UnrelatedIdeas	missing_asset	OSError
@@ -830,7 +830,7 @@ _2021/some1.py	ExamplesOfFunctions	ok
 _2021/some1.py	Featuring	missing_asset	OSError
 _2021/some1.py	FractionsExample	ok	
 _2021/some1.py	Grey	ok	
-_2021/some1.py	LayersOfAbstraction	scene_code_error	StaleHandleError
+_2021/some1.py	LayersOfAbstraction	ok	
 _2021/some1.py	LinkAndDate	ok	
 _2021/some1.py	Nicheness	ok	
 _2021/some1.py	PartialFraction	ok	
@@ -863,7 +863,7 @@ _2022/borwein/main.py	LongerReciprocalSums	ok
 _2022/borwein/main.py	LongerTimescaleMovingAverages	timeout	
 _2022/borwein/main.py	MoreGeneralFact	scene_code_error	IndexError
 _2022/borwein/main.py	MovingAverages	scene_code_error	AttributeError
-_2022/borwein/main.py	MultiplyBigNumbers	tex_unsupported	TexError
+_2022/borwein/main.py	MultiplyBigNumbers	ok	
 _2022/borwein/main.py	ReplaceXWithPiX	timeout	
 _2022/borwein/main.py	ShowIntegrals	timeout	
 _2022/borwein/main.py	ShowReciprocalSums	capability_refusal	NotImplementedError
@@ -968,7 +968,7 @@ _2022/piano/midi_animations.py	AnimatedMidi	missing_dependency
 _2022/piano/midi_animations.py	AnimatedMidiTrapped5m	missing_dependency	
 _2022/piano/midi_animations.py	HelpLongOnlineConverter	missing_dependency	
 _2022/piano/midi_animations.py	STFTAlgorithmOnTrapped	missing_dependency	
-_2022/puzzles/subsets.py	AltThumbnail	scene_code_error	TypeError
+_2022/puzzles/subsets.py	AltThumbnail	ok	
 _2022/puzzles/subsets.py	AnswerGuess	missing_asset	OSError
 _2022/puzzles/subsets.py	AskAboutComplex	missing_asset	OSError
 _2022/puzzles/subsets.py	AskAboutGuess	ok	
@@ -988,7 +988,7 @@ _2022/puzzles/subsets.py	EvaluationTricks	scene_code_error	AttributeError
 _2022/puzzles/subsets.py	ExampleWith5	portal_exception	RuntimeError
 _2022/puzzles/subsets.py	FactorLargeInteger	ok	
 _2022/puzzles/subsets.py	FifthRootsOfOneOverlay	ok	
-_2022/puzzles/subsets.py	FifthRootsOfUnity	scene_code_error	StaleHandleError
+_2022/puzzles/subsets.py	FifthRootsOfUnity	ok	
 _2022/puzzles/subsets.py	FinalAnswerTitle	ok	
 _2022/puzzles/subsets.py	FirstTrick	missing_asset	OSError
 _2022/puzzles/subsets.py	FocusOnPropertiesNotValues	missing_asset	OSError
@@ -1034,7 +1034,7 @@ _2022/puzzles/subsets.py	SquaringZeta	ok
 _2022/puzzles/subsets.py	StrangeTurnsFraming	ok	
 _2022/puzzles/subsets.py	StudentSaysWhat	missing_asset	OSError
 _2022/puzzles/subsets.py	TantalizinglyClose	missing_asset	OSError
-_2022/puzzles/subsets.py	Thumbnail	scene_code_error	TypeError
+_2022/puzzles/subsets.py	Thumbnail	ok	
 _2022/puzzles/subsets.py	ToTheComplexPlane	ok	
 _2022/puzzles/subsets.py	TopicRolidex	ok	
 _2022/puzzles/subsets.py	ToyVsRH	ok	
@@ -1047,12 +1047,12 @@ _2022/puzzles/subsets.py	WriteDFTMatrix	ok
 _2022/quintic/cubic.py	CubicFormula	scene_code_error	TypeError
 _2022/quintic/cubic.py	CubicFormulaTest	scene_code_error	TypeError
 _2022/quintic/polynomial_baisics.py	ComplicatedSingleValuedFunction	ok	
-_2022/quintic/polynomial_baisics.py	ConstructPolynomialWithGivenRoots	scene_code_error	TypeError
+_2022/quintic/polynomial_baisics.py	ConstructPolynomialWithGivenRoots	missing_asset	OSError
 _2022/quintic/polynomial_baisics.py	CubeRootBehavior	scene_code_error	AttributeError
 _2022/quintic/polynomial_baisics.py	FactsAboutRootsToCoefficients	capability_refusal	NotImplementedError
 _2022/quintic/polynomial_baisics.py	FifthRootBehavior	scene_code_error	AttributeError
 _2022/quintic/polynomial_baisics.py	IntroduceUnsolvability	ok	
-_2022/quintic/polynomial_baisics.py	SolvabilityChart	scene_code_error	TypeError
+_2022/quintic/polynomial_baisics.py	SolvabilityChart	scene_code_error	AttributeError
 _2022/quintic/polynomial_baisics.py	StudySqrt	scene_code_error	AttributeError
 _2022/quintic/polynomial_baisics.py	SummarizeRootsToCyclesBehavior	ok	
 _2022/quintic/polynomial_baisics.py	TableOfContents	ok	
@@ -1244,7 +1244,7 @@ _2023/clt/main.py	InfiniteVariance	ok
 _2023/clt/main.py	LimitingDistributions	timeout	
 _2023/clt/main.py	MeanAndStandardDeviation	tex_unsupported	TexError
 _2023/clt/main.py	RandomDieRolls	ok	
-_2023/clt/main.py	RuleOfThumb	scene_code_error	TypeError
+_2023/clt/main.py	RuleOfThumb	ok	
 _2023/clt/main.py	Thumbnail	ok	
 _2023/clt/main.py	TransitionToSkewDistribution	ok	
 _2023/clt/main.py	UDistSumDistributions	scene_code_error	NameError
@@ -1281,19 +1281,19 @@ _2023/clt_proof/main.py	AddingVariablesWithMGF	ok
 _2023/clt_proof/main.py	AskAboutTheProof	missing_asset	OSError
 _2023/clt_proof/main.py	ConfusionAboutCGF	missing_asset	OSError
 _2023/clt_proof/main.py	ConnectingArrow	ok	
-_2023/clt_proof/main.py	CumulantsOfScaledSum	tex_unsupported	TexError
+_2023/clt_proof/main.py	CumulantsOfScaledSum	ok	
 _2023/clt_proof/main.py	DefineCGF	ok	
-_2023/clt_proof/main.py	DefineMGF	tex_unsupported	TexError
-_2023/clt_proof/main.py	DirectMGFInterpretation	tex_unsupported	TexError
-_2023/clt_proof/main.py	ExpandCGF	tex_unsupported	TexError
-_2023/clt_proof/main.py	FirstFewTermsOfCGF	tex_unsupported	TexError
+_2023/clt_proof/main.py	DefineMGF	ok	
+_2023/clt_proof/main.py	DirectMGFInterpretation	timeout	
+_2023/clt_proof/main.py	ExpandCGF	ok	
+_2023/clt_proof/main.py	FirstFewTermsOfCGF	ok	
 _2023/clt_proof/main.py	ImagineProving	missing_asset	OSError
-_2023/clt_proof/main.py	LookingBeyondExpectationAndVariance	tex_unsupported	TexError
+_2023/clt_proof/main.py	LookingBeyondExpectationAndVariance	ok	
 _2023/clt_proof/main.py	PictureCharacteristicFunction	ok	
 _2023/clt_proof/main.py	RefinedHypothesis	ok	
-_2023/clt_proof/main.py	ScalingProperty	tex_unsupported	TexError
+_2023/clt_proof/main.py	ScalingProperty	ok	
 _2023/clt_proof/main.py	SplitScreen	ok	
-_2023/clt_proof/main.py	TermByTermSum	tex_unsupported	TexError
+_2023/clt_proof/main.py	TermByTermSum	ok	
 _2023/clt_proof/main.py	WhyGaussian	ok	
 _2023/convolutions2/continuous.py	AddTwoGammaDistributions	ok	
 _2023/convolutions2/continuous.py	AltConvolutions	scene_code_error	ValueError
@@ -1302,13 +1302,13 @@ _2023/convolutions2/continuous.py	CompareFormulas	missing_asset	OSError
 _2023/convolutions2/continuous.py	ContinuousSampleAnnotations	ok	
 _2023/convolutions2/continuous.py	Convolutions	ok	
 _2023/convolutions2/continuous.py	ConvolveTwoNormals	ok	
-_2023/convolutions2/continuous.py	ConvolveTwoUniforms	timeout	
+_2023/convolutions2/continuous.py	ConvolveTwoUniforms	ok	
 _2023/convolutions2/continuous.py	ConvolveUniformWithWedge	ok	
 _2023/convolutions2/continuous.py	GaussConvolutions	ok	
 _2023/convolutions2/continuous.py	GaussianConvolution	ok	
-_2023/convolutions2/continuous.py	IntroAnnotations	scene_code_error	TypeError
+_2023/convolutions2/continuous.py	IntroAnnotations	ok	
 _2023/convolutions2/continuous.py	MovingAverageAsConvolution	scene_code_error	ValueError
-_2023/convolutions2/continuous.py	MovingAverageOfRectFuncs	timeout	
+_2023/convolutions2/continuous.py	MovingAverageOfRectFuncs	ok	
 _2023/convolutions2/continuous.py	ProbConvolutionControlled	ok	
 _2023/convolutions2/continuous.py	ProbConvolutionControlledToMatchSlices	ok	
 _2023/convolutions2/continuous.py	ProbConvolutions	portal_exception	ValueError
@@ -1316,13 +1316,13 @@ _2023/convolutions2/continuous.py	RectConvolutionFacts	portal_exception	TypeErro
 _2023/convolutions2/continuous.py	RectConvolutionsNewNotation	scene_code_error	AttributeError
 _2023/convolutions2/continuous.py	RepeatedConvolution	ok	
 _2023/convolutions2/continuous.py	RepeatedConvolutionDoubleLump	ok	
-_2023/convolutions2/continuous.py	RepeatedConvolutionExp	timeout	
+_2023/convolutions2/continuous.py	RepeatedConvolutionExp	ok	
 _2023/convolutions2/continuous.py	RepeatedConvolutionGaussian	ok	
 _2023/convolutions2/continuous.py	RepeatedSamplesFromContinuousDistributions	ok	
 _2023/convolutions2/continuous.py	SampleTwoNormals	ok	
 _2023/convolutions2/continuous.py	SampleWedgePlusDoubleLump	ok	
 _2023/convolutions2/continuous.py	ThumbnailGraphs	ok	
-_2023/convolutions2/continuous.py	TransitionToContinuousProbability	scene_code_error	TypeError
+_2023/convolutions2/continuous.py	TransitionToContinuousProbability	ok	
 _2023/convolutions2/continuous.py	UniformSamples	ok	
 _2023/convolutions2/continuous.py	WedgeAndExpSamples	ok	
 _2023/convolutions2/diagonal_slices.py	AnalyzeStepAlongDiagonalLine	ok	
@@ -1358,7 +1358,7 @@ _2023/convolutions2/gauss_example_supplements.py	NothingWrongWithThat	missing_as
 _2023/convolutions2/gauss_example_supplements.py	OscillatingGraphValue	ok	
 _2023/convolutions2/gauss_example_supplements.py	PreviewExplicitCalculation	ok	
 _2023/convolutions2/gauss_example_supplements.py	RotationalSymmetryAnnotations	ok	
-_2023/convolutions2/gauss_example_supplements.py	ShowGaussianConvolutionsAsEquations	tex_unsupported	TexError
+_2023/convolutions2/gauss_example_supplements.py	ShowGaussianConvolutionsAsEquations	ok	
 _2023/convolutions2/gauss_example_supplements.py	SimpleBellRHS	ok	
 _2023/convolutions2/gauss_example_supplements.py	SimpleBellRHS2	ok	
 _2023/convolutions2/gauss_example_supplements.py	SliceLineAnnotations	ok	
@@ -1410,7 +1410,7 @@ _2023/gauss_int/herschel.py	RescaleG	ok
 _2023/gauss_int/herschel.py	ShowPointR0	ok	
 _2023/gauss_int/herschel.py	ShowXYCoordinate	ok	
 _2023/gauss_int/herschel.py	TalkAboutSignOfConstant3D	ok	
-_2023/gauss_int/herschel.py	TwoDGaussianAsADistribution	scene_code_error	NameError
+_2023/gauss_int/herschel.py	TwoDGaussianAsADistribution	timeout	
 _2023/gauss_int/herschel.py	TwoProperties	ok	
 _2023/gauss_int/herschel.py	VariableC	ok	
 _2023/gauss_int/herschel.py	VariableCWithF	ok	
@@ -1418,9 +1418,9 @@ _2023/gauss_int/herschel.py	VariableInputs	ok
 _2023/gauss_int/integral.py	AntiDerivative	ok	
 _2023/gauss_int/integral.py	BellCurveArea	ok	
 _2023/gauss_int/integral.py	CartesianSliceOverlay	ok	
-_2023/gauss_int/integral.py	CartesianSlices	portal_unbound	NotImplementedError
+_2023/gauss_int/integral.py	CartesianSlices	ok	
 _2023/gauss_int/integral.py	CylinderIntegral	ok	
-_2023/gauss_int/integral.py	CylinderSlices	portal_unbound	NotImplementedError
+_2023/gauss_int/integral.py	CylinderSlices	portal_exception	TypeError
 _2023/gauss_int/integral.py	GaussianIntegral	ok	
 _2023/gauss_int/integral.py	UsualFunctionTypes	ok	
 _2023/gauss_int/supplements.py	CirclesToPopulation	ok	
@@ -1464,7 +1464,7 @@ _2023/gauss_int/supplements.py	YLineFlash	ok
 _2023/moser_reboot/main.py	AddArcComment	ok	
 _2023/moser_reboot/main.py	AskAboutPosition	missing_asset	OSError
 _2023/moser_reboot/main.py	AskAboutSome	missing_asset	OSError
-_2023/moser_reboot/main.py	BalancedEquation	portal_unbound	NotImplementedError
+_2023/moser_reboot/main.py	BalancedEquation	ok	
 _2023/moser_reboot/main.py	ChallengeProblem	ok	
 _2023/moser_reboot/main.py	Clean100choose4	ok	
 _2023/moser_reboot/main.py	Clean4choose4	ok	
@@ -1502,7 +1502,7 @@ _2023/numberphile/prime_race.py	PrimeRace	timeout
 _2023/numberphile/prime_race.py	RaceGraph	ok	
 _2023/optics_puzzles/adding_waves.py	AddTwoRotatingVectors	ok	
 _2023/optics_puzzles/adding_waves.py	AddTwoSineWaves	missing_asset	OSError
-_2023/optics_puzzles/adding_waves.py	Pulse	portal_exception	
+_2023/optics_puzzles/adding_waves.py	Pulse	portal_exception	ValueError
 _2023/optics_puzzles/adding_waves.py	WavePlusLayerInfluence	scene_code_error	TypeError
 _2023/optics_puzzles/adding_waves.py	WhiteLightAsASum	scene_code_error	TypeError
 _2023/optics_puzzles/annotations.py	AnnotateDemo	missing_asset	OSError
@@ -1690,10 +1690,10 @@ _2024/antp/main.py	CrankEmail	capability_refusal	ValueError
 _2024/antp/main.py	DensityFormula	ok	
 _2024/antp/main.py	EuclidProof	ok	
 _2024/antp/main.py	GiantSieve	ok	
-_2024/antp/main.py	InfinitePrimes	portal_unbound	NotImplementedError
+_2024/antp/main.py	InfinitePrimes	ok	
 _2024/antp/main.py	NewGapsInPrimes	ok	
 _2024/antp/main.py	OldGapsInPrimes	ok	
-_2024/antp/main.py	PrimeDensityHistogram	scene_code_error	TypeError
+_2024/antp/main.py	PrimeDensityHistogram	ok	
 _2024/antp/main.py	PrimePanning	ok	
 _2024/antp/main.py	PrimesNearMillion	ok	
 _2024/antp/main.py	SieveOfEratosthenes	ok	
@@ -1772,18 +1772,18 @@ _2024/holograms/supplements.py	WhatThisExplanationLacks	ok
 _2024/holograms/supplements.py	WriteHologram	ok	
 _2024/holograms/supplements.py	WriteTransmissionHologram	ok	
 _2024/holograms/supplements.py	WriteWhiteLightReflectionHologram	ok	
-_2024/inscribed_rect/loops.py	AllAspectRatioPi	scene_code_error	TypeError
+_2024/inscribed_rect/loops.py	AllAspectRatioPi	ok	
 _2024/inscribed_rect/loops.py	AllAspectRatioXMaxTree	missing_asset	OSError
 _2024/inscribed_rect/loops.py	AmbientRectangleSearch	missing_asset	OSError
 _2024/inscribed_rect/loops.py	ChangeTheSurface	missing_asset	OSError
 _2024/inscribed_rect/loops.py	ConstructKleinBottle	missing_asset	OSError
 _2024/inscribed_rect/loops.py	DiscussOrderOfPoints	missing_asset	OSError
-_2024/inscribed_rect/loops.py	GenericLoopPair	scene_code_error	TypeError
+_2024/inscribed_rect/loops.py	GenericLoopPair	ok	
 _2024/inscribed_rect/loops.py	KochZoom	portal_exception	
 _2024/inscribed_rect/loops.py	LoopScene	ok	
 _2024/inscribed_rect/loops.py	MapTheStripOntoTheSurface	missing_asset	OSError
 _2024/inscribed_rect/loops.py	MobiusStripsAndKleinBottlesIn4D	missing_asset	OSError
-_2024/inscribed_rect/loops.py	MusicalIntervalsAsPairs	scene_code_error	StaleHandleError
+_2024/inscribed_rect/loops.py	MusicalIntervalsAsPairs	ok	
 _2024/inscribed_rect/loops.py	ParameterizeTheLoop	missing_asset	OSError
 _2024/inscribed_rect/loops.py	PuzzleOverMobiusDiagram	ok	
 _2024/inscribed_rect/loops.py	RectanglesOfAllAspectRatios	missing_asset	OSError
@@ -1794,7 +1794,7 @@ _2024/inscribed_rect/loops.py	ShowTheSurface	missing_asset	OSError
 _2024/inscribed_rect/loops.py	StateThePuzzle	missing_asset	OSError
 _2024/inscribed_rect/loops.py	SudaneseBand	ok	
 _2024/inscribed_rect/loops.py	TrackTheAngle	missing_asset	OSError
-_2024/inscribed_rect/loops.py	TrackTheAngleForFractal	scene_code_error	TypeError
+_2024/inscribed_rect/loops.py	TrackTheAngleForFractal	ok	
 _2024/inscribed_rect/supplements.py	AskAbout4DEmbeddings	missing_asset	OSError
 _2024/inscribed_rect/supplements.py	AskAboutACircle	missing_asset	OSError
 _2024/inscribed_rect/supplements.py	AskAboutProvingCollision	missing_asset	OSError
@@ -1843,10 +1843,10 @@ _2024/puzzles/added_dimension.py	DrawHexagon	ok
 _2024/puzzles/added_dimension.py	FourDDet	ok	
 _2024/puzzles/added_dimension.py	GeneralCentersOfSimilarity	ok	
 _2024/puzzles/added_dimension.py	HexagonStack	ok	
-_2024/puzzles/added_dimension.py	IntersectingCircles	portal_exception	StaleHandleError
+_2024/puzzles/added_dimension.py	IntersectingCircles	ok	
 _2024/puzzles/added_dimension.py	IntroduceHexagonFilling	ok	
 _2024/puzzles/added_dimension.py	LogicForArea	ok	
-_2024/puzzles/added_dimension.py	MongesTheorem	portal_exception	StaleHandleError
+_2024/puzzles/added_dimension.py	MongesTheorem	ok	
 _2024/puzzles/added_dimension.py	ProbabilityQuestion	ok	
 _2024/puzzles/added_dimension.py	Project3DCube	ok	
 _2024/puzzles/added_dimension.py	Project4DCube	ok	
@@ -2147,26 +2147,26 @@ _2024/transformers/supplements.py	TriPanelWithPi	missing_dependency
 _2024/transformers/supplements.py	WhatAboutBiggerThanOne	missing_dependency	
 _2024/transformers/supplements.py	WriteRLHF	missing_dependency	
 _2024/transformers/supplements.py	WriteSuperposition	missing_dependency	
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount16Faster	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e1	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e10	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e2	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e4	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e6	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e8	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount256	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount4	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	BasicBlockCount64Slower	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	Blocks	scene_code_error	TypeError
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount16Faster	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e1	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e10	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e2	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e4	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e6	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount1e8	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount256	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount4	ok	
+_2025/colliding_blocks_v2/blocks.py	BasicBlockCount64Slower	ok	
+_2025/colliding_blocks_v2/blocks.py	Blocks	ok	
 _2025/colliding_blocks_v2/blocks.py	CirclePuzzle	ok	
-_2025/colliding_blocks_v2/blocks.py	IntroduceSetup	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	MovementOfWall	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	PreviewClip	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	SlowMoBlockCount	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	SlowMoBlockCount1e6	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	SlowMoBlockCount1e8	scene_code_error	TypeError
-_2025/colliding_blocks_v2/blocks.py	ThumbnailShot	scene_code_error	TypeError
+_2025/colliding_blocks_v2/blocks.py	IntroduceSetup	ok	
+_2025/colliding_blocks_v2/blocks.py	MovementOfWall	ok	
+_2025/colliding_blocks_v2/blocks.py	PreviewClip	ok	
+_2025/colliding_blocks_v2/blocks.py	SlowMoBlockCount	ok	
+_2025/colliding_blocks_v2/blocks.py	SlowMoBlockCount1e6	ok	
+_2025/colliding_blocks_v2/blocks.py	SlowMoBlockCount1e8	ok	
+_2025/colliding_blocks_v2/blocks.py	ThumbnailShot	ok	
 _2025/colliding_blocks_v2/grover.py	ClassicalSearch	ok	
 _2025/colliding_blocks_v2/grover.py	GroverPreview	ok	
 _2025/colliding_blocks_v2/supplements.py	AngryStudents	missing_asset	OSError
@@ -2517,7 +2517,7 @@ _2025/laplace/main_equations.py	SimpleExpToPole	ok
 _2025/laplace/main_equations.py	SimplePolesOverImaginaryLine	portal_exception	ValueError
 _2025/laplace/main_equations.py	SimpleToComplex	scene_code_error	TypeError
 _2025/laplace/main_equations.py	TranslateDifferentialEquationAndInvert	ok	
-_2025/laplace/main_equations.py	TranslateToNewLanguage	portal_exception	RuntimeError
+_2025/laplace/main_equations.py	TranslateToNewLanguage	portal_exception	ValueError
 _2025/laplace/main_equations.py	WriteFPrimeExists	ok	
 _2025/laplace/main_equations.py	WriteZetaPrimeFact	ok	
 _2025/laplace/main_equations.py	ZetaFunctionPlot	portal_exception	ValueError
@@ -2595,7 +2595,7 @@ _2025/laplace/prequel_equations.py	WhoCares	missing_asset	OSError
 _2025/laplace/prequel_equations.py	WhyToWhat	ok	
 _2025/laplace/prequel_equations.py	WriteMu	ok	
 _2025/laplace/prequel_equations.py	WriteSPlane	ok	
-_2025/laplace/shm.py	BasicSpringScene	scene_code_error	TypeError
+_2025/laplace/shm.py	BasicSpringScene	ok	
 _2025/laplace/shm.py	DampedSpringSolutionsOnSPlane	missing_asset	OSError
 _2025/laplace/shm.py	DampingForceDemo	ok	
 _2025/laplace/shm.py	GuessCosine	ok	
@@ -2650,8 +2650,8 @@ _2025/laplace/supplements.py	WhoCares	missing_asset	OSError
 _2025/laplace/supplements.py	WhyToWhat	ok	
 _2025/laplace/supplements.py	WriteMu	ok	
 _2025/laplace/supplements.py	WriteSPlane	ok	
-_2025/zeta/play.py	ZetaLogDerivSum	scene_code_error	TypeError
-_2025/zeta/play.py	ZetaSum	scene_code_error	TypeError
+_2025/zeta/play.py	ZetaLogDerivSum	ok	
+_2025/zeta/play.py	ZetaSum	ok	
 _2026/cross_entropy/arithmetic_coding.py	DiagramTest	missing_dependency	
 _2026/hairy_ball/model3d.py	OrientAModel	missing_dependency	
 _2026/hairy_ball/model3d.py	RadioBroadcast	missing_dependency	
@@ -2664,8 +2664,8 @@ _2026/hairy_ball/spheres.py	IntroduceVectorField	portal_exception	ValueError
 _2026/hairy_ball/spheres.py	PairsOfNullPoints	portal_exception	ValueError
 _2026/hairy_ball/spheres.py	ProjectedCombedHypersphere	ok	
 _2026/hairy_ball/spheres.py	SimpleRightwardFlow	timeout	
-_2026/hairy_ball/spheres.py	SingleNullPointHairyBall	timeout	
-_2026/hairy_ball/spheres.py	SingleNullPointHairyBallRevealed	timeout	
+_2026/hairy_ball/spheres.py	SingleNullPointHairyBall	ok	
+_2026/hairy_ball/spheres.py	SingleNullPointHairyBallRevealed	ok	
 _2026/hairy_ball/spheres.py	StereographicProjection	timeout	
 _2026/hairy_ball/spheres.py	SurfaceFoldedOverSelf	timeout	
 _2026/hairy_ball/spheres.py	TeddyHeadSwirl	missing_asset	OSError
@@ -2788,7 +2788,7 @@ _2026/spheres_talk/supplements.py	GammaGraph	ok
 _2026/spheres_talk/supplements.py	HyperbolaSquare	ok	
 _2026/spheres_talk/supplements.py	Hypercube	ok	
 _2026/spheres_talk/supplements.py	Integrals	ok	
-_2026/spheres_talk/supplements.py	IntroSphereAnimation	timeout	
+_2026/spheres_talk/supplements.py	IntroSphereAnimation	ok	
 _2026/spheres_talk/supplements.py	IntroText	ok	
 _2026/spheres_talk/supplements.py	REqExample	ok	
 _2026/spheres_talk/supplements.py	ShellTimesThickness	ok	

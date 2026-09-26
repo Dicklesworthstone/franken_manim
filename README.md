@@ -42,7 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_manim/mai
 | Rendering | Analytic nonzero-winding coverage on the actual quadratic curves, true curve-distance strokes with round caps and principled joins, replacing the Reference's signed-alpha blending tricks and polyline ribbons, with 3b1b's lighting, palette, and ~1.5 px AA *feel* deliberately kept. |
 | Determinism | `--reproducible` renders are **bit-identical** (raw frames, canonical PNGs, WAV) across the certified platform matrix, from a content-hashed input closure, at any thread count. |
 | Performance | Retained render IR with revisioned caches and glyph instancing, adaptive edge-AA, frame-parallel pure segments, pipelined stages, SIMD build tiers, topology-aware render teams; a 96-core workstation saturates on a single scene while certified bits stay pinned. |
-| Compatibility | `fmn-python` presents the `manimlib` module surface with real subclassing semantics, so scenes run **source-unedited** where the portal covers what they use. Measured over every Scene class in the pinned 3b1b/videos tree: 981 of 2,814 run to completion and write their final frame today (34.9%), and every failure is classified in the [scene dashboard](docs/ratchet/scene_dashboard.md). |
+| Compatibility | `fmn-python` presents the `manimlib` module surface with real subclassing semantics, so scenes run **source-unedited** where the portal covers what they use. Measured over every Scene class in the pinned 3b1b/videos tree: 1,039 of 2,814 run to completion and write their final frame today (36.9%), and every failure is classified in the [scene dashboard](docs/ratchet/scene_dashboard.md). |
 | Safety | `#![forbid(unsafe_code)]` in every authoritative crate (the PyO3 binding crate is the sole, isolated exception); the full transitive dependency closure is pinned, allowlisted, and audited. |
 | Extras manim never had | The Studio (crash-isolated live iteration, scrubbing, inspection), WASM tiers, a terminal (kitty/sixel) preview, batch render farms, graph/dataframe/neural-network mobjects from the suite. |
 
@@ -215,7 +215,7 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 | TeX mathematics | **Native (fmd-math), bundled CM** | External LaTeX + dvisvgm | External LaTeX + dvisvgm | ✗ (KaTeX via web) | ✗ (web libs) |
 | Geometry correctness | True arc length, error-bounded conversion, analytic coverage | Chord heuristics, polyline strokes | Chord heuristics | Browser canvas | Browser canvas |
 | Deterministic output | **Bit-identical certified renders, cross-platform, any thread count** | ✗ | ✗ | ✗ | ✗ |
-| Existing manim scenes | ◐ source-unedited via `fmn-python`; 33% of the 3b1b corpus runs to completion today ([dashboard](docs/ratchet/scene_dashboard.md)) | — | Dialect-divergent | ✗ | ✗ |
+| Existing manim scenes | ◐ source-unedited via `fmn-python`; 37% of the 3b1b corpus runs to completion today ([dashboard](docs/ratchet/scene_dashboard.md)) | — | Dialect-divergent | ✗ | ✗ |
 | Headless / server | ✓ trivially | Painful (GL + LaTeX container) | Painful | Node required | Chromium required |
 | WASM / browser | ✓ tiered (frame renderer, timeline player) | ✗ | ✗ | ✓ (is the browser) | ✓ (is the browser) |
 | Live iteration | Studio: crash-isolated worker, checkpoints, scrubbing | IPython embed | Jupyter | ✓ editor | ✓ editor |
@@ -498,11 +498,11 @@ A few honest boundaries:
 
 **Will my existing manim scenes run?** That's the G4a gate: a pinned corpus of real 3b1b-era scenes runs **source-unedited** through `fmn-python` under documented shims (imports, asset paths, fonts), passing structural assertions and Look-Gallery review. Scenes using TeX constructs beyond the current fmd-math tier fail with the named missing construct, which feeds the public coverage ratchet.
 
-Where that stands today: every Scene class in the pinned 3b1b/videos tree (2020–2026, 2,814 classes) is swept through the portal, and 981 (34.9%) run to completion and write their final frame. The sweep does not judge those images; that is the Look Gallery's job. The [scene dashboard](docs/ratchet/scene_dashboard.md) classifies the rest:
+Where that stands today: every Scene class in the pinned 3b1b/videos tree (2020–2026, 2,814 classes) is swept through the portal, and 1,039 (36.9%) run to completion and write their final frame. The sweep does not judge those images; that is the Look Gallery's job. The [scene dashboard](docs/ratchet/scene_dashboard.md) classifies the rest:
 - 24.7% need the videos' private image and SVG assets;
 - 15.2% import packages the sweep did not install (gensim, transformers, torch) or corpus modules missing from the pinned tree;
-- 18.4% fail in the scene's own code. The largest clusters are scenes written for older manim than the pinned Reference (removed classes and keywords, `CONFIG` dictionaries), though an exception that surfaces in scene code does not by itself prove the scene is at fault;
-- 6.9% stop in the portal: named refusals (mostly fonts the portal does not bundle, such as Consolas), TeX constructs past the current tier, portal exceptions and timeouts.
+- 16.9% fail in the scene's own code. The largest clusters are scenes written for older manim than the pinned Reference (removed classes and keywords, `CONFIG` dictionaries), though an exception that surfaces in scene code does not by itself prove the scene is at fault;
+- 6.3% stop in the portal: named refusals (mostly fonts the portal does not bundle, such as Consolas), TeX constructs past the current tier, portal exceptions and timeouts.
 
 **Why is it not pixel-identical to Python manim, and why is that the right call?** Because exact conformance, cross-platform reproducibility, and improved mathematics are mutually contradictory: the Reference's output depends on LaTeX binaries, Pango versions, GPU drivers, float drift, and two legacy RNG streams. FrankenManim chose the stronger pair: *correct* (true arc length, drift-free clock, defined color) and *beautiful* (a renderer judged against the 3b1b look, deliberately kept: same lighting model, same palette, same ~1.5 px AA feel). Every difference is a documented Behavior Note.
 
