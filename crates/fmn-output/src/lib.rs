@@ -48,6 +48,7 @@ pub mod negotiate;
 pub mod provenance;
 pub mod sinks;
 pub mod sound;
+mod sound_edit;
 
 pub use fmn_hash::Digest as ArtifactDigest;
 
