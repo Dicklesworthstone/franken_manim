@@ -42,3 +42,22 @@ fn _build_svg_paints<'py>(
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_build_svg_paints, module)?)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn production_svg_subclass_lifecycle() {
+        crate::with_python_test_module("SVG subclass lifecycle", |py, _module, globals| {
+            let source = std::ffi::CString::new(concat!(
+                include_str!("../tests/svg_lifecycle.py"),
+                "\n_suite = unittest.defaultTestLoader.loadTestsFromTestCase(SvgLifecycleTests)\n",
+                "_result = unittest.TextTestRunner(verbosity=2).run(_suite)\n",
+                "assert _result.wasSuccessful(), 'native SVG lifecycle acceptance failed'\n",
+            ))
+            .unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("native SVG subclass lifecycle");
+        });
+    }
+}

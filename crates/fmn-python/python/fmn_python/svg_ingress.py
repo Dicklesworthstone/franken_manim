@@ -8,10 +8,62 @@ from __future__ import annotations
 
 from functools import wraps
 import inspect
+from itertools import islice
+import math
 
 from .invocation import InvocationGuard
 
 _ROLE = "_fmn_svg_paint_role"
+_MAX_PARTS = 65_536
+_MAX_POINTS = 1_048_576  # Atlas's MAX_SVG_PAINT_POINTS, including paint layers.
+
+
+def _dimension(value, name):
+    if value is None:
+        return None
+    value = float(value)
+    if not math.isfinite(value) or value <= 0 or value > 3.4028234663852886e38:
+        raise ValueError("SVG " + name + " must be positive, finite and f32-representable")
+    return value
+
+
+def _authored_parts(g, receiver, values):
+    """Freeze a whole factory result before adopting or transforming any part."""
+    parts = list(islice(iter(values), _MAX_PARTS + 1))
+    if len(parts) > _MAX_PARTS:
+        raise ValueError("SVG factory exceeds the 65536-part budget")
+    if len({id(part) for part in parts}) != len(parts):
+        raise ValueError("SVG factory returned the same root more than once")
+    retained = {id(member) for member in g["_family_preorder"](receiver)}
+    seen, admitted, count = set(), [], 0
+    for part in parts:
+        if not isinstance(part, g["VMobject"]):
+            raise TypeError("mobjects_from_svg_string must return VMobjects")
+        for member in g["_family_preorder"](part):
+            marker = id(member)
+            if marker in retained:
+                raise ValueError("SVG factory cannot return the receiver or its existing family")
+            if marker in seen:
+                continue  # Shared descendants remain a shared DAG, not copies.
+            seen.add(marker)
+            admitted.append(member)
+            if len(seen) > _MAX_PARTS:
+                raise ValueError("SVG factory exceeds the 65536-member budget")
+            if not isinstance(member, g["VMobject"]):
+                raise TypeError("SVG factory families must contain only VMobjects")
+            if getattr(member, "_scene", None) is not None or member._is_bound():
+                raise ValueError("SVG factory must return detached geometry")
+            count += member.get_num_points()
+            if count > _MAX_POINTS:
+                raise ValueError("SVG factory exceeds the 1048576-point budget")
+            if not g["_np"].isfinite(member.get_points()).all():
+                raise ValueError("SVG factory geometry must be finite")
+    # A later authored geometry getter may adopt an earlier part. Nothing has
+    # been installed yet; recheck native ownership after all such callbacks.
+    if any(g["_BridgeMobject"]._is_bound(member) or vars(member).get("_scene") is not None
+           for member in admitted):
+        raise ValueError("SVG factory ownership changed during preparation")
+    return parts
 
 
 def install_svg_ingress(native):
@@ -108,12 +160,61 @@ def install_svg_ingress(native):
         return tag(builder(self, factory, source, {}))
 
     old_init = Svg.__init__
+    init_signature = inspect.signature(old_init)
     @wraps(old_init)
     def initialize(self, *args, **kwargs):
-        # Keep native-class identity, original signature and all authored
-        # constructor/resolver dispatch. Only the redundant second read changes.
         with constructors.hold(self, message="SVG construction cannot reenter the same object"):
-            return old_init(self, *args, **kwargs)
+            bound = init_signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            p = bound.arguments
+            options = dict(p["kwargs"])
+            g["_preflight_vmobject_style_kwargs"](options)
+            g["_refuse_unrouted"](type(self).__name__ + "()", [
+                ("svg_default", bool(p["svg_default"])
+                 and any(value is not None for value in p["svg_default"].values())),
+                ("path_string_config", bool(p["path_string_config"])),
+            ])
+            height = _dimension(p["height"] if p["height"] is not None else type(self).height, "height")
+            width = _dimension(p["width"] if p["width"] is not None else type(self).width, "width")
+            if self._is_bound():
+                raise RuntimeError("SVG construction requires a detached receiver")
+            # Preserve the resolver's established access to live proxy state
+            # and the exact input recipes; initialize the record schema only
+            # once, through VMobject, after source resolution succeeds.
+            g["_install_live_state"](self)
+            self.svg_default = dict(p["svg_default"]) if p["svg_default"] else dict.fromkeys((
+                "color", "opacity", "fill_color", "fill_opacity", "stroke_width",
+                "stroke_color", "stroke_opacity",
+            ))
+            self.path_string_config = dict(p["path_string_config"] or {})
+            if p["svg_string"]:
+                self.svg_string = p["svg_string"]
+            else:
+                name = p["file_name"] or type(self).file_name
+                if not name:
+                    raise Exception("Must specify either a file_name or svg_string SVGMobject")
+                self.svg_string = self.file_name_to_svg_string(name)
+            if not isinstance(self.svg_string, str):
+                raise TypeError("SVG source resolver must return str")
+            if self._is_bound():
+                raise RuntimeError("SVG receiver was adopted during source resolution")
+            # Do not install a replacement tree over init_data-owned columns
+            # or children. Both public assembly hooks produce the real family.
+            g["_init_native_vmobject"](self, options)
+            self.init_svg_mobject()
+            self.flip(g["_RIGHT"])
+            self.set_style(
+                fill_color=p["color"] or p["fill_color"], fill_opacity=p["fill_opacity"],
+                stroke_color=p["color"] or p["stroke_color"], stroke_width=p["stroke_width"],
+                stroke_opacity=p["stroke_opacity"],
+            )
+            g["_apply_vmobject_style_kwargs"](self, dict(options))
+            if p["should_center"]:
+                self.center()
+            if height is not None:
+                self.set_height(height)
+            if width is not None:
+                self.set_width(width)
 
     def parts(self, source):
         # This API returns detached shapes; it must not replace the receiver's
@@ -125,11 +226,15 @@ def install_svg_ingress(native):
         root.remove(*result)
         return result
 
+    rebuilds = InvocationGuard()
+
     def rebuild(self):
         # Reference svg_mobject.py:123 (Ledger row `same`): add a freshly
         # built family, so a second call appends a second one, and return
         # None. Preparing first keeps a refused source from publishing.
-        self.add(*parts(self, self.svg_string))
+        with rebuilds.hold(self, message="SVG rebuilding cannot reenter the same object"):
+            children = _authored_parts(g, self, self.mobjects_from_svg_string(self.svg_string))
+            self.add(*children)
 
     Mob.set_rgba_array_by_color = by_color
     Mob.set_rgba_array = array
