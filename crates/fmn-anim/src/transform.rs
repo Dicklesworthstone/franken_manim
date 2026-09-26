@@ -437,7 +437,12 @@ impl Animation for Transform {
         if !stage.contains(self.target) {
             return Err(AnimError::StaleHandle(self.target));
         }
-        let mut target_copy = if stage.is_aligned_with(mobject, self.target) {
+        // A self-target is a live begin-time recipe (used by the grow family),
+        // not an endpoint that may alias interpolation's destination. Freeze
+        // it before taking/preparing the starting copy, on every begin/replay.
+        let mut target_copy = if self.target != mobject
+            && stage.is_aligned_with(mobject, self.target)
+        {
             self.target
         } else {
             stage.copy_family(self.target)?

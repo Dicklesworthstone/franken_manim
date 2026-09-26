@@ -16,7 +16,8 @@ use crate::transform::{StartPrep, Transform};
 
 /// `GrowFromPoint` (growing.py:16): transform from a zero-scale copy at
 /// `point` (optionally colored `point_color`) onto a copy of the mobject
-/// as it stands.
+/// as it stands at `begin`, not when this function is called. The anchor
+/// remains construction-time state, including when replaying the animation.
 ///
 /// # Errors
 /// [`AnimError::StaleHandle`] / [`AnimError::Stage`].
@@ -26,8 +27,12 @@ pub fn grow_from_point(
     point: Vec3,
     point_color: Option<[f32; 3]>,
 ) -> Result<Transform, AnimError> {
-    let target = stage.copy_family(mobject)?;
-    let mut t = Transform::new(mobject, target).with_start_prep(StartPrep {
+    if !stage.contains(mobject) {
+        return Err(AnimError::StaleHandle(mobject));
+    }
+    // Keep the live handle until Transform::setup snapshots it. A later
+    // Succession child must observe its predecessor's geometry and paint.
+    let mut t = Transform::new(mobject, mobject).with_start_prep(StartPrep {
         scale: Some(0.0),
         move_to: Some(point),
         color: point_color,
