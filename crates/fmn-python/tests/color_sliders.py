@@ -93,8 +93,13 @@ class ColorSliderAcceptance(unittest.TestCase):
             background_grid_kwargs={"colors": [m.BLUE, m.WHITE], "single_square_len": .2},
             sliders_buff=.3,
         )
-        _, template, _ = bank._native_color_slider_parts((255., 255., 255., 1.), apply_value=True)
+        # The constructor's native layout: rows arranged with each handle at its
+        # axis midpoint, as the pinned Reference arranges them (every axis at
+        # x=0 here). apply_value=True rows are validation-only geometry; the
+        # handle at its value widens each row box and shifts it by half a radius.
+        _, template, _ = bank._native_color_slider_parts((255., 255., 255., 1.), apply_value=False)
         for control, native_row in zip(channels(bank), template):
+            self.assertAlmostEqual(float(control.slider_axis.get_center()[0]), 0., places=5)
             np.testing.assert_allclose(control.slider_axis.get_center(), native_row[2].get_center(), atol=3e-6)
             self.assertAlmostEqual(control.bar.get_width(), native_row[0].get_width(), places=5)
             self.assertAlmostEqual(control.slider.get_width(), native_row[1].get_width(), places=5)
