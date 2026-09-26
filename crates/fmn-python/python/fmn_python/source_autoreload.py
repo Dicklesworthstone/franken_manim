@@ -79,7 +79,11 @@ class _Controller:
         self.global_bindings = None
         self.closed = False
         self.callback = None
-        self.previous = _exports(self.shell.user_module)
+        # Only an active SceneSource knows which names it published. Without
+        # one, the shell namespace also holds the caller's locals (a Scene, its
+        # mobjects), so the first refresh claims only names that the freshly
+        # executed source also defines; see `_first_published`.
+        self.previous = None
         existing = active_source(self.path)
         if existing is not None:
             self.previous = _exports(existing.module)
@@ -107,6 +111,11 @@ class _Controller:
             raise RuntimeError("source reload cannot interrupt an executing scene segment")
         return embedded
 
+    def _first_published(self, source, namespace):
+        if self.previous is not None:
+            return self.previous
+        return {name: namespace[name] for name in _exports(source.module) if name in namespace}
+
     def refresh(self, *, force=False):
         embedded = self.check()
         if self.namespace is None:
@@ -122,14 +131,15 @@ class _Controller:
                 self.owns_source = acquired = True
             self.source = source
             protected = embedded.get_shortcuts()
-            self.bindings = SourceNamespace(source, self.namespace,
-                                             protected=protected, previous=self.previous)
+            self.bindings = SourceNamespace(source, self.namespace, protected=protected,
+                                             previous=self._first_published(source, self.namespace))
             # Embedded cells have separate locals and module globals. Update
             # both source-owned projections, so a function defined in a cell
             # sees refreshed helpers too. Interactive overrides still win.
             if vars(self.module) is not self.namespace:
-                self.global_bindings = SourceNamespace(source, vars(self.module),
-                                                         protected=protected, previous=self.previous)
+                self.global_bindings = SourceNamespace(
+                    source, vars(self.module), protected=protected,
+                    previous=self._first_published(source, vars(self.module)))
         # Initial acquisition already executed the module once. All other
         # refreshes execute at most one generation, regardless of namespace count.
         module = self.source.module if acquired else self.source.reload(if_changed=not force)
@@ -144,7 +154,7 @@ class _Controller:
         self.closed = True
         source, self.source = self.source, None
         self.bindings = self.global_bindings = None
-        self.previous.clear()
+        self.previous = None
         self.namespace = self.module = self.shell = self.native = None
         self.callback = None
         if self.owns_source and source is not None:
