@@ -173,7 +173,9 @@ impl SceneBundleRecorder {
 
     fn encode_snapshot(&self, snapshot: &Snapshot) -> Result<Vec<u8>, RecordingError> {
         if self.render_only {
-            snapshot.to_render_bytes().map_err(RecordingError::Projection)
+            snapshot
+                .to_render_bytes()
+                .map_err(RecordingError::Projection)
         } else {
             snapshot.to_bytes().map_err(RecordingError::from)
         }

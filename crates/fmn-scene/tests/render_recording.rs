@@ -9,8 +9,8 @@ use fmn_core::color::Srgb;
 use fmn_hash::sha256;
 use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
-    EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig,
-    ScreenMap, Tiling, Viewport,
+    EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
+    Tiling, Viewport,
 };
 use fmn_scene::recording::{RecordedSceneBundle, RecordingError, SceneBundleRecorder};
 use fmn_scene::timeline_bundle::{SharedTimelineBundle, TimelineFrameCache};
@@ -27,9 +27,8 @@ fn rect(stage: &mut Stage, x: f64, rgba: [f32; 4]) -> Mob {
         "point",
         0,
         &[
-            -0.5, -0.5, 0.0, 0.0, -0.5, 0.0, 0.5, -0.5, 0.0,
-            0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.5, 0.0,
-            -0.5, 0.5, 0.0, -0.5, 0.0, 0.0, -0.5, -0.5, 0.0,
+            -0.5, -0.5, 0.0, 0.0, -0.5, 0.0, 0.5, -0.5, 0.0, 0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0,
+            0.5, 0.0, -0.5, 0.5, 0.0, -0.5, 0.0, 0.0, -0.5, -0.5, 0.0,
         ],
     );
     entry.buffer.write_range("fill_rgba", 0, &rgba.repeat(9));
@@ -41,14 +40,21 @@ fn rect(stage: &mut Stage, x: f64, rgba: [f32; 4]) -> Mob {
 fn renderer(threads: usize) -> RetainedFrameRenderer {
     RetainedFrameRenderer::new(RetainedFrameRendererConfig {
         frame: FrameConfig::new(
-            Viewport { width: 96, height: 64 },
+            Viewport {
+                width: 96,
+                height: 64,
+            },
             ScreenMap::y_up(16.0, [48.0, 32.0]),
             Srgb::from_rgb8(0, 0, 0).to_linear(1.0),
         ),
-        tiling: Tiling { macro_tile: 64, fine_tile: 8 },
+        tiling: Tiling {
+            macro_tile: 64,
+            fine_tile: 8,
+        },
         engine: EngineIdentity::certified(),
         threads,
-    }).unwrap()
+    })
+    .unwrap()
 }
 
 fn pixels(renderer: &mut RetainedFrameRenderer, stage: &Stage) -> Vec<u8> {
@@ -57,7 +63,14 @@ fn pixels(renderer: &mut RetainedFrameRenderer, stage: &Stage) -> Vec<u8> {
 }
 
 fn scene() -> Scene {
-    Scene::new(RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 19).unwrap()
+    Scene::new(
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        19,
+    )
+    .unwrap()
 }
 
 fn picture(history: usize) -> Stage {
@@ -90,13 +103,18 @@ impl Paired {
     fn new() -> Self {
         Self {
             full: SceneBundleRecorder::new(8, BundleExportLimits::default()).unwrap(),
-            compact: SceneBundleRecorder::new_render_only(8, BundleExportLimits::default()).unwrap(),
+            compact: SceneBundleRecorder::new_render_only(8, BundleExportLimits::default())
+                .unwrap(),
             packets: Vec::new(),
         }
     }
 
     fn finish(self) -> (RecordedSceneBundle, RecordedSceneBundle, Vec<FramePacket>) {
-        (self.full.finish().unwrap(), self.compact.finish().unwrap(), self.packets)
+        (
+            self.full.finish().unwrap(),
+            self.compact.finish().unwrap(),
+            self.packets,
+        )
     }
 }
 
@@ -106,7 +124,11 @@ impl SceneSink for Paired {
         self.compact.event(event)
     }
 
-    fn capture(&mut self, reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         self.full.capture(reason, packet.clone())?;
         self.compact.capture(reason, packet.clone())?;
         self.packets.push(packet);
@@ -118,11 +140,16 @@ impl SceneSink for Paired {
 fn terminal_export_ignores_history_and_accepts_the_same_exact_output_budget() {
     let clean = picture(0);
     let history = picture(256);
-    let export = |stage: &Stage| terminal(stage, true, BundleExportLimits::default()).finish().unwrap();
+    let export = |stage: &Stage| {
+        terminal(stage, true, BundleExportLimits::default())
+            .finish()
+            .unwrap()
+    };
     let first = export(&clean);
     for _ in 0..3 {
         let next = terminal(&history, true, BundleExportLimits::default())
-            .finish_with_max_bytes(first.bytes.len()).unwrap();
+            .finish_with_max_bytes(first.bytes.len())
+            .unwrap();
         assert_eq!(next.bytes, first.bytes);
         assert_eq!(next.digest, first.digest);
         assert_eq!((next.frame_count, next.segment_count), (1, 1));
@@ -132,11 +159,15 @@ fn terminal_export_ignores_history_and_accepts_the_same_exact_output_budget() {
             .finish_with_max_bytes(first.bytes.len() - 1),
         Err(RecordingError::OutputLimit { .. })
     ));
-    let full = terminal(&history, false, BundleExportLimits::default()).finish().unwrap();
+    let full = terminal(&history, false, BundleExportLimits::default())
+        .finish()
+        .unwrap();
     assert!(full.bytes.len() > 20 * first.bytes.len());
     println!(
         "{{\"scenario\":\"render-only-terminal\",\"history\":256,\"full_bytes\":{},\"render_bytes\":{},\"sha256\":\"{}\"}}",
-        full.bytes.len(), first.bytes.len(), first.digest.to_hex(),
+        full.bytes.len(),
+        first.bytes.len(),
+        first.digest.to_hex(),
     );
 }
 
@@ -147,17 +178,24 @@ fn observed_updaters_replay_the_same_pixels_without_retaining_their_copies() {
     source.stage_mut().add_to_scene(moving).unwrap();
     let calls = Rc::new(Cell::new(0));
     let observed = calls.clone();
-    source.stage_mut().add_dt_updater(moving, move |stage, mob, dt| {
-        if dt > 0.0 {
-            observed.set(observed.get() + 1);
-            stage.shift(mob, [dt, 0.0, 0.0]);
-            // The old producer carries these invisible copies in later frames.
-            // Keep the live scene unchanged: no garbage-collection shortcut.
-            for _ in 0..8 {
-                stage.copy_family(mob).unwrap();
-            }
-        }
-    }, false).unwrap();
+    source
+        .stage_mut()
+        .add_dt_updater(
+            moving,
+            move |stage, mob, dt| {
+                if dt > 0.0 {
+                    observed.set(observed.get() + 1);
+                    stage.shift(mob, [dt, 0.0, 0.0]);
+                    // The old producer carries these invisible copies in later frames.
+                    // Keep the live scene unchanged: no garbage-collection shortcut.
+                    for _ in 0..8 {
+                        stage.copy_family(mob).unwrap();
+                    }
+                }
+            },
+            false,
+        )
+        .unwrap();
     let mut paired = Paired::new();
     source.show(&mut paired).unwrap();
     source.wait(Some(0.5), &mut paired).unwrap();
@@ -175,29 +213,49 @@ fn observed_updaters_replay_the_same_pixels_without_retaining_their_copies() {
         assert_eq!(replay.segment_kind(i), Some(BundleSegmentKind::Stateful));
     }
     let mut reference_renderer = renderer(1);
-    let expected: Vec<Vec<u8>> = packets.iter().map(|packet| {
-        pixels(&mut reference_renderer, &packet.state().materialize())
-    }).collect();
+    let expected: Vec<Vec<u8>> = packets
+        .iter()
+        .map(|packet| pixels(&mut reference_renderer, &packet.state().materialize()))
+        .collect();
     let blank = pixels(&mut reference_renderer, &Stage::new());
     assert!(expected.iter().all(|frame| *frame != blank));
-    assert!(expected.windows(2).filter(|pair| pair[0] != pair[1]).count() >= 3);
+    assert!(
+        expected
+            .windows(2)
+            .filter(|pair| pair[0] != pair[1])
+            .count()
+            >= 3
+    );
     for threads in [1, 4, 16] {
         let mut output = renderer(threads);
         for index in [5, 0, 4, 1, 3, 2, 5] {
-            assert_eq!(pixels(&mut output, &replay.stage_at(index).unwrap()), expected[index as usize]);
-            assert_eq!(pixels(&mut output, &legacy.stage_at(index).unwrap()), expected[index as usize]);
+            assert_eq!(
+                pixels(&mut output, &replay.stage_at(index).unwrap()),
+                expected[index as usize]
+            );
+            assert_eq!(
+                pixels(&mut output, &legacy.stage_at(index).unwrap()),
+                expected[index as usize]
+            );
         }
     }
     let shared = SharedTimelineBundle::from_bytes(&compact.bytes).unwrap();
-    let jobs: Vec<_> = (0..compact.frame_count).rev()
-        .map(|index| shared.frame_job(index).unwrap()).collect();
+    let jobs: Vec<_> = (0..compact.frame_count)
+        .rev()
+        .map(|index| shared.frame_job(index).unwrap())
+        .collect();
     drop(shared);
-    let workers: Vec<_> = jobs.into_iter().map(|job| std::thread::spawn(move || {
-        let mut cache = TimelineFrameCache::default();
-        let mut output = renderer(1);
-        let frame = pixels(&mut output, &cache.materialize(&job).unwrap());
-        (job.index(), frame)
-    })).collect();
+    let workers: Vec<_> = jobs
+        .into_iter()
+        .map(|job| {
+            std::thread::spawn(move || {
+                let mut cache = TimelineFrameCache::default();
+                let mut output = renderer(1);
+                let frame = pixels(&mut output, &cache.materialize(&job).unwrap());
+                (job.index(), frame)
+            })
+        })
+        .collect();
     for worker in workers {
         let (index, frame) = worker.join().unwrap();
         assert_eq!(frame, expected[index as usize]);
@@ -206,7 +264,9 @@ fn observed_updaters_replay_the_same_pixels_without_retaining_their_copies() {
     assert!(source.stage().contains(moving));
     println!(
         "{{\"scenario\":\"render-only-updater\",\"frames\":6,\"updater_calls\":4,\"full_bytes\":{},\"render_bytes\":{},\"sha256\":\"{}\"}}",
-        full.bytes.len(), compact.bytes.len(), compact.digest.to_hex(),
+        full.bytes.len(),
+        compact.bytes.len(),
+        compact.digest.to_hex(),
     );
 }
 
@@ -229,16 +289,20 @@ fn remapped_frame_identities_do_not_reuse_stale_retained_pixels() {
     let (_, compact, packets) = paired.finish();
     let replay = TimelineBundle::from_bytes(&compact.bytes).unwrap();
     let mut control = renderer(1);
-    let expected: Vec<_> = packets.iter().map(|packet| {
-        pixels(&mut control, &packet.state().materialize())
-    }).collect();
+    let expected: Vec<_> = packets
+        .iter()
+        .map(|packet| pixels(&mut control, &packet.state().materialize()))
+        .collect();
     assert_eq!(expected[0], expected[3]);
     assert_ne!(expected[0], expected[1]);
     assert_ne!(expected[1], expected[2]);
     for threads in [1, 4, 16] {
         let mut output = renderer(threads);
         for index in [0, 1, 2, 3, 2, 1, 0] {
-            assert_eq!(pixels(&mut output, &replay.stage_at(index).unwrap()), expected[index as usize]);
+            assert_eq!(
+                pixels(&mut output, &replay.stage_at(index).unwrap()),
+                expected[index as usize]
+            );
         }
     }
     assert!(source.stage().contains(red) && source.stage().contains(blue));
@@ -247,43 +311,73 @@ fn remapped_frame_identities_do_not_reuse_stale_retained_pixels() {
 #[test]
 fn capture_budget_charges_the_selected_representation_and_remains_sticky() {
     let stage = picture(256);
-    let limits = BundleExportLimits { max_frames: 10, max_capture_bytes: 16 * 1024 };
+    let limits = BundleExportLimits {
+        max_frames: 10,
+        max_capture_bytes: 16 * 1024,
+    };
     let compact = terminal(&stage, true, limits).finish().unwrap();
     assert!(compact.bytes.len() < 16 * 1024);
     let mut full = SceneBundleRecorder::new(8, limits).unwrap();
     assert!(full.capture_terminal_still(&stage).is_err());
     assert!(full.capture_terminal_still(&Stage::new()).is_err());
     assert_eq!(full.frame_count(), 0);
-    assert!(matches!(full.finish(), Err(RecordingError::Bundle(
-        BundleError::CaptureLimitExceeded { .. }
-    ))));
+    assert!(matches!(
+        full.finish(),
+        Err(RecordingError::Bundle(
+            BundleError::CaptureLimitExceeded { .. }
+        ))
+    ));
     let bytes = stage.snapshot().to_render_bytes().unwrap();
-    let limits = BundleExportLimits { max_frames: 10, max_capture_bytes: bytes.len() };
+    let limits = BundleExportLimits {
+        max_frames: 10,
+        max_capture_bytes: bytes.len(),
+    };
     let mut compact = SceneBundleRecorder::new_render_only(8, limits).unwrap();
-    assert!(compact.capture_terminal_still(&stage).is_err(), "destination tables also cost bytes");
+    assert!(
+        compact.capture_terminal_still(&stage).is_err(),
+        "destination tables also cost bytes"
+    );
     assert!(compact.finish().is_err());
 }
 
 #[test]
 fn full_state_constructor_keeps_its_complete_snapshot_contract() {
     let stage = picture(32);
-    let full = terminal(&stage, false, BundleExportLimits::default()).finish().unwrap();
-    let restored = TimelineBundle::from_bytes(&full.bytes).unwrap().stage_at(0).unwrap();
-    assert_eq!(stage.snapshot().to_bytes().unwrap(), restored.snapshot().to_bytes().unwrap());
-    assert_ne!(stage.snapshot().to_bytes().unwrap(), stage.snapshot().to_render_bytes().unwrap());
+    let full = terminal(&stage, false, BundleExportLimits::default())
+        .finish()
+        .unwrap();
+    let restored = TimelineBundle::from_bytes(&full.bytes)
+        .unwrap()
+        .stage_at(0)
+        .unwrap();
+    assert_eq!(
+        stage.snapshot().to_bytes().unwrap(),
+        restored.snapshot().to_bytes().unwrap()
+    );
+    assert_ne!(
+        stage.snapshot().to_bytes().unwrap(),
+        stage.snapshot().to_render_bytes().unwrap()
+    );
 }
 
 #[test]
 fn render_only_frame_refusal_cannot_publish_a_partial_artifact() {
     let mut source = scene();
-    let limits = BundleExportLimits { max_frames: 1, ..BundleExportLimits::default() };
+    let limits = BundleExportLimits {
+        max_frames: 1,
+        ..BundleExportLimits::default()
+    };
     let mut recorder = SceneBundleRecorder::new_render_only(8, limits).unwrap();
     source.show(&mut recorder).unwrap();
     assert!(source.show(&mut recorder).is_err());
     assert_eq!(recorder.frame_count(), 1);
-    assert!(matches!(recorder.finish(), Err(RecordingError::Bundle(
-        BundleError::FrameLimitExceeded { frames: 2, max_frames: 1 }
-    ))));
+    assert!(matches!(
+        recorder.finish(),
+        Err(RecordingError::Bundle(BundleError::FrameLimitExceeded {
+            frames: 2,
+            max_frames: 1
+        }))
+    ));
     assert!(SceneBundleRecorder::new_render_only(0, limits).is_err());
 }
 
@@ -293,8 +387,12 @@ fn equal_empty_frames_do_not_inherit_offscene_durable_resources() {
     let mut source = stage.snapshot().materialize();
     let root = source.roots()[0];
     source.remove_from_scene(root);
-    let a = terminal(&source, true, BundleExportLimits::default()).finish().unwrap();
-    let b = terminal(&Stage::new(), true, BundleExportLimits::default()).finish().unwrap();
+    let a = terminal(&source, true, BundleExportLimits::default())
+        .finish()
+        .unwrap();
+    let b = terminal(&Stage::new(), true, BundleExportLimits::default())
+        .finish()
+        .unwrap();
     assert_eq!(a.bytes, b.bytes);
     assert_eq!(a.digest, sha256(&a.bytes));
     assert!(source.contains(root));

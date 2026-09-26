@@ -434,23 +434,30 @@ mod tests {
 
     #[test]
     fn compact_python_scene_bundle_export() {
-        crate::with_python_test_module("Compact Python scene bundle export", |py, module, globals| {
-            globals
-                .set_item(
-                    "_test_bundle_frames",
-                    wrap_pyfunction!(_test_bundle_frames, module).unwrap(),
-                )
-                .unwrap();
-            globals
-                .set_item(
-                    "__file__",
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/compact_bundle_export.py"),
-                )
-                .unwrap();
-            let source = CString::new(include_str!("../../tests/compact_bundle_export.py")).unwrap();
-            py.run(source.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py))
-                .expect("render-only FMTL history independence, replay and atomic publication");
-        });
+        crate::with_python_test_module(
+            "Compact Python scene bundle export",
+            |py, module, globals| {
+                globals
+                    .set_item(
+                        "_test_bundle_frames",
+                        wrap_pyfunction!(_test_bundle_frames, module).unwrap(),
+                    )
+                    .unwrap();
+                globals
+                    .set_item(
+                        "__file__",
+                        concat!(
+                            env!("CARGO_MANIFEST_DIR"),
+                            "/tests/compact_bundle_export.py"
+                        ),
+                    )
+                    .unwrap();
+                let source =
+                    CString::new(include_str!("../../tests/compact_bundle_export.py")).unwrap();
+                py.run(source.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .expect("render-only FMTL history independence, replay and atomic publication");
+            },
+        );
     }
 }
