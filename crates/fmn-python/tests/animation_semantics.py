@@ -166,8 +166,9 @@ linear_rate = lambda value: value
 assert animation.update_rate_info(4.0, linear_rate, 0.75) is animation
 assert (animation.run_time, animation.lag_ratio) == (4.0, 0.75)
 assert animation.rate_func is linear_rate
+# BN-12 deliberately fixes the Reference's truthiness-based no-op.
 animation.update_rate_info(0, None, 0)
-assert (animation.run_time, animation.lag_ratio) == (4.0, 0.75)
+assert (animation.run_time, animation.lag_ratio) == (0, 0)
 assert animation.set_run_time(3.0) is animation
 assert animation.set_rate_func(square_rate) is animation
 assert animation.set_name("renamed") is animation
@@ -802,3 +803,177 @@ def _assert_authored_transform_native_paths():
 
 
 _assert_authored_transform_native_paths()
+
+
+# Shared pre-begin timing, exercised against the installed native engine. These
+# are not a modeled frame loop: Scene.play and render_session own every sample.
+import unittest as _timing_unittest
+
+
+class TimingContract(_timing_unittest.TestCase):
+    def test_explicit_zero_and_none_are_distinct(self):
+        import manimlib as m
+        animation = m.Animation(m.Mobject(), run_time=3, lag_ratio=.5)
+        rate = animation.rate_func
+        self.assertIs(animation.update_rate_info(0, None, 0), animation)
+        self.assertEqual((animation.run_time, animation.lag_ratio), (0, 0))
+        self.assertIs(animation.rate_func, rate)
+        animation.update_rate_info(None, None, None)
+        self.assertEqual((animation.run_time, animation.lag_ratio), (0, 0))
+
+    def test_rate_override_never_inspects_authored_truthiness(self):
+        import manimlib as m
+        class Rate:
+            __hash__ = None
+            def __bool__(self):
+                raise AssertionError("a rate is not an optional boolean")
+            def __eq__(self, other):
+                raise AssertionError("rate admission must use identity")
+            def __call__(self, alpha):
+                return alpha * alpha
+        source = m.VectorizedPoint()
+        scene = m.Scene().add(source)
+        rate = Rate()
+        animation = m.Transform(source, source.copy().shift(m.RIGHT))
+        animation.update_rate_info(rate_func=rate)
+        self.assertIs(animation.rate_func, rate)
+        scene.play(animation, run_time=.1, rate_func=rate)
+        self.assertTrue(np.allclose(source.get_center(), m.RIGHT))
+
+    def test_native_default_duration_is_queryable_without_consuming_sentinel(self):
+        import manimlib as m
+        source = m.Square()
+        animations = [m.Transform(source, source.copy()), m.ShowCreation(source),
+                      m.MoveAlongPath(source, m.Line())]
+        for animation in animations:
+            with self.subTest(kind=type(animation).__name__):
+                self.assertIsNone(animation.run_time)
+                self.assertEqual(animation.get_run_time(), 1)
+                self.assertIsNone(animation.run_time)
+                self.assertFalse(hasattr(animation, 'starting_mobject'))
+
+    def test_time_windows_widen_default_and_explicit_durations(self):
+        import manimlib as m
+        source = m.Square()
+        for run_time, span, expected in [
+            (None, (.25, .5), 1), (None, (.25, 2), 2),
+            (0, (.25, 2), 2), (3, (.25, 2), 3),
+        ]:
+            with self.subTest(run_time=run_time, span=span):
+                animation = m.Transform(source, source.copy(), run_time=run_time, time_span=span)
+                self.assertEqual(animation.get_run_time(), expected)
+                self.assertEqual(animation.run_time, run_time)
+                group = m.AnimationGroup(animation)
+                self.assertEqual(group.get_run_time(), expected)
+                self.assertEqual(group.anims_with_timings[0][1:], (0, expected))
+
+    def test_query_does_not_invoke_authored_setup_or_target_factory(self):
+        import manimlib as m
+        calls = []
+        class Deferred(m.ApplyFunction):
+            def _ensure_runtime_defaults(self):
+                raise AssertionError('a duration query is not begin')
+            def create_starting_mobject(self):
+                raise AssertionError('a duration query must not copy')
+        source = m.Square()
+        animation = Deferred(lambda target: calls.append(target) or target, source,
+                             time_span=(.25, 2))
+        self.assertEqual(animation.get_run_time(), 2)
+        self.assertEqual(m.Succession(animation).get_run_time(), 2)
+        self.assertEqual(calls, [])
+        self.assertIsNone(animation.run_time)
+        self.assertIsNone(animation.target_mobject)
+
+    def test_specialized_constructor_durations_are_preserved(self):
+        import manimlib as m
+        source = m.Square()
+        for animation, expected in [
+            (m.Rotating(source), 5),
+            (m.Homotopy(lambda x, y, z, t: [x, y, z], source), 3),
+            (m.DrawBorderThenFill(source), 2),
+            (m.Write(source), 1),
+        ]:
+            with self.subTest(kind=type(animation).__name__):
+                self.assertEqual(animation.get_run_time(), expected)
+                self.assertEqual(m.AnimationGroup(animation).get_run_time(), expected)
+
+    def test_nested_time_window_playback_uses_the_real_clock(self):
+        import manimlib as m
+        from fmn_python import render_session
+        from pathlib import Path
+        import tempfile
+        for callback in (False, True):
+            with self.subTest(callback=callback):
+                scene, source = m.Scene(), m.VectorizedPoint()
+                samples = []
+                def observe(member, dt):
+                    if member is source and dt > 0:
+                        samples.append((float(scene.time), member.get_x()))
+                source.add_updater(observe, call=False)
+                options = {'path_func': lambda a, b, t: (1-t)*a+t*b} if callback else {}
+                first = m.Transform(source, source.copy().shift(m.RIGHT),
+                                    time_span=(.25, 1.25), rate_func=m.linear, **options)
+                last = m.Transform(source, source.copy().shift(2*m.RIGHT),
+                                   run_time=.25, rate_func=m.linear, **options)
+                inner = m.AnimationGroup(first)
+                outer = m.Succession(inner, last)
+                self.assertEqual(outer.get_run_time(), 1.5)
+                with tempfile.TemporaryDirectory() as directory:
+                    with render_session(scene, Path(directory) / 'timed.y4m',
+                                        resolution=(16, 8), fps=8, threads=1) as output:
+                        scene.add(source)
+                        scene.play(outer)
+                    self.assertEqual(output.result.frame_count, 12)
+                times = np.arange(1, 13) / 8
+                values = [max(0, t-.25) if t <= 1.25 else 1+4*(t-1.25) for t in times]
+                self.assertTrue(np.allclose(samples, np.column_stack((times, values)), atol=1e-6), samples)
+                self.assertEqual(scene.time, 1.5)
+                self.assertTrue(np.allclose(source.get_center(), 2*m.RIGHT))
+
+    def test_zero_duration_play_finishes_without_advancing_native_clock(self):
+        import manimlib as m
+        for callback in (False, True):
+            with self.subTest(callback=callback):
+                source = m.Square()
+                scene = m.Scene().add(source)
+                ticks = []
+                source.add_updater(lambda member, dt: ticks.append(dt), call=False)
+                options = {'path_func': lambda a, b, t: (1-t)*a+t*b} if callback else {}
+                animation = m.Transform(source, source.copy().shift(m.RIGHT),
+                                        run_time=3, lag_ratio=.5, rate_func=m.linear, **options)
+                scene.play(animation, run_time=0, lag_ratio=0)
+                self.assertEqual(scene.time, 0)
+                self.assertEqual(scene.num_plays, 1)
+                self.assertEqual((animation.run_time, animation.lag_ratio), (0, 0))
+                self.assertTrue(all(dt == 0 for dt in ticks), ticks)
+                self.assertTrue(np.allclose(source.get_center(), m.RIGHT))
+                self.assertFalse(source._is_updating_suspended())
+
+    def test_zero_lag_update_reaches_native_and_callback_family_interpolation(self):
+        import manimlib as m
+        for callback in (False, True):
+            with self.subTest(callback=callback):
+                left, right = m.VectorizedPoint(m.LEFT), m.VectorizedPoint(m.RIGHT)
+                source, samples = m.Group(left, right), []
+                scene = m.Scene().add(source)
+                def observe(member, dt):
+                    if member is source and dt > 0:
+                        samples.append((scene.time, left.get_x()+1, right.get_x()-1))
+                source.add_updater(observe, call=False)
+                options = {'path_func': lambda a, b, t: (1-t)*a+t*b} if callback else {}
+                animation = m.Transform(source, source.copy().shift(2*m.RIGHT),
+                                        run_time=.2, lag_ratio=.75, rate_func=m.linear, **options)
+                animation.update_rate_info(lag_ratio=0)
+                scene.play(animation)
+                self.assertTrue(samples)
+                for time, first, second in samples:
+                    expected = 2*min(time/.2, 1)
+                    self.assertAlmostEqual(first, expected, places=6)
+                    self.assertAlmostEqual(second, expected, places=6)
+
+
+_timing_result = _timing_unittest.TextTestRunner(verbosity=2).run(
+    _timing_unittest.defaultTestLoader.loadTestsFromTestCase(TimingContract)
+)
+if not _timing_result.wasSuccessful():
+    raise AssertionError('native animation timing contract failed')

@@ -20,6 +20,31 @@ def install_live_rates(native: Any) -> None:
     previous_requires, previous_play = g["_requires_python_animation"], Scene.play
     previous_defaults = Transform._ensure_runtime_defaults
 
+    def update_rate_info(self, run_time=None, rate_func=None, lag_ratio=None):
+        # BN-12: None is the only absent option. In particular, zero duration
+        # and zero family lag must mean the same thing on Choreo's native and
+        # callback paths. Never ask an authored rate object for its truth value.
+        if run_time is not None:
+            self.run_time = run_time
+        if rate_func is not None:
+            self.rate_func = rate_func
+        if lag_ratio is not None:
+            self.lag_ratio = lag_ratio
+        return self
+
+    def get_run_time(self):
+        # Native leaves retain None until lowering selects their constructor
+        # defaults. Composition must nevertheless be able to query duration
+        # before begin, especially when time_span widens that default. Do not
+        # call _ensure_runtime_defaults here: an observation must not execute
+        # authored setup, construct a target, or consume the native sentinel.
+        duration = self.run_time
+        if duration is None:
+            duration = self.max_end_time if isinstance(self, Group) else 1.0
+        if self.time_span is not None:
+            duration = max(duration, float(self.time_span[1]))
+        return duration
+
     def custom(rate):
         # Identity lookup also accepts callable objects with __hash__ = None;
         # checking a rate must never evaluate it or invoke its equality hook.
@@ -140,6 +165,12 @@ def install_live_rates(native: Any) -> None:
                 else:
                     group._composition_scene = prior
 
+    for name, function in (("update_rate_info", update_rate_info),
+                           ("get_run_time", get_run_time)):
+        function.__name__ = name
+        function.__qualname__ = Animation.__qualname__ + "." + name
+        function.__module__ = Animation.__module__
+        setattr(Animation, name, function)
     Transform._ensure_runtime_defaults = defaults
     g["_requires_python_animation"] = requires
     Scene.play = play
