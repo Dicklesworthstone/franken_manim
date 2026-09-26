@@ -60,8 +60,9 @@ def portal():
             self.depth_test = False
         def set_points(self, points):
             records = np.zeros(len(points), dtype=self.data_dtype)
+            points = np.asarray(points).reshape((-1, 3))
             records['point'] = points
-            records['d_normal_point'] = np.asarray(points) + (0, 0, .001)
+            records['d_normal_point'] = points + (0, 0, .001)
             self.data = records
         def shift(self, delta):
             for name in ('point', 'd_normal_point'):
@@ -75,6 +76,14 @@ def portal():
             calls.append(('torus', r1, r2))
             # Deliberately recognizable fixtures, NOT a replacement UV kernel.
             self.set_points([(r1, r2, k) for k in range(shape[0]*shape[1])])
+            return []
+
+        def _build_sphere(self, factory, radius, ur, vr, shape, true_normals,
+                          clockwise, axis, epsilon, nudge):
+            calls.append(('sphere', radius, true_normals, clockwise))
+            self.set_points([(radius, k, 0) for k in range(shape[0]*shape[1])])
+            if true_normals and radius:
+                self.data['d_normal_point'] = self.data['point'] * ((radius+nudge)/radius)
             return []
 
     class Surface(Mobject):
@@ -92,6 +101,10 @@ def portal():
     class Torus(Surface):
         def uv_func(self, u, v):
             raise AssertionError('stock Torus must select its specialized native builder')
+
+    class Sphere(Surface):
+        def uv_func(self, u, v):
+            raise AssertionError('stock Sphere must select its specialized native builder')
 
     def publish(self, shape, candidate=None):
         count = shape[0]*shape[1]
@@ -111,7 +124,7 @@ def portal():
             raise TypeError(where + ': unexpected keyword')
 
     native = SimpleNamespace(Mobject=Mobject, Surface=Surface,
-        ParametricSurface=ParametricSurface, Torus=Torus, GREY='grey',
+        ParametricSurface=ParametricSurface, Torus=Torus, Sphere=Sphere, _np=np, GREY='grey',
         _refuse_unrouted=refuse, _install_live_state=install_live,
         _initialize_surface_grid=publish, _native_surface_shell_factory=None)
     install_surface_lifecycle(native)
@@ -254,6 +267,180 @@ class SolidLifecycleProtocol(unittest.TestCase):
         self.assertEqual(calls, ['generic'])
         surface.init_points()
         self.assertEqual(calls[-1], 'regenerate')
+
+
+class SphereLifecycleProtocol(unittest.TestCase):
+    def test_hooks_run_once_and_radial_correction_follows_the_color_hook(self):
+        m, calls = portal()
+        events = []
+        class Authored(m.Sphere):
+            def init_data(self):
+                events.append(('data', self.radius, self.clockwise))
+                super().init_data()
+            def init_points(self):
+                events.append('points')
+                super().init_points()
+                self.shift((1, 0, 0))
+            def init_uniforms(self):
+                events.append('uniforms')
+                super().init_uniforms()
+            def init_colors(self):
+                events.append('colors')
+                super().init_colors()
+                self.data['d_normal_point'][:] = 0
+                self.normal_nudge = .25
+        actual = Authored(radius=2, clockwise=True, resolution=(2, 2))
+        self.assertEqual(events, [('data', 2., True), 'points', 'uniforms', 'colors'])
+        self.assertEqual(calls, [('sphere', 2., True, True)])
+        np.testing.assert_array_equal(actual.get_points()[:, 0], 3.)
+        np.testing.assert_array_equal(actual.data['d_normal_point'], actual.get_points() * 1.125)
+
+    def test_untouched_stock_columns_are_not_double_rounded(self):
+        m, _ = portal()
+        original, captured = m.Mobject._build_sphere, []
+        def native_with_rounding(self, *args):
+            result = original(self, *args)
+            self.data['d_normal_point'] = np.nextafter(self.data['d_normal_point'], np.float32(1.))
+            captured.append(self.data['d_normal_point'].tobytes())
+            return result
+        m.Mobject._build_sphere = native_with_rounding
+        class Forwarding(m.Sphere):
+            def init_points(self):
+                super().init_points()
+        actual = Forwarding(radius=.7, resolution=(2, 2))
+        self.assertEqual(actual.data['d_normal_point'].tobytes(), captured[0])
+
+    def test_false_true_normals_preserves_authored_normal_column(self):
+        m, calls = portal()
+        class Authored(m.Sphere):
+            def init_colors(self):
+                super().init_colors()
+                self.data['d_normal_point'][:] = (7, 8, 9)
+        actual = Authored(resolution=(2, 2), true_normals=False)
+        self.assertEqual(calls, [('sphere', 1., False, False)])
+        np.testing.assert_array_equal(actual.data['d_normal_point'], [(7, 8, 9)] * 4)
+
+    def test_uv_override_uses_generic_sampling_and_final_radial_normals(self):
+        m, calls = portal()
+        class Authored(m.Sphere):
+            def uv_func(self, u, v):
+                return u, v, self.radius
+        actual = Authored(radius=2, resolution=(2, 2))
+        self.assertEqual(calls, ['generic'])
+        expected = (actual.get_points().astype(np.float64) * 1.0005).astype(np.float32)
+        np.testing.assert_array_equal(actual.data['d_normal_point'], expected)
+
+    def test_replaced_points_skip_all_sampling_and_still_get_final_normals(self):
+        m, calls = portal()
+        class Authored(m.Sphere):
+            def init_points(self):
+                self.set_points([(1, 2, 3)] * 4)
+        actual = Authored(radius=2, resolution=(2, 2), normal_nudge=.5)
+        self.assertEqual(calls, [])
+        np.testing.assert_array_equal(actual.data['d_normal_point'], [(1.25, 2.5, 3.75)] * 4)
+
+    def test_init_data_radius_edits_do_not_replace_constructor_normal_argument(self):
+        m, calls = portal()
+        class Authored(m.Sphere):
+            def init_data(self):
+                self.radius = 3
+        actual = Authored(radius=2, resolution=(2, 2), normal_nudge=.5)
+        self.assertEqual(calls, [('sphere', 3., False, False)])
+        np.testing.assert_array_equal(actual.data['d_normal_point'], actual.get_points() * 1.25)
+
+    def test_empty_and_zero_radius_shapes_are_legal(self):
+        m, _ = portal()
+        empty = m.Sphere(resolution=(0, 3))
+        self.assertEqual(len(empty.data), 0)
+        zero = m.Sphere(radius=0, resolution=(2, 2))
+        self.assertTrue(np.isfinite(zero.data['d_normal_point']).all())
+
+    def test_recipe_changes_fail_before_publishing_an_authored_sample(self):
+        m, _ = portal()
+        roots = []
+        class Authored(m.Sphere):
+            def init_data(self):
+                roots.append(self)
+            def uv_func(self, u, v):
+                self.clockwise = not self.clockwise
+                self.radius += 1
+                return u, v, 0
+        with self.assertRaisesRegex(RuntimeError, 'shape parameters changed'):
+            Authored(resolution=(2, 2))
+        self.assertEqual(len(roots[0].data), 0)
+
+    def test_live_authored_candidate_receives_radial_correction_before_publish(self):
+        m, _ = portal()
+        class Authored(m.Sphere):
+            def uv_func(self, u, v):
+                return u, v, 2
+        actual = Authored(radius=2, resolution=(2, 2), normal_nudge=.5)
+        before = actual.data.copy()
+        def sample():
+            candidate = m.Surface.__new__(m.Surface)
+            candidate.set_points([(1, 2, 3)] * 4)
+            return candidate
+        result = m._fmn_build_solid_candidate(actual, {'normal_nudge': .5}, sample)
+        np.testing.assert_array_equal(result.data['d_normal_point'], [(1.25, 2.5, 3.75)] * 4)
+        np.testing.assert_array_equal(actual.data, before)
+
+    def test_late_invalid_normals_refuse_before_writing_the_normal_column(self):
+        m, _ = portal()
+        roots = []
+        class Authored(m.Sphere):
+            def init_colors(self):
+                roots.append(self)
+                self.data['d_normal_point'][:] = 42
+                self.normal_nudge = -1
+        with self.assertRaisesRegex(ValueError, 'normal_nudge'):
+            Authored(resolution=(2, 2))
+        np.testing.assert_array_equal(roots[0].data['d_normal_point'], 42)
+        self.assertEqual(m.Sphere(resolution=(2, 2)).native_shape, (2, 2))
+
+    def test_final_normals_use_actual_point_records_not_a_custom_getter(self):
+        m, _ = portal()
+        calls = []
+        class Authored(m.Sphere):
+            def init_colors(self):
+                def getter():
+                    calls.append('getter')
+                    raise AssertionError('normal correction owns the actual point column')
+                self.get_points = getter
+                self.data['d_normal_point'][:] = 42
+        actual = Authored(resolution=(2, 2), radius=2, normal_nudge=.5)
+        self.assertEqual(calls, [])
+        np.testing.assert_array_equal(actual.data['d_normal_point'], actual.data['point'] * 1.25)
+
+    def test_late_animation_lock_is_respected_before_normal_writes(self):
+        m, _ = portal()
+        roots = []
+        class Authored(m.Sphere):
+            def init_colors(self):
+                roots.append(self)
+                self.data['d_normal_point'][:] = 42
+                self.locked_data_keys.add('d_normal_point')
+        with self.assertRaisesRegex(RuntimeError, 'active animation'):
+            Authored(resolution=(2, 2))
+        np.testing.assert_array_equal(roots[0].data['d_normal_point'], 42)
+
+    def test_candidate_is_released_after_constructor_success_and_failure(self):
+        import gc
+        import weakref
+        m, _ = portal()
+        original, candidates = m.Mobject._build_sphere, []
+        def capture(self, *args):
+            candidates.append(weakref.ref(self))
+            return original(self, *args)
+        m.Mobject._build_sphere = capture
+        m.Sphere(resolution=(2, 2))
+        class Broken(m.Sphere):
+            def init_colors(self):
+                raise ValueError('late hook failure')
+        with self.assertRaisesRegex(ValueError, 'late hook failure'):
+            Broken(resolution=(2, 2))
+        gc.collect()
+        self.assertEqual([ref() for ref in candidates], [None, None])
+
 
 
 if __name__ == '__main__':

@@ -43,6 +43,7 @@ python3 crates/fmn-python/tests/coordinate_lifecycle.py
 python3 crates/fmn-python/tests/plane_lifecycle.py
 python3 crates/fmn-python/tests/coordinate_labels.py
 python3 crates/fmn-python/tests/native_surface_sampling.py
+python3 crates/fmn-python/tests/native_solid_lifecycle.py
 python3 crates/fmn-python/tests/native_graph_sampling.py
 python3 crates/fmn-python/tests/live_implicit.py
 python3 crates/fmn-python/tests/native_implicit_lifecycle.py
@@ -85,6 +86,7 @@ python3 crates/fmn-python/tests/test_runtime_provenance_protocol.py
 python3 crates/fmn-python/tests/test_reproducible_batch_protocol.py
 python3 crates/fmn-python/tests/test_reproducible_batch_cli_protocol.py
 python3 crates/fmn-python/tests/test_persistent_scene_ownership.py
+python3 crates/fmn-python/tests/test_solid_lifecycle_protocol.py
 
 # These unittest suites include native geometry/clock and failure-recovery cases.
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed.py

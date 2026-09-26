@@ -61,7 +61,7 @@ class TorusLifecycleTests(unittest.TestCase):
         np.testing.assert_array_equal(surface.get_points(), expected.get_points())
         np.testing.assert_array_equal(surface.data['d_normal_point'], expected.data['d_normal_point'])
         self.assertEqual(surface.get_color(), m.BLUE)
-        self.assertEqual(surface.get_z_index(), 7)
+        self.assertEqual(surface.z_index, 7)
         np.testing.assert_allclose(surface.get_shading(), (.1, .4, .2), atol=1e-7)
         self.assertEqual(m._surface_grid_resolution(surface), (5, 4))
 
@@ -178,9 +178,167 @@ class TorusLifecycleTests(unittest.TestCase):
                 self.assertEqual(render(tmp/f'authored-{threads}.y4m', actual, threads), reference)
 
 
+def native_sphere(shape=(9, 7), radius=.7, true_normals=True, clockwise=False):
+    candidate = m.Surface.__new__(m.Surface)
+    m._install_live_state(candidate)
+    specs = candidate._build_sphere(m._native_surface_shell_factory, radius,
+        (0., 6.283185307179586), (0., 3.141592653589793), shape,
+        true_normals, clockwise, 1, .001, .001)
+    assert not specs
+    candidate.resolution = shape
+    candidate.compute_triangle_indices()
+    candidate.set_color(m.GREY)
+    candidate.set_shading(.3, .2, .4)
+    candidate.apply_depth_test()
+    return candidate
+
+
+class SphereLifecycleTests(unittest.TestCase):
+    def test_stock_and_forwarding_subclasses_preserve_native_bits(self):
+        class Forwarding(m.Sphere):
+            def init_data(self):
+                super().init_data()
+            def init_points(self):
+                super().init_points()
+            def init_uniforms(self):
+                super().init_uniforms()
+            def init_colors(self):
+                super().init_colors()
+        for radius in (0., .001, .7, 2.3, -.7):
+            for true_normals in (False, True):
+                for clockwise in (False, True):
+                    options = dict(radius=radius, true_normals=true_normals, clockwise=clockwise)
+                    expected = native_sphere(**options)
+                    for cls in (m.Sphere, Forwarding):
+                        with self.subTest(radius=radius, true_normals=true_normals,
+                                          clockwise=clockwise, cls=cls):
+                            actual = cls(resolution=(9, 7), **options)
+                            for key in ('point', 'd_normal_point', 'rgba'):
+                                self.assertEqual(actual.data[key].tobytes(), expected.data[key].tobytes())
+
+    def test_all_hooks_run_before_constructor_radial_normal_correction(self):
+        events = []
+        class Authored(m.Sphere):
+            def init_data(self):
+                events.append(('data', self.radius, self.resolution))
+                super().init_data()
+            def init_points(self):
+                events.append('points')
+                super().init_points()
+                self.shift(m.RIGHT)
+            def init_uniforms(self):
+                events.append('uniforms')
+                super().init_uniforms()
+            def init_colors(self):
+                events.append('colors')
+                super().init_colors()
+                self.set_color(m.BLUE)
+                self.data['d_normal_point'][:] = 0.
+        actual = Authored(radius=2., resolution=(7, 5), normal_nudge=.25)
+        self.assertEqual(events, [('data', 2., (7, 5)), 'points', 'uniforms', 'colors'])
+        self.assertEqual(actual.get_color(), m.BLUE)
+        expected = native_sphere((7, 5), radius=2.).shift(m.RIGHT)
+        np.testing.assert_array_equal(actual.get_points(), expected.get_points())
+        # Source arithmetic is fixed-order f64 with a single final narrowing.
+        normals = (actual.get_points().astype(np.float64) * 1.125).astype(np.float32)
+        np.testing.assert_array_equal(actual.data['d_normal_point'], normals)
+
+    def test_false_true_normals_keeps_authored_normal_points(self):
+        class Authored(m.Sphere):
+            def init_colors(self):
+                super().init_colors()
+                self.data['d_normal_point'][:] = self.get_points() + m.OUT
+        actual = Authored(resolution=(5, 4), true_normals=False)
+        np.testing.assert_array_equal(actual.data['d_normal_point'], actual.get_points() + m.OUT)
+
+    def test_uv_override_and_live_regrid_share_normal_semantics(self):
+        visits = []
+        class Authored(m.Sphere):
+            def uv_func(self, u, v):
+                visits.append((u, v))
+                return u, v, self.radius
+        actual = Authored(radius=2., resolution=(3, 4), normal_nudge=.25)
+        self.assertEqual(len(visits), 36)
+        np.testing.assert_array_equal(actual.get_points()[:, 2], 2.)
+        scene = m.Scene()
+        scene.add(actual)
+        for rebuild, shape in ((actual.init_points, (3, 4)),
+                               (lambda: actual.set_resolution((4, 5)), (4, 5))):
+            visits.clear()
+            rebuild()
+            self.assertEqual(len(visits), 3*shape[0]*shape[1])
+            self.assertIs(actual._scene, scene)
+            self.assertEqual(m._surface_grid_resolution(actual), shape)
+            expected = (actual.get_points().astype(np.float64) * 1.125).astype(np.float32)
+            np.testing.assert_array_equal(actual.data['d_normal_point'], expected)
+
+    def test_authored_replacement_keeps_schema_children_and_has_native_topology(self):
+        child = m.Circle()
+        class Authored(m.Sphere):
+            data_dtype = [*m.Surface.data_dtype, ('tag', np.float32, (1,))]
+            def init_data(self):
+                super().init_data()
+                self.add(child)
+            def init_points(self):
+                self.set_points([[-1, -1, 2], [-1, 1, 2], [1, -1, 2], [1, 1, 2]])
+                self.data['tag'][:] = 7.
+            def uv_func(self, u, v):
+                raise AssertionError('replacement geometry must not invoke UV sampling')
+        actual = Authored(radius=2., resolution=(2, 2), normal_nudge=.25)
+        self.assertIs(actual.submobjects[0], child)
+        self.assertEqual(m._surface_grid_resolution(actual), (2, 2))
+        np.testing.assert_array_equal(actual.data['tag'], 7.)
+        np.testing.assert_array_equal(actual.data['d_normal_point'], actual.get_points() * 1.125)
+        duplicate = copy.deepcopy(actual)
+        np.testing.assert_array_equal(duplicate.data, actual.data)
+        self.assertIsNot(duplicate.submobjects[0], child)
+
+    def test_constructor_radius_remains_the_normal_correction_argument(self):
+        class Authored(m.Sphere):
+            def init_data(self):
+                super().init_data()
+                self.radius = 3.
+        actual = Authored(radius=2., resolution=(5, 4), normal_nudge=.5)
+        expected = native_sphere((5, 4), radius=3.)
+        np.testing.assert_array_equal(actual.get_points(), expected.get_points())
+        np.testing.assert_array_equal(actual.data['d_normal_point'], actual.get_points() * 1.25)
+
+    def test_empty_and_strip_initial_grids_keep_the_native_contract(self):
+        for shape in ((0, 3), (3, 0), (1, 4), (4, 1)):
+            with self.subTest(shape=shape):
+                actual = m.Sphere(resolution=shape, radius=.7)
+                expected = native_sphere(shape)
+                for key in ('point', 'd_normal_point'):
+                    self.assertEqual(actual.data[key].tobytes(), expected.data[key].tobytes())
+
+    def test_authored_sphere_reaches_native_render_and_preserves_worker_identity(self):
+        class Authored(m.Sphere):
+            def init_points(self):
+                super().init_points()
+                self.shift(m.RIGHT)
+        def render(path, surface, threads):
+            scene = m.Scene()
+            with render_session(scene, path, resolution=(64, 40), fps=24, threads=threads) as session:
+                scene.add(surface)
+                scene.wait(.125)
+            self.assertEqual(session.result.frame_count, 3)
+            return path.read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            expected = native_sphere().shift(m.RIGHT)
+            expected.data['d_normal_point'][:] = (
+                expected.get_points().astype(np.float64) * ((.7 + .001)/.7))
+            reference = render(tmp/'expected.y4m', expected, 1)
+            self.assertNotEqual(reference, render(tmp/'unmodified.y4m', native_sphere(), 1))
+            for threads in (1, 4):
+                actual = Authored(radius=.7, resolution=(9, 7))
+                self.assertEqual(reference, render(tmp/f'actual-{threads}.y4m', actual, threads))
+
+
 def run_native_solid_lifecycle():
-    result = unittest.TextTestRunner(verbosity=2).run(
-        unittest.defaultTestLoader.loadTestsFromTestCase(TorusLifecycleTests))
+    suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
+        for cls in (TorusLifecycleTests, SphereLifecycleTests))
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
         raise AssertionError('native solid lifecycle acceptance failed')
 
