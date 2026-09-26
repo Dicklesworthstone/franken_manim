@@ -1,4 +1,4 @@
-"""Arrow authoring through the VMobject lifecycle and Atlas's outline builder.
+"""Line and arrow authoring over native geometry and the VMobject lifecycle.
 
 Python owns the recipe and public hook dispatch. Atlas still constructs the
 filled/curved outline and tip; Marionette owns point publication, schemas and
@@ -11,6 +11,8 @@ def install_arrow_geometry(native):
     g = vars(native)
     if g.get("_FMN_ARROW_GEOMETRY_INSTALLED", False):
         return
+    _install_line_regeneration(g)
+    _install_stroke_arrow(g)
     Arrow, np = g["Arrow"], g["_np"]
 
     def arrow_init(
@@ -63,3 +65,58 @@ def install_arrow_geometry(native):
         function.__module__ = Arrow.__module__
         setattr(Arrow, name, function)
     g["_FMN_ARROW_GEOMETRY_INSTALLED"] = True
+
+
+def _bind(cls, name, function):
+    function.__name__ = name
+    function.__qualname__ = cls.__qualname__ + "." + name
+    function.__module__ = cls.__module__
+    setattr(cls, name, function)
+
+
+def _install_line_regeneration(g):
+    def replace(self, start, end, buff=0.0, path_arc=0.0):
+        start, end = g["_vec3"](start), g["_vec3"](end)
+        style, uniforms = self.get_style(), self.uniforms.copy()
+        # Detached objects also own real Marionette records. Replacing their
+        # entire nursery drops custom schemas, views and hook-owned children.
+        # Use the same native point writer on either side of Scene adoption.
+        self._rebuild_line(start, end, float(buff), float(path_arc))
+        self.set_style(**style, recurse=False)
+        self.uniforms.update(uniforms)
+        return self
+
+    _bind(g["Line"], "_replace_line_geometry", replace)
+
+
+def _install_stroke_arrow(g):
+    Stroke = g["StrokeArrow"]
+
+    def initialize(
+        self, start, end, stroke_color=g["_DEFAULT_LIGHT_COLOR"], stroke_width=5,
+        buff=0.25, tip_width_ratio=5, tip_len_to_width=0.0075,
+        max_tip_length_to_length_ratio=0.3, max_width_to_length_ratio=8.0,
+        **kwargs,
+    ):
+        self.tip_width_ratio = float(tip_width_ratio)
+        self.tip_len_to_width = float(tip_len_to_width)
+        self.max_tip_length_to_length_ratio = float(max_tip_length_to_length_ratio)
+        self.max_width_to_length_ratio = float(max_width_to_length_ratio)
+        self.n_tip_points = 3
+        self.original_stroke_width = float(stroke_width)
+        # Line resolves endpoint objects and runs the cooperative data/points/
+        # uniforms/colors protocol. The existing tip reset keeps the profile
+        # synchronized when init_colors dispatches the public set_stroke.
+        super(Stroke, self).__init__(
+            start, end, buff=buff, stroke_color=stroke_color,
+            stroke_width=stroke_width, **kwargs,
+        )
+
+    def points(self):
+        # Inherited Line.init_points would build a plain line. Atlas already
+        # provides a schema-preserving stroke-arrow writer for live or nursery
+        # objects, including exact taper widths and true-arclength trimming.
+        return self.set_points_by_ends(self.start, self.end, self.buff, self.path_arc)
+
+    _bind(Stroke, "__init__", initialize)
+    _bind(Stroke, "init_points", points)

@@ -50,6 +50,7 @@ python3 crates/fmn-python/tests/live_curves.py
 python3 crates/fmn-python/tests/native_curve_lifecycle.py
 python3 crates/fmn-python/tests/native_geometry_lifecycle.py
 python3 crates/fmn-python/tests/native_arrow_lifecycle.py
+python3 crates/fmn-python/tests/line_stroke_lifecycle.py
 python3 crates/fmn-python/tests/native_polygon_lifecycle.py
 python3 crates/fmn-python/tests/graph_callback_snapshots.py
 python3 crates/fmn-python/tests/field_callback_snapshots.py
@@ -67,6 +68,7 @@ python3 crates/fmn-python/tests/markdown_documents.py
 python3 crates/fmn-python/tests/markdown_restoration.py
 python3 crates/fmn-python/tests/native_svg_paints.py
 python3 crates/fmn-python/tests/svg_paint_ingress.py
+python3 crates/fmn-python/tests/svg_lifecycle.py
 
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
 python3 crates/fmn-python/tests/test_paired_output_protocol.py
