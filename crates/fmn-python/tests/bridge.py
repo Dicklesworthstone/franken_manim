@@ -7490,10 +7490,10 @@ assert np.isclose(grow_point_source.get_width(), 2.0)
 grow_point.path_arc = 0.0
 grow_point_source.shift(2.0 * manimlib.RIGHT)
 grow_point_identity = id(grow_point_source)
-grow_point_samples = []
+grow_point_all_samples = []
 grow_point_source.add_updater(
-    lambda mob: grow_point_samples.append(
-        (mob.get_center().copy(), mob.get_width(), mob.get_color())
+    lambda mob: grow_point_all_samples.append(
+        (mob.get_center().copy(), mob.get_width(), mob.get_color(), mob is grow_point_source)
     ),
     call=False,
 )
@@ -7506,6 +7506,21 @@ grow_point_scene.play(
 )
 assert id(grow_point_source) == grow_point_identity
 assert grow_point_scene.get_mobjects()[0] is grow_point_source
+# The pinned Reference fires copied updaters on the animation's helper
+# copies each frame (Animation.update_mobjects: starting mobject, then
+# target copy), then on the source in the scene pass, and once more after
+# play: 7 samples. Its 8th, first sample is add_updater(call=False)'s
+# trailing update() pass, which BN-07 (C-5) removes.
+assert [s[3] for s in grow_point_all_samples] == [False, False, True] * 2 + [True], (
+    grow_point_all_samples
+)
+for grow_point_copy in (grow_point_all_samples[0], grow_point_all_samples[3]):
+    assert np.allclose(grow_point_copy[0], 2.0 * manimlib.LEFT)
+    assert np.isclose(grow_point_copy[1], 0.0) and grow_point_copy[2] == manimlib.RED
+for grow_point_copy in (grow_point_all_samples[1], grow_point_all_samples[4]):
+    assert np.allclose(grow_point_copy[0], 2.0 * manimlib.RIGHT)
+    assert np.isclose(grow_point_copy[1], 2.0) and grow_point_copy[2] == manimlib.BLUE
+grow_point_samples = [s[:3] for s in grow_point_all_samples if s[3]]
 assert len(grow_point_samples) == 3, f"len={len(grow_point_samples)}, samples={grow_point_samples}"
 assert np.allclose(grow_point_samples[0][0], manimlib.ORIGIN)
 assert np.isclose(grow_point_samples[0][1], 1.0)
@@ -7522,8 +7537,12 @@ grow_center = growing.GrowFromCenter(grow_center_source)
 assert np.array_equal(grow_center.point, manimlib.RIGHT)
 grow_center_source.shift(2.0 * manimlib.RIGHT)
 grow_center_samples = []
+# Helper copies fire the copied updater too (see GrowFromPoint above); keep
+# the source's own samples. The Reference's mid sample is 3*RIGHT, because
+# its anchor aliases the live bounding box; BN-12 section 5 fixes the anchor.
 grow_center_source.add_updater(
-    lambda mob: grow_center_samples.append(mob.get_center().copy()),
+    lambda mob: mob is grow_center_source
+    and grow_center_samples.append(mob.get_center().copy()),
     call=False,
 )
 Scene().play(
@@ -7542,7 +7561,8 @@ assert np.array_equal(grow_edge.point, manimlib.RIGHT)
 grow_edge_source.shift(2.0 * manimlib.UP)
 grow_edge_samples = []
 grow_edge_source.add_updater(
-    lambda mob: grow_edge_samples.append(mob.get_center().copy()),
+    lambda mob: mob is grow_edge_source
+    and grow_edge_samples.append(mob.get_center().copy()),
     call=False,
 )
 Scene().play(
@@ -7566,7 +7586,8 @@ grow_arrow_anchor = grow_arrow.point.copy()
 grow_arrow_source.shift(2.0 * manimlib.UP)
 grow_arrow_samples = []
 grow_arrow_source.add_updater(
-    lambda mob: grow_arrow_samples.append(mob.get_start().copy()),
+    lambda mob: mob is grow_arrow_source
+    and grow_arrow_samples.append(mob.get_start().copy()),
     call=False,
 )
 Scene().play(
@@ -7594,7 +7615,7 @@ spin_source = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
 spin_target_points = spin_source.get_points().copy()
 spin_samples = []
 spin_source.add_updater(
-    lambda mob: spin_samples.append(mob.get_points().copy()),
+    lambda mob: mob is spin_source and spin_samples.append(mob.get_points().copy()),
     call=False,
 )
 spin = growing.SpinInFromNothing(spin_source)

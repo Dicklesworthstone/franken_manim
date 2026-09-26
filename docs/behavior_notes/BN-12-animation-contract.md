@@ -13,7 +13,7 @@ surface presents these semantics), and the Parity Ledger.
 The Animation lifecycle, the constructor surface, `get_sub_alpha`'s lag
 formula, and `time_spanned_alpha`'s re-window are kept **exactly** (fixture
 corpus: `crates/fmn-anim/fixtures/`, generated from the pinned formulas by
-`scripts/gen_anim_fixtures.py`). Three edges of the surface diverge
+`scripts/gen_anim_fixtures.py`). The edges below diverge
 deliberately (D-05) — each replaces an accident of Python with the correct
 behavior under the same name.
 
@@ -72,6 +72,35 @@ round away local shape through translated-basis subtraction.
 **Migration:** spatial arc motion with displacement parallel to the axis now
 has a linear axial component. Planar arcs keep their circular geometry. Code
 must not rely on malformed non-finite arc parameters reaching interpolation.
+
+## 5. A growing animation's anchor is the point it was constructed with
+
+`GrowFromCenter(mob)` stores `point = mob.get_center()`. In the Reference,
+`get_center()` returns `self.get_bounding_box()[1]`, a row *view* into the
+cached bounding box. `get_bounding_box` refreshes that array in place, so
+moving `mob` after constructing the animation also moves its "fixed" anchor,
+and the growth starts from wherever the mobject is at play time.
+`GrowFromEdge` and `GrowArrow` compute a fresh array and do not alias.
+FrankenManim's anchor is a value for all three: the point where the mobject
+was when the animation was constructed.
+
+**Migration:** to grow from the play-time center, construct the animation
+after moving the mobject, or pass `GrowFromPoint(mob, mob.get_center())`
+at that time.
+
+## 6. `Transform` resolves its arc path when it begins
+
+The Reference's `Transform.__init__` calls `init_path_func()`, so
+`path_func` is built from the constructor's `path_arc`/`path_arc_axis`, and
+assigning `anim.path_arc` later has no effect. FrankenManim leaves
+`path_func` as `None` unless one is authored, and resolves `path_arc` and
+`path_arc_axis` when the animation begins. A later assignment takes effect.
+An authored `path_func`, or an explicit `init_path_func()` call, fixes the
+path as before.
+
+**Migration:** code that reads `anim.path_func` right after construction gets
+`None` for an arc given only by `path_arc`. Call `anim.init_path_func()`
+first if the callable itself is needed.
 
 ## Complete native method transforms
 
