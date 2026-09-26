@@ -102,6 +102,21 @@ impl ClosureItem {
         bytes: &[u8],
         detail: impl Into<String>,
     ) -> Result<Self, ManifestError> {
+        Self::digest_input(item_id, virtual_path, sha256(bytes), detail)
+    }
+
+    /// Bind a byte input by the SHA-256 of its bytes, for inputs hashed
+    /// while streaming rather than held (a portal scene's file reads). Equal
+    /// to [`Self::byte_input`] over the same bytes.
+    ///
+    /// # Errors
+    /// [`ManifestError::Invalid`] for an invalid item id or empty path.
+    pub fn digest_input(
+        item_id: u8,
+        virtual_path: impl Into<String>,
+        digest: Digest,
+        detail: impl Into<String>,
+    ) -> Result<Self, ManifestError> {
         let virtual_path = virtual_path.into();
         validate_item_id(item_id)?;
         if virtual_path.is_empty() {
@@ -112,7 +127,7 @@ impl ClosureItem {
         Ok(Self {
             item_id,
             virtual_path: Some(virtual_path),
-            digest: sha256(bytes),
+            digest,
             detail: detail.into(),
         })
     }
@@ -849,6 +864,21 @@ mod tests {
                 "{unnamed}"
             );
         }
+    }
+
+    #[test]
+    fn a_streamed_digest_binds_the_same_input_as_its_bytes() {
+        let bytes = b"x,y\n1,2\n";
+        let held = ClosureItem::byte_input(6, "read/a/data.csv", bytes, "scene read")
+            .expect("valid byte input");
+        let streamed = ClosureItem::digest_input(6, "read/a/data.csv", sha256(bytes), "scene read")
+            .expect("valid digest input");
+        assert_eq!(held, streamed);
+        let other = ClosureItem::digest_input(6, "read/a/data.csv", sha256(b"x,y\n1,3\n"), "r")
+            .expect("valid digest input");
+        assert_ne!(held.digest, other.digest);
+        assert!(ClosureItem::digest_input(6, "", sha256(bytes), "scene read").is_err());
+        assert!(ClosureItem::digest_input(11, "read/a", sha256(bytes), "scene read").is_err());
     }
 
     #[test]

@@ -2,14 +2,16 @@
 
 No new manifest format, renderer or checkpoint authority. One runtime snapshot
 binds a batch's executions; each scene retains its own sources, seed, native
-output and manifest receipt. Arbitrary Python effects remain the single-scene
-portal's declared-input responsibility, not a new batch certification claim.
+output and manifest receipt. Each scene's session records its effects
+(effect_audit) exactly as a single certified render does.
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
 import sys
+
+from .effect_audit import paused as paused_effects
 
 
 def validate_batch_mode(native, format, reproducible, checkpoint=None):
@@ -66,7 +68,9 @@ class BatchProvenance:
         for destination in destinations:
             _available(destination)
         try:
-            self.snapshot = capture_runtime(native)
+            # Hashing the runtime is not a scene effect.
+            with paused_effects():
+                self.snapshot = capture_runtime(native)
             self.identities = dict(self.snapshot.identities)
             supplied = None if runtime_identities is None else dict(runtime_identities)
             if (supplied is not None and supplied != self.identities
@@ -80,7 +84,8 @@ class BatchProvenance:
         # Includes changes caused by a preceding scene or progress observer,
         # BEFORE another constructor runs. RenderSession independently verifies
         # again before/after its own native finalization and sidecar publication.
-        self.snapshot.verify()
+        with paused_effects():
+            self.snapshot.verify()
         _available(destination)
         return {
             "reproducible": True,

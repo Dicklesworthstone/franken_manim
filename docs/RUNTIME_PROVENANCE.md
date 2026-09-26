@@ -77,6 +77,48 @@ verification runs before provenance publication. When a change occurs that late,
 provenance note. It does not falsely claim rollback or publish a success sidecar.
 There is no per-frame hashing.
 
+## Scene effects
+
+A source mapping declares code, but a scene can also read data, spawn
+processes or reach the network. `fmn_python/effect_audit.py` records these
+effects for every certified session. It installs a CPython audit hook
+(PEP 578) on the first certified render. The hook costs one global check per
+audit event while nothing is recording.
+
+- **Reads become C6 inputs.** Each regular file the scene opens for reading
+  is hashed at open time. It becomes a C6 item `read/<sha256>/<basename>`,
+  so the manifest names what was read without naming a host path.
+- **SVG reads are visible.** `SVGMobject` reads its file natively. The native
+  reader raises the same `open` audit event as Python's `open()`, so SVG
+  files are recorded too.
+- **Changed inputs are refused.** Recorded files are hashed again before the
+  native artifact is published and again before the sidecar is published.
+  An input that changed during the render refuses certification.
+- **Uncapturable effects are refused** with
+  `CAPABILITY: certified output cannot capture …`:
+  - a read of a missing or non-regular file;
+  - a directory listing;
+  - a subprocess;
+  - a network connection or name lookup;
+  - an SQLite connection.
+
+  When the effect happens during the scene, the refusal comes before native
+  publication and no artifact is written. The certified CLI exits 4
+  (`render-capability-unavailable`). Standard rendering is unaffected.
+- **Import-time effects count.** The certified CLI (`fmn-python … --reproducible`,
+  single scene or batch) starts recording before the scene module is
+  imported. Import-time reads are inputs of every render the invocation
+  makes, and an import-time subprocess refuses before anything renders. In a
+  batch, each render also inherits the effects of the renders before it,
+  because they share one process.
+- **Not recorded:**
+  - module loading, which SceneSource and the runtime identity govern;
+  - reads inside the interpreter's library directories and the portal
+    package;
+  - source-line reads for tracebacks and warnings;
+  - the portal's own provenance reads (runtime hashing, source providers,
+    sound-cue verification).
+
 ## Evidence and limits
 
 `test_runtime_identity.py` exercises real file and installation-metadata inputs.
@@ -86,13 +128,34 @@ rendered output. `runtime_provenance.py`, registered in the installed-wheel gate
 requires the actual extension and tests both Scene front doors, native PNG/
 manifest publication and rejection without output.
 
+`runtime_provenance.py` also covers scene effects with real renders:
+- a CSV read through `open()` and an SVG read through `SVGMobject` appear as
+  content-named C6 items. The same inputs in another folder give the same
+  closure digest; a different CSV gives a different closure and different
+  pixels;
+- a subprocess, a missing-file probe, a directory listing, `/dev/urandom`,
+  and a file rewritten mid-render each refuse certification with no artifact
+  or sidecar;
+- a standard render of the subprocess scene succeeds;
+- the certified CLI records an import-time read, and refuses an import-time
+  subprocess with exit 4.
+
 This strengthens the runtime component of the closure; it does not complete G4b.
-It does not inventory arbitrary third-party imports, the entire standard library,
-unbundled system libraries, GPU state or uncontrolled host effects. File snapshots
-are not an attestation of already-loaded machine code or protection against an
-adversarial host process rewriting both code and guards. Original wheel archive
-identity, complete C1-C10 input closure and cross-platform certification remain
-separate obligations. No subprocess or dependency is added.
+It does not cover:
+- arbitrary third-party imports, the entire standard library, unbundled
+  system libraries or GPU state;
+- effects that raise no audit event: environment variables, clocks, entropy,
+  and C extensions other than the portal doing their own I/O;
+- effects before a programmatic `Scene.render(...)` session begins. Only the
+  certified CLI records from import time.
+
+A file is hashed when it is opened, so a file rewritten and restored between
+that hash and the scene's own read is not detected. File snapshots are not an
+attestation of already-loaded machine code, or protection against an
+adversarial host process that rewrites both code and guards. Original wheel
+archive identity, the complete C1-C10 input closure and cross-platform
+certification remain separate obligations. No subprocess or dependency is
+added.
 
 Portal manifests record C3 the way native `fmn` does: the toolchain and the
 Python runtime versions as the platform-neutral C3 item, and the target triple

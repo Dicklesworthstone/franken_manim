@@ -126,6 +126,49 @@ const fn plan_tuning_name(source: fmn_runtime::TuningSource) -> &'static str {
     }
 }
 
+/// The distinct files one certified scene may read (`fmn_python.effect_audit`).
+const MAX_SCENE_READS: usize = 4_096;
+
+/// C6 items for the files a certified Python scene read, as recorded by
+/// `fmn_python.effect_audit`: each is named `read/<sha256>/<basename>` and
+/// bound to that digest.
+fn scene_read_items(reads: Vec<(String, String)>) -> PyResult<Vec<ClosureItem>> {
+    if reads.len() > MAX_SCENE_READS {
+        return Err(PyValueError::new_err(
+            "scene file reads exceed the 4096-input budget",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    reads
+        .into_iter()
+        .map(|(path, hex)| {
+            let name = path
+                .strip_prefix("read/")
+                .and_then(|rest| rest.strip_prefix(hex.as_str()))
+                .and_then(|rest| rest.strip_prefix('/'));
+            let named = hex.len() == 64
+                && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                && name.is_some_and(|name| {
+                    !name.is_empty() && !name.contains('/') && !name.chars().any(char::is_control)
+                });
+            if !named {
+                return Err(PyValueError::new_err(format!(
+                    "scene read {path:?} is not named read/<sha256>/<basename>"
+                )));
+            }
+            if !seen.insert(path.clone()) {
+                return Err(PyValueError::new_err(format!(
+                    "duplicate scene read {path:?}"
+                )));
+            }
+            let digest =
+                Digest::from_hex(&hex).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            ClosureItem::digest_input(6, path, digest, "file read by the scene")
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        })
+        .collect()
+}
+
 pub(crate) fn adjacent_manifest_destination(artifact: &Path) -> Result<PathBuf, String> {
     let leaf = artifact.file_name().ok_or_else(|| {
         format!(
@@ -211,6 +254,7 @@ pub(crate) fn publish_manifest_generation(
     sources,
     runtime_identities,
     cue_assets = None,
+    scene_reads = None,
 ))]
 pub(crate) fn _portal_publish_manifest(
     _py: Python<'_>,
@@ -224,6 +268,7 @@ pub(crate) fn _portal_publish_manifest(
     sources: &Bound<'_, PyDict>,
     runtime_identities: &Bound<'_, PyDict>,
     cue_assets: Option<Vec<(String, Vec<u8>)>>,
+    scene_reads: Option<Vec<(String, String)>>,
 ) -> PyResult<(String, String)> {
     if !matches!(format, "png" | "png_sequence" | "wav") {
         return Err(CapabilityError::new_err(format!(
@@ -377,10 +422,13 @@ pub(crate) fn _portal_publish_manifest(
     )
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
+    // Files the scene read (fmn_python.effect_audit): C6 inputs named by
+    // content and basename, so equal inputs give equal closures on any host.
+    let read_items = scene_read_items(scene_reads.unwrap_or_default())?;
+    let read_count = read_items.len();
+
     // Fonts: every face compiled into the extension is a C6 byte input, as
-    // on the native route (bundling is not an exemption). Arbitrary files
-    // a Python scene opens itself are not yet recorded; that remains open
-    // on fm-certified-closure-integrity-4fei.
+    // on the native route (bundling is not an exemption).
     let bundled_faces = fmn_library::bundled_faces();
     let font_items = bundled_faces
         .iter()
@@ -395,24 +443,32 @@ pub(crate) fn _portal_publish_manifest(
         })
         .collect::<PyResult<Vec<_>>>()?;
     let face_count = bundled_faces.len() as u64;
-    let c6 = if cue_count == 0 {
-        ClosureItem::structural(
+    let c6 = match (cue_count, read_count) {
+        (0, 0) => ClosureItem::structural(
             6,
             "no asset reads on the portal route; bundled fonts listed",
             &[
                 StructuralField::Absent("asset reads"),
                 StructuralField::U64(face_count),
             ],
-        )
-    } else {
-        ClosureItem::structural(
+        ),
+        (_, 0) => ClosureItem::structural(
             6,
             "scene sound-cue asset reads on the portal route; bundled fonts listed",
             &[
                 StructuralField::U64(cue_count as u64),
                 StructuralField::U64(face_count),
             ],
-        )
+        ),
+        _ => ClosureItem::structural(
+            6,
+            "scene file and sound-cue asset reads on the portal route; bundled fonts listed",
+            &[
+                StructuralField::U64(cue_count as u64),
+                StructuralField::U64(read_count as u64),
+                StructuralField::U64(face_count),
+            ],
+        ),
     }
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
@@ -553,6 +609,7 @@ pub(crate) fn _portal_publish_manifest(
         c10,
     ];
     items.extend(source_items);
+    items.extend(read_items);
     items.extend(font_items);
 
     let manifest = ProvenanceManifest::new(ManifestMode::Certified, items, identity, outputs, None)
@@ -591,5 +648,33 @@ mod tests {
         let artifact = Path::new("/tmp/test/render.png");
         let sidecar = adjacent_manifest_destination(artifact).expect("adjacent manifest");
         assert_eq!(sidecar, PathBuf::from("/tmp/test/render.png.manifest"));
+    }
+
+    #[test]
+    fn scene_reads_are_content_named_c6_items() {
+        let data = fmn_hash::sha256(b"x,1\n");
+        let hex = data.to_hex();
+        let named = |name: &str| (format!("read/{hex}/{name}"), hex.clone());
+        let items = scene_read_items(vec![named("data.csv"), named("copy.csv")]).expect("valid");
+        assert_eq!(items.len(), 2);
+        for item in &items {
+            assert_eq!((item.item_id, item.digest), (6, data));
+        }
+        let other = fmn_hash::sha256(b"x,2\n").to_hex();
+        for bad in [
+            (format!("read/{other}/data.csv"), hex.clone()), // name disagrees with digest
+            (format!("data/{hex}/data.csv"), hex.clone()),
+            (format!("read/{hex}/"), hex.clone()),
+            (format!("read/{hex}/a/b.csv"), hex.clone()),
+            (format!("read/{hex}/a\nb"), hex.clone()),
+            (
+                format!("read/{}/data.csv", hex.to_uppercase()),
+                hex.to_uppercase(),
+            ),
+        ] {
+            assert!(scene_read_items(vec![bad.clone()]).is_err(), "{bad:?}");
+        }
+        assert!(scene_read_items(vec![named("data.csv"), named("data.csv")]).is_err());
+        assert!(scene_read_items(vec![named("data.csv"); MAX_SCENE_READS + 1]).is_err());
     }
 }

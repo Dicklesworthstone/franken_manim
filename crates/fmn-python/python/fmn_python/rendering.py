@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .effect_audit import paused as paused_effects
 from .render_selection import animation_range as _animation_range, apply_animation_range
 
 _FORMATS = frozenset({"png", "png_sequence", "gif", "y4m", "wav", "svg", "mp4", "mov"})
@@ -69,7 +70,8 @@ def _cue_assets(inputs: Any) -> list[tuple[str, bytes]] | None:
             continue
         if len(assets) >= _MAX_PROVENANCE_INPUTS:
             raise ValueError("audio provenance exceeds its input budget")
-        with path.open("rb") as stream:
+        # Verifying a C1 input is not a scene effect (effect_audit).
+        with paused_effects(), path.open("rb") as stream:
             data = stream.read(_MAX_PROVENANCE_BYTES - size + 1)
         size += len(data)
         if size > _MAX_PROVENANCE_BYTES:
@@ -188,8 +190,9 @@ class RenderSession:
     For reproducible output, ``sources`` is a frozen source mapping or a
     zero-argument provider evaluated after scene execution and before native
     publication. Use ``lambda: loaded.sources`` with SceneSource to include
-    imports made during construct/tear_down. Source capture alone does not
-    certify arbitrary Python host effects or other undeclared inputs.
+    imports made during construct/tear_down. Files the scene reads are
+    recorded as C6 inputs, and effects the closure cannot capture refuse
+    certification (effect_audit).
     """
 
     def __init__(

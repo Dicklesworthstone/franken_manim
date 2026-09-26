@@ -33,7 +33,7 @@ items marked *(bytes)* are hashed as raw byte streams.
 | C3 | Toolchain: the exact pinned nightly (from `SUITE.lock`) and Cargo profile; for a Python-portal run only, the CPython implementation/version, ABI policy, `fmn-python` wheel version, and NumPy version. The target triple and the SIMD build tier's target-feature set form a separate C3 item at virtual path `platform/target` (§4) | structural |
 | C4 | Configuration: the fully-resolved config **bytes** after precedence (defaults → user file → CLI), not the file paths | bytes |
 | C5 | RNG seeds: the root seed and the named-substream layout version (BN-01) | structural |
-| C6 | Assets and fonts: content hash of every asset and font file actually read, keyed by virtual path (bundled fonts included — bundling is not exemption). Native `fmn` and the portal list every face compiled into the binary at `bundled-font/<name>`, a sound superset of the faces a scene reads. Files a Python scene opens on its own are not yet recorded (open on fm-certified-closure-integrity-4fei) | bytes, per file |
+| C6 | Assets and fonts: content hash of every asset and font file actually read, keyed by virtual path (bundled fonts included — bundling is not exemption). Native `fmn` and the portal list every face compiled into the binary at `bundled-font/<name>`, a sound superset of the faces a scene reads. On the portal route, every regular file a Python scene reads (with `open()`, NumPy, PIL, `SVGMobject`, `ImageMobject`, …) is a C6 item at `read/<sha256>/<basename>`; an effect this cannot capture refuses certification (§2, portal effects) | bytes, per file |
 | C7 | Execution-engine and backend identities: the semantic renderer version, execution engine (`certified` requires the certified CPU engine), and — in `standard` provenance only — annex device/driver identities | structural |
 | C8 | Locale and timezone as visible to the engine (certified runs pin `C`/UTC; the pin itself is recorded) | structural |
 | C9 | Capability policy: which capability traits were live (fs/process/clock/AssetFetcher implementations by identity, not by pointer), whether the separately hosted Python portal was present, and, when the ffmpeg boundary is used, the process-mechanism identity + policy version and ffmpeg fingerprint (path + content hash + versioned native-image format/architecture attestation + version line) | structural |
@@ -50,6 +50,32 @@ does not embed, locate, or spawn CPython, so Python runtime state is proven
 inert and C3/C9 encode the portal as absent. For `fmn-python` runs, the portal
 fields and all imported module bytes are mandatory closure inputs; forgetting
 one is a certification bug, not permission to weaken the native claim.
+
+**Portal effects (plan §15.5).** A Python scene can reach inputs no native
+scene can. During a certified portal render, `fmn_python.effect_audit`
+observes CPython's audit events. For the certified CLI, observation starts
+before the scene module is imported, so import-time reads count.
+- Every regular file the scene reads is hashed when it is opened and becomes
+  a C6 item named by content and basename. Such names are host-path-free, so
+  equal inputs give equal closures on every host. Each file is hashed again
+  before publication, and a file that changed during the render is refused.
+- The native SVG reader raises the same `open` event Python's `open()`
+  does.
+- Effects the closure cannot capture refuse certification with a named
+  capability error, before any artifact is published:
+  - a read of a missing or non-regular file (`/dev/urandom`, a FIFO);
+  - a directory listing;
+  - a subprocess;
+  - a network connection or name lookup;
+  - an SQLite connection.
+- These are not scene inputs:
+  - module loading, which is C1 through SceneSource, plus the runtime
+    identity;
+  - reads inside the interpreter's library directories and the installed
+    portal;
+  - source-line reads for diagnostics.
+- Not observed, because they raise no audit event: environment variables,
+  the host clock, and entropy (`os.urandom`, unseeded `random`).
 
 ## 3. Hashing rules
 

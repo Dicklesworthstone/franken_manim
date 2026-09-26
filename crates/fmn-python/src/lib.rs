@@ -4055,24 +4055,7 @@ impl BridgeMobject {
             fmn_library::svg::SvgDocument::parse_with_limits(text.as_bytes(), &limits)
                 .map_err(native_error)?
         } else {
-            let metadata = std::fs::metadata(file_name).map_err(|error| {
-                PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
-            })?;
-            if !metadata.is_file() {
-                return Err(PyOSError::new_err(format!(
-                    "SVGMobject source {file_name:?} is not a regular file"
-                )));
-            }
-            let bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-            if bytes > limits.max_bytes {
-                return Err(native_error(fmn_library::svg::SvgError::TooLarge {
-                    bytes,
-                    limit: limits.max_bytes,
-                }));
-            }
-            let contents = std::fs::read(file_name).map_err(|error| {
-                PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
-            })?;
+            let contents = read_svg_source(slf.py(), file_name, &limits)?;
             fmn_library::svg::SvgDocument::parse_with_limits(&contents, &limits)
                 .map_err(native_error)?
         };
@@ -4083,26 +4066,9 @@ impl BridgeMobject {
     /// the constructor uses: identical byte budget, identical error surface,
     /// so the Python seam cannot read what the parser would refuse.
     #[staticmethod]
-    fn _read_svg_file(file_name: &str) -> PyResult<String> {
+    fn _read_svg_file(py: Python<'_>, file_name: &str) -> PyResult<String> {
         let limits = fmn_library::svg::SvgLimits::default();
-        let metadata = std::fs::metadata(file_name).map_err(|error| {
-            PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
-        })?;
-        if !metadata.is_file() {
-            return Err(PyOSError::new_err(format!(
-                "SVGMobject source {file_name:?} is not a regular file"
-            )));
-        }
-        let bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-        if bytes > limits.max_bytes {
-            return Err(native_error(fmn_library::svg::SvgError::TooLarge {
-                bytes,
-                limit: limits.max_bytes,
-            }));
-        }
-        let contents = std::fs::read(file_name).map_err(|error| {
-            PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
-        })?;
+        let contents = read_svg_source(py, file_name, &limits)?;
         String::from_utf8(contents).map_err(|error| {
             PyOSError::new_err(format!(
                 "SVGMobject source {file_name:?} is not UTF-8: {error}"
@@ -10162,6 +10128,38 @@ fn with_font_book<T>(operation: impl FnOnce(&fmn_library::FontBook) -> PyResult<
 
 fn native_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+/// Read one user SVG file under the processor's byte budget. The size is
+/// checked against metadata before the read, so a bomb never allocates.
+/// Raises CPython's `open` audit event first, as `open()` would: a native
+/// read is otherwise invisible to audit hooks, including the certified
+/// session's effect recorder (fmn_python.effect_audit).
+fn read_svg_source(
+    py: Python<'_>,
+    file_name: &str,
+    limits: &fmn_library::svg::SvgLimits,
+) -> PyResult<Vec<u8>> {
+    py.import("sys")?
+        .call_method1("audit", ("open", file_name, "r", 0))?;
+    let metadata = std::fs::metadata(file_name).map_err(|error| {
+        PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(PyOSError::new_err(format!(
+            "SVGMobject source {file_name:?} is not a regular file"
+        )));
+    }
+    let bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    if bytes > limits.max_bytes {
+        return Err(native_error(fmn_library::svg::SvgError::TooLarge {
+            bytes,
+            limit: limits.max_bytes,
+        }));
+    }
+    std::fs::read(file_name).map_err(|error| {
+        PyOSError::new_err(format!("SVGMobject cannot read {file_name:?}: {error}"))
+    })
 }
 
 fn graph_sampling_error(error: fmn_library::graphs::GraphError<PyErr>) -> PyErr {

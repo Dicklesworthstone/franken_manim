@@ -14,6 +14,7 @@ from typing import Any
 
 from .batch_cli import _BATCH_HELP, _VALUE_FLAGS, _emit_result
 from .batch_provenance import validate_batch_mode
+from .effect_audit import recording as recording_effects
 from .checkpoint_cli import CHECKPOINT_HELP, CHECKPOINT_VALUES, take_checkpoint_options
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, _error_fields, _error_notes,
@@ -264,7 +265,10 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     phase, session, report = "load", None, None
     redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
     try:
-        with redirect, SceneSource(source_path, native.Scene) as loaded:
+        # A certified invocation records scene effects from before its
+        # module loads: import-time reads are inputs of every render.
+        with (redirect, recording_effects(bool(options.get("reproducible"))),
+              SceneSource(source_path, native.Scene) as loaded):
             scenes = loaded.scenes
             names = sorted(scenes)
             if batch:
@@ -366,7 +370,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             return native._portal_cli_emit(6, "render", "render-batch-reporting-failed", _message(error), robot,
                                            source=source, destination=str(destination), batch=partial.as_dict())
         capability = getattr(native, "_CapabilityError", ())
-        if phase in {"start", "batch"} and (isinstance(error, capability)
+        if phase in {"start", "batch", "finish"} and (isinstance(error, capability)
                 or _error_fields(error)[1].startswith("CAPABILITY: ")):
             code, identity, kind = 4, "capability", "render-capability-unavailable"
         elif phase in {"load", "construct"}:

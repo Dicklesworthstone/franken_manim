@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .batch_provenance import validate_batch_mode
+from .effect_audit import recording as recording_effects
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_fields, render_scenes
 from .rendering import _positive_integer
 from .scene_loading import SceneSource
@@ -137,7 +138,8 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
     redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
     phase = "load"
     try:
-        with redirect, SceneSource(source_path, native.Scene) as loaded:
+        with (redirect, recording_effects(bool(options.get("reproducible"))),
+              SceneSource(source_path, native.Scene) as loaded):
             discovered = loaded.scenes
             if not discovered:
                 raise ValueError(f"no locally declared Scene classes found in {source}")
