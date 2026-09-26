@@ -83,9 +83,12 @@ def install_number_line_lifecycle(native):
         # geometry and the public fields above, not this inventory, drive ticks.
         self._number_line_params = (terms, config)
         # Line's primitive helper treats color as an overriding shorthand.
-        # NumberLine's explicit stroke_color must win over its color default.
-        options.setdefault("fill_color", color)
-        options.setdefault("stroke_color", color)
+        # NumberLine's explicit stroke_color must win over its color default,
+        # and an explicit None defers to it: VMobject.__init__ resolves
+        # `stroke_color or color` (subsets passes stroke_color=None).
+        for key in ("fill_color", "stroke_color"):
+            if options.get(key) is None:
+                options[key] = color
         super(NumberLine, self).__init__(
             terms[0] * g["_RIGHT"], terms[1] * g["_RIGHT"],
             stroke_width=stroke_width, **options,
