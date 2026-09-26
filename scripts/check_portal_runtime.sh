@@ -52,6 +52,8 @@ python3 crates/fmn-python/tests/native_geometry_lifecycle.py
 python3 crates/fmn-python/tests/native_arrow_lifecycle.py
 python3 crates/fmn-python/tests/native_curved_lifecycle.py
 python3 crates/fmn-python/tests/test_curved_constructor_protocol.py
+python3 crates/fmn-python/tests/native_shape_matcher_lifecycle.py
+python3 crates/fmn-python/tests/test_shape_matcher_protocol.py
 python3 crates/fmn-python/tests/line_stroke_lifecycle.py
 python3 crates/fmn-python/tests/native_polygon_lifecycle.py
 python3 crates/fmn-python/tests/graph_callback_snapshots.py
