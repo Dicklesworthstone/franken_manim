@@ -29,7 +29,7 @@ use fmn_core::types::Vec3;
 use fmn_mobject::{Mob, Mobject, Stage, StageError};
 
 use crate::animation::{AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc};
-use crate::transform::{PathFunc, StartPrep, Transform, interpolate_fields};
+use crate::transform::{PathFunc, StartPrep, TargetPrep, Transform, interpolate_fields};
 
 fn neg(v: Vec3) -> Vec3 {
     [-v[0], -v[1], -v[2]]
@@ -44,7 +44,8 @@ fn sub(a: Vec3, b: Vec3) -> Vec3 {
 /// `FadeIn` (fading.py:34): transform from an invisible, pre-scaled,
 /// pre-shifted starting copy onto a copy of the mobject as it stands.
 /// `shift`/`scale` are the Reference's `Fade` parameters (`ORIGIN`/`1`
-/// defaults).
+/// defaults). Geometry and paint are copied at each `begin`, while these
+/// parameters remain construction-time values.
 ///
 /// # Errors
 /// [`AnimError::StaleHandle`] / [`AnimError::Stage`].
@@ -54,8 +55,12 @@ pub fn fade_in(
     shift: Vec3,
     scale: f64,
 ) -> Result<Transform, AnimError> {
-    let target = stage.copy_family(mobject)?;
-    let mut t = Transform::new(mobject, target).with_start_prep(StartPrep {
+    if !stage.contains(mobject) {
+        return Err(AnimError::StaleHandle(mobject));
+    }
+    // Transform freezes self-targets at begin, not while a whole Succession
+    // is constructed. This also samples fresh geometry and paint on replay.
+    let mut t = Transform::new(mobject, mobject).with_start_prep(StartPrep {
         opacity_zero: true,
         scale: Some(1.0 / scale),
         shift: Some(neg(shift)),
@@ -67,7 +72,8 @@ pub fn fade_in(
 
 /// `FadeOut` (fading.py:46): transform onto an invisible, shifted, scaled
 /// copy; a remover whose `final_alpha_value = 0` puts the mobject back in
-/// its original state when done.
+/// its begin-time state when done. The invisible target is prepared at each
+/// `begin`, so delayed composition members and replay use the live source.
 ///
 /// # Errors
 /// [`AnimError::StaleHandle`] / [`AnimError::Stage`].
@@ -77,12 +83,13 @@ pub fn fade_out(
     shift: Vec3,
     scale: f64,
 ) -> Result<Transform, AnimError> {
-    let target = stage.copy_family(mobject)?;
-    // create_target order: set_opacity(0), shift, scale (fading.py:63).
-    stage.set_family_opacity_zero(target);
-    stage.shift(target, shift);
-    stage.scale(target, scale);
-    let mut t = Transform::new(mobject, target);
+    if !stage.contains(mobject) {
+        return Err(AnimError::StaleHandle(mobject));
+    }
+    // Keep only the recipe until begin; the private target must reflect any
+    // preceding animation, without making that predecessor's state vanish.
+    let mut t =
+        Transform::new(mobject, mobject).with_target_prep(TargetPrep::FadeOut { shift, scale });
     t.state_mut().config.name = "FadeOut".to_owned();
     t.state_mut().config.remover = true;
     t.state_mut().config.final_alpha_value = 0.0;
@@ -90,7 +97,8 @@ pub fn fade_out(
 }
 
 /// `FadeInFromPoint` (fading.py:71): `shift = center − point`,
-/// `scale = ∞`.
+/// `scale = ∞`. The shift is captured now, as in the Reference; if the
+/// source moves before begin, the collapse point moves by the same amount.
 ///
 /// # Errors
 /// As [`fade_in`].
@@ -106,6 +114,7 @@ pub fn fade_in_from_point(
 }
 
 /// `FadeOutToPoint` (fading.py:81): `shift = point − center`, `scale = 0`.
+/// The constructor captures the shift, not a fixed world-space destination.
 ///
 /// # Errors
 /// As [`fade_out`].

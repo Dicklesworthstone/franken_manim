@@ -338,6 +338,7 @@ pub(crate) fn set_family_rgb(stage: &mut Stage, mob: Mob, rgb: [f32; 3]) {
 pub(crate) enum TargetPrep {
     Indicate { scale: f64, color: [f32; 3] },
     ReversePoints,
+    FadeOut { shift: Vec3, scale: f64 },
 }
 
 impl TargetPrep {
@@ -348,6 +349,13 @@ impl TargetPrep {
                 set_family_rgb(stage, target, color);
             }
             Self::ReversePoints => stage.reverse_family_points(target)?,
+            Self::FadeOut { shift, scale } => {
+                // Reference create_target: vanish, then shift, then scale
+                // about the shifted center. Do not reorder the stage writes.
+                stage.set_family_opacity_zero(target);
+                stage.shift(target, shift);
+                stage.scale(target, scale);
+            }
         }
         Ok(())
     }
@@ -395,7 +403,7 @@ impl Transform {
     }
 
     /// Prepare a private target at begin, before family alignment. Used by
-    /// the indication family without adding a second interpolation mechanism.
+    /// the fade/indication families without a second interpolation mechanism.
     #[must_use]
     pub(crate) fn with_target_prep(mut self, prep: TargetPrep) -> Self {
         self.target_prep = Some(prep);
