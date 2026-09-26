@@ -129,6 +129,23 @@ def console(*arguments):
     return code, result
 
 
+def batch_console(*arguments):
+    """A robot batch keeps one receipt on stdout; per-scene progress lines go
+    to stderr by design (batch_cli's help), so return them for checking."""
+    previous = sys.argv
+    stdout, stderr = io.StringIO(), io.StringIO()
+    sys.argv = ["fmn-python", "--robot", *arguments]
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = manimlib._console_main()
+    finally:
+        sys.argv = previous
+    result = json.loads(stdout.getvalue())  # Reject decoration or a second JSON record.
+    assert result["schema"] == "fmn-python.cli" and result["version"] == 1
+    assert result["exit"]["code"] == code
+    return code, result, stderr.getvalue().splitlines()
+
+
 output_root = pathlib.Path(globals().get("_fmn_output_root") or tempfile.mkdtemp(prefix="fmn-native-output-"))
 output_root.mkdir(parents=True, exist_ok=True)
 source = output_root / "native_scene.py"
@@ -686,12 +703,35 @@ if ffmpeg:
     )
     assert code_bad == 4, bad_report
 
-    # Capability refusal: batch with --reproducible must fail closed
-    code_batch, batch_report = console(
+    # Reproducible batches (a8d883dc) give every completed scene its own
+    # manifest and keep the aggregate uncertified. Scenes run in sorted order,
+    # so FailingScene stops the batch (exit 5) after the scenes before it.
+    batch_root = output_root / "batch_out"
+    code_batch, batch_report, batch_progress = batch_console(
         str(source), "--write_all", "--format", "png",
-        "--reproducible", "--video_dir", str(output_root / "batch_out"),
+        "--reproducible", "--video_dir", str(batch_root),
     )
-    assert code_batch == 4, batch_report
+    if has_installed_wheel:
+        batch = batch_report["batch"]
+        assert code_batch == 5, batch_report
+        assert batch["reproducible_requested"] and not batch["certified"], batch_report
+        statuses = {outcome["name"]: outcome["status"] for outcome in batch["outcomes"]}
+        assert statuses["FailingScene"] == "failed", statuses
+        done = [name for name, status in statuses.items() if status == "succeeded"]
+        assert done and done == sorted(done) and all(name < "FailingScene" for name in done), statuses
+        assert all(status == "not_run" for name, status in statuses.items() if name > "FailingScene")
+        for name in done:
+            sidecar = batch_root / (name + ".png.manifest")
+            assert (batch_root / (name + ".png")).is_file(), name
+            assert (sidecar / "manifest.fmnp").is_file() and (sidecar / "manifest.txt").is_file(), name
+        assert batch_progress == [
+            f"fmn-python: {outcome['name']}: {outcome['status']}: {outcome['destination']}"
+            for outcome in batch["outcomes"] if outcome["status"] != "not_run"
+        ], batch_progress
+    else:
+        # Without an installed wheel payload nothing may be certified.
+        assert code_batch != 0, batch_report
+        assert not (batch_report.get("batch") or {}).get("all_scenes_certified"), batch_report
 
 native_output_report = {"frames": len(gif_frames), "formats": len(reports),
                         "publication_failures": publication_failures,
