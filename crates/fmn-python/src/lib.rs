@@ -10915,9 +10915,103 @@ fn _resolved_directories<'py>(
     Ok(out)
 }
 
+// CPython's `subtype_traverse` skips visiting an instance's heap type when
+// the nearest non-Python base is itself a heap type with a traverse, trusting
+// that base to visit `Py_TYPE(self)`: since CPython 3.9, heap types visit
+// their type. PyO3 0.29's synthesized traverse for the two subclassable,
+// `dict` pyclasses never does, so a cycle through a Python subclass's class
+// object is invisible to the collector and leaks. The case that surfaced it
+// (fm-2mvb) is a scene-local `class Demo(Scene)` whose `construct` closes over
+// mobjects bound to that scene: instance -> class -> construct -> closure ->
+// mobject -> `_scene` -> instance. These wrappers visit the type first and
+// then run PyO3's own traverse. Neither class extends another pyclass, so
+// PyO3's super-traverse still finds nothing to chain to.
+static BRIDGE_TRAVERSE: std::sync::OnceLock<ffi::traverseproc> = std::sync::OnceLock::new();
+static SCENE_TRAVERSE: std::sync::OnceLock<ffi::traverseproc> = std::sync::OnceLock::new();
+
+/// # Safety
+/// Called only by the collector through a wrapped `tp_traverse` slot, with a
+/// live object of the wrapped class and the collector's own visit callback.
+unsafe fn traverse_heap_type_then(
+    object: *mut ffi::PyObject,
+    visit: ffi::visitproc,
+    arg: *mut std::ffi::c_void,
+    original: Option<&ffi::traverseproc>,
+) -> std::ffi::c_int {
+    // SAFETY: the collector passes a live object, whose type pointer is valid
+    // and cannot change while traversal runs.
+    let ty = unsafe { ffi::Py_TYPE(object) };
+    // SAFETY: `ty` is a valid type object (above).
+    if unsafe { ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_HEAPTYPE) } != 0 {
+        // SAFETY: the instance holds a strong reference to its heap type
+        // (PyO3 releases it in tp_dealloc), which is exactly what we report.
+        let visited = unsafe { visit(ty.cast(), arg) };
+        if visited != 0 {
+            return visited;
+        }
+    }
+    match original {
+        // SAFETY: PyO3's own traverse for this class, with the collector's
+        // arguments.
+        Some(traverse) => unsafe { traverse(object, visit, arg) },
+        None => 0,
+    }
+}
+
+unsafe extern "C" fn bridge_traverse(
+    object: *mut ffi::PyObject,
+    visit: ffi::visitproc,
+    arg: *mut std::ffi::c_void,
+) -> std::ffi::c_int {
+    // SAFETY: installed only as `_BridgeMobject`'s tp_traverse.
+    unsafe { traverse_heap_type_then(object, visit, arg, BRIDGE_TRAVERSE.get()) }
+}
+
+unsafe extern "C" fn scene_traverse(
+    object: *mut ffi::PyObject,
+    visit: ffi::visitproc,
+    arg: *mut std::ffi::c_void,
+) -> std::ffi::c_int {
+    // SAFETY: installed only as `_SceneCore`'s tp_traverse.
+    unsafe { traverse_heap_type_then(object, visit, arg, SCENE_TRAVERSE.get()) }
+}
+
+fn visit_heap_type_in_traverse(
+    ty: &Bound<'_, pyo3::types::PyType>,
+    original_slot: &std::sync::OnceLock<ffi::traverseproc>,
+    wrapper: ffi::traverseproc,
+) -> PyResult<()> {
+    let raw = ty.as_type_ptr();
+    // SAFETY: ADR-0015 keeps abi3 off, so pyo3-ffi's PyTypeObject layout is
+    // the interpreter ABI (method_cache reads tp_version_tag the same way).
+    // The type is fully initialized and the GIL is held.
+    let current = unsafe { (*raw).tp_traverse };
+    if current.map(|traverse| traverse as usize) == Some(wrapper as usize) {
+        // The module can initialize again over the same process-wide type.
+        return Ok(());
+    }
+    let original = current.ok_or_else(|| {
+        PyRuntimeError::new_err("a subclassable dict pyclass has no tp_traverse slot")
+    })?;
+    let _ = original_slot.set(original);
+    // SAFETY: as above. Replacing a slot of our own heap type and announcing
+    // it with PyType_Modified is the documented way to change a type slot.
+    unsafe {
+        (*raw).tp_traverse = Some(wrapper);
+        ffi::PyType_Modified(raw);
+    }
+    Ok(())
+}
+
 fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BridgeMobject>()?;
     module.add_class::<PyScene>()?;
+    visit_heap_type_in_traverse(
+        &py.get_type::<BridgeMobject>(),
+        &BRIDGE_TRAVERSE,
+        bridge_traverse,
+    )?;
+    visit_heap_type_in_traverse(&py.get_type::<PyScene>(), &SCENE_TRAVERSE, scene_traverse)?;
     module.add_class::<portal_studio::Recording>()?;
     module.add_class::<portal_studio::Host>()?;
     module.add_class::<PyRecordView>()?;

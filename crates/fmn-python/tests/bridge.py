@@ -2916,6 +2916,27 @@ for callback_owns_anchor in (False, True):
     )
 
 
+# fm-2mvb: an instance of a Python subclass references its class, and the
+# collector must see that edge. PyO3's synthesized traverse for the
+# subclassable pyclasses did not visit the heap type, so a cycle through a
+# subclass's class object (a scene-local `class Demo(Scene)` whose construct
+# closes over mobjects bound to that scene) was never collected.
+def class_cycle_observers():
+    class ClassCycleScene(Scene):
+        pass
+
+    cyclic = ClassCycleScene()
+    ClassCycleScene.instance = cyclic
+    return weakref.ref(cyclic), weakref.ref(ClassCycleScene)
+
+
+class_observers = class_cycle_observers()
+gc.collect()
+assert all(observer() is None for observer in class_observers), (
+    "a cycle through a Scene subclass's class object was not collected"
+)
+
+
 # Reentrant callbacks and Python exceptions cross the engine boundary intact.
 updates = []
 
