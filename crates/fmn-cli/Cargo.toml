@@ -46,6 +46,14 @@ fmn-library.workspace = true
 fmn.workspace = true
 asupersync = { workspace = true, optional = true }
 
+# The build identity's uncommitted-state digest (ADR-0025).
+[build-dependencies]
+fmn-hash.workspace = true
+
+# The same digest, for build_identity's unit tests in this crate.
+[dev-dependencies]
+fmn-hash.workspace = true
+
 [features]
 batch = ["cli", "dep:asupersync"]
 cli = []

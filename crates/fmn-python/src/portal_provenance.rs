@@ -20,6 +20,14 @@ use pyo3::types::PyDict;
 use crate::CapabilityError;
 
 const BUILD_ID: &str = env!("FMN_BUILD_ID");
+
+/// Certified output only from a wheel whose build identity names its sources
+/// (ADR-0025); see `fmn_output::certified_build_refusal`.
+pub(super) fn certified_build_check() -> PyResult<()> {
+    fmn_output::certified_build_refusal(BUILD_ID).map_or(Ok(()), |reason| {
+        Err(CapabilityError::new_err(format!("CAPABILITY: {reason}")))
+    })
+}
 const TARGET_TRIPLE: &str = env!("FMN_TARGET_TRIPLE");
 const CARGO_PROFILE: &str = env!("FMN_CARGO_PROFILE");
 const SUITE_LOCK_BYTES: &[u8] = include_bytes!("../../../SUITE.lock");
@@ -227,6 +235,7 @@ pub(crate) fn _portal_publish_manifest(
             "CAPABILITY: windows-x86-64 is excluded from certified reproducibility by ADR-0019",
         ));
     }
+    certified_build_check()?;
 
     let path_str: String = artifact_report
         .get_item("path")?

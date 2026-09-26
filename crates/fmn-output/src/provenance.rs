@@ -288,6 +288,12 @@ impl ProvenanceManifest {
         validate_items(&items)?;
         validate_identity(&items, &identity)?;
         validate_outputs(&outputs)?;
+        if mode == ManifestMode::Certified && certified_build_refusal(&identity.build_id).is_some()
+        {
+            return Err(ManifestError::Invalid(
+                "a certified manifest requires an identified build (ADR-0025)",
+            ));
+        }
         let closure_digest = closure_digest(&items)?;
         Ok(Self {
             mode,
@@ -618,6 +624,31 @@ fn validate_outputs(outputs: &[ManifestOutput]) -> Result<(), ManifestError> {
     Ok(())
 }
 
+/// Why this build cannot sign certified output, if it cannot (ADR-0025).
+///
+/// A certified closure must name the sources it was built from. A clean
+/// commit (`git:<commit>`), a commit plus the digest of its uncommitted
+/// compiled inputs (`git:<commit>+dirty:<sha256>`), and an explicit
+/// `FMN_BUILD_ID` all do. A build without git metadata or `FMN_BUILD_ID`
+/// (`unidentified:`), or one whose tree state git could not report
+/// (`+unverified`), does not.
+#[must_use]
+pub fn certified_build_refusal(build_id: &str) -> Option<&'static str> {
+    if build_id.starts_with("unidentified:") {
+        Some(
+            "certified output requires an identified build: this binary was built without git \
+             metadata or FMN_BUILD_ID, so its closure cannot name its sources",
+        )
+    } else if build_id.ends_with("+unverified") {
+        Some(
+            "certified output requires an identified build: git could not report the tree state \
+             this binary was built from",
+        )
+    } else {
+        None
+    }
+}
+
 fn validate_identity(
     items: &[ClosureItem],
     identity: &ManifestIdentity,
@@ -736,7 +767,13 @@ mod tests {
     use super::*;
 
     fn complete_manifest() -> ProvenanceManifest {
-        let build_id = "git:0123456789abcdef";
+        manifest_with(ManifestMode::Certified, "git:0123456789abcdef").expect("complete manifest")
+    }
+
+    fn manifest_with(
+        mode: ManifestMode,
+        build_id: &str,
+    ) -> Result<ProvenanceManifest, ManifestError> {
         let mut items = vec![
             ClosureItem::structural(1, "C1", &[StructuralField::U64(1)]).expect("valid C1"),
             ClosureItem::byte_input(2, "franken_manim.build", build_id.as_bytes(), "build")
@@ -760,7 +797,7 @@ mod tests {
             .expect("C10 item")
             .digest;
         ProvenanceManifest::new(
-            ManifestMode::Certified,
+            mode,
             items,
             ManifestIdentity {
                 build_id: build_id.to_owned(),
@@ -780,7 +817,38 @@ mod tests {
             }],
             None,
         )
-        .expect("complete manifest")
+    }
+
+    #[test]
+    fn certified_output_requires_a_build_that_names_its_sources() {
+        let commit = "git:0123456789abcdef0123456789abcdef01234567";
+        let dirty = format!("{commit}+dirty:{}", "a".repeat(64));
+        for identified in [commit, dirty.as_str(), "release:fmn-cli:0.4.0"] {
+            assert_eq!(certified_build_refusal(identified), None, "{identified}");
+            assert!(
+                manifest_with(ManifestMode::Certified, identified).is_ok(),
+                "{identified}"
+            );
+        }
+        for unnamed in [
+            "unidentified:fmn-cli:0.4.0",
+            "git:0123456789abcdef+unverified",
+        ] {
+            assert!(certified_build_refusal(unnamed).is_some(), "{unnamed}");
+            assert_eq!(
+                manifest_with(ManifestMode::Certified, unnamed),
+                Err(ManifestError::Invalid(
+                    "a certified manifest requires an identified build (ADR-0025)"
+                )),
+                "{unnamed}"
+            );
+            // Standard output claims no cross-platform identity; it records
+            // whatever identity the build has.
+            assert!(
+                manifest_with(ManifestMode::Standard, unnamed).is_ok(),
+                "{unnamed}"
+            );
+        }
     }
 
     #[test]

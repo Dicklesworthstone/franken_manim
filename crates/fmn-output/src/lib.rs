@@ -74,7 +74,7 @@ pub use negotiate::{
 pub use provenance::{
     CLOSURE_SCHEMA, ClosureItem, ManifestComparison, ManifestError, ManifestIdentity, ManifestMode,
     ManifestOutput, PLATFORM_ITEM_PREFIX, PROVENANCE_SCHEMA, ProvenanceManifest, SEMANTIC_SCHEMA,
-    StructuralField,
+    StructuralField, certified_build_refusal,
 };
 pub use sinks::{
     FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegSoundtrack, GifSink, GifSinkConfig,

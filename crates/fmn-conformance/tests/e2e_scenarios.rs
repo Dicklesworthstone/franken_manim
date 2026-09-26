@@ -1258,6 +1258,19 @@ fn determinism_certified_manifest_compare_run(
                 && item.digest == sha256(bytes)
         })
     });
+    // ADR-0025: the manifest carries exactly the identity the binary reports,
+    // and that identity names its sources (a clean commit, or the commit plus
+    // the digest of its exact uncommitted state).
+    let version = fmn_cli::run(["--version", "--robot"]);
+    let reported = version
+        .stdout
+        .split("\"build_id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default();
+    let build_named = !reported.is_empty()
+        && one.identity.build_id == reported
+        && fmn_output::certified_build_refusal(reported).is_none();
     ctx.event(
         LogEvent::new("e2e.determinism.manifest")
             .field("same_input_agree", truth(same.certified_bits_agree()))
@@ -1267,7 +1280,8 @@ fn determinism_certified_manifest_compare_run(
                 truth(different.semantic_equal),
             )
             .field("platform_record", truth(has_platform_record))
-            .field("fonts_recorded", truth(fonts_recorded)),
+            .field("fonts_recorded", truth(fonts_recorded))
+            .field("build_identity_named", truth(build_named)),
     );
     let agree = same.certified_bits_agree();
     let distinguished = !different.semantic_equal && !different.certified_bits_agree();
@@ -1276,9 +1290,10 @@ fn determinism_certified_manifest_compare_run(
         "certified_manifest_input_distinguished",
         u64::from(distinguished),
     );
-    if !agree || !distinguished || !has_platform_record || !fonts_recorded {
+    if !agree || !distinguished || !has_platform_record || !fonts_recorded || !build_named {
         return Err(fail(format!(
-            "certified manifest comparison drifted: same={same:?} other={different:?} platform_record={has_platform_record} fonts_recorded={fonts_recorded}"
+            "certified manifest comparison drifted: same={same:?} other={different:?} platform_record={has_platform_record} fonts_recorded={fonts_recorded} build_id={:?} reported={reported:?}",
+            one.identity.build_id
         )));
     }
     Ok(RunOutcome::ok()
@@ -5185,6 +5200,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("other_input_semantic_equal", "false"),
                 FieldPred::str_eq("platform_record", "true"),
                 FieldPred::str_eq("fonts_recorded", "true"),
+                FieldPred::str_eq("build_identity_named", "true"),
             ],
         )],
     ));

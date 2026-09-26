@@ -29,7 +29,7 @@ items marked *(bytes)* are hashed as raw byte streams.
 | # | Item | Form |
 |---|---|---|
 | C1 | Scene sources and every transitively loaded module: native registrations/artifacts for standalone `fmn`, or the Python file/module set loaded by the separate `fmn-python` portal | bytes, per file, ordered by virtual path |
-| C2 | Engine identity: the franken_manim commit (or release build id) and the full `SUITE.lock` contents | bytes |
+| C2 | Engine identity: the franken_manim build identity and the full `SUITE.lock` contents. The identity is `git:<commit>` for a clean checkout; `git:<commit>+dirty:<sha256>` when compiled inputs differ from the commit, with the digest naming that exact uncommitted state; or an explicit `FMN_BUILD_ID`. Certified output refuses `unidentified:` builds (no `.git`, no `FMN_BUILD_ID`) and `+unverified` builds (git could not report the tree), because they cannot name their sources (ADR-0025) | bytes |
 | C3 | Toolchain: the exact pinned nightly (from `SUITE.lock`) and Cargo profile; for a Python-portal run only, the CPython implementation/version, ABI policy, `fmn-python` wheel version, and NumPy version. The target triple and the SIMD build tier's target-feature set form a separate C3 item at virtual path `platform/target` (§4) | structural |
 | C4 | Configuration: the fully-resolved config **bytes** after precedence (defaults → user file → CLI), not the file paths | bytes |
 | C5 | RNG seeds: the root seed and the named-substream layout version (BN-01) | structural |

@@ -35,5 +35,9 @@ pyo3.workspace = true
 # frankenscipy's); already in the lock as fsci-integrate's dependency.
 fsci-opt.workspace = true
 
+# The build identity's uncommitted-state digest (ADR-0025).
+[build-dependencies]
+fmn-hash.workspace = true
+
 [lints]
 workspace = true

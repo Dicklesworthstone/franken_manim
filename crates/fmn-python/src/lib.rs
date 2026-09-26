@@ -7775,6 +7775,9 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
             "render destination must not be empty",
         ));
     }
+    if reproducible {
+        portal_provenance::certified_build_check()?;
+    }
     portal_video::check_scene_ownership(slf)?;
     let render_slot = Arc::clone(&slf.borrow().render);
     let video = match &format {

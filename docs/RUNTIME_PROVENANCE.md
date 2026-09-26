@@ -60,6 +60,10 @@ No timestamp-only digest cache can hide a same-size/same-mtime edit.
 Runtime identities are acquired before native output acquisition. Legacy console
 version labels remain accepted as an input spelling but are replaced by measured
 identities; arbitrary caller-supplied labels cannot certify a different build.
+The wheel's own build identity (C2) follows ADR-0025. A wheel built from edited
+sources records `git:<commit>+dirty:<sha256>`. A wheel whose sources cannot be
+named (`unidentified:`, `+unverified`) is refused when a render begins with
+`reproducible=True`, before any output is acquired.
 
 The source provider and its mapping are frozen before the first verification.
 An intervening runtime change cancels the active native generation before

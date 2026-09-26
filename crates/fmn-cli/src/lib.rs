@@ -6,8 +6,10 @@
 //! files and does not carry a second flag inventory.
 #![forbid(unsafe_code)]
 
-// Compiled into the build scripts via `include!`; here only for its tests.
 mod camera_route;
+// Compiled into the build scripts via `include!`; here only for their tests.
+#[cfg(test)]
+mod build_identity;
 #[cfg(test)]
 mod cargo_profile;
 mod generated;
@@ -1326,6 +1328,14 @@ fn exit_code(name: &str) -> u8 {
 #[must_use]
 pub fn internal_exit_code() -> u8 {
     exit_code("internal")
+}
+
+/// Certified output only from a build whose identity names its sources
+/// (ADR-0025): a clean commit, a commit plus its uncommitted-state digest, or
+/// an explicit `FMN_BUILD_ID`.
+fn certified_build_check(build_id: &str) -> Result<(), CliError> {
+    fmn_output::certified_build_refusal(build_id)
+        .map_or(Ok(()), |reason| Err(CliError::new("capability", reason)))
 }
 
 fn usage(message: impl Into<String>) -> CliError {
@@ -5675,6 +5685,11 @@ fn execute_native_render_with_cancellation(
             ));
         }
     };
+    // ADR-0025: a certified closure must name the sources this binary was
+    // built from. Refuse before any rendering or output reservation.
+    if config.determinism.mode == fmn_config::config::DeterminismMode::Certified {
+        certified_build_check(BUILD_ID)?;
+    }
     let (plan, _, _) = derive_execution_plan_with_annex(
         fs.as_ref(),
         &config,
@@ -8678,6 +8693,25 @@ mod tests {
             requested_render_format(&command).expect("codec implies video"),
             RequestedRenderFormat::Video
         );
+    }
+
+    #[test]
+    fn certified_renders_require_a_build_that_names_its_sources() {
+        let commit = "git:0123456789abcdef0123456789abcdef01234567";
+        assert!(certified_build_check(commit).is_ok());
+        assert!(certified_build_check(&format!("{commit}+dirty:{}", "b".repeat(64))).is_ok());
+        for unnamed in [
+            "unidentified:fmn-cli:0.4.0",
+            &format!("{commit}+unverified"),
+        ] {
+            let error = certified_build_check(unnamed).expect_err(unnamed);
+            assert_eq!(error.exit_name, "capability", "{unnamed}");
+            assert!(
+                error.message.contains("identified build"),
+                "{}",
+                error.message
+            );
+        }
     }
 
     #[test]
