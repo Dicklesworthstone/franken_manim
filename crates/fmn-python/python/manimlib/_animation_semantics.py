@@ -241,6 +241,11 @@ def install(native, subsystems=True):
             self.run_time = max(float(self.time_span[1]), self.run_time)
         self.mobject.set_animating_status(True)
         self.starting_mobject = self.create_starting_mobject()
+        # Duck-typed animations driven through this begin need not carry
+        # the Transform re-alignment hook.
+        align_starting_mobject = getattr(self, "_align_starting_mobject", None)
+        if align_starting_mobject is not None:
+            align_starting_mobject()
         self.mobject_was_updating = False
         if self.suspend_mobject_updating:
             self.mobject_was_updating = not self.mobject._is_updating_suspended()
@@ -424,6 +429,30 @@ def install(native, subsystems=True):
                 self.target_copy,
             )
 
+    def animation_align_starting_mobject(self):
+        # A plain Animation interpolates nothing pointwise from its start.
+        return None
+
+    def transform_align_starting_mobject(self):
+        # BN-09: a rebuilt shape follows the one arc-density rule, so a
+        # starting mobject derived from the aligned mobject can change its
+        # point count. GrowArrow's scale(0) re-tessellates an arced Arrow at
+        # a new stem angle. The Reference's Arrow keeps a flat 8-component
+        # arc and never meets this. Re-align start, mobject and target copy
+        # until all three agree. Alignment only inserts points, so this
+        # settles within a few rounds, and an aligned start is untouched.
+        start = self.starting_mobject
+        if start.is_aligned_with(self.mobject):
+            return
+        if self.target_copy is self.target_mobject:
+            self.target_copy = self.target_mobject.copy()
+        for _ in range(3):
+            start.align_data_and_family(self.mobject)
+            self.mobject.align_data_and_family(self.target_copy)
+            if start.is_aligned_with(self.mobject) and self.mobject.is_aligned_with(
+                    self.target_copy):
+                return
+
     def transform_finish(self):
         Animation.finish(self)
         self.mobject.unlock_data()
@@ -487,6 +516,7 @@ def install(native, subsystems=True):
     Animation._ensure_runtime_defaults = ensure_runtime_defaults
     Animation.__str__ = animation_str
     Animation.begin = animation_begin
+    Animation._align_starting_mobject = animation_align_starting_mobject
     Animation.finish = animation_finish
     Animation.create_starting_mobject = create_starting_mobject
     Animation.get_all_mobjects = get_all_mobjects
@@ -516,6 +546,7 @@ def install(native, subsystems=True):
     Transform.check_target_mobject_validity = check_target_mobject_validity
     Transform._native_target = native_target
     Transform.begin = transform_begin
+    Transform._align_starting_mobject = transform_align_starting_mobject
     Transform.finish = transform_finish
     Transform.clean_up_from_scene = transform_cleanup
     Transform.get_all_mobjects = transform_all_mobjects

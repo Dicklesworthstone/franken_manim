@@ -45,6 +45,14 @@ exactly as in the Reference.
   Pass an explicit `n_components` to reproduce old counts.
 - Anything that consumed `quadratic_bezier_points_for_arc`'s fixed default
   of 8 regardless of angle now scales with the angle instead.
+- An arced `Arrow` scales its point count with its stem angle, where the
+  Reference's arrow always carries 43 points. A rebuild at a new length
+  therefore changes the count too: `GrowArrow`'s zero-scale start copy of a
+  `path_arc=PI` arrow has fewer points than the arrow. A `Transform` whose
+  starting mobject no longer aligns with its mobject re-aligns the start, the
+  mobject and its target copy before the first interpolation, so these
+  animations run as in the Reference. Pointwise results are unchanged
+  whenever the start already aligned.
 - A non-finite implicit arc angle (`path_arc=NaN` or infinity) is rejected
   before geometry or the stored angle changes. The Reference can publish the
   invalid angle and clear the existing points before failing during component

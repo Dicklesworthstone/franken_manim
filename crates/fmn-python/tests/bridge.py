@@ -7493,6 +7493,18 @@ assert np.allclose(grow_arrow_samples[0], grow_arrow_anchor + manimlib.UP)
 assert np.allclose(grow_arrow_samples[1], grow_arrow_anchor + 2.0 * manimlib.UP)
 assert np.allclose(grow_arrow_samples[2], grow_arrow_samples[1])
 
+# BN-09: an arced Arrow re-tessellates when GrowArrow scales its start copy to
+# zero, so the start can carry a different point count from the arrow
+# (some1 LayersOfAbstraction grows path_arc=PI arrows). Transform re-aligns
+# the start with the mobject and its target before the first interpolation.
+for grow_arc in (1.0, math.pi, -math.pi):
+    arced = geometry.Arrow(manimlib.LEFT, manimlib.RIGHT, path_arc=grow_arc)
+    arced_points = arced.get_points().copy()
+    arced_start = growing.GrowArrow(arced).create_starting_mobject()
+    assert arced_start.get_width() < 1e-3 and arced_start.get_height() < 1e-3
+    Scene().play(growing.GrowArrow(arced), run_time=2.0 / 30.0, rate_func=manimlib.linear)
+    assert np.allclose(arced.get_points(), arced_points), grow_arc
+
 spin_source = geometry.Line(manimlib.LEFT, manimlib.RIGHT)
 spin_target_points = spin_source.get_points().copy()
 spin_samples = []
