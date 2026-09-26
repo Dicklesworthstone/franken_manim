@@ -172,8 +172,8 @@ def install_indication(native: Any) -> None:
             validators[cls] = installer(g, cls)
             families.append(cls)
             default_removers[cls] = remover
-    if not families:
-        if deferred or wave_installed:
+    if not families and not deferred:
+        if wave_installed:
             g["_FMN_INDICATION_INSTALLED"] = True
         return
     families = tuple(families)
@@ -236,7 +236,7 @@ def install_indication(native: Any) -> None:
                 if not isinstance(animation, Animation):
                     raise TypeError("AnimationBuilder.build must return an Animation")
             animations.append(animation)
-        targets, seen, visiting = [], set(), set()
+        targets, deferred_targets, seen, visiting = [], [], set(), set()
         stack = [(animation, False) for animation in reversed(animations)]
         while stack:
             animation, leaving = stack.pop()
@@ -251,6 +251,8 @@ def install_indication(native: Any) -> None:
             seen.add(marker)
             visiting.add(marker)
             stack.append((animation, True))
+            if isinstance(animation, deferred):
+                deferred_targets.append(animation)
             if isinstance(animation, families):
                 targets.append(animation)
                 for cls, validate in validators.items():
@@ -262,8 +264,11 @@ def install_indication(native: Any) -> None:
         forced, absent = [], object()
         try:
             if _custom_rate(g, kwargs.get("rate_func")):
-                for animation in animations:
-                    if isinstance(animation, families):
+                # A global authored curve must remain live for deferred
+                # leaves inside groups, not only for direct play arguments.
+                candidates = [a for a in animations if isinstance(a, families)]
+                for animation in [*candidates, *deferred_targets]:
+                    if isinstance(animation, families + deferred):
                         forced.append((animation, animation.__dict__.get("_indication_force_callback", absent)))
                         animation.__dict__["_indication_force_callback"] = True
                 if animations and all(g["_requires_python_animation"](animation)
@@ -291,27 +296,63 @@ def install_indication(native: Any) -> None:
 
 
 def _install_transform_indications(g):
-    """Defer state-derived targets until the shared Transform actually begins.
+    """Use Choreo's begin-time target recipes unless public hooks need Python.
 
-    Native grow/indication specs freeze their source while the whole play is
-    lowered. That is too early for a later Succession member, and bypasses the
-    public create_target/create_starting_mobject protocol. These classes already
-    implement that protocol; use it rather than manufacturing another target or
-    interpolation kernel. Grow anchors stay construction-time values, while
-    shape, placement and paint are taken from the live source at each begin.
+    Grow, Indicate and TurnInsideOut now freeze their native targets at begin,
+    including in Succession and replay. Blanket callback routing would instead
+    run copied host updaters as well as the live scene updater. Keep the native
+    path for unchanged effects without changing Mobject's copy semantics.
     """
     families = tuple(g[name] for name in (
         "GrowFromPoint", "Indicate", "TurnInsideOut",
     ) if name in g)
-    if families:
-        previous_requires = g["_requires_python_animation"]
+    if not families:
+        return families
+    protocols = _protocols(g, g["Animation"], (
+        "begin", "finish", "abort", "interpolate", "interpolate_mobject",
+        "interpolate_submobject", "create_target", "create_starting_mobject",
+        "check_target_mobject_validity", "init_path_func", "update_mobjects",
+        "get_all_mobjects", "get_all_families_zipped", "get_all_mobjects_to_update",
+        "get_sub_alpha", "time_spanned_alpha", "clean_up_from_scene",
+        "_ensure_runtime_defaults", "__getattribute__", "__getattr__",
+    ))
+    object_protocols = _protocols(g, g["Mobject"], (
+        "copy", "get_family", "get_center", "scale", "move_to", "shift",
+        "set_color", "reverse_points", "interpolate", "align_data_and_family",
+        "is_aligned_with", "lock_matching_data", "unlock_data", "update",
+        "set_animating_status", "suspend_updating", "resume_updating",
+        "__getattribute__", "__getattr__",
+    ))
+    previous_requires = g["_requires_python_animation"]
 
-        def requires(animation):
-            # A replay retains target_mobject from the previous invocation.
-            # Never use its presence to decide that a deferred target is final.
-            return isinstance(animation, families) or previous_requires(animation)
+    def requires(animation):
+        if isinstance(animation, families):
+            if (getattr(animation, "_indication_force_callback", False)
+                    or getattr(animation, "final_alpha_value", 1.0) != 1.0
+                    or getattr(animation, "remover", False)
+                    or _custom_rate(g, getattr(animation, "rate_func", None))
+                    or _changed(animation, protocols)):
+                return True
+            # Native Indicate owns a straight path, unlike Grow/TurnInsideOut
+            # whose native specifications carry an explicit arc.
+            Indicate = g.get("Indicate")
+            if (Indicate is not None and isinstance(animation, Indicate)
+                    and getattr(animation, "path_arc", 0.0) != 0.0):
+                return True
+            stack, seen = [animation.mobject], set()
+            while stack:
+                member = stack.pop()
+                if id(member) in seen:
+                    continue
+                seen.add(id(member))
+                if _changed(member, object_protocols):
+                    return True
+                stack.extend(reversed(tuple(vars(member).get("submobjects", ()))))
+        # Preserve custom paths, vector trackers and other subsystem decisions.
+        # A target_mobject retained by replay is deliberately not a routing flag.
+        return previous_requires(animation)
 
-        g["_requires_python_animation"] = requires
+    g["_requires_python_animation"] = requires
     return families
 
 
