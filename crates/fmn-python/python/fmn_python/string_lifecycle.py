@@ -14,7 +14,7 @@ def initialize_string(g, obj, style):
     g["_preflight_vmobject_style_kwargs"](style)
     obj._fmn_string_style = dict(style)
     obj._string_sub_spans, obj._string_sub_paths = [], []
-    obj._fmn_string_children = ()
+    obj._fmn_string_children = g["_np"].empty(0, dtype=object)
     options = dict(style)
     options.setdefault("fill_opacity", 1.0)
     options.setdefault("stroke_width", 0.0)
@@ -37,10 +37,16 @@ def _publish(g, obj, candidate, specs):
         raise ValueError("native string span paths do not identify glyph children")
     # Rebase only the first component: TeX parts retain their nested structure.
     paths = [[path[0] + offset, *path[1:]] for path in paths]
+    # Plain tuples keep shallow references under the public copy contract.
+    # Record generated members in the shared copier's object-array protocol
+    # so a copied string claims its own glyphs, not the original's objects.
+    owned = g["_np"].empty(len(children), dtype=object)
+    for index, child in enumerate(children):
+        owned[index] = child
     obj.set_points(candidate.get_points())
     obj.set_submobjects([*retained, *children])
     obj._string_sub_spans, obj._string_sub_paths = spans, paths
-    obj._fmn_string_children = children
+    obj._fmn_string_children = owned
     return obj
 
 
