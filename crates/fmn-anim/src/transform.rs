@@ -339,6 +339,9 @@ pub(crate) enum TargetPrep {
     Indicate { scale: f64, color: [f32; 3] },
     ReversePoints,
     FadeOut { shift: Vec3, scale: f64 },
+    Color([f32; 3]),
+    Scale(f64),
+    Matrix([[f64; 3]; 3]),
 }
 
 impl TargetPrep {
@@ -355,6 +358,27 @@ impl TargetPrep {
                 stage.set_family_opacity_zero(target);
                 stage.shift(target, shift);
                 stage.scale(target, scale);
+            }
+            Self::Color(rgb) => set_family_rgb(stage, target, rgb),
+            Self::Scale(factor) => {
+                stage.scale(target, factor);
+            }
+            Self::Matrix(matrix) => {
+                // Use the existing world-space point-map operation, not a
+                // second matrix/placement interpolation path. The origin and
+                // arithmetic association match ApplyPointwiseFunction.
+                stage.apply_points_function(
+                    target,
+                    |p| {
+                        [
+                            matrix[0][0] * p[0] + matrix[0][1] * p[1] + matrix[0][2] * p[2],
+                            matrix[1][0] * p[0] + matrix[1][1] * p[1] + matrix[1][2] * p[2],
+                            matrix[2][0] * p[0] + matrix[2][1] * p[1] + matrix[2][2] * p[2],
+                        ]
+                    },
+                    Some([0.0, 0.0, 0.0]),
+                    None,
+                );
             }
         }
         Ok(())
@@ -403,7 +427,7 @@ impl Transform {
     }
 
     /// Prepare a private target at begin, before family alignment. Used by
-    /// the fade/indication families without a second interpolation mechanism.
+    /// the fade, indication and fixed-method families over one interpolator.
     #[must_use]
     pub(crate) fn with_target_prep(mut self, prep: TargetPrep) -> Self {
         self.target_prep = Some(prep);
@@ -699,6 +723,7 @@ pub fn apply_pointwise_function_to_center(
 }
 
 /// `FadeToColor` (transform.py:223): `ApplyMethod(mobject.set_color, c)`.
+/// The color is retained now; the live family is copied and recolored at begin.
 ///
 /// # Errors
 /// As [`apply_function`].
@@ -707,15 +732,18 @@ pub fn fade_to_color(
     mobject: Mob,
     rgb: [f32; 3],
 ) -> Result<Transform, AnimError> {
-    let mut t = apply_function(stage, mobject, |s, m| {
-        set_family_rgb(s, m, rgb);
-    })?;
+    if !stage.contains(mobject) {
+        return Err(AnimError::StaleHandle(mobject));
+    }
+    let mut t = Transform::new(mobject, mobject).with_target_prep(TargetPrep::Color(rgb));
     t.state.config.name = "FadeToColor".to_owned();
     Ok(t)
 }
 
 /// `ApplyMatrix` (transform.py:272): `ApplyPointwiseFunction` under
-/// `p ↦ M·p` (the Reference's `np.dot(p, M.T)`).
+/// `p ↦ M·p` (the Reference's `np.dot(p, M.T)`). The fixed matrix is
+/// applied to a copy of the live world-space geometry at each begin, including
+/// after a predecessor and on replay. Default run time remains three seconds.
 ///
 /// # Errors
 /// As [`apply_function`].
@@ -724,14 +752,12 @@ pub fn apply_matrix(
     mobject: Mob,
     matrix: [[f64; 3]; 3],
 ) -> Result<Transform, AnimError> {
-    let mut t = apply_pointwise_function(stage, mobject, move |p| {
-        [
-            matrix[0][0] * p[0] + matrix[0][1] * p[1] + matrix[0][2] * p[2],
-            matrix[1][0] * p[0] + matrix[1][1] * p[1] + matrix[1][2] * p[2],
-            matrix[2][0] * p[0] + matrix[2][1] * p[1] + matrix[2][2] * p[2],
-        ]
-    })?;
+    if !stage.contains(mobject) {
+        return Err(AnimError::StaleHandle(mobject));
+    }
+    let mut t = Transform::new(mobject, mobject).with_target_prep(TargetPrep::Matrix(matrix));
     t.state.config.name = "ApplyMatrix".to_owned();
+    t.state.config.run_time = 3.0;
     Ok(t)
 }
 
@@ -786,6 +812,8 @@ pub fn apply_complex_function(
 }
 
 /// `ScaleInPlace` (transform.py:233): `ApplyMethod(mobject.scale, k)`.
+/// Scale a fresh begin-time family about its current center, not the center
+/// or extent it had when this animation was constructed.
 ///
 /// # Errors
 /// As [`apply_function`].
@@ -794,9 +822,10 @@ pub fn scale_in_place(
     mobject: Mob,
     scale_factor: f64,
 ) -> Result<Transform, AnimError> {
-    let mut t = apply_function(stage, mobject, |s, m| {
-        s.scale(m, scale_factor);
-    })?;
+    if !stage.contains(mobject) {
+        return Err(AnimError::StaleHandle(mobject));
+    }
+    let mut t = Transform::new(mobject, mobject).with_target_prep(TargetPrep::Scale(scale_factor));
     t.state.config.name = "ScaleInPlace".to_owned();
     Ok(t)
 }
