@@ -23140,3 +23140,23 @@ _z_surface = manimlib.Surface(resolution=(3, 3), z_index=2)
 assert _z_surface.z_index == 2
 _z_surface.set_z_index(5)
 assert _z_surface.z_index == 5
+
+
+# ------------------ generated glyph/digit families are collectable (fm-2mvb)
+# A string or readout records its generated children for regeneration. An
+# object ndarray there is invisible to the cycle collector (owner -> array ->
+# child -> parents -> owner), which leaked every Text. FamilyRefs is a tuple.
+def _generated_families_are_collected():
+    import weakref as _weakref
+    text = manimlib.Text("ab")
+    number = manimlib.DecimalNumber(3.25)
+    refs = [_weakref.ref(mob) for mob in (*text.get_family(), *number.get_family())]
+    kinds = {type(text._fmn_string_children).__name__, type(number._fmn_decimal_children).__name__}
+    del text, number
+    gc.collect()
+    return [type(ref()).__name__ for ref in refs if ref() is not None], kinds
+
+
+_leaked_generated, _generated_kinds = _generated_families_are_collected()
+assert _leaked_generated == [], _leaked_generated
+assert _generated_kinds == {"FamilyRefs"}, _generated_kinds
