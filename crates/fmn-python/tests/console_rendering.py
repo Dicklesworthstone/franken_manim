@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import importlib
 import io
 import json
 from pathlib import Path
@@ -16,6 +15,7 @@ import struct
 import sys
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import wave
 
 import numpy as np
@@ -25,9 +25,22 @@ from fmn_python.__main__ import main
 
 ROOT = Path(tempfile.mkdtemp(prefix="fmn-console-native-"))
 SUPPORT = "fmn_console_support_" + ROOT.name.rsplit("-", 1)[-1]
+# The console's scoped loader gives each invocation a fresh copy of this
+# project-local module and evicts it on exit (scene_loading.SceneSource), so
+# scene-side events go to a log beside it rather than to a module global.
+EVENTS = ROOT / (SUPPORT + ".events")
 (ROOT / (SUPPORT + ".py")).write_text(textwrap.dedent('''\
+    import json
+    from pathlib import Path
+
     import manimlib as m
-    events = []
+
+    class _Events:
+        def append(self, event):
+            with Path(__file__).with_suffix(".events").open("a") as log:
+                log.write(json.dumps(list(event)) + "\\n")
+
+    events = _Events()
 
     class Motion(m.Scene):
         direction = 1
@@ -94,8 +107,15 @@ def invoke(scene_source, destination, *selectors, format="y4m", threads=1, extra
     return code, report, err.getvalue()
 
 
+class _EventLog(list):
+    def clear(self):
+        super().clear()
+        EVENTS.write_text("")
+
+
 def support():
-    return importlib.import_module(SUPPORT)
+    lines = EVENTS.read_text().splitlines() if EVENTS.exists() else []
+    return SimpleNamespace(events=_EventLog(tuple(json.loads(line)) for line in lines))
 
 
 def constructed():
