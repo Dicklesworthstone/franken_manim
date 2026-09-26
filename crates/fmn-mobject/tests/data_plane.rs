@@ -126,6 +126,44 @@ fn writable_view_detach_conservatively_revises_exactly_its_scope() {
 }
 
 #[test]
+fn frame_snapshots_of_a_viewed_buffer_stay_view_dirty_for_its_scope() {
+    // A frame freeze copies a viewed buffer eagerly (V5), revisions included.
+    // A foreign write between two frames changes the cells but not the
+    // revision, so a revision-keyed render cache would reuse the first frame's
+    // paint unless the copies keep reporting the view's scope as dirty.
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 2).unwrap();
+    let fill_view = buffer.export_field_view("fill_rgba", true).unwrap();
+    let first = buffer.snapshot_clone();
+    assert!(fill_view.write_foreign(0, "fill_rgba", &[0.25; 4]));
+    let second = buffer.snapshot_clone();
+    assert_eq!(
+        first.field_revision("fill_rgba"),
+        second.field_revision("fill_rgba")
+    );
+    assert_ne!(first.read(0, "fill_rgba"), second.read(0, "fill_rgba"));
+    for frame in [&first, &second, &second.snapshot_clone()] {
+        assert!(frame.writable_view_affects("fill_rgba"));
+        assert!(!frame.writable_view_affects("point"));
+        assert_eq!(frame.live_view_count(), 0);
+        assert!(!frame.has_writable_whole_view());
+    }
+    drop(fill_view);
+    assert!(!buffer.snapshot_clone().writable_view_affects("fill_rgba"));
+
+    let whole_view = buffer.export_view(true);
+    let frame = buffer.snapshot_clone();
+    assert!(
+        buffer
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| frame.writable_view_affects(&field.name))
+    );
+    drop(whole_view);
+    assert!(!buffer.snapshot_clone().writable_view_affects("point"));
+}
+
+#[test]
 fn ranged_edits_accumulate_precise_dirty_spans() {
     let mut buffer = RecordBuffer::new(RecordSchema::mobject(), 10).unwrap();
     assert_eq!(buffer.take_dirty_span("point"), None);

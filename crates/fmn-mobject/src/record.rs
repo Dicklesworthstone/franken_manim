@@ -42,7 +42,7 @@
 //! SIMD tier derive from these mirrors in Lumen (§10.8, §17.3).
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use fnp_ndarray::NdLayout;
@@ -257,6 +257,12 @@ struct Storage {
     writable_whole_views: AtomicUsize,
     /// Writable field-scoped views, per field.
     writable_field_views: Vec<AtomicUsize>,
+    /// Set on a snapshot copy of a generation that had writable views
+    /// attached (whole-buffer, then per field). Those views could write
+    /// without an engine callback, so the copy's revisions cannot vouch for
+    /// that scope: it stays view-dirty at every observation of the copy.
+    snapshot_view_dirty_whole: AtomicBool,
+    snapshot_view_dirty_fields: Vec<AtomicBool>,
     /// Per-field dirty spans (record indices) since last take.
     dirty_spans: Mutex<Vec<Option<DirtySpan>>>,
 }
@@ -270,8 +276,34 @@ impl Storage {
             views: AtomicUsize::new(0),
             writable_whole_views: AtomicUsize::new(0),
             writable_field_views: (0..n_fields).map(|_| AtomicUsize::new(0)).collect(),
+            snapshot_view_dirty_whole: AtomicBool::new(false),
+            snapshot_view_dirty_fields: (0..n_fields).map(|_| AtomicBool::new(false)).collect(),
             dirty_spans: Mutex::new(vec![None; n_fields]),
         })
+    }
+
+    /// V4 across V5's eager snapshot copy: the copy of a generation with
+    /// writable views keeps reporting their scope as view-dirty. A copy of
+    /// such a copy inherits it.
+    fn clone_for_snapshot(&self) -> Arc<Self> {
+        let fresh = self.clone_with_revisions();
+        fresh.snapshot_view_dirty_whole.store(
+            self.writable_whole_views.load(Ordering::Acquire) > 0
+                || self.snapshot_view_dirty_whole.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        for ((dirty, views), inherited) in fresh
+            .snapshot_view_dirty_fields
+            .iter()
+            .zip(&self.writable_field_views)
+            .zip(&self.snapshot_view_dirty_fields)
+        {
+            dirty.store(
+                views.load(Ordering::Acquire) > 0 || inherited.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+        }
+        fresh
     }
 
     fn clone_with_revisions(&self) -> Arc<Self> {
@@ -409,14 +441,27 @@ impl RecordBuffer {
     }
 
     /// Whether a writable view can mutate `field` without an engine-mediated
-    /// write callback.
+    /// write callback, or, for a snapshot copy, could have before the copy
+    /// was taken.
     ///
     /// A whole-buffer view affects every field; a field-scoped view affects
     /// only its declared field. Render consumers use this predicate rather than
-    /// weakening field-scoped invalidation into object-wide invalidation.
+    /// weakening field-scoped invalidation into object-wide invalidation. A
+    /// frame snapshot copies a viewed buffer eagerly (V5) with its revisions,
+    /// so without the snapshot flags a foreign write between two frames
+    /// would reach the copy's cells but not its revisions.
     #[must_use]
     pub fn writable_view_affects(&self, field: &str) -> bool {
-        self.has_writable_whole_view() || self.field_has_writable_view(field)
+        self.has_writable_whole_view()
+            || self.field_has_writable_view(field)
+            || self
+                .storage
+                .snapshot_view_dirty_whole
+                .load(Ordering::Acquire)
+            || self
+                .schema
+                .index_of(field)
+                .is_some_and(|i| self.storage.snapshot_view_dirty_fields[i].load(Ordering::Acquire))
     }
 
     fn shared_beyond_views(&self) -> bool {
@@ -860,7 +905,7 @@ impl RecordBuffer {
         if self.live_view_count() > 0 {
             Self {
                 schema: Arc::clone(&self.schema),
-                storage: self.storage.clone_with_revisions(),
+                storage: self.storage.clone_for_snapshot(),
                 len: self.len,
                 defaults: self.defaults.clone(),
                 locked: self.locked.clone(),
