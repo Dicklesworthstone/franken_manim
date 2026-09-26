@@ -174,9 +174,11 @@ fn discover(
         context: "addressable objects",
     })?;
     budget.charge::<(Mob, Visit)>(1, "identity table")?;
-    visits.try_reserve(1).map_err(|_| RenderSnapshotError::AllocationFailed {
-        context: "identity table",
-    })?;
+    visits
+        .try_reserve(1)
+        .map_err(|_| RenderSnapshotError::AllocationFailed {
+            context: "identity table",
+        })?;
     budget.reserve(order, 1, "object order")?;
     budget.reserve(stack, 1, "traversal stack")?;
     visits.insert(

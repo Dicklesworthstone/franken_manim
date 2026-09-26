@@ -161,17 +161,33 @@ mod tests {
         let samples = [-0.0, f32::from_bits(1), f32::MAX];
         let no_fade = cue(1, &samples).with_source_fades_frames(0, 0).unwrap();
         assert_eq!(
-            no_fade.audio.samples.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+            no_fade
+                .audio
+                .samples
+                .iter()
+                .map(|s| s.to_bits())
+                .collect::<Vec<_>>(),
             samples.iter().map(|s| s.to_bits()).collect::<Vec<_>>()
         );
         let faded = cue(1, &samples).with_source_fades_frames(1, 1).unwrap();
         assert_eq!(faded.audio.samples[0].to_bits(), 0);
         assert_eq!(faded.audio.samples[1].to_bits(), 1);
         assert_eq!(faded.audio.samples[2].to_bits(), 0);
-        assert!(cue(1, &[]).with_source_fades_frames(0, 0).unwrap().audio.samples.is_empty());
+        assert!(
+            cue(1, &[])
+                .with_source_fades_frames(0, 0)
+                .unwrap()
+                .audio
+                .samples
+                .is_empty()
+        );
         assert!(cue(1, &[]).with_source_fades_frames(1, 0).is_err());
         assert_eq!(
-            cue(1, &[-1.0]).with_source_fades_frames(1, 1).unwrap().audio.samples,
+            cue(1, &[-1.0])
+                .with_source_fades_frames(1, 1)
+                .unwrap()
+                .audio
+                .samples,
             vec![0.0]
         );
     }

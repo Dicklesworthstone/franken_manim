@@ -83,11 +83,7 @@ impl SoundCue {
     ///
     /// # Errors
     /// The same validation errors as [`Self::trim_source_frames`].
-    pub fn with_source_frames(
-        mut self,
-        start: u64,
-        end: Option<u64>,
-    ) -> Result<Self, SoundError> {
+    pub fn with_source_frames(mut self, start: u64, end: Option<u64>) -> Result<Self, SoundError> {
         self.trim_source_frames(start, end)?;
         Ok(self)
     }
@@ -96,11 +92,7 @@ impl SoundCue {
     ///
     /// # Errors
     /// The same validation errors as [`Self::trim_source_seconds`].
-    pub fn with_source_seconds(
-        mut self,
-        start: f64,
-        end: Option<f64>,
-    ) -> Result<Self, SoundError> {
+    pub fn with_source_seconds(mut self, start: f64, end: Option<f64>) -> Result<Self, SoundError> {
         self.trim_source_seconds(start, end)?;
         Ok(self)
     }

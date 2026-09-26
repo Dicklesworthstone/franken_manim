@@ -81,9 +81,13 @@ fn empty_trim_does_not_extend_or_duck_the_timeline() {
 fn trim_is_applied_before_the_prepared_cue_resource_budget() {
     let full = cue(1, 8, 0, &[0.25; 100]);
     let mut mix = mixer(1, 8);
-    assert!(matches!(mix.add(full.clone()), Err(SoundError::OutputTooLong { .. })));
+    assert!(matches!(
+        mix.add(full.clone()),
+        Err(SoundError::OutputTooLong { .. })
+    ));
     assert!(mix.is_empty());
-    mix.add(full.with_source_frames(20, Some(24)).unwrap()).unwrap();
+    mix.add(full.with_source_frames(20, Some(24)).unwrap())
+        .unwrap();
     assert_eq!(mix.mix(1).unwrap().audio.samples, vec![0.25; 4]);
 }
 
@@ -93,8 +97,10 @@ fn edited_stereo_resamples_identically_across_kernels_workers_and_windows() {
         2,
         8,
         1,
-        &[0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8,
-          0.6, -0.5, 0.4, -0.3, 0.2, -0.1, 0.05, -0.05],
+        &[
+            0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.6, -0.5, 0.4, -0.3, 0.2, -0.1, 0.05,
+            -0.05,
+        ],
     );
     let mut expected = original.clone();
     expected.audio.samples = vec![0.0, 0.0, 0.7, -0.8, 0.6, -0.5, 0.0, 0.0];
@@ -122,7 +128,9 @@ fn edited_stereo_resamples_identically_across_kernels_workers_and_windows() {
         }
     }
 
-    let wav = reference.wav_bytes(SampleFormat::F32, DitherPolicy::None).unwrap();
+    let wav = reference
+        .wav_bytes(SampleFormat::F32, DitherPolicy::None)
+        .unwrap();
     let decoded = decode_wav(&wav, &WavLimits::default()).unwrap();
     assert_eq!(decoded.channels, 1);
     assert_eq!(decoded.sample_rate, 12);

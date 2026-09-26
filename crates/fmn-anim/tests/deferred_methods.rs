@@ -35,7 +35,10 @@ fn assert_points(stage: &Stage, mob: Mob, expected: &[[f64; 3]]) {
     assert_eq!(points.len(), expected.len());
     for (point, expected_point) in points.iter().zip(expected) {
         for (value, expected_value) in point.iter().zip(expected_point) {
-            assert!((value - expected_value).abs() < 1e-5, "{points:?} != {expected:?}");
+            assert!(
+                (value - expected_value).abs() < 1e-5,
+                "{points:?} != {expected:?}"
+            );
         }
     }
 }

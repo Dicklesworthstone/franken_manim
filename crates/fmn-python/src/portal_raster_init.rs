@@ -6,7 +6,8 @@
 
 use super::RasterImage;
 use crate::{
-    BridgeMobject, PyRuntimeError, PyValueError, StaleHandleError, parse_schema, stage_error, with_stage,
+    BridgeMobject, PyRuntimeError, PyValueError, StaleHandleError, parse_schema, stage_error,
+    with_stage,
 };
 use fmn_mobject::{Mobject, RenderPrimitive, Stage};
 use pyo3::prelude::*;

@@ -72,7 +72,10 @@ fn shared_children_keep_both_root_placements_and_painter_partitions() {
     assert_eq!(before.group_count(), after.group_count());
     assert_eq!(before.batch_trace(), after.batch_trace());
     for (a, b) in before.items().iter().zip(after.items()) {
-        assert_eq!((a.group, a.batch, a.key, a.passes), (b.group, b.batch, b.key, b.passes));
+        assert_eq!(
+            (a.group, a.batch, a.key, a.passes),
+            (b.group, b.batch, b.key, b.passes)
+        );
         assert_eq!(stage.get_points(a.mob), restored.get_points(b.mob));
     }
     let roots = restored.roots();
@@ -146,20 +149,28 @@ fn custom_columns_placement_uniforms_and_shape_validity_survive() {
         &[("point", 3), ("aux", 3), ("rgba", 4), ("custom", 2)],
         &["point", "aux", "rgba", "custom"],
         &["point", "aux"],
-    ).unwrap();
+    )
+    .unwrap();
     let e = stage.get_mut(mob).unwrap();
     e.buffer = RecordBuffer::new(schema, 3).unwrap();
-    e.buffer.write_range("point", 0, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
-    e.buffer.write_range("aux", 0, &[0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 2.0, 1.0, 0.0]);
-    e.buffer.write_range("custom", 0, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-    e.buffer.write_range("rgba", 0, &[0.25, 0.5, 0.75, 0.5].repeat(3));
+    e.buffer
+        .write_range("point", 0, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+    e.buffer
+        .write_range("aux", 0, &[0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 2.0, 1.0, 0.0]);
+    e.buffer
+        .write_range("custom", 0, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    e.buffer
+        .write_range("rgba", 0, &[0.25, 0.5, 0.75, 0.5].repeat(3));
     e.uniforms_mut().is_fixed_in_frame = 0.5;
     e.uniforms_mut().clip_planes[0] = [0.0, 1.0, 0.0, 0.5];
     stage.add_to_scene(mob).unwrap();
     stage.shift(mob, [2.0, 3.0, 4.0]);
     let mut source = stage.snapshot();
     let e = source.slots[0].1.as_mut().unwrap();
-    e.shape.tag = ShapeTag::Circle { center: [0.0, 0.0, 0.0], radius: 1.0 };
+    e.shape.tag = ShapeTag::Circle {
+        center: [0.0, 0.0, 0.0],
+        radius: 1.0,
+    };
     e.shape.point_revision = None; // A stale constructor hint must stay stale.
     let projected = project(&source, RenderSnapshotLimits::DEFAULT).unwrap();
     let a = source.slots[0].1.as_ref().unwrap();
@@ -174,7 +185,10 @@ fn custom_columns_placement_uniforms_and_shape_validity_survive() {
     assert_eq!(a.shape.tag, b.shape.tag);
     assert!(b.shape.point_revision.is_none());
     let decoded = decode(&source.to_render_bytes().unwrap());
-    assert_eq!(decoded.get_points(decoded.roots()[0]), stage.get_points(mob));
+    assert_eq!(
+        decoded.get_points(decoded.roots()[0]),
+        stage.get_points(mob)
+    );
 }
 
 #[test]
@@ -182,11 +196,12 @@ fn primary_and_dark_image_resources_and_primitive_are_preserved() {
     let mut stage = Stage::new();
     let mob = line(&mut stage, 0.0);
     stage.add_to_scene(mob).unwrap();
-    let make_image = |pixel| ImageResource::rgba8(
-        1, 1, pixel, ImageColorSpace::Srgb, ImageSampler::default(),
-    ).unwrap();
+    let make_image = |pixel| {
+        ImageResource::rgba8(1, 1, pixel, ImageColorSpace::Srgb, ImageSampler::default()).unwrap()
+    };
     let image = make_image(vec![255, 0, 0, 127])
-        .with_dark_image(make_image(vec![0, 0, 255, 255])).unwrap();
+        .with_dark_image(make_image(vec![0, 0, 255, 255]))
+        .unwrap();
     let mut source = stage.snapshot();
     let entry = source.slots[0].1.as_mut().unwrap();
     entry.render_primitive = RenderPrimitive::TriangleMesh;
@@ -196,7 +211,10 @@ fn primary_and_dark_image_resources_and_primitive_are_preserved() {
     assert_eq!(entry.render_primitive, RenderPrimitive::TriangleMesh);
     assert_eq!(entry.image.as_ref(), Some(&image));
     let decoded = decode(&source.to_render_bytes().unwrap()).snapshot();
-    assert_eq!(decoded.slots[0].1.as_ref().unwrap().image.as_ref(), Some(&image));
+    assert_eq!(
+        decoded.slots[0].1.as_ref().unwrap().image.as_ref(),
+        Some(&image)
+    );
 }
 
 #[test]
@@ -204,12 +222,16 @@ fn empty_picture_drops_all_arena_history() {
     let mut stage = picture(32, true);
     let root = stage.roots()[0];
     stage.remove_from_scene(root);
-    let bytes = stage.snapshot().to_render_bytes_with_limits(RenderSnapshotLimits {
-        max_graph_bytes: 0,
-    }).unwrap();
+    let bytes = stage
+        .snapshot()
+        .to_render_bytes_with_limits(RenderSnapshotLimits { max_graph_bytes: 0 })
+        .unwrap();
     assert_eq!(bytes, Stage::new().snapshot().to_bytes().unwrap());
     assert!(decode(&bytes).snapshot().slots.is_empty());
-    assert!(stage.contains(root), "projection must not free removed objects");
+    assert!(
+        stage.contains(root),
+        "projection must not free removed objects"
+    );
 }
 
 #[test]
@@ -219,11 +241,17 @@ fn graph_budget_and_overflow_refuse_before_reservation() {
         snapshot.to_render_bytes_with_limits(RenderSnapshotLimits { max_graph_bytes: 0 }),
         Err(RenderSnapshotError::GraphLimit { limit: 0, .. })
     ));
-    let mut budget = Budget { limit: usize::MAX, charged: 0 };
+    let mut budget = Budget {
+        limit: usize::MAX,
+        charged: 0,
+    };
     let mut values = Vec::<u64>::new();
     assert!(matches!(
         budget.reserve(&mut values, usize::MAX, "overflow probe"),
-        Err(RenderSnapshotError::GraphLimit { needed: usize::MAX, .. })
+        Err(RenderSnapshotError::GraphLimit {
+            needed: usize::MAX,
+            ..
+        })
     ));
     assert_eq!(values.capacity(), 0);
     assert_eq!(budget.charged, 0);
@@ -247,7 +275,12 @@ fn stale_foreign_and_cyclic_rooted_edges_are_refused() {
         Err(RenderSnapshotError::Graph(StageError::StaleHandle))
     ));
     source.roots[0] = root;
-    source.slots[root.parts().0 as usize].1.as_mut().unwrap().submobjects.push(root);
+    source.slots[root.parts().0 as usize]
+        .1
+        .as_mut()
+        .unwrap()
+        .submobjects
+        .push(root);
     assert!(matches!(
         source.to_render_bytes(),
         Err(RenderSnapshotError::Graph(StageError::CycleDetected))
@@ -293,7 +326,9 @@ fn deeply_shared_dag_uses_objects_and_edges_not_expanded_paths() {
     assert_eq!(projected.slots.len(), 65);
     assert_eq!(projected.roots.len(), 2);
     assert_eq!(
-        projected.slots.iter()
+        projected
+            .slots
+            .iter()
             .map(|(_, e)| e.as_ref().unwrap().submobjects.len())
             .sum::<usize>(),
         126,
@@ -325,7 +360,13 @@ fn handle_generations_and_unrooted_parents_do_not_leak_into_picture_identity() {
     }
     assert_eq!(clean, snapshot.to_render_bytes().unwrap());
     let restored = decode(&clean);
-    assert!(restored.get(restored.roots()[0]).unwrap().parents().is_empty());
+    assert!(
+        restored
+            .get(restored.roots()[0])
+            .unwrap()
+            .parents()
+            .is_empty()
+    );
     assert!(stage.contains(child) && stage.contains(outside));
 }
 
@@ -345,8 +386,24 @@ fn a_live_shape_hint_is_preserved_and_an_invalidated_one_is_not_revived() {
     // Canonical order is group, left, right, unlike this arena's slot order.
     let projected_left = projected.slots[1].1.as_ref().unwrap();
     assert!(projected_left.shape.point_revision.is_some());
-    assert_eq!(projected_left.shape.point_revision, projected_left.buffer.field_revision("point"));
-    snapshot.slots[0].1.as_mut().unwrap().buffer.write_range("point", 0, &[9.0, 8.0, 7.0]);
+    assert_eq!(
+        projected_left.shape.point_revision,
+        projected_left.buffer.field_revision("point")
+    );
+    snapshot.slots[0]
+        .1
+        .as_mut()
+        .unwrap()
+        .buffer
+        .write_range("point", 0, &[9.0, 8.0, 7.0]);
     let projected = project(&snapshot, RenderSnapshotLimits::DEFAULT).unwrap();
-    assert!(projected.slots[1].1.as_ref().unwrap().shape.point_revision.is_none());
+    assert!(
+        projected.slots[1]
+            .1
+            .as_ref()
+            .unwrap()
+            .shape
+            .point_revision
+            .is_none()
+    );
 }
