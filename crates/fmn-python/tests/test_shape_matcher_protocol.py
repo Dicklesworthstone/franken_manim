@@ -15,6 +15,7 @@ _SPEC.loader.exec_module(_ADAPTER)
 def namespace():
     class Mobject:
         def is_fixed_in_frame(self): return False
+        def family_members_with_points(self): return [self]
     class Rectangle(Mobject):
         def __init__(self, **kwargs):
             self.events = [("rectangle", kwargs)]

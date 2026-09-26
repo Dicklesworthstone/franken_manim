@@ -18,6 +18,7 @@ _STEPS = (
     ("point_editing", "install_point_editing"),
     ("arrow_geometry", "install_arrow_geometry"),
     ("shape_matchers", "install_shape_matchers"),
+    ("shape_matchers", "install_annotation_marks"),
     ("functional_color", "install_functional_color"),
     ("rendering", "install_scene_rendering"),
     ("camera_capture", "install_camera_capture"),
