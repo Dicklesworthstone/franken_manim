@@ -16,6 +16,10 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(_portal_begin_bundle, module)?,
     )?;
     module.setattr(
+        "_portal_begin_camera_bundle",
+        wrap_pyfunction!(_portal_begin_camera_bundle, module)?,
+    )?;
+    module.setattr(
         "_portal_bundle_segment",
         wrap_pyfunction!(_portal_bundle_segment, module)?,
     )?;
@@ -31,6 +35,7 @@ pub(super) struct BundleCapture {
     destination: PathBuf,
     max_output_bytes: usize,
     expected_camera: Camera,
+    camera_track: bool,
     active: Option<(SegmentKind, u64)>,
     failure: Option<String>,
 }
@@ -54,10 +59,21 @@ impl BundleCapture {
 
     pub(super) fn validate_camera(&mut self, camera: &Camera) -> PyResult<()> {
         let expected = &self.expected_camera;
+        if self.camera_track {
+            // The export viewport/FPS are frozen before acquiring this owner.
+            // Pose, lighting and background may change at every capture.
+            if camera.fps() != expected.fps() || camera.pixel_shape() != expected.pixel_shape() {
+                let error =
+                    capability("camera FPS and pixel dimensions cannot change during export");
+                self.fail(&error);
+                return Err(error);
+            }
+            return Ok(());
+        }
         let frame = camera.frame();
         let baseline = expected.frame();
         // Revisions are not semantics: a descriptor may set a value to itself.
-        // FMTL/1 has no camera/background track, so never silently drop one.
+        // Minor-0 FMTL has no camera/background track; never silently drop one.
         if frame.center() != baseline.center()
             || frame.shape() != baseline.shape()
             || frame.orientation() != baseline.orientation()
@@ -79,13 +95,20 @@ impl BundleCapture {
         camera: &Camera,
     ) -> PyResult<()> {
         self.validate_camera(camera)?;
-        Self::validate_stage(stage)?;
+        if !self.camera_track {
+            Self::validate_stage(stage)?;
+        }
         let reason = if packet.segment_frame() == 0 {
             CaptureReason::Show
         } else {
             CaptureReason::Segment
         };
-        self.recorder.capture(reason, packet).map_err(native_error)
+        if self.camera_track {
+            self.recorder.capture_with_camera(reason, packet, camera)
+        } else {
+            self.recorder.capture(reason, packet)
+        }
+        .map_err(native_error)
     }
 
     fn validate_stage(stage: &Stage) -> PyResult<()> {
@@ -135,6 +158,60 @@ fn _portal_begin_bundle(
     max_capture_bytes: usize,
     max_output_bytes: usize,
 ) -> PyResult<()> {
+    begin_bundle(
+        scene,
+        destination,
+        width,
+        height,
+        fps,
+        seed,
+        max_frames,
+        max_capture_bytes,
+        max_output_bytes,
+        false,
+    )
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn _portal_begin_camera_bundle(
+    scene: &Bound<'_, PyScene>,
+    destination: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    seed: u64,
+    max_frames: u64,
+    max_capture_bytes: usize,
+    max_output_bytes: usize,
+) -> PyResult<()> {
+    begin_bundle(
+        scene,
+        destination,
+        width,
+        height,
+        fps,
+        seed,
+        max_frames,
+        max_capture_bytes,
+        max_output_bytes,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn begin_bundle(
+    scene: &Bound<'_, PyScene>,
+    destination: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    seed: u64,
+    max_frames: u64,
+    max_capture_bytes: usize,
+    max_output_bytes: usize,
+    camera_track: bool,
+) -> PyResult<()> {
     if destination.is_empty() || destination.contains('\0') {
         return Err(PyValueError::new_err(
             "bundle destination must be nonempty and contain no NUL",
@@ -170,7 +247,12 @@ fn _portal_begin_bundle(
     };
     // Portable bundles replay pictures, not the arena's authoring history.
     // Do not retain hidden target/saved copies or Python proxy pins per frame.
-    let recorder = SceneBundleRecorder::new_render_only(fps, limits).map_err(native_error)?;
+    let recorder = if camera_track {
+        SceneBundleRecorder::new_render_only_with_camera(fps, limits)
+    } else {
+        SceneBundleRecorder::new_render_only(fps, limits)
+    }
+    .map_err(native_error)?;
     // Reuse the capture owner's configured camera and validation. The bundle
     // branch never rasterizes, populates Studio history, or starts a worker.
     let identity = protocol_digest(&[]);
@@ -190,6 +272,7 @@ fn _portal_begin_bundle(
         destination,
         max_output_bytes,
         expected_camera: capture.camera.clone(),
+        camera_track,
         active: None,
         failure: None,
     });
@@ -326,11 +409,15 @@ fn _portal_finish_bundle(
         return Err(capability("audio is not carried by this format"));
     }
     if bundle.is_empty() {
-        BundleCapture::validate_stage(live.stage())?;
-        bundle
-            .recorder
-            .capture_terminal_still(live.stage())
-            .map_err(native_error)?;
+        if bundle.camera_track {
+            bundle
+                .recorder
+                .capture_terminal_still_with_camera(live.stage(), &capture.camera)
+        } else {
+            BundleCapture::validate_stage(live.stage())?;
+            bundle.recorder.capture_terminal_still(live.stage())
+        }
+        .map_err(native_error)?;
     }
     drop(live);
     let artifact = bundle
@@ -389,6 +476,45 @@ mod tests {
             .map(|index| {
                 let stage = bundle.stage_at(index).map_err(native_error)?;
                 output.renderer.render(&stage, 0).map_err(native_error)?;
+                portal_video::convert_frame(output.renderer.frame(), &mut output.rgba, None)
+                    .map_err(native_error)?;
+                Ok(output.rgba.plane(0).to_vec())
+            })
+            .collect()
+    }
+
+    #[pyfunction]
+    fn _test_camera_bundle_frames(
+        bytes: Vec<u8>,
+        indices: Vec<u32>,
+        width: u32,
+        height: u32,
+        threads: usize,
+    ) -> PyResult<Vec<Vec<u8>>> {
+        let bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(native_error)?;
+        assert!(bundle.has_camera_track());
+        let identity = protocol_digest(&[]);
+        let (mut output, _) = Capture::new(
+            "camera-replay-test".to_owned(),
+            identity,
+            identity,
+            width,
+            height,
+            bundle.fps(),
+            threads,
+            1,
+            1,
+        )?;
+        indices
+            .into_iter()
+            .map(|index| {
+                let (stage, camera) = bundle
+                    .stage_at_with_camera(index, (width, height))
+                    .map_err(native_error)?;
+                output
+                    .renderer
+                    .render_with_camera(&stage, &camera.expect("validated camera track"))
+                    .map_err(native_error)?;
                 portal_video::convert_frame(output.renderer.frame(), &mut output.rgba, None)
                     .map_err(native_error)?;
                 Ok(output.rgba.plane(0).to_vec())
@@ -457,6 +583,38 @@ mod tests {
                 py.run(source.as_c_str(), Some(globals), Some(globals))
                     .inspect_err(|error| error.print(py))
                     .expect("render-only FMTL history independence, replay and atomic publication");
+            },
+        );
+    }
+
+    #[test]
+    fn camera_python_scene_bundle_export() {
+        crate::with_python_test_module(
+            "Camera Python scene bundle export",
+            |py, module, globals| {
+                globals
+                    .set_item(
+                        "_test_camera_bundle_frames",
+                        wrap_pyfunction!(_test_camera_bundle_frames, module).unwrap(),
+                    )
+                    .unwrap();
+                globals
+                    .set_item(
+                        "_test_png_pixels",
+                        wrap_pyfunction!(_test_png_pixels, module).unwrap(),
+                    )
+                    .unwrap();
+                globals
+                    .set_item(
+                        "__file__",
+                        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/camera_bundle_export.py"),
+                    )
+                    .unwrap();
+                let source =
+                    CString::new(include_str!("../../tests/camera_bundle_export.py")).unwrap();
+                py.run(source.as_c_str(), Some(globals), Some(globals))
+                    .inspect_err(|error| error.print(py))
+                    .expect("camera-aware export, real replay, pixels and no-clobber publication");
             },
         );
     }

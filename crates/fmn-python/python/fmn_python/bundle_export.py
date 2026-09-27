@@ -30,17 +30,24 @@ class BundleExportResult:
     digest: str
     fps: int
     resolution: tuple[int, int]
+    camera_track: bool = False
 
     def as_dict(self) -> dict[str, Any]:
-        return {"schema": "fmn.python-bundle-export", "version": 1,
+        result = {"schema": "fmn.python-bundle-export", "version": 1,
                 "format": "fmtl", "destination": str(self.destination),
                 "frame_count": self.frame_count, "segment_count": self.segment_count,
                 "bytes": self.bytes, "sha256": self.digest, "fps": self.fps,
                 "replay_resolution": list(self.resolution), "certified_source": False}
+        if self.camera_track:
+            result.update(camera_track=True, fmtl_minor=1)
+        return result
 
 
-def require_bundle_capability(native):
-    for name in ("_portal_begin_bundle", "_portal_bundle_segment", "_portal_finish_bundle"):
+def require_bundle_capability(native, *, camera=False):
+    if type(camera) is not bool:
+        raise TypeError("camera must be a bool")
+    begin = "_portal_begin_camera_bundle" if camera else "_portal_begin_bundle"
+    for name in (begin, "_portal_bundle_segment", "_portal_finish_bundle"):
         if not callable(getattr(native, name, None)):
             error = getattr(native, "_CapabilityError", RuntimeError)
             raise error("FMTL export requires a matching native wheel with SceneBundleRecorder support")
@@ -61,17 +68,21 @@ class BundleExportSession:
     """Own one complete, atomically published, code-free scene generation.
 
     A pristine Scene is required. Setup/construct/tear_down are not invoked by
-    this context itself; export_bundle runs them once. FMTL/1 admits captured
-    planar vectors (including text outlines and Python updaters), not camera,
-    lighting, background or audio tracks. Unsupported content fails closed.
-    The resolution is a replay setting, not a field serialized by FMTL/1.
-    Arbitrary Python source effects are not certified by exporting snapshots.
+    this context itself; export_bundle runs them once. By default, minor-0
+    bundles admit planar vectors (including text and Python updaters) and work
+    with the camera-less browser player. With camera=True, minor-1 bundles
+    record each frame's view, lighting and background alongside 3D/raster/vector
+    geometry for the native player. Replay needs no Python or scene code.
+    Resolution controls capture aspect; native replay may change pixel size.
+    Audio remains unsupported in either mode. Arbitrary Python source effects
+    are not certified by exporting their observed pictures.
     """
-    def __init__(self, scene, destination, *, resolution=None, fps=None,
+    def __init__(self, scene, destination, *, resolution=None, fps=None, camera=False,
                  max_frames=1_000_000, max_capture_bytes=_CAP, max_output_bytes=_CAP,
                  _native=None):
         native = importlib.import_module("manimlib") if _native is None else _native
-        require_bundle_capability(native)
+        require_bundle_capability(native, camera=camera)
+        self._camera_track = camera
         # Reuse the existing output validation, without entering a pixel sink.
         self._configuration = RenderSession(
             scene, destination, format="png_sequence", resolution=resolution,
@@ -114,7 +125,9 @@ class BundleExportSession:
             raise RuntimeError("bundle export must start outside a play/wait call")
         # Freeze configuration before native generation acquisition. Pixel
         # shape affects camera aspect, so it must be set before validation.
-        self._native._portal_begin_bundle(
+        begin = (self._native._portal_begin_camera_bundle if self._camera_track
+                 else self._native._portal_begin_bundle)
+        begin(
             self.scene, str(self.destination), *self.resolution, self.fps,
             self._configuration.seed, self.max_frames, self.max_capture_bytes,
             self.max_output_bytes,
@@ -192,7 +205,7 @@ class BundleExportSession:
             path, frames, segments, size, digest = self._native._portal_finish_bundle(self.scene)
             self._artifact_published = True
             self.result = BundleExportResult(Path(path), frames, segments, size, digest,
-                                             self.fps, self.resolution)
+                                             self.fps, self.resolution, self._camera_track)
             self._state = "finished"
         except BaseException as primary:
             self._abort_preserving(primary)
@@ -204,9 +217,13 @@ class BundleExportSession:
 
 
 def export_bundle(scene, destination, *, scene_kwargs=None, **options):
-    """Run a Scene class/instance once and return its immutable FMTL receipt."""
+    """Run a Scene once; camera=True includes its view for native FMTL replay.
+
+    The default remains the planar browser-compatible format. Both modes use
+    the same ownership, capture budgets and atomic create-only publication.
+    """
     native = importlib.import_module("manimlib")
-    require_bundle_capability(native)
+    require_bundle_capability(native, camera=options.get("camera", False))
     if isinstance(scene, type) and issubclass(scene, native.Scene):
         scene = scene(**({} if scene_kwargs is None else dict(scene_kwargs)))
     elif scene_kwargs is not None:

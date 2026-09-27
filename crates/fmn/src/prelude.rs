@@ -10,6 +10,9 @@ pub use crate::{
     Stage, export_bundle, export_bundle_bytes, export_bundle_with_fs, render, render_with_fs,
     run_scene,
 };
+pub use crate::exporting::{
+    export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs,
+};
 pub use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationGroup, FramePacket, IntoAnimation, IntoAnimations,
     MoveAlongPath, RateFunc, Rotating, ShowPartial, Succession, Transform, fade_in, fade_out,

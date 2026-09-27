@@ -12,6 +12,9 @@ on:
       - 'crates/fmn-scene/src/recording.rs'
       - 'crates/fmn-scene/src/timeline_bundle*'
       - 'crates/fmn-scene/src/timeline_bundle/**'
+      - 'crates/fmn/src/exporting.rs'
+      - 'crates/fmn/src/exporting/**'
+      - 'crates/fmn/tests/native_camera_export.rs'
       - 'crates/fmn/src/rendering/compiled.rs'
       - 'crates/fmn/src/rendering/pipeline.rs'
       - 'crates/fmn-conformance/tests/camera_bundle.rs'
@@ -59,6 +62,8 @@ jobs:
         run: cargo test --locked -p fmn-python portal_studio -- --nocapture
       - name: Camera bundles through native workers and standalone CLI
         run: cargo test --locked -p fmn-conformance --test camera_bundle -- --nocapture
+      - name: Native camera-rig export front door
+        run: cargo test --locked -p fmn --test native_camera_export --test native_bundle_export -- --nocapture
       - name: Legacy bundle readers and camera-less player compatibility
         run: |
           cargo test --locked -p fmn-scene
@@ -73,7 +78,9 @@ jobs:
       - name: Python console to standalone native replay
         env:
           FMN_TEST_BIN: ${{ github.workspace }}/target/portable/debug/fmn
-        run: python crates/fmn-python/tests/bundle_cli_native.py
+        run: |
+          python crates/fmn-python/tests/bundle_cli_native.py
+          python crates/fmn-python/tests/camera_bundle_cli_native.py
       - name: Check export sources without modifying the repository
         run: |
           rustfmt --edition 2024 --check --config skip_children=true crates/fmn-python/src/portal_studio/bundle.rs

@@ -106,7 +106,7 @@ fn recording() -> (RecordedSceneBundle, Vec<Vec<u8>>) {
     (sink.recorder.finish().unwrap(), sink.observed)
 }
 
-fn options(threads: usize, window: usize) -> RenderOptions {
+fn options(threads: u32, window: usize) -> RenderOptions {
     let mut options = RenderOptions::new("/movie").unwrap();
     options.config.camera.resolution = RESOLUTION;
     options.config.camera.fps = 8;

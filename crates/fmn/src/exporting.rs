@@ -6,11 +6,11 @@
 //! Same scene inputs yield the same bundle bytes; this is not an attestation of
 //! arbitrary callback inputs or a complete certified input-closure manifest.
 //!
-//! FMTL/1 contains geometry and its frame grid, not renderer configuration,
-//! external camera-rig bindings or audio. Replay must use the same viewport,
-//! background, AA and fixed camera as a corresponding direct render. Sound
-//! requests are refused rather than silently stripped. Camera-rig scenes must
-//! use `rendering::render_camera` until a camera-bearing bundle format exists.
+//! The original exports preserve FMTL/1 minor 0: geometry and the frame grid,
+//! with replay policy supplied separately. [`export_camera_bundle_bytes`] and
+//! its publication siblings record minor 1 with exact per-frame cameras, light
+//! and background. Neither format serializes callbacks or audio. Sound requests
+//! are refused rather than silently stripped.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,11 @@ use fmn_scene::recording::{RecordedSceneBundle, RecordingError, SceneBundleRecor
 use fmn_scene::{BundleExportLimits, RuntimeConfig, SceneRunReport};
 
 use crate::SceneConstruct;
+
+mod camera;
+pub use camera::{
+    export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs,
+};
 
 /// Explicit semantic settings and bounded storage for one native scene export.
 #[derive(Clone, Debug)]
@@ -234,6 +239,14 @@ pub fn export_bundle_with_fs<P: SceneConstruct + ?Sized>(
         ));
     }
     let export = export_bundle_bytes(program, options)?;
+    publish(export, output, fs)
+}
+
+fn publish(
+    export: SceneBundleExport,
+    output: &Path,
+    fs: Arc<dyn FileSystem>,
+) -> Result<BundleExportReport, BundleExportError> {
     let report = BundleExportReport {
         output: output.to_owned(),
         digest: export.bundle.digest.to_hex(),
