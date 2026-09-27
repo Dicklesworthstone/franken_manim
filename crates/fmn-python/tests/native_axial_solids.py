@@ -1,4 +1,4 @@
-"""Cylinder/Cone/Line3D subclass behavior through real native geometry and output."""
+"""Axial and flat solid subclass behavior through real native geometry and output."""
 from pathlib import Path
 import tempfile
 import unittest
@@ -267,9 +267,194 @@ class AxialSolidTests(unittest.TestCase):
                     self.assertEqual(render(directory/f'actual-{workers}.y4m', actual, workers), expected)
 
 
+def flat_kernel(kind, size=1., shape=(9, 7)):
+    surface = m.Surface.__new__(m.Surface)
+    m._install_live_state(surface)
+    ur, vr = ((0., 1.), (0., m.TAU)) if kind == 'disk3d' else ((-1., 1.), (-1., 1.))
+    specs = getattr(surface, '_build_' + kind)(m._native_surface_shell_factory,
+        size, ur, vr, shape, 1, .001, .001, 0)
+    assert not specs
+    surface.resolution = shape
+    surface.compute_triangle_indices()
+    surface.set_color(m.GREY)
+    surface.set_shading(.3, .2, .4)
+    surface.apply_depth_test()
+    return surface
+
+
+class FlatSolidTests(unittest.TestCase):
+    def test_untouched_sphere_normals_are_not_double_rounded_after_publication(self):
+        for radius in (.7, 2.3, -.7):
+            for clockwise in (False, True):
+                expected = m.Surface.__new__(m.Surface)
+                m._install_live_state(expected)
+                expected._build_sphere(m._native_surface_shell_factory, radius,
+                    (0., m.TAU), (0., m.PI), (9, 7), True, clockwise, 1, .001, .001)
+                actual = m.Sphere(radius=radius, clockwise=clockwise, resolution=(9, 7))
+                # Native world-space publication canonicalizes signed zero.
+                # Every nonzero normal coordinate must remain EXACTLY the
+                # f64-built native value, not a second calculation from f32.
+                np.testing.assert_array_equal(actual.data['d_normal_point'],
+                                              expected.data['d_normal_point'])
+
+    def test_stock_sizes_and_degenerate_grids_preserve_native_geometry(self):
+        for base, kind, key in ((m.Disk3D, 'disk3d', 'radius'),
+                                (m.Square3D, 'square3d', 'side_length')):
+            for size in (-.7, 0., .7, 3.):
+                for shape in ((0, 4), (4, 0), (1, 4), (4, 1), (9, 7)):
+                    with self.subTest(kind=kind, size=size, shape=shape):
+                        actual = base(**{key: size}, resolution=shape)
+                        expected = flat_kernel(kind, size, shape)
+                        for field in ('point', 'd_normal_point', 'rgba'):
+                            np.testing.assert_array_equal(actual.data[field], expected.data[field])
+
+    def test_all_hooks_see_unit_geometry_before_the_final_scale(self):
+        for base, kind, key, unit in ((m.Disk3D, 'disk3d', 'radius', 1.),
+                                     (m.Square3D, 'square3d', 'side_length', 2.)):
+            events = []
+            class Authored(base):
+                def init_data(self):
+                    events.append('data')
+                    super().init_data()
+                def init_points(self):
+                    events.append('points')
+                    super().init_points()
+                    self.shift(m.RIGHT)
+                def init_uniforms(self):
+                    events.append('uniforms')
+                    super().init_uniforms()
+                def init_colors(self):
+                    events.append('colors')
+                    super().init_colors()
+                    self.set_color(m.BLUE)
+                    self.before_scale = self.get_points().copy()
+                def scale(self, factor, **kwargs):
+                    events.append(('scale', factor))
+                    return super().scale(factor, **kwargs)
+            actual = Authored(**{key: 3*unit}, resolution=(9, 7), color=m.RED)
+            expected = flat_kernel(kind, unit).shift(m.RIGHT)
+            np.testing.assert_array_equal(actual.before_scale, expected.get_points())
+            expected.scale(3)
+            np.testing.assert_array_equal(actual.get_points(), expected.get_points())
+            self.assertEqual(events, ['data', 'points', 'uniforms', 'colors', ('scale', 3)])
+            self.assertEqual(actual.get_color(), m.BLUE)
+
+    def test_replacement_geometry_children_and_custom_columns_survive_scaling(self):
+        points = np.array([[-1, -1, 2], [-1, 1, 2], [1, -1, 2], [1, 1, 2]])
+        for base, kwargs in ((m.Disk3D, dict(radius=2)), (m.Square3D, dict(side_length=4))):
+            child = m.Point([1, 2, 3])
+            class Replacement(base):
+                data_dtype = [*m.Surface.data_dtype, ('temperature', np.float32, (1,))]
+                def init_points(self):
+                    self.set_points(points)
+                    self.data['d_normal_point'][:] = points + .001*m.OUT
+                    self.data['temperature'][:] = 23
+                def init_colors(self):
+                    super().init_colors()
+                    self.add(child)
+                def uv_func(self, u, v):
+                    raise AssertionError('replacement points must not invoke the sampler')
+            actual = Replacement(resolution=(2, 2), **kwargs)
+            expected = m.ParametricSurface(lambda u, v: (u, v, 2),
+                u_range=(-1, 1), v_range=(-1, 1), resolution=(2, 2))
+            other = m.Point([1, 2, 3])
+            expected.add(other).scale(2)
+            self.assertIs(actual.submobjects[0], child)
+            np.testing.assert_array_equal(actual.get_points(), expected.get_points())
+            np.testing.assert_array_equal(child.get_points(), other.get_points())
+            np.testing.assert_array_equal(actual.data['temperature'], 23)
+            duplicate = actual.copy()
+            self.assertIsNot(duplicate.submobjects[0], child)
+            np.testing.assert_array_equal(duplicate.data, actual.data)
+
+    def test_authored_uv_and_live_resolution_changes_keep_dimensions(self):
+        for base, kwargs, domains in (
+                (m.Disk3D, dict(radius=3), ((0, 1), (0, m.TAU))),
+                (m.Square3D, dict(side_length=6), ((-1, 1), (-1, 1)))):
+            calls = []
+            def uv(u, v):
+                return u, v, u + v
+            class Authored(base):
+                def uv_func(self, u, v):
+                    calls.append((u, v))
+                    return uv(u, v)
+            actual = Authored(resolution=(3, 4), **kwargs)
+            scene = m.Scene()
+            scene.add(actual)
+            for operation, shape in ((lambda: None, (3, 4)), (actual.init_points, (3, 4)),
+                                     (lambda: actual.set_resolution((4, 5)), (4, 5))):
+                operation()
+                self.assertIs(scene.mobjects[0], actual)
+                self.assertEqual(len(calls), 3*shape[0]*shape[1])
+                calls.clear()
+                expected = m.ParametricSurface(uv, u_range=domains[0], v_range=domains[1],
+                                               resolution=shape).scale(3)
+                np.testing.assert_allclose(actual.get_points(), expected.get_points(), atol=1e-6)
+                self.assertEqual(m._surface_grid_resolution(actual), shape)
+                self.assertIs(actual._scene, scene)
+
+    def test_constructor_scale_argument_is_not_replaced_by_an_authored_attribute(self):
+        class Authored(m.Disk3D):
+            def init_data(self):
+                super().init_data()
+                self.radius = 7
+        actual = Authored(radius=3, resolution=(9, 7))
+        expected = flat_kernel('disk3d').scale(3)
+        np.testing.assert_array_equal(actual.get_points(), expected.get_points())
+        self.assertEqual(actual.radius, 7)
+
+    def test_bad_size_and_recursive_hooks_refuse_without_partial_construction(self):
+        calls = []
+        class Authored(m.Square3D):
+            def init_data(self):
+                calls.append('data')
+                super().init_data()
+        for size in (float('nan'), float('inf'), 1e40):
+            with self.assertRaises(ValueError):
+                Authored(side_length=size)
+        self.assertEqual(calls, [])
+        class Recursive(m.Disk3D):
+            def init_colors(self):
+                self.__init__()
+        with self.assertRaisesRegex(RuntimeError, 'already in progress'):
+            Recursive(resolution=(2, 2))
+
+    def test_changed_size_during_sampling_refuses_before_publication(self):
+        roots = []
+        class Mutating(m.Square3D):
+            def init_data(self):
+                super().init_data()
+                roots.append(self)
+            def uv_func(self, u, v):
+                self.side_length += 1
+                return u, v, 0
+        with self.assertRaisesRegex(RuntimeError, 'shape parameters changed'):
+            Mutating(resolution=(3, 4))
+        self.assertEqual(roots[0].n_records(), 0)
+        self.assertEqual(m.Square3D(resolution=(2, 2)).n_records(), 4)
+
+    def test_authored_flat_geometry_is_visible_and_worker_independent(self):
+        for base, kind, key, unit in ((m.Disk3D, 'disk3d', 'radius', 1.),
+                                     (m.Square3D, 'square3d', 'side_length', 2.)):
+            class Authored(base):
+                def init_points(self):
+                    super().init_points()
+                    self.shift(m.RIGHT)
+            with tempfile.TemporaryDirectory() as directory:
+                directory = Path(directory)
+                expected = flat_kernel(kind, unit).shift(m.RIGHT).scale(1.5)
+                reference = render(directory/'reference.y4m', expected, 1)
+                self.assertNotEqual(reference, render(directory/'unmodified.y4m',
+                    flat_kernel(kind, 1.5*unit), 1))
+                for workers in (1, 4, 16):
+                    actual = Authored(**{key: 1.5*unit}, resolution=(9, 7))
+                    self.assertEqual(reference, render(directory/f'actual-{workers}.y4m', actual, workers))
+
+
 def run_native_axial_solids():
-    result = unittest.TextTestRunner(verbosity=2).run(
-        unittest.defaultTestLoader.loadTestsFromTestCase(AxialSolidTests))
+    suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
+        for cls in (AxialSolidTests, FlatSolidTests))
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
         raise AssertionError('native axial-solid acceptance failed')
 
