@@ -8,6 +8,7 @@ initialized receiver's schema, children, saved state or view generation.
 from __future__ import annotations
 
 import math
+import operator
 
 from .invocation import InvocationGuard
 
@@ -29,10 +30,11 @@ def install_brace_lifecycle(native):
         return value
 
     def vector(value):
-        result = np.array(g["_vec3"](value), dtype=float)
-        if not np.isfinite(result).all():
-            raise ValueError("brace direction must be finite")
-        return result
+        result = np.asarray(value, dtype=float)
+        if (result.shape != (3,) or not np.isfinite(result).all()
+                or np.any(np.abs(result) > np.finfo(np.float32).max)):
+            raise ValueError("brace direction must contain three finite f32-representable coordinates")
+        return result.copy()
 
     def idle(self):
         if vars(self).get("_is_animating", False) or getattr(self, "locked_data_keys", ()):
@@ -54,7 +56,11 @@ def install_brace_lifecycle(native):
         g["_preflight_vmobject_style_kwargs"](kwargs)
         options = dict(kwargs)
         options.setdefault("fill_color", g["_WHITE"])
-        options.setdefault("fill_opacity", 1.0)
+        options.setdefault("stroke_color", g["_WHITE"])
+        # The shared initializer applies opacity only to absent channels.
+        # Seeding an unconditional 1 here silently made translucent braces opaque.
+        alpha = options.get("opacity")
+        options.setdefault("fill_opacity", 1.0 if alpha is None else alpha)
         options.setdefault("stroke_width", 0.0)
         with constructing.hold(self, message="brace initialization is already in progress"):
             self._brace_source = mobject
@@ -66,10 +72,15 @@ def install_brace_lifecycle(native):
             # Do not invoke Tex.__init__: that would typeset an unrelated glyph.
             # The shared initializer dispatches the complete real VMobject MRO.
             g["_init_native_vmobject"](self, options)
+            points = self.get_points()
+            if self._is_bound():
+                raise RuntimeError("brace ownership changed during initialization")
+            if not np.isfinite(points).all():
+                raise ValueError("authored brace geometry must be finite")
             # A replacement point hook can supply a completely different path.
             # Honor an explicit tip index; otherwise locate its outward extreme.
-            if self.tip_point_index is None and self.get_num_points():
-                self.tip_point_index = int(np.argmax(self.get_points() @ selected))
+            if self.tip_point_index is None and len(points):
+                self.tip_point_index = int(np.argmax(points @ selected))
 
     def line_init(self, line, direction=g["_UP"], **kwargs):
         super(LineBrace, self).__init__(line, direction, **kwargs)
@@ -119,9 +130,22 @@ def install_brace_lifecycle(native):
         # paints. Braces are an ordinary filled native VMobject instead.
         return VMobject.init_colors(self)
 
+    def get_tip(self):
+        points = self.get_points()
+        if not len(points):
+            raise ValueError("an empty brace has no tip")
+        try:
+            index = operator.index(self.tip_point_index)
+        except TypeError:
+            raise ValueError("brace tip_point_index must identify an outline point") from None
+        if not -len(points) <= index < len(points):
+            raise ValueError("brace tip_point_index is outside the current outline")
+        return points[index].copy()
+
     for cls, name, function in (
         (Brace, "__init__", init), (Brace, "init_points", init_points),
         (Brace, "init_colors", init_colors), (LineBrace, "__init__", line_init),
+        (Brace, "get_tip", get_tip),
     ):
         function.__name__ = name
         function.__qualname__ = cls.__qualname__ + "." + name

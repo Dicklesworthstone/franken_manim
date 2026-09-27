@@ -317,3 +317,26 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     svg_ingress::install(module)?;
     markdown::install(module)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_brace_authoring() {
+        crate::with_python_test_module("native brace authoring", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/native_brace_lifecycle.py"))
+                .expect("brace tests contain no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_native_braces")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
+}
