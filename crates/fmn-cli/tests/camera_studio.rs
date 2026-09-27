@@ -4,7 +4,10 @@
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use fmn::prelude::*;
@@ -14,13 +17,18 @@ use fmn_hash::sha256;
 use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_scene::CameraRig;
 use fmn_studio::protocol::studio_seek_command;
-use fmn_studio::{CURRENT_VERSION, FramePayload, FrameStream, JournalReplay, ProtocolLimits,
-    RequestEnvelope, SupervisorRequest, WorkerResponse, read_response, write_request};
+use fmn_studio::{
+    CURRENT_VERSION, FramePayload, FrameStream, JournalReplay, ProtocolLimits, RequestEnvelope,
+    SupervisorRequest, WorkerResponse, read_response, write_request,
+};
 
 const NAME: &str = "CameraStudio";
 const SIZE: (u32, u32) = (64, 40);
 
-struct Orbit { rig: CameraRig, camera: CameraConfig }
+struct Orbit {
+    rig: CameraRig,
+    camera: CameraConfig,
+}
 impl SceneConstruct for Orbit {
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
         stage.add(Cube::new(1.6).color(BLUE))?;
@@ -29,10 +37,14 @@ impl SceneConstruct for Orbit {
         target.frame.set_width(3.8).unwrap();
         target.light_source_position = [-3.0, 4.0, 5.0];
         let animation = self.rig.animate_to(stage.scene_mut(), &target)?;
-        stage.play_prepared_with(vec![Box::new(animation)], PlayOverrides {
-            run_time: Some(0.5), rate_func: Some(RateFunc::linear()),
-            ..PlayOverrides::default()
-        })?;
+        stage.play_prepared_with(
+            vec![Box::new(animation)],
+            PlayOverrides {
+                run_time: Some(0.5),
+                rate_func: Some(RateFunc::linear()),
+                ..PlayOverrides::default()
+            },
+        )?;
         Ok(())
     }
 }
@@ -41,27 +53,59 @@ fn source() -> Vec<u8> {
     options.config.camera.fps = 8;
     options.config.camera.resolution = SIZE;
     options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(1);
-    let mut camera = CameraConfig { resolution: SIZE, fps: 8, samples: 4,
-        ..CameraConfig::default() };
+    let mut camera = CameraConfig {
+        resolution: SIZE,
+        fps: 8,
+        samples: 4,
+        ..CameraConfig::default()
+    };
     camera.frame.set_width(5.0).unwrap();
     camera.frame.set_orientation([0.1, 0.2, 0.0, 1.0]).unwrap();
-    export_camera_bundle_bytes(|scene, base| {
-        let rig = CameraRig::new(scene, base)?;
-        Ok((Orbit { rig, camera: base.clone() }, rig))
-    }, camera, options).unwrap().bundle.bytes
+    export_camera_bundle_bytes(
+        |scene, base| {
+            let rig = CameraRig::new(scene, base)?;
+            Ok((
+                Orbit {
+                    rig,
+                    camera: base.clone(),
+                },
+                rig,
+            ))
+        },
+        camera,
+        options,
+    )
+    .unwrap()
+    .bundle
+    .bytes
 }
 fn command(path: &str, threads: &str) -> StudioCommand {
-    let Invocation::Studio(command) = parse_args(["studio", "--resolution", "64x40",
-        "--fps", "8", "--threads", threads, path]).unwrap() else { panic!("Studio") };
+    let Invocation::Studio(command) = parse_args([
+        "studio",
+        "--resolution",
+        "64x40",
+        "--fps",
+        "8",
+        "--threads",
+        threads,
+        path,
+    ])
+    .unwrap() else {
+        panic!("Studio")
+    };
     command
 }
 fn frame_bytes(frame: &FrameStream) -> &[u8] {
-    let FramePayload::Pipe { bytes, digest } = &frame.payload else { panic!("PNG") };
+    let FramePayload::Pipe { bytes, digest } = &frame.payload else {
+        panic!("PNG")
+    };
     assert_eq!(sha256(bytes), *digest);
     bytes
 }
 fn pixels(bytes: &[u8]) -> Vec<u8> {
-    fmn_codec::decode_png(bytes, &fmn_codec::PngLimits::default()).unwrap().rgba
+    fmn_codec::decode_png(bytes, &fmn_codec::PngLimits::default())
+        .unwrap()
+        .rgba
 }
 fn expected(source: &[u8]) -> Vec<Vec<u8>> {
     let fs = Arc::new(VirtualFs::new());
@@ -70,7 +114,12 @@ fn expected(source: &[u8]) -> Vec<Vec<u8>> {
     options.config.camera.fps = 8;
     options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(1);
     render_bundle_with_fs(source, options, fs.clone()).unwrap();
-    (0..4).map(|index| fs.read(&Path::new("/replay").join(format!("frame_{index:06}.png"))).unwrap()).collect()
+    (0..4)
+        .map(|index| {
+            fs.read(&Path::new("/replay").join(format!("frame_{index:06}.png")))
+                .unwrap()
+        })
+        .collect()
 }
 
 #[test]
@@ -84,7 +133,10 @@ fn camera_studio_composition_matches_native_bundle_output_and_preserves_clock() 
         let command = command("/CameraStudio.fmtl", threads);
         for index in [3, 0, 2, 1] {
             let frame = compose_studio_preview_frame(&fs, &command, index).unwrap();
-            assert_eq!(pixels(frame_bytes(&frame)), pixels(&expected[index as usize]));
+            assert_eq!(
+                pixels(frame_bytes(&frame)),
+                pixels(&expected[index as usize])
+            );
             assert_eq!(frame.scene, NAME);
             assert_eq!(frame.frame_index, index as u64);
         }
@@ -103,11 +155,14 @@ fn camera_studio_composition_matches_native_bundle_output_and_preserves_clock() 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 fn fixture() -> PathBuf {
     for _ in 0..128 {
-        let root = std::env::temp_dir().join(format!("fmn-camera-studio-{}-{}",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let root = std::env::temp_dir().join(format!(
+            "fmn-camera-studio-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         match std::fs::create_dir(&root) {
             Ok(()) => return root,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => panic!("fixture: {error}"),
         }
     }
@@ -118,36 +173,72 @@ fn exchange(root: &Path, requests: Vec<SupervisorRequest>, threads: &str) -> Vec
     let limits = ProtocolLimits::default();
     let mut encoded = Vec::new();
     let all = std::iter::once(SupervisorRequest::Hello {
-        version: CURRENT_VERSION, supervisor_build: sha256(b"camera-studio-test-host"),
+        version: CURRENT_VERSION,
+        supervisor_build: sha256(b"camera-studio-test-host"),
         max_frame_bytes: limits.max_frame_bytes as u64,
-    }).chain(requests).chain(std::iter::once(SupervisorRequest::Shutdown));
+    })
+    .chain(requests)
+    .chain(std::iter::once(SupervisorRequest::Shutdown));
     let mut count = 0;
     for (index, request) in all.enumerate() {
-        write_request(&mut encoded, &RequestEnvelope { request_id: index as u64 + 1, request }, limits).unwrap();
+        write_request(
+            &mut encoded,
+            &RequestEnvelope {
+                request_id: index as u64 + 1,
+                request,
+            },
+            limits,
+        )
+        .unwrap();
         count += 1;
     }
     // This is the actual worker subprocess owned by fmn studio, not an engine
     // substitute. No executable search path or interpreter is available to it.
     let mut child = Command::new(env!("CARGO_BIN_EXE_fmn"))
-        .arg(fmn_cli::INTERNAL_STUDIO_WORKER_ARG).args(["studio", "--resolution", "64x40",
-            "--fps", "8", "--threads", threads]).arg(root.join("CameraStudio.fmtl"))
-        .current_dir(root).env_clear().env("PATH", "")
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        .arg(fmn_cli::INTERNAL_STUDIO_WORKER_ARG)
+        .args([
+            "studio",
+            "--resolution",
+            "64x40",
+            "--fps",
+            "8",
+            "--threads",
+            threads,
+        ])
+        .arg(root.join("CameraStudio.fmtl"))
+        .current_dir(root)
+        .env_clear()
+        .env("PATH", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let out = child.stdout.take().unwrap();
     let err = child.stderr.take().unwrap();
     let stdout = std::thread::spawn(move || {
-        let mut bytes = Vec::new(); out.take(16 * 1024 * 1024).read_to_end(&mut bytes).unwrap(); bytes
+        let mut bytes = Vec::new();
+        out.take(16 * 1024 * 1024).read_to_end(&mut bytes).unwrap();
+        bytes
     });
     let stderr = std::thread::spawn(move || {
-        let mut bytes = Vec::new(); err.take(1024 * 1024).read_to_end(&mut bytes).unwrap(); bytes
+        let mut bytes = Vec::new();
+        err.take(1024 * 1024).read_to_end(&mut bytes).unwrap();
+        bytes
     });
     child.stdin.take().unwrap().write_all(&encoded).unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     let status = loop {
-        if let Some(status) = child.try_wait().unwrap() { break status; }
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if Instant::now() >= deadline {
-            child.kill().unwrap(); child.wait().unwrap();
-            panic!("camera worker timed out; fixture retained at {}", root.display());
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!(
+                "camera worker timed out; fixture retained at {}",
+                root.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     };
@@ -158,8 +249,14 @@ fn exchange(root: &Path, requests: Vec<SupervisorRequest>, threads: &str) -> Vec
     for index in 0..count {
         let envelope = read_response(&mut response, limits).unwrap();
         assert_eq!(envelope.request_id, index as u64 + 1);
-        assert!(!matches!(envelope.response, WorkerResponse::Error { .. } | WorkerResponse::Crash(_)),
-            "{:?}", envelope.response);
+        assert!(
+            !matches!(
+                envelope.response,
+                WorkerResponse::Error { .. } | WorkerResponse::Crash(_)
+            ),
+            "{:?}",
+            envelope.response
+        );
         results.push(envelope.response);
     }
     assert_eq!(response.position() as usize, response.get_ref().len());
@@ -172,27 +269,67 @@ fn camera_studio_shipping_worker_roundtrips_frames_and_cold_recovers_without_sou
     let source = source();
     let expected = expected(&source);
     std::fs::write(root.join("CameraStudio.fmtl"), &source).unwrap();
-    let responses = exchange(&root, vec![
-        SupervisorRequest::Scrub { scene: NAME.into(), frame: 3 },
-        SupervisorRequest::Play { scene: NAME.into(), command: studio_seek_command(NAME, 3).unwrap() },
-        SupervisorRequest::Inspect { scene: NAME.into() },
-    ], "1");
-    let WorkerResponse::Frame(frame) = &responses[1] else { panic!("frame") };
+    let responses = exchange(
+        &root,
+        vec![
+            SupervisorRequest::Scrub {
+                scene: NAME.into(),
+                frame: 3,
+            },
+            SupervisorRequest::Play {
+                scene: NAME.into(),
+                command: studio_seek_command(NAME, 3).unwrap(),
+            },
+            SupervisorRequest::Inspect { scene: NAME.into() },
+        ],
+        "1",
+    );
+    let WorkerResponse::Frame(frame) = &responses[1] else {
+        panic!("frame")
+    };
     assert_eq!(pixels(frame_bytes(frame)), pixels(&expected[3]));
-    let WorkerResponse::JournalSegment { journal, start_entry, .. } = &responses[2] else { panic!("journal") };
+    let WorkerResponse::JournalSegment {
+        journal,
+        start_entry,
+        ..
+    } = &responses[2]
+    else {
+        panic!("journal")
+    };
     assert_eq!(*start_entry, 0);
-    let WorkerResponse::StudioData { bytes, .. } = &responses[3] else { panic!("inspector") };
+    let WorkerResponse::StudioData { bytes, .. } = &responses[3] else {
+        panic!("inspector")
+    };
     let json = String::from_utf8(bytes.clone()).unwrap();
     assert!(json.contains("\"frame_index\":3"));
     assert!(json.contains("\"fps\":8"));
     assert!(json.contains("\"scene_time\":0.5"));
-    let recovered = exchange(&root, vec![
-        SupervisorRequest::ReplayJournal(JournalReplay { scene: NAME.into(), from_entry: 0,
-            through_entry: 1, journal: journal.clone() }),
-        SupervisorRequest::Scrub { scene: NAME.into(), frame: 3 },
-    ], "4");
-    assert!(matches!(recovered[1], WorkerResponse::ReplayComplete { from_entry: 0, .. }));
-    let WorkerResponse::Frame(frame) = &recovered[2] else { panic!("recovered frame") };
+    let recovered = exchange(
+        &root,
+        vec![
+            SupervisorRequest::ReplayJournal(JournalReplay {
+                scene: NAME.into(),
+                from_entry: 0,
+                through_entry: 1,
+                journal: journal.clone(),
+            }),
+            SupervisorRequest::Scrub {
+                scene: NAME.into(),
+                frame: 3,
+            },
+        ],
+        "4",
+    );
+    assert!(matches!(
+        recovered[1],
+        WorkerResponse::ReplayComplete { from_entry: 0, .. }
+    ));
+    let WorkerResponse::Frame(frame) = &recovered[2] else {
+        panic!("recovered frame")
+    };
     assert_eq!(pixels(frame_bytes(frame)), pixels(&expected[3]));
-    assert_eq!(std::fs::read(root.join("CameraStudio.fmtl")).unwrap(), source);
+    assert_eq!(
+        std::fs::read(root.join("CameraStudio.fmtl")).unwrap(),
+        source
+    );
 }

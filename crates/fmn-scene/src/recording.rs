@@ -18,13 +18,12 @@ use fmn_anim::{FramePacket, RationalFrameClock, SegmentKind};
 use fmn_hash::serial::{Limits, Writer};
 use fmn_hash::{Digest, SerialError, sha256};
 use fmn_mobject::{RenderSnapshotError, Snapshot, Stage};
-use fmn_render::camera::CameraSample;
 use fmn_render::Camera;
+use fmn_render::camera::CameraSample;
 
 use crate::timeline_bundle::{
     BundleError, BundleExportLimits, BundleReadError, CAMERA_TIMELINE_BUNDLE_SCHEMA,
-    TIMELINE_BUNDLE_SCHEMA, TimelineBundle,
-    bundle_engine_version,
+    TIMELINE_BUNDLE_SCHEMA, TimelineBundle, bundle_engine_version,
 };
 use crate::{CaptureReason, IntegrationError, LifecycleEvent, LifecyclePhase, SceneSink};
 
@@ -239,7 +238,11 @@ impl SceneBundleRecorder {
         self.terminal_still(stage, Some(camera))
     }
 
-    fn terminal_still(&mut self, stage: &Stage, camera: Option<&Camera>) -> Result<(), IntegrationError> {
+    fn terminal_still(
+        &mut self,
+        stage: &Stage,
+        camera: Option<&Camera>,
+    ) -> Result<(), IntegrationError> {
         let result = if self.frames != 0 || self.active.is_some() {
             Err(RecordingError::Unsupported(
                 "terminal still requires an idle empty recording",
@@ -325,20 +328,27 @@ impl SceneBundleRecorder {
         result
     }
 
-    fn camera_sample(&self, camera: Option<&Camera>) -> Result<Option<CameraSample>, RecordingError> {
+    fn camera_sample(
+        &self,
+        camera: Option<&Camera>,
+    ) -> Result<Option<CameraSample>, RecordingError> {
         if self.cameras.is_some() != camera.is_some() {
             return Err(RecordingError::Unsupported(
                 "camera capture must match the recorder's declared mode",
             ));
         }
-        camera.map(|camera| {
-            if camera.fps() != self.fps {
-                return Err(RecordingError::Unsupported("camera frame rate changed"));
-            }
-            CameraSample::capture(camera).map_err(|error| RecordingError::Decode(
-                BundleReadError::Camera(fmn_render::camera::CameraSampleError::Camera(error)),
-            ))
-        }).transpose()
+        camera
+            .map(|camera| {
+                if camera.fps() != self.fps {
+                    return Err(RecordingError::Unsupported("camera frame rate changed"));
+                }
+                CameraSample::capture(camera).map_err(|error| {
+                    RecordingError::Decode(BundleReadError::Camera(
+                        fmn_render::camera::CameraSampleError::Camera(error),
+                    ))
+                })
+            })
+            .transpose()
     }
 
     fn capture_snapshot(
@@ -351,9 +361,10 @@ impl SceneBundleRecorder {
         if let Some(sample) = camera {
             // Charge the retained table AND serialization work, as for snapshots.
             self.charge(CameraSample::WIRE_BYTES, "recorded camera sample")?;
-            let mut cameras = self.cameras.take().ok_or(RecordingError::Unsupported(
-                "unexpected camera capture",
-            ))?;
+            let mut cameras = self
+                .cameras
+                .take()
+                .ok_or(RecordingError::Unsupported("unexpected camera capture"))?;
             let result = self.reserve(&mut cameras, "recorded camera table");
             if result.is_ok() {
                 cameras.push(sample);
@@ -542,9 +553,10 @@ impl SceneBundleRecorder {
             if cameras.len() as u64 != self.frames {
                 return Err(RecordingError::Unsupported("camera/frame count mismatch"));
             }
-            writer.put_u32(u32::try_from(cameras.len()).map_err(|_| {
-                RecordingError::Unsupported("camera count exceeds FMTL/1")
-            })?);
+            writer.put_u32(
+                u32::try_from(cameras.len())
+                    .map_err(|_| RecordingError::Unsupported("camera count exceeds FMTL/1"))?,
+            );
             for camera in cameras {
                 camera.write_to(&mut writer);
             }

@@ -4,14 +4,14 @@
 //! crates. Less-common surfaces remain discoverable under `fmn::animation`,
 //! `fmn::library`, `fmn::scene`, and the other named modules.
 
+pub use crate::exporting::{
+    export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs,
+};
 pub use crate::{
     BundleExportError, BundleExportOptions, BundleExportReport, CompletedScene, Error, ErrorKind,
     RenderError, RenderFormat, RenderOptions, RenderReport, SceneBundleExport, SceneConstruct,
     Stage, export_bundle, export_bundle_bytes, export_bundle_with_fs, render, render_with_fs,
     run_scene,
-};
-pub use crate::exporting::{
-    export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs,
 };
 pub use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationGroup, FramePacket, IntoAnimation, IntoAnimations,

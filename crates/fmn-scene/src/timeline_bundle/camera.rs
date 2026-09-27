@@ -30,7 +30,9 @@ pub(super) fn read_track(
     // Validate the entire fixed-size table BEFORE reserving from an input count.
     // Exact equality also refuses trailing data under the certified strict policy.
     if count.checked_mul(CameraSample::WIRE_BYTES) != Some(reader.remaining()) {
-        return Err(BundleReadError::PlanInconsistent("camera track payload size"));
+        return Err(BundleReadError::PlanInconsistent(
+            "camera track payload size",
+        ));
     }
     let mut cameras = Vec::new();
     cameras
@@ -86,7 +88,9 @@ impl TimelineBundle {
             });
         }
         restore(
-            self.cameras.as_ref().map(|cameras| &cameras[index as usize]),
+            self.cameras
+                .as_ref()
+                .map(|cameras| &cameras[index as usize]),
             resolution,
             self.fps(),
             index,

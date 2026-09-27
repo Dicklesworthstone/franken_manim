@@ -875,5 +875,4 @@ mod tests {
             Err(PlayerError::Render(message)) if message.contains("camera-aware")
         ));
     }
-
 }

@@ -96,14 +96,23 @@ pub(super) fn source_reads(
     if selected(&command.render) {
         Ok(configuration(fs, command)?.0.base_input_reads())
     } else if let Some(input) = camera_bundle_input(fs, command)? {
-        let NativeRenderInput::Compiled { bundle, source_item, .. } = input else {
+        let NativeRenderInput::Compiled {
+            bundle,
+            source_item,
+            ..
+        } = input
+        else {
             return Err(internal("compiled camera selection changed kind"));
         };
         let (renderer, seed) = camera_bundle_config(fs, command, &bundle)?;
         fmn_studio::camera_bundle::CameraBundleWorker::input_reads(
             fmn_studio::protocol_digest(BUILD_ID.as_bytes()),
-            &compiled_source_read(source_item)?, &bundle, renderer, seed,
-        ).map_err(|error| CliError::new("scene", error.to_string()))
+            &compiled_source_read(source_item)?,
+            &bundle,
+            renderer,
+            seed,
+        )
+        .map_err(|error| CliError::new("scene", error.to_string()))
     } else {
         Ok(Vec::new())
     }
@@ -115,14 +124,27 @@ pub(super) fn worker(
 ) -> Result<Box<dyn fmn_studio::WorkerService>, CliError> {
     if !selected(&command.render) {
         if let Some(input) = camera_bundle_input(fs, command)? {
-            let NativeRenderInput::Compiled { name, bundle, source_item, .. } = input else {
+            let NativeRenderInput::Compiled {
+                name,
+                bundle,
+                source_item,
+                ..
+            } = input
+            else {
                 return Err(internal("compiled camera selection changed kind"));
             };
             let (renderer, seed) = camera_bundle_config(fs, command, &bundle)?;
-            return Ok(Box::new(fmn_studio::camera_bundle::CameraBundleWorker::new(
-                name, fmn_studio::protocol_digest(BUILD_ID.as_bytes()),
-                compiled_source_read(source_item)?, *bundle, renderer, seed,
-            ).map_err(|error| CliError::new("scene", error.to_string()))?));
+            return Ok(Box::new(
+                fmn_studio::camera_bundle::CameraBundleWorker::new(
+                    name,
+                    fmn_studio::protocol_digest(BUILD_ID.as_bytes()),
+                    compiled_source_read(source_item)?,
+                    *bundle,
+                    renderer,
+                    seed,
+                )
+                .map_err(|error| CliError::new("scene", error.to_string()))?,
+            ));
         }
         return Ok(Box::new(NativeStudioWorker::from_command(fs, command)?));
     }
@@ -148,7 +170,6 @@ pub(super) fn worker(
     Ok(Box::new(worker))
 }
 
-
 // Keep executable scene registration and immutable bundle playback separate.
 // A recorded Python updater is already a captured picture, never live code in
 // this worker. The ordinary resolver validates the actual source bytes once.
@@ -163,18 +184,24 @@ fn camera_bundle_input(
     if !matches!(&input, NativeRenderInput::Compiled { bundle, .. } if bundle.has_camera_track()) {
         return Ok(None);
     }
-    if command.render.skip_animations || command.render.animation_range.is_some()
-        || command.render.presenter_mode || command.render.write_all
+    if command.render.skip_animations
+        || command.render.animation_range.is_some()
+        || command.render.presenter_mode
+        || command.render.write_all
     {
-        return Err(CliError::new("config",
-            "camera-bundle Studio uses recorded frames, not offline skip/range/presenter/batch flags"));
+        return Err(CliError::new(
+            "config",
+            "camera-bundle Studio uses recorded frames, not offline skip/range/presenter/batch flags",
+        ));
     }
     Ok(Some(input))
 }
 
 fn compiled_source_read(source: ClosureItem) -> Result<AssetRead, CliError> {
     Ok(AssetRead {
-        path: source.virtual_path.ok_or_else(|| internal("compiled Studio source omitted its closure path"))?,
+        path: source
+            .virtual_path
+            .ok_or_else(|| internal("compiled Studio source omitted its closure path"))?,
         digest: source.digest,
     })
 }
@@ -186,22 +213,42 @@ fn camera_bundle_config(
 ) -> Result<(RetainedFrameRendererConfig, u64), CliError> {
     let mut render = command.render.clone();
     if render.fps.is_some_and(|fps| fps != bundle.fps()) {
-        return Err(CliError::new("config", "requested FPS disagrees with the camera artifact's fixed clock"));
+        return Err(CliError::new(
+            "config",
+            "requested FPS disagrees with the camera artifact's fixed clock",
+        ));
     }
     render.fps = Some(bundle.fps());
     let config = resolve_render_config(fs, &render)?;
     if config.render.aa != fmn_core::AaPolicy::Adaptive {
-        return Err(CliError::new("capability", "camera-bundle Studio requires adaptive camera coverage"));
+        return Err(CliError::new(
+            "capability",
+            "camera-bundle Studio requires adaptive camera coverage",
+        ));
     }
-    let (plan, _, _) = derive_execution_plan_with_annex(fs, &config,
-        fmn_runtime::RenderIntent::Preview, fmn_runtime::OutputPixelFormat::Rgba8,
-        MetalSelection::Studio, true)?;
-    Ok((RetainedFrameRendererConfig {
-        frame: resolved_frame_config(&config)?,
-        tiling: Tiling { macro_tile: plan.macro_tile, fine_tile: plan.fine_tile },
-        engine: EngineIdentity::certified(),
-        threads: plan.render_teams.first().map_or(1, fmn_runtime::TeamPlan::threads),
-    }, config.determinism.seed))
+    let (plan, _, _) = derive_execution_plan_with_annex(
+        fs,
+        &config,
+        fmn_runtime::RenderIntent::Preview,
+        fmn_runtime::OutputPixelFormat::Rgba8,
+        MetalSelection::Studio,
+        true,
+    )?;
+    Ok((
+        RetainedFrameRendererConfig {
+            frame: resolved_frame_config(&config)?,
+            tiling: Tiling {
+                macro_tile: plan.macro_tile,
+                fine_tile: plan.fine_tile,
+            },
+            engine: EngineIdentity::certified(),
+            threads: plan
+                .render_teams
+                .first()
+                .map_or(1, fmn_runtime::TeamPlan::threads),
+        },
+        config.determinism.seed,
+    ))
 }
 
 #[cfg(test)]

@@ -24,9 +24,7 @@ use fmn_scene::{BundleExportLimits, RuntimeConfig, SceneRunReport};
 use crate::SceneConstruct;
 
 mod camera;
-pub use camera::{
-    export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs,
-};
+pub use camera::{export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs};
 
 /// Explicit semantic settings and bounded storage for one native scene export.
 #[derive(Clone, Debug)]

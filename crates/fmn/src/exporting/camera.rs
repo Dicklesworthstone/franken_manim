@@ -8,8 +8,8 @@ use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_render::{Camera, CameraConfig};
 use fmn_scene::recording::{RecordingError, SceneBundleRecorder};
 use fmn_scene::{
-    CameraRig, CaptureReason, IntegrationError, LifecycleEvent, RuntimeConfig, Scene,
-    SceneError, SceneSink,
+    CameraRig, CaptureReason, IntegrationError, LifecycleEvent, RuntimeConfig, Scene, SceneError,
+    SceneSink,
 };
 
 use super::{BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport};
@@ -77,9 +77,17 @@ where
             "camera factory must not run playback before returning its program",
         ));
     }
-    let mut sink = RigRecorder { recorder, rig, camera, failure: None };
+    let mut sink = RigRecorder {
+        recorder,
+        rig,
+        camera,
+        failure: None,
+    };
     sink.sample(scene.stage())?;
-    let mut adapter = ProgramAdapter { program: &mut program, front_door_error: None };
+    let mut adapter = ProgramAdapter {
+        program: &mut program,
+        front_door_error: None,
+    };
     let run = scene.run(&mut adapter, &mut sink);
     if let Some(error) = sink.failure.take() {
         return Err(error);
@@ -90,10 +98,12 @@ where
     };
     let report = match result {
         Ok(report) => report,
-        Err(error) => return Err(match sink.recorder.into_error() {
-            Some(error) => recording_error(error),
-            None => BundleExportError::Scene(error),
-        }),
+        Err(error) => {
+            return Err(match sink.recorder.into_error() {
+                Some(error) => recording_error(error),
+                None => BundleExportError::Scene(error),
+            });
+        }
     };
     if !scene.sound_requests().is_empty() {
         return Err(BundleExportError::Capability(
@@ -103,11 +113,18 @@ where
     if sink.recorder.frame_count() == 0 {
         let camera = sink.sample(scene.stage())?;
         // The recorder retains a typed terminal-capture refusal through finish.
-        let _ = sink.recorder.capture_terminal_still_with_camera(scene.stage(), &camera);
+        let _ = sink
+            .recorder
+            .capture_terminal_still_with_camera(scene.stage(), &camera);
     }
-    let bundle = sink.recorder.finish_with_max_bytes(options.max_output_bytes)
+    let bundle = sink
+        .recorder
+        .finish_with_max_bytes(options.max_output_bytes)
         .map_err(recording_error)?;
-    Ok(SceneBundleExport { scene: report, bundle })
+    Ok(SceneBundleExport {
+        scene: report,
+        bundle,
+    })
 }
 
 /// Publish a camera-rig scene as a new code-free `.fmtl` file.
@@ -145,7 +162,9 @@ where
 {
     let output = output.as_ref();
     if output.as_os_str().is_empty() || output.file_name().is_none() {
-        return Err(BundleExportError::InvalidOptions("bundle output must name a file"));
+        return Err(BundleExportError::InvalidOptions(
+            "bundle output must name a file",
+        ));
     }
     let export = export_camera_bundle_bytes(factory, camera, options)?;
     super::publish(export, output, fs)
@@ -170,7 +189,11 @@ impl SceneSink for RigRecorder {
         self.recorder.event(event)
     }
 
-    fn capture(&mut self, reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         if let Some(error) = &self.failure {
             return Err(IntegrationError::new("fmtl-camera", error.to_string()));
         }

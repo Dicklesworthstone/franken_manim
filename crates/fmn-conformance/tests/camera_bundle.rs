@@ -36,14 +36,22 @@ fn camera_config() -> CameraConfig {
 fn pixels(stage: &fmn_mobject::Stage, camera: &Camera) -> Vec<u8> {
     let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
         frame: FrameConfig::new(
-            Viewport { width: RESOLUTION.0, height: RESOLUTION.1 },
-            ScreenMap { scale: 8.0, origin: [24.0, 16.0], y_up: true },
+            Viewport {
+                width: RESOLUTION.0,
+                height: RESOLUTION.1,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [24.0, 16.0],
+                y_up: true,
+            },
             camera.background(),
         ),
         tiling: Tiling::default(),
         engine: EngineIdentity::certified(),
         threads: 1,
-    }).unwrap();
+    })
+    .unwrap();
     renderer.render_with_camera(stage, camera).unwrap();
     let mut frame = FrameBuffer::new(
         FrameLayout::tight(PixelFormat::Rgba8, RESOLUTION.0, RESOLUTION.1).unwrap(),
@@ -64,7 +72,11 @@ impl SceneSink for Capture {
         self.recorder.event(event)
     }
 
-    fn capture(&mut self, reason: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         let stage = packet.materialize_stage();
         let mut camera = Camera::new(self.rig.sample(&stage, &self.base).unwrap()).unwrap();
         // Authored background is part of the actual capture, not replay policy.
@@ -78,11 +90,22 @@ impl SceneSink for Capture {
 
 fn recording() -> (RecordedSceneBundle, Vec<Vec<u8>>) {
     let base = camera_config();
-    let mut scene = Scene::new(RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 19).unwrap();
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        19,
+    )
+    .unwrap();
     let rig = CameraRig::new(&mut scene, &base).unwrap();
     scene.add_mobject(Cube::new(1.4).color(BLUE)).unwrap();
-    let marker = scene.add_mobject(Circle::new().radius(0.25).color(YELLOW)).unwrap();
-    scene.stage_mut().set_fill(marker, Some(YELLOW), Some(1.0), None, true);
+    let marker = scene
+        .add_mobject(Circle::new().radius(0.25).color(YELLOW))
+        .unwrap();
+    scene
+        .stage_mut()
+        .set_fill(marker, Some(YELLOW), Some(1.0), None, true);
     scene.stage_mut().shift(marker, [-1.1, 0.3, 0.2]);
     let mut target = base.clone();
     target.frame.set_orientation([0.1, 0.8, 0.2, 0.5]).unwrap();
@@ -92,16 +115,26 @@ fn recording() -> (RecordedSceneBundle, Vec<Vec<u8>>) {
     target.light_source_position = [4.0, 3.0, 8.0];
     let animation = rig.animate_to(&mut scene, &target).unwrap();
     let mut sink = Capture {
-        recorder: SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits::default()).unwrap(),
+        recorder: SceneBundleRecorder::new_render_only_with_camera(
+            8,
+            BundleExportLimits::default(),
+        )
+        .unwrap(),
         rig,
         base,
         observed: Vec::new(),
     };
-    scene.play(vec![Box::new(animation)], PlayOverrides {
-        run_time: Some(0.5),
-        rate_func: Some(RateFunc::linear()),
-        ..PlayOverrides::default()
-    }, &mut sink).unwrap();
+    scene
+        .play(
+            vec![Box::new(animation)],
+            PlayOverrides {
+                run_time: Some(0.5),
+                rate_func: Some(RateFunc::linear()),
+                ..PlayOverrides::default()
+            },
+            &mut sink,
+        )
+        .unwrap();
     scene.show(&mut sink).unwrap();
     (sink.recorder.finish().unwrap(), sink.observed)
 }
@@ -120,17 +153,33 @@ fn options(threads: u32, window: usize) -> RenderOptions {
 fn moving_camera_light_background_and_depth_replay_through_native_workers() {
     let (artifact, expected) = recording();
     assert_eq!(artifact.frame_count, 5);
-    assert_ne!(expected[0], expected[1], "static geometry must move through the camera");
-    assert_ne!(expected[1], expected[3], "later captures include the changed background");
+    assert_ne!(
+        expected[0], expected[1],
+        "static geometry must move through the camera"
+    );
+    assert_ne!(
+        expected[1], expected[3],
+        "later captures include the changed background"
+    );
     for threads in [1, 4, 16] {
         for window in [1, 4] {
             let fs = Arc::new(VirtualFs::new());
-            let report = render_bundle_with_fs(&artifact.bytes, options(threads, window), fs.clone()).unwrap();
+            let report =
+                render_bundle_with_fs(&artifact.bytes, options(threads, window), fs.clone())
+                    .unwrap();
             let stats = report.frame_pipeline.as_ref().unwrap();
-            assert_eq!((stats.submitted, stats.emitted, stats.outstanding_slots), (5, 5, 0));
+            assert_eq!(
+                (stats.submitted, stats.emitted, stats.outstanding_slots),
+                (5, 5, 0)
+            );
             for (index, expected) in expected.iter().enumerate() {
-                let bytes = fs.read(&Path::new("/movie").join(format!("frame_{index:06}.png"))).unwrap();
-                assert_eq!(&decode_png(&bytes, &PngLimits::default()).unwrap().rgba, expected);
+                let bytes = fs
+                    .read(&Path::new("/movie").join(format!("frame_{index:06}.png")))
+                    .unwrap();
+                assert_eq!(
+                    &decode_png(&bytes, &PngLimits::default()).unwrap().rgba,
+                    expected
+                );
             }
         }
     }
@@ -142,7 +191,10 @@ fn random_access_and_shared_cache_keep_camera_and_geometry_paired() {
     let bundle = TimelineBundle::from_bytes(&artifact.bytes).unwrap();
     assert!(bundle.requires_camera());
     assert!(bundle.has_camera_track());
-    assert!(matches!(bundle.stage_at(0), Err(BundleReadError::CameraTrackRequired)));
+    assert!(matches!(
+        bundle.stage_at(0),
+        Err(BundleReadError::CameraTrackRequired)
+    ));
     assert!(bundle.camera_at(5, RESOLUTION).is_err());
     assert!(bundle.camera_at(0, (0, 32)).is_err());
     for index in [4, 0, 3, 1, 2, 0] {
@@ -151,7 +203,10 @@ fn random_access_and_shared_cache_keep_camera_and_geometry_paired() {
         assert_eq!(camera.revision(), u64::from(index) + 1);
         assert_eq!(pixels(&stage, &camera), expected[index as usize]);
         if index == 0 {
-            assert_ne!(pixels(&stage, &Camera::new(camera_config()).unwrap()), expected[0]);
+            assert_ne!(
+                pixels(&stage, &Camera::new(camera_config()).unwrap()),
+                expected[0]
+            );
         }
     }
     let shared = bundle.into_shared().unwrap();
@@ -159,7 +214,10 @@ fn random_access_and_shared_cache_keep_camera_and_geometry_paired() {
     for index in [4, 0, 3, 1, 2, 0] {
         let job = shared.frame_job(index).unwrap();
         assert!(job.has_camera_track());
-        assert!(matches!(job.materialize(), Err(BundleReadError::CameraTrackRequired)));
+        assert!(matches!(
+            job.materialize(),
+            Err(BundleReadError::CameraTrackRequired)
+        ));
         let (stage, camera) = cache.materialize_with_camera(&job, RESOLUTION).unwrap();
         assert_eq!(pixels(&stage, &camera.unwrap()), expected[index as usize]);
     }
@@ -175,7 +233,15 @@ fn rehash(bytes: &mut [u8]) {
 fn versioned_camera_payload_rejects_old_consumers_and_corrupt_tracks() {
     let (artifact, _) = recording();
     assert_eq!(&artifact.bytes[10..12], &1u16.to_le_bytes());
-    assert!(Reader::open(&artifact.bytes, TIMELINE_BUNDLE_SCHEMA, Limits::DEFAULT, UnknownPolicy::Strict).is_err());
+    assert!(
+        Reader::open(
+            &artifact.bytes,
+            TIMELINE_BUNDLE_SCHEMA,
+            Limits::DEFAULT,
+            UnknownPolicy::Strict
+        )
+        .is_err()
+    );
     let start = artifact.bytes.len() - 32 - 5 * fmn_render::camera::CameraSample::WIRE_BYTES;
     for (offset, replacement) in [
         (start - 4, 4u32.to_le_bytes().to_vec()),
@@ -200,7 +266,8 @@ fn terminal_stills_legacy_bytes_and_camera_mode_refusals_are_explicit() {
     let stage = fmn_mobject::Stage::new();
     let camera = Camera::new(camera_config()).unwrap();
     let legacy = || {
-        let mut recorder = SceneBundleRecorder::new_render_only(8, BundleExportLimits::default()).unwrap();
+        let mut recorder =
+            SceneBundleRecorder::new_render_only(8, BundleExportLimits::default()).unwrap();
         recorder.capture_terminal_still(&stage).unwrap();
         recorder.finish().unwrap()
     };
@@ -209,21 +276,43 @@ fn terminal_stills_legacy_bytes_and_camera_mode_refusals_are_explicit() {
     assert_eq!(&old.bytes[10..12], &[0, 0]);
     let decoded = TimelineBundle::from_bytes(&old.bytes).unwrap();
     assert!(!decoded.has_camera_track());
-    assert!(decoded.stage_at_with_camera(0, RESOLUTION).unwrap().1.is_none());
+    assert!(
+        decoded
+            .stage_at_with_camera(0, RESOLUTION)
+            .unwrap()
+            .1
+            .is_none()
+    );
     let build = |limit| {
-        let mut recorder = SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits::default()).unwrap();
-        recorder.capture_terminal_still_with_camera(&stage, &camera).unwrap();
+        let mut recorder =
+            SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits::default())
+                .unwrap();
+        recorder
+            .capture_terminal_still_with_camera(&stage, &camera)
+            .unwrap();
         recorder.finish_with_max_bytes(limit)
     };
     let artifact = build(Limits::DEFAULT.max_total).unwrap();
     assert_eq!(build(artifact.bytes.len()).unwrap().bytes, artifact.bytes);
-    assert!(matches!(build(artifact.bytes.len() - 1), Err(RecordingError::OutputLimit { .. })));
-    let mut missing = SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits::default()).unwrap();
+    assert!(matches!(
+        build(artifact.bytes.len() - 1),
+        Err(RecordingError::OutputLimit { .. })
+    ));
+    let mut missing =
+        SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits::default()).unwrap();
     assert!(missing.capture_terminal_still(&stage).is_err());
-    assert!(missing.capture_terminal_still_with_camera(&stage, &camera).is_err());
+    assert!(
+        missing
+            .capture_terminal_still_with_camera(&stage, &camera)
+            .is_err()
+    );
     assert!(missing.finish().is_err());
     let mut wrong_mode = SceneBundleRecorder::new(8, BundleExportLimits::default()).unwrap();
-    assert!(wrong_mode.capture_terminal_still_with_camera(&stage, &camera).is_err());
+    assert!(
+        wrong_mode
+            .capture_terminal_still_with_camera(&stage, &camera)
+            .is_err()
+    );
     assert!(wrong_mode.finish().is_err());
 }
 
@@ -231,11 +320,19 @@ fn terminal_stills_legacy_bytes_and_camera_mode_refusals_are_explicit() {
 fn camera_capture_budgets_and_explicit_replay_override_fail_without_publication() {
     let stage = fmn_mobject::Stage::new();
     let camera = Camera::new(camera_config()).unwrap();
-    let mut limited = SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits {
-        max_frames: 1,
-        max_capture_bytes: fmn_render::camera::CameraSample::WIRE_BYTES,
-    }).unwrap();
-    assert!(limited.capture_terminal_still_with_camera(&stage, &camera).is_err());
+    let mut limited = SceneBundleRecorder::new_render_only_with_camera(
+        8,
+        BundleExportLimits {
+            max_frames: 1,
+            max_capture_bytes: fmn_render::camera::CameraSample::WIRE_BYTES,
+        },
+    )
+    .unwrap();
+    assert!(
+        limited
+            .capture_terminal_still_with_camera(&stage, &camera)
+            .is_err()
+    );
     assert!(limited.finish().is_err());
     let (artifact, _) = recording();
     let fs = Arc::new(VirtualFs::new());
@@ -252,10 +349,15 @@ fn cli_camera_scenario(
     use fmn_conformance::e2e::{LogEvent, RunOutcome, ScenarioError, counters, spans};
     let error = |error: std::io::Error| ScenarioError::new(error.to_string());
     ctx.set_fps((8, 1));
-    ctx.record_asset("camera-bundle.scene.source", include_bytes!("camera_bundle.rs"));
+    ctx.record_asset(
+        "camera-bundle.scene.source",
+        include_bytes!("camera_bundle.rs"),
+    );
     ctx.event(LogEvent::new(spans::PREFLIGHT).field("mode", "recorded-camera"));
     let (artifact, expected) = recording();
-    ctx.event(LogEvent::new(spans::SCENE_CONSTRUCT).field("frames", u64::from(artifact.frame_count)));
+    ctx.event(
+        LogEvent::new(spans::SCENE_CONSTRUCT).field("frames", u64::from(artifact.frame_count)),
+    );
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| ScenarioError::new(e.to_string()))?
@@ -268,8 +370,17 @@ fn cli_camera_scenario(
     let destination = directory.join("output");
     let mut command = std::process::Command::new(env!("CARGO_BIN_FILE_FMN_CLI_fmn"));
     command
-        .args(["--robot", "--reproducible", "--format", "png_sequence", "--resolution",
-               "48x32", "--threads", "4", "--video_dir"])
+        .args([
+            "--robot",
+            "--reproducible",
+            "--format",
+            "png_sequence",
+            "--resolution",
+            "48x32",
+            "--threads",
+            "4",
+            "--video_dir",
+        ])
         .arg(&destination)
         .arg(&source)
         .arg("CapturedCamera")
@@ -277,34 +388,50 @@ fn cli_camera_scenario(
         .env("PATH", "")
         .current_dir(&directory)
         .stdin(std::process::Stdio::null());
-    if cfg!(windows) && let Some(root) = std::env::var_os("SystemRoot") {
+    if cfg!(windows)
+        && let Some(root) = std::env::var_os("SystemRoot")
+    {
         command.env("SystemRoot", root);
     }
     let output = command.output().map_err(error)?;
     if !output.status.success() || !output.stderr.is_empty() {
-        return Err(ScenarioError::new(format!("native camera CLI failed: {:?} {} {}",
-            output.status.code(), String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr))));
+        return Err(ScenarioError::new(format!(
+            "native camera CLI failed: {:?} {} {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
-    let robot = String::from_utf8(output.stdout)
-        .map_err(|e| ScenarioError::new(e.to_string()))?;
-    if robot.lines().count() != 1 || !robot.contains("\"frames\":5")
-        || !robot.contains("\"source\":\"compiled\"") {
-        return Err(ScenarioError::new("CLI did not report the recorded frame grid"));
+    let robot = String::from_utf8(output.stdout).map_err(|e| ScenarioError::new(e.to_string()))?;
+    if robot.lines().count() != 1
+        || !robot.contains("\"frames\":5")
+        || !robot.contains("\"source\":\"compiled\"")
+    {
+        return Err(ScenarioError::new(
+            "CLI did not report the recorded frame grid",
+        ));
     }
     let sequence = destination.join("CapturedCamera");
     if !sequence.join("FMN_COMPLETE").is_file() {
-        return Err(ScenarioError::new("CLI did not atomically complete its sequence"));
+        return Err(ScenarioError::new(
+            "CLI did not atomically complete its sequence",
+        ));
     }
     for (index, expected) in expected.iter().enumerate() {
         let png = std::fs::read(sequence.join(format!("frame_{index:06}.png"))).map_err(error)?;
         let actual = decode_png(&png, &PngLimits::default())
             .map_err(|e| ScenarioError::new(e.to_string()))?;
         if actual.rgba != *expected {
-            return Err(ScenarioError::new(format!("CLI lost captured camera at frame {index}")));
+            return Err(ScenarioError::new(format!(
+                "CLI lost captured camera at frame {index}"
+            )));
         }
     }
-    ctx.event(LogEvent::new(spans::RENDER_FRAME).field("equal", true).field("frames", 5u64));
+    ctx.event(
+        LogEvent::new(spans::RENDER_FRAME)
+            .field("equal", true)
+            .field("frames", 5u64),
+    );
     ctx.counter(counters::FRAMES_RASTERIZED, 5);
     Ok(RunOutcome::ok()
         .with_artifact("camera.fmtl", artifact.bytes)
@@ -318,24 +445,31 @@ fn standalone_camera_bundle_fast_scenario() {
         Assertion, FieldPred, Invocation, LogExpect, Runner, ScenarioClass, ScenarioSpec,
         StructuralAssert, Surface, counters, spans,
     };
-    let scenario = ScenarioSpec::new("recording.camera.v1", ScenarioClass::ParityDrill,
-        Surface::RustApi, Invocation::new(cli_camera_scenario))
-        .assertions(vec![
-            Assertion::ExitCode(0),
-            Assertion::Structural(StructuralAssert::ArtifactCountEq(2)),
-            Assertion::Structural(StructuralAssert::NoEmptyArtifacts),
-            Assertion::Structural(StructuralAssert::CounterEq("frames", 5)),
-            Assertion::FileInventory(vec!["camera.fmtl".to_owned(), "camera.frame".to_owned()]),
-            Assertion::NdjsonSchema,
-        ])
-        .logs(vec![
-            LogExpect::span_present(spans::RENDER_FRAME, vec![FieldPred::bool_eq("equal", true)]),
-            LogExpect::event_order(spans::SCENE_CONSTRUCT, spans::RENDER_FRAME),
-            LogExpect::counter_ge(counters::FRAMES_RASTERIZED, 5),
-        ]);
+    let scenario = ScenarioSpec::new(
+        "recording.camera.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(cli_camera_scenario),
+    )
+    .assertions(vec![
+        Assertion::ExitCode(0),
+        Assertion::Structural(StructuralAssert::ArtifactCountEq(2)),
+        Assertion::Structural(StructuralAssert::NoEmptyArtifacts),
+        Assertion::Structural(StructuralAssert::CounterEq("frames", 5)),
+        Assertion::FileInventory(vec!["camera.fmtl".to_owned(), "camera.frame".to_owned()]),
+        Assertion::NdjsonSchema,
+    ])
+    .logs(vec![
+        LogExpect::span_present(spans::RENDER_FRAME, vec![FieldPred::bool_eq("equal", true)]),
+        LogExpect::event_order(spans::SCENE_CONSTRUCT, spans::RENDER_FRAME),
+        LogExpect::counter_ge(counters::FRAMES_RASTERIZED, 5),
+    ]);
     let scratch = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let runner = Runner::new(scratch.join("camera_bundle_e2e_logs"),
-        scratch.join("camera_bundle_e2e_goldens"), fmn_conformance::golden::Mode::Check);
+    let runner = Runner::new(
+        scratch.join("camera_bundle_e2e_logs"),
+        scratch.join("camera_bundle_e2e_goldens"),
+        fmn_conformance::golden::Mode::Check,
+    );
     let report = runner.run_gated(scenario, false);
     assert!(report.is_pass(), "{}", report.summary());
 }
