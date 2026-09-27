@@ -27,6 +27,7 @@ PY
 done
 
 python3 crates/fmn-python/tests/camera_configuration.py
+python3 crates/fmn-python/tests/camera_frame_lifecycle.py
 python3 crates/fmn-python/tests/tracker_lifecycle.py
 python3 crates/fmn-python/tests/raster_initialization.py
 python3 crates/fmn-python/tests/raster_lifecycle.py
