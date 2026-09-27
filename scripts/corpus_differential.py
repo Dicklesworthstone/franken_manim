@@ -253,6 +253,93 @@ def write_gallery(records, path):
                     + "".join(rows) + "</table>", encoding="utf-8")
 
 
+def _construct_of(tree, scene):
+    """The construct FunctionDef used by `scene`: its own, or the nearest in-module base's."""
+    import ast
+
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    queue, seen = [scene], set()
+    while queue:
+        name = queue.pop(0)
+        if name in seen or name not in classes:
+            continue
+        seen.add(name)
+        for item in classes[name].body:
+            if isinstance(item, ast.FunctionDef) and item.name == "construct":
+                return item
+        queue.extend(base.id for base in classes[name].bases if isinstance(base, ast.Name))
+    return None
+
+
+def minimize(args, module, scene, target=None, budget=60):
+    """Delta-debug `construct` (ddmin over its top-level statements) while the structure
+    difference with the same (class, fact) as the full scene's first one persists.
+
+    The reduced module is written under --out only (the corpus is CC BY-NC-SA). The record
+    names the target difference, the statement counts, and the tests run.
+    """
+    import ast
+    import math
+
+    source = (args.videos / module).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    construct = _construct_of(tree, scene)
+    if construct is None:
+        return {"module": module, "scene": scene, "error": "no construct found in the module"}
+    statements = list(construct.body)
+    work = args.out / "minimize" / _slug(module, scene)
+    work.mkdir(parents=True, exist_ok=True)
+    tests = {"count": 0}
+
+    def differences_for(kept):
+        # Every variant stays under --out; nothing is written into, or removed from,
+        # the corpus checkout. Corpus imports resolve through PYTHONPATH (the corpus root).
+        construct.body = [statements[i] for i in kept] or [ast.Pass()]
+        tests["count"] += 1
+        run = work / f"run{tests['count']}"
+        run.mkdir(exist_ok=True)
+        variant = run / pathlib.Path(module).name
+        variant.write_text(ast.unparse(tree), encoding="utf-8")
+        run_portal(args, str(variant), scene, run)
+        run_reference(args, str(variant), scene, run)
+        ref, portal = _facts(run / "reference.ndjson"), _facts(run / "portal.ndjson")
+        if ref is None or portal is None or "error" in ref or "error" in portal:
+            return None
+        return sf.diff_subject(ref, portal, args.exclusions, limit=200, ignore=sf.GEOMETRY_FACTS)
+
+    full = differences_for(list(range(len(statements))))
+    if full is None or full["verdict"] != "differs":
+        return {"module": module, "scene": scene, "error": "the full scene does not differ structurally"}
+    first = full["first_difference"]
+    target = target or (first["class"], first["fact"])
+
+    def reproduces(kept):
+        if tests["count"] >= budget:
+            return False
+        result = differences_for(kept)
+        return bool(result) and any((d["class"], d["fact"]) == tuple(target) for d in result["differences"])
+
+    items, n = list(range(len(statements))), 2
+    while len(items) >= 2 and tests["count"] < budget:
+        size = math.ceil(len(items) / n)
+        chunks = [items[i:i + size] for i in range(0, len(items), size)]
+        for chunk in chunks:
+            complement = [i for i in items if i not in chunk]
+            if reproduces(complement):
+                items, n = complement, max(n - 1, 2)
+                break
+        else:
+            if n >= len(items):
+                break
+            n = min(len(items), 2 * n)
+    construct.body = [statements[i] for i in items] or [ast.Pass()]
+    (work / "minimized.py").write_text(ast.unparse(tree), encoding="utf-8")
+    return {"module": module, "scene": scene, "target": list(target),
+            "statements_before": len(statements), "statements_after": len(items),
+            "tests_run": tests["count"], "budget_exhausted": tests["count"] >= budget,
+            "minimized": str(work / "minimized.py")}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--portal-python")
@@ -271,6 +358,9 @@ def main():
     parser.add_argument("--portal-id", default="unlabeled-portal",
                         help="the portal build identity recorded in every record (e.g. its wheel's commit)")
     parser.add_argument("--reference-id", default="3b1b/manim@6199a00d4c1b1127ebe45cb629c3f22538b10e13")
+    parser.add_argument("--minimize", action="append", default=[],
+                        help="MODULE:SCENE to delta-debug to a minimal structure-differing construct")
+    parser.add_argument("--minimize-budget", type=int, default=60)
     parser.add_argument("--report", type=pathlib.Path, help="re-derive dashboard/gallery from DIR")
     parser.add_argument("--dashboard", type=pathlib.Path)
     parser.add_argument("--title", default="Corpus differential")
@@ -294,6 +384,11 @@ def main():
         args.workdir = args.out / "workdir"
         args.workdir.mkdir(exist_ok=True)
         (args.workdir / "custom_config.yml").write_text(args.config.read_text(encoding="utf-8"))
+    if args.minimize:
+        for spec in args.minimize:
+            module, _, scene = spec.rpartition(":")
+            print(sf.canonical(minimize(args, module, scene, budget=args.minimize_budget)))
+        return 0
     scenes = candidates(args)
     print(f"{len(scenes)} candidate scenes", file=sys.stderr)
     records = []
