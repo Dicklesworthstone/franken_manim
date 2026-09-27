@@ -17,6 +17,7 @@ from typing import Any
 
 from .batch_checkpoint import BatchCheckpoint
 from .batch_provenance import BatchProvenance, has_provenance, validate_batch_mode
+from .bundle_export import BundleExportResult, _validated_limits, export_bundle, require_bundle_capability
 from .render_selection import animation_range as _animation_range
 from .rendering import RenderResult, SourceInputs, _FORMATS, _positive_integer, render_scene
 from .paired_output import (
@@ -42,7 +43,7 @@ class SceneRenderOutcome:
     name: str
     destination: Path
     status: str
-    result: RenderResult | SubdividedRenderResult | PairedRenderResult | None = None
+    result: RenderResult | SubdividedRenderResult | PairedRenderResult | BundleExportResult | None = None
     error_type: str | None = None
     message: str | None = None
     notes: tuple[str, ...] = ()
@@ -214,6 +215,8 @@ def render_scenes(
     reproducible: bool = False,
     sources: SourceInputs | None = None,
     runtime_identities: dict[str, str] | None = None,
+    bundle_camera: bool = False,
+    bundle_limits: Mapping[str, int] | None = None,
 ) -> BatchRenderResult:
     """Render named scenes in input order using independent native sessions.
 
@@ -262,9 +265,23 @@ def render_scenes(
     Checkpoint/resume is excluded because its receipts verify artifacts only.
     The aggregate is not itself a certified artifact; all_scenes_certified
     reports whether every selected scene returned a complete certified receipt.
+
+    format="fmtl" captures independent code-free scene bundles through the same
+    job planner and ordered execution loop. bundle_camera=True records each
+    frame's camera/light/background for native 3D/raster replay; False retains
+    the planar/browser-compatible format. bundle_limits may set max_frames,
+    max_capture_bytes and max_output_bytes per scene. Limits are frozen and
+    validated before any scene constructor runs. Completed bundles survive
+    later failures. Pixel-output options, threads, partial playback, paired or
+    subdivided outputs, checkpoint/resume and certification are not applicable
+    to this mode and refuse before constructing any scene.
     """
-    if not isinstance(format, str) or format not in _FORMATS:
-        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, or mov")
+    if not isinstance(format, str) or format not in _FORMATS | {"fmtl"}:
+        raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, mov, or fmtl")
+    if not isinstance(bundle_camera, bool):
+        raise TypeError("bundle_camera must be bool")
+    if format != "fmtl" and (bundle_camera or bundle_limits is not None):
+        raise ValueError("bundle_camera and bundle_limits require format='fmtl'")
     if not isinstance(save_last_frame, bool):
         raise TypeError("save_last_frame must be bool")
     if not isinstance(subdivide, bool):
@@ -292,6 +309,22 @@ def render_scenes(
     fps = None if fps is None else _positive_integer(fps, "fps")
     threads = None if threads is None else _positive_integer(threads, "threads")
     native = importlib.import_module("manimlib")
+    limits = None
+    if format == "fmtl":
+        require_bundle_capability(native, camera=bundle_camera)
+        if (threads is not None or selection is not None or subdivide or save_last_frame
+                or checkpoint is not None or reproducible or sources is not None
+                or runtime_identities is not None or _output_options):
+            raise native._CapabilityError(
+                "FMTL batches require complete scene capture without pixel-output options, "
+                "threads, subdivision, paired output, checkpoints or source certification"
+            )
+        if ((resolution is not None and resolution[0] * resolution[1] > 16_777_216)
+                or (fps is not None and fps > 240)):
+            raise ValueError("bundle export requires at most 16M pixels and 1..240 FPS")
+        if bundle_limits is not None and not isinstance(bundle_limits, Mapping):
+            raise TypeError("bundle_limits must be a mapping or None")
+        limits = _validated_limits(**({} if bundle_limits is None else dict(bundle_limits)))
     if subdivide and ((resolution is not None and resolution[0] * resolution[1] > 16_777_216)
                       or (threads is not None and threads > 96)):
         raise ValueError("subdivision requires at most 16777216 pixels and 1..96 threads")
@@ -339,7 +372,11 @@ def render_scenes(
                     kwargs = job.scene_kwargs
                     if journal is not None and kwargs is not None:
                         kwargs = journal.constructor_kwargs(index)
-                    receipt = render(job.scene, path, format=format, resolution=resolution,
+                    if format == "fmtl":
+                        receipt = export_bundle(job.scene, path, resolution=resolution, fps=fps,
+                                                camera=bundle_camera, scene_kwargs=kwargs, **limits)
+                    else:
+                        receipt = render(job.scene, path, format=format, resolution=resolution,
                                            fps=fps, threads=threads, scene_kwargs=kwargs,
                                            **provenance_options,
                                            **({"still_destination": still_destinations[index], "subdivide": subdivide}

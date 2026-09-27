@@ -53,6 +53,15 @@ def require_bundle_capability(native, *, camera=False):
             raise error("FMTL export requires a matching native wheel with SceneBundleRecorder support")
 
 
+def _validated_limits(*, max_frames=1_000_000, max_capture_bytes=_CAP, max_output_bytes=_CAP):
+    """Freeze the native recorder's bounds before constructing any batch job."""
+    return {
+        "max_frames": _positive_integer(max_frames, "max_frames"),
+        "max_capture_bytes": _positive_integer(max_capture_bytes, "max_capture_bytes", _CAP),
+        "max_output_bytes": _positive_integer(max_output_bytes, "max_output_bytes", _CAP),
+    }
+
+
 class _Segment:
     def __init__(self, owner, kind):
         self.owner, self.kind, self.started = owner, kind, False
@@ -91,9 +100,11 @@ class BundleExportSession:
         self.destination = Path(os.path.abspath(os.fspath(destination)))
         self.scene, self._native = scene, native
         self.resolution, self.fps = self._configuration.resolution, self._configuration.fps
-        self.max_frames = _positive_integer(max_frames, "max_frames")
-        self.max_capture_bytes = _positive_integer(max_capture_bytes, "max_capture_bytes", _CAP)
-        self.max_output_bytes = _positive_integer(max_output_bytes, "max_output_bytes", _CAP)
+        limits = _validated_limits(max_frames=max_frames, max_capture_bytes=max_capture_bytes,
+                                   max_output_bytes=max_output_bytes)
+        self.max_frames = limits["max_frames"]
+        self.max_capture_bytes = limits["max_capture_bytes"]
+        self.max_output_bytes = limits["max_output_bytes"]
         self.result = None
         self._state, self._failure = "new", None
         self._current = None
