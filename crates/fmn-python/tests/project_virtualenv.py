@@ -127,7 +127,10 @@ class ProjectVirtualenv(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='fmn-project-venv-') as directory:
             root = Path(directory).resolve()
             environment = root/'.venv'
-            builder = venv.EnvBuilder(with_pip=False)
+            # Symlink like `python -m venv` and `uv venv` on POSIX. The class
+            # defaults to copies, and a copied python-build-standalone (uv)
+            # interpreter cannot find its $ORIGIN/../lib/libpython (exit 127).
+            builder = venv.EnvBuilder(with_pip=False, symlinks=os.name != 'nt')
             builder.create(environment)
             context = builder.ensure_directories(environment)
             python = Path(context.env_exe)
