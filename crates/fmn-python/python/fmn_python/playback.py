@@ -243,7 +243,7 @@ def _install_deferred_transforms(g: dict[str, Any]) -> None:
 
 
 def _install_transform_dispatch(g: dict[str, Any]) -> None:
-    """Preserve authored Transform lifecycle hooks on the callback boundary.
+    """Preserve authored Transform and creation hooks on the callback boundary.
 
     The shared classifier's helper-only fast path returns before consulting
     its older lifecycle checker. Compare the completed shipped protocols here,
@@ -259,10 +259,13 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         "create_target", "create_starting_mobject", "init_path_func",
         "check_target_mobject_validity", "get_all_mobjects",
         "get_all_families_zipped", "get_all_mobjects_to_update",
-        "get_sub_alpha", "time_spanned_alpha",
+        "get_sub_alpha", "time_spanned_alpha", "_ensure_runtime_defaults",
         "__getattribute__", "__getattr__",
     )
-    protocols = _protocols(g, Transform, hooks)
+    # Include Animation/_NativeAnimation: shipped wrappers call their live
+    # base methods, so a late base patch must not disappear into native code.
+    animation_root = g.get("Animation", Transform)
+    protocols = _protocols(g, animation_root, hooks)
     # A stock Transform is not necessarily a stock interpolation: its source
     # can be an authored Mobject, including a child deep inside a stock Group.
     # Freeze after tracker/camera interpolation has been installed so those
@@ -286,8 +289,27 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
                          for cls in mobject_protocols}
     child_types = (list, tuple, g.get("_LiveSubmobjects"))
     previous_requires = g["_requires_python_animation"]
+    reveal_types = tuple(g[name] for name in ("ShowPartial", "DrawBorderThenFill") if name in g)
+    reveal_hooks = hooks + ("get_bounds", "get_outline")
+    reveal_protocols = _protocols(g, animation_root, reveal_hooks)
+    # Creation and writing use the same Animation copy/update/suspension
+    # lifecycle. Writing additionally builds and styles a separate outline.
+    partial_hooks = (
+        "copy", "get_family", "set_animating_status", "_is_updating_suspended",
+        "suspend_updating", "resume_updating", "update", "pointwise_become_partial",
+        "__getattribute__", "__getattr__",
+    )
+    border_hooks = partial_hooks + (
+        "align_data_and_family", "align_family", "align_data", "align_points",
+        "add_n_more_submobjects", "invisible_copy", "set_fill", "set_stroke",
+        "family_members_with_points", "get_stroke_width", "get_stroke_color",
+        "get_color", "match_style", "set_data", "set_uniform", "get_uniforms",
+        "interpolate", "refresh_joint_angles",
+    )
+    partial_protocols = _protocols(g, Mobject, partial_hooks)
+    border_protocols = _protocols(g, Mobject, border_hooks)
 
-    def authored_family(root):
+    def authored_family(root, object_protocols):
         # This is behavior admission, not interpolation's path-wise family
         # traversal. Deduplicate identities to bound deep/shared DAGs, and
         # inspect each member before reading its child-list descriptor. Never
@@ -299,7 +321,7 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
             if marker in seen:
                 continue
             seen.add(marker)
-            if not isinstance(member, Mobject) or _changed(member, mobject_protocols):
+            if not isinstance(member, Mobject) or _changed(member, object_protocols):
                 return True
             expected = next(child_descriptors[cls] for cls in type(member).__mro__
                             if cls in child_descriptors)
@@ -321,8 +343,22 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
             # instance methods may change between plays of the same object.
             for name in ("mobject", "target_mobject"):
                 root = getattr(animation, name, None)
-                if isinstance(root, Mobject) and authored_family(root):
+                if isinstance(root, Mobject) and authored_family(root, mobject_protocols):
                     return True
+        elif isinstance(animation, reveal_types):
+            if _changed(animation, reveal_protocols):
+                return True
+            # mobject is ordinary instance state on the shipped protocols.
+            # Never execute an authored descriptor just to classify its owner.
+            if _implementation(type(animation), "mobject") is not None:
+                return True
+            object_protocols = (border_protocols if isinstance(
+                animation, g.get("DrawBorderThenFill", ())) else partial_protocols)
+            if authored_family(animation.mobject, object_protocols):
+                return True
+        # Keep specialized native defaults and existing family capability
+        # decisions. The guards above run BEFORE older classifiers which
+        # traverse get_family or inspect methods through dynamic attributes.
         return previous_requires(animation)
 
     def finalize_protocols():
@@ -331,11 +367,15 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         # seen here, or every stock Transform would become a Python callback.
         # Direct installers without later adapters keep the initial snapshot.
         nonlocal protocols, mobject_protocols, child_descriptors
-        protocols = _protocols(g, Transform, hooks)
+        nonlocal reveal_protocols, partial_protocols, border_protocols
+        protocols = _protocols(g, animation_root, hooks)
         names = next(iter(mobject_protocols.values())).keys()
         mobject_protocols = _protocols(g, Mobject, names)
         child_descriptors = {cls: _implementation(cls, "submobjects")
                              for cls in mobject_protocols}
+        reveal_protocols = _protocols(g, animation_root, reveal_hooks)
+        partial_protocols = _protocols(g, Mobject, partial_hooks)
+        border_protocols = _protocols(g, Mobject, border_hooks)
 
     g["_requires_python_animation"] = requires
     g["_fmn_finalize_transform_dispatch"] = finalize_protocols
