@@ -17242,11 +17242,13 @@ imag_number.set_value(2j)
 assert imag_number.get_value() == 2j
 assert imag_number.get_tex() == "2.00i"
 
-# Named errors for non-finite and non-numeric values.
+# Named errors for NaN and non-numeric values. Real infinities render as
+# readout text since 31f0a52d; NaN stays a named refusal until fm-5wq.30 rules
+# (the pinned Reference renders it as the text "nan").
 try:
     manimlib.DecimalNumber(float("nan"))
 except ValueError as error:
-    assert "finite value" in str(error)
+    assert "non-NaN" in str(error), str(error)
 else:
     raise AssertionError("DecimalNumber accepted nan")
 

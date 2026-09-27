@@ -2271,6 +2271,25 @@ fn python_structural_facts_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         .with_counter("structural_equal", report.equal))
 }
 
+/// The Appendix-A class sweep (fm-5wq.26): every public mobject class's
+/// default and declared constructions, public methods included, match the
+/// pinned Reference's facts in the embedded portal. Anything else must be
+/// covered by a cited BN, ADR or open-bead row.
+fn python_class_sweep_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_class_sweep()
+        .map_err(|error| fail(format!("class sweep against the Reference: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.class_sweep")
+            .field("compared", report.compared)
+            .field("equal", report.equal)
+            .field("equal_with_exclusions", report.equal_with_exclusions)
+            .field("summary", report.summary.as_str()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("class_sweep_subjects", report.compared)
+        .with_counter("class_sweep_equal", report.equal))
+}
+
 fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_svg()
         .map_err(|error| fail(format!("Python native SVG: {error}")))?;
@@ -4870,6 +4889,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.class_sweep.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_class_sweep_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("class_sweep_subjects", 284),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.class_sweep",
+            vec![FieldPred::u64_eq("compared", 284)],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_svg.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -6115,6 +6148,16 @@ fn catalog_invariants_hold() {
             .any(|scenario| scenario.surface == Surface::PythonInProcess),
         "Python lost its production composition scenario"
     );
+}
+
+#[test]
+fn python_class_sweep_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.class_sweep.v1")
+        .expect("class sweep scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }
 
 #[test]

@@ -33,6 +33,13 @@ python3 crates/fmn-conformance/python/structural_facts.py check \
     --engine-id installed-wheel \
     --reference crates/fmn-conformance/fixtures/structural_facts/reference_constructions.v1.ndjson \
     --exclusions crates/fmn-conformance/fixtures/structural_facts/exclusions.json
+# Appendix-A class sweep (fm-5wq.26): every public mobject class, default and
+# declared calls, public methods included; any untriaged divergence fails.
+python3 crates/fmn-conformance/python/structural_facts.py check \
+    --engine-id installed-wheel \
+    --sweep crates/fmn-conformance/fixtures/structural_facts/class_sweep.json \
+    --reference crates/fmn-conformance/fixtures/structural_facts/reference_classes.v1.ndjson \
+    --exclusions crates/fmn-conformance/fixtures/structural_facts/exclusions.json
 python3 crates/fmn-python/tests/project_virtualenv.py
 python3 crates/fmn-python/tests/test_runtime_source_ownership.py
 python3 crates/fmn-python/tests/test_runtime_project_watch.py
