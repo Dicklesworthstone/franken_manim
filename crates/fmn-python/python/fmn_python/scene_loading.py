@@ -23,6 +23,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from .runtime_paths import RuntimePaths
+
 # sys.path, sys.meta_path and sys.modules are interpreter-wide. Reject another
 # owner instead of blocking: authored code may join a thread trying to render.
 _SOURCE_OWNER = threading.Lock()
@@ -59,7 +61,8 @@ def _namespace_paths(module: Any) -> tuple[Path, ...]:
 
 
 def _local_namespace(name: str, paths: tuple[Path, ...], root: Path) -> bool:
-    local = [path.is_relative_to(root) for path in paths]
+    runtime = RuntimePaths(root)
+    local = [path.is_relative_to(root) and not runtime.contains(path) for path in paths]
     if any(local) and not all(local):
         raise ImportError(f"scene namespace {name!r} has locations outside the scene project")
     return bool(local) and all(local)
@@ -170,10 +173,14 @@ class SceneSource:
                 raise ImportError("the filesystem root cannot be a scene package")
             root = root.parent
         self.root = root
+        self._runtime_paths = RuntimePaths(root)
+        if self._runtime_paths.contains(self.path):
+            raise ImportError("scene source is inside a runtime installation; move it into the project")
         self._source_inputs = self._freeze_inputs(source_inputs)
         self._source_directories = frozenset(
             path.parent for path in (self._source_inputs or {})
             if path.suffix.lower() in (".py", ".pyw")
+            and not self._runtime_paths.contains(path)
         )
         self.package = ".".join(parts)
         if self.package and self.path.name == "__init__.py":
@@ -220,23 +227,29 @@ class SceneSource:
         return result
 
     def _owns_source(self, path: Path) -> bool:
-        return path.is_relative_to(self.root) or (
-            self._source_inputs is not None and path in self._source_inputs
+        # Runtime exclusions precede even an explicit Studio watch declaration.
+        return not self._runtime_paths.contains(path) and (
+            path.is_relative_to(self.root) or (
+                self._source_inputs is not None and path in self._source_inputs
+            )
         )
 
     def _owns_namespace(self, name: str, paths: tuple[Path, ...]) -> bool:
         # Namespace containers have no source file. Refresh them when they
         # contain declared helper sources, or cached child attributes bypass
         # the loader even after the children's sys.modules entries are evicted.
-        local = [path.is_relative_to(self.root) or any(
-            directory.is_relative_to(path) for directory in self._source_directories
+        local = [not self._runtime_paths.contains(path) and (
+            path.is_relative_to(self.root) or any(
+                directory.is_relative_to(path) for directory in self._source_directories
+            )
         ) for path in paths]
         if any(local) and not all(local):
             raise ImportError(f"scene namespace {name!r} has locations outside the scene project")
         return bool(local) and all(local)
 
     def _check_package_scope(self, name: str, origin: Path | None) -> None:
-        if (origin is not None and origin.name == "__init__.py"
+        if (origin is not None and not self._runtime_paths.contains(origin)
+                and origin.name == "__init__.py"
                 and not self._owns_source(origin)
                 and any(directory.is_relative_to(origin.parent)
                         for directory in self._source_directories)):
