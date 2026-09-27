@@ -249,6 +249,60 @@ class Exclusions(unittest.TestCase):
             self.assertRegex(row["ref"], r"^(BN-\d\d|fm-[a-z0-9.]+)$")
 
 
+class RowScoping(unittest.TestCase):
+    def test_under_requires_a_matching_ancestor(self):
+        rows = [{"id": "r", "kind": "behavior-note", "ref": "BN-00", "under": "VGroup",
+                 "fact": ["class", "mro", "getters", "getters.*"], "reason": "t"}]
+        inside = sf.diff_subject(facts([VGroup(children=[Square(SQUARE)])]),
+                                 facts([VGroup(children=[VMobject(SQUARE)])]), rows)
+        self.assertEqual(inside["verdict"], "equal-with-exclusions")
+        top = sf.diff_subject(facts([Square(SQUARE)]), facts([VMobject(SQUARE)]), rows)
+        self.assertEqual(top["verdict"], "differs")
+
+    def test_mro_missing_admits_only_that_exact_gap(self):
+        rows = [{"id": "g", "kind": "open-bead", "ref": "fm-x", "fact": "mro",
+                 "mro_missing": ["Group"], "reason": "t"}]
+
+        class FlatGroup(VMobject):
+            pass
+
+        FlatGroup.__name__ = "VGroup"
+        NS.VGroup, original = FlatGroup, NS.VGroup
+        try:
+            portal = facts([FlatGroup()])
+        finally:
+            NS.VGroup = original
+        ref = facts([VGroup()])
+        self.assertEqual(sf.diff_subject(ref, portal, rows)["verdict"], "equal-with-exclusions")
+        portal["members"][0]["mro"] = ["VGroup", "Mobject"]  # VMobject missing too
+        self.assertEqual(sf.diff_subject(ref, portal, rows)["verdict"], "differs")
+
+    def test_scene_scoped_rows_are_not_stale_in_construction_runs(self):
+        rows = [{"id": "s", "kind": "open-bead", "ref": "fm-x", "scope": "scenes",
+                 "fact": "camera_frame_roots", "reason": "t"}]
+        record = facts([Square(SQUARE)])
+        _, summary = sf.diff_files([record], [record], rows, scope="constructions")
+        self.assertEqual(summary["stale_open_bead_exclusions"], [])
+        _, summary = sf.diff_files([record], [record], rows, scope="scenes")
+        self.assertEqual(summary["stale_open_bead_exclusions"], ["s"])
+
+    def test_structure_tier_ignores_geometry_but_not_classes_or_counts(self):
+        far = [(x + 0.5, y, z) for x, y, z in SQUARE]
+        ref, moved = facts([Square(SQUARE)]), facts([Square(far)])
+        self.assertEqual(sf.diff_subject(ref, moved, ignore=sf.GEOMETRY_FACTS)["verdict"], "equal")
+        self.assertEqual(sf.diff_subject(ref, moved)["verdict"], "differs")
+        retyped = facts([VMobject(SQUARE)])
+        self.assertEqual(sf.diff_subject(ref, retyped, ignore=sf.GEOMETRY_FACTS)["verdict"], "differs")
+
+    def test_scene_level_facts_are_compared(self):
+        a = dict(facts([Square(SQUARE)]), camera_frame_roots=1, time=2000)
+        b = dict(facts([Square(SQUARE)]), camera_frame_roots=0, time=2000)
+        first = sf.diff_subject(a, b)["first_difference"]
+        self.assertEqual((first["fact"], first["reference"], first["portal"]), ("camera_frame_roots", 1, 0))
+        c = dict(b, camera_frame_roots=1, time=2001)
+        self.assertEqual(sf.diff_subject(a, c)["verdict"], "equal")
+
+
 class ClassHook(unittest.TestCase):
     def setUp(self):
         self.original = sf._engine_namespace

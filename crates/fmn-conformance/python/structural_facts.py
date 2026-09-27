@@ -328,6 +328,62 @@ def extract_class(name: str, args=(), kwargs=None, *, points_mode: str = "digest
     return record
 
 
+def scene_facts(scene, namespace=None, points_mode: str = "digest") -> dict:
+    """Facts for `scene.mobjects` at the end of `construct`.
+
+    The Reference keeps its CameraFrame in `scene.mobjects` (scene.py:117). It is
+    dropped from the roots, so content paths align, and its count is recorded as
+    the scene-level fact `camera_frame_roots`.
+    """
+    namespace = namespace or _engine_namespace()
+    roots = [m for m in scene.mobjects if type(m).__name__ != "CameraFrame"]
+    record = extract(type(scene).__name__, roots, namespace=namespace, points_mode=points_mode)
+    record["camera_frame_roots"] = len(scene.mobjects) - len(roots)
+    record["time"] = quantize(getattr(scene, "time", None))
+    return record
+
+
+def run_scene(facts_path: str, engine: str, engine_argv, points_mode: str = "digest") -> int:
+    """Run one scene through an engine's own CLI and write its facts at `tear_down`.
+
+    `engine` is `reference` (manimlib.__main__) or `portal` (fmn_python.__main__).
+    The base `Scene.tear_down` is wrapped before the CLI runs, so scene source
+    stays unedited. The facts file is written even when the scene fails, with an
+    `error` record when the scene never reached `tear_down`.
+    """
+    program = "manimlib" if engine == "reference" else "fmn-python"
+    sys.argv = [program, *engine_argv]  # the Reference parses sys.argv at import
+    import manimlib
+
+    records = []
+    original = manimlib.Scene.tear_down
+
+    def tear_down(self):
+        try:
+            records.append(scene_facts(self, manimlib, points_mode))
+        except Exception as error:  # noqa: BLE001 - an extraction failure is a fact
+            records.append(extract_error(type(self).__name__, error))
+        return original(self)
+
+    manimlib.Scene.tear_down = tear_down
+    code = 1
+    try:
+        if engine == "reference":
+            from manimlib.__main__ import main as engine_main
+        else:
+            from fmn_python.__main__ import main as engine_main
+        result = engine_main()
+        code = result if isinstance(result, int) else 0
+    except SystemExit as exit_:
+        code = exit_.code if isinstance(exit_.code, int) else (0 if exit_.code is None else 1)
+    finally:
+        manimlib.Scene.tear_down = original
+        if not records:
+            records.append(extract_error("scene", RuntimeError("tear_down was never reached")))
+        Path(facts_path).write_text("".join(canonical(r) + "\n" for r in records), encoding="utf-8")
+    return code
+
+
 def scene_hook(scene_class, sink):
     """Return a subclass of `scene_class` whose `tear_down` records `self.mobjects`.
 
@@ -359,6 +415,8 @@ def load_exclusions(path) -> list[dict]:
             raise ValueError(f"exclusion {row.get('id')!r} lacks {sorted(missing)}")
         if row["kind"] not in ("behavior-note", "open-bead"):
             raise ValueError(f"exclusion {row['id']!r}: kind must be behavior-note or open-bead")
+        if row.get("scope", "any") not in ("any", "constructions", "scenes"):
+            raise ValueError(f"exclusion {row['id']!r}: scope must be any, constructions or scenes")
     return rows
 
 
@@ -368,14 +426,33 @@ def _matches(value, pattern) -> bool:
     return any(fnmatch.fnmatchcase(value, p) for p in patterns)
 
 
-def _excluded_by(rows, subject, member_class, fact):
-    """The first row covering this difference. Rows name the Reference-side class."""
+def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None):
+    """The first row covering this difference. Rows name the Reference-side class.
+
+    Optional row fields: `under` requires an ancestor whose class matches, and
+    `mro_missing` admits an `mro` difference only when the Reference chain equals
+    the portal chain plus exactly those names.
+    """
     for row in rows:
-        if (_matches(subject, row.get("subject", "*"))
+        if not (_matches(subject, row.get("subject", "*"))
                 and _matches(member_class or "", row.get("class", "*"))
                 and _matches(fact, row["fact"])):
-            return row
+            continue
+        if "under" in row and not any(_matches(a, row["under"]) for a in ancestors):
+            continue
+        if "mro_missing" in row:
+            ref_mro, portal_mro = values if values else (None, None)
+            if not (isinstance(ref_mro, list) and isinstance(portal_mro, list)
+                    and [n for n in ref_mro if n not in row["mro_missing"]] == portal_mro
+                    and set(ref_mro) - set(portal_mro) == set(row["mro_missing"])):
+                continue
+        return row
     return None
+
+
+# Facts that carry positions or sizes. The structure tier ignores them: under
+# BN-05, text metrics move everything laid out relative to text.
+GEOMETRY_FACTS = frozenset({"points", "points_sha256", "bbox", "getters"})
 
 
 def _within_tolerance(a, b) -> bool:
@@ -416,13 +493,26 @@ def _member_differences(ref, portal):
             yield "points_sha256", ref.get("points_sha256"), portal.get("points_sha256")
 
 
-def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50) -> dict:
-    """Compare one subject's facts. Differences are reported in depth-first path order."""
+def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
+                 ignore=frozenset()) -> dict:
+    """Compare one subject's facts. Differences are reported in depth-first path order.
+
+    `ignore` names top-level facts to skip; `GEOMETRY_FACTS` gives the structure tier.
+    """
     subject = ref.get("subject", portal.get("subject"))
     differences, excluded = [], {}
+    classes = {m["path"]: m["class"] for m in ref.get("members", ())}
+    for m in portal.get("members", ()):
+        classes.setdefault(m["path"], m["class"])
+
+    def ancestors(path):
+        parts = path.split(".")
+        return [classes[".".join(parts[:i])] for i in range(1, len(parts)) if ".".join(parts[:i]) in classes]
 
     def note(path, member_class, fact, a, b):
-        row = _excluded_by(exclusions, subject, member_class, fact)
+        if fact.split(".")[0] in ignore:
+            return
+        row = _excluded_by(exclusions, subject, member_class, fact, ancestors(path), (a, b))
         if row is not None:
             excluded[row["id"]] = excluded.get(row["id"], 0) + 1
         elif len(differences) < limit:
@@ -449,6 +539,12 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50) -> dic
         for member in portal["members"]:
             if member["path"] not in seen:
                 note(member["path"], member["class"], "member", "absent", member["class"])
+    # Scene-level facts from scene_facts(): exact count, quantized time.
+    for key, same in (("camera_frame_roots", lambda a, b: a == b), ("time", _within_tolerance)):
+        if key in ref or key in portal:
+            a, b = ref.get(key, "absent"), portal.get(key, "absent")
+            if not same(a, b):
+                note("", None, key, a, b)
     shown = [d for d in differences if d is not None]
     verdict = "differs" if differences else ("equal-with-exclusions" if excluded else "equal")
     return {
@@ -468,8 +564,14 @@ def _short(value):
     return value if len(text) <= 240 else f"{text[:200]}… ({len(text)} chars, sha256 {hashlib.sha256(text.encode()).hexdigest()[:16]})"
 
 
-def diff_files(reference_lines, portal_lines, exclusions=()):
+def in_scope(rows, scope: str):
+    """The rows that apply to a `constructions` or `scenes` run."""
+    return [row for row in rows if row.get("scope", "any") in ("any", scope)]
+
+
+def diff_files(reference_lines, portal_lines, exclusions=(), scope: str = "constructions"):
     """Verdict records for every subject, then a summary with stale open-bead exclusions."""
+    exclusions = in_scope(exclusions, scope)
     ref = {r["subject"]: r for r in reference_lines}
     portal = {r["subject"]: r for r in portal_lines}
     results, used = [], set()
@@ -555,8 +657,16 @@ def main(argv=None) -> int:
     chk.add_argument("--engine-id", required=True)
     chk.add_argument("--reference", required=True)
     chk.add_argument("--exclusions", required=True)
+    run = sub.add_parser("run-scene", help="run one scene through an engine CLI, recording facts")
+    run.add_argument("--facts", required=True)
+    run.add_argument("--engine", choices=("reference", "portal"), required=True)
+    run.add_argument("--points", choices=("digest", "full"), default="digest")
+    run.add_argument("engine_argv", nargs=argparse.REMAINDER)
     original = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
+    if args.command == "run-scene":
+        engine_argv = args.engine_argv[1:] if args.engine_argv[:1] == ["--"] else args.engine_argv
+        return run_scene(args.facts, args.engine, engine_argv, args.points)
     # The Reference's manimlib parses sys.argv when imported (manimlib/config.py).
     # It must see a bare invocation, not this tool's flags.
     sys.argv = sys.argv[:1]
