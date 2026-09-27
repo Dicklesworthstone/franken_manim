@@ -190,6 +190,9 @@ def _last_error(stderr):
 def candidates(args):
     first, _, last = args.years.partition("-")
     scenes = enumerate_scenes(args.videos, range(int(first), int(last or first) + 1))
+    if args.scene:
+        chosen = {tuple(spec.rsplit(":", 1)) for spec in args.scene}
+        return [s for s in scenes if s in chosen]
     if args.candidates:
         wanted = set(args.candidate_outcome.split(","))
         keep = {(r["module"], r["scene"]) for r in map(json.loads, args.candidates.read_text().splitlines())
@@ -358,6 +361,8 @@ def main():
     parser.add_argument("--portal-id", default="unlabeled-portal",
                         help="the portal build identity recorded in every record (e.g. its wheel's commit)")
     parser.add_argument("--reference-id", default="3b1b/manim@6199a00d4c1b1127ebe45cb629c3f22538b10e13")
+    parser.add_argument("--scene", action="append", default=[],
+                        help="MODULE:SCENE to run (repeatable); overrides --candidates")
     parser.add_argument("--minimize", action="append", default=[],
                         help="MODULE:SCENE to delta-debug to a minimal structure-differing construct")
     parser.add_argument("--minimize-budget", type=int, default=60)
