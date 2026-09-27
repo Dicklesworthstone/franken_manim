@@ -39,6 +39,7 @@ python3 crates/fmn-python/tests/number_line_lifecycle.py
 python3 crates/fmn-python/tests/decimal_lifecycle.py
 python3 crates/fmn-python/tests/string_lifecycle.py
 python3 crates/fmn-python/tests/brace_lifecycle.py
+python3 crates/fmn-python/tests/legacy_tex_lifecycle.py
 python3 crates/fmn-python/tests/copied_string_regeneration.py
 python3 crates/fmn-python/tests/coordinate_lifecycle.py
 python3 crates/fmn-python/tests/plane_lifecycle.py
