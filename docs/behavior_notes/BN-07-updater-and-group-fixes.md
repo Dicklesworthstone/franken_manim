@@ -1,4 +1,4 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
@@ -140,3 +140,25 @@ directly. Code on default square-aspect planes sees no change.
 Locked by the actual-extension bridge acceptance in
 `crates/fmn-python/tests/bridge.py` (equal-units assertion on a square-aspect
 plane alongside the x-axis measurement).
+
+## C-18 — `SingleStringTex`, `OldTex` and `OldTexText` construct
+
+At the pin, `SingleStringTex` supplies its SVG through
+`get_svg_string_by_content` (`old_tex_mobject.py:77`). `SVGMobject.__init__`
+never calls that method; it accepts only `svg_string` or `file_name`
+(`svg_mobject.py:86-93`). `SingleStringTex` passes neither, so every
+`SingleStringTex`, `OldTex` and `OldTexText` construction raises
+`Exception: Must specify either a file_name or svg_string SVGMobject`,
+whatever the input. The corpus differential (fm-5wq.33) observed this in
+every 3b1b scene that uses them.
+
+**FrankenManim:** these classes construct as their evident intent: native
+typesetting (BN-05), with the Reference's part-splitting semantics
+(`tex_strings`, isolates and `tex_to_color_map` keys, one part per piece,
+and part lookup) kept exactly.
+
+**Migration:** none needed. Scenes that could not run under the pinned
+Reference now run.
+
+Locked by the OldTex/OldTexText assertions in
+`crates/fmn-python/tests/bridge.py` (part splitting, part lookup).
