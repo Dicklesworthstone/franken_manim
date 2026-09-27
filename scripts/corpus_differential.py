@@ -11,7 +11,7 @@ the BN-keyed exclusion table:
 BN-05 text metrics move everything laid out relative to text, so geometry equality is
 reported separately from structural equality.
 
-Both final frames are kept, with SSIM and mean-absolute-difference smoke metrics. Those are
+Both engines run in skip mode (-s: the final state, updaters per BN-10). Both final frames are kept, with SSIM and mean-absolute-difference smoke metrics. Those are
 never gates. The corpus is CC BY-NC-SA, so records and the dashboard carry scene identifiers
 and outcome codes only. The side-by-side gallery is written under --out, outside the repo.
 
@@ -61,7 +61,7 @@ def _slug(module: str, scene: str) -> str:
 def run_portal(args, module, scene, work):
     png = work / "portal.png"
     argv = [args.portal_python, str(FACTS_TOOL), "run-scene", "--facts", str(work / "portal.ndjson"),
-            "--engine", "portal", "--", str(args.videos / module), scene,
+            "--engine", "portal", "--", str(args.videos / module), scene, "-s",
             "--format", "png", "--resolution", "320x180", "--video_dir", str(png)]
     env = dict(os.environ, PYTHONPATH=str(args.videos))
     return run_child(argv, args.workdir, env, args.timeout), png
@@ -158,7 +158,7 @@ def run_one(args, module, scene):
 # engine whose error is matched. A scene no rule covers stays "untriaged".
 TRIAGE = (
     ("reference", "Must specify either a file_name or svg_string SVGMobject", "reference-defect",
-     "OldTex/OldTexText at 6199a00d call SVGMobject.__init__ with neither file_name nor svg_string"),
+     "the pinned Reference cannot construct OldTex/OldTexText (Appendix C-18, BN-07)"),
     ("any", "ModuleNotFoundError", "environment", "a scene-side package is not installed"),
     ("any", r"not Found|No such file or directory|cannot read", "environment",
      "a private asset (image, SVG, sound, data) is absent"),
