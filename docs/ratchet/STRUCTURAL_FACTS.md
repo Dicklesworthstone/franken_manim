@@ -89,6 +89,30 @@ python3 crates/fmn-conformance/python/structural_facts.py check --engine-id inst
 The e2e scenario `parity.structural_facts.v1` runs the same check in the
 embedded portal. `test_structural_facts.py` holds the unit tests.
 
+## Corpus differential (fm-5wq.33)
+
+`scripts/corpus_differential.py` runs candidate corpus scenes through both
+engines' own CLIs under `structural_facts.py run-scene`. `run-scene` wraps
+`Scene.tear_down` and records `scene.mobjects`; scene source is never edited.
+Both engines run in skip mode (`-s`, 320×180) from the corpus workdir.
+
+Each scene gets two verdicts:
+- **structure**: the diff with `GEOMETRY_FACTS` ignored;
+- **geometry**: the full diff.
+
+Under BN-05, text metrics move everything laid out relative to text, so a
+text-bearing scene can be structurally equal and still differ in geometry.
+
+Scenes that ran in only one engine are labeled by rule-based triage:
+`reference-defect` (for example C-18), `environment`, `portal-leniency` or
+`untriaged`. Final frames get SSIM/MAE smoke metrics, which are never gates.
+
+`--scene MODULE:SCENE` targets single scenes, and `--minimize MODULE:SCENE`
+delta-debugs `construct` to a minimal structure-differing variant, written
+under `--out` only. `--report DIR --dashboard PATH` renders the outcome-code
+dashboard. Records carry scene identifiers and outcome codes only, because
+the corpus is CC BY-NC-SA.
+
 ## First measurement (2026-09-27, portal wheel from `fac2e515`)
 
 25 constructions: 15 equal, 10 equal with exclusions, 0 unexcluded.
