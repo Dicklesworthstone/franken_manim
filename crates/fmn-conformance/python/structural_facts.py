@@ -469,7 +469,21 @@ def _within_tolerance(a, b) -> bool:
 QUANTIZED_FACTS = frozenset({"points", "bbox", "z_index", "getters", "style"})
 
 
-def _same(key, a, b) -> bool:
+_TAU_QUANTA = _quantize_scalar(2 * math.pi)
+
+
+def _same_angle(a, b) -> bool:
+    """Angles in quanta, equal modulo a full turn. atan2 returns -pi or +pi for
+    the same direction depending on the sign of a zero component."""
+    if not (isinstance(a, int) and isinstance(b, int)) or isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    gap = abs(a - b) % _TAU_QUANTA
+    return min(gap, _TAU_QUANTA - gap) <= TOLERANCE_QUANTA + 1
+
+
+def _same(key, a, b, sub=None) -> bool:
+    if key == "getters" and sub is not None and sub.endswith("angle"):
+        return _same_angle(a, b)
     return _within_tolerance(a, b) if key in QUANTIZED_FACTS else a == b
 
 
@@ -484,7 +498,7 @@ def _member_differences(ref, portal):
         if isinstance(a, dict) and isinstance(b, dict):
             for sub in sorted(set(a) | set(b)):
                 x, y = a.get(sub, "absent"), b.get(sub, "absent")
-                if not _same(key, x, y):
+                if not _same(key, x, y, sub):
                     yield f"{key}.{sub}", x, y
         elif not _same(key, a, b):
             yield key, a, b

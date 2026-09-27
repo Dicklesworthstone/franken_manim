@@ -294,6 +294,15 @@ class RowScoping(unittest.TestCase):
         retyped = facts([VMobject(SQUARE)])
         self.assertEqual(sf.diff_subject(ref, retyped, ignore=sf.GEOMETRY_FACTS)["verdict"], "differs")
 
+    def test_angle_getters_compare_modulo_a_full_turn(self):
+        a = facts([Square(SQUARE)])
+        b = facts([Square(SQUARE)])
+        a["members"][0]["getters"]["get_angle"] = -3142
+        b["members"][0]["getters"]["get_angle"] = 3142
+        self.assertEqual(sf.diff_subject(a, b)["verdict"], "equal")
+        b["members"][0]["getters"]["get_angle"] = 3000
+        self.assertEqual(sf.diff_subject(a, b)["verdict"], "differs")
+
     def test_scene_level_facts_are_compared(self):
         a = dict(facts([Square(SQUARE)]), camera_frame_roots=1, time=2000)
         b = dict(facts([Square(SQUARE)]), camera_frame_roots=0, time=2000)
