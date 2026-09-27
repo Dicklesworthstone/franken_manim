@@ -249,6 +249,33 @@ class Exclusions(unittest.TestCase):
             self.assertRegex(row["ref"], r"^(BN-\d\d|fm-[a-z0-9.]+)$")
 
 
+class ClassHook(unittest.TestCase):
+    def setUp(self):
+        self.original = sf._engine_namespace
+        sf._engine_namespace = lambda: NS
+
+    def tearDown(self):
+        sf._engine_namespace = self.original
+
+    def test_constructs_by_name_and_records_facts(self):
+        record = sf.extract_class("Square", (SQUARE,))
+        self.assertEqual(record["class"], "Square")
+        self.assertEqual(record["members"][0]["mro"], ["Square", "Polygon", "VMobject", "Mobject"])
+
+    def test_missing_class_and_raising_constructor_are_error_facts(self):
+        self.assertTrue(sf.extract_class("NoSuchMobject")["error"].startswith("AttributeError"))
+        self.assertTrue(sf.extract_class("Square", (1, 2, 3, 4))["error"].startswith("TypeError"))
+
+
+class Engines(unittest.TestCase):
+    def test_summary_names_both_engine_identities(self):
+        a = dict(facts([Square(SQUARE)]), engine={"engine": "reference", "engine_id": "r"})
+        b = dict(facts([Square(SQUARE)]), engine={"engine": "franken_manim", "engine_id": "p"})
+        _, summary = sf.diff_files([a], [b])
+        self.assertIn('"engine_id":"r"', summary["engines"]["reference"][0])
+        self.assertIn('"engine_id":"p"', summary["engines"]["portal"][0])
+
+
 class SceneHook(unittest.TestCase):
     def test_tear_down_records_the_scene_mobjects_then_runs_the_original(self):
         calls = []

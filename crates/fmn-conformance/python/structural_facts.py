@@ -310,6 +310,24 @@ def extract_constructions(engine_id: str, points_mode: str = "digest", only=None
         yield record
 
 
+def extract_class(name: str, args=(), kwargs=None, *, points_mode: str = "digest") -> dict:
+    """Construct `manimlib.<name>(*args, **kwargs)` in the running engine and record its facts.
+
+    This is the class-level hook for the Appendix-A sweep (fm-5wq.26). A missing
+    class or a raising constructor is recorded as an `error` fact, never skipped.
+    """
+    namespace = _engine_namespace()
+    subject = name if not args and not kwargs else f"{name}{canonical([list(args), kwargs or {}])}"
+    try:
+        cls = getattr(namespace, name)
+        record = extract(subject, [cls(*args, **(kwargs or {}))], namespace=namespace,
+                         points_mode=points_mode)
+    except Exception as error:  # noqa: BLE001
+        record = extract_error(subject, error)
+    record["class"] = name
+    return record
+
+
 def scene_hook(scene_class, sink):
     """Return a subclass of `scene_class` whose `tear_down` records `self.mobjects`.
 
@@ -468,8 +486,13 @@ def diff_files(reference_lines, portal_lines, exclusions=()):
     counts = {}
     for result in results:
         counts[result["verdict"]] = counts.get(result["verdict"], 0) + 1
+
+    def identities(records):
+        return sorted({canonical(r["engine"]) for r in records.values() if "engine" in r})
+
     summary = {"schema": DIFF_SCHEMA, "version": VERSION, "summary": dict(sorted(counts.items())),
-               "stale_open_bead_exclusions": stale}
+               "stale_open_bead_exclusions": stale,
+               "engines": {"reference": identities(ref), "portal": identities(portal)}}
     return results, summary
 
 
