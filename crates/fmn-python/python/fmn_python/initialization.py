@@ -16,6 +16,7 @@ from types import ModuleType
 _STEPS = (
     ("copying", "install_mobject_copying"),
     ("point_editing", "install_point_editing"),
+    ("point_cloud_lifecycle", "install_point_cloud_lifecycle"),
     ("arrow_geometry", "install_arrow_geometry"),
     ("shape_matchers", "install_shape_matchers"),
     ("shape_matchers", "install_annotation_marks"),

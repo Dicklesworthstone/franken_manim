@@ -43,6 +43,7 @@ python3 crates/fmn-python/tests/coordinate_lifecycle.py
 python3 crates/fmn-python/tests/plane_lifecycle.py
 python3 crates/fmn-python/tests/coordinate_labels.py
 python3 crates/fmn-python/tests/native_surface_sampling.py
+python3 crates/fmn-python/tests/native_point_cloud_lifecycle.py
 python3 crates/fmn-python/tests/native_solid_lifecycle.py
 python3 crates/fmn-python/tests/native_axial_solids.py
 python3 crates/fmn-python/tests/solid_group_lifecycle.py

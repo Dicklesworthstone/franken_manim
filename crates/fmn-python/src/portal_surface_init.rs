@@ -1,6 +1,9 @@
 //! Constructor-only UV-grid publication. Atlas samples; Marionette owns data.
 use super::*;
 
+#[path = "portal_point_cloud.rs"]
+mod point_cloud;
+
 /// Install a native candidate's geometry into the schema initialized by the
 /// authored class, or finalize that class's own point table. This is distinct
 /// from live regridding: empty grids and strips are valid at construction.
@@ -154,6 +157,7 @@ fn _initialize_surface_grid(
 
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_initialize_surface_grid, module)?)?;
+    point_cloud::install(module)?;
     Ok(())
 }
 
