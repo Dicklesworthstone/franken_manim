@@ -1340,6 +1340,47 @@ impl Stage {
         Ok(Self::install_detached_family(target, entries).root())
     }
 
+    /// Cross-stage move of a whole family: this stage gives up every member
+    /// and the destination receives the same entries. Each keeps its record
+    /// storage, so NumPy views exported before the move stay live (§8.2:
+    /// reallocation under a live view is impossible by construction), and
+    /// no record is copied. Otherwise the result is [`Stage::copy_into`]'s:
+    /// family-internal edges remap, external edges drop, and `target`,
+    /// `saved_state`, pins and derived caches reset.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if `mob` is not live in this stage.
+    pub fn move_into(&mut self, mob: Mob, target: &mut Stage) -> Result<Mob, StageError> {
+        self.try_get(mob)?;
+        let members = self.family(mob);
+        self.remove_many_from_scene(&[mob]);
+        // Drop edges from outside the family before the slots empty, so no
+        // remaining entry here names a moved member.
+        for &member in &members {
+            let parents = self.try_get(member)?.parents.clone();
+            for parent in parents {
+                if !members.contains(&parent) {
+                    self.detach(parent, member);
+                }
+            }
+        }
+        let mut entries = Vec::with_capacity(members.len());
+        for old in members {
+            let slot = &mut self.slots[old.index as usize];
+            let mut entry = slot.entry.take().expect("family members are live");
+            slot.generation = slot.generation.wrapping_add(1);
+            self.free.push(old.index);
+            entry.target = None;
+            entry.saved_state = None;
+            entry.pins = 0;
+            entry.pending_delete = false;
+            entry.family_cache = RefCell::new(None);
+            entry.bbox = RefCell::new(BboxCache::default());
+            entries.push((old, entry));
+        }
+        Ok(Self::install_detached_family(target, entries).root())
+    }
+
     /// Cross-stage transfer of exactly one arena entry, without its family.
     ///
     /// Binding and serialization tiers whose object graph lives outside

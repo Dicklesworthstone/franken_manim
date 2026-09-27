@@ -585,6 +585,80 @@ fn cross_stage_copy_preserves_diamond_sharing_and_entry_state() {
     );
 }
 
+/// A move gives the destination the source's entries: the same record
+/// storage, so views exported before the move stay live (§8.2), and no
+/// source handle survives. Everything else matches the cross-stage copy.
+#[test]
+fn cross_stage_move_keeps_record_storage_and_views_live() {
+    let mut source = Stage::new();
+    let outside = source.add(Mobject::new());
+    let root = source.add(Mobject::from_buffer(
+        RecordBuffer::new(RecordSchema::mobject(), 2).unwrap(),
+    ));
+    let left = source.add(Mobject::new());
+    let right = source.add(Mobject::new());
+    let shared = source.add_value_tracker(2.5);
+    source.attach(outside, root).unwrap();
+    source.attach(root, left).unwrap();
+    source.attach(root, right).unwrap();
+    source.attach(left, shared).unwrap();
+    source.attach(right, shared).unwrap();
+    source.set_z_index(shared, 17, false);
+    let updater = source
+        .add_updater(shared, |_, _| {}, false)
+        .expect("source updater");
+    source.generate_target(shared).expect("source target");
+    source.save_state(shared).expect("source saved state");
+    source.pin(root).expect("source proxy pin");
+    source.add_to_scene(root).expect("source root");
+    let view = source.get_mut(root).unwrap().buffer.export_view(true);
+    assert!(view.write(0, "point", &[1.0, 2.0, 3.0]));
+
+    let mut target = Stage::new();
+    let moved = source.move_into(root, &mut target).expect("cross-stage move");
+
+    // Same storage: the pre-move view reads and writes the destination entry.
+    let moved_buffer = &target.get(moved).unwrap().buffer;
+    assert!(view.is_attached_to(moved_buffer), "views stay attached");
+    assert_eq!(moved_buffer.read(0, "point"), Some(vec![1.0, 2.0, 3.0]));
+    assert!(target
+        .get_mut(moved)
+        .unwrap()
+        .buffer
+        .write(1, "point", &[4.0, 5.0, 6.0]));
+    assert_eq!(view.read(1, "point"), Some(vec![4.0, 5.0, 6.0]));
+
+    // The family arrives whole, diamond sharing included.
+    let children = target.get(moved).unwrap().submobjects().to_vec();
+    let moved_shared = target.get(children[0]).unwrap().submobjects()[0];
+    assert_eq!(target.family(moved).len(), 4);
+    assert_eq!(
+        target.get(moved_shared).unwrap().parents(),
+        &[children[0], children[1]]
+    );
+    assert_eq!(target.tracker_value(moved_shared), Some(2.5));
+    assert_eq!(target.z_index(moved_shared), 17);
+    assert_eq!(target.updater_ids(moved_shared), vec![updater]);
+    assert_eq!(target.target(moved_shared), None);
+    assert_eq!(target.saved_state(moved_shared), None);
+    assert_eq!(target.get(moved).unwrap().pins(), 0);
+    assert!(target.roots().is_empty());
+    assert!(target.get(moved).unwrap().parents().is_empty());
+
+    // The source keeps nothing of the family, and no dangling edge.
+    for member in [root, left, right, shared] {
+        assert!(source.get(member).is_none(), "moved handles are retired");
+    }
+    assert!(source.get(outside).unwrap().submobjects().is_empty());
+    assert!(!source.roots().contains(&root));
+    assert_eq!(source.family(outside), vec![outside]);
+
+    let next = target
+        .add_updater(moved, |_, _| {}, false)
+        .expect("destination updater allocation");
+    assert_ne!(next, updater, "imported updater ids stay reserved");
+}
+
 #[test]
 fn cross_stage_copy_handles_a_deep_family_iteratively() {
     const DEPTH: usize = 1_024;
