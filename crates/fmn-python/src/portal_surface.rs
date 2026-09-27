@@ -62,8 +62,18 @@ fn world_column(entry: &fmn_mobject::Entry, key: &str) -> PyResult<Vec<f32>> {
         .read_column(key)
         .ok_or_else(|| PyValueError::new_err("surface field is missing"))?;
     let mut output = Vec::with_capacity(input.len());
+    // An identity placement is a no-op, as in `Stage::bake_placement`.
+    // Evaluating it anyway turns every -0.0 into +0.0 and breaks the
+    // native-bit contract of sampled surfaces.
+    let placement = entry.placement();
+    let identity = placement.is_identity();
     for point in input.as_chunks::<3>().0 {
-        let world = entry.placement().apply_point(point.map(f64::from));
+        let local = point.map(f64::from);
+        let world = if identity {
+            local
+        } else {
+            placement.apply_point(local)
+        };
         if world
             .iter()
             .any(|v| !v.is_finite() || v.abs() > f64::from(f32::MAX))
