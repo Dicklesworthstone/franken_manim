@@ -153,6 +153,10 @@ impl std::error::Error for PlayerError {
 impl From<BundleReadError> for PlayerError {
     fn from(error: BundleReadError) -> Self {
         match error {
+            BundleReadError::Camera(error) => Self::Render(error.to_string()),
+            BundleReadError::CameraTrackRequired => Self::Render(
+                "camera-bearing FMTL requires the native camera-aware player".to_owned(),
+            ),
             BundleReadError::Malformed(error) => Self::Malformed(error),
             BundleReadError::EngineMismatch { wanted, found } => {
                 Self::EngineMismatch { wanted, found }
@@ -188,8 +192,12 @@ impl PlayerCore {
     /// scrub time. The viewport starts unset; [`PlayerCore::set_viewport`]
     /// is the deliberate second step.
     fn load(bytes: &[u8]) -> Result<Self, PlayerError> {
+        let bundle = TimelineBundle::from_bytes(bytes)?;
+        if bundle.has_camera_track() {
+            return Err(BundleReadError::CameraTrackRequired.into());
+        }
         Ok(Self {
-            bundle: TimelineBundle::from_bytes(bytes)?,
+            bundle,
             width: 0,
             height: 0,
             cursor: 0,
@@ -849,4 +857,23 @@ mod tests {
             Err(PlayerError::PlanInconsistent("segment kind tag"))
         ));
     }
+
+    #[test]
+    fn camera_tracks_refuse_at_load_instead_of_losing_the_view() {
+        let camera = fmn_render::Camera::new(fmn_render::CameraConfig::default()).unwrap();
+        let mut recorder = fmn_scene::recording::SceneBundleRecorder::new_render_only_with_camera(
+            camera.fps(),
+            fmn_scene::BundleExportLimits::default(),
+        )
+        .unwrap();
+        recorder
+            .capture_terminal_still_with_camera(&Stage::new(), &camera)
+            .unwrap();
+        let bytes = recorder.finish().unwrap().bytes;
+        assert!(matches!(
+            PlayerCore::load(&bytes),
+            Err(PlayerError::Render(message)) if message.contains("camera-aware")
+        ));
+    }
+
 }

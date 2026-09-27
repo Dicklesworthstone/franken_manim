@@ -48,6 +48,7 @@ pub struct SharedTimelineBundle {
     frame_count: u32,
     engine_version: String,
     snapshot_bytes: usize,
+    cameras: Option<Vec<fmn_render::camera::CameraSample>>,
 }
 
 fn freeze(snapshot: Snapshot, used: &mut usize) -> Result<Arc<[u8]>, BundleReadError> {
@@ -132,6 +133,7 @@ impl TimelineBundle {
             frame_count: self.frame_count,
             engine_version: self.engine_version,
             snapshot_bytes,
+            cameras: self.cameras,
         })
     }
 }
@@ -219,6 +221,7 @@ impl SharedTimelineBundle {
             fps: self.fps(),
             offset,
             run_time: planned.run_time,
+            camera: self.cameras.as_ref().map(|cameras| cameras[index as usize]),
         })
     }
 }
@@ -232,6 +235,7 @@ pub struct TimelineFrameJob {
     fps: u32,
     offset: i64,
     run_time: f64,
+    camera: Option<fmn_render::camera::CameraSample>,
 }
 
 impl TimelineFrameJob {
@@ -240,6 +244,23 @@ impl TimelineFrameJob {
     pub const fn index(&self) -> u32 {
         self.index
     }
+    /// Whether this frame must be rendered with its recorded camera.
+    #[must_use]
+    pub const fn has_camera_track(&self) -> bool {
+        self.camera.is_some()
+    }
+
+    /// Reconstruct without a cache, retaining required camera semantics.
+    ///
+    /// # Errors
+    /// Preserves snapshot and camera/viewport validation failures.
+    pub fn materialize_with_camera(
+        &self,
+        resolution: (u32, u32),
+    ) -> Result<(Stage, Option<fmn_render::Camera>), BundleReadError> {
+        TimelineFrameCache::default().materialize_with_camera(self, resolution)
+    }
+
     /// Kind chosen by the bundle exporter, including conservative demotions.
     #[must_use]
     pub fn kind(&self) -> BundleSegmentKind {
@@ -291,6 +312,26 @@ impl TimelineFrameCache {
     /// Preserves canonical decode errors without evicting a valid cached pair
     /// in favor of a partially decoded replacement.
     pub fn materialize(&mut self, job: &TimelineFrameJob) -> Result<Stage, BundleReadError> {
+        if job.has_camera_track() {
+            return Err(BundleReadError::CameraTrackRequired);
+        }
+        self.materialize_scene(job)
+    }
+
+    /// Reconstruct geometry and its recorded camera as one frame input.
+    ///
+    /// # Errors
+    /// Refuses invalid viewports/cameras before decoding or replacing a cache.
+    pub fn materialize_with_camera(
+        &mut self,
+        job: &TimelineFrameJob,
+        resolution: (u32, u32),
+    ) -> Result<(Stage, Option<fmn_render::Camera>), BundleReadError> {
+        let camera = super::camera::restore(job.camera.as_ref(), resolution, job.fps, job.index)?;
+        Ok((self.materialize_scene(job)?, camera))
+    }
+
+    fn materialize_scene(&mut self, job: &TimelineFrameJob) -> Result<Stage, BundleReadError> {
         let mut stage = match job.source.as_ref() {
             Source::Pure {
                 begin,

@@ -55,6 +55,9 @@ use fmn_mobject::persist::PersistError;
 use fmn_mobject::{Snapshot, Stage};
 use fmn_render::engine::EngineIdentity;
 
+mod camera;
+pub use camera::CAMERA_TIMELINE_BUNDLE_SCHEMA;
+
 mod shared;
 pub use shared::{SharedTimelineBundle, TimelineFrameCache, TimelineFrameJob};
 
@@ -138,6 +141,10 @@ impl BundleSegmentKind {
 pub enum BundleReadError {
     /// Container framing, schema, version, checksum, or limit failure.
     Malformed(SerialError),
+    /// A camera capture was invalid or malformed.
+    Camera(fmn_render::camera::CameraSampleError),
+    /// This consumer requested geometry alone from a camera-bearing frame.
+    CameraTrackRequired,
     /// The bundle targets a different certified engine closure.
     EngineMismatch {
         /// Identity recorded in the bundle.
@@ -174,6 +181,10 @@ impl std::fmt::Display for BundleReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Malformed(error) => write!(f, "malformed FMTL/1 container: {error}"),
+            Self::Camera(error) => write!(f, "invalid FMTL camera capture: {error}"),
+            Self::CameraTrackRequired => f.write_str(
+                "camera-bearing FMTL requires camera-aware replay; geometry-only playback would discard the recorded camera",
+            ),
             Self::EngineMismatch { wanted, found } => write!(
                 f,
                 "bundle was written for engine {wanted:?}; this reader is {found:?}"
@@ -204,6 +215,7 @@ impl std::error::Error for BundleReadError {
         match self {
             Self::Malformed(error) => Some(error),
             Self::Snapshot(error) => Some(error),
+            Self::Camera(error) => Some(error),
             _ => None,
         }
     }
@@ -232,6 +244,7 @@ pub struct TimelineBundle {
     segments: Vec<SegmentData>,
     frame_count: u32,
     engine_version: String,
+    cameras: Option<Vec<fmn_render::camera::CameraSample>>,
 }
 
 impl TimelineBundle {
@@ -246,7 +259,7 @@ impl TimelineBundle {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BundleReadError> {
         let mut reader = Reader::open(
             bytes,
-            TIMELINE_BUNDLE_SCHEMA,
+            CAMERA_TIMELINE_BUNDLE_SCHEMA,
             Limits::DEFAULT,
             UnknownPolicy::Strict,
         )
@@ -364,12 +377,14 @@ impl TimelineBundle {
             };
             segments.push(segment);
         }
+        let cameras = camera::read_track(&mut reader, frame_count)?;
         reader.finish().map_err(BundleReadError::Malformed)?;
         Ok(Self {
             plan,
             segments,
             frame_count,
             engine_version: found,
+            cameras,
         })
     }
 
@@ -451,6 +466,9 @@ impl TimelineBundle {
     /// Call before consuming this bundle into worker-shareable frame jobs.
     #[must_use]
     pub fn requires_camera(&self) -> bool {
+        if self.has_camera_track() {
+            return true;
+        }
         fn needs_camera(snapshot: &Snapshot) -> bool {
             snapshot
                 .materialize()
@@ -483,6 +501,13 @@ impl TimelineBundle {
     /// [`BundleReadError::PlanInconsistent`] if decoded storage no longer
     /// agrees with the validated plan.
     pub fn stage_at(&self, index: u32) -> Result<Stage, BundleReadError> {
+        if self.has_camera_track() {
+            return Err(BundleReadError::CameraTrackRequired);
+        }
+        self.stage_at_inner(index)
+    }
+
+    fn stage_at_inner(&self, index: u32) -> Result<Stage, BundleReadError> {
         let total = self.frame_count();
         let global = i64::from(index) + 1;
         let (segment_index, offset) = self

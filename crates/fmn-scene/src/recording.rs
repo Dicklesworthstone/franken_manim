@@ -9,17 +9,21 @@
 //! Segment durations describe the *captured frame grid*, not the original
 //! floating-point play argument (which a SceneSink does not receive). Explicit
 //! `show()` captures are one-frame holds. Skipped previews and presenter input
-//! are refused rather than silently retimed. Camera rigs and audio are not part
-//! of FMTL/1; composition roots must reject these unsupported side channels.
+//! are refused rather than silently retimed. Minor 1 can record the exact camera
+//! sampled by a composition root; no rig binding or camera callback is inferred.
+//! Audio remains unsupported and must be refused by composition roots.
 
 use fmn_anim::timeline::{TIMELINE_SCHEMA, TimelineError, TimelinePlan};
 use fmn_anim::{FramePacket, RationalFrameClock, SegmentKind};
 use fmn_hash::serial::{Limits, Writer};
 use fmn_hash::{Digest, SerialError, sha256};
 use fmn_mobject::{RenderSnapshotError, Snapshot, Stage};
+use fmn_render::camera::CameraSample;
+use fmn_render::Camera;
 
 use crate::timeline_bundle::{
-    BundleError, BundleExportLimits, BundleReadError, TIMELINE_BUNDLE_SCHEMA, TimelineBundle,
+    BundleError, BundleExportLimits, BundleReadError, CAMERA_TIMELINE_BUNDLE_SCHEMA,
+    TIMELINE_BUNDLE_SCHEMA, TimelineBundle,
     bundle_engine_version,
 };
 use crate::{CaptureReason, IntegrationError, LifecycleEvent, LifecyclePhase, SceneSink};
@@ -127,6 +131,7 @@ pub struct SceneBundleRecorder {
     active: Option<ActiveSegment>,
     failure: Option<RecordingError>,
     render_only: bool,
+    cameras: Option<Vec<CameraSample>>,
 }
 
 impl SceneBundleRecorder {
@@ -151,6 +156,7 @@ impl SceneBundleRecorder {
             active: None,
             failure: None,
             render_only: false,
+            cameras: None,
         })
     }
 
@@ -168,6 +174,22 @@ impl SceneBundleRecorder {
     pub fn new_render_only(fps: u32, limits: BundleExportLimits) -> Result<Self, RecordingError> {
         let mut recorder = Self::new(fps, limits)?;
         recorder.render_only = true;
+        Ok(recorder)
+    }
+
+    /// Record render-only snapshots and their exact camera/light/background
+    /// captures in FMTL/1 minor 1. Existing constructors still emit minor 0.
+    /// Every frame must use `capture_with_camera` (including a terminal still);
+    /// missing camera samples are sticky failures, never default-camera frames.
+    ///
+    /// # Errors
+    /// Refuses zero FPS; per-frame values and budgets are checked at capture.
+    pub fn new_render_only_with_camera(
+        fps: u32,
+        limits: BundleExportLimits,
+    ) -> Result<Self, RecordingError> {
+        let mut recorder = Self::new_render_only(fps, limits)?;
+        recorder.cameras = Some(Vec::new());
         Ok(recorder)
     }
 
@@ -202,14 +224,31 @@ impl SceneBundleRecorder {
     /// # Errors
     /// Refuses a nonempty/active/failed recording or exhausted capture budgets.
     pub fn capture_terminal_still(&mut self, stage: &Stage) -> Result<(), IntegrationError> {
+        self.terminal_still(stage, None)
+    }
+
+    /// Record a static scene and its camera without advancing the scene clock.
+    ///
+    /// # Errors
+    /// As `capture_terminal_still`, plus invalid camera or recording-mode errors.
+    pub fn capture_terminal_still_with_camera(
+        &mut self,
+        stage: &Stage,
+        camera: &Camera,
+    ) -> Result<(), IntegrationError> {
+        self.terminal_still(stage, Some(camera))
+    }
+
+    fn terminal_still(&mut self, stage: &Stage, camera: Option<&Camera>) -> Result<(), IntegrationError> {
         let result = if self.frames != 0 || self.active.is_some() {
             Err(RecordingError::Unsupported(
                 "terminal still requires an idle empty recording",
             ))
         } else {
             self.admit_frame().and_then(|()| {
+                let sample = self.camera_sample(camera)?;
                 let bytes = self.encode_snapshot(&stage.snapshot());
-                self.capture_snapshot(bytes)
+                self.capture_snapshot(bytes, sample)
             })
         };
         self.retain_failure(result)
@@ -286,12 +325,42 @@ impl SceneBundleRecorder {
         result
     }
 
+    fn camera_sample(&self, camera: Option<&Camera>) -> Result<Option<CameraSample>, RecordingError> {
+        if self.cameras.is_some() != camera.is_some() {
+            return Err(RecordingError::Unsupported(
+                "camera capture must match the recorder's declared mode",
+            ));
+        }
+        camera.map(|camera| {
+            if camera.fps() != self.fps {
+                return Err(RecordingError::Unsupported("camera frame rate changed"));
+            }
+            CameraSample::capture(camera).map_err(|error| RecordingError::Decode(
+                BundleReadError::Camera(fmn_render::camera::CameraSampleError::Camera(error)),
+            ))
+        }).transpose()
+    }
+
     fn capture_snapshot(
         &mut self,
         bytes: Result<Vec<u8>, RecordingError>,
+        camera: Option<CameraSample>,
     ) -> Result<(), RecordingError> {
         self.admit_frame()?;
         let bytes = bytes?;
+        if let Some(sample) = camera {
+            // Charge the retained table AND serialization work, as for snapshots.
+            self.charge(CameraSample::WIRE_BYTES, "recorded camera sample")?;
+            let mut cameras = self.cameras.take().ok_or(RecordingError::Unsupported(
+                "unexpected camera capture",
+            ))?;
+            let result = self.reserve(&mut cameras, "recorded camera table");
+            if result.is_ok() {
+                cameras.push(sample);
+            }
+            self.cameras = Some(cameras);
+            result?;
+        }
         self.charge(bytes.len(), "recorded frame snapshot")?;
         let mut frames = self.active.as_mut().map_or_else(Vec::new, |active| {
             std::mem::take(&mut active.recorded.frames)
@@ -448,7 +517,12 @@ impl SceneBundleRecorder {
         schedule.put_u32(0); // Imperative Scene has no authored Timeline labels.
         let plan_bytes = schedule.finish().map_err(encoding_error)?;
         TimelinePlan::from_bytes(&plan_bytes).map_err(RecordingError::Plan)?;
-        let mut writer = Writer::with_limits(TIMELINE_BUNDLE_SCHEMA, limits);
+        let schema = if self.cameras.is_some() {
+            CAMERA_TIMELINE_BUNDLE_SCHEMA
+        } else {
+            TIMELINE_BUNDLE_SCHEMA
+        };
+        let mut writer = Writer::with_limits(schema, limits);
         writer.put_str(&bundle_engine_version());
         writer.put_u32(self.fps);
         writer.put_bytes(&plan_bytes);
@@ -462,6 +536,17 @@ impl SceneBundleRecorder {
             );
             for frame in segment.frames {
                 writer.put_bytes(&frame);
+            }
+        }
+        if let Some(cameras) = self.cameras {
+            if cameras.len() as u64 != self.frames {
+                return Err(RecordingError::Unsupported("camera/frame count mismatch"));
+            }
+            writer.put_u32(u32::try_from(cameras.len()).map_err(|_| {
+                RecordingError::Unsupported("camera count exceeds FMTL/1")
+            })?);
+            for camera in cameras {
+                camera.write_to(&mut writer);
             }
         }
         let bytes = writer.finish().map_err(encoding_error)?;
@@ -490,6 +575,31 @@ impl SceneSink for SceneBundleRecorder {
         reason: CaptureReason,
         packet: FramePacket,
     ) -> Result<(), IntegrationError> {
+        self.capture_packet(reason, packet, None)
+    }
+}
+
+impl SceneBundleRecorder {
+    /// Freeze a camera sampled at the same post-updater boundary as this packet.
+    /// The caller owns camera synchronization; no callback executes here.
+    ///
+    /// # Errors
+    /// Preserves sticky capture, clock, camera, schema and budget failures.
+    pub fn capture_with_camera(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+        camera: &Camera,
+    ) -> Result<(), IntegrationError> {
+        self.capture_packet(reason, packet, Some(camera))
+    }
+
+    fn capture_packet(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+        camera: Option<&Camera>,
+    ) -> Result<(), IntegrationError> {
         let result = (|| {
             self.admit_frame()?;
             if packet.time().fps() != self.fps {
@@ -516,8 +626,9 @@ impl SceneSink for SceneBundleRecorder {
                     ));
                 }
             }
+            let sample = self.camera_sample(camera)?;
             let bytes = self.encode_snapshot(packet.state());
-            self.capture_snapshot(bytes)
+            self.capture_snapshot(bytes, sample)
         })();
         self.retain_failure(result)
     }
