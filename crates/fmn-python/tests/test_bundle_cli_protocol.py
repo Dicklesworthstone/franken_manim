@@ -87,7 +87,7 @@ class BundleCliProtocol(unittest.TestCase):
 
     def test_unsupported_modes_fail_before_import(self):
         self.source.write_text("raise AssertionError('source executed')\n")
-        for extra in (("--reproducible",), ("--threads", "4"), ("--write_all",),
+        for extra in (("--reproducible",), ("--threads", "4"),
                       ("--subdivide",), ("-n", "2"), ("--skip_animations",),
                       ("--transparent",), ("--vcodec", "auto")):
             with self.subTest(extra=extra):
@@ -238,7 +238,7 @@ class BundleCliProtocol(unittest.TestCase):
         self.enable_camera()
         self.source.write_text("raise AssertionError('source executed')\n")
         for extra in (("--reproducible",), ("--skip_animations",), ("-n", "2"),
-                      ("--write_all",), ("--transparent",), ("--threads", "4")):
+                      ("--transparent",), ("--threads", "4")):
             with self.subTest(extra=extra):
                 code, receipt, _ = self.export("--bundle-camera", *extra)
                 self.assertEqual(code, 4)

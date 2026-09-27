@@ -74,3 +74,39 @@ batched planar/camera bytes equal independent single-scene exports; exact native
 byte limits and one-byte-too-small refusals are verified; swallowed capture
 failures, cancellation, collision and observer exceptions preserve publication
 and recovery semantics. The installed-wheel runtime gate includes this suite.
+
+## Console selection
+
+The ordinary console front door accepts the same bundle mode and batch owner:
+
+```sh
+python -m fmn_python --robot scenes.py Orbit Diagram \
+    --format fmtl --bundle-camera --video_dir bundles
+
+python -m fmn_python --robot scenes.py --write_all \
+    --format fmtl --bundle-camera --keep-going --video_dir bundles
+```
+
+Explicit names run in the requested order. `--write_all` (or `-a`) selects only
+locally declared scenes and runs them in sorted name order. Imported classes
+are not silently added. The source and sibling imports remain scoped through
+the entire batch; source code is loaded once, not once for every output.
+
+With multiple names or `--write_all`, `--video_dir` is a directory, and every
+scene writes `DIRECTORY/SCENE.fmtl`. With a single selected scene and no
+`--write_all`, its existing exact-file meaning and single-export receipt stay
+unchanged. Omitting the flag keeps the existing planar/browser-compatible
+format. `--bundle-camera` selects native camera-bearing bundles for every job.
+
+All selected names and destinations are preflighted before any constructor.
+An occupied destination for a later scene prevents the entire batch from
+starting; a concurrent writer is still protected by each native publisher.
+The default stops on the first ordinary scene error. `--keep-going` permits
+later scenes to run, but any failure still yields exit 5. Ctrl-C always stops
+with exit 130 and `SystemExit`, even `SystemExit(0)`, stops with a nonzero code.
+Already published bundles survive and appear in the aggregate receipt.
+
+Robot mode writes one terminal JSON batch receipt to stdout. Authored print
+output and per-scene progress go to stderr. The receipt records succeeded,
+failed, cancelled, and not-run jobs separately. There is no new scene loop,
+renderer, worker scheduler, or shared mutable native owner in this route.
