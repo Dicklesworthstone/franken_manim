@@ -58,6 +58,8 @@ python3 crates/fmn-python/tests/native_implicit_lifecycle.py
 python3 crates/fmn-python/tests/live_curves.py
 python3 crates/fmn-python/tests/native_curve_lifecycle.py
 python3 crates/fmn-python/tests/native_geometry_lifecycle.py
+python3 crates/fmn-python/tests/native_brace_lifecycle.py
+python3 crates/fmn-python/tests/native_derived_curves.py
 python3 crates/fmn-python/tests/native_arrow_lifecycle.py
 python3 crates/fmn-python/tests/native_curved_lifecycle.py
 python3 crates/fmn-python/tests/test_curved_constructor_protocol.py
