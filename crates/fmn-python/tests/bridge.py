@@ -13156,7 +13156,11 @@ assert np.allclose(
     [3.0, 4.0, 4.0],
     atol=1e-6,
 )
-assert np.allclose(cone.get_center(), [1.5, 0.0, 0.0], atol=1e-6)
+# scale and set_depth act about the sampled cone's center (z = 1/2), then
+# apply_matrix about the origin: the pinned Reference measures this cone at
+# x in [-1, 2] with center (0.5, 0, 0) (0a5539ed).
+assert np.allclose(cone.get_center(), [0.5, 0.0, 0.0], atol=1e-6)
+assert np.allclose([cone.get_points()[:, 0].min(), cone.get_points()[:, 0].max()], [-1.0, 2.0], atol=1e-6)
 
 default_cone = three_dimensions.Cone()
 assert default_cone.n_records() == 101 * 11
