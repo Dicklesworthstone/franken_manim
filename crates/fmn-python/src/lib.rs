@@ -1466,15 +1466,16 @@ fn bind_graph<'py>(
         if proxy.borrow().engine.is_some() {
             continue;
         }
-        // Adoption: transfer the nursery family into the scene's stage by
-        // content (the two-scene copy policy), then retire the nursery.
+        // Adoption: move the nursery family into the scene's stage, then
+        // retire the nursery. Moving keeps each record buffer's storage, so
+        // NumPy views exported before scene.add stay live (§8.2).
         let mob = {
-            let cell = proxy.borrow();
-            let nursery = cell.nursery.as_ref().expect("validated detached state");
+            let mut cell = proxy.borrow_mut();
+            let nursery = cell.nursery.as_mut().expect("validated detached state");
             let mut runtime = engine.borrow_mut();
             let mob = nursery
                 .stage
-                .copy_into(nursery.root, runtime.stage_mut())
+                .move_into(nursery.root, runtime.stage_mut())
                 .map_err(stage_error)?;
             runtime.stage_mut().pin(mob).map_err(stage_error)?;
             mob
