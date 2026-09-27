@@ -11,7 +11,10 @@ use super::*;
 /// Never replace a nursery which those hooks (or a schema descriptor) already
 /// initialized: that would discard its records, views and family identities.
 #[pyfunction]
-pub(crate) fn _portal_allocate_tracker(target: &Bound<'_, BridgeMobject>, kind: u8) -> PyResult<()> {
+pub(crate) fn _portal_allocate_tracker(
+    target: &Bound<'_, BridgeMobject>,
+    kind: u8,
+) -> PyResult<()> {
     if kind > 2 {
         return Err(PyValueError::new_err("unknown native tracker encoding"));
     }
