@@ -38,6 +38,7 @@ _STEPS = (
     ("surface_lifecycle", "install_surface_lifecycle"),
     ("solid_lifecycle", "install_solid_lifecycle"),
     ("solid_groups", "install_solid_groups"),
+    ("vector_solid_groups", "install_vector_solid_groups"),
     ("surface_mesh", "install_surface_mesh"),
     ("surface_plotting", "install_surface_plotting"),
     ("svg_ingress", "install_svg_ingress"),
