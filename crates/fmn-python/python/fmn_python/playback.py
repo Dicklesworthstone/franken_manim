@@ -243,7 +243,7 @@ def _install_deferred_transforms(g: dict[str, Any]) -> None:
 
 
 def _install_transform_dispatch(g: dict[str, Any]) -> None:
-    """Preserve authored Transform and creation hooks on the callback boundary.
+    """Preserve authored object protocols on the existing callback boundary.
 
     The shared classifier's helper-only fast path returns before consulting
     its older lifecycle checker. Compare the completed shipped protocols here,
@@ -308,6 +308,16 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
     )
     partial_protocols = _protocols(g, Mobject, partial_hooks)
     border_protocols = _protocols(g, Mobject, border_hooks)
+    rotation_type = g.get("Rotating", ())
+    # Rotating restores a starting copy before every absolute-angle rotation.
+    # Checking rotate alone misses authored snapshots, point restoration and
+    # the geometry/placement hooks called by the stock rotate implementation.
+    rotation_hooks = partial_hooks + (
+        "match_points", "rotate", "family_members_with_points", "get_points",
+        "set_points", "apply_points_function", "apply_points_function_about_point",
+        "get_bounding_box_point", "get_center", "get_bounding_box",
+    )
+    rotation_protocols = _protocols(g, Mobject, rotation_hooks)
 
     def authored_family(root, object_protocols):
         # This is behavior admission, not interpolation's path-wise family
@@ -356,6 +366,12 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
                 animation, g.get("DrawBorderThenFill", ())) else partial_protocols)
             if authored_family(animation.mobject, object_protocols):
                 return True
+        elif isinstance(animation, rotation_type):
+            if (_changed(animation, protocols)
+                    or _implementation(type(animation), "mobject") is not None):
+                return True
+            if authored_family(animation.mobject, rotation_protocols):
+                return True
         # Keep specialized native defaults and existing family capability
         # decisions. The guards above run BEFORE older classifiers which
         # traverse get_family or inspect methods through dynamic attributes.
@@ -367,7 +383,7 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         # seen here, or every stock Transform would become a Python callback.
         # Direct installers without later adapters keep the initial snapshot.
         nonlocal protocols, mobject_protocols, child_descriptors
-        nonlocal reveal_protocols, partial_protocols, border_protocols
+        nonlocal reveal_protocols, partial_protocols, border_protocols, rotation_protocols
         protocols = _protocols(g, animation_root, hooks)
         names = next(iter(mobject_protocols.values())).keys()
         mobject_protocols = _protocols(g, Mobject, names)
@@ -376,6 +392,7 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         reveal_protocols = _protocols(g, animation_root, reveal_hooks)
         partial_protocols = _protocols(g, Mobject, partial_hooks)
         border_protocols = _protocols(g, Mobject, border_hooks)
+        rotation_protocols = _protocols(g, Mobject, rotation_hooks)
 
     g["_requires_python_animation"] = requires
     g["_fmn_finalize_transform_dispatch"] = finalize_protocols

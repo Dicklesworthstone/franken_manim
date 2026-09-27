@@ -31,6 +31,28 @@ def install_point_editing(native):
     if g.get("_FMN_POINT_EDITING_INSTALLED", False):
         return
     Mobject, np = g["Mobject"], g["_np"]
+    from functools import wraps
+    from .movement import _changed, _protocols
+
+    original_rotate = Mobject.rotate
+    rotation_mapping = _protocols(g, Mobject, (
+        "apply_points_function", "get_family", "__getattribute__", "__getattr__",
+    ))
+
+    @wraps(original_rotate)
+    def rotate(self, angle, axis=g["_OUT"], about_point=None, **kwargs):
+        # The placement shortcut is valid only for the shipping point mapper
+        # and family walk. Authored implementations must receive the actual
+        # native rotation map, just as they do for apply_matrix. Keep Lumen's
+        # f64 placement path unchanged for ordinary objects and surfaces.
+        if _changed(self, rotation_mapping):
+            matrix = np.asarray(g["rotation_matrix_transpose"](float(angle), axis))
+            self.apply_points_function(lambda points: np.dot(points, matrix),
+                                       about_point, **kwargs)
+            return self
+        return original_rotate(self, angle, axis=axis, about_point=about_point, **kwargs)
+
+    Mobject.rotate = rotate
 
     def set_points(self, points):
         values = _point_table(np, points)
