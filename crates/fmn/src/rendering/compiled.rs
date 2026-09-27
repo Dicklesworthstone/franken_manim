@@ -20,7 +20,10 @@ use super::{NativeFramePipeline, RenderError, RenderOptions, RenderReport, Rende
 /// resampling, alpha-zero insertion or terminal still is performed. An empty
 /// compiled artifact is rejected before creating an output sink. `options.camera`
 /// selects the existing fixed-camera path for surfaces, images and dot clouds.
-/// Camera trackers need a separate binding; this format does not infer one.
+/// Camera-bearing minor-1 bundles instead select the native camera route
+/// automatically and replay their recorded camera/light/background samples.
+/// An explicit `options.camera` is refused for those bundles, not silently
+/// substituted for the recorded view. Minor-0 behavior is unchanged.
 ///
 /// The loaded bundle and worker-local reconstructed geometry are additional
 /// to `max_resident_bytes`, which bounds planned pixels and native sink storage.
@@ -41,7 +44,7 @@ pub fn render_bundle(bytes: &[u8], options: RenderOptions) -> Result<RenderRepor
 /// Returns the same typed failures as [`render_bundle`].
 pub fn render_bundle_with_fs(
     bytes: &[u8],
-    options: RenderOptions,
+    mut options: RenderOptions,
     fs: Arc<dyn FileSystem>,
 ) -> Result<RenderReport, RenderError> {
     let bundle = TimelineBundle::from_bytes(bytes).map_err(RenderError::Bundle)?;
@@ -59,6 +62,16 @@ pub fn render_bundle_with_fs(
         return Err(RenderError::InvalidOptions(
             "compiled artifact exceeds max_frames",
         ));
+    }
+    if bundle.has_camera_track() {
+        if options.camera.is_some() {
+            return Err(RenderError::InvalidOptions(
+                "an explicit camera cannot override a recorded FMTL camera track",
+            ));
+        }
+        // Select the correctly budgeted camera CPU route. Each compiled job
+        // supplies its exact captured pose/background/light, not this baseline.
+        options.camera = Some(options.camera_config()?);
     }
     let shared = bundle.into_shared().map_err(RenderError::Bundle)?;
     let mut clock = RationalFrameClock::new(shared.fps())

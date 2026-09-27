@@ -79,3 +79,46 @@ little-endian; floats are IEEE-754 bits; strings are length-prefixed UTF-8;
 Two exports of the same scene run MUST produce identical bytes: fixed field
 order, canonical floats, no timestamps, no host paths, no hash-map iteration
 (wherever maps appear, serialize in sorted key order).
+
+
+## Camera-bearing FMTL/1 minor 1
+
+`SceneBundleRecorder::new_render_only_with_camera` records a camera at each
+actual capture boundary using `capture_with_camera` (or the explicit terminal
+still counterpart). It reuses Lumen's `CameraSample`; it does not serialize
+camera-rig handles, callbacks or an alternate clock. Missing camera samples,
+mode mismatches and changed FPS poison the recording. Camera bytes and table
+storage count toward the same cumulative capture budget as geometry.
+
+These artifacts use schema `(FMTL, 1, 0, 1)`. After the unchanged segment payload,
+a `u32` frame count is followed by exactly that many 153-byte camera samples.
+The count must equal the nested plan's total output frames. Each sample contains
+original pixel dimensions, frame center and shape, quaternion, field of view,
+light position, clipping norm, linear RGBA background and adaptive sample count.
+The existing canonical trailer binds geometry and camera together. Strict old
+readers reject this additive minor version; existing minor-0 writers and their
+bytes are unchanged.
+
+The production reader validates count, exact fixed-size payload and camera
+invariants before accepting the artifact. `stage_at_with_camera` and shared
+`TimelineFrameCache::materialize_with_camera` return geometry and its camera as
+one frame result. Geometry-only access explicitly refuses camera-bearing input.
+Equal-aspect playback preserves the captured frame shape and orientation bits;
+a changed aspect preserves authored frame width. Revisions derive from original
+frame indices, not output order or worker completion. No quaternion
+renormalization, Euler conversion or callback runs during reconstruction.
+
+Native compiled rendering and the standalone CLI consume the track through the
+existing bounded CPU render-team pipeline. Recorded pose, background, lighting
+and sample policy are authoritative; `render_bundle` refuses an explicit camera
+override. The camera-less WASM player refuses these artifacts at load rather
+than emitting a plausible but incorrect planar movie. Other geometry-only
+consumers must adopt the paired reconstruction API before claiming support.
+Audio and arbitrary external effects are still not represented by this format.
+
+Regression coverage lives in `crates/fmn-conformance/tests/camera_bundle.rs`:
+actual camera-rig captures versus decoded native frames at 1/4/16 threads,
+random-order shared-worker reconstruction, changed backgrounds, old-reader
+refusal, malformed counts/cameras, sticky capture failures and output limits.
+These tests are execution evidence only when their recorded run passes; the
+format addition does not itself establish cross-platform certification.

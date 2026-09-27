@@ -10,6 +10,13 @@ on:
       - 'crates/fmn-python/python/fmn_python/__main__.py'
       - 'crates/fmn-python/tests/*bundle*'
       - 'crates/fmn-scene/src/recording.rs'
+      - 'crates/fmn-scene/src/timeline_bundle*'
+      - 'crates/fmn-scene/src/timeline_bundle/**'
+      - 'crates/fmn/src/rendering/compiled.rs'
+      - 'crates/fmn/src/rendering/pipeline.rs'
+      - 'crates/fmn-conformance/tests/camera_bundle.rs'
+      - 'crates/fmn-wasm/src/player.rs'
+      - 'crates/fmn-scene/tests/camera_recording.rs'
       - '.github/workflows/python-scene-bundle-export.yml'
   workflow_dispatch:
 permissions:
@@ -50,6 +57,12 @@ jobs:
         run: python -m unittest discover -s crates/fmn-python/tests -p 'test_bundle*protocol.py' -v
       - name: Real native recording and direct-versus-replayed pixels
         run: cargo test --locked -p fmn-python portal_studio -- --nocapture
+      - name: Camera bundles through native workers and standalone CLI
+        run: cargo test --locked -p fmn-conformance --test camera_bundle -- --nocapture
+      - name: Legacy bundle readers and camera-less player compatibility
+        run: |
+          cargo test --locked -p fmn-scene
+          cargo test --locked -p fmn-wasm camera_tracks_refuse_at_load
       - name: Existing capture boundary regressions
         run: cargo test --locked -p fmn-python portal_recording -- --nocapture
       - name: Build the standalone consumer and matching installed wheel

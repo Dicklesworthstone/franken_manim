@@ -141,9 +141,15 @@ impl PipelineStages for NativeFrameStages {
                 // Reconstruction is inside the render-team worker, not the
                 // serial source or prepare stage. It returns a local Stage
                 // which is compiled here and dropped before conversion.
-                let stage = COMPILED_ENDPOINTS
-                    .with(|cache| cache.borrow_mut().materialize(&job))
+                let (stage, recorded_camera) = COMPILED_ENDPOINTS
+                    .with(|cache| {
+                        cache.borrow_mut().materialize_with_camera(
+                            &job,
+                            (config.frame.viewport.width, config.frame.viewport.height),
+                        )
+                    })
                     .map_err(NativeFrameError::Bundle)?;
+                let camera = recorded_camera.or(camera);
                 let TeamRole::Render(index) = team.role else {
                     return Err(NativeFrameError::WorkerState(
                         "compiled frame requires a render team",
@@ -521,6 +527,11 @@ impl NativeFramePipeline {
         job: TimelineFrameJob,
         sequence: u64,
     ) -> Result<(), RenderError> {
+        if job.has_camera_track() && matches!(&self.compiler, NativeCompiler::Vector(_)) {
+            return Err(RenderError::Capability(
+                "camera-bearing FMTL requires a camera-aware CPU execution plan",
+            ));
+        }
         let stream = self
             .stream
             .as_mut()
