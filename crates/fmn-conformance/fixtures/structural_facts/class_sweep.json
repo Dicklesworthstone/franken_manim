@@ -410,7 +410,7 @@
   ],
   "Cone": [
    "Cone(height=3, radius=0.5)",
-   "Cone(direction=RIGHT)"
+   "Cone(axis=RIGHT)"
   ],
   "Line3D": [
    "Line3D(ORIGIN, OUT)"

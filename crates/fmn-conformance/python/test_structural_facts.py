@@ -246,7 +246,7 @@ class Exclusions(unittest.TestCase):
         self.assertTrue(rows)
         self.assertEqual(len({row["id"] for row in rows}), len(rows))
         for row in rows:
-            self.assertRegex(row["ref"], r"^(BN-\d\d|fm-[a-z0-9.]+)$")
+            self.assertRegex(row["ref"], r"^(BN-\d\d|ADR-\d{4}|fm-[a-z0-9.]+)$")
 
 
 class RowScoping(unittest.TestCase):

@@ -37,6 +37,14 @@ missing font silently substitutes.
   least-badness is an explicit option), not Pango's font-derived leading.
 - **Markup** is the manim tag set with precise line:column diagnostics —
   unknown tags/attributes are errors, not passthrough.
+- **Empty input constructs an empty mobject.** At the pin, `TexText()`,
+  `Title()`, `BulletedList()` and `TexTextFromPresetString()` with no text
+  raise `LatexError` ("There's no line here to end", "perhaps a missing
+  \item"), because the Reference compiles an empty LaTeX body. Native
+  typesetting returns a point-less mobject with no glyph children instead
+  (`Title` keeps its underline), which can be filled later with `become`
+  or animated in. Found by the
+  Appendix-A class sweep (fm-5wq.26).
 
 ## Why
 

@@ -99,6 +99,171 @@
       "scope": "scenes",
       "fact": "camera_frame_roots",
       "reason": "The Reference's scene.mobjects starts with the CameraFrame; the portal's does not."
+    },
+    {
+      "id": "bn08-drawn-natives",
+      "kind": "behavior-note",
+      "ref": "BN-08",
+      "scope": ["classes", "scenes"],
+      "class": ["Checkmark", "Exmark", "Matrix", "DecimalMatrix", "IntegerMatrix", "TexMatrix", "MobjectMatrix", "BulletedList", "Title"],
+      "fact": ["bbox", "points", "points_sha256", "n_points", "style.*"],
+      "reason": "De-TeX'd natives (BN-08 table): Checkmark/Exmark are drawn paths, Matrix brackets are drawn, BulletedList/Title set native text. The root is the drawn or native object, not a Tex glyph container."
+    },
+    {
+      "id": "bn08-drawn-native-children",
+      "kind": "behavior-note",
+      "ref": "BN-08",
+      "scope": ["classes", "scenes"],
+      "under": ["Checkmark", "Exmark", "Matrix", "DecimalMatrix", "IntegerMatrix", "TexMatrix", "MobjectMatrix", "BulletedList", "Title"],
+      "fact": ["member", "class", "mro", "string", "bbox", "points", "points_sha256", "n_points", "style.*", "getters", "getters.*"],
+      "reason": "The Reference's Tex glyph children of these natives do not exist, or are native glyphs (BN-08)."
+    },
+    {
+      "id": "bn07-c15-functiongraph-color",
+      "kind": "behavior-note",
+      "ref": "BN-07",
+      "scope": ["classes", "scenes"],
+      "class": "FunctionGraph",
+      "fact": ["style.fill_color", "style.stroke_color"],
+      "reason": "C-15: the Reference's FunctionGraph declares color=YELLOW but never forwards it, so its graphs keep the default stroke. FrankenManim forwards it (BN-07)."
+    },
+    {
+      "id": "bn13-cubic-bezier",
+      "kind": "behavior-note",
+      "ref": "BN-13",
+      "scope": ["classes", "scenes"],
+      "class": "CubicBezier",
+      "fact": ["n_points", "points", "points_sha256"],
+      "reason": "One error-bounded cubic-to-quadratic converter for API cubics (BN-13). The Reference splits a cubic into two quadratics with no bound (5 points against 33)."
+    },
+    {
+      "id": "bn09-curved-arrow-stem-density",
+      "kind": "behavior-note",
+      "ref": "BN-09",
+      "scope": ["classes", "scenes"],
+      "class": "Arrow",
+      "fact": ["n_points", "points", "points_sha256", "bbox"],
+      "reason": "A curved Arrow's stem edges use quadratic_bezier_points_for_arc(path_arc) at its default of 8 components in the Reference, and BN-09's one arc-density rule in FrankenManim. Fewer components move the quadratic handles, and so the bbox. Straight arrows are equal."
+    },
+    {
+      "id": "adr0020-drawings-shelf",
+      "kind": "adr",
+      "ref": "ADR-0020",
+      "scope": "classes",
+      "subject": ["Lightbulb", "VideoIcon", "VideoSeries", "Bubble", "OldSpeechBubble", "DoubleSpeechBubble", "OldThoughtBubble", "VectorizedEarth"],
+      "fact": "error",
+      "reason": "Reference-derived drawings SVGs stay unbundled (ADR-0020). Both engines refuse without the file: the Reference raises OSError 'not Found', the portal a named NotImplementedError pointing at the drawings shelf."
+    },
+    {
+      "id": "bn05-empty-text",
+      "kind": "behavior-note",
+      "ref": "BN-05",
+      "scope": "classes",
+      "subject": ["TexText", "Title", "BulletedList", "TexTextFromPresetString"],
+      "fact": "error",
+      "reason": "Empty input constructs an empty mobject natively. The Reference's LaTeX raises on an empty body (BN-05)."
+    },
+    {
+      "id": "fm-c1up-composite-children",
+      "kind": "open-bead",
+      "ref": "fm-c1up",
+      "scope": ["classes", "scenes"],
+      "class": ["Checkbox", "EnableDisableButton", "LinearNumberSlider", "ColorSliders", "Textbox", "ControlPanel", "Dodecahedron", "Piano", "Piano3D", "TracingTail", "Code", "Dartboard", "Speedometer", "ThoughtBubble"],
+      "fact": ["bbox", "points", "points_sha256", "n_points", "string", "style.*", "class", "mro", "data_fields", "style"],
+      "reason": "Composite roots built differently from the Reference (class sweep)."
+    },
+    {
+      "id": "fm-c1up-composite-children-members",
+      "kind": "open-bead",
+      "ref": "fm-c1up",
+      "scope": ["classes", "scenes"],
+      "under": ["Checkbox", "EnableDisableButton", "LinearNumberSlider", "ColorSliders", "Textbox", "ControlPanel", "Dodecahedron", "Piano", "Piano3D", "Dartboard", "Speedometer", "ThoughtBubble", "Code"],
+      "fact": ["member", "class", "mro", "string", "bbox", "points", "points_sha256", "n_points", "style.*", "getters", "getters.*", "data_fields", "style"],
+      "reason": "Composite children are plain VMobject or differently structured (class sweep)."
+    },
+    {
+      "id": "fm-c1up-error-classes",
+      "kind": "open-bead",
+      "ref": "fm-c1up",
+      "scope": "classes",
+      "subject": "StringMobject",
+      "fact": "error",
+      "reason": "The Reference refuses to instantiate the abstract StringMobject with TypeError; the portal raises a different exception."
+    },
+    {
+      "id": "fm-ui0c-boolean-structure",
+      "kind": "open-bead",
+      "ref": "fm-ui0c",
+      "scope": ["classes", "scenes"],
+      "class": ["Union", "Difference", "Intersection", "Exclusion"],
+      "fact": ["n_points", "points", "points_sha256", "bbox", "style.stroke_color", "style.fill_color"],
+      "reason": "Flatten-first boolean results: point counts, start point, orientation and inherited style differ, with no Behavior Note."
+    },
+    {
+      "id": "fm-8pj7-curved-arrows",
+      "kind": "open-bead",
+      "ref": "fm-8pj7",
+      "scope": ["classes", "scenes"],
+      "class": ["CurvedArrow", "CurvedDoubleArrow", "ArrowTip"],
+      "under": ["CurvedArrow", "CurvedDoubleArrow"],
+      "fact": ["n_points", "points", "points_sha256", "bbox", "getters", "getters.*"],
+      "reason": "Tip accommodation rescales the arc in the Reference (put_start_and_end_on against the tip base)."
+    },
+    {
+      "id": "fm-8pj7-curved-arrow-roots",
+      "kind": "open-bead",
+      "ref": "fm-8pj7",
+      "scope": ["classes", "scenes"],
+      "class": ["CurvedArrow", "CurvedDoubleArrow"],
+      "fact": ["n_points", "points", "points_sha256", "bbox", "getters", "getters.*"],
+      "reason": "Tip accommodation rescales the arc in the Reference."
+    },
+    {
+      "id": "fm-ym2i-glow-factor-field",
+      "kind": "open-bead",
+      "ref": "fm-ym2i",
+      "scope": ["classes", "scenes"],
+      "class": ["DotCloud", "TrueDot", "GlowDot", "GlowDots"],
+      "fact": "data_fields",
+      "reason": "The portal's point-cloud records carry glow_factor; the Reference's is a uniform."
+    },
+    {
+      "id": "fm-78b6-style-defaults-sweep",
+      "kind": "open-bead",
+      "ref": "fm-78b6",
+      "scope": ["classes", "scenes"],
+      "class": ["AnnularSector", "Sector", "ArrowTip", "VPrism", "DashedVMobject", "VectorizedPoint", "BackgroundRectangle", "Prismify", "SurfaceMesh", "VGroup", "Square", "Rectangle", "Line", "Text", "RoundedRectangle"],
+      "fact": ["style.stroke_color", "style.fill_color", "style.fill_opacity", "style.stroke_width", "style.stroke_opacity"],
+      "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults."
+    },
+    {
+      "id": "fm-fc53-empty-position",
+      "kind": "open-bead",
+      "ref": "fm-fc53",
+      "scope": ["classes", "scenes"],
+      "class": ["VGroup", "Group", "VMobject", "Mobject"],
+      "fact": "bbox",
+      "empty_only": true,
+      "reason": "Point-less mobjects stay at the origin through shift/move_to/next_to in the portal; the Reference moves their bounding box."
+    },
+    {
+      "id": "fm-4qmn-tex-part-nesting",
+      "kind": "open-bead",
+      "ref": "fm-4qmn",
+      "scope": "classes",
+      "subject": "Tex#2",
+      "fact": ["member", "class", "mro", "n_points", "style.*", "bbox", "points", "points_sha256"],
+      "reason": "Multi-string Tex nests one point-less container per string in the portal; the Reference's glyph family is flat."
+    },
+    {
+      "id": "fm-c1up-rounded-rectangle-corners",
+      "kind": "open-bead",
+      "ref": "fm-c1up",
+      "scope": "classes",
+      "subject": ["RoundedRectangle#1", "RoundedRectangle#2"],
+      "class": "RoundedRectangle",
+      "fact": ["n_points", "points", "points_sha256", "getters", "getters.*"],
+      "reason": "An explicit-radius RoundedRectangle has 21 points against the Reference's 25 (corner arc construction). BN-16 covers only the default radius."
     }
   ]
 }

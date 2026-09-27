@@ -289,13 +289,16 @@ def engine_identity(engine_id: str) -> dict:
     return {"engine": "franken_manim" if portal else "reference", "engine_id": engine_id}
 
 
-def public_names(mob) -> list[str]:
-    """Public attribute and method names on an instance: the reachable API surface."""
-    names = set()
-    for name in dir(mob):
-        if not name.startswith("_"):
-            names.add(name)
-    return sorted(names)
+def public_methods(mob) -> list[str]:
+    """Public methods of an instance's class: the callable API surface.
+
+    Instance data attributes are left out. The Reference's include GL renderer
+    state (shader_wrapper, outer_vert_indices, ...) that the portal does not
+    have by design (ADR-0021).
+    """
+    cls = type(mob)
+    return sorted(name for name in dir(cls)
+                  if not name.startswith("_") and callable(getattr(cls, name, None)))
 
 
 def class_sweep_constructions(sweep: dict):
@@ -322,8 +325,10 @@ def extract_constructions(engine_id: str, points_mode: str = "digest", only=None
             code = compile(source, f"<construction {subject}>", "eval")
             mob = eval(code, {"__builtins__": {}, **scope})  # noqa: S307
             record = extract(subject, [mob], namespace=namespace, points_mode=points_mode)
-            if api_names:
-                record["public_names"] = public_names(mob)
+            # A class's methods do not depend on its arguments: record them once,
+            # on the default call (subject without "#").
+            if api_names and "#" not in subject:
+                record["public_methods"] = public_methods(mob)
         except Exception as error:  # noqa: BLE001
             record = extract_error(subject, error)
         record["source"] = source
@@ -434,9 +439,11 @@ def load_exclusions(path) -> list[dict]:
         missing = {"id", "kind", "ref", "fact", "reason"} - set(row)
         if missing:
             raise ValueError(f"exclusion {row.get('id')!r} lacks {sorted(missing)}")
-        if row["kind"] not in ("behavior-note", "open-bead"):
-            raise ValueError(f"exclusion {row['id']!r}: kind must be behavior-note or open-bead")
-        if row.get("scope", "any") not in ("any", "constructions", "classes", "scenes"):
+        if row["kind"] not in ("behavior-note", "adr", "open-bead"):
+            raise ValueError(f"exclusion {row['id']!r}: kind must be behavior-note, adr or open-bead")
+        scopes = row.get("scope", "any")
+        scopes = [scopes] if isinstance(scopes, str) else scopes
+        if not set(scopes) <= {"any", "constructions", "classes", "scenes"}:
             raise ValueError(f"exclusion {row['id']!r}: scope must be any, constructions, classes or scenes")
     return rows
 
@@ -447,10 +454,11 @@ def _matches(value, pattern) -> bool:
     return any(fnmatch.fnmatchcase(value, p) for p in patterns)
 
 
-def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None):
+def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None, empty=False):
     """The first row covering this difference. Rows name the Reference-side class.
 
-    Optional row fields: `under` requires an ancestor whose class matches, and
+    Optional row fields: `under` requires an ancestor whose class matches,
+    `empty_only` requires the Reference member to have no points, and
     `mro_missing` admits an `mro` difference only when the Reference chain equals
     the portal chain plus exactly those names.
     """
@@ -460,6 +468,8 @@ def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None):
                 and _matches(fact, row["fact"])):
             continue
         if "under" in row and not any(_matches(a, row["under"]) for a in ancestors):
+            continue
+        if row.get("empty_only") and not empty:
             continue
         if "mro_missing" in row:
             ref_mro, portal_mro = values if values else (None, None)
@@ -537,6 +547,7 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
     subject = ref.get("subject", portal.get("subject"))
     differences, excluded = [], {}
     classes = {m["path"]: m["class"] for m in ref.get("members", ())}
+    ref_points = {m["path"]: m.get("n_points") for m in ref.get("members", ())}
     for m in portal.get("members", ()):
         classes.setdefault(m["path"], m["class"])
 
@@ -547,7 +558,8 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
     def note(path, member_class, fact, a, b):
         if fact.split(".")[0] in ignore:
             return
-        row = _excluded_by(exclusions, subject, member_class, fact, ancestors(path), (a, b))
+        row = _excluded_by(exclusions, subject, member_class, fact, ancestors(path), (a, b),
+                           empty=ref_points.get(path) == 0)
         if row is not None:
             excluded[row["id"]] = excluded.get(row["id"], 0) + 1
         elif len(differences) < limit:
@@ -576,10 +588,10 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
                 note(member["path"], member["class"], "member", "absent", member["class"])
     # The API surface: each Reference public name the portal instance lacks is a gap.
     # Names only the portal has are not compared (extensions are allowed).
-    if "public_names" in ref and "public_names" in portal:
+    if "public_methods" in ref and "public_methods" in portal:
         root_class = ref["members"][0]["class"] if ref.get("members") else None
-        for name in sorted(set(ref["public_names"]) - set(portal["public_names"])):
-            note("", root_class, f"public_names.{name}", "present", "absent")
+        for name in sorted(set(ref["public_methods"]) - set(portal["public_methods"])):
+            note("", root_class, f"public_methods.{name}", "present", "absent")
     # Scene-level facts from scene_facts(): exact count, quantized time.
     for key, same in (("camera_frame_roots", lambda a, b: a == b), ("time", _within_tolerance)):
         if key in ref or key in portal:
@@ -606,8 +618,13 @@ def _short(value):
 
 
 def in_scope(rows, scope: str):
-    """The rows that apply to a `constructions`, `classes` or `scenes` run."""
-    return [row for row in rows if row.get("scope", "any") in ("any", scope)]
+    """The rows that apply to a `constructions`, `classes` or `scenes` run. A row's
+    `scope` is one name or a list; `any` (the default) applies everywhere."""
+    def scopes(row):
+        value = row.get("scope", "any")
+        return [value] if isinstance(value, str) else value
+
+    return [row for row in rows if "any" in scopes(row) or scope in scopes(row)]
 
 
 def diff_files(reference_lines, portal_lines, exclusions=(), scope: str = "constructions"):
@@ -668,7 +685,7 @@ def check_constructions(reference_text: str, exclusions_text: str, engine_id: st
     """Extract a construction set in the running engine and diff it.
 
     The fixed construction set by default; with `sweep_text` (a class-sweep JSON),
-    every Appendix-A class's default and declared calls, public names included.
+    every Appendix-A class's default and declared calls, public methods included.
     This is the gate and e2e entry point. It returns the diff summary plus
     `compared` (subjects on both sides) and `failing` (subjects that differ
     or are one-sided). A zero-subject comparison is a failure, never a pass.
@@ -699,7 +716,7 @@ def main(argv=None) -> int:
     ext.add_argument("--engine-id", required=True)
     ext.add_argument("--points", choices=("digest", "full"), default="digest")
     ext.add_argument("--only", nargs="*")
-    ext.add_argument("--sweep", help="a class-sweep JSON: extract its classes (public names included)")
+    ext.add_argument("--sweep", help="a class-sweep JSON: extract its classes (public methods included)")
     ext.add_argument("out")
     dif = sub.add_parser("diff")
     dif.add_argument("reference")
