@@ -11,6 +11,8 @@ from itertools import islice
 import math
 import sys
 
+from .copying import FamilyRefs
+
 _MAX_FAMILY = 65_536
 _MAX_RECORDS = 16_777_216
 
@@ -135,8 +137,9 @@ def install_solid_groups(native):
             # The legacy portal exposes the per-face shape on Cube.resolution.
             # Keep that metadata; the point-free root itself is not a UV face.
             self.resolution = shape
-            self._solid_faces = g["_np"].empty(len(faces), dtype=object)
-            self._solid_faces[:] = faces
+            # FamilyRefs, not an object ndarray: an ndarray is invisible to the
+            # cycle collector, so Cube -> faces -> parents -> Cube never freed.
+            self._solid_faces = FamilyRefs(faces)
             self._index_faces()
 
     def index_faces(self):

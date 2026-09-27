@@ -23164,3 +23164,21 @@ def _generated_families_are_collected():
 _leaked_generated, _generated_kinds = _generated_families_are_collected()
 assert _leaked_generated == [], _leaked_generated
 assert _generated_kinds == {"FamilyRefs"}, _generated_kinds
+
+
+# Compound solids record their faces the same way. An object ndarray in
+# Cube._solid_faces (0c958e37) leaked every Cube and Prism with their six
+# Square3D faces, which then failed every later embedded suite's survivor check.
+def _compound_solids_are_collected():
+    import weakref as _weakref
+    solids = (manimlib.Cube(), manimlib.Prism())
+    refs = [_weakref.ref(mob) for solid in solids for mob in solid.get_family()]
+    kinds = {type(solid._solid_faces).__name__ for solid in solids}
+    del solids
+    gc.collect()
+    return [type(ref()).__name__ for ref in refs if ref() is not None], kinds
+
+
+_leaked_solids, _solid_face_kinds = _compound_solids_are_collected()
+assert _leaked_solids == [], _leaked_solids
+assert _solid_face_kinds == {"FamilyRefs"}, _solid_face_kinds
