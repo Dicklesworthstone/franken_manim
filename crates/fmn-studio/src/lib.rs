@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod advance;
+pub mod camera_bundle;
 pub mod host;
 pub mod inspect;
 pub mod interaction;
