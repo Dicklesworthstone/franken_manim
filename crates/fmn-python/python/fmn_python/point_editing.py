@@ -1,8 +1,8 @@
-"""Validate authored point tables before changing Marionette record generations.
+"""Admit point tables and preserve authored transform dispatch over native records.
 
 Native RecordBuffer resize, view lifetimes, paint lanes and path metadata remain
-owned by the existing Mobject/VMobject protocol. Only input admission lives here:
-empty Rust vector returns are valid empty point tables, not malformed (0,) rows.
+owned by the existing Mobject/VMobject protocol. Empty Rust vector returns are
+valid empty point tables, and authored point maps use the shared native matrices.
 """
 from __future__ import annotations
 

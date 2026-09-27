@@ -318,6 +318,15 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         "get_bounding_box_point", "get_center", "get_bounding_box",
     )
     rotation_protocols = _protocols(g, Mobject, rotation_hooks)
+    path_type = g.get("MoveAlongPath", ())
+    path_object_hooks = partial_hooks + (
+        "move_to", "shift", "get_center", "get_bounding_box_point",
+        "get_bounding_box", "_bbox_rows", "_each_stage_target",
+    )
+    path_object_protocols = _protocols(g, Mobject, path_object_hooks)
+    path_hooks = ("point_from_proportion", "_point_from_proportion", "has_points",
+                  "get_num_points", "__getattribute__", "__getattr__")
+    path_protocols = _protocols(g, g.get("VMobject", Mobject), path_hooks)
 
     def authored_family(root, object_protocols):
         # This is behavior admission, not interpolation's path-wise family
@@ -372,6 +381,17 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
                 return True
             if authored_family(animation.mobject, rotation_protocols):
                 return True
+        elif isinstance(animation, path_type):
+            # Path and receiver are independent protocols: a stock sampler
+            # does not license bypassing authored copies, updates or placement.
+            # Inspect descriptors before older path classifiers read operands.
+            if (_changed(animation, protocols) or any(
+                    _implementation(type(animation), name) is not None
+                    for name in ("mobject", "path"))):
+                return True
+            if (authored_family(animation.mobject, path_object_protocols)
+                    or _changed(animation.path, path_protocols)):
+                return True
         # Keep specialized native defaults and existing family capability
         # decisions. The guards above run BEFORE older classifiers which
         # traverse get_family or inspect methods through dynamic attributes.
@@ -384,6 +404,7 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         # Direct installers without later adapters keep the initial snapshot.
         nonlocal protocols, mobject_protocols, child_descriptors
         nonlocal reveal_protocols, partial_protocols, border_protocols, rotation_protocols
+        nonlocal path_object_protocols, path_protocols
         protocols = _protocols(g, animation_root, hooks)
         names = next(iter(mobject_protocols.values())).keys()
         mobject_protocols = _protocols(g, Mobject, names)
@@ -393,6 +414,8 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         partial_protocols = _protocols(g, Mobject, partial_hooks)
         border_protocols = _protocols(g, Mobject, border_hooks)
         rotation_protocols = _protocols(g, Mobject, rotation_hooks)
+        path_object_protocols = _protocols(g, Mobject, path_object_hooks)
+        path_protocols = _protocols(g, g.get("VMobject", Mobject), path_hooks)
 
     g["_requires_python_animation"] = requires
     g["_fmn_finalize_transform_dispatch"] = finalize_protocols

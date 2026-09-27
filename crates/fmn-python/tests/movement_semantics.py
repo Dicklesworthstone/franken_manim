@@ -309,3 +309,246 @@ for _case in (check_homotopy_family_lag,check_start_hook_and_complex_map,
               check_mixed_native_callback_succession,check_path_failure_and_scene_reuse,
               check_deformation_reaches_renderer):
     _case()
+
+# Moving along a native path still requires the receiver's authored lifecycle.
+from pathlib import Path as _Path
+import tempfile as _tempfile
+import unittest as _unittest
+from unittest.mock import patch as _patch
+import manimlib as _m
+
+
+class PathObjectProtocols(_unittest.TestCase):
+    def motion(self, obj, path=None, **kwargs):
+        return _m.MoveAlongPath(obj, _m.Line([0, 0, 0], [2, 0, 0]) if path is None else path,
+                                run_time=.125, rate_func=_m.linear, **kwargs)
+
+    @staticmethod
+    def center(obj):
+        points = obj.get_points()
+        return .5 * (points.min(axis=0) + points.max(axis=0))
+
+    def test_stock_path_motion_keeps_native_admission(self):
+        for obj in (_m.Square(), _m.Dot(), _m.VGroup(_m.Dot(), _m.Square())):
+            with self.subTest(obj=type(obj)):
+                self.assertFalse(_m._requires_python_animation(self.motion(obj)))
+
+    def test_authored_bounding_box_controls_placement_at_every_frame(self):
+        class Offset(_m.Square):
+            def get_bounding_box(self):
+                return super().get_bounding_box() + _m.UP
+        samples = []
+        obj = Offset()
+        obj.add_updater(lambda mob, dt: samples.append(self.center(mob))
+                        if mob is obj and dt > 0 else None, call=False)
+        animation = self.motion(obj)
+        self.assertTrue(_m._requires_python_animation(animation))
+        with _tempfile.TemporaryDirectory() as directory:
+            scene = _m.Scene()
+            with scene.render_session(_Path(directory) / 'bounds.y4m', resolution=(48, 32), fps=24):
+                scene.play(animation)
+        np.testing.assert_allclose(samples, [[2/3, -1, 0], [4/3, -1, 0], [2, -1, 0]], atol=3e-6)
+
+    def test_starting_copy_updater_drives_visible_shape_each_frame(self):
+        copied, elapsed, widths = [], [0.], []
+        class Authored(_m.Square):
+            def copy(self):
+                result = super().copy()
+                copied.append(result)
+                def grow(snapshot, dt):
+                    if dt > 0:
+                        elapsed[0] += dt
+                        self.set_width(1 + elapsed[0], stretch=True)
+                result.add_updater(grow, call=False)
+                return result
+        obj = Authored()
+        obj.add_updater(lambda mob, dt: widths.append(mob.get_width())
+                        if mob is obj and dt > 0 else None, call=False)
+        with _tempfile.TemporaryDirectory() as directory:
+            scene = _m.Scene()
+            with scene.render_session(_Path(directory) / 'growth.y4m', resolution=(48, 32), fps=24):
+                scene.play(self.motion(obj))
+        self.assertTrue(copied)
+        np.testing.assert_allclose(widths, [1+1/24, 1+2/24, 1+3/24], atol=3e-6)
+        np.testing.assert_allclose(self.center(obj), [2, 0, 0], atol=3e-6)
+
+    def test_snapshot_creation_waits_for_nested_begin(self):
+        seen = []
+        class Authored(_m.Square):
+            def copy(self):
+                seen.append(self.get_width())
+                return super().copy()
+        obj = Authored()
+        animation = self.motion(obj)
+        class Prefix(_m.Animation):
+            def finish(self):
+                super().finish()
+                obj.set_width(3, stretch=True)
+        _m.Scene().play(_m.Succession(Prefix(_m.Mobject(), run_time=.125), animation))
+        self.assertTrue(seen)
+        self.assertAlmostEqual(seen[-1], 3, places=5)
+        np.testing.assert_allclose(self.center(obj), [2, 0, 0], atol=3e-6)
+
+    def test_copy_descriptor_is_not_called_to_choose_execution(self):
+        reads = []
+        class Authored(_m.Square):
+            @property
+            def copy(self):
+                reads.append(self)
+                return lambda: _m.Square.copy(self)
+        obj = Authored()
+        animation = self.motion(obj)
+        self.assertTrue(_m._requires_python_animation(animation))
+        self.assertEqual(reads, [])
+        _m.Scene().play(animation)
+        self.assertTrue(reads)
+
+    def test_animation_operand_descriptors_are_not_read_at_admission(self):
+        for name in ('mobject', 'path'):
+            with self.subTest(name=name):
+                reads = []
+                class Authored(_m.MoveAlongPath):
+                    pass
+                animation = Authored(_m.Square(), _m.Line())
+                def get(instance):
+                    reads.append(name)
+                    return instance.__dict__[name]
+                setattr(Authored, name, property(get,
+                    lambda instance, value: instance.__dict__.__setitem__(name, value)))
+                self.assertTrue(_m._requires_python_animation(animation))
+                self.assertEqual(reads, [])
+
+    def test_starting_snapshot_update_override_uses_its_actual_receiver(self):
+        calls = []
+        class Authored(_m.Square):
+            def update(self, *args, **kwargs):
+                calls.append(self)
+                return super().update(*args, **kwargs)
+        obj = Authored()
+        animation = self.motion(obj)
+        self.assertTrue(_m._requires_python_animation(animation))
+        self.assertEqual(calls, [])
+        _m.Scene().play(animation)
+        self.assertIn(animation.starting_mobject, calls)
+        self.assertIsNot(animation.starting_mobject, obj)
+
+    def test_authored_path_admission_rechecks_live_state_at_begin(self):
+        healthy, calls = [True], []
+        class Path(_m.Line):
+            def has_points(self):
+                calls.append(self)
+                return healthy[0] and super().has_points()
+        path = Path([0, 0, 0], [2, 0, 0])
+        obj = _m.Square()
+        animation = self.motion(obj, path)
+        calls.clear()
+        self.assertTrue(_m._requires_python_animation(animation))
+        self.assertEqual(calls, [])
+        healthy[0] = False
+        scene = _m.Scene()
+        with self.assertRaisesRegex(ValueError, 'nonempty'):
+            scene.play(animation)
+        healthy[0] = True
+        scene.play(animation)
+        np.testing.assert_allclose(self.center(obj), [2, 0, 0], atol=3e-6)
+
+    def test_copy_failure_releases_suspension_and_allows_reuse(self):
+        error, failing = RuntimeError('path snapshot failed'), [True]
+        class Authored(_m.Square):
+            def copy(self):
+                if failing[0]:
+                    raise error
+                return super().copy()
+        obj, scene = Authored(), _m.Scene()
+        animation = self.motion(obj, suspend_mobject_updating=True)
+        with self.assertRaises(RuntimeError) as caught:
+            scene.play(animation)
+        self.assertIs(caught.exception, error)
+        self.assertFalse(obj._is_updating_suspended())
+        failing[0] = False
+        scene.play(animation)
+        self.assertFalse(obj._is_updating_suspended())
+        np.testing.assert_allclose(self.center(obj), [2, 0, 0], atol=3e-6)
+
+    def test_late_instance_and_base_snapshot_changes_remain_observable(self):
+        obj, calls = _m.Square(), []
+        animation = self.motion(obj)
+        self.assertFalse(_m._requires_python_animation(animation))
+        def duplicate():
+            calls.append(obj)
+            return _m.Square.copy(obj)
+        obj.copy = duplicate
+        self.assertTrue(_m._requires_python_animation(animation))
+        _m.Scene().play(animation)
+        self.assertIn(obj, calls)
+        original = _m.Mobject.copy
+        def copy(self):
+            calls.append(self)
+            return original(self)
+        with _patch.object(_m.Mobject, 'copy', copy):
+            other = _m.Square()
+            self.assertTrue(_m._requires_python_animation(self.motion(other)))
+            _m.Scene().play(self.motion(other))
+            self.assertIn(other, calls)
+
+    def test_callback_placement_reads_a_path_animated_earlier_in_the_same_frame(self):
+        class Offset(_m.Square):
+            def get_bounding_box(self):
+                return super().get_bounding_box() + _m.UP
+        obj, path, samples = Offset(), _m.Line([0, 0, 0], [2, 0, 0]), []
+        obj.add_updater(lambda mob, dt: samples.append(self.center(mob))
+                        if mob is obj and dt > 0 else None, call=False)
+        with _tempfile.TemporaryDirectory() as directory:
+            scene = _m.Scene()
+            with scene.render_session(_Path(directory) / 'live-path.y4m', resolution=(48, 32), fps=24):
+                scene.add(path, obj)
+                scene.play(path.animate.shift(_m.UP), self.motion(obj, path),
+                           run_time=.125, rate_func=_m.linear)
+        np.testing.assert_allclose(samples, [[2/3, -2/3, 0], [4/3, -1/3, 0], [2, 0, 0]], atol=3e-6)
+
+    def test_exact_authored_path_easing_at_48fps(self):
+        calls = []
+        class Offset(_m.Square):
+            def get_bounding_box(self):
+                return super().get_bounding_box() + _m.UP
+        def rate(alpha):
+            calls.append(alpha)
+            return alpha * alpha
+        obj = Offset()
+        with _tempfile.TemporaryDirectory() as directory:
+            scene = _m.Scene()
+            with scene.render_session(_Path(directory) / 'eased.y4m', resolution=(48, 32), fps=48):
+                scene.play(_m.MoveAlongPath(obj, _m.Line([0, 0, 0], [2, 0, 0]),
+                                             run_time=3/48, rate_func=rate))
+        np.testing.assert_allclose(calls, [0, 1/3, 2/3, 1, 1], atol=1e-15)
+        np.testing.assert_allclose(self.center(obj), [2, -1, 0], atol=3e-6)
+
+    def test_rendered_placement_matches_independent_native_path_controls(self):
+        class Offset(_m.Square):
+            def get_bounding_box(self):
+                return super().get_bounding_box() + _m.UP
+        def render(path, kind, workers):
+            scene = _m.Scene()
+            with scene.render_session(path, resolution=(64, 40), fps=24, threads=workers):
+                obj = (Offset() if kind == 'authored' else _m.Square()).scale(.4)
+                y = -1 if kind == 'expected' else 0
+                curve = _m.Line([0, y, 0], [2, y, 0])
+                scene.add(obj)
+                scene.play(self.motion(obj, curve))
+            return path.read_bytes()
+        with _tempfile.TemporaryDirectory() as directory:
+            root = _Path(directory)
+            expected = render(root/'expected.y4m', 'expected', 1)
+            self.assertNotEqual(expected, render(root/'ignored.y4m', 'ignored', 1))
+            for workers in (1, 4, 16):
+                with self.subTest(workers=workers):
+                    self.assertEqual(expected, render(root/f'{workers}.y4m', 'authored', workers))
+            frames = expected.split(b'FRAME\n')[1:]
+            self.assertEqual(len(frames), 3)
+            self.assertEqual(len(set(frames)), 3)
+
+
+_path_result = _unittest.TextTestRunner(verbosity=2).run(
+    _unittest.defaultTestLoader.loadTestsFromTestCase(PathObjectProtocols))
+if not _path_result.wasSuccessful():
+    raise AssertionError('path object protocols failed')
