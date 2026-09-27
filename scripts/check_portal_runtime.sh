@@ -62,6 +62,7 @@ python3 crates/fmn-python/tests/native_axial_solids.py
 python3 crates/fmn-python/tests/solid_group_lifecycle.py
 python3 crates/fmn-python/tests/vector_solid_group_lifecycle.py
 python3 crates/fmn-python/tests/native_surface_lifecycle.py
+python3 crates/fmn-python/tests/surface_record_export.py
 python3 crates/fmn-python/tests/native_graph_sampling.py
 python3 crates/fmn-python/tests/live_implicit.py
 python3 crates/fmn-python/tests/native_implicit_lifecycle.py

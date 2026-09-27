@@ -74,7 +74,18 @@ def install_point_editing(native):
         data["point"][count:] = values
         return self
 
-    for name, method in (("set_points", set_points), ("append_points", append_points)):
+    def get_shader_data(self):
+        # This historical name is a record export, not a GLSL operation.
+        # Surface supplies a NumPy triangle-index array. Its truth value is
+        # undefined for multiple elements (and [0] is false), so None alone
+        # denotes an unindexed stream. Empty topology must export no rows,
+        # including a nonempty one-row/one-column Surface grid.
+        indices = self.get_shader_vert_indices()
+        data = self.data
+        return data if indices is None else data[indices]
+
+    for name, method in (("set_points", set_points), ("append_points", append_points),
+                         ("get_shader_data", get_shader_data)):
         method.__name__ = name
         method.__qualname__ = Mobject.__qualname__ + "." + name
         method.__module__ = Mobject.__module__
