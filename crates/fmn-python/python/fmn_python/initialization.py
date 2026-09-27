@@ -128,6 +128,12 @@ def initialize(native: ModuleType) -> ModuleType:
             raise ImportError(f"invalid manimlib schema provenance: {error}") from error
         for installer in installers:
             installer(native)
+        # Dispatch compares authored hooks against the completed runtime, not
+        # intermediate implementations replaced by later shipping adapters.
+        # Consume this one-shot barrier before publishing the native module.
+        finalize_dispatch = namespace.pop("_fmn_finalize_transform_dispatch", None)
+        if finalize_dispatch is not None:
+            finalize_dispatch()
     except BaseException:
         # Do not retain an exception/traceback cycle owning native proxies. A
         # failed instance must be discarded, never retried as a success-shaped

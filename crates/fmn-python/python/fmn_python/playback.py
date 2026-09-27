@@ -269,6 +269,14 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
     # shipping implementations keep their native route.
     Mobject = g["Mobject"]
     mobject_protocols = _protocols(g, Mobject, (
+        # Native Transform owns all of these operations, not only the final
+        # field lerp. An authored starting/target copy, alignment, updater or
+        # release hook must execute through the shared Python lifecycle too.
+        "copy", "is_aligned_with", "align_data_and_family", "align_family",
+        "align_data", "align_points", "add_n_more_submobjects", "invisible_copy",
+        "has_updaters", "lock_matching_data", "lock_data", "lock_uniforms",
+        "unlock_data", "set_animating_status",
+        "_is_updating_suspended", "suspend_updating", "resume_updating", "update",
         "interpolate", "get_family", "__getattribute__", "__getattr__",
     ))
     # submobjects is normally a per-instance _LiveSubmobjects, not a method.
@@ -317,4 +325,17 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
                     return True
         return previous_requires(animation)
 
+    def finalize_protocols():
+        # The complete initializer installs native surface alignment after
+        # playback. Freeze its final shipping methods, not the temporary ones
+        # seen here, or every stock Transform would become a Python callback.
+        # Direct installers without later adapters keep the initial snapshot.
+        nonlocal protocols, mobject_protocols, child_descriptors
+        protocols = _protocols(g, Transform, hooks)
+        names = next(iter(mobject_protocols.values())).keys()
+        mobject_protocols = _protocols(g, Mobject, names)
+        child_descriptors = {cls: _implementation(cls, "submobjects")
+                             for cls in mobject_protocols}
+
     g["_requires_python_animation"] = requires
+    g["_fmn_finalize_transform_dispatch"] = finalize_protocols
