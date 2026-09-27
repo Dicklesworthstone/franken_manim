@@ -2252,6 +2252,25 @@ fn python_surface_hooks_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     Ok(RunOutcome::ok().with_counter("surface_hook_cases", cases))
 }
 
+/// Structural parity (fm-5wq.36): the fixed construction set, extracted in
+/// the embedded portal by the same `structural_facts.py` the Reference ran,
+/// matches the checked-in Reference facts except for BN-keyed and open-bead
+/// rows. A stale open-bead row (its bug fixed) fails, forcing its removal.
+fn python_structural_facts_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_structural_facts()
+        .map_err(|error| fail(format!("structural parity with the Reference: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.structural_facts")
+            .field("compared", report.compared)
+            .field("equal", report.equal)
+            .field("equal_with_exclusions", report.equal_with_exclusions)
+            .field("summary", report.summary.as_str()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("structural_subjects", report.compared)
+        .with_counter("structural_equal", report.equal))
+}
+
 fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_svg()
         .map_err(|error| fail(format!("Python native SVG: {error}")))?;
@@ -4837,6 +4856,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.structural_facts.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_structural_facts_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("structural_subjects", 25),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.structural_facts",
+            vec![FieldPred::u64_eq("compared", 25)],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_svg.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -6082,6 +6115,16 @@ fn catalog_invariants_hold() {
             .any(|scenario| scenario.surface == Surface::PythonInProcess),
         "Python lost its production composition scenario"
     );
+}
+
+#[test]
+fn python_structural_facts_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.structural_facts.v1")
+        .expect("structural facts scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }
 
 #[test]

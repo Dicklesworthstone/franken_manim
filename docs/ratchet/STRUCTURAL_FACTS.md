@@ -1,0 +1,104 @@
+# Structural facts — schema `fmn.structural-facts` v1
+
+One extractor, one diff, both engines (fm-5wq.36). The code lives in
+`crates/fmn-conformance/python/structural_facts.py` and runs unmodified in the
+pinned Reference (3b1b/manim @ `6199a00d`, under `xvfb-run`) and in the
+FrankenManim portal. It reads only the public manimlib API, so both engines
+are measured by the same code. The class sweep (fm-5wq.26), the corpus
+differential (fm-5wq.33) and the differential fuzzer (fm-5wq.34) consume it
+and add no second extractor.
+
+## Record
+
+One JSON object per *subject*: a construction, a class, or a scene's
+`self.mobjects` at `tear_down`.
+
+| key | meaning |
+|---|---|
+| `schema`, `version` | `fmn.structural-facts`, `1` |
+| `quanta_per_unit` | `1000`: every length is an integer count of 1e-3 scene units |
+| `subject` | stable identifier (construction id, class name, scene name) |
+| `source` | the construction's source text (constructions only) |
+| `engine` | `{engine: reference or franken_manim, engine_id}`, excluded from the diff |
+| `members` | depth-first members of every root, see below |
+| `error` | instead of `members` when construction raised: `"<ExceptionClass>: <first line>"` |
+| `truncated_at` | present only if the family exceeded 20,000 members |
+
+Each member has these fields:
+
+| key | meaning |
+|---|---|
+| `path` | dot-joined submobject indices under the root index: `"0"`, `"0.1"`, `"0.1.3"` |
+| `class` | `type(m).__name__` |
+| `mro` | the class chain restricted to names the engine's `manimlib` exports as the same object. Private names and stdlib classes (`Generic`, `ABC`) are dropped. |
+| `n_points`, `points_sha256` | point count, and sha256 of the quantized points as signed 64-bit little-endian integers |
+| `points` | the quantized point rows (only in `--points full`, up to 200,000 points) |
+| `bbox` | quantized `get_bounding_box()` (min, center, max) |
+| `data_fields` | `data.dtype.names` |
+| `z_index` | quantized |
+| `string` | `m.string` for StringMobject members |
+| `style` | VMobject only: fill/stroke color (uppercase hex), fill/stroke opacity and stroke width (quantized) |
+| `getters` | declared zero-argument getters per public class (`GETTERS` table), quantized when numeric. The value `"absent"` or `"raises <Class>"` is itself a fact. |
+
+**Quantization** is `round(x * 1000)`, half to even. Non-finite values map to
+distinct integer sentinels, and magnitudes are clamped at 2^61.
+
+**Canonical form** is JSON with sorted keys and no whitespace. Records hold
+only integers, strings, booleans, null, lists and objects, so equal facts are
+equal bytes.
+
+Changing the `GETTERS` table, the member fields, ordering or quantization is
+a **version bump**.
+
+## Diff (`fmn.structural-diff` v1)
+
+- Members are aligned by `path`. A path present on one side is a `member`
+  difference.
+- Quantized lengths (`points`, `bbox`, `z_index`, `getters.*`, `style.*`)
+  compare with one quantum of slack. That absorbs values straddling a
+  rounding boundary between two f64 paths; a move of two quanta (2e-3) is a
+  difference. Everything else is exact: class, MRO, counts, field names,
+  strings, digests.
+- A subject that raised on both sides with the same exception class is equal.
+- Verdicts are `equal`, `equal-with-exclusions`, `differs` and `one-sided`.
+  The first difference is reported with its path, fact, and both values.
+
+## Exclusions (`crates/fmn-conformance/fixtures/structural_facts/exclusions.json`)
+
+Each row names `subject`, `class` (Reference side) and `fact`, each a glob or
+a list of globs, and cites its `ref`. The first matching row wins.
+
+- `behavior-note` rows cite a BN and cover exactly what the note documents.
+- `open-bead` rows cite a bead for a known bug. A row that matches nothing in
+  a run is **stale** and fails the diff, so a fixed bug forces its row out.
+
+## Running it
+
+```bash
+# Reference facts (regenerate only on purpose; the header line records the command)
+PYTHONPATH=scripts/manim_ref xvfb-run -a <ref-venv>/bin/python \
+  crates/fmn-conformance/python/structural_facts.py extract \
+  --engine-id 3b1b/manim@6199a00d4c1b1127ebe45cb629c3f22538b10e13 --points full OUT.ndjson
+
+# Gate: installed portal against the checked-in Reference facts (check_portal_runtime.sh)
+python3 crates/fmn-conformance/python/structural_facts.py check --engine-id installed-wheel \
+  --reference crates/fmn-conformance/fixtures/structural_facts/reference_constructions.v1.ndjson \
+  --exclusions crates/fmn-conformance/fixtures/structural_facts/exclusions.json
+```
+
+The e2e scenario `parity.structural_facts.v1` runs the same check in the
+embedded portal. `test_structural_facts.py` holds the unit tests.
+
+## First measurement (2026-09-27, portal wheel from `fac2e515`)
+
+25 constructions: 15 equal, 10 equal with exclusions, 0 unexcluded.
+
+- **BN rows:** BN-05 glyph geometry, BN-08 Brace and DecimalNumber structure,
+  and BN-09 Annulus density. The Reference's `quadratic_bezier_points_for_arc`
+  defaults to 8 components; BN-09's one rule gives 16.
+- **Bugs found and filed, carried as open-bead rows:**
+  - fm-16u6: `VGroup` is not a `Group`;
+  - fm-78b6: style getter defaults;
+  - fm-15k9: glyph submobject classes.
+
+The Reference facts are byte-identical across two extractions.

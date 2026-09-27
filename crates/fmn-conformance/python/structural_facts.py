@@ -298,7 +298,10 @@ def extract_constructions(engine_id: str, points_mode: str = "digest", only=None
         if only is not None and subject not in only:
             continue
         try:
-            mob = eval(source, dict(scope))  # noqa: S307 - fixed, checked-in source text
+            # CONSTRUCTIONS is checked-in constant text. It is evaluated over the
+            # manimlib namespace only, with no builtins, so it can reach nothing else.
+            code = compile(source, f"<construction {subject}>", "eval")
+            mob = eval(code, {"__builtins__": {}, **scope})  # noqa: S307
             record = extract(subject, [mob], namespace=namespace, points_mode=points_mode)
         except Exception as error:  # noqa: BLE001
             record = extract_error(subject, error)

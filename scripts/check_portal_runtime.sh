@@ -26,6 +26,13 @@ print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
 
+python3 crates/fmn-conformance/python/test_structural_facts.py
+# Structural parity with the pinned Reference (fm-5wq.36): the installed
+# portal must match the checked-in Reference facts except for BN/open-bead rows.
+python3 crates/fmn-conformance/python/structural_facts.py check \
+    --engine-id installed-wheel \
+    --reference crates/fmn-conformance/fixtures/structural_facts/reference_constructions.v1.ndjson \
+    --exclusions crates/fmn-conformance/fixtures/structural_facts/exclusions.json
 python3 crates/fmn-python/tests/project_virtualenv.py
 python3 crates/fmn-python/tests/test_runtime_source_ownership.py
 python3 crates/fmn-python/tests/test_runtime_project_watch.py

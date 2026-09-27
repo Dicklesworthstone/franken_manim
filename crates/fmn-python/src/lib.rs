@@ -36,8 +36,12 @@ mod portal_svg;
 mod portal_texture;
 mod portal_typography;
 mod portal_video;
+#[cfg(any(test, feature = "gauntlet"))]
+mod structural_parity;
 #[cfg(feature = "gauntlet")]
 pub use portal_texture::{run_portal_gauntlet_surface_lifecycle, run_portal_gauntlet_textures};
+#[cfg(feature = "gauntlet")]
+pub use structural_parity::{StructuralParityReport, run_portal_gauntlet_structural_facts};
 mod portal_provenance;
 mod report;
 
