@@ -85,7 +85,14 @@ def install_tracker_interpolation(native: Any) -> None:
     def interpolate(self, mobject1, mobject2, alpha, path_func=None):
         if not isinstance(self, ValueTracker) or "value" in getattr(self, "locked_uniform_keys", ()):
             return original(self, mobject1, mobject2, alpha, path_func)
-        if self._vector_value() is not None:
+        # Uniform shape follows the endpoints. A scalar receiver can become
+        # a vector here; reading only its old shape would let the ordinary
+        # interpolator mutate live endpoint arrays before we snapshot them.
+        vector_endpoints = self._tracker_kind == 0 and any(
+            isinstance(endpoint, ValueTracker) and endpoint._vector_value() is not None
+            for endpoint in (mobject1, mobject2)
+        )
+        if self._vector_value() is not None or vector_endpoints:
             value = vector_value(self, mobject1, mobject2, float(alpha))
             result = original(self, mobject1, mobject2, alpha, path_func)
             # Uniform interpolation replaces the value array; its shape is

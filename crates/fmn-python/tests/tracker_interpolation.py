@@ -205,6 +205,62 @@ def test_vector_callback_alias_drives_actual_scene_geometry():
     np.testing.assert_allclose(dot.get_center()[:2], observed[-1], atol=1e-6)
 
 
+def test_scalar_receiver_snapshots_vector_endpoints_before_authored_path():
+    start, end = m.ValueTracker([0., 2.]), m.ValueTracker([8., 10.])
+    tracker = m.ValueTracker(-1.)
+    for mob in (tracker, start, end):
+        mob.set_points([[0., 0., 0.]])
+    def mutate_endpoint(first, last, alpha):
+        start.set_value([100., 200.])
+        return path(first, last, alpha)
+    tracker.interpolate(start, end, .5, path_func=mutate_endpoint)
+    np.testing.assert_array_equal(tracker.get_value(), [4., 6.])
+    assert tracker._tracker_value() == 4.
+
+
+def test_scalar_receiver_reads_live_vector_uniform_not_stale_native_lane():
+    start, end = m.ValueTracker([0., 2.]), m.ValueTracker([8., 10.])
+    start.get_value()[:] = [20., 30.]
+    tracker = m.ValueTracker(-1.)
+    tracker.interpolate(start, end, .5)
+    np.testing.assert_array_equal(tracker.get_value(), [14., 20.])
+    assert tracker._tracker_value() == 14.
+
+
+def test_scalar_promotion_bad_width_refuses_before_geometry_changes():
+    tracker, start, end = m.ValueTracker(7.), m.ValueTracker([0., 2.]), m.ValueTracker([1., 2., 3.])
+    for index, mob in enumerate((tracker, start, end)):
+        mob.set_points([[float(index), 0., 0.]])
+    before = tracker.data.copy()
+    try:
+        tracker.interpolate(start, end, .5)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("incompatible promotion widths were accepted")
+    np.testing.assert_array_equal(tracker.data, before)
+    assert tracker.get_value() == tracker._tracker_value() == 7.
+
+
+def test_bound_tracker_can_promote_demote_and_reenter_vector_callback_playback():
+    scene, tracker, dot = m.Scene(), m.ValueTracker(0.), m.Dot()
+    seen = []
+    def update(current):
+        value = np.asarray(tracker.get_value()).reshape(-1)
+        assert tracker._tracker_value() == value[0]
+        current.set_x(float(value[0]))
+        seen.append(value.copy())
+    dot.add_updater(update)
+    scene.add(tracker, dot)
+    for low, high in (([1., 3.], [5., 7.]), (2., 6.), ([0., 2., 4.], [8., 10., 12.])):
+        start, end = m.ValueTracker(low), m.ValueTracker(high)
+        scene.play(m.UpdateFromAlphaFunc(tracker, lambda current, alpha:
+                   current.interpolate(start, end, alpha)), run_time=.1, rate_func=m.linear)
+        np.testing.assert_array_equal(tracker.get_value(), high)
+    assert {len(value) for value in seen} == {1, 2, 3}
+    assert dot.get_x() == 8.
+
+
 def test_vector_alias_frames_match_independent_native_controls():
     from pathlib import Path
     import tempfile
