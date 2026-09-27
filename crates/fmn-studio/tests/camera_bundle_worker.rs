@@ -256,7 +256,7 @@ fn camera_worker_serves_the_real_framed_protocol_and_graceful_shutdown() {
     let limits = ProtocolLimits::default();
     let mut requests = Vec::new();
     for (index, request) in [
-        SupervisorRequest::Hello { version: CURRENT_VERSION, max_frame_bytes: limits.max_frame_bytes,
+        SupervisorRequest::Hello { version: CURRENT_VERSION, max_frame_bytes: limits.max_frame_bytes as u64,
             supervisor_build: sha256(b"host") },
         SupervisorRequest::Scrub { scene: NAME.into(), frame: 2 },
         SupervisorRequest::Play { scene: NAME.into(), command: studio_seek_command(NAME, 2).unwrap() },

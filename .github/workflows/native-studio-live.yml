@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/native-studio-live.yml'
       - 'crates/fmn-cli/src/**'
+      - 'crates/fmn-cli/tests/camera_studio.rs'
       - 'crates/fmn-studio/src/**'
       - 'crates/fmn-studio/tests/**'
       - 'crates/fmn-conformance/tests/e2e_scenarios.rs'
@@ -49,8 +50,39 @@ jobs:
             ~/.cargo/git
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Retain pinned-formatter output for the camera playback sources
+        run: |
+          python - <<'PYFORMAT'
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          destination = Path(os.environ["RUNNER_TEMP"]) / "camera-studio-checked-sources"
+          destination.mkdir()
+          files = (
+              "crates/fmn-studio/src/camera_bundle.rs",
+              "crates/fmn-studio/tests/camera_bundle_worker.rs",
+              "crates/fmn-cli/src/studio_live.rs",
+              "crates/fmn-cli/tests/camera_studio.rs",
+          )
+          for name in files:
+              copy = destination / name
+              copy.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(name, copy)
+              subprocess.run(["rustfmt", "--edition", "2024", "--config", "skip_children=true", str(copy)], check=True)
+          (destination / "source-sha.txt").write_text(os.environ["GITHUB_SHA"] + "\n")
+          PYFORMAT
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: camera-studio-checked-sources-${{ github.sha }}
+          path: ${{ runner.temp }}/camera-studio-checked-sources
+          retention-days: 3
+          if-no-files-found: error
       - name: Test the native editor, protocol, host and CLI registration
         run: |
+          cargo test --locked -p fmn-studio --test camera_bundle_worker
+          cargo test --locked -p fmn-cli --features cli,batch --test camera_studio
           cargo test --locked -p fmn-studio --lib
           cargo test --locked -p fmn-studio --test native_committed_input --test native_worker --test native_deferred_worker --test studio
           cargo test --locked -p fmn-cli --features cli,batch --lib studio_live
