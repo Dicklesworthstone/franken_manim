@@ -46,6 +46,7 @@ _STEPS = (
     ("svg_ingress", "install_svg_ingress"),
     ("text_authoring", "install_text_authoring"),
     ("string_lifecycle", "install_string_lifecycle"),
+    ("brace_lifecycle", "install_brace_lifecycle"),
     ("decimal_authoring", "install_decimal_authoring"),
     ("coordinate_mapping", "install_coordinate_labels"),
     ("live_tex", "install_live_tex"),
