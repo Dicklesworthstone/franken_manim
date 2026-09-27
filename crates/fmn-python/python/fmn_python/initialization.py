@@ -18,6 +18,7 @@ _STEPS = (
     ("point_editing", "install_point_editing"),
     ("point_cloud_lifecycle", "install_point_cloud_lifecycle"),
     ("point_cloud_materials", "install_point_cloud_materials"),
+    ("tracker_lifecycle", "install_tracker_lifecycle"),
     ("arrow_geometry", "install_arrow_geometry"),
     ("shape_matchers", "install_shape_matchers"),
     ("shape_matchers", "install_annotation_marks"),

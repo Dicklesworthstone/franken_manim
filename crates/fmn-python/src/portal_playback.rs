@@ -6,6 +6,43 @@
 
 use super::*;
 
+/// Allocate the authored tracker's record plane and typed f64 state together.
+/// Python runs the normal virtual hooks only after this allocation succeeds.
+/// Never replace a nursery which those hooks (or a schema descriptor) already
+/// initialized: that would discard its records, views and family identities.
+#[pyfunction]
+pub(crate) fn _portal_allocate_tracker(target: &Bound<'_, BridgeMobject>, kind: u8) -> PyResult<()> {
+    if kind > 2 {
+        return Err(PyValueError::new_err("unknown native tracker encoding"));
+    }
+    let check = |cell: &BridgeMobject| -> PyResult<()> {
+        if cell.initialized || cell.engine.is_some() || cell.mob.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "tracker engine initialization may run only once, before scene entry",
+            ));
+        }
+        Ok(())
+    };
+    check(&*target.try_borrow()?)?;
+    let schema = parse_schema(target)?;
+    let buffer = RecordBuffer::new(schema, 0).map_err(record_error_to_py)?;
+    // Reuse Marionette's encodings, including its deterministic logarithm.
+    // The public init_uniforms hook subsequently installs the authored value.
+    let mut nursery = Nursery::value_tracker(kind, if kind == 1 { 1.0 } else { 0.0 }, 0.0);
+    nursery
+        .stage
+        .get_mut(nursery.root)
+        .ok_or_else(|| StaleHandleError::new_err("new tracker root is stale"))?
+        .buffer = buffer;
+    // parse_schema may execute Python. Recheck under the publication borrow;
+    // neither a failed schema nor reentrant initialization mutates its target.
+    let mut cell = target.try_borrow_mut()?;
+    check(&cell)?;
+    cell.nursery = Some(nursery);
+    cell.initialized = true;
+    Ok(())
+}
+
 #[derive(Default)]
 pub(super) struct OutputTimeline {
     pub(super) final_state_only: bool,
@@ -146,6 +183,29 @@ pub(super) fn synchronize(scene: &Bound<'_, PyScene>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_tracker_lifecycle_and_native_rendering() {
+        crate::with_python_test_module("tracker lifecycle", |py, _module, globals| {
+            globals
+                .set_item(
+                    "__file__",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/tracker_lifecycle.py"),
+                )
+                .unwrap();
+            let source = CString::new(include_str!("../tests/tracker_lifecycle.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_tracker_lifecycle")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
 
     #[test]
     fn insert_timeline_rebases_live_time_and_skipped_intervals() {

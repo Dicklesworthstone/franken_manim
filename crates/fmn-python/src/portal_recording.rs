@@ -11,6 +11,10 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     // This runs after the schema bootstrap. Do not recreate PyO3's __all__:
     // these are private host boundaries, not a new wildcard import surface.
     module.setattr(
+        "_portal_allocate_tracker",
+        wrap_pyfunction!(portal_playback::_portal_allocate_tracker, module)?,
+    )?;
+    module.setattr(
         "_portal_begin_recording",
         wrap_pyfunction!(_portal_begin_recording, module)?,
     )?;
