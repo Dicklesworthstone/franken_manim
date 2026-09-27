@@ -17,6 +17,7 @@ _STEPS = (
     ("camera_lifecycle", "install_scene_camera_configuration"),
     ("camera_frame_lifecycle", "install_camera_frame_lifecycle"),
     ("copying", "install_mobject_copying"),
+    ("updater_dispatch", "install_updater_dispatch"),
     ("point_editing", "install_point_editing"),
     ("point_cloud_lifecycle", "install_point_cloud_lifecycle"),
     ("point_cloud_materials", "install_point_cloud_materials"),
