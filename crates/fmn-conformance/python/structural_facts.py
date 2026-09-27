@@ -547,7 +547,14 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
     subject = ref.get("subject", portal.get("subject"))
     differences, excluded = [], {}
     classes = {m["path"]: m["class"] for m in ref.get("members", ())}
-    ref_points = {m["path"]: m.get("n_points") for m in ref.get("members", ())}
+    # Points over each member's whole family: a group root has no points of its
+    # own, so `empty_only` means a point-less family, not a point-less root.
+    ref_points = {}
+    for m in ref.get("members", ()):
+        parts = m["path"].split(".")
+        for depth in range(1, len(parts) + 1):
+            prefix = ".".join(parts[:depth])
+            ref_points[prefix] = ref_points.get(prefix, 0) + (m.get("n_points") or 0)
     for m in portal.get("members", ()):
         classes.setdefault(m["path"], m["class"])
 

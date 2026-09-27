@@ -312,6 +312,68 @@ class RowScoping(unittest.TestCase):
         self.assertEqual(sf.diff_subject(a, c)["verdict"], "equal")
 
 
+class ClassSweep(unittest.TestCase):
+    def test_sweep_lists_each_default_then_its_declared_calls(self):
+        sweep = {"classes": ["Square", "Circle"], "calls": {"Square": ["Square(2)", "Square(3)"]}}
+        self.assertEqual(list(sf.class_sweep_constructions(sweep)),
+                         [("Square", "Square()"), ("Square#1", "Square(2)"),
+                          ("Square#2", "Square(3)"), ("Circle", "Circle()")])
+
+    def test_public_methods_are_class_callables_only(self):
+        square = Square(SQUARE)
+        square.data_attribute = 5
+        methods = sf.public_methods(square)
+        self.assertIn("get_vertices", methods)
+        self.assertNotIn("data_attribute", methods)
+        self.assertNotIn("points", methods)
+
+    def test_missing_reference_method_is_a_gap_and_portal_extras_are_not(self):
+        ref = dict(facts([Square(SQUARE)]), public_methods=["get_vertices", "shift"])
+        extra = dict(facts([Square(SQUARE)]), public_methods=["get_vertices", "shift", "extension"])
+        self.assertEqual(sf.diff_subject(ref, extra)["verdict"], "equal")
+        missing = dict(facts([Square(SQUARE)]), public_methods=["get_vertices"])
+        first = sf.diff_subject(ref, missing)["first_difference"]
+        self.assertEqual(first["fact"], "public_methods.shift")
+
+    def test_the_checked_in_sweep_covers_appendix_a_and_only_known_classes(self):
+        path = Path(__file__).resolve().parents[1] / "fixtures/structural_facts/class_sweep.json"
+        sweep = json.loads(path.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(sweep["classes"]), 150)
+        self.assertTrue({"VMobject", "VGroup", "Group"} <= set(sweep["classes"]))
+        self.assertTrue(set(sweep["calls"]) <= set(sweep["classes"]))
+        self.assertFalse([c for c in sweep["classes"] if c.startswith("_")])
+
+
+class RowConditions(unittest.TestCase):
+    def test_empty_only_applies_to_point_less_reference_members(self):
+        rows = [{"id": "e", "kind": "open-bead", "ref": "fm-x", "class": "VGroup",
+                 "fact": "bbox", "empty_only": True, "reason": "t"}]
+        empty_ref, empty_portal = facts([VGroup()]), facts([VGroup()])
+        empty_ref["members"][0]["bbox"] = [[1000, 0, 0]] * 3
+        self.assertEqual(sf.diff_subject(empty_ref, empty_portal, rows)["verdict"], "equal-with-exclusions")
+        full_ref = facts([VGroup(children=[Square(SQUARE)])])
+        full_portal = facts([VGroup(children=[Square(SQUARE)])])
+        full_ref["members"][0]["bbox"] = [[5000, 0, 0]] * 3
+        self.assertEqual(sf.diff_subject(full_ref, full_portal, rows)["verdict"], "differs")
+
+    def test_adr_kind_and_scope_lists_validate(self):
+        import tempfile
+
+        rows = {"exclusions": [
+            {"id": "a", "kind": "adr", "ref": "ADR-0020", "scope": ["classes", "scenes"],
+             "fact": "error", "reason": "t"}]}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump(rows, handle)
+        loaded = sf.load_exclusions(handle.name)
+        self.assertEqual([r["id"] for r in sf.in_scope(loaded, "classes")], ["a"])
+        self.assertEqual(sf.in_scope(loaded, "constructions"), [])
+        rows["exclusions"][0]["scope"] = ["nowhere"]
+        with open(handle.name, "w") as again:
+            json.dump(rows, again)
+        with self.assertRaises(ValueError):
+            sf.load_exclusions(handle.name)
+
+
 class ClassHook(unittest.TestCase):
     def setUp(self):
         self.original = sf._engine_namespace

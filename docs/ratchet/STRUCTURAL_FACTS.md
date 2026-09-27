@@ -89,6 +89,39 @@ python3 crates/fmn-conformance/python/structural_facts.py check --engine-id inst
 The e2e scenario `parity.structural_facts.v1` runs the same check in the
 embedded portal. `test_structural_facts.py` holds the unit tests.
 
+## Class sweep (fm-5wq.26)
+
+`crates/fmn-conformance/fixtures/structural_facts/class_sweep.json` lists every public mobject class in plan Appendix A (153 classes; private helpers such as `_AnimationBuilder` are excluded) and declares parameterized calls for the classes whose arguments matter (131 calls). Each class is constructed with its default call (subject `Class`), and each declared call gets subject `Class#n`. A default call that raises in both engines with the same exception class is equal; the error text records why the class is unconstructible without arguments.
+
+Sweep records add `public_methods`: the public callables of the instance's class, recorded once per class on the default call. A Reference method missing from the portal is a difference (`public_methods.<name>`). Portal extras are not compared. Instance data attributes are not compared either: the Reference's include GL renderer state that the portal deliberately lacks (ADR-0021).
+
+```bash
+python3 crates/fmn-conformance/python/structural_facts.py check --engine-id installed-wheel \
+  --sweep crates/fmn-conformance/fixtures/structural_facts/class_sweep.json \
+  --reference crates/fmn-conformance/fixtures/structural_facts/reference_classes.v1.ndjson \
+  --exclusions crates/fmn-conformance/fixtures/structural_facts/exclusions.json
+```
+
+The same check runs in the portal gate and, embedded, as the e2e scenario `parity.class_sweep.v1`. It takes seconds: 19 s for the Reference and 8 s for the portal on the dev host.
+
+**First measurement (portal wheel from `35c65d6e`):**
+- No Reference public method is missing from the portal on any class.
+- 162 constructions equal, 122 equal only through cited rows, 0 untriaged.
+- Planted negative: re-introducing origin-relative Cone scaling fails the gate on `Cone#1`'s bbox.
+
+## Exclusion row conditions
+
+Besides `subject`, `class` and `fact` (a glob or list of globs each), a row may carry:
+- `under` (an ancestor's class);
+- `empty_only` (the Reference member's whole family has no points);
+- `mro_missing` (the difference is exactly those missing names);
+- `scope` (`constructions`, `classes`, `scenes`, a list, or `any`).
+
+`kind` is one of:
+- `behavior-note` (cites BN-nn);
+- `adr` (cites ADR-nnnn);
+- `open-bead` (cites fm-…; stale when it matches nothing in its scope, which fails the run).
+
 ## Corpus differential (fm-5wq.33)
 
 `scripts/corpus_differential.py` runs candidate corpus scenes through both
