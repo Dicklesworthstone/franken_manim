@@ -130,6 +130,11 @@ def install_scene_camera_configuration(native):
         camera = self.__dict__.get("_camera")
         if camera is None:
             config = dict(self.camera_config)
+            # Scene already consumed this recipe into its authoritative frame.
+            # Re-evaluating it for a temporary CameraFrame repeats authored
+            # conversions and can observe caller-mutated arrays. The temporary
+            # capture frame is discarded below; only capture options remain.
+            config.pop("frame_config", None)
             if "samples" not in config:
                 config["samples"] = int(getattr(self, "samples", 0))
             camera = g["Camera"](**config)

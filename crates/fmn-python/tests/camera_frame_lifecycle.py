@@ -13,6 +13,7 @@ class CameraFrameLifecycleTests(unittest.TestCase):
             def init_data(self):
                 self.events = ['data']
                 self.seen_core = self._core
+                np.testing.assert_array_equal(self.get_center(), m.ORIGIN)
                 super().init_data()
             def init_points(self):
                 self.events.append('points')

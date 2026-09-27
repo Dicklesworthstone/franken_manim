@@ -30,7 +30,11 @@ time applies the native width-preserving pixel-aspect policy to the **existing
 live scene frame**. For example, width 5 at a 960-by-540 resolution yields a
 frame height of 2.8125. Until that first access, the frame retains the explicitly
 requested shape. Subsequent camera accesses do not reset its height, orientation,
-position or updaters. A render session realizes the camera before playback.
+position or updaters. The frame recipe is evaluated only during Scene
+construction, not again during lazy capture creation or a retry after a capture
+configuration error. Later pose changes go through `scene.frame`, not through
+mutations to the already-consumed `camera_config["frame_config"]` dictionary.
+A render session realizes the camera before playback.
 Unsupported capture options such as a window or background image still fail on
 first camera access, not merely on constructing a Scene.
 

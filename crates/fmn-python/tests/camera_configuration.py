@@ -153,5 +153,65 @@ class CameraConfigurationTests(unittest.TestCase):
             self.assertNotEqual(actual, render(root/'wrong', 1, False, True))
 
 
+    def test_lazy_camera_does_not_evaluate_frame_recipe_twice(self):
+        class Once:
+            def __init__(self, value):
+                self.value, self.calls = value, 0
+            def __float__(self):
+                self.calls += 1
+                if self.calls != 1:
+                    raise RuntimeError("frame recipe evaluated twice")
+                return self.value
+        fovy, width = Once(.8), Once(5.)
+        scene = m.Scene(camera_config={"resolution": (96, 54), "samples": 1,
+            "frame_config": {"frame_shape": (width, 3.), "fovy": fovy}})
+        frame = scene.frame
+        self.assertIs(scene.camera.frame, frame)
+        self.assertEqual((fovy.calls, width.calls), (1, 1))
+        self.assertEqual(frame.get_width(), 5.)
+        self.assertAlmostEqual(frame.get_field_of_view(), .8)
+
+    def test_caller_mutating_consumed_recipe_cannot_poison_capture(self):
+        shape = [5., 3.]
+        center = np.array([2., 1., 0.])
+        scene = m.Scene(camera_config={"resolution": (96, 54), "samples": 1,
+            "frame_config": {"frame_shape": shape, "center_point": center, "fovy": .8}})
+        shape[:] = [0., float('nan')]
+        center[:] = float('nan')
+        obj = m.Square(side_length=1., fill_color=m.RED, fill_opacity=1).move_to((2., 1., 0.))
+        expected = m.Camera(resolution=(96, 54), samples=1,
+            frame_config={"frame_shape": (5., 3.), "center_point": (2., 1., 0.), "fovy": .8})
+        self.assertEqual(scene.camera.capture_snapshot(obj).png(), expected.capture_snapshot(obj).png())
+        np.testing.assert_array_equal(scene.frame.get_center(), (2., 1., 0.))
+
+    def test_retrying_failed_capture_does_not_replay_recipe_callbacks(self):
+        calls = []
+        class Fovy:
+            def __float__(self):
+                calls.append("fovy")
+                return .8
+        scene = m.Scene(camera_config={"resolution": (0, 54),
+            "frame_config": {"fovy": Fovy(), "center_point": (2., 1., 0.)}})
+        with self.assertRaises(ValueError):
+            _ = scene.camera
+        self.assertNotIn("_camera", vars(scene))
+        self.assertEqual(calls, ["fovy"])
+        scene.frame.shift(m.RIGHT)
+        scene.camera_config["resolution"] = (96, 54)
+        self.assertIs(scene.camera.frame, scene.frame)
+        self.assertEqual(calls, ["fovy"])
+        np.testing.assert_array_equal(scene.frame.get_center(), (3., 1., 0.))
+
+    def test_consumed_frame_recipe_is_not_used_after_explicit_replacement(self):
+        scene = m.Scene(camera_config={"resolution": (96, 54),
+            "frame_config": {"frame_shape": (8., 4.)}})
+        scene.camera_config["frame_config"] = {"fovy": object()}
+        replacement = m.CameraFrame(frame_shape=(6., 4.), center_point=(3., 0., 0.), fovy=.7)
+        scene.frame = replacement
+        self.assertIs(scene.camera.frame, replacement)
+        self.assertEqual(replacement.get_shape(), (6., 6. / (96/54)))
+        self.assertAlmostEqual(replacement.get_field_of_view(), .7)
+
+
 if __name__ == '__main__':
     unittest.main()
