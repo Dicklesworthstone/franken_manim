@@ -59,20 +59,20 @@ fn _validate_point_cloud(target: &Bound<'_, BridgeMobject>) -> PyResult<()> {
         ));
     }
     with_stage(target, |stage, mob| -> PyResult<()> {
-        let entry = stage.get(mob).ok_or_else(|| {
-            StaleHandleError::new_err("point-cloud construction target is stale")
-        })?;
-        if entry.buffer.schema() != &schema
-            || entry.render_primitive() != RenderPrimitive::DotCloud
+        let entry = stage
+            .get(mob)
+            .ok_or_else(|| StaleHandleError::new_err("point-cloud construction target is stale"))?;
+        if entry.buffer.schema() != &schema || entry.render_primitive() != RenderPrimitive::DotCloud
         {
             return Err(PyValueError::new_err(
                 "point-cloud schema or native primitive changed during construction",
             ));
         }
         for name in ["point", "radius", "rgba", "glow_factor"] {
-            let values = entry.buffer.read_column(name).ok_or_else(|| {
-                PyValueError::new_err("point-cloud record field is missing")
-            })?;
+            let values = entry
+                .buffer
+                .read_column(name)
+                .ok_or_else(|| PyValueError::new_err("point-cloud record field is missing"))?;
             if values.iter().any(|value| !value.is_finite())
                 || (matches!(name, "radius" | "glow_factor")
                     && values.iter().any(|&value| value < 0.0))
@@ -115,8 +115,9 @@ mod tests {
     #[test]
     fn authored_point_cloud_records_and_native_rendering() {
         crate::with_python_test_module("authored point clouds", |py, _module, globals| {
-            let code = std::ffi::CString::new(include_str!("../tests/native_point_cloud_lifecycle.py"))
-                .unwrap();
+            let code =
+                std::ffi::CString::new(include_str!("../tests/native_point_cloud_lifecycle.py"))
+                    .unwrap();
             py.run(code.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .unwrap();
@@ -133,8 +134,9 @@ mod tests {
     #[test]
     fn live_point_cloud_materials_and_retained_frames() {
         crate::with_python_test_module("live point-cloud materials", |py, _module, globals| {
-            let code = std::ffi::CString::new(include_str!("../tests/native_point_cloud_materials.py"))
-                .unwrap();
+            let code =
+                std::ffi::CString::new(include_str!("../tests/native_point_cloud_materials.py"))
+                    .unwrap();
             py.run(code.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .unwrap();
@@ -147,5 +149,4 @@ mod tests {
                 .unwrap();
         });
     }
-
 }

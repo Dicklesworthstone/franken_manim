@@ -37,7 +37,7 @@ mod portal_texture;
 mod portal_typography;
 mod portal_video;
 #[cfg(feature = "gauntlet")]
-pub use portal_texture::run_portal_gauntlet_textures;
+pub use portal_texture::{run_portal_gauntlet_surface_lifecycle, run_portal_gauntlet_textures};
 mod portal_provenance;
 mod report;
 

@@ -2241,6 +2241,17 @@ fn python_scene_console_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     Ok(RunOutcome::ok().with_counter("console_checks", checks))
 }
 
+/// Authored Surface hooks (fm-5wq.13): subclasses of the stock solids
+/// sample their authored `uv_func` and dispatch `init_points` once at
+/// construction, and render the same bytes as the equivalent
+/// ParametricSurface.
+fn python_surface_hooks_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_surface_lifecycle()
+        .map_err(|error| fail(format!("Python surface hooks: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.surface_hooks").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("surface_hook_cases", cases))
+}
+
 fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_svg()
         .map_err(|error| fail(format!("Python native SVG: {error}")))?;
@@ -4815,6 +4826,17 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_surface_hooks.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_surface_hooks_run),
+        vec![Assertion::ExitCode(0), counter_eq("surface_hook_cases", 15)],
+        vec![LogExpect::span_present(
+            "e2e.python.surface_hooks",
+            vec![FieldPred::u64_eq("cases", 15)],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_svg.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -6060,6 +6082,16 @@ fn catalog_invariants_hold() {
             .any(|scenario| scenario.surface == Surface::PythonInProcess),
         "Python lost its production composition scenario"
     );
+}
+
+#[test]
+fn python_surface_hooks_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_surface_hooks.v1")
+        .expect("Python surface hooks scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }
 
 #[test]

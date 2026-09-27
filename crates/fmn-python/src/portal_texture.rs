@@ -5,6 +5,8 @@ use fmn_mobject::RenderPrimitive;
 
 #[path = "portal_surface.rs"]
 mod surface;
+#[cfg(feature = "gauntlet")]
+pub use surface::run_portal_gauntlet_surface_lifecycle;
 
 #[path = "portal_raster.rs"]
 mod raster;
