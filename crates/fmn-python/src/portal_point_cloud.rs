@@ -129,4 +129,23 @@ mod tests {
                 .unwrap();
         });
     }
+
+    #[test]
+    fn live_point_cloud_materials_and_retained_frames() {
+        crate::with_python_test_module("live point-cloud materials", |py, _module, globals| {
+            let code = std::ffi::CString::new(include_str!("../tests/native_point_cloud_materials.py"))
+                .unwrap();
+            py.run(code.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_native_point_cloud_materials")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
+
 }
