@@ -60,7 +60,7 @@ counts, byte count and SHA-256. Camera outcomes identify FMTL minor 1. Neither
 captured bundles nor the batch claim source-effect certification.
 
 Pixel-output options, `threads`, partial animation selection, subdivision,
-paired last-frame output, checkpoint/resume, and source certification are
+paired last-frame output and source certification are
 explicitly unsupported in this mode. They are refused before scene construction,
 rather than being ignored or written into an incompatible checkpoint receipt.
 Audio remains outside the current bundle format.
@@ -110,3 +110,64 @@ Robot mode writes one terminal JSON batch receipt to stdout. Authored print
 output and per-scene progress go to stderr. The receipt records succeeded,
 failed, cancelled, and not-run jobs separately. There is no new scene loop,
 renderer, worker scheduler, or shared mutable native owner in this route.
+
+
+## Checkpoint and resume
+
+Long batches can keep completed native bundles across failures or interruptions:
+
+```python
+options = dict(
+    format="fmtl", bundle_camera=True, resolution=(960, 540), fps=30,
+    checkpoint="progress.json", resume_key="scene-and-assets-v3",
+)
+report = render_scenes(jobs, "bundles", **options)
+# A later invocation retries only failed, cancelled, or unattempted jobs:
+report = render_scenes(jobs, "bundles", resume=True, **options)
+```
+
+The console accepts the same recovery options with named batches or write-all:
+
+```sh
+python -m fmn_python --robot scenes.py --write_all --format fmtl \
+    --bundle-camera --video_dir bundles \
+    --checkpoint progress.json --resume-key scene-and-assets-v3
+
+python -m fmn_python --robot scenes.py --write_all --format fmtl \
+    --bundle-camera --video_dir bundles \
+    --checkpoint progress.json --resume-key scene-and-assets-v3 --resume
+```
+
+This uses the existing versioned, atomically written batch journal and exclusive
+kernel lock. It does not add a bundle format, replay renderer, or source cache.
+The saved plan binds job order, names, constructor inputs, explicit resolution
+and FPS, camera mode, and normalized per-scene capture/output limits. These
+settings must match on resume, including limits omitted in favor of defaults.
+Plain JSON constructor arguments have the same isolated value semantics as
+other checkpointed batches. Invalid settings are refused before construction.
+
+Before executing any unfinished scene, every completed artifact is rehashed as
+a regular, non-symlink file and compared with its inventory and original native
+publication receipt. Bundle receipt schemas, counter types, SHA-256, dimensions,
+FPS, camera flags, and bounds are checked independently. Unknown future receipt
+or camera versions fail closed. A damaged/missing file, changed plan, or output
+that exists without a completed journal entry is an error, never permission to
+rewrite or silently trust an artifact.
+
+Progress is journaled after native publication and integrity validation, before
+observers run. A completed scene is not constructed or executed on resume; its
+immutable bundle receipt is restored with the same public shape. All-completed
+resumes run no scenes. The console still loads the source module to discover
+classes; this is not a promise that top-level Python effects are skipped.
+
+The caller supplies `resume_key` as an explicit version of scene code/assets.
+Change it when inputs for completed scenes change, then use fresh destinations
+and a new checkpoint. Neither the journal nor successful hash verification
+certifies Python source effects. A crash between artifact publication and
+journal publication leaves an unrecorded file which must be dealt with
+explicitly; it is never auto-adopted, overwritten, or deleted.
+
+The native recovery suite exercises both planar and camera bundles, partial
+success, interruption after frame capture, complete reuse, exact byte bounds,
+process-level console recovery and output corruption. Protocol suites test
+malformed receipts, plan changes, locks, symlinks and option-value parsing.

@@ -31,6 +31,7 @@ python3 crates/fmn-python/tests/test_runtime_source_ownership.py
 python3 crates/fmn-python/tests/test_runtime_project_watch.py
 python3 crates/fmn-python/tests/bundle_batching.py
 python3 crates/fmn-python/tests/bundle_batch_console.py
+python3 crates/fmn-python/tests/bundle_checkpoint_native.py
 python3 crates/fmn-python/tests/camera_configuration.py
 python3 crates/fmn-python/tests/camera_frame_lifecycle.py
 python3 crates/fmn-python/tests/public_update_dispatch.py
@@ -99,6 +100,8 @@ python3 crates/fmn-python/tests/svg_paint_ingress.py
 python3 crates/fmn-python/tests/svg_lifecycle.py
 
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
+python3 crates/fmn-python/tests/test_bundle_checkpoint_protocol.py
+python3 crates/fmn-python/tests/test_bundle_resume_cli_protocol.py
 python3 crates/fmn-python/tests/test_paired_output_protocol.py
 python3 crates/fmn-python/tests/test_scene_attributes.py
 python3 crates/fmn-python/tests/test_project_editor_facade.py

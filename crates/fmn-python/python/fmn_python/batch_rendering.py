@@ -273,8 +273,11 @@ def render_scenes(
     max_capture_bytes and max_output_bytes per scene. Limits are frozen and
     validated before any scene constructor runs. Completed bundles survive
     later failures. Pixel-output options, threads, partial playback, paired or
-    subdivided outputs, checkpoint/resume and certification are not applicable
-    to this mode and refuse before constructing any scene.
+    subdivided outputs and certification are not applicable to this mode and
+    refuse before constructing any scene. Checkpoint/resume retains the same
+    caller-owned resume_key contract: completed bundles are hash-verified and
+    skipped, never reconstructed as live Scenes. Camera mode, capture limits,
+    explicit resolution/FPS and constructor inputs must match the saved plan.
     """
     if not isinstance(format, str) or format not in _FORMATS | {"fmtl"}:
         raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, mov, or fmtl")
@@ -313,11 +316,11 @@ def render_scenes(
     if format == "fmtl":
         require_bundle_capability(native, camera=bundle_camera)
         if (threads is not None or selection is not None or subdivide or save_last_frame
-                or checkpoint is not None or reproducible or sources is not None
+                or reproducible or sources is not None
                 or runtime_identities is not None or _output_options):
             raise native._CapabilityError(
                 "FMTL batches require complete scene capture without pixel-output options, "
-                "threads, subdivision, paired output, checkpoints or source certification"
+                "threads, subdivision, paired output or source certification"
             )
         if ((resolution is not None and resolution[0] * resolution[1] > 16_777_216)
                 or (fps is not None and fps > 240)):
@@ -356,6 +359,8 @@ def render_scenes(
                 "format": format, "resolution": resolution, "fps": fps,
                 "threads": threads, "animation_range": selection,
                 "output_options": _output_options,
+                **({"bundle_camera": bundle_camera, "bundle_limits": limits}
+                   if format == "fmtl" else {}),
             })
             completed = journal.completed
             for index, job in enumerate(jobs):
@@ -455,6 +460,10 @@ def _record_checkpoint(journal, outcomes):
 def _restored_outcome(row):
     """Restore data only, never a pickled Scene or executable Python object."""
     data = dict(row["result"])
+    if data.get("format") == "fmtl":
+        from .bundle_checkpoint import restore_bundle_receipt
+        result = restore_bundle_receipt(data)
+        return SceneRenderOutcome(row["name"], result.destination, "succeeded", result=result)
     for name in ("fps", "threads", "bytes", "seed", "frame_count", "sample_frames"):
         value = data.get(name)
         if value is None and name in {"frame_count", "sample_frames"}:

@@ -14,6 +14,7 @@ import sys
 from .bundle_export import BundleExportSession, require_bundle_capability
 from .console_rendering import _tokens, _VALUE_FLAGS, _message, _MAX_SELECTED_SCENES
 from .batch_cli import _emit_result
+from .checkpoint_cli import CHECKPOINT_HELP, take_checkpoint_options
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_notes, _name_key, render_scenes
 from .scene_loading import SceneSource
 
@@ -85,7 +86,8 @@ def try_bundle_cli(native, arguments):
         return None
     robot = "--robot" in switches
     if "--help" in switches or "-h" in switches:
-        return native._portal_cli_emit(0, "success", "help", BUNDLE_HELP, robot, help=BUNDLE_HELP)
+        text = BUNDLE_HELP + "\n" + CHECKPOINT_HELP
+        return native._portal_cli_emit(0, "success", "help", text, robot, help=text)
     source = selected = destination = None
     session = report = None
     phase = "options"
@@ -110,6 +112,9 @@ def try_bundle_cli(native, arguments):
             keys = [_name_key(name) for name in requested]
             if len(set(keys)) != len(keys):
                 raise ValueError("selected scene names collide; each output must be unique")
+        native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
+        if recovery and not batch:
+            raise ValueError("checkpoint recovery requires multiple scene names or --write_all")
         # Refuse unsupported semantics before importing or constructing source.
         # Unsupported modes cannot be silently ignored by a bundle export.
         index = 0
@@ -169,7 +174,7 @@ def try_bundle_cli(native, arguments):
                     {name: loaded.scenes[name] for name in requested}, destination,
                     format="fmtl", resolution=(width, height), fps=fps,
                     bundle_camera=camera, continue_on_error=bool(keep_going),
-                    max_jobs=_MAX_SELECTED_SCENES,
+                    max_jobs=_MAX_SELECTED_SCENES, **recovery,
                     on_result=lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
                         file=sys.stderr,

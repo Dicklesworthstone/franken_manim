@@ -146,7 +146,7 @@ class BundleBatchProtocol(unittest.TestCase):
 
     def test_pixel_and_nonportable_modes_refuse_before_construction(self):
         modes = ({"threads": 1}, {"animation_range": (0, 1)}, {"subdivide": True},
-                 {"save_last_frame": True}, {"checkpoint": self.root / "checkpoint"},
+                 {"save_last_frame": True},
                  {"reproducible": True}, {"sources": {"scene.py": b"pass"}},
                  {"runtime_identities": {}}, {"_output_options": {"transparent": True}})
         for options in modes:

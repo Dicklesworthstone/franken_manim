@@ -271,12 +271,18 @@ class BatchCheckpoint:
                 raise ValueError("invalid checkpoint outcome status")
             if status == "succeeded":
                 receipt = row.get("result")
-                if not isinstance(receipt, dict) or receipt.get("destination") != str(destination) or receipt.get("format") != options["format"] or receipt.get("certified") is not False:
-                    raise ValueError("invalid checkpoint publication receipt")
+                if options["format"] == "fmtl":
+                    from .bundle_checkpoint import restore_bundle_receipt
+                    bundle = restore_bundle_receipt(receipt, destination=destination, options=options)
+                    size, digest = bundle.bytes, bundle.digest
+                else:
+                    if not isinstance(receipt, dict) or receipt.get("destination") != str(destination) or receipt.get("format") != options["format"] or receipt.get("certified") is not False:
+                        raise ValueError("invalid checkpoint publication receipt")
+                    size, digest = receipt.get("bytes"), receipt.get("digest")
                 actual = _inventory(destination)
                 if artifacts.get(job.name) != actual:
                     raise ValueError(f"checkpoint artifact is missing or modified: {destination}")
-                if options["format"] != "png_sequence" and (len(actual) != 1 or actual[0]["bytes"] != receipt.get("bytes") or actual[0]["sha256"] != receipt.get("digest")):
+                if options["format"] != "png_sequence" and (len(actual) != 1 or actual[0]["bytes"] != size or actual[0]["sha256"] != digest):
                     raise ValueError("checkpoint artifact does not match its native receipt")
                 self.artifacts[job.name] = actual
                 self.completed[job.name] = row
@@ -293,9 +299,14 @@ class BatchCheckpoint:
         rows = [outcome.as_dict() for outcome in outcomes]
         for outcome in outcomes:
             if outcome.status == "succeeded" and outcome.name not in self.artifacts:
-                files = _inventory(outcome.destination)
                 receipt = outcome.result
-                if receipt.format != "png_sequence" and (len(files) != 1 or files[0]["bytes"] != receipt.bytes or files[0]["sha256"] != receipt.digest):
+                bundle_mode = self.plan["options"]["format"] == "fmtl"
+                if bundle_mode:
+                    from .bundle_checkpoint import restore_bundle_receipt
+                    receipt = restore_bundle_receipt(receipt.as_dict(), destination=outcome.destination,
+                                                     options=self.plan["options"])
+                files = _inventory(outcome.destination)
+                if (bundle_mode or receipt.format != "png_sequence") and (len(files) != 1 or files[0]["bytes"] != receipt.bytes or files[0]["sha256"] != receipt.digest):
                     raise ValueError("published artifact does not match its native receipt")
                 self.artifacts[outcome.name] = files
         payload = _json({"schema": _SCHEMA, "version": _VERSION, "key": self.key,
