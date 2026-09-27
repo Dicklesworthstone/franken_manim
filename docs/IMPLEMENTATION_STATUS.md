@@ -1,6 +1,6 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-09-23. The September 23 assessment below supersedes earlier current-state statements; the September 9 and September 7 assessments and earlier execution records remain historical evidence.
+**Status date:** 2026-09-27. The September 27 assessment below supersedes earlier current-state statements; the September 23, September 9 and September 7 assessments and earlier execution records remain historical evidence.
 
 **September 7 reality-check source:** `d784048148002acdb7d3a914a8e764afcfad3b1d` on `main`; initially clean. That audit changed this report and Beads only.
 
@@ -8,6 +8,132 @@
 **Historical runtime-audit checkpoint:** `7aeb3f40a763998d07b43b74613f3c6becc49207`.  
 **Agent-governance checkpoint:** ADR-0023 and `docs/GOVERNANCE.md` through `19e1e8b0014f5e4dd68aebc0520cd7ba9fb98283`.  
 **Authority rule:** this document summarizes evidence. `.beads/issues.jsonl` remains the task, status, and dependency authority; the Revision-4 comprehensive plan remains the design authority.
+
+## 2026-09-27 reality check
+
+**Verdict: the native core converges and the portal answers real scenes, but main is structurally red, and the one release users can install is 40 days old and renders text upside down.**
+
+In four days (273 commits) several 09-23 findings were fixed:
+- the offline CLI renders through the multi-team frame pipeline;
+- 3D camera content reaches `fmn`;
+- a public `fmn::render` exists;
+- the perf rig's machine-shape and profile-detection bugs are fixed;
+- the certified manifest names its exact sources and a Python scene's file reads;
+- `linear_sum_assignment` is real;
+- Atlas solids and pre-`Scene.add` NumPy views now match the Reference.
+
+Measured against the Reference in this environment, the portal renders about 96% of the corpus scenes the Reference itself can render (1,052 of about 1,095). That is a much stronger statement than the headline 37.4%.
+
+Against that:
+- the working tree fails `cargo fmt --check` and `cargo test` at HEAD because of peer commits whose authors had no Rust toolchain;
+- hosted CI has not been green since 08-10;
+- the portal's Python layer grew 11.6% and its installer list from 54 to 75 in four days, with no ADR;
+- no performance gate has a qualified number;
+- a critical bug made `fmn-python` fail on every scene when the project directory contains its own virtualenv, which is uv's default layout. A peer fixed the loader during the audit (`87d6f185`), and I confirmed the fix on a wheel built from `bc8af88d`. The gate coverage is still missing, so fm-5wq.25 stays open.
+
+Assessment source: `main` at `52a53d69`/`91804f06`, re-checked at `bc8af88d` (peers committed during the audit). Beads at entry: 687 records (635 closed, 41 open, 11 in progress).
+
+### Executed evidence
+
+| Observation | Result and proof boundary |
+|---|---|
+| Native README matrix, HEAD release build (`build_id git:52a53d69`, `cargo_profile release`) | Exit 0 for all of these: `png_sequence`, `png`, `gif`, `y4m`, `video`, `--transparent` video, `--write_all`, `batch`, `doctor`, and the new camera builtins `surface_cube.v1`/`mixed_camera.v1`. `.py` is refused with exit 4. **The README's `demo/wasm/bundle.fmtl` command now fails with exit 5**: "shared pure rate is not in the catalog". It rendered at `6b6fd393` on 09-23, so the checked-in bundle has drifted from the engine. |
+| Certified, one host | `--reproducible` circle_shift at 320×180: 12 PNGs byte-identical at `--threads 1` and `--threads 16` (combined sha256 `e6cc8aec…`). |
+| Portal README scenes (HEAD wheel from `c03206ca`, CPython 3.13.1, NumPy 2.5.2) | In a clean directory, `SquareToCircle` and `Hello` render png, gif and y4m. Text is upright and the formula sits above the circle. `-o` and `-so` return exit 4 as documented. |
+| **Portal in a project with its own venv** | Wheel from `c03206ca`: `uv venv` inside the project, wheel installed there, then `.venv/bin/fmn-python scene.py Minimal` gives **exit 5, `ImportError: cannot load module more than once per process`**, on every scene. The same interpreter renders the same scene from a directory without a venv (exit 0). Cause: SceneSource treated every module under the scene's directory as project source and re-executed NumPy's C extension from `.venv/…/site-packages`.<br>After the peer loader fix `87d6f185`, a release wheel built from `bc8af88d` passes the same repro (exit 0, 1920×1080 PNG). NumPy resolves once, from the venv, and a local helper module stays project source. Still missing: the new unit tests are not in `check_portal_runtime.sh`, no gate case builds a real in-project venv, and the Studio/autoreload path is untested (fm-5wq.25). |
+| Local format gate | `cargo fmt --check` exits 1: nine files at `52a53d69`, **thirteen at `bc8af88d`**. All come from the peer camera-bundle and camera-Studio commits (`b090db93`, `bf10112e`, `59afb41c`, `38c83e10`). Formatted in `33007065`, and the check is clean at `34d15d10`. |
+| Workspace tests | `cargo test --workspace --no-fail-fast` at `52a53d69` (debug, 16 jobs): 161 of 163 completed test binaries passed. **Two failed.** Both were fixed on main during the audit, each with the planted red observed first:<br>- `crates/fmn/tests/native_camera_export.rs:82`: the direct-render half gave `render_camera` a camera background that differs from its export config, which the function refuses by contract. The test was never run by its author. Fixed in `33007065`: the setup is corrected and every assertion is unchanged.<br>- `perf_frontdoor::tests::fmtl_fixtures_are_deterministic_and_have_the_declared_duration`: the opening FMTL fixture digest moved. Bisected to `3e3bc154` and `a6ad13e3`, which resolve FadeIn and fixed-method targets at `begin` like the Reference. The bytes changed and the meaning did not: 30 certified frames are byte-identical across the old pin, `3e3bc154` and HEAD. Re-pinned with that provenance in `34d15d10`.<br>The fmn-python lib binary was still running when this was written (FMN_PYTHON_LIB). |
+| Hosted CI | The last green `ci.yml` run is still 2026-08-10. None of the last 400 runs succeeded. 59 workflows push directly to main. |
+| Corpus vs Reference | The 09-26 portal sweep (`15c65f1c`) has 1,052 of 2,814 ok. Of the 1,762 non-ok scenes, 1,124 need private assets or uninstalled packages in both engines. I ran the pinned Reference on the other 638 (`-s -w`, same workdir and config):<br>- 580 fail there too;<br>- 15 time out in both at 300 s;<br>- **43 render in the Reference but not the portal.** Of those 43:<br>&nbsp;&nbsp;- 28 are policy-bound: 18 unbundled fonts (Consolas, Roboto), 8 use `camera.moderngl` directly (ADR-0021), 1 fetches an image URL, 1 needs a CJK glyph;<br>&nbsp;&nbsp;- 8 are performance: the portal exceeded 180 s where the Reference took 6–34 s (6 scenes) or 207–274 s (2), though the portal sweep ran on a loaded host;<br>&nbsp;&nbsp;- 7 are functional bugs: VCube faces lack `get_vertices` (2 scenes); `set_value` on a VMobject; array truthiness; two non-finite refusals the Reference tolerates; and the retained-plan curve budget (KochZoom, 3.1M curves against a 1M cap).<br>An earlier pass of mine omitted `-w`. ManimGL then waits in a preview window, so successes looked like timeouts. The table above uses the corrected run. |
+
+### Vision checklist (changes since 2026-09-23)
+
+| # | Goal | Status now | Evidence |
+|---|---|---|---|
+| 1 | One-binary native CLI | **WORKING** for the builtins (now including 3D camera content) and FMTL. **The README FMTL demo is REGRESSED.** User content reaches `fmn` only as FMTL. | `camera_route.rs:15-17,83-88`; demo bundle exit 5. |
+| 2 | Native Rust front door | **PARTIAL.** The API exists, but the README example still renders nothing. | `crates/fmn/src/rendering.rs:264` `pub fn render`, exported at `lib.rs:75-77`; `README.md:119` still `NullSceneSink`. |
+| 3 | Native TeX (fmd-math) | **WORKING engine.** Pin is 34 commits behind upstream (was about 920). G2 criterion 7 is **not met** and is now honestly marked not green. | fmd at `e911be2a`: HTML is MathML, PDF display math uses fmd-math, PDF inline math prints TeX source in monospace (`src/pdf.rs:17697`); `G2-native-word-evidence.md:41`. |
+| 4 | Rev-4 scaling in the product | **PARTIAL** (was DISCONNECTED). | Offline CLI and `fmn::render` rasterize across all render teams (`fmn/src/rendering/pipeline.rs:106,391`). Pure-segment frame parallelism runs only for compiled FMTL replay (`fmn/src/rendering/compiled.rs:14`). Studio live and the portal still use one team (`fmn-cli/src/studio_live.rs:203`, `fmn-python/src/lib.rs:480-482`), so a Python scene on a 96-core plan uses one team; this is now item 6 of fm-sq8.5. `FramePacket` still holds `Rc<Snapshot>` (`fmn-anim/src/frame.rs:67`). |
+| 5 | Performance gates | **NOT MEASURED.** | ADR-0024 (isolated 8-core slice) is ratified and implemented; profile detection is fixed. macOS is still refused (`perf_host.rs:446`). No host-qualified observation exists (`PERFORMANCE_GATES.md:61,68`). PG-6 counts only arena pools; there is no global allocator (`perf_pg6.rs:358-409`). The PG-8 fixtures say `bare_metal true` under `pg8-shared-dev-host`. fm-5wq.8 is still open although its acceptance is met. |
+| 6 | Certified reproducibility | **WORKING on one host**, with the closure much improved. Cross-platform is **STALE**. | ADR-0025 build identity, C6 fonts plus scene reads, C3 split (fm-certified-closure-integrity-4fei closed). Both matrix legs have failed at "workspace tests" in every CI run since 08-10. The fsci-integrate `powf` leak is unchanged (`rk.rs:809`), and the arithmetic guard does not scan suite crates. |
+| 7 | Source-unedited Python scenes | **PARTIAL, much better measured.** About 96% of Reference-renderable corpus scenes render. **The project-venv bug is critical.** | Corpus row above. Hook dispatch reaches 95 of 105 constructible classes (Reference: all); the 10 left are native-build classes. |
+| 8 | Portal architecture | **WRONG_APPROACH, growing.** | 75 `_STEPS` installers (54 on 09-23). Python layer 54.4k lines (48.7k). `Scene.play` is replaced 14×, `_requires_python_animation` wrapped 18×. No ADR (fm-5wq.15, P2). Some dead stubs still pass the audit (`matching_blocks` returns `[]` at bootstrap:19697). |
+| 9 | Studio | **WORKING baseline.** Live input still works only for `interactive.v1`. Camera-bearing compiled scenes now open in the native Studio (`59afb41c`, `38c83e10`). | `fmn-cli/src/studio_live.rs:8-14`; fm-studio-general-input-juh7. |
+| 10 | WASM | **PARTIAL, unchanged.** Three scenes, no Scribe, size budget breached (fm-8j70). | `fmn-wasm/src/lib.rs:140`. |
+| 11 | Distribution | **STALE.** v0.4.0 (08-18) is still newest, with text upside down. No PyPI or npm. | `gh release list`. |
+| 12 | Engineering hygiene | **REGRESSED, repaired by hand again.** | fmt and two tests were red from peer commits built without a toolchain, and `portal_surface_init.rs` did not compile its tests until f9e970fd. All were fixed during the audit (`33007065`, `34d15d10`), and the next unbuilt landing will break them again until fm-0qvo exists. CI has had no green run since 08-10. |
+| 13 | Structural fidelity vs the Reference (§16.3) | **PARTIAL, and no systematic check exists.** | This session found three class-level divergences by comparing with the Reference: stock `Cone()` sat at z ∈ [0, 2] against the Reference's [−0.5, 1.5] (fixed, `0a5539ed`); pre-add views went stale (fixed, `5edfaa91`/`c03206ca`); VCube faces are not Polygons (open). There is no sweep of the Appendix-A classes against Reference constructor output. |
+
+### Would finishing the open beads close the gap?
+
+No. The open beads cover most pillars, but these gaps had no bead (all are filed now):
+- the project-venv loader failure (critical): fm-5wq.25;
+- a land gate that stops unbuilt or untested commits reaching main: fm-0qvo. That is the root cause of the recurring red, and nothing but manual cleanup addresses it today;
+- any systematic structural comparison with the Reference, at class, scene or random-program level: fm-5wq.36, fm-5wq.26, fm-5wq.33, fm-5wq.34;
+- the portal functional gaps from the corpus comparison: fm-5wq.27 to fm-5wq.31, fm-sq8.10;
+- the missing-font-family policy (18 of the 43 scenes, plus the CJK glyph miss): fm-mywm;
+- the stale README FMTL demo bundle: fm-34mh;
+- the mislabeled PG-8 fixtures: fm-5wq.32;
+- a same-host portal/Reference speed ratio while no qualified host exists: fm-5wq.35;
+- a nightly prerelease, so the public artifact cannot lag the source by weeks: fm-7wm.11;
+- **G2 criterion 7 itself.** fmd's PDF still writes inline `$…$` as monospace TeX source (`franken_markdown` `src/pdf.rs:17697`, unchanged at upstream `8ff5887`), and no bead or UPSTREAM_LEDGER row owned the fix. Without it the flagship gate cannot close from its own graph: fm-djcw, now blocking fm-i1q;
+- Studio live and portal renders using every render team: added to fm-sq8.5 as item 6, since its scope named only the CLI and facade.
+
+Several tracker states are also stale:
+- fm-5wq.8 was open with its acceptance met; it is now closed;
+- the fm-inr children have been claimed by agents with no activity since 09-20 (fm-inr.2.3 since 08-17).
+
+### Bridge plan
+
+The plan was revised in place across three ambition rounds. The first draft was a list of per-gap fixes. The revised plan changes how convergence is measured and how code lands, because today's most productive discovery method was direct comparison with the Reference. It found three engine-level bugs and 43 scene gaps in one day, and none of them was visible to "1,052 ok".
+
+**1. Make main reproducibly green, and keep it green.** Owner decision first: without it, every other claim below decays within hours.
+- Land gate: fm-0qvo (owner decision) and fm-neutralize-bot-push-workflows-ieol. A commit reaches main only through a check on an owned host.
+- Today's reds: fm-restore-green-ci-tqsr, covering fmt (9 files) and `native_camera_export`.
+- Then the gate also runs the installed-wheel portal gate, because most activity is portal work.
+
+**2. Make "runs" mean "means the same thing".** The corpus metric becomes a semantic-parity metric.
+- *One foundation:* fm-5wq.36 provides a versioned structural-facts schema, one pure-Python extractor that runs unmodified in both engines, and one diff with BN-keyed exclusions. The three consumers below share it, so they cannot disagree about quantization or ordering.
+- *Class level:* fm-5wq.26 compares every constructible Appendix-A class with the pinned Reference (points, family types, bbox, methods).
+- *Scene level:* fm-5wq.33 records structural facts when `construct` ends, for every corpus scene that runs in both engines, and diffs them. The facts are the family tree with types, point counts, quantized geometry hashes, bboxes and text content. The headline becomes "N scenes run and are structurally equal to the Reference, M differ (triaged)", not "N run".
+- *Differential API fuzzing:* fm-5wq.34 generates random manim call sequences (construct, transform, animate) and compares structural outputs between engines. Behavior-Noted divergences are exclusions. Every divergence is minimized by delta debugging into a unit repro. This is what systematically finds the class of bug found by hand today.
+- *Gallery at corpus scale* (part of fm-5wq.33): both engines already write each scene's final frame. Publish portal and Reference side by side, with SSIM and edge smoke metrics, for owner review. That is the Look Gallery the plan requires (§16.3), at a scale that catches regressions such as the weeks-long mirrored text.
+
+**3. Close the measured compatibility gaps**, all under the W10 epic:
+- project-venv loader: fm-5wq.25 (P0);
+- VCube faces: fm-5wq.27;
+- changeable-number copy: fm-5wq.28;
+- surface shader data: fm-5wq.29;
+- non-finite policy: fm-5wq.30;
+- curve budget: fm-sq8.10;
+- slow scenes: fm-5wq.31;
+- font-family policy ADR: fm-mywm, 18 scenes;
+- the 10 remaining native-build hook classes: fm-5wq.13.
+
+**4. Collapse the portal architecture before it grows further.** fm-5wq.15 is now P1.
+- The ADR should weigh generating the portal's class layer and hook dispatch from the one API schema (plan §16.2's own mechanism, never applied to portal behavior) against hand migration.
+- Freeze new installer modules until it is ratified.
+
+**5. Performance truth now, qualification when the host exists.**
+- Owner action: reboot one bare-metal host with the ADR-0024 isolation parameters (fm-inr.1).
+- Meanwhile, publish a labeled, unqualified, same-host interleaved corpus ratio: portal wall time over Reference wall time, for all scenes that run in both. Report the median and the tails with bootstrap intervals.
+- PG-1 promises ≤0.5×, and today nobody knows whether the typical ratio is below or above 1. At least 8 scenes are 5–30× slower.
+- fm-5wq.35 carries the ratio. fm-5wq.31 fixes the eight slow scenes directly, with deterministic work counters rather than wall time as its regression tests. fm-5wq.32 corrects the mislabeled PG-8 fixture.
+
+**6. Ship what exists.**
+- v0.5.0 (fm-7wm.9), with acceptance covering the project-venv layout, the README FMTL demo (fm-34mh) and upright text.
+- After that, a nightly prerelease from green main behind the land gate (fm-7wm.11), so the public artifact never lags the fixed source by weeks again.
+- README truth: the Rust example should call `fmn::render` (fm-facade-render-api-9ewt, fm-7wm.7).
+
+**7. Unchanged but still open:**
+- G2 criterion 7: fmd PDF inline math, upstream (fm-djcw, new);
+- the certified matrix re-run (fm-5wq.16) and libm leak (fm-certified-libm-leak-3aja);
+- Studio general input (fm-studio-general-input-juh7);
+- WASM Scribe and size (fm-8j70, fm-zsu);
+- the CUDA annex (fm-ktj);
+- fuzz campaigns (fm-5wq.19).
+
+Order: 1 (owner), then 2 and 3 in parallel, with 4 decided early. 5 runs continuously. 6 follows as soon as 1 holds and fm-5wq.25 lands.
 
 ## 2026-09-23 reality check
 
