@@ -54,6 +54,7 @@ python3 crates/fmn-python/tests/graph_admission.py
 python3 crates/fmn-python/tests/coordinate_mapping.py
 python3 crates/fmn-python/tests/number_line_lifecycle.py
 python3 crates/fmn-python/tests/decimal_lifecycle.py
+python3 crates/fmn-python/tests/infinite_readouts.py
 python3 crates/fmn-python/tests/string_lifecycle.py
 python3 crates/fmn-python/tests/brace_lifecycle.py
 python3 crates/fmn-python/tests/legacy_tex_lifecycle.py

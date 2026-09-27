@@ -41,15 +41,18 @@ def install_decimal_authoring(native):
     def normalize(value):
         if isinstance(value, (complex, np.complexfloating)):
             result = complex(value)
-            finite = math.isfinite(result.real) and math.isfinite(result.imag)
+            valid = math.isfinite(result.real) and math.isfinite(result.imag)
         else:
             try:
                 result = float(value)
             except (TypeError, ValueError, OverflowError) as error:
                 raise TypeError("DecimalNumber requires a real or complex number") from error
-            finite = math.isfinite(result)
-        if not finite:
-            raise ValueError("DecimalNumber requires a finite value in both real and imaginary components")
+            # Infinity is a display token, not a geometry coordinate. Real
+            # readouts can show a divergent limit through ordinary Text glyphs;
+            # complex nonfinite components and NaN remain explicit refusals.
+            valid = not math.isnan(result)
+        if not valid:
+            raise ValueError("DecimalNumber requires a non-NaN real value or finite complex components")
         return result
 
     def validate_format(self):
@@ -249,7 +252,11 @@ def install_decimal_authoring(native):
     def set_submobjects_from_number(self, number):
         number = normalize(number)
         validate_format(self)
-        if text_options(self) or _changed(self, protocols):
+        symbolic = not isinstance(number, complex) and math.isinf(number)
+        if text_options(self) or _changed(self, protocols) or symbolic:
+            # The native f64 number shelf intentionally accepts finite values.
+            # Infinity follows the existing authored-string composition path;
+            # only its finite glyph records ever reach the geometry engine.
             text = self.get_num_string(number)
             check_string(self, text)
             scratch = build_authored(self, text)

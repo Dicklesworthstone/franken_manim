@@ -24,13 +24,12 @@ def triangle_indices(nu, nv):
 class SurfaceRecordExportTests(unittest.TestCase):
     def test_triangle_stream_matches_independent_cell_order(self):
         for nu, nv in ((2, 2), (2, 5), (5, 2), (4, 7)):
-            with self.subTest(shape=(nu, nv)):
-                surface = m.ParametricSurface(lambda u, v: (u, v, u*v),
-                                              resolution=(nu, nv))
-                expected = surface.data.copy()[triangle_indices(nu, nv)]
-                stream = surface.get_shader_data()
-                self.assertEqual(len(stream), 6*(nu-1)*(nv-1))
-                np.testing.assert_array_equal(stream, expected)
+            surface = m.ParametricSurface(lambda u, v: (u, v, u*v),
+                                          resolution=(nu, nv))
+            expected = surface.data.copy()[triangle_indices(nu, nv)]
+            stream = surface.get_shader_data()
+            self.assertEqual(len(stream), 6*(nu-1)*(nv-1))
+            np.testing.assert_array_equal(stream, expected)
         print(json.dumps({"bead": "fm-5wq.29", "construct": "Surface(resolution=(4,7)).get_shader_data()",
                           "observed_records": len(stream), "expected_records": 108,
                           "reference": "6199a00:manimlib/mobject/types/surface.py:compute_triangle_indices",

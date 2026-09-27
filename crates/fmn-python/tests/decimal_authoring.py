@@ -100,7 +100,7 @@ class DecimalAuthoringTests(unittest.TestCase):
             if bound:
                 scene.add(m.VGroup(mob))
             before = snapshot(mob)
-            for value in (float("nan"), float("inf"), complex(0, float("nan")),
+            for value in (float("nan"), complex(0, float("nan")),
                           complex(float("inf"), 0), complex(1, float("inf")), "seven", object()):
                 with self.subTest(bound=bound, value=value):
                     with self.assertRaises((ValueError, TypeError)):
