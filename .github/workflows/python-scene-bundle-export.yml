@@ -81,6 +81,7 @@ jobs:
         run: |
           python crates/fmn-python/tests/bundle_cli_native.py
           python crates/fmn-python/tests/camera_bundle_cli_native.py
+          python crates/fmn-python/tests/camera_bundle_console.py
       - name: Check export sources without modifying the repository
         run: |
           rustfmt --edition 2024 --check --config skip_children=true crates/fmn-python/src/portal_studio/bundle.rs

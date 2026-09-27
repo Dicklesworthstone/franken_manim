@@ -18,15 +18,19 @@ from .scene_loading import SceneSource
 
 BUNDLE_HELP = """Portable scene bundles:
   fmn-python [--robot] SOURCE.py [SCENE] --format fmtl
-             [--resolution WIDTHxHEIGHT] [--fps FPS] [--video_dir FILE.fmtl]
+             [--bundle-camera] [--resolution WIDTHxHEIGHT] [--fps FPS]
+             [--video_dir FILE.fmtl]
 
 Runs setup/construct/tear_down once in the host interpreter. Actual captured
 frames become a bounded, code-free FMTL/1 artifact for standalone fmn/WASM.
 --video_dir names the exact output file (default: media/videos/SOURCE/SCENE.fmtl).
-Publication never overwrites a destination. FMTL/1 currently preserves planar
-vectors/text at the default camera/light/background. Camera, audio, depth,
-raster content, partial playback and source certification are explicit refusals.
-Use the same --resolution when replaying; FMTL/1 stores FPS but not resolution.
+Publication never overwrites a destination. The default minor-0 bundle preserves
+planar vectors/text at the default camera/light/background for native/WASM replay.
+--bundle-camera records each captured view, lighting and background together with
+3D/raster/vector geometry in a minor-1 bundle for the native fmn player. The
+camera-less WASM player refuses this mode. Replay never executes scene code.
+Audio, partial playback and source certification remain explicit refusals.
+Use the same --resolution for exact replay; camera bundles also record aspect.
 """
 
 _ALLOWED = frozenset({"--format", "--resolution", "--fps", "--video_dir"})
@@ -63,9 +67,10 @@ def _bundle_options(arguments):
 
 def try_bundle_cli(native, arguments):
     arguments, formats = _bundle_options(arguments)
-    if "fmtl" not in formats:
+    native_options, selectors, switches = _tokens(arguments, {"--robot", "--bundle-camera"})
+    camera = "--bundle-camera" in switches
+    if "fmtl" not in formats and not camera:
         return None
-    native_options, selectors, switches = _tokens(arguments, {"--robot"})
     robot = "--robot" in switches
     if "--help" in switches or "-h" in switches:
         return native._portal_cli_emit(0, "success", "help", BUNDLE_HELP, robot, help=BUNDLE_HELP)
@@ -73,8 +78,10 @@ def try_bundle_cli(native, arguments):
     session = None
     phase = "options"
     try:
-        if len(formats) != 1 or switches.count("--robot") > 1:
-            raise ValueError("bundle format and --robot must not be repeated")
+        if len(formats) != 1 or formats[0] != "fmtl":
+            raise ValueError("bundle export requires exactly one --format fmtl")
+        if switches.count("--robot") > 1 or switches.count("--bundle-camera") > 1:
+            raise ValueError("--robot and --bundle-camera must not be repeated")
         # Refuse unsupported semantics before importing or constructing source.
         # Unsupported modes cannot be silently ignored by a bundle export.
         index = 0
@@ -88,7 +95,7 @@ def try_bundle_cli(native, arguments):
                 raise native._CapabilityError(
                     f"{token} is not supported for full-scene FMTL export; use the PNG/video path"
                 )
-        require_bundle_capability(native)
+        require_bundle_capability(native, camera=camera)
         parser_options = list(native_options)
         parser_options[parser_options.index("--format") + 1] = "png_sequence"
         # Only common syntax/config validation is delegated. Never render PNG.
@@ -127,7 +134,10 @@ def try_bundle_cli(native, arguments):
             phase = "construct"
             scene = loaded.scenes[selected]()
             phase = "start"
-            session = BundleExportSession(scene, destination, resolution=(width, height), fps=fps, _native=native)
+            session = BundleExportSession(
+                scene, destination, resolution=(width, height), fps=fps,
+                camera=camera, _native=native,
+            )
             with session:
                 phase = "execute"
                 try:

@@ -167,5 +167,107 @@ class BundleCliProtocol(unittest.TestCase):
         self.assertEqual(self.native.instances, [])
 
 
+    def enable_camera(self):
+        begin = self.native._portal_begin_bundle
+        def camera_begin(*args):
+            begin(*args)
+            self.native.bundle_calls[-1] = ("camera", *self.native.bundle_calls[-1][1:])
+        self.native._portal_begin_camera_bundle = camera_begin
+
+    def test_camera_console_uses_only_camera_owner_and_reports_wire_version(self):
+        self.enable_camera()
+        code, receipt, _ = self.export("Example", "--bundle-camera", "--fps=24", "--resolution=128x72")
+        self.assertEqual(code, 0)
+        self.assertTrue(receipt["bundle"]["camera_track"])
+        self.assertEqual(receipt["bundle"]["fmtl_minor"], 1)
+        self.assertFalse(receipt["bundle"]["certified_source"])
+        self.assertEqual(self.native.bundle_calls,
+                         [("camera", str(self.output), 128, 72, 24), ("finish",)])
+        self.assertEqual(len(self.native.instances), 1)
+        self.assertNotIn("begin", self.native.instances[0].events)
+
+    def test_camera_console_does_not_require_planar_entry(self):
+        self.enable_camera()
+        del self.native._portal_begin_bundle
+        code, receipt, _ = self.export("--bundle-camera")
+        self.assertEqual(code, 0)
+        self.assertTrue(receipt["exported"])
+
+    def test_default_receipt_stays_planar_even_with_camera_capability(self):
+        self.enable_camera()
+        code, receipt, _ = self.export()
+        self.assertEqual(code, 0)
+        self.assertNotIn("camera_track", receipt["bundle"])
+        self.assertNotIn("fmtl_minor", receipt["bundle"])
+        self.assertEqual(self.native.bundle_calls[0][0], "begin")
+
+    def test_camera_capability_is_required_before_import(self):
+        self.source.write_text("raise AssertionError('source executed')\n")
+        for value in (None, False, "unavailable"):
+            with self.subTest(value=value):
+                self.native._portal_begin_camera_bundle = value
+                code, receipt, _ = self.export("--bundle-camera")
+                self.assertEqual(code, 4)
+                self.assertEqual(receipt["phase"], "options")
+                self.assertFalse(receipt["artifact_published"])
+        self.assertEqual(self.native.instances, [])
+        self.assertEqual(self.native.bundle_calls, [])
+
+    def test_camera_requires_fmtl_and_is_not_repeatable(self):
+        self.enable_camera()
+        self.source.write_text("raise AssertionError('source executed')\n")
+        for args in (("--bundle-camera",), ("--bundle-camera", "--format", "png_sequence"),
+                     ("--bundle-camera", "--bundle-camera", "--format", "fmtl")):
+            with self.subTest(args=args):
+                code, receipt, _ = self.invoke("--robot", str(self.source), *args)
+                self.assertEqual(code, 2)
+                self.assertEqual(receipt["phase"], "options")
+        self.assertEqual(self.native.instances, [])
+        self.assertEqual(self.native.bundle_calls, [])
+
+    def test_camera_switch_inside_option_value_is_not_interpreted(self):
+        self.assertIsNone(self.invoke("--video_dir", "--bundle-camera")[0])
+        code, receipt, _ = self.invoke("--robot", str(self.source), "--format=fmtl",
+                                        "--video_dir=--bundle-camera")
+        self.assertEqual(code, 0)
+        self.assertNotIn("camera_track", receipt["bundle"])
+        self.assertEqual(Path(receipt["destination"]).name, "--bundle-camera")
+        self.assertEqual(self.native.bundle_calls[0][0], "begin")
+
+    def test_camera_keeps_unsupported_playback_modes_fail_closed(self):
+        self.enable_camera()
+        self.source.write_text("raise AssertionError('source executed')\n")
+        for extra in (("--reproducible",), ("--skip_animations",), ("-n", "2"),
+                      ("--write_all",), ("--transparent",), ("--threads", "4")):
+            with self.subTest(extra=extra):
+                code, receipt, _ = self.export("--bundle-camera", *extra)
+                self.assertEqual(code, 4)
+                self.assertEqual(receipt["phase"], "options")
+        self.assertEqual(self.native.instances, [])
+        self.assertEqual(self.native.bundle_calls, [])
+
+    def test_camera_publication_error_aborts_without_success(self):
+        self.enable_camera()
+        def fail(scene):
+            raise ValueError("native output budget exceeded")
+        self.native._portal_finish_bundle = fail
+        code, receipt, _ = self.export("--bundle-camera")
+        self.assertEqual(code, 6)
+        self.assertEqual(receipt["phase"], "finish")
+        self.assertFalse(receipt["exported"])
+        self.assertFalse(receipt["artifact_published"])
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.native.instances[0].events[-1], "abort")
+
+    def test_camera_help_needs_no_native_capability_or_source(self):
+        self.source.write_text("raise AssertionError('source executed')\n")
+        code, receipt, _ = self.export("--bundle-camera", "--help")
+        self.assertEqual(code, 0)
+        self.assertIn("--bundle-camera", receipt["help"])
+        self.assertIn("minor-1", receipt["help"])
+        self.assertEqual(self.native.instances, [])
+        self.assertEqual(self.native.bundle_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
