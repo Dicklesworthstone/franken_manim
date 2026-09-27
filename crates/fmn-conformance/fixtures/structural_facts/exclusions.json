@@ -1,0 +1,75 @@
+{
+  "schema": "fmn.structural-exclusions",
+  "version": 1,
+  "rules": "First matching row wins; `class` names the Reference-side member class. A behavior-note row is a deliberate, documented divergence. An open-bead row is a known bug: it must be removed when the bead lands, because an unmatched open-bead row fails the diff.",
+  "exclusions": [
+    {
+      "id": "bn05-glyph-geometry",
+      "kind": "behavior-note",
+      "ref": "BN-05",
+      "subject": ["text", "tex"],
+      "fact": ["bbox", "points", "points_sha256", "n_points"],
+      "reason": "Native typesetting over bundled faces and fmd-math: glyph metrics and outlines differ from Pango/LaTeX by design. BN-05 keeps the structural conventions (glyph order and count), which stay compared."
+    },
+    {
+      "id": "fm-15k9-glyph-classes",
+      "kind": "open-bead",
+      "ref": "fm-15k9",
+      "subject": ["text", "tex"],
+      "class": ["VMobjectFromSVGPath", "Rectangle"],
+      "fact": ["class", "mro", "getters.get_vertices", "getters"],
+      "reason": "Glyphs are plain VMobject (Reference VMobjectFromSVGPath), and Tex rules are not Rectangle."
+    },
+    {
+      "id": "fm-78b6-text-root-style",
+      "kind": "open-bead",
+      "ref": "fm-78b6",
+      "subject": ["text", "tex"],
+      "class": ["Text", "Tex"],
+      "fact": ["style.fill_opacity", "style.stroke_width"],
+      "reason": "The point-less Text/Tex root reports opacity and width 1 where the Reference reports 0."
+    },
+    {
+      "id": "bn08-brace-path-family",
+      "kind": "behavior-note",
+      "ref": "BN-08",
+      "subject": "brace",
+      "fact": ["bbox", "points", "points_sha256", "n_points", "member", "style.fill_opacity"],
+      "reason": "Brace is a parametric path family, not a stretched \\underbrace glyph render (BN-08 table). Its root is the drawn path, not a container of glyph children."
+    },
+    {
+      "id": "bn08-decimal-native-text",
+      "kind": "behavior-note",
+      "ref": "BN-08",
+      "subject": "decimal_number",
+      "fact": ["bbox", "points", "points_sha256", "n_points", "member", "class", "mro", "string"],
+      "reason": "DecimalNumber is native text through Scribe with a per-character glyph cache (BN-08, 'Why DecimalNumber is a cache'). Each digit is one glyph submobject, not a Text wrapping a glyph path, so the family is one level shallower."
+    },
+    {
+      "id": "bn09-annulus-density",
+      "kind": "behavior-note",
+      "ref": "BN-09",
+      "subject": "annulus",
+      "class": "Annulus",
+      "fact": ["n_points", "points", "points_sha256"],
+      "reason": "The Reference builds each Annulus circle with quadratic_bezier_points_for_arc(TAU), whose default is 8 components (35 points). FrankenManim applies BN-09's one arc-density rule, 16 components for a full circle (67 points). bbox stays compared."
+    },
+    {
+      "id": "fm-78b6-style-defaults",
+      "kind": "open-bead",
+      "ref": "fm-78b6",
+      "subject": ["annulus", "vcube", "number_plane"],
+      "class": ["Annulus", "VCube", "NumberLine"],
+      "fact": ["style.stroke_color", "style.fill_color"],
+      "reason": "Default stroke/fill colors differ: Annulus and VCube stroke, NumberPlane axis fill."
+    },
+    {
+      "id": "fm-16u6-vgroup-not-group",
+      "kind": "open-bead",
+      "ref": "fm-16u6",
+      "class": ["VGroup", "Axes", "NumberPlane", "VCube", "VGroup3D"],
+      "fact": "mro",
+      "reason": "The portal's VGroup lacks Group in its MRO (Reference: VGroup(Group, VMobject))."
+    }
+  ]
+}
