@@ -16,7 +16,7 @@ from .vector_fields import _bind, _finite_nonnegative, _rows
 def install_vector_field_lifecycle(native: Any) -> None:
     """Construct authored fields through VMobject, then populate live vectors.
 
-    The unchanged concrete class retains its one-sample native construction.
+    The unchanged concrete class retains its one-sample construction.
     Authored subclasses use the Reference lifecycle: preparation, base hooks,
     final stroke configuration, then the public update_vectors operation.
     """
@@ -28,7 +28,6 @@ def install_vector_field_lifecycle(native: Any) -> None:
     from .movement import _changed, _protocols
 
     Field, np = g["VectorField"], g["_np"]
-    previous = Field.__init__
     constructing = InvocationGuard()
     hooks = ("init_data", "init_points", "init_uniforms", "init_colors",
              "update_sample_points", "init_base_stroke_width_array", "update_vectors",
@@ -45,15 +44,8 @@ def install_vector_field_lifecycle(native: Any) -> None:
                    norm_to_opacity_func=None, **kwargs):
         if self._is_bound():
             raise RuntimeError("a field constructor requires a detached target; use update_vectors")
-        options = dict(sample_coords=sample_coords, density=density,
-                       magnitude_range=magnitude_range, color=color, color_map_name=color_map_name,
-                       color_map=color_map, stroke_opacity=stroke_opacity, stroke_width=stroke_width,
-                       tip_width_ratio=tip_width_ratio, tip_len_to_width=tip_len_to_width,
-                       max_vect_len=max_vect_len, max_vect_len_to_step_size=max_vect_len_to_step_size,
-                       flat_stroke=flat_stroke, norm_to_opacity_func=norm_to_opacity_func)
         with constructing.hold(self, message="cannot reenter vector-field construction"):
-            if type(self) is Field and not _changed(self, protocols):
-                return previous(self, func, coordinate_system, **options, **kwargs)
+            stock = type(self) is Field and not _changed(self, protocols)
             if not callable(func):
                 raise TypeError("VectorField func must be callable")
             if color is None and color_map is not None and not callable(color_map):
@@ -61,7 +53,11 @@ def install_vector_field_lifecycle(native: Any) -> None:
             if norm_to_opacity_func is not None and not callable(norm_to_opacity_func):
                 raise TypeError("VectorField norm_to_opacity_func must be callable")
             if color is None and color_map is None and color_map_name not in (None, "3b1b_colormap"):
-                raise NotImplementedError("VectorField requires the bundled 3b1b_colormap or an authored color_map")
+                raise NotImplementedError(
+                    "VectorField color_map_name requires a non-bundled matplotlib "
+                    f"map: {color_map_name!r}; pass color=, color_map=, or "
+                    "color_map_name=None"
+                )
             g["_preflight_vmobject_style_kwargs"](kwargs)
             stroke_width = _finite_nonnegative(stroke_width, "stroke_width")
             stroke_opacity = _finite_nonnegative(stroke_opacity, "stroke_opacity")
@@ -102,11 +98,13 @@ def install_vector_field_lifecycle(native: Any) -> None:
             if math.isnan(length) or length <= 0:
                 raise ValueError("VectorField max displayed length must be positive and non-NaN")
             self.max_displayed_vect_len = length
-            if magnitude_range is None:
+            outputs = None
+            if stock or magnitude_range is None:
                 outputs = _rows(np, self._evaluate_outputs(), "VectorField callback output",
                                 count=len(coordinates))
-                norms = np.linalg.norm(outputs, axis=1)
-                magnitude_range = (0., float(norms.max(initial=0.)))
+                if magnitude_range is None:
+                    norms = np.linalg.norm(outputs, axis=1)
+                    magnitude_range = (0., float(norms.max(initial=0.)))
             low, high = (float(value) for value in magnitude_range)
             if not math.isfinite(low) or not math.isfinite(high) or high < low:
                 raise ValueError("VectorField magnitude_range must be finite and ordered")
@@ -119,7 +117,14 @@ def install_vector_field_lifecycle(native: Any) -> None:
             # declared material choice before its geometry builder consumes it.
             self.color = color
             self.set_stroke(color=color, width=stroke_width, opacity=stroke_opacity, flat=flat_stroke)
-            self.update_vectors()
+            # Ordinary construction already sampled to infer its color range.
+            # Publish those exact samples through the same live-update owner:
+            # no second callback, and no set_stroke pass erasing attenuation.
+            # Authored hooks always dispatch their public final operation.
+            if stock and not _changed(self, protocols):
+                g["_fmn_update_field_from_samples"](self, outputs)
+            else:
+                self.update_vectors()
 
     _bind(Field, "__init__", initialize)
     g["_FMN_VECTOR_FIELD_LIFECYCLE_INSTALLED"] = True

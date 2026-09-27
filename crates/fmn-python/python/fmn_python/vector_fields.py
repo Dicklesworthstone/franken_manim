@@ -55,6 +55,42 @@ def _finite_nonnegative(value, name):
     return value
 
 
+def _width_profile(np, values, count):
+    """Freeze an authored taper before geometry/color callbacks can change it."""
+    array = np.asarray(values)
+    if array.ndim != 1 or len(array) != count:
+        raise ValueError("VectorField base stroke profile must have one scalar per native point")
+    if array.dtype.kind == "c":
+        raise TypeError("VectorField base stroke profile must be real")
+    array = np.array(array, dtype=float, copy=True)
+    _representable(np, array, "VectorField base stroke profile")
+    if np.any(array < 0):
+        raise ValueError("VectorField base stroke profile must be nonnegative")
+    return array
+
+
+def _profile_widths(np, widths, profile, ratio):
+    """Apply authored taper to Atlas's per-arrow attenuation, not a new kernel.
+
+    Shaft lane zero contains stroke_width * native_short_vector_scale. Repeat
+    that value across the arrow's eight lanes before applying the profile.
+    Unchanged profiles retain the exact native bytes, including head rounding.
+    """
+    count = len(profile)
+    if widths.shape != (count, 1):
+        raise RuntimeError("native VectorField returned an inconsistent width count")
+    stock = np.ones(count)
+    stock[4::8], stock[5::8] = ratio, ratio / 2
+    stock[6::8], stock[7::8] = 0, 0
+    if np.array_equal(profile, stock):
+        return widths
+    with np.errstate(over="ignore", invalid="ignore"):
+        scaled = np.repeat(widths[0::8, 0].astype(float), 8)[:count] * profile
+    _representable(np, scaled, "VectorField profiled stroke widths")
+    widths[:, 0] = scaled
+    return widths
+
+
 def _bind(cls, name, function):
     function.__name__ = name
     function.__qualname__ = cls.__qualname__ + "." + name
@@ -194,7 +230,7 @@ def install_vector_fields(native: Any) -> None:
         if opacity is not None:
             target.data["stroke_rgba"][:, 3] = opacity
 
-    def update_vectors(self):
+    def update_from_samples(self, prepared_outputs=None):
         with _updating(self):
             self.get_points()
             before = self.data.copy()
@@ -204,21 +240,24 @@ def install_vector_fields(native: Any) -> None:
             coordinates = _rows(np, self.sample_coords, "VectorField sample_coords")
             chart = self.coordinate_system
             self.update_sample_points()
-            outputs = self._evaluate_outputs()
+            outputs = self._evaluate_outputs() if prepared_outputs is None else prepared_outputs
             outputs = _rows(np, outputs, "VectorField callback output", count=len(self.sample_points))
             self.init_base_stroke_width_array(len(outputs))
+            count = max(0, 8 * len(outputs) - 1)
+            profile = _width_profile(np, self.base_stroke_width_array, count)
+            ratio = _finite_nonnegative(self.tip_width_ratio, "tip_width_ratio")
             scratch = VMobject.__new__(VMobject)
             g["_install_live_state"](scratch)
             specs = self._build_geometry(g["_native_shell_factory"], outputs, target=scratch)
             if specs:
                 raise RuntimeError("native VectorField unexpectedly returned children")
             points = np.array(scratch.get_points(), copy=True)
-            count = max(0, 8 * len(outputs) - 1)
             if points.shape != (count, 3):
                 raise RuntimeError("native VectorField returned an inconsistent point count")
             _representable(np, points, "VectorField native points")
             widths = np.array(scratch.data["stroke_width"], copy=True)
             _representable(np, widths, "VectorField native widths")
+            widths = _profile_widths(np, widths, profile, ratio)
             # Keep live paint (including user edits) when no color/opacity
             # callback owns that channel. Scratch construction defaults are not
             # allowed to recolor a field or wipe other live record lanes.
@@ -235,6 +274,8 @@ def install_vector_fields(native: Any) -> None:
                     or tuple(self.pointlike_data_keys) != pointlike
                     or self.coordinate_system is not chart
                     or not np.array_equal(self.sample_coords, coordinates)
+                    or self.tip_width_ratio != ratio
+                    or not np.array_equal(self.base_stroke_width_array, profile)
                     or not np.array_equal(self.data, before)):
                 raise RuntimeError("vector field changed during sampling; candidate was not published")
             # Only now touch live records. The ordinary public set_points
@@ -244,6 +285,11 @@ def install_vector_fields(native: Any) -> None:
             self.data["stroke_width"][:] = widths
             self.data["stroke_rgba"][:] = paint
         return self
+
+    def update_vectors(self):
+        return update_from_samples(self)
+
+    g["_fmn_update_field_from_samples"] = update_from_samples
 
     for name, function in (
         ("_evaluate_outputs", evaluate), ("_geometry_inputs", geometry_inputs),
