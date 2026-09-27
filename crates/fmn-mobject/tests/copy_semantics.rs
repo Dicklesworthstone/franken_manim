@@ -615,17 +615,21 @@ fn cross_stage_move_keeps_record_storage_and_views_live() {
     assert!(view.write(0, "point", &[1.0, 2.0, 3.0]));
 
     let mut target = Stage::new();
-    let moved = source.move_into(root, &mut target).expect("cross-stage move");
+    let moved = source
+        .move_into(root, &mut target)
+        .expect("cross-stage move");
 
     // Same storage: the pre-move view reads and writes the destination entry.
     let moved_buffer = &target.get(moved).unwrap().buffer;
     assert!(view.is_attached_to(moved_buffer), "views stay attached");
     assert_eq!(moved_buffer.read(0, "point"), Some(vec![1.0, 2.0, 3.0]));
-    assert!(target
-        .get_mut(moved)
-        .unwrap()
-        .buffer
-        .write(1, "point", &[4.0, 5.0, 6.0]));
+    assert!(
+        target
+            .get_mut(moved)
+            .unwrap()
+            .buffer
+            .write(1, "point", &[4.0, 5.0, 6.0])
+    );
     assert_eq!(view.read(1, "point"), Some(vec![4.0, 5.0, 6.0]));
 
     // The family arrives whole, diamond sharing included.
