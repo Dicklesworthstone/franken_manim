@@ -1733,8 +1733,11 @@ mod tests {
             sha256(&opening_a).to_string(),
             // The bundle binds its renderer and animation-law identity:
             // re-pinned for fmtl-law:2 (835cc580) and renderer version 7
-            // (fm-sq8.9, +Y up the frame).
-            "bf2074f2a1acb95e60dab748705f3eccb6affd280fad787aefc2551eff62e13f"
+            // (fm-sq8.9, +Y up the frame); then for begin-time targets,
+            // since FadeIn (3e3bc154) and fixed-method transforms (a6ad13e3)
+            // no longer allocate construction-time copies. All 30 certified
+            // frames are byte-identical across both re-pins.
+            "939ab39bae8d220314f89dc97a94c71968a7e0ba5105abf1b94e44bbe78786a0"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);
