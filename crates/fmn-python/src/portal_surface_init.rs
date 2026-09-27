@@ -161,30 +161,36 @@ pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Authored Surface hooks through construction, regeneration and native
+/// rendering, including the stock solids' subclass hooks (fm-5wq.13). Runs
+/// `tests/native_surface_lifecycle.py` and returns how many cases ran.
+///
+/// # Errors
+/// Returns the actual Python/native acceptance failure.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_surface_lifecycle() -> Result<u64, String> {
+    crate::with_python_test_module("authored surface initialization", |py, _module, globals| {
+        let code = std::ffi::CString::new(include_str!("../tests/native_surface_lifecycle.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(code.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("run_native_surface_lifecycle")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "surface lifecycle entry point is absent".to_owned())?
+            .call0()
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<u64>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn authored_surface_lifecycle_and_native_rendering() {
-        crate::with_python_test_module(
-            "authored surface initialization",
-            |py, _module, globals| {
-                let code =
-                    std::ffi::CString::new(include_str!("../tests/native_surface_lifecycle.py"))
-                        .unwrap();
-                py.run(code.as_c_str(), Some(globals), Some(globals))
-                    .inspect_err(|error| error.print(py))
-                    .unwrap();
-                globals
-                    .get_item("run_native_surface_lifecycle")
-                    .unwrap()
-                    .unwrap()
-                    .call0()
-                    .inspect_err(|error| error.print(py))
-                    .unwrap();
-            },
-        );
+        assert_eq!(super::run_portal_gauntlet_surface_lifecycle().unwrap(), 15);
     }
 
     #[test]

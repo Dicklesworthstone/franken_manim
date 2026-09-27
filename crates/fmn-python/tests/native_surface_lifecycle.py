@@ -263,11 +263,105 @@ class SurfaceLifecycleTests(unittest.TestCase):
                 self.assertEqual(render(tmp/f'authored-{threads}.y4m', surface, threads), reference)
 
 
+    # fm-5wq.13. The stock solids build their geometry with specialized native
+    # constructors; a subclass that authors a Surface hook is constructed in
+    # Reference order instead. Each expectation is an independently sampled
+    # ParametricSurface plus the Reference constructor's own post-steps.
+    SOLIDS = (
+        (m.Sphere, dict(radius=2, resolution=(9, 7), true_normals=False), (0, m.TAU), (0, m.PI),
+         lambda s: s),
+        (m.Torus, dict(resolution=(8, 6)), (0, m.TAU), (0, m.TAU), lambda s: s),
+        (m.Cylinder, dict(height=3, radius=.5, axis=np.array([1., 1, 0]), resolution=(9, 5)),
+         (0, m.TAU), (-1, 1),
+         lambda s: s.scale(.5).set_depth(3, stretch=True).apply_matrix(m.z_to_vector([1, 1, 0]))),
+        (m.Cone, dict(radius=2, resolution=(9, 5)), (0, m.TAU), (0, 1),
+         lambda s: s.scale(2).set_depth(2, stretch=True)),
+        (m.Line3D, dict(start=np.array([0., 0, 0]), end=np.array([2., 1, 0]), resolution=(7, 5)),
+         (0, m.TAU), (-1, 1),
+         lambda s: s.scale(.025).set_depth(np.sqrt(5), stretch=True)
+                    .apply_matrix(m.z_to_vector([2, 1, 0])).shift([1, .5, 0])),
+        (m.Disk3D, dict(radius=3, resolution=(3, 12)), (0, 1), (0, m.TAU), lambda s: s.scale(3)),
+        (m.Square3D, dict(side_length=4, resolution=(3, 3)), (-1, 1), (-1, 1), lambda s: s.scale(2)),
+    )
+
+    @staticmethod
+    def wave(u, v):
+        return np.array([np.cos(u) + .1 * v, np.sin(u), .25 * v * v])
+
+    def test_authored_uv_func_on_every_solid_is_sampled_at_construction(self):
+        for cls, kwargs, u_range, v_range, place in self.SOLIDS:
+            with self.subTest(solid=cls.__name__):
+                calls = []
+                wave = self.wave
+
+                class Authored(cls):
+                    def uv_func(self, u, v):
+                        calls.append(1)
+                        return wave(u, v)
+                surface = Authored(**kwargs)
+                shape = kwargs['resolution']
+                # The Reference samples each grid point and its two nudges.
+                self.assertEqual(len(calls), 3 * shape[0] * shape[1])
+                expected = place(m.ParametricSurface(wave, u_range=u_range, v_range=v_range,
+                                                     resolution=shape))
+                np.testing.assert_allclose(surface.get_points(), expected.get_points(), atol=2e-5)
+                # Unmodified subclasses keep the specialized native solid.
+                plain = type('Plain' + cls.__name__, (cls,), {})(**kwargs)
+                np.testing.assert_array_equal(plain.get_points(), cls(**kwargs).get_points())
+
+    def test_sphere_true_normals_follow_the_reference_post_step(self):
+        class Squashed(m.Sphere):
+            def uv_func(self, u, v):
+                return self.radius * np.array([np.cos(u) * np.sin(v), .5 * np.sin(u) * np.sin(v), -np.cos(v)])
+        surface = Squashed(radius=2, resolution=(9, 7))
+        points, normals = surface.data['point'], surface.data['d_normal_point']
+        # The authored chart is sampled: y spans 2, half a radius-2 sphere's 4.
+        self.assertAlmostEqual(float(np.ptp(points[:, 1])), 2.0, places=5)
+        # ...and the Reference's true_normals post-step rescales that chart.
+        np.testing.assert_allclose(normals, points * ((2 + surface.normal_nudge) / 2), rtol=1e-6)
+
+    def test_point_hook_on_every_solid_is_dispatched_once(self):
+        for cls, kwargs, *_ in self.SOLIDS:
+            with self.subTest(solid=cls.__name__):
+                calls = []
+
+                class Hooked(cls):
+                    def init_points(self):
+                        calls.append(1)
+                        super().init_points()
+                        self.shift(m.RIGHT)
+                surface = Hooked(**kwargs)
+                self.assertEqual(len(calls), 1)
+                expected = cls(**kwargs).shift(m.RIGHT)
+                np.testing.assert_allclose(surface.get_points(), expected.get_points(), atol=2e-5)
+
+    def test_rendered_authored_solid_matches_the_parametric_surface(self):
+        wave = self.wave
+
+        class Authored(m.Sphere):
+            def uv_func(self, u, v):
+                return wave(u, v)
+
+        def render(path, surface):
+            scene = m.Scene()
+            with render_session(scene, path, resolution=(48, 32), fps=24, threads=2):
+                scene.add(surface)
+                scene.wait(.125)
+            return path.read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            options = dict(u_range=(0, m.TAU), v_range=(0, m.PI), resolution=(9, 7))
+            expected = render(tmp / 'parametric.y4m', m.ParametricSurface(wave, **options))
+            options.pop('u_range'), options.pop('v_range')
+            self.assertEqual(render(tmp / 'authored.y4m', Authored(true_normals=False, **options)), expected)
+
+
 def run_native_surface_lifecycle():
     result = unittest.TextTestRunner(verbosity=2).run(
         unittest.defaultTestLoader.loadTestsFromTestCase(SurfaceLifecycleTests))
     if not result.wasSuccessful():
         raise AssertionError('native surface lifecycle acceptance failed')
+    return result.testsRun
 
 
 if __name__ in ('__main__', '<run_path>'):

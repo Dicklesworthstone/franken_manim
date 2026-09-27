@@ -49,10 +49,14 @@
 //!   normals, bespoke to avoid the degenerate cross product at the poles
 //!   (a `radius` of `0`, which is a `ZeroDivisionError` in the Reference,
 //!   instead keeps the sampled column here).
-//! * **`Cone` is not z-centered.** Like the Reference, it is built on
-//!   `v ∈ (0, 1)` and then `scale(radius)`/`set_depth(height)` leave it
-//!   spanning `z ∈ [0, height]` along its axis; `Cylinder` (`v ∈ (−1, 1)`)
-//!   is centered.
+//! * **Solid placement follows the Reference's transform defaults.**
+//!   `scale`, `stretch` and `set_depth` act about the sampled shape's
+//!   bounding-box center (`about_edge=ORIGIN`), and `apply_matrix` acts about
+//!   the origin. A `Cone` is sampled on `v ∈ [0, 1]`, so it spans
+//!   `z ∈ [½ − height/2, ½ + height/2]` along its axis: `[−½, 3⁄2]` by
+//!   default, not `[0, height]`. A `Disk3D` with coarse angular sampling
+//!   drifts off the origin by its sampled polygon's center offset, exactly as
+//!   in the Reference.
 //! * **`SurfaceMesh` style kwargs land on the point-less parent.** In the
 //!   Reference the wireframe paths are bare `VMobject()` children, so they
 //!   draw with VMobject defaults (GREY_A stroke, width `4`, `auto` joint,
@@ -773,11 +777,31 @@ impl Surface {
         self.map_points(|p| add(p, offset))
     }
 
-    /// `scale(factor)` about the origin (the Reference's default
-    /// `about_point=None` for the solids' own post-init transforms).
+    /// `scale(factor, about_point=ORIGIN)`: scaling about the origin.
     #[must_use]
     pub fn scaled(self, factor: f64) -> Self {
         self.map_points(|p| mul(p, factor))
+    }
+
+    /// `scale(factor)` with the Reference's defaults: `about_point=None`
+    /// resolves `about_edge=ORIGIN`, the bounding-box center. A shape that
+    /// is not centered on the origin (a cone on `v ∈ [0, 1]`) stays about
+    /// its own center rather than scaling toward the origin.
+    #[must_use]
+    pub fn scaled_about_center(self, factor: f64) -> Self {
+        let center = self.center_point();
+        self.map_points(move |p| add(center, mul(sub(p, center), factor)))
+    }
+
+    /// `stretch(factor, dim)` with the Reference's defaults: about the
+    /// bounding-box center.
+    #[must_use]
+    pub fn stretched_about_center(self, factor: f64, dim: usize) -> Self {
+        let center = self.center_point()[dim];
+        self.map_points(move |mut p| {
+            p[dim] = center + (p[dim] - center) * factor;
+            p
+        })
     }
 
     /// `stretch(factor, dim)` about the origin.
@@ -837,8 +861,9 @@ impl Surface {
         self.shifted(sub(point, c))
     }
 
-    /// `rescale_to_fit(length, dim, stretch)`: a zero current length is a
-    /// no-op, exactly as the Reference returns early.
+    /// `rescale_to_fit(length, dim, stretch)` about the bounding-box center,
+    /// as the Reference's `stretch`/`scale` default. A zero current length
+    /// is a no-op, exactly as the Reference returns early.
     #[must_use]
     pub fn rescaled_to_fit(self, length: f64, dim: usize, stretch: bool) -> Self {
         let old = self.length_over_dim(dim);
@@ -847,9 +872,9 @@ impl Surface {
         }
         let factor = length / old;
         if stretch {
-            self.stretched(factor, dim)
+            self.stretched_about_center(factor, dim)
         } else {
-            self.scaled(factor)
+            self.scaled_about_center(factor)
         }
     }
 
@@ -1121,9 +1146,11 @@ impl From<Torus> for Mobject {
 /// `apply_matrix(z_to_vector(axis))` — all about the origin, on both
 /// pointlike columns.
 fn finish_cylinder(surface: Surface, radius: f64, height: f64, axis: Vec3) -> Surface {
+    // Reference Cylinder.init_points: scale and set_depth about the sampled
+    // shape's center; apply_matrix about the origin.
     let m = space_ops::z_to_vector(axis);
     surface
-        .scaled(radius)
+        .scaled_about_center(radius)
         .rescaled_to_fit(height, 2, true)
         .map_points(move |p| apply_matrix(p, &m))
 }
@@ -1370,7 +1397,7 @@ impl Disk3D {
     #[must_use]
     pub fn build(self) -> Surface {
         let surface = self.spec.sample(Self::uv_func);
-        surface.scaled(self.radius)
+        surface.scaled_about_center(self.radius)
     }
 }
 
@@ -1428,7 +1455,7 @@ impl Square3D {
     #[must_use]
     pub fn build(self) -> Surface {
         let surface = self.spec.sample(Self::uv_func);
-        surface.scaled(self.side_length / 2.0)
+        surface.scaled_about_center(self.side_length / 2.0)
     }
 }
 
@@ -3129,17 +3156,23 @@ mod tests {
     }
 
     #[test]
-    fn cone_spans_zero_to_height_like_the_reference() {
+    fn cone_is_placed_about_its_center_like_the_reference() {
         assert_close(Cone::uv_func(0.0, 0.0), [1.0, 0.0, 0.0]);
         assert_close(Cone::uv_func(0.0, 1.0), [0.0, 0.0, 1.0]);
         let cone = Cone::new(2.0, 1.0).build();
         let (min, max) = extents(&cone);
         assert!((min[0] + 1.0).abs() < 1e-9 && (max[0] - 1.0).abs() < 1e-9);
-        // Not centered: z runs 0 → height.
-        assert!(min[2].abs() < 1e-9 && (max[2] - 2.0).abs() < 1e-9);
-        // The v = 1 row is the tip at (0, 0, height): last grid point.
+        // set_depth stretches the unit cone (z ∈ [0, 1]) about its center
+        // z = ½: the pinned Reference's Cone() spans z ∈ [−½, 3⁄2].
+        assert!((min[2] + 0.5).abs() < 1e-9 && (max[2] - 1.5).abs() < 1e-9);
+        // The v = 1 row is the tip: last grid point.
         let last = cone.points()[cone.points().len() - 1];
-        assert_close(last, [0.0, 0.0, 2.0]);
+        assert_close(last, [0.0, 0.0, 1.5]);
+        // scale(radius) is about the center too, before set_depth.
+        let wide = Cone::new(2.0, 2.0).build();
+        let (min, max) = extents(&wide);
+        assert!((min[0] + 2.0).abs() < 1e-9 && (max[0] - 2.0).abs() < 1e-9);
+        assert!((min[2] + 0.5).abs() < 1e-9 && (max[2] - 1.5).abs() < 1e-9);
     }
 
     #[test]
@@ -3169,18 +3202,26 @@ mod tests {
         let disk = Disk3D::new(2.0).build();
         assert_eq!(disk.resolution(), (2, 100));
         assert_eq!(disk.points().len(), 200);
+        // scale(radius) is about the sampled unit disk's bounding-box center,
+        // as in the Reference. The +x rim (v = 0) is a grid point; −x falls
+        // between grid angles, so that center sits (1 + cos(49·TAU/99))/2
+        // right of the origin, and the scaled disk drifts left by it.
+        let offset = 0.5 * (1.0 + (49.0 * TAU / 99.0).cos());
         // u = 0: 100 copies of the center.
         for p in &disk.points()[..100] {
-            assert_close(*p, [0.0, 0.0, 0.0]);
+            assert_close(*p, [-offset, 0.0, 0.0]);
         }
         let (min, max) = extents(&disk);
-        // v = 0 and v = TAU are grid points, so +x is exact; the −x and ±y
-        // extremes fall between grid angles (TAU/99 off the true apex).
-        assert!((max[0] - 2.0).abs() < 1e-9);
+        assert!((max[0] - (2.0 - offset)).abs() < 1e-9);
         assert!(min[0] > -2.0 && min[0] < -1.998, "min x = {}", min[0]);
         assert!(min[1] > -2.0 && min[1] < -1.999, "min y = {}", min[1]);
         assert!(max[1] < 2.0 && max[1] > 1.999, "max y = {}", max[1]);
         assert!(min[2].abs() < EPS && max[2].abs() < EPS);
+        // Coarse angular sampling makes the drift visible: 12 angles leave
+        // −x at cos(5·TAU/11), and radius 3 moves the center by 2× that offset.
+        let coarse = Disk3D::new(3.0).resolution(3, 12).build();
+        let offset = 0.5 * (1.0 + (5.0 * TAU / 11.0).cos());
+        assert_close(coarse.points()[0], [-2.0 * offset, 0.0, 0.0]);
     }
 
     #[test]
