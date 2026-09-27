@@ -7,6 +7,7 @@ records, so custom schemas, children, and cooperative hooks keep their owners.
 """
 from __future__ import annotations
 
+import itertools
 import math
 
 from .surface_admission import _finite
@@ -22,6 +23,15 @@ def install_solid_lifecycle(native):
     # Capture identities now. Later class/instance monkey patches are authored
     # functions, even if they retain a built-in method's name or signature.
     torus_uv, sphere_uv = Torus.uv_func, Sphere.uv_func
+    Cylinder, Cone, Line3D = (g.get(name) for name in ("Cylinder", "Cone", "Line3D"))
+    axial_types = () if Cylinder is None else (Cylinder,)
+    cylinder_uv = None if Cylinder is None else Cylinder.uv_func
+    cone_uv = None if Cone is None else Cone.uv_func
+    placement_hooks = ("scale", "set_depth", "apply_matrix", "rescale_to_fit",
+                       "get_depth", "get_center", "get_bounding_box", "get_family",
+                       "apply_points_function", "apply_points_function_about_point")
+    placement_protocol = {} if Cylinder is None else {
+        name: getattr(Cylinder, name, None) for name in placement_hooks}
     # Invocation state, not copied/pickled attributes. A retained sphere
     # candidate exists only until the constructor finishes (also on failure).
     constructing = {}
@@ -33,11 +43,81 @@ def install_solid_lifecycle(native):
             raise RuntimeError("solid initialization is already in progress")
 
     def dimensions(self):
+        if isinstance(self, axial_types):
+            return (_finite(self.height, "surface height", record=True),
+                    _finite(self.radius, "surface radius", record=True),
+                    vector(self.axis, "surface axis"))
         keys = ("r1", "r2") if isinstance(self, Torus) else ("radius",)
         values = tuple(_finite(getattr(self, key), "surface " + key, record=True) for key in keys)
         if isinstance(self, Sphere):
             values += (bool(self.true_normals), bool(self.clockwise))
         return values
+
+    def vector(value, name):
+        values = tuple(itertools.islice(iter(value), 4))
+        if len(values) != 3:
+            raise ValueError(name + " must contain three coordinates")
+        return tuple(_finite(v, name, record=True) for v in values)
+
+    def cylinder(self, u_range=(0, math.tau), v_range=(-1, 1),
+                 resolution=(101, 11), height=2, radius=1, axis=(0, 0, 1), **kwargs):
+        admit(self)
+        height = _finite(height, "surface height", record=True)
+        radius = _finite(radius, "surface radius", record=True)
+        axis = vector(axis, "surface axis")
+        constructing[id(self)] = {}
+        try:
+            self.height, self.radius, self.axis = height, radius, np.array(axis)
+            super(Cylinder, self).__init__(u_range=u_range, v_range=v_range,
+                                          resolution=resolution, **kwargs)
+            kind = "cone" if Cone is not None and isinstance(self, Cone) else "cylinder"
+            self._solid_params = (kind, *dimensions(self))
+            self._solid_native_height = self.get_height()
+        finally:
+            constructing.pop(id(self), None)
+
+    def cone(self, u_range=(0, math.tau), v_range=(0, 1), *args, **kwargs):
+        # Keep the actual Cylinder MRO and its duplicate-argument semantics.
+        super(Cone, self).__init__(*args, u_range=u_range, v_range=v_range, **kwargs)
+
+    def place_axial(target, values):
+        height, radius, axis = values
+        target.scale(radius)
+        target.set_depth(height, stretch=True)
+        target.apply_matrix(g["z_to_vector"](axis))
+
+    def cylinder_points(self):
+        context = constructing.get(id(self))
+        if context is not None:
+            context["axial_placed"] = False
+        result = super(Cylinder, self).init_points()
+        if context is not None and not context["axial_placed"]:
+            # An authored UV map, transform hook or existing child family needs
+            # the actual receiver's Reference placement protocol. Native stock
+            # samples have already applied it in f64 and must not be scaled twice.
+            place_axial(self, dimensions(self))
+        return result
+
+    def plain_axial_placement(self):
+        if self.submobjects:
+            return False
+        for name, expected in placement_protocol.items():
+            method = getattr(self, name, None)
+            if getattr(method, "__func__", method) is not expected:
+                return False
+        return True
+
+    def line3d(self, start, end, width=.05, resolution=(21, 25), **kwargs):
+        admit(self)
+        start, end = (np.array(vector(v, "Line3D endpoint")) for v in (start, end))
+        width = _finite(width, "Line3D width", record=True)
+        axis = end - start
+        super(Line3D, self).__init__(height=g["get_norm"](axis), radius=width / 2,
+                                    axis=axis, resolution=resolution, **kwargs)
+        # Placement belongs AFTER every construction hook, as in the Reference.
+        # In particular, init_colors observes the centered cylinder and a custom
+        # point-hook replacement is translated too. Do not reconstruct the root.
+        self.shift((start + end) / 2)
 
     def torus(self, u_range=(0, math.tau), v_range=(0, math.tau),
               r1=3.0, r2=1.0, **kwargs):
@@ -105,17 +185,29 @@ def install_solid_lifecycle(native):
             constructing.pop(id(self), None)
 
     def build_candidate(self, options, sample):
-        if not isinstance(self, (Torus, Sphere)):
+        if not isinstance(self, (Torus, Sphere, *axial_types)):
             return sample()
         values = dimensions(self)
         function = getattr(self.uv_func, "__func__", None)
         is_torus = isinstance(self, Torus)
-        stock = function is (torus_uv if is_torus else sphere_uv)
+        is_axial = isinstance(self, axial_types)
+        is_cone = is_axial and Cone is not None and isinstance(self, Cone)
+        expected = (cone_uv if is_cone else cylinder_uv) if is_axial else (
+            torus_uv if is_torus else sphere_uv)
+        stock = function is expected
         context = constructing.get(id(self))
+        if is_axial and context is not None and not plain_axial_placement(self):
+            stock = False
         if stock:
             candidate = Surface.__new__(Surface)
             g["_install_live_state"](candidate)
-            if is_torus:
+            if is_axial:
+                builder = candidate._build_cone if is_cone else candidate._build_cylinder
+                specs = builder(g["_native_surface_shell_factory"], *values,
+                    options["u_range"], options["v_range"], options["resolution"],
+                    options["preferred_creation_axis"], options["epsilon"],
+                    options["normal_nudge"], 0)
+            elif is_torus:
                 specs = candidate._build_torus(
                     g["_native_surface_shell_factory"], *values,
                     options["u_range"], options["v_range"], options["resolution"],
@@ -137,9 +229,17 @@ def install_solid_lifecycle(native):
                 raise RuntimeError("a solid sampler returned unexpected children")
         else:
             candidate = sample()
+            if is_axial and context is None:
+                # The native UV sampler supplies the authored object-space map.
+                # Complete Cylinder's recipe through Marionette's existing
+                # pointlike transforms, before any live geometry is published.
+                # This also serves set_resolution and explicit regeneration.
+                place_axial(candidate, values)
         if dimensions(self) != values:
             raise RuntimeError("solid shape parameters changed during sampling; geometry was not published")
-        if not is_torus:
+        if is_axial and context is not None:
+            context["axial_placed"] = stock
+        if isinstance(self, Sphere):
             if context is not None:
                 context.update(candidate=candidate if stock else None,
                                sampled_radius=values[0], sampled_nudge=options["normal_nudge"])
@@ -149,7 +249,17 @@ def install_solid_lifecycle(native):
                 radial_normals(candidate, values[0], options["normal_nudge"])
         return candidate
 
-    for cls, constructor in ((Torus, torus), (Sphere, sphere)):
+    constructors = [(Torus, torus), (Sphere, sphere)]
+    constructors.extend((cls, method) for cls, method in (
+        (Cylinder, cylinder), (Cone, cone), (Line3D, line3d)) if cls is not None)
+    if Cylinder is not None:
+        # surface_geometry replaced the old Cylinder no-op before the shared
+        # construction protocol was installed. Follow the current Surface hook,
+        # which distinguishes initial publication from live regeneration.
+        cylinder_points.__name__, cylinder_points.__qualname__, cylinder_points.__module__ = (
+            "init_points", Cylinder.__qualname__ + ".init_points", Cylinder.__module__)
+        Cylinder.init_points = cylinder_points
+    for cls, constructor in constructors:
         constructor.__name__, constructor.__qualname__, constructor.__module__ = (
             "__init__", cls.__qualname__ + ".__init__", cls.__module__)
         cls.__init__ = constructor
