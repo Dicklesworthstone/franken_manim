@@ -62,6 +62,7 @@ _STEPS = (
     ("bar_chart", "install_bar_chart"),
     ("calculus", "install_graph_calculus"),
     ("vector_fields", "install_vector_fields"),
+    ("vector_field_lifecycle", "install_vector_field_lifecycle"),
     ("text_reveal", "install_text_reveal"),
     ("subset_reveal", "install_subset_reveal"),
     ("fading", "install_fading"),
