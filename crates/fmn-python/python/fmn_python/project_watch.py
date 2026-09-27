@@ -15,6 +15,8 @@ import threading
 import time
 from typing import Any, TYPE_CHECKING
 
+from .runtime_paths import RuntimePaths
+
 if TYPE_CHECKING:
     from .scene_project import SceneProject
 
@@ -45,19 +47,28 @@ def _snapshot(project: SceneProject, extra_paths: tuple[Path, ...]) -> tuple[tup
     """Watch local Python additions as well as already imported dependencies.
 
     Hidden/cache directories and directory symlinks are not recursively walked.
-    Explicit files and observed imports are included even in excluded locations.
+    Explicit files and observed imports can include hidden project locations,
+    but runtime installations are never part of the source watch set.
     Hash bytes, not mtimes: editors can preserve timestamps and file sizes.
     """
     source = project._source
-    paths = {source.path, *source.source_digests, *extra_paths}
+    runtime = getattr(source, "_runtime_paths", None) or RuntimePaths(source.root)
+    paths = {path for path in (source.path, *source.source_digests, *extra_paths)
+             if not runtime.contains(path)}
     directories = 0
     for directory, dirs, files in os.walk(source.root, followlinks=False, onerror=_walk_error):
+        if runtime.contains(Path(directory)):
+            dirs[:] = []
+            continue
         directories += 1
         if directories > _MAX_FILES:
             raise ValueError("scene watch exceeds its directory count budget")
         dirs[:] = sorted(name for name in dirs
-                         if not name.startswith(".") and name not in _IGNORED_DIRECTORIES)
-        paths.update(Path(directory) / name for name in files if name.endswith(".py"))
+                         if not name.startswith(".") and name not in _IGNORED_DIRECTORIES
+                         and not runtime.contains(Path(directory) / name)
+                         and not (Path(directory) / name / "pyvenv.cfg").is_file())
+        paths.update(Path(directory) / name for name in files if name.endswith(".py")
+                     and not runtime.contains(Path(directory) / name))
         if len(paths) > _MAX_FILES:
             raise ValueError("scene watch exceeds its file count budget")
     if len(paths) > _MAX_FILES:
@@ -67,6 +78,8 @@ def _snapshot(project: SceneProject, extra_paths: tuple[Path, ...]) -> tuple[tup
         try:
             # Resolve file links, but never open a FIFO/device while polling.
             target = path.resolve()
+            if runtime.contains(target):
+                continue
             before = target.stat()
             if not stat.S_ISREG(before.st_mode):
                 raise ValueError(f"scene watch input must be a regular file: {path}")

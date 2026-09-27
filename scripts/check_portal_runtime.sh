@@ -26,6 +26,9 @@ print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
 
+python3 crates/fmn-python/tests/project_virtualenv.py
+python3 crates/fmn-python/tests/test_runtime_source_ownership.py
+python3 crates/fmn-python/tests/test_runtime_project_watch.py
 python3 crates/fmn-python/tests/bundle_batching.py
 python3 crates/fmn-python/tests/bundle_batch_console.py
 python3 crates/fmn-python/tests/camera_configuration.py

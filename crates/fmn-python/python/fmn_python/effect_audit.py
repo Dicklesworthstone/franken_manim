@@ -29,11 +29,11 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
-import site
 import stat
 import sys
-import sysconfig
 import threading
+
+from .runtime_paths import library_roots
 
 _LISTINGS = frozenset({"os.listdir", "os.scandir", "glob.glob", "glob.glob/2"})
 _PROCESSES = frozenset({
@@ -58,13 +58,7 @@ _installed = False
 
 
 def _library_roots() -> tuple[str, ...]:
-    paths = sysconfig.get_paths()
-    roots = {paths.get(key) for key in ("stdlib", "platstdlib", "purelib", "platlib")}
-    roots.update(site.getsitepackages() if hasattr(site, "getsitepackages") else ())
-    roots.add(site.getusersitepackages() if hasattr(site, "getusersitepackages") else None)
-    # fmn_python and manimlib: installed payload covered by the runtime identity.
-    roots.add(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return tuple(sorted({os.path.realpath(root) + os.sep for root in roots if root}))
+    return tuple(str(root) + os.sep for root in library_roots())
 
 
 def _install() -> None:
