@@ -56,28 +56,42 @@ def install_tracker_interpolation(native: Any) -> None:
             )
         return value
 
-    def interpolate_vector(self, mobject1, mobject2, alpha):
+    def vector_value(self, mobject1, mobject2, alpha):
         # Reference Mobject.interpolate blends the "value" uniform with
         # interpolate(start, end, alpha); the endpoints stay exact.
-        start = np.asarray(mobject1.get_value(), dtype=self.value_type)
-        end = np.asarray(mobject2.get_value(), dtype=self.value_type)
+        def endpoint(mobject):
+            if not isinstance(mobject, ValueTracker) or mobject._tracker_kind != 0:
+                raise TypeError("Vector interpolation requires plain ValueTracker endpoints")
+            vector = mobject._vector_value()
+            # A scalar endpoint may have a stale Python mirror after native
+            # playback. Read its authoritative lane, not that mirror.
+            return np.asarray([mobject._tracker_value()] if vector is None else vector,
+                              dtype=self.value_type)
+
+        start, end = endpoint(mobject1), endpoint(mobject2)
+        shape = np.broadcast_shapes(start.shape, end.shape)
         if alpha == 0.0:
             value = start
         elif alpha == 1.0:
             value = end
         else:
             value = (1.0 - alpha) * start + alpha * end
-        vector = self._vector_value()
-        vector[:] = value
-        self._set_tracker_value(float(vector[0]))
+        # Validate broadcasting before the record/uniform interpolator writes
+        # anything. Copy even at alpha 0/1: either endpoint can be self, and
+        # that interpolator is allowed to mutate its current uniform in place.
+        return np.array(np.broadcast_to(value, shape), copy=True)
 
     @wraps(original)
     def interpolate(self, mobject1, mobject2, alpha, path_func=None):
         if not isinstance(self, ValueTracker) or "value" in getattr(self, "locked_uniform_keys", ()):
             return original(self, mobject1, mobject2, alpha, path_func)
         if self._vector_value() is not None:
+            value = vector_value(self, mobject1, mobject2, float(alpha))
             result = original(self, mobject1, mobject2, alpha, path_func)
-            interpolate_vector(self, mobject1, mobject2, float(alpha))
+            # Uniform interpolation replaces the value array; its shape is
+            # determined by the endpoints, not the receiver's old width.
+            self.uniforms["value"] = value
+            self._set_tracker_value(float(value[0]))
             return result
         kind = self._tracker_kind
         if kind not in (0, 1, 2):
