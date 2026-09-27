@@ -295,5 +295,140 @@ class PublicUpdateTests(unittest.TestCase):
             self.assertNotEqual(frames[1], frames[2])
 
 
+class PublicSceneUpdateTests(unittest.TestCase):
+    def test_camera_only_callbacks_are_detected(self):
+        scene = m.Scene()
+        self.assertIs(scene.should_update_mobjects(), False)
+        callback = lambda frame, dt: None
+        scene.frame.add_updater(callback, call=False)
+        self.assertIs(scene.should_update_mobjects(), True)
+        scene.frame.remove_updater(callback)
+        self.assertIs(scene.should_update_mobjects(), False)
+
+    def test_deep_descendant_callbacks_are_detected_without_running_them(self):
+        calls = []
+        leaf = m.Square()
+        leaf.add_updater(lambda obj, dt: calls.append(dt), call=False)
+        root = m.Group(m.Group(leaf))
+        scene = m.Scene().add(root)
+        self.assertFalse(root.updaters)
+        self.assertIs(scene.should_update_mobjects(), True)
+        self.assertEqual(calls, [])
+        leaf.clear_updaters()
+        self.assertIs(scene.should_update_mobjects(), False)
+
+    def test_authored_has_updaters_is_called_on_actual_root(self):
+        calls = []
+        class Group(m.Group):
+            def has_updaters(self):
+                calls.append(self)
+                return True
+        root = Group()
+        scene = m.Scene().add(root)
+        self.assertIs(scene.should_update_mobjects(), True)
+        self.assertEqual(calls, [root])
+
+    def test_always_update_short_circuits_family_queries(self):
+        scene = m.Scene(always_update_mobjects=True)
+        scene.frame = None
+        self.assertIs(scene.should_update_mobjects(), True)
+
+    def test_camera_is_updated_before_drawable_callbacks(self):
+        scene = m.Scene()
+        events = []
+        root = m.Group(m.Square())
+        def camera(frame, dt):
+            events.append(('camera', dt))
+            frame.shift(dt * m.RIGHT)
+        scene.frame.add_updater(camera, call=False)
+        root.add_updater(lambda obj, dt: events.append(('root', scene.frame.get_x())), call=False)
+        scene.add(root)
+        self.assertIsNone(scene.update_mobjects(.25))
+        self.assertEqual(events, [('camera', .25), ('root', .25)])
+
+    def test_replacement_frame_uses_public_dt_only_update(self):
+        calls = []
+        class Frame(m.CameraFrame):
+            def update(self, dt):
+                calls.append(dt)
+                return super().update(dt)
+        scene = m.Scene()
+        scene.frame = Frame()
+        scene.update_mobjects(.125)
+        self.assertEqual(calls, [.125])
+
+    def test_camera_suspension_prunes_its_callbacks_not_drawable_roots(self):
+        scene = m.Scene()
+        events = []
+        scene.frame.add_updater(lambda obj, dt: events.append('camera'), call=False)
+        leaf = m.Square().add_updater(lambda obj, dt: events.append('leaf'), call=False)
+        scene.add(leaf)
+        scene.frame.suspend_updating()
+        scene.update_mobjects(.25)
+        self.assertEqual(events, ['leaf'])
+        scene.frame.resume_updating(call_updater=False)
+        scene.update_mobjects(.25)
+        self.assertEqual(events, ['leaf', 'camera', 'leaf'])
+
+    def test_camera_family_edits_apply_to_the_next_root_snapshot(self):
+        scene = m.Scene()
+        events = []
+        old = m.Square().add_updater(lambda obj, dt: events.append('old'), call=False)
+        new = m.Circle().add_updater(lambda obj, dt: events.append('new'), call=False)
+        scene.add(old)
+        scene.frame.add_updater(lambda frame, dt: scene.remove(old).add(new), call=False)
+        scene.update_mobjects(.125)
+        self.assertEqual(events, ['old'])
+        scene.update_mobjects(.125)
+        self.assertEqual(events, ['old', 'new'])
+
+    def test_frame_failure_stops_root_callbacks_and_scene_can_recover(self):
+        scene = m.Scene()
+        events = []
+        error = RuntimeError('camera updater failed')
+        def fail(frame, dt): raise error
+        scene.frame.add_updater(fail, call=False)
+        scene.add(m.Square().add_updater(lambda obj, dt: events.append(dt), call=False))
+        with self.assertRaises(RuntimeError) as caught: scene.update_mobjects(.25)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(events, [])
+        scene.frame.remove_updater(fail)
+        scene.update_mobjects(.5)
+        self.assertEqual(events, [.5])
+
+    def test_update_frame_uses_post_advance_clock_even_when_skipping(self):
+        scene = m.Scene(skip_animations=True)
+        times = []
+        scene.frame.add_updater(lambda frame, dt: times.append((dt, scene.get_time())), call=False)
+        self.assertIsNone(scene.update_frame(.25))
+        self.assertEqual(times, [(.25, .25)])
+
+    def test_public_frame_pixels_match_independent_camera_and_geometry_updates(self):
+        def render(mode, threads):
+            scene = m.Scene(camera_config={'resolution': (64, 40)})
+            square = m.Square(side_length=1, fill_opacity=1, stroke_width=0)
+            scene.add(m.Group(square))
+            camera = scene.camera
+            camera.capture_threads = threads
+            if mode == 'public':
+                scene.frame.add_updater(lambda frame, dt: frame.shift(.5 * dt * m.UP), call=False)
+                square.add_updater(lambda obj, dt: obj.shift(dt * m.RIGHT), call=False)
+            frames = []
+            for _ in range(3):
+                if mode == 'public':
+                    scene.update_frame(.125)
+                else:
+                    scene.increment_time(.125)
+                    square.shift(.125 * m.RIGHT)
+                    if mode == 'control': scene.frame.shift(.0625 * m.UP)
+                frames.append(camera.capture_snapshot(*scene.mobjects).png())
+            return frames
+        actual = render('public', 1)
+        self.assertEqual(actual, render('control', 1))
+        self.assertNotEqual(actual, render('without_camera', 1))
+        for threads in (4, 16): self.assertEqual(actual, render('public', threads))
+        self.assertEqual(len(set(actual)), 3)
+
+
 if __name__ == '__main__':
     unittest.main()
