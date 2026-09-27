@@ -289,20 +289,41 @@ def engine_identity(engine_id: str) -> dict:
     return {"engine": "franken_manim" if portal else "reference", "engine_id": engine_id}
 
 
-def extract_constructions(engine_id: str, points_mode: str = "digest", only=None):
-    """Yield one fact record per construction in the fixed set."""
+def public_names(mob) -> list[str]:
+    """Public attribute and method names on an instance: the reachable API surface."""
+    names = set()
+    for name in dir(mob):
+        if not name.startswith("_"):
+            names.add(name)
+    return sorted(names)
+
+
+def class_sweep_constructions(sweep: dict):
+    """(subject, source) pairs for a class sweep: each class's default call, then its
+    declared parameterized calls, subjects `Class` and `Class#1`, `Class#2`, ..."""
+    for name in sweep["classes"]:
+        yield name, f"{name}()"
+        for index, source in enumerate(sweep.get("calls", {}).get(name, ()), 1):
+            yield f"{name}#{index}", source
+
+
+def extract_constructions(engine_id: str, points_mode: str = "digest", only=None,
+                          constructions=CONSTRUCTIONS, api_names: bool = False):
+    """Yield one fact record per construction (the fixed set by default)."""
     namespace = _engine_namespace()
     scope = {name: getattr(namespace, name) for name in dir(namespace) if not name.startswith("_")}
     identity = engine_identity(engine_id)
-    for subject, source in CONSTRUCTIONS:
+    for subject, source in constructions:
         if only is not None and subject not in only:
             continue
         try:
-            # CONSTRUCTIONS is checked-in constant text. It is evaluated over the
-            # manimlib namespace only, with no builtins, so it can reach nothing else.
+            # Constructions are checked-in constant text. They are evaluated over the
+            # manimlib namespace only, with no builtins, so they can reach nothing else.
             code = compile(source, f"<construction {subject}>", "eval")
             mob = eval(code, {"__builtins__": {}, **scope})  # noqa: S307
             record = extract(subject, [mob], namespace=namespace, points_mode=points_mode)
+            if api_names:
+                record["public_names"] = public_names(mob)
         except Exception as error:  # noqa: BLE001
             record = extract_error(subject, error)
         record["source"] = source
@@ -415,8 +436,8 @@ def load_exclusions(path) -> list[dict]:
             raise ValueError(f"exclusion {row.get('id')!r} lacks {sorted(missing)}")
         if row["kind"] not in ("behavior-note", "open-bead"):
             raise ValueError(f"exclusion {row['id']!r}: kind must be behavior-note or open-bead")
-        if row.get("scope", "any") not in ("any", "constructions", "scenes"):
-            raise ValueError(f"exclusion {row['id']!r}: scope must be any, constructions or scenes")
+        if row.get("scope", "any") not in ("any", "constructions", "classes", "scenes"):
+            raise ValueError(f"exclusion {row['id']!r}: scope must be any, constructions, classes or scenes")
     return rows
 
 
@@ -553,6 +574,12 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
         for member in portal["members"]:
             if member["path"] not in seen:
                 note(member["path"], member["class"], "member", "absent", member["class"])
+    # The API surface: each Reference public name the portal instance lacks is a gap.
+    # Names only the portal has are not compared (extensions are allowed).
+    if "public_names" in ref and "public_names" in portal:
+        root_class = ref["members"][0]["class"] if ref.get("members") else None
+        for name in sorted(set(ref["public_names"]) - set(portal["public_names"])):
+            note("", root_class, f"public_names.{name}", "present", "absent")
     # Scene-level facts from scene_facts(): exact count, quantized time.
     for key, same in (("camera_frame_roots", lambda a, b: a == b), ("time", _within_tolerance)):
         if key in ref or key in portal:
@@ -579,7 +606,7 @@ def _short(value):
 
 
 def in_scope(rows, scope: str):
-    """The rows that apply to a `constructions` or `scenes` run."""
+    """The rows that apply to a `constructions`, `classes` or `scenes` run."""
     return [row for row in rows if row.get("scope", "any") in ("any", scope)]
 
 
@@ -636,17 +663,27 @@ def provenance_line(engine_id: str, argv) -> str:
     })
 
 
-def check_constructions(reference_text: str, exclusions_text: str, engine_id: str) -> dict:
-    """Extract the fixed construction set in the running engine and diff it.
+def check_constructions(reference_text: str, exclusions_text: str, engine_id: str,
+                        sweep_text: str | None = None) -> dict:
+    """Extract a construction set in the running engine and diff it.
 
+    The fixed construction set by default; with `sweep_text` (a class-sweep JSON),
+    every Appendix-A class's default and declared calls, public names included.
     This is the gate and e2e entry point. It returns the diff summary plus
     `compared` (subjects on both sides) and `failing` (subjects that differ
     or are one-sided). A zero-subject comparison is a failure, never a pass.
     """
     exclusions = json.loads(exclusions_text)["exclusions"]
     reference = parse_ndjson(reference_text)
-    portal = list(extract_constructions(engine_id, points_mode="full"))
-    results, summary = diff_files(reference, portal, exclusions)
+    if sweep_text is None:
+        portal = list(extract_constructions(engine_id, points_mode="full"))
+        scope = "constructions"
+    else:
+        sweep = json.loads(sweep_text)
+        portal = list(extract_constructions(engine_id, points_mode="full", api_names=True,
+                                            constructions=list(class_sweep_constructions(sweep))))
+        scope = "classes"
+    results, summary = diff_files(reference, portal, exclusions, scope=scope)
     compared = sum(1 for r in results if r["verdict"] != "one-sided")
     failing = [r for r in results if r["verdict"] in ("differs", "one-sided")]
     summary.update(compared=compared, failing=failing)
@@ -662,6 +699,7 @@ def main(argv=None) -> int:
     ext.add_argument("--engine-id", required=True)
     ext.add_argument("--points", choices=("digest", "full"), default="digest")
     ext.add_argument("--only", nargs="*")
+    ext.add_argument("--sweep", help="a class-sweep JSON: extract its classes (public names included)")
     ext.add_argument("out")
     dif = sub.add_parser("diff")
     dif.add_argument("reference")
@@ -671,6 +709,7 @@ def main(argv=None) -> int:
     chk.add_argument("--engine-id", required=True)
     chk.add_argument("--reference", required=True)
     chk.add_argument("--exclusions", required=True)
+    chk.add_argument("--sweep", help="a class-sweep JSON: check its classes instead of the construction set")
     run = sub.add_parser("run-scene", help="run one scene through an engine CLI, recording facts")
     run.add_argument("--facts", required=True)
     run.add_argument("--engine", choices=("reference", "portal"), required=True)
@@ -689,7 +728,13 @@ def main(argv=None) -> int:
         if out.exists():
             print(f"refusing to overwrite {out}", file=sys.stderr)
             return 2
-        lines = [canonical(r) for r in extract_constructions(args.engine_id, args.points, args.only)]
+        if args.sweep:
+            sweep = json.loads(Path(args.sweep).read_text(encoding="utf-8"))
+            records = extract_constructions(args.engine_id, args.points, args.only, api_names=True,
+                                            constructions=list(class_sweep_constructions(sweep)))
+        else:
+            records = extract_constructions(args.engine_id, args.points, args.only)
+        lines = [canonical(r) for r in records]
         header = provenance_line(args.engine_id, original)
         out.write_text("".join(line + "\n" for line in [header, *lines]), encoding="utf-8")
         print(canonical({"schema": SCHEMA, "written": str(out), "subjects": len(lines)}))
@@ -697,7 +742,8 @@ def main(argv=None) -> int:
     if args.command == "check":
         summary = check_constructions(Path(args.reference).read_text(encoding="utf-8"),
                                       Path(args.exclusions).read_text(encoding="utf-8"),
-                                      args.engine_id)
+                                      args.engine_id,
+                                      Path(args.sweep).read_text(encoding="utf-8") if args.sweep else None)
         print(canonical(summary))
         return 1 if summary["failing"] or summary["stale_open_bead_exclusions"] else 0
     exclusions = load_exclusions(args.exclusions) if args.exclusions else []
