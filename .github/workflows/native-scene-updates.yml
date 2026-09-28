@@ -57,8 +57,22 @@ jobs:
           marker = 'Scene-Update-Patch-SHA256: ' + digest
           applied = bool(subprocess.check_output(['git', 'log', '-200', '--format=%H', '--fixed-strings', '--grep=' + marker], text=True).strip())
           if not applied:
-              subprocess.run(['git', 'apply', '--check', str(path)], check=True)
-              subprocess.run(['git', 'apply', str(path)], check=True)
+              # Another accepted suite was inserted beside the old hunk. Keep
+              # every existing gate invocation; apply the eight source hunks
+              # byte-for-byte and reconcile only these two additive entries.
+              gate = pathlib.Path('scripts/check_portal_runtime.sh')
+              before = gate.read_text()
+              anchor = 'python3 crates/fmn-python/tests/public_update_dispatch.py\n'
+              assert before.count(anchor) == 1, 'missing or ambiguous public-update gate'
+              additions = ''.join(
+                  'python3 crates/fmn-python/tests/' + suite + '.py\n'
+                  for suite in ('scene_update_phase', 'native_scene_update_dispatch')
+                  if 'python3 crates/fmn-python/tests/' + suite + '.py\n' not in before
+              )
+              args = ['git', 'apply', '--exclude=scripts/check_portal_runtime.sh']
+              subprocess.run([*args, '--check', str(path)], check=True)
+              subprocess.run([*args, str(path)], check=True)
+              gate.write_text(before.replace(anchor, anchor + additions, 1))
           pathlib.Path(os.environ['RUNNER_TEMP'], 'scene-update-files.txt').write_text('\n'.join(sorted(allowed)) + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('applied=' + str(applied).lower() + '\n')
