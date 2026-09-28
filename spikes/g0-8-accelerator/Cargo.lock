@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "adler2"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -141,12 +135,6 @@ name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cc"
@@ -298,15 +286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crc32fast"
-version = "1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "crossbeam-deque"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -394,16 +373,6 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
-
-[[package]]
-name = "flate2"
-version = "1.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
-dependencies = [
- "miniz_oxide",
- "zlib-rs",
-]
 
 [[package]]
 name = "fmd-font"
@@ -721,7 +690,7 @@ dependencies = [
 [[package]]
 name = "fsci-fft"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5a7aafa27951bd3eeb2a678763df05faaa68b679#5a7aafa27951bd3eeb2a678763df05faaa68b679"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
 dependencies = [
  "fsci-runtime",
 ]
@@ -729,7 +698,7 @@ dependencies = [
 [[package]]
 name = "fsci-integrate"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5a7aafa27951bd3eeb2a678763df05faaa68b679#5a7aafa27951bd3eeb2a678763df05faaa68b679"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
 dependencies = [
  "fsci-opt",
  "fsci-runtime",
@@ -740,7 +709,7 @@ dependencies = [
 [[package]]
 name = "fsci-linalg"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5a7aafa27951bd3eeb2a678763df05faaa68b679#5a7aafa27951bd3eeb2a678763df05faaa68b679"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
 dependencies = [
  "fsci-fft",
  "fsci-runtime",
@@ -753,7 +722,7 @@ dependencies = [
 [[package]]
 name = "fsci-opt"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5a7aafa27951bd3eeb2a678763df05faaa68b679#5a7aafa27951bd3eeb2a678763df05faaa68b679"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
 dependencies = [
  "fsci-runtime",
  "rand",
@@ -764,7 +733,7 @@ dependencies = [
 [[package]]
 name = "fsci-runtime"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5a7aafa27951bd3eeb2a678763df05faaa68b679#5a7aafa27951bd3eeb2a678763df05faaa68b679"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
 dependencies = [
  "blake3",
  "serde",
@@ -774,16 +743,14 @@ dependencies = [
 [[package]]
 name = "fsci-sparse"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=5a7aafa27951bd3eeb2a678763df05faaa68b679#5a7aafa27951bd3eeb2a678763df05faaa68b679"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
 dependencies = [
  "fsci-linalg",
  "fsci-runtime",
  "nalgebra",
- "npyz",
  "rayon",
  "sha2 0.10.9",
  "thiserror",
- "zip",
 ]
 
 [[package]]
@@ -947,16 +914,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "miniz_oxide"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
-dependencies = [
- "adler2",
- "simd-adler32",
-]
-
-[[package]]
 name = "nalgebra"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -985,17 +942,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "npyz"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a01a88a1d2f89d362475ad16f34de3994f7c86b12259236f5d33537b040bcd4"
-dependencies = [
- "byteorder",
- "num-bigint",
- "py_literal",
 ]
 
 [[package]]
@@ -1074,48 +1020,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
-name = "pest"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45d3aca230fad2e6f6317ca0a72724338c4960cb97168a85cdee66df4a9a21a8"
-dependencies = [
- "memchr",
- "ucd-trie",
-]
-
-[[package]]
-name = "pest_derive"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "284b60557f2c4a2e72ad3f2d34d42685a2fa4a6a61d0d2a10c0ae2a5e916c2cf"
-dependencies = [
- "pest",
- "pest_generator",
-]
-
-[[package]]
-name = "pest_generator"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d9d1f08a115309ee99268cf85e5228e0e56aa9caf8841ec12866b6be07c3109"
-dependencies = [
- "pest",
- "pest_meta",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "pest_meta"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed93ba1a9ffcca32130a5188701c81c0c49cf00d4b7c5007d5148951d743adcb"
-dependencies = [
- "pest",
-]
-
-[[package]]
 name = "phf"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1140,19 +1044,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "py_literal"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "102df7a3d46db9d3891f178dcc826dc270a6746277a9ae6436f8d29fd490a8e1"
-dependencies = [
- "num-bigint",
- "num-complex",
- "num-traits",
- "pest",
- "pest_derive",
 ]
 
 [[package]]
@@ -1348,12 +1239,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "simd-adler32"
-version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
-
-[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1414,12 +1299,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
-name = "typed-path"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1430,12 +1309,6 @@ name = "ucd"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe4fa6e588762366f1eb4991ce59ad1b93651d0b769dfb4e4d1c5c4b943d1159"
-
-[[package]]
-name = "ucd-trie"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
 name = "unicode-casefold"
@@ -1559,25 +1432,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "zip"
-version = "8.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap",
- "memchr",
- "typed-path",
-]
-
-[[package]]
-name = "zlib-rs"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

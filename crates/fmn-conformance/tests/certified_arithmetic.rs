@@ -1015,11 +1015,11 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
         "frankenscipy/crates/fsci-integrate",
         "step_size.rs",
         "powf",
-        5,
-        "fm-9esi: 1 in select_initial_step's fallback arm for a non-integral error order (RK45's \
-         order is 5, so it takes the deterministic kth_root arm, frankenscipy 5a7aafa2) + 4 \
-         EPSILON.powf constants in num_jac, whose only callers are bdf.rs and radau.rs \
-         (unreachable below); this file carries no call on fmn's RK45 path",
+        1,
+        "fm-9esi: select_initial_step's fallback arm for a caller-supplied non-integral error \
+         order (SciPy's float `order`); RK45's order is 4, so fmn takes the deterministic \
+         kth_root arm (frankenscipy 5a7aafa2). num_jac's four EPSILON.powf went to IEEE sqrt \
+         at 85edd7a9",
     ),
     (
         "frankenscipy/crates/fsci-linalg",

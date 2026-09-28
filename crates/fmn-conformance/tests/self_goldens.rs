@@ -8,7 +8,15 @@
 //!   snapshotted after each step;
 //! - `stage_lifecycle.v1` — a three-mobject Stage family driven through the
 //!   positional API (attach → next_to → arrange → scale → to_edge), with
-//!   every member's f32 records and the root bounding box snapshotted.
+//!   every member's f32 records and the root bounding box snapshotted;
+//! - `stream_lines.v1` (fm-9esi) — StreamLines over a polynomial limit-cycle
+//!   field, every line's f64 points. Before frankenscipy `5a7aafa2` the RK45
+//!   step control went through the platform `powf`, so these lines could not
+//!   carry a cross-platform lock. Measured 2026-09-28 at frankenscipy
+//!   `85edd7a9`: blessed on linux-x86_64 (glibc, debug) as `48d9c4cf…`
+//!   (12,012 bytes). It passes unchanged on macos-aarch64 (Darwin, M4 Pro,
+//!   `--release`). linux-aarch64 has NOT been run: the binfmt/qemu leg below is
+//!   not registered on the dev box since its 2026-08-29 reboot.
 //!
 //! Snapshots are serialized through fmn-hash's canonical Writer (versioned
 //! schema, defined field order, float canonicalization, trailing checksum),
@@ -45,15 +53,19 @@
 
 use fmn_conformance::golden::{GoldenError, GoldenStore, Scope};
 use fmn_core::constants::{DOWN, LEFT, RIGHT, TAU, UP};
+use fmn_core::rng::RngRoot;
 use fmn_core::types::Vec3;
 use fmn_geom::QuadPath;
 use fmn_hash::{Schema, Writer};
+use fmn_library::coords::CoordinateSystem;
+use fmn_library::fields::StreamLines;
 use fmn_mobject::{Mob, Mobject, Stage};
 use std::path::PathBuf;
 
 /// Schema family for self-golden snapshot documents.
 const GEOM_SCHEMA: Schema = Schema::new(*b"FMNS", 1, 1, 0);
 const STAGE_SCHEMA: Schema = Schema::new(*b"FMNS", 2, 1, 0);
+const STREAM_SCHEMA: Schema = Schema::new(*b"FMNS", 3, 1, 0);
 
 fn store() -> GoldenStore {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("goldens");
@@ -160,6 +172,58 @@ fn stage_lifecycle_doc() -> Vec<u8> {
     w.finish().expect("stage snapshot encodes")
 }
 
+/// A 2-D plane over `[-2, 2]²` with unit sampling steps.
+struct Plane;
+
+impl CoordinateSystem for Plane {
+    fn c2p(&self, coords: &[f64]) -> Vec3 {
+        [
+            coords.first().copied().unwrap_or(0.0),
+            coords.get(1).copied().unwrap_or(0.0),
+            0.0,
+        ]
+    }
+    fn p2c(&self, point: Vec3) -> Vec3 {
+        point
+    }
+    fn all_ranges(&self) -> Vec<[f64; 3]> {
+        vec![[-2.0, 2.0, 1.0], [-2.0, 2.0, 1.0]]
+    }
+    fn dimension(&self) -> usize {
+        2
+    }
+}
+
+/// A polynomial limit-cycle field: rotation plus a radial pull toward the
+/// unit circle. No transcendental, so every bit of the lines comes from the
+/// integrator: adaptive RK45 step control (frankenscipy's `kth_root`, fm-9esi),
+/// dense output, and the true-arclength cap.
+fn limit_cycle(rows: &[[f64; 3]]) -> Vec<[f64; 3]> {
+    rows.iter()
+        .map(|&[x, y, _]| {
+            let pull = 0.3 * (1.0 - x * x - y * y);
+            [-y + pull * x, x + pull * y, 0.0]
+        })
+        .collect()
+}
+
+/// The StreamLines document: every line's points, in family order, plus the
+/// seed-jitter draw count.
+fn stream_lines_doc() -> Vec<u8> {
+    let mut w = Writer::new(STREAM_SCHEMA);
+    let built = StreamLines::new(limit_cycle, Plane, &RngRoot::from_seed(7))
+        .with_noise_factor(0.25)
+        .build()
+        .expect("the fixture field builds");
+    w.put_u64(built.rng_draws());
+    let lines = built.vmob().children();
+    w.put_u64(lines.len() as u64);
+    for (index, line) in lines.iter().enumerate() {
+        put_points_f64(&mut w, &format!("line{index}"), line.points());
+    }
+    w.finish().expect("stream-lines snapshot encodes")
+}
+
 #[test]
 fn geom_lifecycle_is_bit_locked() -> Result<(), GoldenError> {
     let doc = geom_lifecycle_doc();
@@ -175,10 +239,18 @@ fn stage_lifecycle_is_bit_locked() -> Result<(), GoldenError> {
 }
 
 #[test]
+fn stream_lines_are_bit_locked() -> Result<(), GoldenError> {
+    let doc = stream_lines_doc();
+    store().check("stream_lines.v1", &doc)?;
+    Ok(())
+}
+
+#[test]
 fn snapshot_documents_are_reproducible_within_run() {
     // The rig's premise: the same engine state serializes to the same bytes.
     // A failure here is nondeterminism in the engine or the encoder, which
     // must be caught before it can masquerade as cross-commit drift.
     assert_eq!(geom_lifecycle_doc(), geom_lifecycle_doc());
     assert_eq!(stage_lifecycle_doc(), stage_lifecycle_doc());
+    assert_eq!(stream_lines_doc(), stream_lines_doc());
 }
