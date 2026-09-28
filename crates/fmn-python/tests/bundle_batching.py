@@ -146,7 +146,7 @@ class BundleBatching(unittest.TestCase):
                              bundle_limits={"max_output_bytes": len(expected) - 1})
         self.assertEqual(refused.counts["failed"], 2)
         for row in refused.outcomes:
-            self.assertEqual(row.error_type, "ValueError")
+            self.assertEqual(row.error_type, "RuntimeError")
             self.assertIn("output budget", row.message)
             self.assertFalse(row.destination.exists())
         self.assertEqual(hashlib.sha256(reference.read_bytes()).hexdigest(), report.outcomes[0].result.digest)

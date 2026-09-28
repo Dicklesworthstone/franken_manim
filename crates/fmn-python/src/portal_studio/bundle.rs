@@ -7,7 +7,7 @@
 use super::*;
 use fmn_anim::SegmentKind;
 use fmn_platform::fs::{FileSystem, StdFs};
-use fmn_scene::recording::SceneBundleRecorder;
+use fmn_scene::recording::{RecordingError, SceneBundleRecorder};
 use fmn_scene::{BundleExportLimits, CaptureReason, LifecycleEvent, LifecyclePhase, SceneSink};
 
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -423,7 +423,12 @@ fn _portal_finish_bundle(
     let artifact = bundle
         .recorder
         .finish_with_max_bytes(bundle.max_output_bytes)
-        .map_err(native_error)?;
+        .map_err(|error| match error {
+            // A spent output budget is a runtime limit, not a bad argument:
+            // raise it as the capture-budget refusals above are raised.
+            RecordingError::OutputLimit { .. } => PyRuntimeError::new_err(error.to_string()),
+            other => native_error(other),
+        })?;
     let result = (
         bundle.destination.to_string_lossy().into_owned(),
         artifact.frame_count,
