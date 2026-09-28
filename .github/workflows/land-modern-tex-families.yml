@@ -9,11 +9,11 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: land-modern-tex-families
+  group: land-modern-tex-families-macos
   cancel-in-progress: false
 jobs:
   publish:
-    runs-on: ubuntu-24.04-arm
+    runs-on: macos-14
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
