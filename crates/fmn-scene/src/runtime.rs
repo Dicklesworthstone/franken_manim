@@ -30,8 +30,8 @@ use fmn_anim::{
     Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind,
     SegmentReport, abort_open_play, abort_open_wait, complete_play_frame, complete_wait_frame,
     finish_open_play, finish_open_play_animations, finish_open_wait, open_play_with_mode,
-    open_wait, play_segment_with_boundary, prepare_play_animation, prepare_play_frame,
-    prepare_wait_frame, validate_play, wait_segment_with_boundary,
+    open_wait, open_wait_after_updaters, play_segment_with_boundary, prepare_play_animation,
+    prepare_play_frame, prepare_wait_frame, validate_play, wait_segment_with_boundary,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_hash::SerialError;
@@ -633,6 +633,37 @@ pub struct SteppedPlay {
 pub struct SteppedWait {
     open: OpenWait,
     sink_error: Option<IntegrationError>,
+}
+
+impl SteppedPlay {
+    /// The unborrowed host completed all scene updater work for this frame.
+    /// Native completion still drains events and captures exactly once.
+    ///
+    /// # Errors
+    /// No prepared frame exists, or its updater phase is already complete.
+    pub fn mark_scene_updaters_complete(&mut self) -> Result<(), SceneError> {
+        self.open.mark_scene_updaters_complete().map_err(Into::into)
+    }
+
+    /// The host completed the final zero-dt phase after animation cleanup.
+    ///
+    /// # Errors
+    /// Cleanup is incomplete, a frame is pending, or this phase is complete.
+    pub fn mark_final_scene_updaters_complete(&mut self) -> Result<(), SceneError> {
+        self.open
+            .mark_final_scene_updaters_complete()
+            .map_err(Into::into)
+    }
+}
+
+impl SteppedWait {
+    /// The unborrowed host completed all scene updater work for this frame.
+    ///
+    /// # Errors
+    /// No prepared frame exists, or its updater phase is already complete.
+    pub fn mark_scene_updaters_complete(&mut self) -> Result<(), SceneError> {
+        self.open.mark_scene_updaters_complete().map_err(Into::into)
+    }
 }
 
 impl fmt::Debug for SteppedWait {
@@ -1324,6 +1355,25 @@ impl Scene {
         duration: Option<f64>,
         sink: &mut dyn SceneSink,
     ) -> Result<SteppedWait, SceneError> {
+        self.begin_stepped_wait_with_updates(duration, sink, false)
+    }
+
+    /// Begin after the unborrowed host completed the whole initial zero-dt
+    /// scene-updater phase, including native slots. Do not run them again.
+    pub fn begin_stepped_wait_after_updaters(
+        &mut self,
+        duration: Option<f64>,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SteppedWait, SceneError> {
+        self.begin_stepped_wait_with_updates(duration, sink, true)
+    }
+
+    fn begin_stepped_wait_with_updates(
+        &mut self,
+        duration: Option<f64>,
+        sink: &mut dyn SceneSink,
+        updaters_completed: bool,
+    ) -> Result<SteppedWait, SceneError> {
         let duration = duration.unwrap_or(self.config.default_wait_time);
         if !duration.is_finite() || duration < 0.0 {
             return Err(SceneError::InvalidConfig(
@@ -1333,7 +1383,11 @@ impl Scene {
         self.clock.segment(duration).map_err(AnimError::Clock)?;
         self.pre_play(SegmentKind::Wait, &[], sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Wait))?;
-        let open = open_wait(&mut self.stage, &self.clock, duration, self.skipping)?;
+        let open = if updaters_completed {
+            open_wait_after_updaters(&mut self.stage, &self.clock, duration, self.skipping)?
+        } else {
+            open_wait(&mut self.stage, &self.clock, duration, self.skipping)?
+        };
         Ok(SteppedWait {
             open,
             sink_error: None,

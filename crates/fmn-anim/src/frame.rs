@@ -52,7 +52,9 @@ use fmn_mobject::{Mob, Snapshot, Stage};
 
 use crate::animation::{AnimError, Animation};
 use crate::clock::{FrameSample, FrameSegment, RationalFrameClock, RationalTime};
-use crate::purity::{SegmentKind, SegmentReport, classify_play, classify_wait};
+use crate::purity::{
+    ImpureEffect, Purity, SegmentKind, SegmentReport, classify_play, classify_wait,
+};
 
 /// The immutable frame boundary (§9.3 step 5): everything after capture
 /// consumes only this. Cheap to hold several in flight (CoW snapshot
@@ -223,6 +225,34 @@ fn begin_animations(
 struct StepPlan {
     sample: FrameSample,
     dt: f64,
+    updaters_completed: bool,
+}
+
+/// An external scene callback is not reconstructible from a begin snapshot.
+/// Keep the journal conservative even when no native updater slot represents it.
+fn note_external_updaters(report: &mut SegmentReport) {
+    match &mut report.purity {
+        Purity::Pure => report.purity = Purity::Stateful(vec![ImpureEffect::SceneUpdater]),
+        Purity::Stateful(effects) => {
+            if !effects.contains(&ImpureEffect::SceneUpdater) {
+                effects.push(ImpureEffect::SceneUpdater);
+            }
+        }
+    }
+    report.begin_state = None;
+}
+
+fn mark_updaters_completed(prepared: &mut Option<StepPlan>) -> Result<(), AnimError> {
+    let plan = prepared.as_mut().ok_or(AnimError::InvalidFramePhase(
+        "prepare a frame before completing its external scene updaters",
+    ))?;
+    if plan.updaters_completed {
+        return Err(AnimError::InvalidFramePhase(
+            "the prepared frame's scene updaters were already completed",
+        ));
+    }
+    plan.updaters_completed = true;
+    Ok(())
 }
 
 /// The host-language release point inside step 4 of the six-step frame
@@ -379,6 +409,7 @@ pub struct OpenSegment {
     next_animation: usize,
     prepared: Option<StepPlan>,
     animations_finished: bool,
+    final_updaters_completed: bool,
 }
 
 impl OpenSegment {
@@ -399,6 +430,37 @@ impl OpenSegment {
     #[must_use]
     pub fn stepped(&self) -> i64 {
         self.stepped
+    }
+
+    /// Mark the prepared frame's whole scene-updater phase as completed by
+    /// an unborrowed host. Completion still dispatches events and captures.
+    ///
+    /// # Errors
+    /// No prepared frame exists, or this phase was already marked complete.
+    pub fn mark_scene_updaters_complete(&mut self) -> Result<(), AnimError> {
+        mark_updaters_completed(&mut self.prepared)?;
+        note_external_updaters(&mut self.report);
+        Ok(())
+    }
+
+    /// Mark the final zero-dt scene update complete after animation cleanup.
+    ///
+    /// # Errors
+    /// Animation cleanup is not complete, a frame is pending, or the final
+    /// updater phase was already marked complete.
+    pub fn mark_final_scene_updaters_complete(&mut self) -> Result<(), AnimError> {
+        if !self.animations_finished
+            || self.prepared.is_some()
+            || self.current_sample.is_some()
+            || self.final_updaters_completed
+        {
+            return Err(AnimError::InvalidFramePhase(
+                "finish animation lifecycles before completing final scene updaters once",
+            ));
+        }
+        self.final_updaters_completed = true;
+        note_external_updaters(&mut self.report);
+        Ok(())
     }
 
     /// Consume the handle for its report (after finishing, or discarding).
@@ -442,6 +504,7 @@ pub fn open_play_with_mode(
         next_animation: 0,
         prepared: None,
         animations_finished: false,
+        final_updaters_completed: false,
     })
 }
 
@@ -460,6 +523,11 @@ pub fn prepare_play_animation(
     animations: &mut [Box<dyn Animation>],
     open: &mut OpenSegment,
 ) -> Result<Option<AnimationBoundary>, AnimError> {
+    if open.animations_finished {
+        return Err(AnimError::InvalidFramePhase(
+            "cannot advance a play after animation cleanup",
+        ));
+    }
     if open.prepared.is_some() {
         return Err(AnimError::InvalidFramePhase(
             "complete the prepared frame before advancing another animation",
@@ -529,7 +597,11 @@ pub fn prepare_play_frame(
     // Host-language updaters observe post-increment scene time, exactly as
     // the Reference's Scene.increment_time → update_mobjects order requires.
     stage.set_time_from_clock(clock.now().to_f64());
-    open.prepared = Some(StepPlan { sample, dt });
+    open.prepared = Some(StepPlan {
+        sample,
+        dt,
+        updaters_completed: false,
+    });
     Ok(Some(SceneUpdaterBoundary {
         dt,
         time: clock.now(),
@@ -555,7 +627,9 @@ pub fn complete_play_frame(
     let plan = open.prepared.take().ok_or(AnimError::InvalidFramePhase(
         "prepare a frame before completing it",
     ))?;
-    stage.update_at_time(plan.dt, clock.now().to_f64());
+    if !plan.updaters_completed {
+        stage.update_at_time(plan.dt, clock.now().to_f64());
+    }
     boundary(stage, clock.now());
     if capture {
         emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
@@ -580,7 +654,9 @@ pub fn finish_open_play(
     mut open: OpenSegment,
 ) -> Result<SegmentReport, AnimError> {
     finish_open_play_animations(stage, animations, &mut open)?;
-    update_scene_mobjects(stage, 0.0);
+    if !open.final_updaters_completed {
+        update_scene_mobjects(stage, 0.0);
+    }
     if let Some(error) = animations
         .iter()
         .find_map(|animation| animation.deferred_error())
@@ -646,6 +722,18 @@ pub struct OpenWait {
     prepared: Option<StepPlan>,
 }
 
+impl OpenWait {
+    /// Mark the prepared wait frame's whole scene-updater phase complete.
+    ///
+    /// # Errors
+    /// No prepared frame exists, or this phase was already marked complete.
+    pub fn mark_scene_updaters_complete(&mut self) -> Result<(), AnimError> {
+        mark_updaters_completed(&mut self.prepared)?;
+        note_external_updaters(&mut self.report);
+        Ok(())
+    }
+}
+
 /// Consume a wait abandoned at a host-language updater boundary.
 #[must_use]
 pub fn abort_open_wait(open: OpenWait) -> SegmentReport {
@@ -676,9 +764,33 @@ pub fn open_wait(
     skip: bool,
 ) -> Result<OpenWait, AnimError> {
     update_scene_mobjects(stage, 0.0);
+    plan_open_wait(stage, clock, duration, skip, false)
+}
+
+/// Open a wait after a host has completed BOTH halves of its initial zero-dt
+/// scene-updater phase. This does not repeat native updater slots.
+///
+/// # Errors
+/// [`AnimError::Clock`] for an invalid duration.
+pub fn open_wait_after_updaters(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    duration: f64,
+    skip: bool,
+) -> Result<OpenWait, AnimError> {
+    plan_open_wait(stage, clock, duration, skip, true)
+}
+
+fn plan_open_wait(
+    stage: &Stage,
+    clock: &RationalFrameClock,
+    duration: f64,
+    skip: bool,
+    external_updaters: bool,
+) -> Result<OpenWait, AnimError> {
     let segment = clock.segment(duration).map_err(AnimError::Clock)?;
     let purity = classify_wait(stage, false);
-    let report = SegmentReport {
+    let mut report = SegmentReport {
         kind: SegmentKind::Wait,
         purity: purity.clone(),
         begin_state: (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot())),
@@ -686,6 +798,9 @@ pub fn open_wait(
         n_frames: segment.n_frames(),
         run_time: duration,
     };
+    if external_updaters {
+        note_external_updaters(&mut report);
+    }
     Ok(OpenWait {
         report,
         segment,
@@ -720,7 +835,11 @@ pub fn prepare_wait_frame(
     let dt = clock.dt().to_f64();
     clock.advance_frames(1).map_err(AnimError::Clock)?;
     stage.set_time_from_clock(clock.now().to_f64());
-    open.prepared = Some(StepPlan { sample, dt });
+    open.prepared = Some(StepPlan {
+        sample,
+        dt,
+        updaters_completed: false,
+    });
     Ok(Some(SceneUpdaterBoundary {
         dt,
         time: clock.now(),
@@ -745,7 +864,9 @@ pub fn complete_wait_frame(
     let plan = open.prepared.take().ok_or(AnimError::InvalidFramePhase(
         "prepare a wait frame before completing it",
     ))?;
-    stage.update_at_time(plan.dt, clock.now().to_f64());
+    if !plan.updaters_completed {
+        stage.update_at_time(plan.dt, clock.now().to_f64());
+    }
     boundary(stage, clock.now());
     if capture {
         emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
@@ -945,6 +1066,7 @@ pub fn play_segment_with_boundary(
         next_animation: 0,
         prepared: None,
         animations_finished: false,
+        final_updaters_completed: false,
     };
     // Both modes use the exact same stepped driver. Skip changes one thing:
     // `complete_play_frame` suppresses capture/emission. In particular, a

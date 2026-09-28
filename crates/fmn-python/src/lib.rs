@@ -8541,8 +8541,9 @@ impl PyScene {
             resolved.push(parse_anim_spec(&engine, spec)?);
         }
 
-        let release_for_python_updaters =
-            has_python_updaters(slf)? || portal_has_frame_render(slf)?;
+        let release_for_python_updaters = portal_playback::requires_public_scene_update(slf)?
+            || has_python_updaters(slf)?
+            || portal_has_frame_render(slf)?;
         for callback in callbacks.iter().flatten() {
             crossing::record(CrossingClass::MethodDispatch);
             callback.bind(slf.py()).call_method0("begin")?;
@@ -8601,10 +8602,23 @@ impl PyScene {
                 return Ok(Vec::new());
             }
             if release_for_python_updaters {
-                let mut wait = engine
-                    .borrow_mut()
-                    .begin_stepped_wait(Some(effective_run_time), &mut sink)
-                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                // A camera-only play uses the wait cursor. Preserve its stock
+                // prologue; authored public updates own the whole zero-dt pass.
+                let public_initial = if portal_playback::requires_public_scene_update(slf)? {
+                    portal_playback::run_scene_update_phase(slf, 0.0)?.1
+                } else {
+                    false
+                };
+                let mut wait = {
+                    let mut runtime = engine.borrow_mut();
+                    if public_initial {
+                        runtime
+                            .begin_stepped_wait_after_updaters(Some(effective_run_time), &mut sink)
+                    } else {
+                        runtime.begin_stepped_wait(Some(effective_run_time), &mut sink)
+                    }
+                }
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
                 let drive_result: PyResult<()> = (|| {
                     loop {
                         let release = engine
@@ -8615,7 +8629,11 @@ impl PyScene {
                             break;
                         };
                         sink.apply_camera_before_updaters(slf.py(), release.time.to_f64())?;
-                        let python_ns = run_python_updaters(slf, release.dt)?;
+                        let (python_ns, completed) =
+                            portal_playback::run_scene_update_phase(slf, release.dt)?;
+                        if completed {
+                            wait.mark_scene_updaters_complete().map_err(scene_error)?;
+                        }
                         synchronize_portal_camera(slf)?;
                         let native_start = Instant::now();
                         engine
@@ -8627,9 +8645,11 @@ impl PyScene {
                         crossing::record_phase(python_ns, native_ns);
                     }
                     sink.finish_camera_before_updaters(slf.py())?;
-                    run_python_updaters(slf, 0.0)?;
+                    let (_, completed) = portal_playback::run_scene_update_phase(slf, 0.0)?;
                     synchronize_portal_camera(slf)?;
-                    engine.borrow_mut().stage_mut().update(0.0);
+                    if !completed {
+                        engine.borrow_mut().stage_mut().update(0.0);
+                    }
                     Ok(())
                 })();
                 if let Err(error) = drive_result {
@@ -8696,7 +8716,12 @@ impl PyScene {
                         break;
                     };
                     sink.apply_camera_before_updaters(slf.py(), release.time.to_f64())?;
-                    let python_ns = run_python_updaters(slf, release.dt)?;
+                    let (python_ns, completed) =
+                        portal_playback::run_scene_update_phase(slf, release.dt)?;
+                    if completed {
+                        play.mark_scene_updaters_complete()
+                            .map_err(&map_play_error)?;
+                    }
                     synchronize_portal_camera(slf)?;
                     let native_start = Instant::now();
                     engine
@@ -8744,7 +8769,15 @@ impl PyScene {
                 engine.borrow_mut().abort_stepped_play(play, &mut sink);
                 return Err(error);
             }
-            if let Err(error) = run_python_updaters(slf, 0.0) {
+            let final_phase =
+                portal_playback::run_scene_update_phase(slf, 0.0).and_then(|(_, completed)| {
+                    if completed {
+                        play.mark_final_scene_updaters_complete()
+                            .map_err(&map_play_error)?;
+                    }
+                    Ok(())
+                });
+            if let Err(error) = final_phase {
                 engine.borrow_mut().abort_stepped_play(play, &mut sink);
                 return Err(error);
             }
@@ -8878,8 +8911,9 @@ impl PyScene {
     ) -> PyResult<()> {
         let engine = Rc::clone(&slf.borrow().engine);
         portal_playback::synchronize(slf)?;
-        let has_python_updaters = has_python_updaters(slf)?;
-        if !has_python_updaters && stop_condition.is_none() && !portal_has_frame_render(slf)? {
+        let needs_host_updates =
+            portal_playback::requires_public_scene_update(slf)? || has_python_updaters(slf)?;
+        if !needs_host_updates && stop_condition.is_none() && !portal_has_frame_render(slf)? {
             let mut sink = PortalSceneSink {
                 render: Arc::clone(&slf.borrow().render),
                 ..PortalSceneSink::default()
@@ -8896,20 +8930,26 @@ impl PyScene {
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()));
         }
 
-        // The Reference performs one zero-dt Scene.update_mobjects pass
-        // before planning wait frames. Run the Python half while unborrowed;
-        // begin_stepped_wait immediately follows with the native half.
-        if has_python_updaters {
-            run_python_updaters(slf, 0.0)?;
-        }
+        // Complete the initial zero-dt host phase while unborrowed. If it
+        // dispatched a public update override, it also consumed native slots.
+        let initial_completed = if needs_host_updates {
+            portal_playback::run_scene_update_phase(slf, 0.0)?.1
+        } else {
+            false
+        };
         let mut sink = PortalSceneSink {
             render: Arc::clone(&slf.borrow().render),
             ..PortalSceneSink::default()
         };
-        let mut wait = engine
-            .borrow_mut()
-            .begin_stepped_wait(duration, &mut sink)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let mut wait = {
+            let mut runtime = engine.borrow_mut();
+            if initial_completed {
+                runtime.begin_stepped_wait_after_updaters(duration, &mut sink)
+            } else {
+                runtime.begin_stepped_wait(duration, &mut sink)
+            }
+        }
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let drive_result: PyResult<()> = (|| {
             loop {
                 let release = engine
@@ -8919,11 +8959,13 @@ impl PyScene {
                 let Some(release) = release else {
                     break;
                 };
-                let python_ns = if has_python_updaters {
-                    run_python_updaters(slf, release.dt)?
-                } else {
-                    0
-                };
+                // Reinspect at every release: a stop condition, callback or
+                // captured-frame observer can install a new update protocol.
+                let (python_ns, completed) =
+                    portal_playback::run_scene_update_phase(slf, release.dt)?;
+                if completed {
+                    wait.mark_scene_updaters_complete().map_err(scene_error)?;
+                }
                 synchronize_portal_camera(slf)?;
                 let native_start = Instant::now();
                 engine

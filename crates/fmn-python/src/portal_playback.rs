@@ -46,6 +46,33 @@ pub(crate) fn _portal_allocate_tracker(
     Ok(())
 }
 
+/// Determine whether native slots alone would bypass a public scene/object
+/// update protocol. Python performs descriptor-safe inspection of the completed
+/// runtime, without executing authored update methods during admission.
+pub(super) fn requires_public_scene_update(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
+    scene
+        .call_method0("_fmn_requires_public_scene_update")?
+        .extract()
+}
+
+/// Run the released scene-updater phase. A true second component means the
+/// host has completed BOTH Python callbacks and native slots, so Choreo must
+/// resume at event delivery/capture instead of repeating the native pass.
+pub(super) fn run_scene_update_phase(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<(u64, bool)> {
+    let start = Instant::now();
+    let completed = scene
+        .call_method1("_fmn_dispatch_public_scene_update", (dt,))?
+        .extract::<bool>()?;
+    if completed {
+        Ok((
+            u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            true,
+        ))
+    } else {
+        run_python_updaters(scene, dt).map(|elapsed| (elapsed, false))
+    }
+}
+
 #[derive(Default)]
 pub(super) struct OutputTimeline {
     pub(super) final_state_only: bool,
@@ -186,6 +213,24 @@ pub(super) fn synchronize(scene: &Bound<'_, PyScene>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_scene_update_dispatch() {
+        crate::with_python_test_module("native scene update dispatch", |py, _module, globals| {
+            let source =
+                CString::new(include_str!("../tests/native_scene_update_dispatch.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            globals
+                .get_item("run_native_scene_update_dispatch")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+        });
+    }
 
     #[test]
     fn authored_tracker_lifecycle_and_native_rendering() {

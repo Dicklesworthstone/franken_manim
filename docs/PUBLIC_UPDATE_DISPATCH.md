@@ -33,9 +33,11 @@ Camera suspension does not suspend unrelated drawable roots.
 perform its normal capture/interaction policy, including its skip-mode policy.
 
 These rules apply to direct public updates and animation-owned helper/snapshot
-updates. They do **not** replace the separate native frame scheduler used by
-`Scene.play` and `Scene.wait`. In particular, this change does not claim that
-all drawable `update()` overrides are automatically invoked by that scheduler.
+updates. Native `Scene.play` and `Scene.wait` also dispatch this public phase
+when an authored scene, camera or drawable update protocol requires it. Stock
+objects keep their native updater route. The same rational frame driver still
+owns animation ordering, time advance, event delivery, capture and emission.
+The independent Studio idle/presenter loop is not changed by this dispatch.
 
 ## Regression coverage
 
@@ -62,8 +64,18 @@ true only when it has executed this complete phase. A native caller consuming
 that result must not subsequently run the default scene updater pass. Static
 protocol inspection does not execute authored getters and compares against the
 completed production initializer; ordinary objects retain the native route.
-The handoff is not yet connected to `play`/`wait` in this increment.
+The native caller consumes that result with a per-frame completion marker.
+Markers are valid only after prepare and once per frame; they cannot leak into
+an aborted or subsequent play. Wait's zero-dt prologue and play's final zero-dt
+phase have corresponding explicit handoffs. Externally updated segments are
+marked stateful and do not retain a pure-frame reconstruction snapshot.
 
 `scene_update_phase.py` exercises real native record probes, cross-root
 ordering, failure disposal, authored scope, shared paths, late overrides,
 descriptor-safe admission, and collection after failure.
+
+`native_scene_update_dispatch.py` exercises the actual native play/wait loop,
+including camera-only plays, per-frame override discovery, exceptions, skip
+mode, stop conditions, true native probe counts, and rendered controls at
+1/4/16 workers. `external_scene_updates.rs` independently tests phase validation,
+exact clock/capture values, native callback counts, abort isolation and purity.
