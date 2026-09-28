@@ -21046,6 +21046,13 @@ _split = _old_tex_module.OldTexText(
 assert _split.tex_strings == ["Prevalence", " = ", "Prior"] and len(_split) == 3
 assert all(glyph.get_fill_color().upper() == "#FFFF00" for glyph in _split[2])
 assert _old_tex_module.OldTex("x^2 + y", isolate=["y"]).tex_strings == ["x^2 + ", "y"]
+# C-19 (BN-07): a caller's color= beats constructor defaults. The pinned
+# Reference re-applies Text's white default and Dot's white fill, and drops it.
+# (Explicit fill_color/stroke_color beating color= is fm-qead, not yet true.)
+_red_words = manimlib.Text("ab", color=manimlib.RED)
+assert all(glyph.get_fill_color().upper() == "#FC6255" for glyph in _red_words), \
+    [glyph.get_fill_color() for glyph in _red_words]
+assert manimlib.Dot(color=manimlib.RED).get_fill_color().upper() == "#FC6255"
 assert len(_old_tex_module.OldTex("a", "+", "b")) == 3
 # OldTex selects parts the way the Reference does (old_tex_mobject.py:248-305).
 # Each part carries its piece's source. A lookup tests substrings of that

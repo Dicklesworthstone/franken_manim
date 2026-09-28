@@ -367,9 +367,31 @@ def main():
                         help="MODULE:SCENE to delta-debug to a minimal structure-differing construct")
     parser.add_argument("--minimize-budget", type=int, default=60)
     parser.add_argument("--report", type=pathlib.Path, help="re-derive dashboard/gallery from DIR")
+    parser.add_argument("--rediff", type=pathlib.Path,
+                        help="recompute DIR's verdicts from its saved facts under the current exclusions")
     parser.add_argument("--dashboard", type=pathlib.Path)
     parser.add_argument("--title", default="Corpus differential")
     args = parser.parse_args()
+    if args.rediff:
+        # Recompute both tiers from the saved facts under the current exclusion table.
+        exclusions = sf.in_scope(sf.load_exclusions(args.exclusions_file), "scenes")
+        records = sf.read_ndjson(args.rediff / "records.ndjson")
+        for r in records:
+            if r["outcome"] != "both":
+                continue
+            work = args.rediff / "scenes" / _slug(r["module"], r["scene"])
+            ref, portal = _facts(work / "reference.ndjson"), _facts(work / "portal.ndjson")
+            for tier, ignore in (("structure", sf.GEOMETRY_FACTS), ("geometry", frozenset())):
+                result = sf.diff_subject(ref, portal, exclusions, ignore=ignore)
+                r[tier] = {"verdict": result["verdict"], "first_difference": result["first_difference"],
+                           "difference_count": result["difference_count"], "excluded": result["excluded"]}
+        (args.rediff / "records.ndjson").write_text("".join(sf.canonical(r) + "\n" for r in records))
+        counts = {}
+        for r in records:
+            key = r["outcome"] if r["outcome"] != "both" else f"both:{r['structure']['verdict']}"
+            counts[key] = counts.get(key, 0) + 1
+        print(sf.canonical({"rediff": str(args.rediff), "counts": dict(sorted(counts.items()))}))
+        return 0
     if args.report:
         records = sf.read_ndjson(args.report / "records.ndjson")
         if args.dashboard:

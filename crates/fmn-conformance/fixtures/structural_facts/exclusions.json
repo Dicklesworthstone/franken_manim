@@ -13,6 +13,34 @@
       "reason": "Glyphs are plain VMobject (Reference VMobjectFromSVGPath), and Tex rules are not Rectangle."
     },
     {
+      "id": "bn07-c19-text-color-keyword",
+      "kind": "behavior-note",
+      "ref": "BN-07",
+      "scope": ["classes", "scenes"],
+      "class": ["VMobjectFromSVGPath", "Text", "MarkupText", "Tex", "TexText", "OldTex", "OldTexText", "SingleStringTex"],
+      "fact": ["style.fill_color", "style.stroke_color"],
+      "reference_values": ["#FFFFFF"],
+      "reason": "C-19: at the pin StringMobject.__init__ re-applies its white fill_color after color= reached SVGMobject, so Text(..., color=X) renders white. FrankenManim applies the requested color (BN-07). The row applies only where the Reference shows that default white."
+    },
+    {
+      "id": "bn05-svg-path-geometry",
+      "kind": "behavior-note",
+      "ref": "BN-05",
+      "scope": ["classes", "scenes"],
+      "class": "VMobjectFromSVGPath",
+      "fact": ["n_points", "points", "points_sha256", "bbox"],
+      "reason": "Glyph outlines come from the bundled faces (BN-05), and SVG and CFF cubics go through the one error-bounded converter (BN-13), so point counts and positions of SVG-derived paths differ wherever scenes regroup them."
+    },
+    {
+      "id": "fm-15k9-svg-path-classes",
+      "kind": "open-bead",
+      "ref": "fm-15k9",
+      "scope": ["classes", "scenes"],
+      "class": "VMobjectFromSVGPath",
+      "fact": ["class", "mro"],
+      "reason": "Every SVG-derived path, glyph or SVG file, is VMobjectFromSVGPath in the Reference and VMobject in the portal. Scenes regroup glyphs (VGroup(*tex[0])), so they appear outside any text ancestor."
+    },
+    {
       "id": "bn05-text-geometry",
       "kind": "behavior-note",
       "ref": "BN-05",

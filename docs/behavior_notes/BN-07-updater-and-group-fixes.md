@@ -1,4 +1,4 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
@@ -162,3 +162,35 @@ Reference now run.
 
 Locked by the OldTex/OldTexText assertions in
 `crates/fmn-python/tests/bridge.py` (part splitting, part lookup).
+
+## C-19 — a caller's `color=` is not masked by constructor defaults
+
+The pinned Reference resolves a VMobject's channels as
+`fill_color or color or DEFAULT` and `stroke_color or color or DEFAULT`
+(`vectorized_mobject.py:100-102`). A constructor that passes its own
+default channel color therefore masks the caller's `color=`:
+
+- `StringMobject.__init__` (`string_mobject.py:46-72`) passes `color=`
+  through `**kwargs` to `SVGMobject`, then re-applies its white
+  `fill_color`/`stroke_color` defaults with `set_fill`/`set_stroke`. So
+  `Text("What is this", color=RED)`, `Tex(..., color=BLUE)` and every other
+  `StringMobject` given only `color=` render white.
+- `Dot(color=RED)` passes `fill_color=DEFAULT_MOBJECT_COLOR` and
+  `stroke_color=BLACK` to `Circle`, so it renders white with a black stroke.
+  The corpus has 147 `Dot(..., color=...)` call sites in 60 files.
+
+The corpus differential (fm-5wq.33) found the text case in dozens of 3b1b
+scenes whose authors asked for a color. For example, `_2021/newton_fractal.py`
+`WhatIsThis` is red in the portal and white in the pinned Reference.
+
+**FrankenManim:** a caller's `color=` colors both channels over any
+constructor default, the evident intent and manim's long-standing behavior.
+Measured at `35c65d6e`, the portal also lets `color=` override a caller's
+*explicit* `fill_color`/`stroke_color`, which the Reference correctly keeps.
+That half is a portal bug, fm-qead: the intended precedence is explicit
+channel keyword > `color=` > constructor default.
+
+Locked by the C-19 assertions in `crates/fmn-python/tests/bridge.py`.
+
+**Migration:** scenes that relied on the defect to keep text or dots white
+while passing `color=` should drop the keyword.

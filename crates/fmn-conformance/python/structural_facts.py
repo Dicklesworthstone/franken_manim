@@ -458,6 +458,7 @@ def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None, e
     """The first row covering this difference. Rows name the Reference-side class.
 
     Optional row fields: `under` requires an ancestor whose class matches,
+    `reference_values` requires the Reference-side value to be one of those,
     `empty_only` requires the Reference member to have no points, and
     `mro_missing` admits an `mro` difference only when the Reference chain equals
     the portal chain plus exactly those names.
@@ -470,6 +471,8 @@ def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None, e
         if "under" in row and not any(_matches(a, row["under"]) for a in ancestors):
             continue
         if row.get("empty_only") and not empty:
+            continue
+        if "reference_values" in row and (values is None or values[0] not in row["reference_values"]):
             continue
         if "mro_missing" in row:
             ref_mro, portal_mro = values if values else (None, None)
