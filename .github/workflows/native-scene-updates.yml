@@ -10,14 +10,14 @@ permissions:
   contents: write
 concurrency:
   group: native-scene-updates-publication
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   implement_and_validate:
     if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
-      CARGO_TARGET_DIR: target/camera-runtime
+      CARGO_TARGET_DIR: target/portable
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
       CARGO_TERM_COLOR: never
       PYO3_PYTHON: python
@@ -71,10 +71,11 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target/camera-runtime
+            target/portable
           key: scene-updates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
-            camera-runtime-${{ runner.os }}-${{ runner.arch }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-bundle-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - name: Build and test the real native implementation
         shell: bash
         run: |
