@@ -14,6 +14,7 @@ from types import ModuleType
 # Resolve the entire installation plan before mutating any class. In particular,
 # an incomplete wheel must fail closed, not expose a partly initialized engine.
 _STEPS = (
+    ("grouping", "install_grouping"),
     ("camera_lifecycle", "install_scene_camera_configuration"),
     ("camera_frame_lifecycle", "install_camera_frame_lifecycle"),
     ("copying", "install_mobject_copying"),

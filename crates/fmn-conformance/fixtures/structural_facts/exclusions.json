@@ -122,14 +122,6 @@
       "reason": "Default stroke/fill colors differ: Annulus and VCube stroke, NumberPlane axis fill."
     },
     {
-      "id": "fm-16u6-vgroup-not-group",
-      "kind": "open-bead",
-      "ref": "fm-16u6",
-      "fact": "mro",
-      "mro_missing": ["Group"],
-      "reason": "The portal's VGroup lacks Group in its MRO (Reference: VGroup(Group, VMobject)). Applies only when Group is the entire difference."
-    },
-    {
       "id": "fm-6l2i-camera-frame-root",
       "kind": "open-bead",
       "ref": "fm-6l2i",

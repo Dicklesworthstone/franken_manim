@@ -49,6 +49,7 @@ python3 crates/fmn-python/tests/bundle_checkpoint_native.py
 python3 crates/fmn-python/tests/camera_configuration.py
 python3 crates/fmn-python/tests/camera_frame_lifecycle.py
 python3 crates/fmn-python/tests/public_update_dispatch.py
+python3 crates/fmn-python/tests/vector_group_protocol.py
 python3 crates/fmn-python/tests/tracker_lifecycle.py
 python3 crates/fmn-python/tests/raster_initialization.py
 python3 crates/fmn-python/tests/raster_lifecycle.py
