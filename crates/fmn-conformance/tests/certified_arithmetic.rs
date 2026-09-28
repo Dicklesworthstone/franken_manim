@@ -880,3 +880,680 @@ fn the_exemptions_are_the_two_that_are_argued_for() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The governed closure (fm-certified-libm-leak-3aja).
+//
+// The sweep above reads `crates/*/src` only. FrankenSuite crates also run on
+// certified paths: StreamLines integrate through fsci-integrate, smoothing
+// solves through fsci-linalg, the one RNG is fnp-random-core, glyphs and math
+// come from fmd-font and fmd-math. A platform-libm call there puts the libm
+// back in the loop exactly as a call in our own crates would. So the same
+// needles run over those crates' sources at the SUITE.lock pins, from Cargo's
+// git checkouts. A missing checkout is an error, never a pass.
+
+/// One suite crate on a certified path.
+struct SuiteCrate {
+    /// The SUITE.lock repository.
+    repo: &'static str,
+    /// The crate directory in that repository.
+    dir: &'static str,
+    /// Modules under `src/` to read; empty reads the whole crate.
+    modules: &'static [&'static str],
+    /// The functions fmn calls. When non-empty, only calls inside functions
+    /// reachable from these by name (a conservative over-approximation: every
+    /// function of a called name, and everything any of them calls) count.
+    /// Empty means every function counts.
+    entry_points: &'static [&'static str],
+    /// The fmn call sites that put the crate on the path.
+    reason: &'static str,
+}
+
+const SUITE_CERTIFIED: &[SuiteCrate] = &[
+    SuiteCrate {
+        repo: "frankenscipy",
+        dir: "crates/fsci-integrate",
+        modules: &[],
+        entry_points: &[],
+        reason: "fmn-library fields.rs: StreamLines solve_ivp(Rk45)",
+    },
+    SuiteCrate {
+        repo: "frankenscipy",
+        dir: "crates/fsci-linalg",
+        modules: &[],
+        entry_points: &["solve", "solve_banded"],
+        reason: "fmn-geom smoothing.rs: fsci_linalg::solve and solve_banded only",
+    },
+    SuiteCrate {
+        repo: "franken_numpy",
+        dir: "crates/fnp-random-core",
+        modules: &[],
+        entry_points: &[],
+        reason: "fmn-core rng.rs: PCG64DXSM, the one RNG",
+    },
+    SuiteCrate {
+        repo: "franken_numpy",
+        dir: "crates/fnp-ndarray",
+        modules: &[],
+        entry_points: &[],
+        reason: "fmn-mobject record.rs, numpy.rs: NdLayout and MemoryOrder",
+    },
+    SuiteCrate {
+        repo: "franken_numpy",
+        dir: "crates/fnp-dtype",
+        modules: &[],
+        entry_points: &["item_size", "name"],
+        reason: "fmn-mobject numpy.rs: the DType enum and StructuredField as data, and \
+                 DType::item_size (name is included conservatively)",
+    },
+    SuiteCrate {
+        repo: "franken_markdown",
+        dir: "fmd-font",
+        modules: &[],
+        entry_points: &[],
+        reason: "fmn-text: sfnt parsing and glyph outlines",
+    },
+    SuiteCrate {
+        repo: "franken_markdown",
+        dir: "fmd-math",
+        modules: &[],
+        entry_points: &[],
+        reason: "fmn-tex: TeX math layout",
+    },
+    SuiteCrate {
+        repo: "franken_markdown",
+        dir: ".",
+        modules: &["ast.rs", "parse", "highlight.rs"],
+        entry_points: &[],
+        reason: "fmn-library markdown.rs, markdown_document.rs, code.rs: parser, AST and highlighter only",
+    },
+    SuiteCrate {
+        repo: "franken_networkx",
+        dir: "crates/fnx-classes",
+        modules: &[],
+        entry_points: &[],
+        reason: "fmn-library network_graph.rs",
+    },
+];
+
+/// Suite dependencies of the swept crates that this sweep does not read, each
+/// with the argument: either no certified output reaches them, or the calls
+/// that do reach them perform no floating-point arithmetic.
+const SUITE_NOT_SWEPT: &[(&str, &str)] = &[
+    (
+        "ft-kernel-metal",
+        "Accelerator Annex: standard-only; certified mode refuses annex engines \
+         (fmn-runtime plan::certified_refuses_standard_only_engines)",
+    ),
+    (
+        "asupersync",
+        "batch farms and process supervision; never in the frame loop (§3 D4)",
+    ),
+    (
+        "fp-frame",
+        "TableMobject calls DataFrame::from_csv, shape() and cell access only: correctly \
+         rounded float parsing and text formatting. The crate's arithmetic (6.8 MB lib.rs of \
+         dataframe analytics) is never called by fmn",
+    ),
+    (
+        "fp-types",
+        "the Scalar cell type TableMobject formats; no arithmetic",
+    ),
+    (
+        "fnp-io",
+        "fmn-conformance reads and writes .npy fixtures with it; no certified artifact is \
+         computed through it",
+    ),
+];
+
+/// Calls this guard reports but does not yet fail on, each owned by an open
+/// bead: (label, file, needle, exact count, owner). An entry whose count no
+/// longer matches fails, so a fixed leak forces its entry out and a new call
+/// in the same file is still caught.
+const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "rk.rs",
+        "powf",
+        4,
+        "fm-9esi: RK step control; fixed upstream at frankenscipy 5a7aafa2 (deterministic kth_root), \
+         pin bump pending",
+    ),
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "step_size.rs",
+        "powf",
+        1,
+        "fm-9esi: select_initial_step; fixed upstream at frankenscipy 5a7aafa2, pin bump pending",
+    ),
+    (
+        "frankenscipy/crates/fsci-linalg",
+        "lib.rs",
+        "log10",
+        1,
+        "fm-wi8l: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
+         at thresholds, never the solution values",
+    ),
+];
+
+/// Files of a swept suite crate that the fmn call sites cannot reach, with
+/// the reason. Each is argued, not assumed: fmn calls solve_ivp with
+/// SolverKind::Rk45 only, so the quadrature, BDF, Radau and BVP modules
+/// never run for fmn.
+const SUITE_UNREACHABLE_FILES: &[(&str, &str, &str)] = &[
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "quad.rs",
+        "quadrature: no fmn call site",
+    ),
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "bdf.rs",
+        "BDF: fmn uses SolverKind::Rk45 only",
+    ),
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "radau.rs",
+        "Radau: fmn uses SolverKind::Rk45 only",
+    ),
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "bvp.rs",
+        "boundary-value solver: no fmn call site",
+    ),
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "lebedev.rs",
+        "spherical quadrature: no fmn call site",
+    ),
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "complex.rs",
+        "complex integration: no fmn call site",
+    ),
+];
+
+/// The pinned revision of a suite repository, from SUITE.lock.
+fn suite_rev(repo: &str) -> Result<String, String> {
+    let lock = workspace().join("SUITE.lock");
+    let text = read_utf8_bounded(
+        std::fs::File::open(&lock).map_err(|error| format!("opening SUITE.lock: {error}"))?,
+        "SUITE.lock",
+        1024 * 1024,
+    )?;
+    text.lines()
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            (fields.next() == Some(repo)).then(|| fields.next().map(str::to_owned))?
+        })
+        .ok_or_else(|| format!("SUITE.lock has no row for {repo}"))
+}
+
+/// Cargo's checkout of `repo` at its pinned revision: exactly one
+/// `$CARGO_HOME/git/checkouts/<repo>-<hash>/<rev[..7]>`.
+fn suite_checkout(repo: &str) -> Result<PathBuf, String> {
+    let rev = suite_rev(repo)?;
+    let cargo_home = std::env::var_os("CARGO_HOME").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".cargo"))
+                .ok_or_else(|| "neither CARGO_HOME nor HOME is set".to_owned())
+        },
+        |home| Ok(PathBuf::from(home)),
+    )?;
+    let checkouts = cargo_home.join("git").join("checkouts");
+    let entries = std::fs::read_dir(&checkouts)
+        .map_err(|error| format!("reading {}: {error}", checkouts.display()))?;
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("reading {}: {error}", checkouts.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name
+            .rsplit_once('-')
+            .is_some_and(|(prefix, _)| prefix == repo)
+        {
+            let candidate = entry.path().join(&rev[..7]);
+            if candidate.is_dir() {
+                found.push(candidate);
+            }
+        }
+    }
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(format!(
+            "no Cargo checkout of {repo} at {} under {}: build the workspace first; \
+             a missing source is not a clean one",
+            &rev[..7],
+            checkouts.display()
+        )),
+        _ => Err(format!(
+            "{} checkouts of {repo} at {}: ambiguous",
+            found.len(),
+            &rev[..7]
+        )),
+    }
+}
+
+/// Every swept suite file, grouped by crate: (crate, label, files).
+/// Binary targets (`src/bin`) are never linked into fmn and are not read.
+/// One swept crate with its label and the files read.
+type SuiteGroup = (&'static SuiteCrate, String, Vec<PathBuf>);
+
+fn suite_files() -> Result<Vec<SuiteGroup>, String> {
+    let mut out = Vec::new();
+    for krate in SUITE_CERTIFIED {
+        let src = suite_checkout(krate.repo)?.join(krate.dir).join("src");
+        let label = format!("{}/{}", krate.repo, krate.dir.trim_start_matches("./"));
+        let mut files = Vec::new();
+        if krate.modules.is_empty() {
+            rust_files(&src, &mut files)?;
+        } else {
+            for module in krate.modules {
+                let path = src.join(module);
+                if path.is_dir() {
+                    rust_files(&path, &mut files)?;
+                } else if path.is_file() {
+                    files.push(path);
+                } else {
+                    return Err(format!("{label}: declared module {module} does not exist"));
+                }
+            }
+        }
+        files.retain(|file| !file.starts_with(src.join("bin")));
+        if files.is_empty() {
+            return Err(format!("{label}: no Rust sources under {}", src.display()));
+        }
+        out.push((krate, label, files));
+    }
+    Ok(out)
+}
+
+/// One function body in a suite source.
+struct SuiteFn {
+    file: PathBuf,
+    name: String,
+    /// First and last line of the body, 1-based and inclusive.
+    lines: (usize, usize),
+    callees: Vec<String>,
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+/// Index every `fn` body of `files`, with the names each body calls. The text
+/// is `code_only`, so braces in comments and literals do not count.
+fn suite_functions(files: &[PathBuf]) -> Result<Vec<SuiteFn>, String> {
+    let mut out = Vec::new();
+    for file in files {
+        let code = code_only(&read_rust_source(file)?);
+        let bytes = code.as_bytes();
+        let line_of = |offset: usize| bytes[..offset].iter().filter(|&&b| b == b'\n').count() + 1;
+        let mut i = 0;
+        while let Some(found) = code[i..].find("fn ") {
+            let at = i + found;
+            i = at + 3;
+            if at > 0 && is_ident_byte(bytes[at - 1]) {
+                continue;
+            }
+            let mut j = at + 3;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            let name_start = j;
+            while j < bytes.len() && is_ident_byte(bytes[j]) {
+                j += 1;
+            }
+            if j == name_start {
+                continue;
+            }
+            let name = code[name_start..j].to_owned();
+            let Some(open_rel) = code[j..].find(['{', ';']) else {
+                continue;
+            };
+            let open = j + open_rel;
+            if bytes[open] == b';' {
+                continue; // a declaration without a body
+            }
+            let mut depth = 0usize;
+            let mut close = open;
+            for (k, &byte) in bytes.iter().enumerate().skip(open) {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = k;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let body = &code[open..=close];
+            let body_bytes = body.as_bytes();
+            let mut callees = Vec::new();
+            let mut k = 0;
+            while k < body_bytes.len() {
+                if is_ident_byte(body_bytes[k]) && (k == 0 || !is_ident_byte(body_bytes[k - 1])) {
+                    let s = k;
+                    while k < body_bytes.len() && is_ident_byte(body_bytes[k]) {
+                        k += 1;
+                    }
+                    let mut after = k;
+                    while after < body_bytes.len() && body_bytes[after].is_ascii_whitespace() {
+                        after += 1;
+                    }
+                    // `name(` and turbofish `name::<T>(` are calls.
+                    if after < body_bytes.len()
+                        && (body_bytes[after] == b'(' || body[after..].starts_with("::<"))
+                    {
+                        callees.push(body[s..k].to_owned());
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+            out.push(SuiteFn {
+                file: file.clone(),
+                name,
+                lines: (line_of(open), line_of(close)),
+                callees,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// A function body's file and inclusive 1-based line range.
+type LineRange = (PathBuf, (usize, usize));
+
+/// Line ranges of the functions reachable by name from `entry_points`.
+fn reachable_ranges(
+    functions: &[SuiteFn],
+    entry_points: &[&str],
+) -> Result<Vec<LineRange>, String> {
+    let mut reached: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut queue: Vec<&str> = Vec::new();
+    for entry in entry_points {
+        if !functions.iter().any(|f| f.name == *entry) {
+            return Err(format!("entry point {entry} is not defined in the crate"));
+        }
+        queue.push(entry);
+    }
+    while let Some(name) = queue.pop() {
+        if !reached.insert(name) {
+            continue;
+        }
+        for function in functions.iter().filter(|f| f.name == name) {
+            for callee in &function.callees {
+                if !reached.contains(callee.as_str()) {
+                    queue.push(callee.as_str());
+                }
+            }
+        }
+    }
+    Ok(functions
+        .iter()
+        .filter(|f| reached.contains(f.name.as_str()))
+        .map(|f| (f.file.clone(), f.lines))
+        .collect())
+}
+
+/// Scan the suite, split into (offences, known-leak counts, lines read,
+/// calls dropped as unreachable from the declared entry points).
+type LeakCounts = std::collections::BTreeMap<(String, String, String), usize>;
+
+fn suite_sweep(
+    needles: &[(String, String)],
+) -> Result<(Vec<Offence>, LeakCounts, usize, usize), String> {
+    let mut offences = Vec::new();
+    let mut scanned = 0;
+    let mut unreachable = 0;
+    for (krate, label, files) in suite_files()? {
+        let ranges = if krate.entry_points.is_empty() {
+            None
+        } else {
+            Some(reachable_ranges(
+                &suite_functions(&files)?,
+                krate.entry_points,
+            )?)
+        };
+        for file in files {
+            let name = file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if SUITE_UNREACHABLE_FILES
+                .iter()
+                .any(|(l, f, _)| *l == label && *f == name)
+            {
+                continue;
+            }
+            let mut found = Vec::new();
+            scanned += scan(&file, &label, needles, &mut found)?;
+            if let Some(ranges) = &ranges {
+                let before = found.len();
+                found.retain(|offence| {
+                    ranges.iter().any(|(path, (first, last))| {
+                        *path == file && (*first..=*last).contains(&offence.line)
+                    })
+                });
+                unreachable += before - found.len();
+            }
+            offences.extend(found);
+        }
+    }
+    let mut leaks = std::collections::BTreeMap::new();
+    offences.retain(|offence| {
+        let (label, file) = offence
+            .path
+            .rsplit_once('/')
+            .map_or((offence.path.as_str(), ""), |(l, f)| (l, f));
+        let known = SUITE_KNOWN_LEAKS
+            .iter()
+            .any(|(l, f, n, _, _)| *l == label && *f == file && *n == offence.needle);
+        if known {
+            *leaks
+                .entry((label.to_owned(), file.to_owned(), offence.needle.clone()))
+                .or_insert(0) += 1;
+        }
+        !known
+    });
+    Ok((offences, leaks, scanned, unreachable))
+}
+
+/// The suite sweep reads roughly 60 000 lines at today's pins; the floor
+/// catches a walk that lost a crate.
+const MIN_SUITE_SCANNED_LINES: usize = 20_000;
+
+#[test]
+fn every_certified_suite_transcendental_is_accounted_for() {
+    let mut needles = transcendental_needles();
+    needles.extend(fma_needles());
+    let (offences, leaks, scanned, unreachable) =
+        suite_sweep(&needles).expect("the suite sweep must read every pinned source");
+    assert!(
+        scanned > MIN_SUITE_SCANNED_LINES,
+        "the suite sweep read only {scanned} lines: the walk is broken, not the code clean"
+    );
+    // The reachability filter drops calls in functions no fmn entry point can
+    // reach; report how many so a filter that drops everything is visible.
+    eprintln!(
+        "suite sweep: {scanned} lines, {unreachable} call(s) unreachable from fmn entry points"
+    );
+    assert!(
+        offences.is_empty(),
+        "ADR-0010 property 1 over the governed closure: {} platform-libm or FMA call(s) \
+         in suite crates on certified paths, neither routed through a deterministic \
+         implementation nor owned by a known-leak entry:\n{}",
+        offences.len(),
+        offences
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    for (label, file, needle, count, owner) in SUITE_KNOWN_LEAKS {
+        let observed = leaks
+            .get(&(
+                (*label).to_owned(),
+                (*file).to_owned(),
+                (*needle).to_owned(),
+            ))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            observed, *count,
+            "known leak {label}/{file} [{needle}] ({owner}): expected {count} call(s), found \
+             {observed}. Fewer means the leak is closing: update or remove the entry. More \
+             means a new call arrived: it is not covered by the old audit."
+        );
+    }
+}
+
+#[test]
+fn every_suite_dependency_of_a_certified_crate_is_classified() {
+    // A suite crate added to a certified crate's [dependencies] must be swept
+    // or argued outside the certified path; otherwise it would be forgotten.
+    let manifest = read_utf8_bounded(
+        std::fs::File::open(workspace().join("Cargo.toml")).expect("workspace manifest"),
+        "Cargo.toml",
+        1024 * 1024,
+    )
+    .expect("workspace manifest is readable");
+    let suite: Vec<&str> = manifest
+        .lines()
+        .filter(|line| line.contains("git = \"https://github.com/Dicklesworthstone/"))
+        .filter_map(|line| line.split_once(" = ").map(|(name, _)| name.trim()))
+        .collect();
+    assert!(
+        suite.len() >= 10,
+        "found only {} suite git dependencies",
+        suite.len()
+    );
+    let classified: Vec<&str> = SUITE_CERTIFIED
+        .iter()
+        .map(|krate| {
+            if krate.dir == "." {
+                krate.repo
+            } else {
+                krate.dir.rsplit('/').next().unwrap_or(krate.dir)
+            }
+        })
+        .chain(SUITE_NOT_SWEPT.iter().map(|(name, _)| *name))
+        .collect();
+    let mut unclassified = Vec::new();
+    for (crate_name, _) in certified_roots().expect("crate roots are readable") {
+        let path = workspace()
+            .join("crates")
+            .join(&crate_name)
+            .join("Cargo.toml");
+        let text = read_utf8_bounded(
+            std::fs::File::open(&path).expect("crate manifest"),
+            "crate manifest",
+            1024 * 1024,
+        )
+        .expect("crate manifest is readable");
+        let mut in_dependencies = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_dependencies = trimmed == "[dependencies]";
+                continue;
+            }
+            if !in_dependencies {
+                continue;
+            }
+            let name = trimmed.split(['.', ' ', '=']).next().unwrap_or("");
+            if suite.contains(&name) && !classified.contains(&name) {
+                unclassified.push(format!("{crate_name} -> {name}"));
+            }
+        }
+    }
+    assert!(
+        unclassified.is_empty(),
+        "suite dependencies of certified crates with no classification: {unclassified:?}. \
+         Add each to SUITE_CERTIFIED (swept) or SUITE_NOT_SWEPT (with the argument)."
+    );
+}
+
+#[test]
+fn every_swept_suite_crate_states_why_it_is_on_the_path() {
+    for krate in SUITE_CERTIFIED {
+        assert!(
+            krate.reason.len() > 10 && krate.reason.contains("fmn"),
+            "{}/{}: name the fmn call sites that put it on a certified path",
+            krate.repo,
+            krate.dir
+        );
+    }
+    for (name, reason) in SUITE_NOT_SWEPT {
+        assert!(reason.len() > 20, "{name}: argue why it is not swept");
+    }
+}
+
+#[test]
+fn reachability_keeps_calls_an_entry_point_reaches_and_drops_the_rest() {
+    // Negative and positive control for the entry-point filter: a transcendental
+    // two calls deep from the entry point is kept; one in an unrelated function
+    // is dropped; a brace inside a comment or string does not end a body.
+    let dir = std::env::temp_dir().join(format!("fmn-suite-reach-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("lib.rs");
+    std::fs::write(
+        &file,
+        "pub fn solve(x: f64) -> f64 { let s = \"}\"; /* } */ refine(x) }\n\
+         fn refine(x: f64) -> f64 { step::<f64>(x) }\n\
+         fn step<T>(x: f64) -> f64 { x.powf(0.2) }\n\
+         pub fn unrelated(y: f64) -> f64 { y.sin() }\n",
+    )
+    .expect("write planted crate");
+    let functions = suite_functions(std::slice::from_ref(&file)).expect("index functions");
+    let ranges = reachable_ranges(&functions, &["solve"]).expect("reachable from solve");
+    let mut offences = Vec::new();
+    scan(&file, "planted", &transcendental_needles(), &mut offences).expect("scan");
+    let kept: Vec<&str> = offences
+        .iter()
+        .filter(|o| ranges.iter().any(|(_, (a, b))| (*a..=*b).contains(&o.line)))
+        .map(|o| o.needle.as_str())
+        .collect();
+    assert_eq!(kept, ["powf"], "{offences:?}");
+    assert!(
+        reachable_ranges(&functions, &["missing"]).is_err(),
+        "an entry point that does not exist is an error, not an empty (clean) scope"
+    );
+}
+
+#[test]
+fn the_suite_guard_notices_a_planted_powf() {
+    // Negative control: a suite-labelled source calling f64::powf on a certified
+    // path is flagged, and a known-leak entry cannot hide a call in another file.
+    let dir = std::env::temp_dir().join(format!("fmn-suite-guard-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let planted = dir.join("planted.rs");
+    std::fs::write(
+        &planted,
+        "pub fn step(err: f64, e: f64) -> f64 { 0.9 * err.powf(e) }\n\
+         pub fn fine(x: f64) -> f64 { x.sqrt() }\n",
+    )
+    .expect("write planted source");
+    let mut offences = Vec::new();
+    scan(
+        &planted,
+        "frankenscipy/crates/fsci-integrate",
+        &transcendental_needles(),
+        &mut offences,
+    )
+    .expect("scan the planted source");
+    assert_eq!(offences.len(), 1, "{offences:?}");
+    assert_eq!(offences[0].needle, "powf");
+    assert!(
+        !SUITE_KNOWN_LEAKS
+            .iter()
+            .any(|(l, f, n, _, _)| *l == "frankenscipy/crates/fsci-integrate"
+                && *f == "planted.rs"
+                && *n == "powf"),
+        "a known-leak entry names files, so a new file is never covered by an old audit"
+    );
+}
