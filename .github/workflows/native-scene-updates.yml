@@ -77,7 +77,7 @@ jobs:
           # existing BN-02 binary64 clock fixtures. This correction changes
           # only that new suite and adds independent Fraction-based controls.
           oracle = root / 'clock-oracle.patch'
-          assert hashlib.sha256(oracle.read_bytes()).hexdigest() == '4cd2db853cce977998afea2b7e4880a8379d04263f9d8226c6d051638ae3cec6'
+          assert hashlib.sha256(oracle.read_bytes()).hexdigest() == '5b3bf00bd4506cae80726fa01872c8bf8ffc1296bc75e1eaf16a89877223473d'
           oracle_stats = subprocess.check_output(['git', 'apply', '--numstat', str(oracle)], text=True)
           assert {line.split('\t', 2)[2] for line in oracle_stats.splitlines()} == {'crates/fmn-python/tests/native_scene_update_dispatch.py'}
           if not applied:
@@ -121,13 +121,15 @@ jobs:
           cargo test --locked -p fmn-anim --test frame_order --test clock 2>&1 | tee "$out/frame-tests.log"
           python -m maturin build --locked --interpreter python --profile dev --out "$out/wheels" 2>&1 | tee "$out/build.log"
           python -m pip install --force-reinstall --no-deps "$out"/wheels/*.whl
+          status=0
           for suite in scene_update_phase native_scene_update_dispatch public_update_dispatch updater_family builder_playback creation_semantics movement_semantics rotation_semantics native_animation_updaters animation_updaters camera_execution scene_execution; do
-            python -I "crates/fmn-python/tests/$suite.py" > "$out/$suite.log" 2>&1 || { cat "$out/$suite.log"; exit 1; }
+            python -I "crates/fmn-python/tests/$suite.py" > "$out/$suite.log" 2>&1 || status=1
             cat "$out/$suite.log"
           done
-          cargo test --locked -p fmn-python portal_playback::tests::public_scene_update_dispatch -- --nocapture 2>&1 | tee "$out/embedded.log"
+          cargo test --locked -p fmn-python portal_playback::tests::public_scene_update_dispatch -- --nocapture 2>&1 | tee "$out/embedded.log" || status=1
           bash -n scripts/check_portal_runtime.sh
           git diff --check
+          exit "$status"
           SH
           bash "$RUNNER_TEMP/check-scene-updates.sh"
       - name: Publish tested source directly to main without force
