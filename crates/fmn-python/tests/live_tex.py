@@ -228,6 +228,130 @@ class LiveTexAcceptance(unittest.TestCase):
             self.assertEqual(len(result), 0)
         self.assertEqual(metadata(tex), before)
 
+    def test_infix_fraction_family_indices_remain_live_after_copy(self):
+        import copy
+        for bound in (False, True):
+            for duplicate in (lambda obj: obj.copy(), copy.deepcopy):
+                with self.subTest(bound=bound, duplicate=duplicate.__name__):
+                    tex = m.Tex(r"1 \over 2")
+                    first = tex.make_number_changeable("1")
+                    last = tex.make_number_changeable("2")
+                    self.assertIs(tex[0], first)
+                    self.assertIs(tex[2], last)
+                    if bound:
+                        scene = m.Scene()
+                        scene.add(tex)
+                    copied = duplicate(tex)
+                    self.assertIsInstance(copied[0], m.DecimalNumber)
+                    self.assertIsInstance(copied[2], m.DecimalNumber)
+                    copied[0].set_value(3)
+                    copied[2].set_value(7)
+                    self.assertEqual((first.get_value(), last.get_value()), (1, 2))
+                    self.assertEqual((copied[0].get_value(), copied[2].get_value()), (3, 7))
+                    self.assert_map(copied)
+
+    def test_infix_rule_order_keeps_native_ordinals_and_span_selection(self):
+        tex = m.Tex(r"12 \over 34")
+        self.assertEqual(list(tex.get_part_by_tex("12")), list(tex[:2]))
+        self.assertEqual(list(tex.get_part_by_tex(r"\over")), [tex[2]])
+        self.assertEqual(list(tex.get_part_by_tex("34")), list(tex[3:]))
+        self.assertEqual(tex._string_sub_spans, [(0, 1), (1, 2), (9, 10), (10, 11), (3, 8)])
+        self.assertEqual(tex._string_sub_paths, [[0], [1], [3], [4], [2]])
+        self.assert_map(tex)
+
+    def test_nested_infix_fraction_rules_are_inserted_at_their_own_denominators(self):
+        for source, expected in ((r"{1 \over 2} \over 3", ("1", r"\over", "2", r"\over", "3")),
+                                 (r"1 \over {2 \over 3}", ("1", r"\over", "2", r"\over", "3")),
+                                 (r"x+{1 \over 2}+{3 \over 4}+y",
+                                  ("x", "+", "1", r"\over", "2", "+", "3", r"\over", "4", "+", "y"))):
+            with self.subTest(source=source):
+                tex = m.Tex(source)
+                payload = source.encode()
+                observed = [None] * len(tex)
+                for span, path in zip(tex._string_sub_spans, tex._string_sub_paths):
+                    self.assertEqual(len(path), 1)
+                    observed[path[0]] = payload[slice(*span)].decode()
+                self.assertEqual(tuple(observed), expected)
+                self.assert_map(tex)
+
+    def test_infix_rule_order_is_safe_in_legacy_part_groups(self):
+        from manimlib.mobject.svg.old_tex_mobject import OldTex
+        tex = OldTex(r"{1 \over 2}", "+", r"{3 \over 4}")
+        self.assertEqual(len(tex), 3)
+        for group in (tex[0], tex[2]):
+            self.assertGreater(group[0].get_center()[1], group[1].get_center()[1])
+            self.assertGreater(group[1].get_center()[1], group[2].get_center()[1])
+        self.assert_map(tex)
+
+    def test_infix_utf8_and_authored_decorations_preserve_selection_and_regeneration(self):
+        class Decorated(m.TexText):
+            def init_data(self):
+                super().init_data()
+                self.dot = m.Dot().shift(m.DOWN)
+                self.add(self.dot)
+        tex = Decorated(r"é $1 \over 2$")
+        for _ in range(2):
+            self.assertIs(tex[0], tex.dot)
+            self.assertIs(tex.get_part_by_tex("1")[0], tex[2])
+            self.assertIs(tex.get_part_by_tex(r"\over")[0], tex[3])
+            self.assertIs(tex.get_part_by_tex("2")[0], tex[4])
+            self.assert_map(tex)
+            tex.init_points()
+        scene = m.Scene()
+        scene.add(tex)
+        tex.init_points()
+        self.assertIs(tex[0], tex.dot)
+        self.assertIs(tex.get_part_by_tex("2")[0], tex[4])
+
+    def test_infix_fraction_copy_save_restore_keeps_typed_denominator(self):
+        tex = m.Tex(r"1 \over 2")
+        tex.make_number_changeable("1")
+        tex.make_number_changeable("2")
+        tex.save_state()
+        denominator = tex[2]
+        self.assertIsInstance(denominator, m.DecimalNumber)
+        denominator.set_value(9)
+        tex.restore()
+        self.assertIs(tex[2], denominator)
+        # Reference become restores data/uniforms, not the Python `number`
+        # attribute (numbers.py:get_value). Its public numeric API stays live.
+        self.assertEqual(denominator.get_value(), 9)
+        denominator.set_value(7)
+        self.assertEqual(denominator.get_value(), 7)
+        self.assertEqual(tex[0].get_value(), 1)
+        self.assert_map(tex)
+
+    def test_infix_fraction_indexed_animation_matches_selector_driven_native_frames(self):
+        import tempfile
+        from pathlib import Path
+        root = Path(tempfile.mkdtemp(prefix="fmn-infix-fraction-"))
+        print("retaining infix fraction frame evidence:", root)
+        def render(path, indices, workers):
+            scene = m.Scene()
+            with scene.render_session(path, format="y4m", resolution=(96, 54), fps=8, threads=workers):
+                tex = m.Tex(r"1 \over 2").scale(4)
+                numerator = tex.make_number_changeable("1")
+                denominator = tex.make_number_changeable("2")
+                scene.add(tex)
+                if indices:
+                    numerator, denominator = tex[0], tex[2]
+                scene.play(m.ChangeDecimalToValue(numerator, 5),
+                           m.ChangeDecimalToValue(denominator, 7), run_time=0.5, rate_func=m.linear)
+            return path.read_bytes()
+        expected = render(root / "control.y4m", False, 1)
+        for workers in (1, 4, 16):
+            self.assertEqual(render(root / f"indexed-{workers}.y4m", True, workers), expected)
+        header, frames = expected.split(b"\n", 1)
+        frame_size = 96 * 54 * 3 // 2 + len(b"FRAME\n")
+        self.assertEqual(len(frames), 4 * frame_size)
+        self.assertNotEqual(frames[:frame_size], frames[-frame_size:])
+
+    def test_infix_reordering_does_not_change_plain_or_prefix_tex_construction(self):
+        for source in ("x+y", r"\frac{1}{2}", r"\sqrt{x}"):
+            tex = m.Tex(source)
+            self.assertEqual(tex._string_sub_paths, [[i] for i in range(len(tex._string_sub_spans))])
+            self.assert_map(tex)
+
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(LiveTexAcceptance)
 result = unittest.TextTestRunner(verbosity=2).run(suite)
