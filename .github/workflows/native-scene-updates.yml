@@ -73,6 +73,16 @@ jobs:
               subprocess.run([*args, '--check', str(path)], check=True)
               subprocess.run([*args, str(path)], check=True)
               gate.write_text(before.replace(anchor, anchor + additions, 1))
+          # The prepared tests used decimal-intent counts, contrary to the
+          # existing BN-02 binary64 clock fixtures. This correction changes
+          # only that new suite and adds independent Fraction-based controls.
+          oracle = root / 'clock-oracle.patch'
+          assert hashlib.sha256(oracle.read_bytes()).hexdigest() == '4cd2db853cce977998afea2b7e4880a8379d04263f9d8226c6d051638ae3cec6'
+          oracle_stats = subprocess.check_output(['git', 'apply', '--numstat', str(oracle)], text=True)
+          assert {line.split('\t', 2)[2] for line in oracle_stats.splitlines()} == {'crates/fmn-python/tests/native_scene_update_dispatch.py'}
+          if not applied:
+              subprocess.run(['git', 'apply', '--check', str(oracle)], check=True)
+              subprocess.run(['git', 'apply', str(oracle)], check=True)
           pathlib.Path(os.environ['RUNNER_TEMP'], 'scene-update-files.txt').write_text('\n'.join(sorted(allowed)) + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('applied=' + str(applied).lower() + '\n')
@@ -108,7 +118,7 @@ jobs:
             crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_playback.rs
           git diff --check
           cargo test --locked -p fmn-scene --test external_scene_updates --test runtime 2>&1 | tee "$out/scene-tests.log"
-          cargo test --locked -p fmn-anim --test frame_order 2>&1 | tee "$out/frame-tests.log"
+          cargo test --locked -p fmn-anim --test frame_order --test clock 2>&1 | tee "$out/frame-tests.log"
           python -m maturin build --locked --interpreter python --profile dev --out "$out/wheels" 2>&1 | tee "$out/build.log"
           python -m pip install --force-reinstall --no-deps "$out"/wheels/*.whl
           for suite in scene_update_phase native_scene_update_dispatch public_update_dispatch updater_family builder_playback creation_semantics movement_semantics rotation_semantics native_animation_updaters animation_updaters camera_execution scene_execution; do
