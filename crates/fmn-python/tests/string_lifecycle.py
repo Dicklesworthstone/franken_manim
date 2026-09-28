@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import inspect
+import copy
 import unittest
 
 import numpy as np
@@ -170,6 +171,172 @@ class StringLifecycleTests(unittest.TestCase):
                 self.assertEqual(first,render(root/(base.__name__+'four'),base,True,4))
                 self.assertEqual(first,render(root/(base.__name__+'expected'),base,False,1))
                 self.assertEqual(len(first),2);self.assertNotEqual(first[0],first[1])
+
+
+FRONT_DOORS = ((m.Text, 'xy'), (m.MarkupText, '<b>xy</b>'),
+               (m.Code, 'x = 1'), (m.Tex, 'x+y'), (m.TexText, 'xy'))
+
+
+def assert_paints(test, obj, fill, stroke):
+    members = obj.family_members_with_points()
+    test.assertTrue(members, 'the paint assertion requires real native ink')
+    for member in members:
+        test.assertEqual(member.get_fill_color(), fill)
+        test.assertEqual(member.get_stroke_color(), stroke)
+
+
+class TextChannelColors(unittest.TestCase):
+    def test_explicit_channels_win_independently_at_every_text_front_door(self):
+        cases = ((dict(fill_color=m.BLUE), m.BLUE, m.RED),
+                 (dict(stroke_color=m.GREEN), m.RED, m.GREEN),
+                 (dict(fill_color=m.BLUE, stroke_color=m.GREEN), m.BLUE, m.GREEN),
+                 (dict(fill_color=None, stroke_color=m.GREEN), m.RED, m.GREEN),
+                 (dict(fill_color=m.BLUE, stroke_color=None), m.BLUE, m.RED))
+        for cls, text in FRONT_DOORS:
+            for channels, fill, stroke in cases:
+                with self.subTest(cls=cls.__name__, channels=channels):
+                    obj = cls(text, color=m.RED, stroke_width=2, **channels)
+                    self.assertEqual(obj.fill_color, fill)
+                    self.assertEqual(obj.stroke_color, stroke)
+                    assert_paints(self, obj, fill, stroke)
+
+    def test_color_shorthand_still_overrides_native_and_base_defaults(self):
+        for cls, text in FRONT_DOORS:
+            with self.subTest(cls=cls.__name__):
+                obj = cls(text, color=m.RED, base_color=m.GREEN, stroke_width=2)
+                assert_paints(self, obj, m.RED, m.RED)
+
+    def test_none_shorthand_does_not_erase_explicit_channels(self):
+        for cls, text in FRONT_DOORS:
+            for extra in ({}, {'color': None}):
+                with self.subTest(cls=cls.__name__, extra=extra):
+                    obj = cls(text, fill_color=m.BLUE, stroke_color=m.GREEN,
+                              stroke_width=2, **extra)
+                    assert_paints(self, obj, m.BLUE, m.GREEN)
+
+    def test_source_color_maps_still_win_after_channel_resolution(self):
+        for cls in (m.Text, m.Tex):
+            with self.subTest(cls=cls.__name__):
+                obj = cls('xy', color=m.RED, fill_color=m.BLUE,
+                          stroke_color=m.GREEN, stroke_width=2, t2c={'x': m.YELLOW})
+                assert_paints(self, obj.select_part('x'), m.YELLOW, m.YELLOW)
+                assert_paints(self, obj.select_part('y'), m.BLUE, m.GREEN)
+
+    def test_unstyled_markup_and_highlighting_are_not_repainted(self):
+        markup = m.MarkupText('<span foreground="#FC6255">x</span>y')
+        self.assertEqual(markup.select_part('x').family_members_with_points()[0].get_fill_color(), m.RED)
+        self.assertNotEqual(markup.select_part('y').family_members_with_points()[0].get_fill_color(), m.RED)
+        code = m.Code('def f(x):\n    return 42')
+        colors = {part.get_fill_color() for part in code.family_members_with_points()}
+        self.assertGreater(len(colors), 1)
+
+    def test_hooks_observe_resolved_channels_and_can_override_them(self):
+        for base in (m.Text, m.Tex):
+            events = []
+            class Authored(base):
+                def init_data(self):
+                    events.append(('data', self.fill_color, self.stroke_color))
+                    super().init_data()
+                def init_colors(self):
+                    events.append('colors')
+                    super().init_colors()
+                    self.set_stroke(color=m.YELLOW)
+            with self.subTest(base=base.__name__):
+                obj = Authored('xy', color=m.RED, fill_color=m.BLUE,
+                               stroke_color=m.GREEN, stroke_width=2)
+                self.assertEqual(events, [('data', m.BLUE, m.GREEN), 'colors'])
+                assert_paints(self, obj, m.BLUE, m.YELLOW)
+
+    def test_caller_options_and_rgb_arrays_are_not_mutated(self):
+        fill = np.array([[.1, .2, .8]])
+        shorthand = np.array([[.8, .1, .2]])
+        kwargs = dict(color=shorthand, fill_color=fill, stroke_color=m.GREEN, stroke_width=2)
+        before = {key: value.copy() if isinstance(value, np.ndarray) else value
+                  for key, value in kwargs.items()}
+        obj = m.Text('x', **kwargs)
+        # VMobject itself already implements channel > shorthand. It is an
+        # independent native paint oracle, not the changed string initializer.
+        expected = m.VMobject(**kwargs)
+        expected.set_points_as_corners([m.LEFT, m.RIGHT])
+        assert_paints(self, obj, expected.get_fill_color(), expected.get_stroke_color())
+        for key, value in before.items():
+            np.testing.assert_array_equal(kwargs[key], value)
+
+    def test_empty_text_retains_resolved_defaults_for_later_points(self):
+        obj = m.Text('', color=m.RED, fill_color=m.BLUE,
+                     stroke_color=m.GREEN, stroke_width=2)
+        self.assertFalse(obj.has_points())
+        obj.set_points_as_corners([m.LEFT, m.RIGHT])
+        assert_paints(self, obj, m.BLUE, m.GREEN)
+
+    def test_copies_and_replayed_color_hooks_keep_the_resolved_recipe(self):
+        for cls in (m.Text, m.Tex):
+            original = cls('xy', color=m.RED, fill_color=m.BLUE,
+                           stroke_color=m.GREEN, stroke_width=2)
+            for duplicate in (original.copy(), copy.deepcopy(original)):
+                with self.subTest(cls=cls.__name__, copy=id(duplicate)):
+                    duplicate.set_color(m.YELLOW)
+                    duplicate.init_colors()
+                    assert_paints(self, duplicate, m.BLUE, m.GREEN)
+                    assert_paints(self, original, m.BLUE, m.GREEN)
+                    self.assertIsNot(duplicate.submobjects[0], original.submobjects[0])
+
+    def test_live_rebuild_then_color_hook_preserves_custom_records_and_children(self):
+        class Authored(m.Text):
+            data_dtype = m.VMobject.data_dtype + [('weight', 1)]
+            def init_data(self):
+                super().init_data()
+                self.marker = m.Dot().shift(m.DOWN)
+                self.add(self.marker)
+        obj = Authored('xy', color=m.RED, fill_color=m.BLUE,
+                       stroke_color=m.GREEN, stroke_width=2)
+        scene = m.Scene().add(obj)
+        marker = obj.marker
+        obj.text = 'xyz'
+        obj.init_points(); obj.init_colors()
+        self.assertIs(obj.marker, marker)
+        self.assertIn(marker, obj.submobjects)
+        self.assertIn('weight', obj.data.dtype.names)
+        self.assertIn(obj, scene.mobjects)
+        assert_paints(self, obj, m.BLUE, m.GREEN)
+
+    def test_transform_uses_actual_native_channel_endpoints(self):
+        source = m.Text('xy', color=m.RED, fill_color=m.BLUE,
+                        stroke_color=m.GREEN, stroke_width=2)
+        target = m.Text('xy', color=m.RED, fill_color=m.GREEN,
+                        stroke_color=m.YELLOW, stroke_width=2).shift(m.RIGHT)
+        scene = m.Scene().add(source)
+        scene.play(m.Transform(source, target), run_time=2/30, rate_func=m.linear)
+        assert_paints(self, source, m.GREEN, m.YELLOW)
+
+    def test_rendered_channel_styles_match_independent_postconstruction_paints(self):
+        def render(path, cls, kind, workers):
+            scene = m.Scene()
+            with scene.render_session(path, format='png_sequence', resolution=(96, 54),
+                                      fps=8, threads=workers):
+                if kind == 'authored':
+                    obj = cls('xy', color=m.RED, fill_color=m.BLUE, stroke_color=m.GREEN,
+                              stroke_width=3, fill_opacity=.7, stroke_opacity=.8)
+                else:
+                    obj = cls('xy', color=m.RED, stroke_width=3,
+                              fill_opacity=.7, stroke_opacity=.8)
+                    if kind == 'control':
+                        obj.set_fill(color=m.BLUE)
+                        obj.set_stroke(color=m.GREEN)
+                scene.add(obj)
+                scene.play(obj.animate.shift(m.RIGHT), run_time=.375, rate_func=m.linear)
+            return [p.read_bytes() for p in sorted(path.glob('*.png'))]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for cls in (m.Text, m.Tex):
+                control = render(root/(cls.__name__+'-control'), cls, 'control', 1)
+                self.assertEqual(len(control), 3)
+                self.assertNotEqual(control[0], control[-1])
+                negative = render(root/(cls.__name__+'-negative'), cls, 'negative', 1)
+                self.assertNotEqual(control, negative)
+                for workers in (1, 4, 16):
+                    actual = render(root/(cls.__name__+str(workers)), cls, 'authored', workers)
+                    self.assertEqual(actual, control)
 
 
 if __name__=='__main__':unittest.main()

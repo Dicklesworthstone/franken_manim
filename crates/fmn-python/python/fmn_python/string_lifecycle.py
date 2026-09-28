@@ -12,6 +12,24 @@ from .coordinate_lifecycle import _bind
 from .copying import FamilyRefs
 
 
+def explicit_channel_colors(style):
+    """Resolve genuine caller colors before native defaults enter the recipe.
+
+    A channel keyword wins over the color shorthand, which still supplies the
+    other channel. Do not use this on dictionaries already filled with concrete
+    constructor defaults: those defaults must not mask a caller's color.
+    """
+    result = dict(style)
+    color = result.get("color")
+    if color is not None and any(result.get(key) is not None
+                                 for key in ("fill_color", "stroke_color")):
+        result.pop("color")
+        for key in ("fill_color", "stroke_color"):
+            if result.get(key) is None:
+                result[key] = color
+    return result
+
+
 def initialize_string(g, obj, style):
     """Recipe fields must already exist before init_data/init_points execute."""
     g["_preflight_vmobject_style_kwargs"](style)
@@ -179,7 +197,7 @@ def install_string_lifecycle(native):
         if not self.tex_string:
             self.tex_strings, self.tex_string = [r"\\"], r"\\"
         self.string, self.font_size = self.tex_string, float(font_size)
-        initialize_string(g, self, kwargs)
+        initialize_string(g, self, explicit_channel_colors(kwargs))
         self._validate_isolate_spans()
         self.set_color_by_tex_to_color_map(colors)
         if should_center:

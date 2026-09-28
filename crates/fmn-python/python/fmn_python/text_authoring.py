@@ -57,7 +57,7 @@ def install_text_authoring(native):
     if g.get("_FMN_TEXT_AUTHORING_INSTALLED", False):
         return
     Markup = g["MarkupText"]
-    from .string_lifecycle import initialize_string
+    from .string_lifecycle import initialize_string, explicit_channel_colors
     previous = Markup.__init__
     signature = inspect.signature(previous)
 
@@ -67,7 +67,7 @@ def install_text_authoring(native):
         bound.apply_defaults()
         p = dict(bound.arguments)
         p.pop("self")
-        style = dict(p.pop("kwargs"))
+        style = explicit_channel_colors(p.pop("kwargs"))
         source = str(p["text"])
         if len(source.encode("utf-8")) > _MAX_BYTES:
             raise ValueError("Text source exceeds 262144 bytes")
