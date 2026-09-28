@@ -3,7 +3,9 @@
 Python owns virtual calls and updater-list snapshots. Native updater slots are
 run only after the host traversal returns, with no Stage borrow across Python.
 Invocation state never enters an object's copied/pickled attribute dictionary.
-This covers public updates and animation helpers, not Scene's native scheduler.
+Public scene updates share one host/native boundary across camera and roots.
+The native scheduler may opt into that same boundary when a public override
+requires it; unchanged scenes retain the existing native updater dispatch.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ def install_updater_dispatch(native):
         def __init__(self):
             self.entries = []
             self.authored = False
+            self.roots = []
 
     def python_family(self, dt, recurse):
         if self._is_updating_suspended():
@@ -41,20 +44,38 @@ def install_updater_dispatch(native):
     def host_visit(self, dt, recurse, jobs, ancestors):
         if recurse:
             for child in list(self.submobjects):
-                previous = getattr(state, "delegate", None)
-                state.delegate = (child, jobs, (self, ancestors))
-                try:
-                    # Only pass dt: valid authored overrides need not expose
-                    # recurse. Their super() call chooses its own recursion.
-                    callback = child.update
-                    if (type(callback) is not MethodType or callback.__func__ is not update
-                            or getattr_static(child, "_update_native_mobject") is not native_update):
-                        jobs.authored = True
-                    callback(dt)
-                finally:
-                    state.delegate = previous
+                delegate_update(child, dt, jobs, (self, ancestors))
         for updater in list(self.updaters):
             self._dispatch_updater(updater, dt)
+
+    def delegate_update(member, dt, jobs, ancestors, *, root=False):
+        previous = getattr(state, "delegate", None)
+        state.delegate = (member, jobs, ancestors, root)
+        try:
+            # Only pass dt: authored overrides choose their own recurse value.
+            callback = member.update
+            if (type(callback) is not MethodType or callback.__func__ is not update
+                    or getattr_static(member, "_update_native_mobject") is not native_update):
+                jobs.authored = True
+            callback(dt)
+        finally:
+            state.delegate = previous
+
+    def finish_native(jobs, roots):
+        if not jobs.authored:
+            # The unchanged case keeps one recursive native call per root.
+            for member, elapsed, recurse in roots:
+                member._update_native_mobject(elapsed, recurse)
+            return
+        # Child-first, path-wise; no recursive re-tick at every ancestor.
+        # Check suspension at execution time, including ancestors suspended by
+        # a later host callback or an earlier native updater in this phase.
+        for member, elapsed, parents in jobs.entries:
+            cursor = (member, parents)
+            while cursor and not cursor[0]._is_updating_suspended():
+                cursor = cursor[1]
+            if not cursor:
+                member._update_native_mobject(elapsed, False)
 
     def update(self, dt=0, recurse=True):
         dt, recurse = float(dt), bool(recurse)
@@ -70,26 +91,16 @@ def install_updater_dispatch(native):
             self._update_python_family(dt, recurse)
             state.frame = None
             jobs.entries.append((self, dt, ancestors))
-            if not joined and not jobs.authored:
-                # Unchanged public protocols keep the existing single native
-                # crossing and native family traversal, not one call per node.
-                self._update_native_mobject(dt, recurse)
-            elif not joined:
-                # Child-first, path-wise (shared children keep their visits).
-                # Self-only native calls avoid ticking descendants again at
-                # every ancestor. An override omitting super opts out, and an
-                # override using a different dt/recurse keeps those choices.
-                for member, elapsed, parents in jobs.entries:
-                    cursor = (member, parents)
-                    while cursor and not cursor[0]._is_updating_suspended():
-                        cursor = cursor[1]
-                    if not cursor:
-                        member._update_native_mobject(elapsed, False)
+            if joined and delegate[3]:
+                jobs.roots.append((self, dt, recurse))
+            if not joined:
+                finish_native(jobs, [(self, dt, recurse)])
         finally:
             state.frame = previous
             state.delegate = delegate
             if not joined:
                 jobs.entries.clear()
+                jobs.roots.clear()
         return self
 
     for name, function in (("update", update), ("_update_python_family", python_family)):
@@ -106,10 +117,18 @@ def install_updater_dispatch(native):
         # roots before its callbacks, as the native scene release path does.
         roots = list(self.mobjects)
         frame = self.frame
-        frame.update(dt)
-        for root in roots:
-            if root is not frame:
-                root.update(dt)
+        jobs = NativePass()
+        try:
+            delegate_update(frame, dt, jobs, (), root=True)
+            for root in roots:
+                if root is not frame:
+                    delegate_update(root, dt, jobs, (), root=True)
+            finish_native(jobs, jobs.roots)
+        finally:
+            # A later root's failure must not leak an earlier root's deferred
+            # native callbacks into another update or retain the scene graph.
+            jobs.entries.clear()
+            jobs.roots.clear()
 
     def should_update_mobjects(self):
         if self.always_update_mobjects:
@@ -124,4 +143,73 @@ def install_updater_dispatch(native):
         function.__qualname__ = Scene.__qualname__ + "." + name
         function.__module__ = Scene.__module__
         setattr(Scene, name, function)
+    from .movement import _changed, _implementation, _protocols
+
+    object_hooks = ("update", "_update_python_family", "_update_native_mobject",
+                    "_is_updating_suspended", "__getattribute__", "__getattr__")
+    scene_hooks = ("update_mobjects", "__getattribute__", "__getattr__")
+    object_protocols = scene_protocols = child_descriptors = scene_descriptors = None
+    child_protocols = {}
+
+    def finalize():
+        nonlocal object_protocols, scene_protocols, child_descriptors, scene_descriptors
+        object_protocols = _protocols(g, Mobject, object_hooks)
+        scene_protocols = _protocols(g, Scene, scene_hooks)
+        child_descriptors = {cls: _implementation(cls, "submobjects")
+                             for cls in object_protocols}
+        scene_descriptors = {cls: {name: _implementation(cls, name)
+                                  for name in ("frame", "mobjects")}
+                             for cls in scene_protocols}
+        child_protocols.clear()
+        for cls in (list, tuple, g.get("_LiveSubmobjects")):
+            if cls is not None:
+                child_protocols[cls] = {name: _implementation(cls, name)
+                                        for name in ("__iter__", "__len__")}
+
+    def requires_public_update(self):
+        # Admission must not execute an authored getter, family walker, or
+        # updater. Compare identities before reading ordinary shipping state.
+        if _changed(self, scene_protocols):
+            return True
+        expected = next(scene_descriptors[cls] for cls in type(self).__mro__
+                        if cls in scene_descriptors)
+        if any(_implementation(type(self), name) is not method
+               for name, method in expected.items()):
+            return True
+        pending, seen = [self.frame, *self.mobjects], set()
+        while pending:
+            member = pending.pop()
+            if id(member) in seen:
+                continue
+            seen.add(id(member))
+            if not isinstance(member, Mobject) or _changed(member, object_protocols):
+                return True
+            expected = next(child_descriptors[cls] for cls in type(member).__mro__
+                            if cls in child_descriptors)
+            if _implementation(type(member), "submobjects") is not expected:
+                return True
+            children = member.submobjects
+            methods = child_protocols.get(type(children))
+            if methods is None or any(_implementation(children, name) is not method
+                                      for name, method in methods.items()):
+                return True
+            pending.extend(children)
+        return False
+
+    def dispatch_public_update(self, dt):
+        # A true result means BOTH host and native slots have completed. The
+        # caller must then capture without a second native scene-updater pass.
+        if not requires_public_update(self):
+            return False
+        self.update_mobjects(float(dt))
+        return True
+
+    for name, function in (("_fmn_requires_public_scene_update", requires_public_update),
+                           ("_fmn_dispatch_public_scene_update", dispatch_public_update)):
+        function.__name__ = name
+        function.__qualname__ = Scene.__qualname__ + "." + name
+        function.__module__ = Scene.__module__
+        setattr(Scene, name, function)
+    finalize()
+    g["_fmn_finalize_updater_dispatch"] = finalize
     g["_FMN_UPDATER_DISPATCH_INSTALLED"] = True

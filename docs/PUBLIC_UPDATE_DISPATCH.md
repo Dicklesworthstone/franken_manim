@@ -45,3 +45,25 @@ reentry, copying/collection, animation helpers, camera-only update detection,
 public scene time, and captured frames. Animation-helper Y4M and explicit public
 frame PNG sequences are compared with independent controls at 1, 4 and 16
 renderer workers. The installed runtime gate invokes this suite.
+
+## Shared scene phase
+
+A public `Scene.update_mobjects(dt)` invocation now defers its native callbacks
+until the camera and every selected drawable root have finished their host
+callbacks. A native callback on the first root therefore observes edits made
+by a later root. A host exception abandons the pending native phase, while
+retaining authored side effects and the original exception. Root overrides
+may omit `super()`, select nonrecursive updates, or change `dt`; their choices
+also determine the native work. Explicit updates issued inside a callback
+remain independent invocations.
+
+The private scheduler handoff `_fmn_dispatch_public_scene_update(dt)` returns
+true only when it has executed this complete phase. A native caller consuming
+that result must not subsequently run the default scene updater pass. Static
+protocol inspection does not execute authored getters and compares against the
+completed production initializer; ordinary objects retain the native route.
+The handoff is not yet connected to `play`/`wait` in this increment.
+
+`scene_update_phase.py` exercises real native record probes, cross-root
+ordering, failure disposal, authored scope, shared paths, late overrides,
+descriptor-safe admission, and collection after failure.

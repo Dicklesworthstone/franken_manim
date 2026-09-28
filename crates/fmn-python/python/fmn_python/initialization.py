@@ -136,6 +136,9 @@ def initialize(native: ModuleType) -> ModuleType:
         finalize_dispatch = namespace.pop("_fmn_finalize_transform_dispatch", None)
         if finalize_dispatch is not None:
             finalize_dispatch()
+        finalize_updaters = namespace.pop("_fmn_finalize_updater_dispatch", None)
+        if finalize_updaters is not None:
+            finalize_updaters()
     except BaseException:
         # Do not retain an exception/traceback cycle owning native proxies. A
         # failed instance must be discarded, never retried as a success-shaped
