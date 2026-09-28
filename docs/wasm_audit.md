@@ -1,6 +1,26 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run 2026-09-28 against `Cargo.lock` `02ce9708` and `SUITE.lock`
+**Status:** re-run 2026-09-28 against `Cargo.lock` `d3bec838` and `SUITE.lock`
+`9858f262`, for the frankenscipy repin from `5a7aafa2` to `85edd7a9` (fm-9esi):
+- the fsci-sparse `npz` feature gate, which removes 11 packages none of which are
+  in the wasm graph;
+- the num_jac `sqrt` thresholds.
+
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** the path-normalized `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is identical to the `5a7aafa2`
+  tree below (134 lines) once the rev string is normalized. `wasm-smoke/Cargo.lock`
+  moves only its three fsci entries to the new rev.
+- `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown` exited 0.
+  `wasm-smoke/run.sh` (Node 22.2.0) exited 0 with the unchanged Node digest
+  `1f248a71347b82aa`.
+- `scripts/check_wasm_package.sh` was not re-run, for the same reason as below:
+  the qualified wasm-pack 0.15.0 is absent on this host, and the wasm graph is
+  unchanged.
+
+Earlier re-run, 2026-09-28, against `Cargo.lock` `02ce9708` and `SUITE.lock`
 `8fed8803`, for the frankenscipy repin from `5b1441b1` to `5a7aafa2` (fm-9esi).
 **The release package gate still FAILS at its size budget** (fm-8j70), so this
 audit does not claim a passing package.
@@ -121,9 +141,9 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `8fed8803d2c7492f45ec31b023bd30f10ce869a927f3518213ddcceb8d24c6f4`
-- `Cargo.lock` SHA-256: `02ce9708bc383b8c239b1b70f95d7de99bd7d9acd82ec8445cf9bcca35e7d4db`
-- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `72d29a2ac4caa49ce1d3cb46c8713e783b1bff58a83491619926924c525aec25`
+- `SUITE.lock` SHA-256: `9858f2624322ed241cf02bce35fbe5d7d607d797e3a58ea521275830484053f6`
+- `Cargo.lock` SHA-256: `d3bec838d80da291ec9ef095b760e26de7815bd179bcfdf687cc3104a3855dae`
+- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `cb5eff12b8f8e26aec4e6f0660527c33939ef204f1c74891c707a6b2ff98905b`
 
 Method labels are deliberately narrow:
 
@@ -152,7 +172,7 @@ the exact `nightly-2026-08-31` toolchain.
 `a15d5c32e9330b555b0a653058bcfcff22fcb4ec` for the governed RNG.
 fmn-geom enters with its doctrine-D4 solver gateway: the pinned
 frankenscipy crates `fsci-linalg` 0.2.0, `fsci-fft` 0.2.0, and `fsci-runtime`
-0.2.0 at `5a7aafa27951bd3eeb2a678763df05faaa68b679` (the last bringing its
+0.2.0 at `85edd7a99f2a6487ef35135e135b9959cc0010c1` (the last bringing its
 audit-ledger blake3 hashing chain; fsci-linalg brings the rayon/crossbeam
 pool), plus their
 transitive numeric and serialization stacks (`nalgebra` 0.35.0 with the
