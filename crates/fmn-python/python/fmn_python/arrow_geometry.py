@@ -65,6 +65,7 @@ def install_arrow_geometry(native):
         function.__module__ = Arrow.__module__
         setattr(Arrow, name, function)
     _install_curved_arrows(g)
+    _install_curved_tip_fitting(g)
     g["_FMN_ARROW_GEOMETRY_INSTALLED"] = True
 
 
@@ -158,3 +159,62 @@ def _install_curved_arrows(g):
         function.__qualname__ = cls.__qualname__ + ".__init__"
         function.__module__ = cls.__module__
         cls.__init__ = function
+
+
+def _install_curved_tip_fitting(g):
+    """Fit explicit curved arrows through their public endpoint protocol.
+
+    Generic Line and Arc retain their existing native true-arclength trimming.
+    CurvedArrow/CurvedDoubleArrow use the Reference's whole-shaft fitting,
+    including its distinction between raw shaft endpoints and attached tips.
+    """
+    Curved = g["CurvedArrow"]
+
+    def endpoints(self):
+        # Reference Mobject.get_start_and_end reads the shaft, whereas
+        # get_start/get_end individually may name attached tips. Conflating
+        # those contracts scales a double arrow against the wrong chord.
+        self.throw_error_if_no_points()
+        points = self.get_points()
+        return points[0].copy(), points[-1].copy()
+
+    def reset_endpoints(self, tip, at_start):
+        if self.get_length() == 0:
+            return self
+        start = tip.get_base() if at_start else self.get_start()
+        end = self.get_end() if at_start else tip.get_base()
+        # Curved arrows fit the entire shaft to the tip base, rather than
+        # slicing off a true-arclength interval. Leave the generic Tipable
+        # native trimming policy unchanged for Line and ordinary Arc users.
+        self.put_start_and_end_on(start, end)
+        return self
+
+    def fit_endpoints(self, start, end):
+        # The native Stage shortcut fits raw arena endpoints and cannot see
+        # Python tip accessors or authored scale/rotate/shift hooks. Compose
+        # the same public operations in both nursery and scene-owned states.
+        # Chisel/Marionette still own every point transform and live buffer.
+        np, math = g["_np"], g["_math"]
+        start, end = (np.array(g["_vec3"](point), dtype=float) for point in (start, end))
+        if (not np.isfinite([start, end]).all()
+                or np.any(np.abs([start, end]) > np.finfo(np.float32).max)):
+            raise ValueError("curved-arrow endpoints must be finite and f32-representable")
+        current_start, current_end = (np.array(point, dtype=float, copy=True)
+                                      for point in self.get_start_and_end())
+        current = current_end - current_start
+        if np.all(current == 0):
+            raise Exception("Cannot position endpoints of closed loop")
+        target = end - start
+        self.scale(np.linalg.norm(target) / np.linalg.norm(current), about_point=current_start)
+        self.rotate(math.atan2(target[1], target[0]) - math.atan2(current[1], current[0]))
+        self.rotate(
+            math.atan2(current[2], np.linalg.norm(current[:2]))
+            - math.atan2(target[2], np.linalg.norm(target[:2])),
+            axis=np.array([-target[1], target[0], 0.0]),
+        )
+        self.shift(start - self.get_start())
+        return self
+
+    _bind(Curved, "get_start_and_end", endpoints)
+    _bind(Curved, "put_start_and_end_on", fit_endpoints)
+    _bind(Curved, "reset_endpoints_based_on_tip", reset_endpoints)
