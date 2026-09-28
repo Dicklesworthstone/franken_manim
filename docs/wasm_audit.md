@@ -1,6 +1,40 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run 2026-09-26 against `Cargo.lock` `7207b6fe` and `SUITE.lock`
+**Status:** re-run 2026-09-28 against `Cargo.lock` `02ce9708` and `SUITE.lock`
+`8fed8803`, for the frankenscipy repin from `5b1441b1` to `5a7aafa2` (fm-9esi).
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- This lock change does reach the wasm graph, through fmn-geom's solver gateway.
+  **VERIFIED (mechanical):** the path-normalized `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` goes from 130 to 134 lines:
+  - moved to the new rev: `fsci-linalg`, `fsci-fft` and `fsci-runtime` (0.1.0 to
+    0.2.0);
+  - moved version: `nalgebra` 0.34.2 to 0.35.0, `simba` 0.9.1 to 0.10.2, `wide`
+    0.7.33 to 1.7.1, and `blake3` 1.8.5 to 1.8.7;
+  - added: `rayon` 1.12.0, `rayon-core` 1.13.0, `crossbeam-deque` 0.8.8,
+    `crossbeam-epoch` 0.9.21, `crossbeam-utils` 0.8.22 and `either` 1.17.0
+    (fsci-linalg's thread pool);
+  - dropped: `arrayref`, `paste` and `safe_arch`.
+
+  `wasm-smoke/Cargo.lock` was re-resolved for the same fsci entries only. Every
+  package has its `SUITE_ALLOWLIST.tsv` row.
+- `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown` exited 0.
+  `wasm-smoke/run.sh` (Node 22.2.0) exited 0 with the unchanged Node digest
+  `1f248a71347b82aa`: the probe's frames are byte-identical. The probe does not
+  reach fsci-linalg's n >= 128 parallel factorizations. How rayon behaves there on
+  wasm32 (no spawnable threads in the serial build) is **ASSESSED**, not verified.
+- `scripts/check_wasm_package.sh` was not re-run. The qualified wasm-pack 0.15.0 is
+  not installed on this host (0.13.1 is), and the gate has stopped at the fm-8j70
+  size budget since `b492564b`. A size proxy, the release `fmn_wasm.wasm` cdylib
+  before and after the bump:
+  - raw: 789,937 to 790,184 bytes (+247);
+  - after Binaryen 117 `wasm-opt -Oz`: 583,513 to 583,520 bytes (+7).
+
+  So the repin does not move the fm-8j70 breach materially. The qualified bundler
+  artifact is still unmeasured.
+
+Earlier re-run, 2026-09-26, against `Cargo.lock` `7207b6fe` and `SUITE.lock`
 `33ee2568`, for the build-identity digest of ADR-0025
 (fm-certified-closure-integrity-4fei). **The release package gate still FAILS at
 its size budget** (fm-8j70), so this audit does not claim a passing package.
@@ -87,9 +121,9 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `33ee2568be5910d5bcef1b1cd6a266862d6b0f63c48b77fa0c1c7a9c516b8186`
-- `Cargo.lock` SHA-256: `7207b6fe66eccc142da460cce357dfde457bbaf1043390ce4cab7626ad0f96c8`
-- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `01f3e42a699383d33b42379bab14661069b40496b869cfbbd7d35b7e58fde53b`
+- `SUITE.lock` SHA-256: `8fed8803d2c7492f45ec31b023bd30f10ce869a927f3518213ddcceb8d24c6f4`
+- `Cargo.lock` SHA-256: `02ce9708bc383b8c239b1b70f95d7de99bd7d9acd82ec8445cf9bcca35e7d4db`
+- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `72d29a2ac4caa49ce1d3cb46c8713e783b1bff58a83491619926924c525aec25`
 
 Method labels are deliberately narrow:
 
@@ -117,11 +151,12 @@ the exact `nightly-2026-08-31` toolchain.
 `fmn-core` consumes `fnp-random-core` 0.2.0 at
 `a15d5c32e9330b555b0a653058bcfcff22fcb4ec` for the governed RNG.
 fmn-geom enters with its doctrine-D4 solver gateway: the pinned
-frankenscipy crates `fsci-linalg` 0.1.0, `fsci-fft` 0.1.0, and `fsci-runtime`
-0.1.0 at `5b1441b13a0997901ad2f9835c30072f87ca93b2` (the last bringing its
-audit-ledger blake3 hashing chain), plus their
-transitive numeric and serialization stacks (`nalgebra` 0.34.2 with the
-`simba`/`matrixmultiply`/`wide`/`safe_arch`/`approx`/num-* chain, `serde`
+frankenscipy crates `fsci-linalg` 0.2.0, `fsci-fft` 0.2.0, and `fsci-runtime`
+0.2.0 at `5a7aafa27951bd3eeb2a678763df05faaa68b679` (the last bringing its
+audit-ledger blake3 hashing chain; fsci-linalg brings the rayon/crossbeam
+pool), plus their
+transitive numeric and serialization stacks (`nalgebra` 0.35.0 with the
+`simba`/`matrixmultiply`/`wide`/`approx`/num-* chain, `serde`
 1.0.229 with derive, `serde_json` 1.0.151 with `preserve_order`, and the
 wasm-bindgen family already listed above). The complete admission — exact
 versions, checksums, features, licenses, proc-macro/build-script posture, and

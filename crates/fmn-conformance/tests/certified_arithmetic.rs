@@ -1013,18 +1013,13 @@ const SUITE_NOT_SWEPT: &[(&str, &str)] = &[
 const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
     (
         "frankenscipy/crates/fsci-integrate",
-        "rk.rs",
-        "powf",
-        4,
-        "fm-9esi: RK step control; fixed upstream at frankenscipy 5a7aafa2 (deterministic kth_root), \
-         pin bump pending",
-    ),
-    (
-        "frankenscipy/crates/fsci-integrate",
         "step_size.rs",
         "powf",
-        1,
-        "fm-9esi: select_initial_step; fixed upstream at frankenscipy 5a7aafa2, pin bump pending",
+        5,
+        "fm-9esi: 1 in select_initial_step's fallback arm for a non-integral error order (RK45's \
+         order is 5, so it takes the deterministic kth_root arm, frankenscipy 5a7aafa2) + 4 \
+         EPSILON.powf constants in num_jac, whose only callers are bdf.rs and radau.rs \
+         (unreachable below); this file carries no call on fmn's RK45 path",
     ),
     (
         "frankenscipy/crates/fsci-linalg",
@@ -1033,6 +1028,15 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
         1,
         "fm-wi8l: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
          at thresholds, never the solution values",
+    ),
+    (
+        "frankenscipy/crates/fsci-linalg",
+        "lib.rs",
+        "mul_add",
+        12,
+        "fm-bp82: SPD blocked-Cholesky panel TRSM/SYRK kernels, run only for symmetric systems of \
+         n >= 128; fmn's one dense solve (closed smoothing) never builds a symmetric matrix, pinned \
+         by fmn-geom's closed_smoothing_matrix_is_never_symmetric",
     ),
 ];
 
@@ -1045,6 +1049,11 @@ const SUITE_UNREACHABLE_FILES: &[(&str, &str, &str)] = &[
         "frankenscipy/crates/fsci-integrate",
         "quad.rs",
         "quadrature: no fmn call site",
+    ),
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "quadpack.rs",
+        "private QUADPACK kernels whose only caller is quad.rs (above)",
     ),
     (
         "frankenscipy/crates/fsci-integrate",

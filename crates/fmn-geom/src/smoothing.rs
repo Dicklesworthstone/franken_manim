@@ -121,32 +121,8 @@ pub fn smooth_cubic_handles(anchors: &[Vec3]) -> Result<(Vec<Vec3>, Vec<Vec3>), 
     if closed {
         validate_closed_smoothing_budget(n_pts, n)?;
     }
-    let (l, u) = (2usize, 1usize);
-
-    // LAPACK band storage: ab[u + i - j][j] = A[i][j].
-    let mut ab = vec![vec![0.0; n]; l + u + 1];
-    for j in (1..n).step_by(2) {
-        ab[0][j] = -1.0;
-    }
-    for j in (2..n).step_by(2) {
-        ab[0][j] = 1.0;
-    }
-    for j in (0..n).step_by(2) {
-        ab[1][j] = 2.0;
-    }
-    for j in (1..n).step_by(2) {
-        ab[1][j] = 1.0;
-    }
-    if n >= 2 {
-        for j in (1..n.saturating_sub(2)).step_by(2) {
-            ab[2][j] = -2.0;
-        }
-        for j in (0..n.saturating_sub(3)).step_by(2) {
-            ab[3][j] = 1.0;
-        }
-        ab[2][n - 2] = -1.0;
-        ab[1][n - 1] = 2.0;
-    }
+    let (l, u) = SMOOTHING_BANDS;
+    let ab = smoothing_band(n);
 
     let mut b = vec![[0.0f64; 3]; n];
     for (k, anchor) in anchors.iter().enumerate().skip(1) {
@@ -157,21 +133,7 @@ pub fn smooth_cubic_handles(anchors: &[Vec3]) -> Result<(Vec<Vec3>, Vec<Vec3>), 
 
     let mut solution = vec![[0.0f64; 3]; n];
     if closed {
-        let mut matrix = band_to_dense(l, u, &ab, n);
-        // Last row relates second derivatives across the seam,
-        // first row relates first derivatives.
-        for x in matrix[n - 1].iter_mut() {
-            *x = 0.0;
-        }
-        matrix[n - 1][0] = 2.0;
-        matrix[n - 1][1] = -1.0;
-        matrix[n - 1][n - 2] = 1.0;
-        matrix[n - 1][n - 1] = -2.0;
-        for x in matrix[0].iter_mut() {
-            *x = 0.0;
-        }
-        matrix[0][0] = 1.0;
-        matrix[0][n - 1] = 1.0;
+        let matrix = closed_smoothing_matrix(&ab, n);
         b[0] = vec::scale(anchors[0], 2.0);
         b[n - 1] = [0.0; 3];
         for dim in 0..3 {
@@ -267,6 +229,62 @@ pub fn smooth_quadratic_path(anchors: &[Vec3], tolerance: f64) -> Result<Vec<Vec
     Ok(quads)
 }
 
+/// Lower and upper bandwidths of the smoothing system.
+const SMOOTHING_BANDS: (usize, usize) = (2, 1);
+
+/// The smoothing system of dimension `n` in LAPACK band storage,
+/// `ab[u + i - j][j] = A[i][j]`. It depends on `n` alone.
+fn smoothing_band(n: usize) -> Vec<Vec<f64>> {
+    let (l, u) = SMOOTHING_BANDS;
+    let mut ab = vec![vec![0.0; n]; l + u + 1];
+    for j in (1..n).step_by(2) {
+        ab[0][j] = -1.0;
+    }
+    for j in (2..n).step_by(2) {
+        ab[0][j] = 1.0;
+    }
+    for j in (0..n).step_by(2) {
+        ab[1][j] = 2.0;
+    }
+    for j in (1..n).step_by(2) {
+        ab[1][j] = 1.0;
+    }
+    if n >= 2 {
+        for j in (1..n.saturating_sub(2)).step_by(2) {
+            ab[2][j] = -2.0;
+        }
+        for j in (0..n.saturating_sub(3)).step_by(2) {
+            ab[3][j] = 1.0;
+        }
+        ab[2][n - 2] = -1.0;
+        ab[1][n - 1] = 2.0;
+    }
+    ab
+}
+
+/// The dense closed-path system: the band matrix with its first and last
+/// rows replaced by the seam conditions. Like the band, it depends on `n`
+/// alone.
+fn closed_smoothing_matrix(ab: &[Vec<f64>], n: usize) -> Vec<Vec<f64>> {
+    let (l, u) = SMOOTHING_BANDS;
+    let mut matrix = band_to_dense(l, u, ab, n);
+    // Last row relates second derivatives across the seam,
+    // first row relates first derivatives.
+    for x in matrix[n - 1].iter_mut() {
+        *x = 0.0;
+    }
+    matrix[n - 1][0] = 2.0;
+    matrix[n - 1][1] = -1.0;
+    matrix[n - 1][n - 2] = 1.0;
+    matrix[n - 1][n - 1] = -2.0;
+    for x in matrix[0].iter_mut() {
+        *x = 0.0;
+    }
+    matrix[0][0] = 1.0;
+    matrix[0][n - 1] = 1.0;
+    matrix
+}
+
 /// Expand LAPACK band storage into a dense matrix
 /// (`bezier.diag_to_matrix`).
 fn band_to_dense(l: usize, u: usize, ab: &[Vec<f64>], n: usize) -> Vec<Vec<f64>> {
@@ -325,6 +343,27 @@ mod tests {
             anchors[count - 1] = anchors[0];
         }
         anchors
+    }
+
+    #[test]
+    fn closed_smoothing_matrix_is_never_symmetric() {
+        // fm-bp82: fsci-linalg's only FMA kernels (its blocked Cholesky)
+        // run for symmetric systems of dimension >= 128, and solve_dense
+        // passes no assume_a, so only a detected-symmetric matrix could
+        // reach them. The closed system depends on n alone, so checking
+        // every admissible dimension proves the certified path never does.
+        // (n = 2, the degenerate two-anchor loop, is symmetric but 64x below
+        // that dimension floor.)
+        for n in (4..=MAX_CLOSED_SMOOTHING_DIMENSION).step_by(2) {
+            let m = closed_smoothing_matrix(&smoothing_band(n), n);
+            let symmetric = (0..n).all(|i| (0..n).all(|j| m[i][j] == m[j][i]));
+            assert!(
+                !symmetric,
+                "the closed system of dimension {n} is symmetric"
+            );
+        }
+        let m = closed_smoothing_matrix(&smoothing_band(2), 2);
+        assert_eq!(m, vec![vec![1.0, 1.0], vec![1.0, -2.0]]);
     }
 
     #[test]
