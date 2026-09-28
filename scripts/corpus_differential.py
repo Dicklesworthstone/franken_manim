@@ -425,6 +425,11 @@ def main():
             records.append(future.result())
             if done % 25 == 0:
                 print(f"{done}/{len(scenes)}", file=sys.stderr)
+    # Merge into an earlier run in the same --out: re-run scenes replace their records.
+    previous = args.out / "records.ndjson"
+    if previous.exists():
+        fresh = {(r["module"], r["scene"]) for r in records}
+        records += [r for r in sf.read_ndjson(previous) if (r["module"], r["scene"]) not in fresh]
     records.sort(key=lambda r: (r["module"], r["scene"]))
     used = set()
     for r in records:

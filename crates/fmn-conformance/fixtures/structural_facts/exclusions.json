@@ -32,6 +32,15 @@
       "reason": "Glyph outlines come from the bundled faces (BN-05), and SVG and CFF cubics go through the one error-bounded converter (BN-13), so point counts and positions of SVG-derived paths differ wherever scenes regroup them."
     },
     {
+      "id": "fm-0v8k-reference-tex-environment",
+      "kind": "open-bead",
+      "ref": "fm-0v8k",
+      "scope": "scenes",
+      "under": ["Tex", "TexText", "OldTex", "OldTexText", "SingleStringTex"],
+      "fact": ["member", "class", "mro", "string", "n_points", "style.*"],
+      "reason": "Tex-internal glyph structure on the differential's Reference host (TeX Live 2025, dvisvgm 3.6) is not the structure the pinned Reference was written against: the Reference itself raises IndexError on Tex indexing in scenes the portal runs. Glyph membership, glyph style (t2c shifts) and span strings inside Tex are not compared until fm-0v8k pins a period toolchain."
+    },
+    {
       "id": "fm-15k9-svg-path-classes",
       "kind": "open-bead",
       "ref": "fm-15k9",
