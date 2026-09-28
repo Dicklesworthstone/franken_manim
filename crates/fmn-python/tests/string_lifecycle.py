@@ -88,7 +88,7 @@ class StringLifecycleTests(unittest.TestCase):
         self.assertEqual(tex.select_part('x').family_members_with_points()[0].get_fill_color(),m.RED)
         self.assertEqual(tex.select_part('y').family_members_with_points()[0].get_fill_color(),m.GREEN)
 
-    def test_nested_tex_span_paths_skip_hook_decorations(self):
+    def test_flat_tex_span_paths_skip_hook_decorations(self):
         class Custom(m.Tex):
             def init_data(self):super().init_data();self.dot=m.Dot();self.add(self.dot)
         tex=Custom('x','+','y',tex_to_color_map={'x':m.RED,'y':m.GREEN})
@@ -96,7 +96,8 @@ class StringLifecycleTests(unittest.TestCase):
         self.assertEqual(tex.select_part('x').family_members_with_points()[0].get_fill_color(),m.RED)
         self.assertEqual(tex.select_part('y').family_members_with_points()[0].get_fill_color(),m.GREEN)
         self.assertNotIn(tex.dot,tex.select_parts('x').get_family())
-        self.assertTrue(all(len(path)>1 and path[0]>0 for path in tex._string_sub_paths))
+        self.assertTrue(all(len(path)==1 and path[0]>0 for path in tex._string_sub_paths))
+        self.assertTrue(all(child.has_points() for child in tex._fmn_string_children))
 
     def test_reinitialization_replaces_only_native_glyph_children(self):
         class Custom(m.Text):
@@ -337,6 +338,221 @@ class TextChannelColors(unittest.TestCase):
                 for workers in (1, 4, 16):
                     actual = render(root/(cls.__name__+str(workers)), cls, 'authored', workers)
                     self.assertEqual(actual, control)
+
+
+# fm-4qmn: Reference Tex/StringMobject expose SVG glyphs directly. The
+# existing native builder's one-source form is an independent layout oracle;
+# it does not execute Tex.__init__ or this adapter's init_points.
+def native_tex_control(source, *, text_mode=False, font_size=48, preamble=''):
+    obj = m._native_shell_factory()
+    specs = obj._build_tex(m._native_shell_factory, [source], '', text_mode,
+                          font_size, None, False, '', preamble,
+                          'center' if text_mode else 'left')
+    m._hang_native_children(obj, specs)
+    obj.center()
+    return obj
+
+
+class ModernTexFamilies(unittest.TestCase):
+    def assert_flat_layout(self, obj, control):
+        self.assertFalse(obj.has_points())
+        self.assertEqual(len(obj), len(control.submobjects))
+        self.assertEqual(list(obj._string_sub_spans), list(control._string_sub_spans))
+        self.assertEqual(obj._string_sub_paths, control._string_sub_paths)
+        for actual, expected in zip(obj.submobjects, control.submobjects):
+            self.assertTrue(actual.has_points(), 'an argument wrapper escaped into the public family')
+            self.assertEqual(list(actual.submobjects), [])
+            np.testing.assert_array_equal(actual.get_points(), expected.get_points())
+
+    def test_multiargument_tex_exposes_native_glyphs_not_argument_containers(self):
+        for parts in [('a', '+', 'b'), ('ab', '+', 'cd'), ('', 'x', '', '+y', ''),
+                      (r'\frac{x}{2}', '=', 'y'), ('x^2', '+', 'y_1')]:
+            with self.subTest(parts=parts):
+                obj = m.Tex(*parts)
+                self.assert_flat_layout(obj, native_tex_control(obj.string))
+                self.assertEqual(obj.tex_strings, [p.lstrip() if i == 0 else p.rstrip()
+                                                  if i == len(parts)-1 else p
+                                                  for i, p in enumerate(parts)])
+
+    def test_text_mode_keeps_words_math_islands_and_utf8_spans(self):
+        for parts in [('é', 'plus', '$x^2$'), ('alpha', '+', 'beta'),
+                      ('sum:', r'$\frac{1}{2}$', 'end')]:
+            with self.subTest(parts=parts):
+                obj = m.TexText(*parts)
+                self.assert_flat_layout(obj, native_tex_control(obj.string, text_mode=True))
+                payload = obj.string.encode('utf-8')
+                for start, end in obj._string_sub_spans:
+                    payload[:start].decode('utf-8'); payload[:end].decode('utf-8')
+
+    def test_isolate_is_source_selection_not_family_partition(self):
+        import re
+        source = 'x^2 + y^2'
+        for selector in (['x', 'y'], 'x', re.compile('[xy]'), (0, 3), ['x^2', 'y^2']):
+            with self.subTest(selector=selector):
+                obj = m.Tex(source, isolate=selector)
+                self.assert_flat_layout(obj, native_tex_control(source))
+                self.assertEqual(len(obj), 5)
+                self.assertIs(obj.select_part('x')[0], obj[0])
+                self.assertIs(obj.select_part('y')[0], obj[3])
+                obj[1].set_color(m.YELLOW)
+                self.assertEqual(obj.select_part('2')[0].get_fill_color(), m.YELLOW)
+                self.assertNotEqual(obj[4].get_fill_color(), m.YELLOW)
+
+    def test_logical_parts_and_slices_reference_existing_glyphs(self):
+        import re
+        obj = m.Tex('ab', '+', 'ab')
+        self.assertEqual(len(obj), 5)
+        for selector in ('ab', re.compile('ab')):
+            parts = obj.select_parts(selector)
+            self.assertEqual(len(parts), 2)
+            self.assertEqual(list(parts[0]), [obj[0], obj[1]])
+            self.assertEqual(list(parts[1]), [obj[3], obj[4]])
+        self.assertEqual(list(obj.select_part((1, 4))), [obj[1], obj[2]])
+        self.assertEqual(list(obj[1:4]), [obj[1], obj[2], obj[3]])
+        obj.get_part_by_tex('ab', index=1).shift(m.UP)
+        self.assertGreater(obj[3].get_y(), obj[0].get_y())
+
+    def test_source_color_maps_style_the_right_flat_members(self):
+        obj = m.Tex('x', '+', 'y', color=m.BLUE,
+                    stroke_color=m.GREEN, stroke_width=2, t2c={'y': m.RED})
+        self.assertEqual(len(obj), 3)
+        self.assertEqual(obj[0].get_fill_color(), m.BLUE)
+        self.assertEqual(obj[1].get_stroke_color(), m.GREEN)
+        self.assertEqual(obj[2].get_fill_color(), m.RED)
+        self.assertEqual(obj[2].get_stroke_color(), m.RED)
+
+    def test_custom_separator_and_macro_arguments_keep_original_source(self):
+        class Joined(m.Tex):
+            _tex_arg_separator = ''
+        preamble = r'\newcommand{\sq}[1]{#1^2}'
+        obj = Joined(r'\sq{', 'x', '}+', 'y', additional_preamble=preamble)
+        self.assertEqual(obj.string, r'\sq{x}+y')
+        self.assert_flat_layout(obj, native_tex_control(obj.string, preamble=preamble))
+        self.assertEqual(len(obj.select_part('x')), 1)
+        self.assertIs(obj.select_part('x')[0], obj[0])
+
+    def test_legacy_argument_groups_remain_intentionally_distinct(self):
+        from manimlib.mobject.svg.old_tex_mobject import OldTex, OldTexText, SingleStringTex
+        for cls in (OldTex, OldTexText):
+            with self.subTest(cls=cls.__name__):
+                obj = cls('ab', '+', 'cd')
+                self.assertEqual(len(obj), 3)
+                self.assertTrue(all(not part.has_points() for part in obj))
+                self.assertEqual([len(part) for part in obj], [2, 1, 2])
+                self.assertTrue(all(len(path) == 2 for path in obj._string_sub_paths))
+                duplicate = obj.copy()
+                self.assertEqual([len(part) for part in duplicate], [2, 1, 2])
+                self.assertIsNot(duplicate[0][0], obj[0][0])
+        single = SingleStringTex('ab')
+        self.assertEqual(len(single), 2)
+        self.assertTrue(all(child.has_points() for child in single))
+
+    def test_infix_fraction_indices_survive_separate_arguments(self):
+        obj = m.Tex('12', r'\over', '34')
+        self.assertEqual(len(obj), 5)
+        numerator = obj.make_number_changeable('12')
+        denominator = obj.make_number_changeable('34')
+        self.assertEqual(len(obj), 3)
+        self.assertIs(obj[0], numerator)
+        self.assertIs(obj[2], denominator)
+        duplicate = obj.copy()
+        duplicate[0].set_value(7); duplicate[2].set_value(9)
+        self.assertEqual((obj[0].get_value(), obj[2].get_value()), (12, 34))
+        self.assertEqual((duplicate[0].get_value(), duplicate[2].get_value()), (7, 9))
+
+    def test_copies_pickle_and_targets_keep_flat_family_and_span_identity(self):
+        import pickle
+        original = m.Tex('ab', '+', 'cd')
+        for duplicate in (original.copy(), copy.deepcopy(original),
+                          pickle.loads(pickle.dumps(original)), original.generate_target()):
+            with self.subTest(kind=type(duplicate).__name__):
+                self.assert_flat_layout(duplicate, native_tex_control(original.string))
+                self.assertIs(duplicate.select_part('cd')[0], duplicate[3])
+                self.assertIsNot(duplicate[3], original[3])
+                duplicate[3].shift(m.UP)
+                self.assertNotEqual(duplicate[3].get_y(), original[3].get_y())
+
+    def test_authored_hooks_observe_flat_glyphs_and_keep_custom_data(self):
+        class Authored(m.Tex):
+            data_dtype = m.VMobject.data_dtype + [('weight', 1)]
+            def init_data(self):
+                super().init_data()
+                self.marker = m.Dot().shift(m.DOWN)
+                self.add(self.marker)
+            def init_points(self):
+                super().init_points()
+                self.observed = [child.has_points() for child in self._fmn_string_children]
+                self.set_points_as_corners([m.LEFT, m.RIGHT])
+                self.data['weight'][:] = 7
+        obj = Authored('ab', '+', 'cd')
+        self.assertEqual(obj.observed, [True] * 5)
+        self.assertEqual(len(obj.submobjects), 6)
+        self.assertIs(obj.select_part('ab')[0], obj[1])
+        np.testing.assert_array_equal(obj.data['weight'], 7)
+        scene = m.Scene().add(obj)
+        view = obj.data['weight']
+        obj[2].shift(m.UP)
+        np.testing.assert_array_equal(view, 7)
+        self.assertIn(obj, scene.mobjects)
+        self.assertIn(obj.marker, obj.submobjects)
+
+    def test_regeneration_replaces_only_generated_members_in_either_owner_state(self):
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                obj = m.Tex('ab', '+', 'cd')
+                marker = m.Dot().shift(m.DOWN)
+                obj.add(marker)
+                if bound:
+                    scene = m.Scene().add(obj)
+                for _ in range(2):
+                    old = tuple(obj._fmn_string_children)
+                    obj.init_points()
+                    self.assertEqual(len(obj.submobjects), 6)
+                    self.assertEqual(len(obj._fmn_string_children), 5)
+                    self.assertTrue(all(child.has_points() for child in obj._fmn_string_children))
+                    self.assertFalse(any(child in obj.submobjects for child in old))
+                    self.assertIn(marker, obj.submobjects)
+                    self.assertNotIn(marker, obj.select_parts('ab').get_family())
+                    self.assertIs(obj.select_part('cd')[0], obj[4])
+
+    def test_native_failure_does_not_publish_half_a_new_family(self):
+        obj = m.Tex('x', '+', 'y')
+        children = tuple(obj.submobjects)
+        paths = [list(path) for path in obj._string_sub_paths]
+        obj.tex_strings = [r'\unknownUnimplementedCommand{x}']
+        with self.assertRaises(Exception):
+            obj.init_points()
+        self.assertEqual(tuple(obj.submobjects), children)
+        self.assertEqual(obj._string_sub_paths, paths)
+
+    def test_indexed_glyph_animation_matches_native_controls_and_workers(self):
+        def render(path, workers, control):
+            scene = m.Scene()
+            with scene.render_session(path, format='png_sequence', resolution=(96, 54),
+                                      fps=8, threads=workers):
+                obj = native_tex_control('ab + cd') if control else m.Tex('ab', '+', 'cd')
+                obj.scale(2)
+                scene.add(obj)
+                scene.play(obj[1].animate.shift(m.UP), run_time=.25, rate_func=m.linear)
+                scene.play(m.FadeOut(obj[3]), run_time=.25, rate_func=m.linear)
+            return [p.read_bytes() for p in sorted(path.glob('*.png'))]
+        root = Path(tempfile.mkdtemp(prefix='fmn-flat-tex-'))
+        control = render(root/'control', 1, True)
+        self.assertEqual(len(control), 4)
+        self.assertNotEqual(control[0], control[-1])
+        for workers in (1, 4, 16):
+            self.assertEqual(render(root/str(workers), workers, False), control)
+
+    def test_matching_transform_reaches_flat_target_and_keeps_selectors_live(self):
+        source = m.Tex('ab', '+', 'cd')
+        target = m.Tex('cd', '-', 'ab').shift(m.UP)
+        scene = m.Scene().add(source)
+        scene.play(m.TransformMatchingTex(source, target), run_time=.125)
+        self.assertIn(target, scene.mobjects)
+        self.assertNotIn(source, scene.mobjects)
+        self.assertEqual(len(target), 5)
+        self.assertIs(target.select_part('ab')[1], target[4])
+        self.assertTrue(all(child.has_points() for child in target))
 
 
 if __name__=='__main__':unittest.main()

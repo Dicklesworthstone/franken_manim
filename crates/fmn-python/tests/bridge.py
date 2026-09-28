@@ -16074,17 +16074,19 @@ for empty_cls in (creation_animation.ShowIncreasingSubsets,
     assert list(empty_group.submobjects) == []
 
 # fm-5wq.4.65: isolate= and tex_to_color_map= ride the native span map — the
-# isolated pieces become their own submobject groups (source-identity
-# partition, no labelled second render), and constructor color maps land on
+# isolated pieces select the flat glyph family (source identity, no labelled
+# second render or argument containers), and constructor color maps land on
 # exactly the mapped spans.
 iso_tex = manimlib.Tex("x^2 + y^2", isolate=["x", "y"])
 assert iso_tex.get_string() == "x^2 + y^2"
-assert len(iso_tex.submobjects) == 4
+assert len(iso_tex.submobjects) == 5
+assert all(leaf.has_points() and not leaf.submobjects for leaf in iso_tex)
+assert all(len(path) == 1 for path in iso_tex._string_sub_paths)
 iso_x_part = iso_tex.get_part_by_tex("x")
 iso_y_part = iso_tex.get_part_by_tex("y")
 assert len(iso_x_part) == 1 and len(iso_y_part) == 1
 
-# The isolated span is independently colorable through its own group node.
+# The isolated span refers to the same independently colorable glyph node.
 iso_tex[0].set_color(manimlib.YELLOW)
 assert all(leaf.get_fill_color() == manimlib.YELLOW for leaf in iso_x_part)
 assert all(leaf.get_fill_color() != manimlib.YELLOW for leaf in iso_y_part)
@@ -16103,7 +16105,7 @@ assert all(
     for leaf in t2c_tex.get_part_by_tex("y")
 )
 
-# A Scene can play a fade on the isolated span's group node. The native
+# A Scene can play a fade on the isolated span's glyph node. The native
 # finish contract is the Reference's restore-then-remove (fading.py:76):
 # fade_out finishes at final_alpha_value = 0 and restores the records, so
 # the honest observable is the mid-play probe — the leaf's fill alpha
@@ -17323,11 +17325,23 @@ else:
 
 
 # --------------------------- AddTextWordByWord nested glyph flattening
-# fm-5wq.4.82: multi-part Tex families (sub-paths [part, glyph]) reveal
-# word-by-word through the per-part flattening plan; the finished frame is
-# the untouched original part structure.
+# fm-5wq.4.82: deliberately authored nested Tex families (sub-paths
+# [part, glyph]) reveal word-by-word through the per-part flattening plan.
+# Modern Tex does not create argument containers, but the public family API
+# still supports grouping its glyphs. The finished frame restores those groups.
 
-nested_tex = manimlib.Tex("a b", "c d")
+
+def _author_tex_part_groups(tex):
+    originals = [tex._string_submobject(i) for i in range(len(tex._string_sub_paths))]
+    parts = [tex.get_part_by_tex(part) for part in tex.tex_strings]
+    paths = {id(child): [i, j] for i, part in enumerate(parts) for j, child in enumerate(part)}
+    assert len(paths) == len(originals), "the fixture must partition all native glyphs"
+    tex.set_submobjects(parts)
+    tex._string_sub_paths = [paths[id(child)] for child in originals]
+    return tex
+
+
+nested_tex = _author_tex_part_groups(manimlib.Tex("a b", "c d"))
 assert any(len(path) == 2 for path in nested_tex._string_sub_paths)
 nested_parts_before = [
     len(part.submobjects) for part in nested_tex.submobjects
@@ -17360,7 +17374,7 @@ assert len(nested_tex.submobjects) == len(nested_parts_before)
 
 # The same flattening plan covers the letter grain (fm-5wq.4.59's nested
 # refusal is retired).
-nested_letters = manimlib.Tex("a b", "c d")
+nested_letters = _author_tex_part_groups(manimlib.Tex("a b", "c d"))
 letters_before = [
     len(part.submobjects) for part in nested_letters.submobjects
 ]
@@ -17434,11 +17448,11 @@ else:
 
 
 # --------------------------- Tex.make_number_changeable nested part groups
-# fm-5wq.4.85: a nested (multi-part) Tex replaces the selected number span
+# fm-5wq.4.85: an authored nested Tex replaces the selected number span
 # with a live DecimalNumber inside its owning part — the part structure
 # survives and later glyphs in the part re-index.
 
-nested_changeable_tex = manimlib.Tex("y =", "0.50 x")
+nested_changeable_tex = _author_tex_part_groups(manimlib.Tex("y =", "0.50 x"))
 assert any(len(path) == 2 for path in nested_changeable_tex._string_sub_paths)
 nested_part_count = len(nested_changeable_tex.submobjects)
 nested_decimal = nested_changeable_tex.make_number_changeable("0.50")

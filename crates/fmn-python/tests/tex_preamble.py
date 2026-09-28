@@ -48,9 +48,13 @@ class TexPreambleTests(unittest.TestCase):
             source.encode()[:start].decode()
             source.encode()[:end].decode()
 
-    def test_multiple_parts_regroup_using_formula_spans_not_definition_bytes(self):
+    def test_multiple_parts_select_flat_glyphs_using_formula_spans_not_definition_bytes(self):
         mob = m.Tex(r"\sq{x}", "+", r"\half{y}", additional_preamble=PREAMBLE)
-        self.assertEqual(len(mob), 3)
+        # x and its square, plus, y and the denominator/rule: six native
+        # primitives. Logical argument selection does not add family nodes.
+        self.assertEqual(len(mob), 6)
+        self.assertTrue(all(child.has_points() and not child.submobjects for child in mob))
+        self.assertTrue(all(len(path) == 1 for path in mob._string_sub_paths))
         for token in (r"\sq{x}", "+", r"\half{y}"):
             self.assertTrue(mob.get_part_by_tex(token).family_members_with_points(), token)
         self.assertEqual(mob.get_tex(), r"\sq{x} + \half{y}")

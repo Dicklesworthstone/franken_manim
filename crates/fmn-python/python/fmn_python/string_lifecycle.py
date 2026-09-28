@@ -155,7 +155,14 @@ def install_string_lifecycle(native):
 
     def tex_points(self):
         separator = getattr(self, "_tex_arg_separator", " ")
-        parts, separator = self._isolate_segments(separator)
+        if self._native_group_single_part:
+            # OldTex owns argument groups. Modern Tex/TexText expose the
+            # native glyph family directly, even with several arguments or
+            # isolate=. Their logical parts are selections over source spans,
+            # not extra scene-graph nodes (Reference Tex/StringMobject).
+            parts, separator = self._isolate_segments(separator)
+        else:
+            parts, separator = [separator.join(self.tex_strings).strip()], ""
         native_colors = {key: value for key, value in self.tex_to_color_map.items() if isinstance(key, str)}
         candidate = g["_native_shell_factory"]()
         specs = candidate._build_tex(

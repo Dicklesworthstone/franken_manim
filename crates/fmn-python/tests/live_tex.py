@@ -29,6 +29,22 @@ def nest(tex):
     return wrapper
 
 
+def group_at(tex, split):
+    """Author two real native groups for cross-parent splice/rollback tests.
+
+    Modern Tex no longer inserts argument containers. These tests deliberately
+    exercise edited, nested families, independently of constructor grouping.
+    """
+    children = list(tex.submobjects)
+    assert all(len(path) == 1 for path in tex._string_sub_paths)
+    tex.set_submobjects([m.VGroup(*children[:split]), m.VGroup(*children[split:])])
+    tex._string_sub_paths = [
+        [0, path[0]] if path[0] < split else [1, path[0] - split]
+        for path in tex._string_sub_paths
+    ]
+    return tex
+
+
 class LiveTexAcceptance(unittest.TestCase):
     def assert_map(self, tex):
         payload = tex.string.encode("utf-8")
@@ -84,7 +100,7 @@ class LiveTexAcceptance(unittest.TestCase):
         self.assert_map(tex)
 
     def test_nested_part_identity_and_unmapped_decorations_survive(self):
-        tex = m.Tex("y =", "1.00 x + 2.00")
+        tex = group_at(m.Tex("y =", "1.00 x + 2.00"), 2)
         roots = list(tex.submobjects)
         dot = m.Dot().shift(3 * m.UP)
         roots[-1].add(dot)
@@ -99,7 +115,7 @@ class LiveTexAcceptance(unittest.TestCase):
         self.assert_map(tex)
 
     def test_number_crossing_argument_groups_is_replaced_once(self):
-        tex = JoinedTex("a=1", "2.50", "+3.00")
+        tex = group_at(JoinedTex("a=1", "2.50", "+3.00"), 3)
         roots = list(tex.submobjects)
         number = tex.make_number_changeable("12.50")
         self.assertIsInstance(number, m.DecimalNumber)
@@ -157,7 +173,7 @@ class LiveTexAcceptance(unittest.TestCase):
         self.assertEqual((metadata(tex), identities(tex)), before)
 
     def test_cross_part_splice_failure_rolls_back_both_native_parents(self):
-        tex = JoinedTex("1", "2.50+3.00")
+        tex = group_at(JoinedTex("1", "2.50+3.00"), 1)
         scene = m.Scene()
         scene.add(tex)
         before = metadata(tex), identities(tex), list(scene.mobjects)

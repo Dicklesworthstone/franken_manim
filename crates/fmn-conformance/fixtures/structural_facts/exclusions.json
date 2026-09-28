@@ -276,15 +276,6 @@
       "reason": "Point-less mobjects stay at the origin through shift/move_to/next_to in the portal; the Reference moves their bounding box."
     },
     {
-      "id": "fm-4qmn-tex-part-nesting",
-      "kind": "open-bead",
-      "ref": "fm-4qmn",
-      "scope": "classes",
-      "subject": "Tex#2",
-      "fact": ["member", "class", "mro", "n_points", "style.*", "bbox", "points", "points_sha256"],
-      "reason": "Multi-string Tex nests one point-less container per string in the portal; the Reference's glyph family is flat."
-    },
-    {
       "id": "fm-c1up-rounded-rectangle-corners",
       "kind": "open-bead",
       "ref": "fm-c1up",
