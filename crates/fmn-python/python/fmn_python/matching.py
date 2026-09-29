@@ -57,14 +57,13 @@ def _validate_members(pairs, source_pieces, target_pieces):
                 raise ValueError("matching pair contains a foreign " + ("source" if side == 0 else "target") + " family member")
 
 
-def _validate_owners(objects):
-    scene = None
+def _validate_owners(objects, scene=None, error_type=ValueError):
     for obj in objects:
         for member in _bounded(obj.get_family(), "matching family"):
             owner = getattr(member, "_scene", None)
             if owner is not None:
                 if scene is not None and owner is not scene:
-                    raise ValueError("matching transforms cannot reference multiple Scenes; copy the mobjects")
+                    raise error_type("matching transforms cannot reference multiple Scenes; copy the mobjects")
                 scene = owner
 
 
@@ -113,8 +112,9 @@ def install_matching(native: Any) -> None:
         if not callable(match_animation) or not callable(mismatch_animation):
             raise TypeError("match_animation and mismatch_animation must be callable")
         source_pieces, target_pieces = _pieces(source), _pieces(target)
-        if not source_pieces or not target_pieces:
-            raise ValueError(type(self).__name__ + " requires point-bearing families on both sides")
+        # Empty operands are ordinary states of a changing formula or group.
+        # The existing unmatched-piece fades cover creation/deletion; when
+        # both sides are empty the shared composition still owns elapsed time.
         pairs = _pairs(matched_pairs, Mobject, type(self).__name__ + " matched_pairs")
         _validate_members(pairs, source_pieces, target_pieces)
         _validate_owners((source, target))
@@ -176,6 +176,14 @@ def install_matching(native: Any) -> None:
                          if source.has_same_shape_as(target)), "shape matches")
 
     def begin(self):
+        # A point-free operand contributes no animated leaf, so the native
+        # leaf driver's owner checks cannot see it. Check both public roots
+        # before starting any fades or publishing the target, including when
+        # ownership changed since the matching plan was constructed.
+        scene = getattr(self, "_composition_scene", None)
+        if scene is None:
+            scene = getattr(self.mobject, "_scene", None)
+        _validate_owners((self.source, self.target), scene, g.get("_ForeignStageError", ValueError))
         self._matching_finished = self._matching_cleanup_started = False
         return super(Parts, self).begin()
 
@@ -263,6 +271,15 @@ def install_matching_strings(native: Any) -> None:
     def span_pieces(self, source, target):
         result = []
         for obj in (source, target):
+            # Blank/whitespace strings need no ink or provenance entries, but
+            # dropping a nonempty string's map must not turn it into an empty
+            # match. Keep malformed maps out even with an authored matcher.
+            spans = obj._string_sub_spans
+            paths = getattr(obj, "_string_sub_paths", None)
+            if paths is not None and len(paths) != len(spans):
+                raise g["_TexError"]("matching native span and family-path counts differ")
+            if not spans and _pieces(obj):
+                raise g["_TexError"]("matching point-bearing strings require a native span map")
             # Validate UTF-8 and live native span-map parts even when an
             # authored matching_blocks implementation never calls super().
             keys = _bounded(self._native_span_keys(obj), "native span map")
@@ -273,8 +290,6 @@ def install_matching_strings(native: Any) -> None:
                      run_time=2, lag_ratio=0, **kwargs):
         if not isinstance(source, StringMobject) or not isinstance(target, StringMobject):
             raise TypeError(type(self).__name__ + " expects two StringMobject instances")
-        if not source._string_sub_spans or not target._string_sub_spans:
-            raise g["_TexError"](type(self).__name__ + " requires non-empty native span maps")
         explicit = _pairs(matched_pairs, Mobject, type(self).__name__ + " matched_pairs")
         keys = tuple(_bounded(matched_keys, "matched_keys"))
         if key_map is not None and not isinstance(key_map, Mapping):
@@ -328,4 +343,3 @@ def install_matching_strings(native: Any) -> None:
     # The shared initializer already installs matching_blocks and the D-09
     # no-shape-fallback rule. Reuse both, including all authored overrides.
     g["_FMN_MATCHING_STRINGS_INSTALLED"] = True
-

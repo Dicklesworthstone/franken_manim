@@ -250,12 +250,23 @@ class PlanningTests(unittest.TestCase):
         for pair in [None, (self.source,), (self.source, self.target, self.source), (None, self.target)]:
             with self.subTest(pair=pair), self.assertRaises(TypeError):
                 self.g.TransformMatchingParts(self.source, self.target, matched_pairs=[pair])
-        with self.assertRaisesRegex(ValueError, "point-bearing families"):
-            self.g.TransformMatchingParts(self.g.Mobject(None), self.target)
         with self.assertRaisesRegex(TypeError, "two Mobject families"):
             self.g.TransformMatchingParts(self.source, None)
         with self.assertRaises(TypeError):
             self.g.TransformMatchingParts(self.source, self.target, match_animation=None)
+
+    def test_zero_ink_operands_build_unmatched_fades_or_an_empty_timed_group(self):
+        for start, end, kinds in ((None, "square", ["fade_in_from_point"]),
+                                   ("square", None, ["fade_out_to_point"]),
+                                   (None, None, [])):
+            with self.subTest(start=start, end=end):
+                animation = self.g.TransformMatchingParts(
+                    self.g.Mobject(start), self.g.Mobject(end), run_time=3,
+                )
+                self.assertEqual([child._native_kind for child in animation.animations], kinds)
+                self.assertEqual(animation.group_options["run_time"], 3)
+                animation.begin()
+                animation.finish()
 
     def test_pair_and_comparison_budgets(self):
         with patch.object(matching, "_MAX_PARTS", 3), self.assertRaisesRegex(ValueError, "budget"):

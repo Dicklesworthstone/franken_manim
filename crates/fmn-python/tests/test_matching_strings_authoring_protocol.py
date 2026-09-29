@@ -189,12 +189,26 @@ class StringPlanningTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "splits a native source-span"):
             self.g.TransformMatchingStrings(source, target, key_map={"a": "c"})
 
-    def test_invalid_keys_and_empty_spans_refuse(self):
+    def test_invalid_keys_and_missing_provenance_refuse(self):
         for options in ({"matched_keys": [1]}, {"key_map": {"a": 1}}, {"key_map": []}):
             with self.subTest(options=options), self.assertRaises(TypeError):
                 self.make("a", "a", **options)
-        with self.assertRaisesRegex(ValueError, "non-empty native span maps"):
-            self.make("", "a")
+        source = self.g.StringMobject("a")
+        source._string_sub_spans = []
+        with self.assertRaisesRegex(ValueError, "point-bearing strings require a native span map"):
+            self.g.TransformMatchingStrings(source, self.g.StringMobject(""))
+
+    def test_zero_ink_strings_are_timed_native_compositions(self):
+        for source, target, kinds in (("", "a", ["fade_in_from_point"]),
+                                      ("a", "", ["fade_out_to_point"]),
+                                      ("", "", [])):
+            with self.subTest(source=source, target=target):
+                animation = self.make(source, target, run_time=3)
+                self.assertEqual([child._native_kind for child in animation.animations], kinds)
+                self.assertEqual(animation.group_options["run_time"], 3)
+                self.assertEqual(animation.matched_pairs, [])
+                animation.begin()
+                animation.finish()
 
     def test_idempotent_install_keeps_helper_identity(self):
         helper, constructor = self.g.TransformMatchingStrings.matching_blocks, self.g.TransformMatchingStrings.__init__
