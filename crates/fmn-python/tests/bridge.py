@@ -868,6 +868,61 @@ else:
     raise AssertionError("Mobject.add accepted a non-Mobject")
 assert family_add_root.submobjects == [family_add_a, family_add_b, family_add_c]
 
+# fm-5wq.31: adding N children is one commit, not N (each commit re-projects
+# the whole child list: 7,094 rects in Groups were O(n^2), 33 s). Membership,
+# order and parent edges are those of child-by-child commits.
+family_add_live = type(family_add_root.submobjects)
+family_add_commits = []
+family_add_commit = family_add_live._commit
+
+
+def family_add_counting(live, candidate):
+    family_add_commits.append(len(candidate))
+    return family_add_commit(live, candidate)
+
+
+family_add_live._commit = family_add_counting
+try:
+    family_add_children = [Mobject() for _ in range(64)]
+    family_add_wide = manimlib.Group(*family_add_children, family_add_children[3])
+    assert family_add_commits == [64], family_add_commits
+    assert list(family_add_wide.submobjects) == family_add_children
+    assert all(child.parents == [family_add_wide] for child in family_add_children)
+    # A refusal inside the batch (a cycle under a scene-bound parent)
+    # changes nothing, then the child-by-child path keeps the prefix and
+    # raises the first failing child's error.
+    family_add_scene = manimlib.Scene()
+    family_add_scene.add(family_add_wide)
+    family_add_commits.clear()
+    family_add_cyclic = Mobject()
+    try:
+        family_add_children[0].add(family_add_cyclic, family_add_wide)
+    except Exception as error:
+        family_add_cycle_error = str(error)
+        assert type(error).__name__ == "FamilyCycleError", family_add_cycle_error
+    else:
+        raise AssertionError("Mobject.add accepted a cycle")
+    assert family_add_children[0].submobjects == [family_add_cyclic], family_add_cycle_error
+    assert family_add_cyclic.parents == [family_add_children[0]]
+    assert family_add_commits == [2, 1, 2], family_add_commits
+
+    # An uninitialized child never enters the batch: it keeps the
+    # child-by-child refusal and prefix.
+    class FamilyAddUninitialized(Mobject):
+        def __init__(self):
+            pass
+
+    family_add_owner = Mobject()
+    try:
+        family_add_owner.add(Mobject(), FamilyAddUninitialized())
+    except Exception as error:
+        assert type(error).__name__ == "ForeignStageError", error
+    else:
+        raise AssertionError("Mobject.add accepted an uninitialized mobject")
+    assert len(family_add_owner.submobjects) == 1
+finally:
+    family_add_live._commit = family_add_commit
+
 # set_submobjects is Reference clear-then-add, including identity dedup and
 # its observable prefix on a later failure.
 assert family_add_root.set_submobjects(

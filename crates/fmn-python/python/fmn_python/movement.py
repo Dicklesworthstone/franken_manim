@@ -283,10 +283,80 @@ def _install_phase_flow(g, Flow):
 
 
 def _implementation(obj, name):
-    value = inspect.getattr_static(obj, name, None)
+    value = _getattr_static(obj, name)
     if isinstance(value, (staticmethod, classmethod, types.MethodType)):
         return value.__func__
     return value
+
+
+_NOT_FOUND = object()
+
+
+def _plain_mro(cls):
+    """cls's MRO when every class in it has metaclass `type` exactly, else None.
+
+    Then no metaclass can shadow `__dict__` (inspect._shadowed_dict of `type`
+    is its sentinel), and a class's namespace is its own `__dict__`.
+    """
+    mro = _class_mro(cls)
+    for entry in mro:
+        if type(entry) is not type:
+            return None
+    return mro
+
+
+def _lookup(mro, name):
+    for entry in mro:
+        namespace = _class_dict(entry)
+        if name in namespace:
+            return namespace[name]
+    return _NOT_FOUND
+
+
+def _getattr_static(obj, name):
+    """inspect.getattr_static(obj, name, None), exactly, for CPython 3.13.
+
+    The ordinary case, where every class involved has metaclass `type`,
+    needs only namespace lookups; anything else is getattr_static itself.
+    getattr_static's cost was re-walking each MRO entry's metaclass on every
+    call: 1.05M calls, 12 s of one corpus scene's first 150 s (fm-5wq.31).
+    """
+    # getattr_static's own test; isinstance would consult a faked __class__.
+    if type in _class_mro(type(obj)):
+        mro = _plain_mro(obj)
+        meta_mro = _plain_mro(type(obj)) if mro is not None else None
+        if meta_mro is None:
+            return inspect.getattr_static(obj, name, None)
+        found = _lookup(mro, name)
+        if found is _NOT_FOUND:
+            found = _lookup(meta_mro, name)  # "for types we check the metaclass too"
+        return None if found is _NOT_FOUND else found
+    klass = type(obj)
+    mro = _plain_mro(klass)
+    if mro is None:
+        return inspect.getattr_static(obj, name, None)
+    instance = _NOT_FOUND
+    if _plain_instance_dict(klass):
+        try:
+            own = object.__getattribute__(obj, "__dict__")
+        except AttributeError:
+            own = None
+        if own is not None:
+            if type(own) is not dict:
+                return inspect.getattr_static(obj, name, None)
+            instance = dict.get(own, name, _NOT_FOUND)
+    found = _lookup(mro, name)
+    if instance is not _NOT_FOUND and found is not _NOT_FOUND:
+        kind = _plain_mro(type(found))
+        if kind is None:
+            return inspect.getattr_static(obj, name, None)
+        if _lookup(kind, "__get__") is not _NOT_FOUND and (
+                _lookup(kind, "__set__") is not _NOT_FOUND
+                or _lookup(kind, "__delete__") is not _NOT_FOUND):
+            return found  # a data descriptor beats the instance dict
+    if instance is not _NOT_FOUND:
+        return instance
+    return None if found is _NOT_FOUND else found
 
 
 def _protocols(g, root, names):

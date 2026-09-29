@@ -124,27 +124,35 @@ def install(native, subsystems=True):
         alpha = float(alpha)
         locked_data = getattr(self, "locked_data_keys", ())
         constant_data = getattr(self, "const_data_keys", ())
+        # Each `.data` read builds a fresh live view of the native records
+        # (the Reference's is a plain attribute), so read each once per call
+        # (fm-5wq.31: ~23 view constructions per call was 30% of a large
+        # Transform). Only an authored path_func could replace the records
+        # mid-loop; the views are re-read after each call to one.
+        data = self.data
+        start_data, end_data = mobject1.data, mobject2.data
         data_keys = [
-            key for key in self.data.dtype.names if key not in locked_data
+            key for key in data.dtype.names if key not in locked_data
         ]
         # Point-free family roots can still carry animated uniforms. They
         # have no first record from which to broadcast a constant data field.
-        if len(self.data) == 0:
+        if len(data) == 0:
             data_keys = []
         if data_keys:
             self.note_changed_data()
+        pointlike = self.pointlike_data_keys
         for key in data_keys:
-            start = mobject1.data[key]
-            end = mobject2.data[key]
+            start = start_data[key]
+            end = end_data[key]
             if key in constant_data:
                 start = start[0]
                 end = end[0]
-            value = (
-                path_func(start, end, alpha)
-                if key in self.pointlike_data_keys
-                else interpolate_value(start, end, alpha)
-            )
-            self.data[key][:] = value
+            if key in pointlike:
+                value = path_func(start, end, alpha)
+                data, start_data, end_data = self.data, mobject1.data, mobject2.data
+            else:
+                value = interpolate_value(start, end, alpha)
+            data[key][:] = value
         locked_uniforms = getattr(self, "locked_uniform_keys", ())
         for key in tuple(self.uniforms):
             if key in locked_uniforms:

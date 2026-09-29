@@ -34,13 +34,17 @@ class FirstFailure:
 
 
 def point_sample(value, *, np, label):
+    # Runs once per sampled point (7.5M calls in one corpus scene), so no
+    # per-coordinate generators: unpack once, and one chained comparison per
+    # coordinate, which is false for NaN, infinities and |v| > F32_MAX alike.
     array = np.asarray(value)
     if array.shape != (3,) or array.dtype.kind not in "biuf":
         raise ValueError(label + " must return exactly three real coordinates")
-    point = tuple(float(v) for v in array)
-    if any(not math.isfinite(v) or abs(v) > F32_MAX for v in point):
+    x, y, z = array.tolist()
+    x, y, z = float(x), float(y), float(z)
+    if not (-F32_MAX <= x <= F32_MAX and -F32_MAX <= y <= F32_MAX and -F32_MAX <= z <= F32_MAX):
         raise ValueError(label + " must return finite f32-representable coordinates")
-    return point
+    return (x, y, z)
 
 
 def scalar_sample(value, *, finite_record):

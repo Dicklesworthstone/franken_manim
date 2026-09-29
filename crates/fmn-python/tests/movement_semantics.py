@@ -604,6 +604,63 @@ class ProtocolTables(_unittest.TestCase):
         self.assertIsNot(movement._protocols(g, _m.VMobject, ("update",))[g["Hidden"]]["update"],
                          own)
 
+    def test_static_lookup_equals_getattr_static(self):
+        # fm-5wq.31: movement._getattr_static answers ordinary lookups from
+        # namespaces and defers everything else to getattr_static.
+        import inspect
+        from fmn_python import movement
+
+        class Data:
+            def __get__(self, obj, owner=None):
+                return 1
+
+            def __set__(self, obj, value):
+                pass
+
+        class NonData:
+            def __get__(self, obj, owner=None):
+                return 2
+
+        class Slotted:
+            __slots__ = ("hook",)
+
+        class Meta(type):
+            meta_only = "meta"
+
+        class WithMeta(metaclass=Meta):
+            def hook(self):
+                pass
+
+        class Authored(_m.VMobject):
+            prop = property(lambda self: 3)
+            data_desc = Data()
+            nondata = NonData()
+            static = staticmethod(lambda: 0)
+            klass = classmethod(lambda cls: 0)
+
+            def shift(self, *args, **kwargs):
+                return self
+
+        g = self.namespace()
+        authored = Authored()
+        authored.__dict__.update(prop=5, data_desc=6, nondata=7, shift=8, extra=9)
+        slotted = Slotted()
+        slotted.hook = 1
+        objects = [value for value in g.values() if isinstance(value, type)]
+        objects += [Authored, authored, Slotted, slotted, WithMeta, WithMeta(), Meta,
+                    _m.Square(), _m.VGroup(_m.Circle()), _m.Dot(), _m.DecimalNumber(1.5),
+                    g["Hidden"], g["Hidden"](), g["Wrapped"](), _m.Scene]
+        names = self.NAMES + ("prop", "data_desc", "nondata", "static", "klass", "extra",
+                              "hook", "meta_only", "__dict__", "__class__", "__init__",
+                              "submobjects", "points", "data")
+        compared = 0
+        for obj in objects:
+            for name in names:
+                self.assertIs(movement._getattr_static(obj, name),
+                              inspect.getattr_static(obj, name, None), (obj, name))
+                compared += 1
+        self.assertGreater(compared, 5000)
+
     def test_tables_make_no_getattr_static_calls(self):
         import inspect
         from fmn_python import movement

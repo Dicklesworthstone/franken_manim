@@ -127,6 +127,7 @@ python3 crates/fmn-python/tests/test_project_editor_facade.py
 python3 crates/fmn-python/tests/test_batch_checkpoint_identity.py
 python3 crates/fmn-python/tests/test_batch_checkpoint_inputs.py
 python3 crates/fmn-python/tests/test_runtime_identity.py
+python3 crates/fmn-python/tests/test_sampling_callbacks_protocol.py
 python3 crates/fmn-python/tests/test_runtime_provenance_protocol.py
 python3 crates/fmn-python/tests/test_reproducible_batch_protocol.py
 python3 crates/fmn-python/tests/test_reproducible_batch_cli_protocol.py

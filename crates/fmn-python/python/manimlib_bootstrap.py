@@ -341,6 +341,35 @@ def _color_gradient(colors, length, interp_by_hsl=False):
     ]
 
 
+def _identity_family(owner, children):
+    """Whether committing `children` under `owner` compares only identities.
+
+    _LiveSubmobjects._replace_projection tests `owner in child.parents`,
+    which calls `==` unless every class involved keeps object's equality.
+    """
+    if type(owner).__eq__ is not object.__eq__:
+        return False
+    for child in children:
+        # Anything unusual (not a Mobject, an uninitialized one without its
+        # parent list, a class-level `parents`) takes the child-by-child path.
+        if not isinstance(child, _BridgeMobject) or any(
+                "parents" in _class_namespace(entry) for entry in type(child).__mro__):
+            return False
+        try:
+            parents = object.__getattribute__(child, "__dict__").get("parents")
+        except AttributeError:
+            return False
+        if type(parents) is not list:
+            return False
+        for parent in parents:
+            if type(parent).__eq__ is not object.__eq__:
+                return False
+    return True
+
+
+_class_namespace = type.__dict__["__dict__"].__get__
+
+
 class _LiveSubmobjects(list):
     """A list whose accepted mutations are mirrored into Marionette."""
 
@@ -868,10 +897,29 @@ class Mobject(_BridgeMobject):
         if self in mobjects:
             raise Exception("Mobject cannot contain self")
         present = {id(child) for child in self.submobjects}
+        fresh = []
         for mobject in mobjects:
             if id(mobject) not in present:
-                self.submobjects.append(mobject)
+                fresh.append(mobject)
                 present.add(id(mobject))
+        if fresh and _identity_family(self, fresh):
+            # One commit instead of one per child (fm-5wq.31: each commit
+            # re-projects the whole child list, so Group(*7094 rects) was
+            # O(n^2), 33 s). Marionette validates the whole list before it
+            # changes anything, and with identity equality the parent
+            # bookkeeping runs no authored code, so success ends in the same
+            # state as child-by-child commits. On a refusal nothing changed:
+            # commit child by child below, which keeps the attached prefix
+            # and raises the first failing child's own error.
+            try:
+                self.submobjects.extend(fresh)
+            except Exception:
+                attached = {id(child) for child in self.submobjects}
+                fresh = [mobject for mobject in fresh if id(mobject) not in attached]
+            else:
+                fresh = []
+        for mobject in fresh:
+            self.submobjects.append(mobject)
         # Reference add (mobject.py:467) closes with note_changed_family.
         self.note_changed_family()
         return self
