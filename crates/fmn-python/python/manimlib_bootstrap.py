@@ -61,6 +61,29 @@ _DEFAULT_MOBJECT_TO_MOBJECT_BUFF = 0.25
 _SMALL_BUFF = 0.1
 _MED_SMALL_BUFF = 0.25
 _MED_LARGE_BUFF = 0.5
+class _StyleDefault(str):
+    """A constructor's own fill/stroke color default (fm-qead).
+
+    It is the same color string, ranked below the caller's `color=`, so the
+    resolved precedence is: explicit channel keyword > caller `color` >
+    constructor default. That fixes both the Reference masking `color=` with
+    constructor defaults (Appendix C-19) and explicit channels losing to it.
+    """
+
+    __slots__ = ()
+
+
+def _resolve_channel(channel, color):
+    """One fill/stroke channel under explicit > `color` > constructor default.
+
+    A marked default resolves to a plain `str`, so the marker never reaches
+    attributes, copies or later constructor calls.
+    """
+    if isinstance(channel, _StyleDefault):
+        return color if color is not None else str(channel)
+    return channel if channel is not None else color
+
+
 _BLACK = "#000000"
 _WHITE = "#FFFFFF"
 _GREY_A = "#DDDDDD"
@@ -4168,12 +4191,12 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
         raise TypeError(
             "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
         )
-    # `VMobject(color=...)` is the one-shot public override for both channels.
-    # Constructor-specific defaults (notably Dot's white fill and black
-    # zero-width stroke) must not mask that shorthand when it is supplied.
-    if color is not None:
-        fill_color = color
-        stroke_color = color
+    # `color=` fills whichever channel the caller left unset. An explicit
+    # fill_color/stroke_color keyword wins over it, and a constructor's own
+    # default (marked _StyleDefault, e.g. Dot's white fill) loses to it
+    # (fm-qead; Reference VMobject: fill_color or color).
+    fill_color = _resolve_channel(fill_color, color)
+    stroke_color = _resolve_channel(stroke_color, color)
     if fill_opacity is None:
         fill_opacity = opacity
     if stroke_opacity is None:
@@ -4288,11 +4311,11 @@ def _init_native_vmobject(mobject, kwargs):
     _preflight_vmobject_style_kwargs(kwargs)
     style = dict(kwargs)
     color = style.get("color")
-    if color is not None:
-        # Preserve native constructors' established color shorthand: it wins
-        # over even the concrete class's explicit fill/stroke defaults.
-        style["fill_color"] = color
-        style["stroke_color"] = color
+    # Explicit channel > color > the concrete class's own default (marked
+    # _StyleDefault), fm-qead: color still beats a constructor default.
+    for channel in ("fill_color", "stroke_color"):
+        if channel in style or color is not None:
+            style[channel] = _resolve_channel(style.get(channel), color)
     opacity = style.pop("opacity", None)
     if opacity is not None:
         for channel in ("fill_opacity", "stroke_opacity"):
@@ -4701,7 +4724,7 @@ class ArrowTip(Triangle):
         width=0.35,
         length=0.35,
         fill_opacity=1.0,
-        fill_color="#FFFFFF",
+        fill_color=_StyleDefault("#FFFFFF"),
         stroke_width=0.0,
         tip_style=0,
         **kwargs,
@@ -4792,7 +4815,7 @@ class FullScreenRectangle(ScreenRectangle):
     def __init__(
         self,
         height=_FRAME_HEIGHT,
-        fill_color=_GREY_E,
+        fill_color=_StyleDefault(_GREY_E),
         fill_opacity=1,
         stroke_width=0,
         **kwargs,
@@ -5147,7 +5170,7 @@ class CurvedDoubleArrow(CurvedArrow):
 
 
 class Circle(Arc):
-    def __init__(self, start_angle=0, stroke_color=_RED, **kwargs):
+    def __init__(self, start_angle=0, stroke_color=_StyleDefault(_RED), **kwargs):
         self.radius = float(kwargs.pop("radius", 1.0))
         self.arc_center = _np.array(_vec3(kwargs.pop("arc_center", _ORIGIN)), dtype=float)
         # geometry.py:386 passes **kwargs to Arc, so n_components reaches it.
@@ -5185,10 +5208,10 @@ class Dot(Circle):
         self,
         point=_ORIGIN,
         radius=0.08,
-        stroke_color=_BLACK,
+        stroke_color=_StyleDefault(_BLACK),
         stroke_width=0.0,
         fill_opacity=1.0,
-        fill_color=_WHITE,
+        fill_color=_StyleDefault(_WHITE),
         **kwargs,
     ):
         self.arc_center = _np.array(_vec3(point), dtype=float)
@@ -5222,7 +5245,7 @@ class Ellipse(Circle):
         self.arc_center = _np.array(_vec3(kwargs.pop("arc_center", _ORIGIN)), dtype=float)
         self.start_angle = float(kwargs.pop("start_angle", 0))
         self.angle = _math.tau
-        kwargs.setdefault("stroke_color", _RED)
+        kwargs.setdefault("stroke_color", _StyleDefault(_RED))
         _init_native_vmobject(self, kwargs)
 
     def init_points(self):
@@ -5243,7 +5266,7 @@ class AnnularSector(VMobject):
         inner_radius=1.0,
         outer_radius=2.0,
         arc_center=_ORIGIN,
-        fill_color="#BBBBBB",
+        fill_color=_StyleDefault("#BBBBBB"),
         fill_opacity=1.0,
         stroke_width=0.0,
         **kwargs,
@@ -5276,7 +5299,7 @@ class Annulus(VMobject):
         outer_radius=2.0,
         fill_opacity=1.0,
         stroke_width=0.0,
-        fill_color="#BBBBBB",
+        fill_color=_StyleDefault("#BBBBBB"),
         center=_ORIGIN,
         **kwargs,
     ):
@@ -5650,7 +5673,7 @@ class StrokeArrow(Line):
         self,
         start,
         end,
-        stroke_color=_DEFAULT_LIGHT_COLOR,
+        stroke_color=_StyleDefault(_DEFAULT_LIGHT_COLOR),
         stroke_width=5,
         buff=0.25,
         tip_width_ratio=5,
@@ -5753,7 +5776,7 @@ class Arrow(Line):
         end=_LEFT,
         buff=0.25,
         path_arc=0.0,
-        fill_color=_DEFAULT_LIGHT_COLOR,
+        fill_color=_StyleDefault(_DEFAULT_LIGHT_COLOR),
         fill_opacity=1.0,
         stroke_width=0.0,
         thickness=3.0,
@@ -6242,10 +6265,10 @@ class SampleSpace(Rectangle):
         self,
         width=3,
         height=3,
-        fill_color=_GREY_D,
+        fill_color=_StyleDefault(_GREY_D),
         fill_opacity=1,
         stroke_width=0.5,
-        stroke_color=_GREY_B,
+        stroke_color=_StyleDefault(_GREY_B),
         default_label_scale_val=1,
         **kwargs,
     ):
@@ -13072,7 +13095,7 @@ class VCube(VGroup3D):
     def __init__(
         self,
         side_length=2.0,
-        fill_color=_BLUE_D,
+        fill_color=_StyleDefault(_BLUE_D),
         fill_opacity=1,
         stroke_width=0,
         **kwargs,
@@ -13142,9 +13165,9 @@ class Tetrahedron(VGroup3D):
     def __init__(
         self,
         edge_length=2.0,
-        fill_color=_BLUE_E,
+        fill_color=_StyleDefault(_BLUE_E),
         fill_opacity=1,
-        stroke_color=_BLUE_E,
+        stroke_color=_StyleDefault(_BLUE_E),
         stroke_width=1,
         **kwargs,
     ):
@@ -13188,9 +13211,9 @@ class Tetrahedron(VGroup3D):
 class Dodecahedron(VGroup3D):
     def __init__(
         self,
-        fill_color=_BLUE_E,
+        fill_color=_StyleDefault(_BLUE_E),
         fill_opacity=1,
-        stroke_color=_BLUE_E,
+        stroke_color=_StyleDefault(_BLUE_E),
         stroke_width=1,
         shading=(0.2, 0.2, 0.2),
         **kwargs,

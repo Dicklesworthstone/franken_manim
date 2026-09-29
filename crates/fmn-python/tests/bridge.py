@@ -21068,11 +21068,26 @@ assert all(glyph.get_fill_color().upper() == "#FFFF00" for glyph in _split[2])
 assert _old_tex_module.OldTex("x^2 + y", isolate=["y"]).tex_strings == ["x^2 + ", "y"]
 # C-19 (BN-07): a caller's color= beats constructor defaults. The pinned
 # Reference re-applies Text's white default and Dot's white fill, and drops it.
-# (Explicit fill_color/stroke_color beating color= is fm-qead, not yet true.)
 _red_words = manimlib.Text("ab", color=manimlib.RED)
 assert all(glyph.get_fill_color().upper() == "#FC6255" for glyph in _red_words), \
     [glyph.get_fill_color() for glyph in _red_words]
 assert manimlib.Dot(color=manimlib.RED).get_fill_color().upper() == "#FC6255"
+# fm-qead: explicit fill_color/stroke_color > color > constructor default, the
+# Reference VMobject's `fill_color or color`. The first two rows are the
+# pinned Reference's own values; the Dot and Brace rows keep C-19's color win
+# over their constructor defaults while an explicit channel still wins.
+for _made, _fill, _stroke in (
+    (manimlib.Square(color=manimlib.RED, fill_color=manimlib.BLUE), "#58C4DD", "#FC6255"),
+    (manimlib.Square(color=manimlib.RED, stroke_color=manimlib.GREEN), "#FC6255", "#83C167"),
+    (manimlib.Circle(color=manimlib.RED, fill_color=manimlib.BLUE), "#58C4DD", "#FC6255"),
+    (manimlib.Dot(color=manimlib.RED, fill_color=manimlib.BLUE), "#58C4DD", "#FC6255"),
+    (manimlib.Dot(fill_color=manimlib.BLUE), "#58C4DD", "#000000"),
+    (manimlib.Brace(manimlib.Square(), color=manimlib.RED), "#FC6255", "#FC6255"),
+):
+    assert (_made.get_fill_color().upper(), _made.get_stroke_color().upper()) == (_fill, _stroke), \
+        (type(_made).__name__, _made.get_fill_color(), _made.get_stroke_color())
+# A resolved default is a plain str: the marker never reaches copies.
+assert type(manimlib.Dot().fill_color) is str
 assert len(_old_tex_module.OldTex("a", "+", "b")) == 3
 # OldTex selects parts the way the Reference does (old_tex_mobject.py:248-305).
 # Each part carries its piece's source. A lookup tests substrings of that

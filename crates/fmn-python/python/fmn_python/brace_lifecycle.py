@@ -55,8 +55,9 @@ def install_brace_lifecycle(native):
         text = str(tex_string)
         g["_preflight_vmobject_style_kwargs"](kwargs)
         options = dict(kwargs)
-        options.setdefault("fill_color", g["_WHITE"])
-        options.setdefault("stroke_color", g["_WHITE"])
+        # Constructor defaults: a caller's color= still wins over them (fm-qead).
+        options.setdefault("fill_color", g["_StyleDefault"](g["_WHITE"]))
+        options.setdefault("stroke_color", g["_StyleDefault"](g["_WHITE"]))
         # The shared initializer applies opacity only to absent channels.
         # Seeding an unconditional 1 here silently made translucent braces opaque.
         alpha = options.get("opacity")

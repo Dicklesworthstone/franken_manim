@@ -183,14 +183,19 @@ The corpus differential (fm-5wq.33) found the text case in dozens of 3b1b
 scenes whose authors asked for a color. For example, `_2021/newton_fractal.py`
 `WhatIsThis` is red in the portal and white in the pinned Reference.
 
-**FrankenManim:** a caller's `color=` colors both channels over any
-constructor default, the evident intent and manim's long-standing behavior.
-Measured at `35c65d6e`, the portal also lets `color=` override a caller's
-*explicit* `fill_color`/`stroke_color`, which the Reference correctly keeps.
-That half is a portal bug, fm-qead: the intended precedence is explicit
-channel keyword > `color=` > constructor default.
+**FrankenManim:** the precedence is explicit channel keyword > `color=` >
+constructor default. A caller's `color=` colors every channel the caller
+left unset, over any constructor default: the evident intent and manim's
+long-standing behavior. An explicit `fill_color`/`stroke_color` still wins
+over `color=`, as in the Reference. So `Square(color=RED, fill_color=BLUE)`
+fills blue with a red stroke, and `Dot(color=RED, fill_color=BLUE)` is a
+blue dot with a red stroke. (Until fm-qead, `color=` also overrode explicit
+channels.) Constructors mark their own channel defaults as such, which is how
+the portal tells them from a caller's keyword. `BackgroundRectangle` keeps
+the Reference's fixed style (its `set_style` changes only fill opacity).
 
-Locked by the C-19 assertions in `crates/fmn-python/tests/bridge.py`.
+Locked by the C-19 and fm-qead assertions in
+`crates/fmn-python/tests/bridge.py`.
 
 **Migration:** scenes that relied on the defect to keep text or dots white
 while passing `color=` should drop the keyword.
