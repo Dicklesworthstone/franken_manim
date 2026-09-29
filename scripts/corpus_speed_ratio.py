@@ -215,6 +215,51 @@ def scene_ratios(runs):
     return included, excluded
 
 
+def timeout_bounds(runs, excluded):
+    """Lower bounds on the ratio of scenes excluded only by portal timeouts.
+
+    A repetition whose portal timed out while its Reference succeeded has a
+    ratio of at least portal elapsed / Reference seconds. A scene's bound is
+    the median of those per-repetition bounds (componentwise lower bounds
+    bound the median). Scenes that also failed another way have none.
+    """
+    cells = {}
+    for record in runs:
+        cells.setdefault((record["module"], record["scene"]), {})[
+            (record["engine"], record["rep"])] = record
+    bounds = {}
+    for scene, reasons in excluded.items():
+        if reasons != ["portal:timeout"]:
+            continue
+        per_rep = [portal["seconds"] / reference["seconds"]
+                   for (engine, rep), portal in cells[scene].items()
+                   if engine == "portal" and portal["exit"] is None
+                   for reference in [cells[scene].get(("reference", rep))]
+                   if reference and reference["exit"] == 0 and reference["seconds"] > 0]
+        if per_rep:
+            bounds[scene] = statistics.median(per_rep)
+    return bounds
+
+
+def censored_percentile(ratios, bounds, q):
+    """percentile(ratios + bounds, q) when no lower bound can move it, else None.
+
+    Each bound's true ratio is at least the bound. The interpolated percentile
+    reads the sorted values at the index below its position and, unless the
+    position is whole, the one above; it is exact when every bound sorts
+    strictly after those (ties sort measured values first).
+    """
+    ordered = sorted([(value, False) for value in ratios] + [(value, True) for value in bounds])
+    if not ordered:
+        return None
+    position = (len(ordered) - 1) * q / 100.0
+    low = int(position)
+    read = low if position == low else min(low + 1, len(ordered) - 1)
+    if any(is_bound for _, is_bound in ordered[:read + 1]):
+        return None
+    return percentile([value for value, _ in ordered], q)
+
+
 def corpus_summary(included):
     ratios = [row["ratio"] for row in included.values()]
     if not ratios:
@@ -260,6 +305,16 @@ def write_dashboard(out_dir: pathlib.Path, dashboard: pathlib.Path):
             lines.append(f"| ratio {name} (95% bootstrap CI) | {summary[name]:.2f}"
                          f" ({low:.2f}-{high:.2f}) |")
         lines.append(f"| scenes above 1x | {summary['above_1x']} |")
+    bounds = timeout_bounds(runs, excluded)
+    if bounds:
+        # Dropping portal timeouts flatters the portal: they are its slowest
+        # scenes. Count them at their lower bounds wherever that is exact.
+        ratios = [row["ratio"] for row in included.values()]
+        for name, q in (("median", 50), ("p90", 90), ("p99", 99)):
+            value = censored_percentile(ratios, list(bounds.values()), q)
+            shown = "not determinable (a timeout bound reaches it)" if value is None else f"{value:.2f}"
+            lines.append(f"| ratio {name} counting {len(bounds)} portal timeouts at their lower"
+                         f" bounds | {shown} |")
     lines += ["", "## Per scene (slowest first)", "",
               "| scene | ratio | min | max | pairs | portal s | Reference s | later failures |",
               "|---|---:|---:|---:|---:|---:|---:|---|"]

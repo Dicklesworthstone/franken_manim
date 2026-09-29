@@ -78,6 +78,36 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertEqual(csr.corpus_summary(included)["scenes"], 1)
         self.assertEqual(included[("m.py", "Ok")]["failed"], [])
 
+    def test_portal_timeouts_count_at_their_lower_bounds_only_where_exact(self):
+        runs = [run("m.py", s, e, 0, sec)
+                for s, factor in (("A", 0.5), ("B", 1.0), ("C", 2.0))
+                for e, sec in (("portal", factor), ("reference", 1.0))]
+        runs += [run("m.py", "T1", "portal", 0, 300.0, None), run("m.py", "T1", "reference", 0, 30.0),
+                 run("m.py", "T2", "portal", 0, 300.0, None), run("m.py", "T2", "reference", 0, 15.0),
+                 run("m.py", "Both", "portal", 0, 300.0, None), run("m.py", "Both", "reference", 0, 2.0, 1),
+                 run("m.py", "Refail", "portal", 0, 1.0), run("m.py", "Refail", "reference", 0, 1.0, 1)]
+        included, excluded = csr.scene_ratios(runs)
+        bounds = csr.timeout_bounds(runs, excluded)
+        self.assertEqual(bounds, {("m.py", "T1"): 10.0, ("m.py", "T2"): 20.0})
+        ratios = [row["ratio"] for row in included.values()]
+        # Dropping the timeouts would report 1.0; counted at their bounds the
+        # median is the third of five values, which no bound can move.
+        self.assertEqual(csr.percentile(ratios, 50), 1.0)
+        self.assertEqual(csr.censored_percentile(ratios, list(bounds.values()), 50), 2.0)
+        # p90 reads the two largest values, both only bounded: unknown.
+        self.assertIsNone(csr.censored_percentile(ratios, list(bounds.values()), 90))
+        # A bound inside the interpolated pair makes the median unknown too.
+        self.assertIsNone(csr.censored_percentile([0.5, 1.0, 2.0], [0.7], 50))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "runs.ndjson").write_text("\n".join(
+                __import__("json").dumps(r) for r in runs) + "\n")
+            csr.write_dashboard(out, out / "dash.md")
+            text = (out / "dash.md").read_text()
+        self.assertIn("| ratio median counting 2 portal timeouts at their lower bounds | 2.00 |", text)
+        self.assertIn("| ratio p90 counting 2 portal timeouts at their lower bounds |"
+                      " not determinable (a timeout bound reaches it) |", text)
+
     def test_a_later_failure_keeps_the_pairs_and_stays_visible(self):
         runs = [run("m.py", "A", "portal", 0, 2.0), run("m.py", "A", "reference", 0, 1.0),
                 run("m.py", "A", "portal", 1, 300.0, None)]
