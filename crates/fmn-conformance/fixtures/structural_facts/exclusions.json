@@ -23,6 +23,16 @@
       "reason": "C-19: at the pin StringMobject.__init__ re-applies its white fill_color after color= reached SVGMobject, so Text(..., color=X) renders white. FrankenManim applies the requested color (BN-07). The row applies only where the Reference shows that default white."
     },
     {
+      "id": "bn07-c19-dot-color-keyword",
+      "kind": "behavior-note",
+      "ref": "BN-07",
+      "scope": ["classes", "scenes"],
+      "class": ["Dot", "SmallDot"],
+      "fact": ["style.fill_color", "style.stroke_color"],
+      "reference_values": ["#FFFFFF", "#000000"],
+      "reason": "C-19: at the pin Dot passes fill_color=DEFAULT_MOBJECT_COLOR and stroke_color=BLACK to Circle, masking the caller's color=; Dot(color=RED) is white with a black stroke. FrankenManim ranks color= above constructor defaults and an explicit channel above color= (fm-qead), so Dot(color=RED, fill_color=BLUE) keeps the blue fill the Reference also keeps and a red stroke where the Reference shows black. The row applies only where the Reference shows those defaults."
+    },
+    {
       "id": "bn05-svg-path-geometry",
       "kind": "behavior-note",
       "ref": "BN-05",
@@ -250,10 +260,20 @@
       "id": "fm-78b6-style-defaults-sweep",
       "kind": "open-bead",
       "ref": "fm-78b6",
-      "scope": ["classes", "scenes"],
+      "scope": ["scenes"],
       "class": ["AnnularSector", "Sector", "ArrowTip", "VPrism", "DashedVMobject", "VectorizedPoint", "BackgroundRectangle", "Prismify", "SurfaceMesh", "VGroup", "Square", "Rectangle", "Line", "Text", "RoundedRectangle"],
       "fact": ["style.stroke_color", "style.fill_color", "style.fill_opacity", "style.stroke_width", "style.stroke_opacity"],
       "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults."
+    },
+    {
+      "id": "fm-78b6-style-defaults-classes",
+      "kind": "open-bead",
+      "ref": "fm-78b6",
+      "scope": ["classes"],
+      "subject": ["AnnularSector", "AnnularSector#1", "ArrowTip", "ArrowTip#1", "BackgroundRectangle#1", "DashedVMobject#1", "Sector", "Sector#1", "SurfaceMesh#1", "VPrism", "VPrism#1", "VectorizedPoint", "VectorizedPoint#1"],
+      "class": ["AnnularSector", "Sector", "ArrowTip", "VPrism", "DashedVMobject", "VectorizedPoint", "BackgroundRectangle", "Prismify", "SurfaceMesh", "VGroup", "Square", "Rectangle", "Line", "Text", "RoundedRectangle"],
+      "fact": ["style.stroke_color", "style.fill_color", "style.fill_opacity", "style.stroke_width", "style.stroke_opacity"],
+      "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults. Class-sweep scope is pinned to the 13 subjects that need it (measured 2026-09-28, fm-qead), so a style regression elsewhere, e.g. Square(color=RED, fill_color=BLUE), is no longer masked."
     },
     {
       "id": "fm-fc53-empty-position",

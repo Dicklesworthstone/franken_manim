@@ -228,7 +228,9 @@
   ],
   "Dot": [
    "Dot(UP, radius=0.2)",
-   "Dot(RIGHT, fill_opacity=0.5)"
+   "Dot(RIGHT, fill_opacity=0.5)",
+   "Dot(color=RED)",
+   "Dot(color=RED, fill_color=BLUE)"
   ],
   "Ellipse": [
    "Ellipse(width=4, height=1)"
@@ -293,7 +295,9 @@
   ],
   "Square": [
    "Square(side_length=3)",
-   "Square(0.5)"
+   "Square(0.5)",
+   "Square(color=RED, fill_color=BLUE)",
+   "Square(color=RED, stroke_color=GREEN)"
   ],
   "RoundedRectangle": [
    "RoundedRectangle(corner_radius=0.3)",
