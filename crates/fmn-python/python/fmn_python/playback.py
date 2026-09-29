@@ -250,7 +250,7 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
     including changed bases reached through super(), without running authored
     descriptors while deciding which execution route is valid.
     """
-    from fmn_python.movement import _changed, _implementation, _protocols
+    from fmn_python.movement import _changed, _class_implementation, _implementation, _protocols
 
     Transform = g["Transform"]
     hooks = (
@@ -333,18 +333,20 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         # traversal. Deduplicate identities to bound deep/shared DAGs, and
         # inspect each member before reading its child-list descriptor. Never
         # call an authored get_family merely to decide how to execute it.
-        stack, seen = [root], set()
+        # The walk runs no authored code, so one memo resolves each class's
+        # hooks once per walk instead of once per member (fm-5wq.31).
+        stack, seen, memo = [root], set(), {}
         while stack:
             member = stack.pop()
             marker = id(member)
             if marker in seen:
                 continue
             seen.add(marker)
-            if not isinstance(member, Mobject) or _changed(member, object_protocols):
+            if not isinstance(member, Mobject) or _changed(member, object_protocols, memo):
                 return True
             expected = next(child_descriptors[cls] for cls in type(member).__mro__
                             if cls in child_descriptors)
-            if _implementation(type(member), "submobjects") is not expected:
+            if _class_implementation(type(member), "submobjects", memo) is not expected:
                 return True
             children = getattr(member, "submobjects", ())
             if type(children) not in child_types:

@@ -213,13 +213,14 @@ def install_indication(native: Any) -> None:
                 # Public pivot getters observe the scale-then-rotate order.
                 # The native stock kernel snapshots both pivots beforehand.
                 return True
-            stack, seen = [animation.mobject], set()
+            # The walk reads instance state only: memoize per class (fm-5wq.31).
+            stack, seen, memo = [animation.mobject], set(), {}
             while stack:
                 member = stack.pop()
                 if id(member) in seen:
                     continue
                 seen.add(id(member))
-                if _changed(member, object_protocols):
+                if _changed(member, object_protocols, memo):
                     return True
                 stack.extend(reversed(tuple(vars(member).get("submobjects", ()))))
         return previous_requires(animation)
@@ -339,13 +340,14 @@ def _install_transform_indications(g):
             if (Indicate is not None and isinstance(animation, Indicate)
                     and getattr(animation, "path_arc", 0.0) != 0.0):
                 return True
-            stack, seen = [animation.mobject], set()
+            # The walk reads instance state only: memoize per class (fm-5wq.31).
+            stack, seen, memo = [animation.mobject], set(), {}
             while stack:
                 member = stack.pop()
                 if id(member) in seen:
                     continue
                 seen.add(id(member))
-                if _changed(member, object_protocols):
+                if _changed(member, object_protocols, memo):
                     return True
                 stack.extend(reversed(tuple(vars(member).get("submobjects", ()))))
         # Preserve custom paths, vector trackers and other subsystem decisions.

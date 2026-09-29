@@ -59,14 +59,15 @@ def install_rotation(native: Any) -> None:
     def object_changed(animation):
         # Classification must not call authored descriptors. Traverse the
         # already-materialized Python family projection from instance state.
-        stack, seen = [animation.mobject], set()
+        # No authored code runs in this walk: memoize per class (fm-5wq.31).
+        stack, seen, memo = [animation.mobject], set(), {}
         while stack:
             member = stack.pop()
             marker = id(member)
             if marker in seen:
                 continue
             seen.add(marker)
-            if _changed(member, object_protocols):
+            if _changed(member, object_protocols, memo):
                 return True
             try:
                 children = vars(member).get("submobjects", ())

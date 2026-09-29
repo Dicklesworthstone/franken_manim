@@ -326,6 +326,40 @@ class PublicUpdateTests(unittest.TestCase):
         scene.add(*squares)
         self.assertTrue(scene._fmn_requires_public_scene_update())
 
+    def test_play_admission_walks_resolve_each_class_once(self):
+        # fm-5wq.31: every play walked its animations' families four times
+        # (playback's authored_family, rotation, and indication's two
+        # walks), resolving every hook of every member through
+        # getattr_static: ~27,500 calls per play of a 50-square group, 90%
+        # of the play's time. The count must not grow with the family.
+        import inspect
+        original, calls = inspect.getattr_static, []
+
+        def counting(obj, name, *default):
+            calls.append(name)
+            return original(obj, name, *default)
+
+        def play_lookups(count):
+            scene = m.Scene()
+            group = m.VGroup(*(m.Square() for _ in range(count)))
+            scene.add(group)
+            calls.clear()
+            inspect.getattr_static = counting
+            try:
+                scene.play(group.animate.shift(0.1 * m.UP), run_time=1 / 30)
+            finally:
+                inspect.getattr_static = original
+            return len(calls)
+
+        self.assertEqual(play_lookups(4), play_lookups(64))
+        # The per-class answer never hides one member's own override.
+        requires = vars(getattr(m, "_native", m))["_requires_python_animation"]
+        squares = [m.Square() for _ in range(8)]
+        group = m.VGroup(*squares)
+        self.assertFalse(requires(m.Rotate(group, 0.1)))
+        squares[5].rotate = lambda *args, **kwargs: squares[5]
+        self.assertTrue(requires(m.Rotate(group, 0.1)))
+
     def test_scene_public_update_mobjects_dispatches_children(self):
         child = MovingSquare(); scene = m.Scene().add(m.Group(child))
         scene.update_mobjects(.25)
