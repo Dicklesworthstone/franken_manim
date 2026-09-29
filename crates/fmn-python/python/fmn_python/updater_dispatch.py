@@ -143,7 +143,8 @@ def install_updater_dispatch(native):
         function.__qualname__ = Scene.__qualname__ + "." + name
         function.__module__ = Scene.__module__
         setattr(Scene, name, function)
-    from .movement import _changed, _implementation, _protocols
+    from .movement import (_changed, _class_implementation, _implementation, _protocols,
+                           _scan_implementation)
 
     object_hooks = ("update", "_update_python_family", "_update_native_mobject",
                     "_is_updating_suspended", "__getattribute__", "__getattr__")
@@ -169,11 +170,15 @@ def install_updater_dispatch(native):
     def requires_public_update(self):
         # Admission must not execute an authored getter, family walker, or
         # updater. Compare identities before reading ordinary shipping state.
-        if _changed(self, scene_protocols):
+        # Nothing authored runs during this scan, so no class can change in it:
+        # per-class lookups are resolved once per scan (fm-5wq.31), not once
+        # per family member per frame.
+        memo = {}
+        if _changed(self, scene_protocols, memo):
             return True
         expected = next(scene_descriptors[cls] for cls in type(self).__mro__
                         if cls in scene_descriptors)
-        if any(_implementation(type(self), name) is not method
+        if any(_class_implementation(type(self), name, memo) is not method
                for name, method in expected.items()):
             return True
         pending, seen = [self.frame, *self.mobjects], set()
@@ -182,15 +187,15 @@ def install_updater_dispatch(native):
             if id(member) in seen:
                 continue
             seen.add(id(member))
-            if not isinstance(member, Mobject) or _changed(member, object_protocols):
+            if not isinstance(member, Mobject) or _changed(member, object_protocols, memo):
                 return True
             expected = next(child_descriptors[cls] for cls in type(member).__mro__
                             if cls in child_descriptors)
-            if _implementation(type(member), "submobjects") is not expected:
+            if _class_implementation(type(member), "submobjects", memo) is not expected:
                 return True
             children = member.submobjects
             methods = child_protocols.get(type(children))
-            if methods is None or any(_implementation(children, name) is not method
+            if methods is None or any(_scan_implementation(children, name, memo) is not method
                                       for name, method in methods.items()):
                 return True
             pending.extend(children)

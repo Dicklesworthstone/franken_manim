@@ -275,6 +275,39 @@ class PublicUpdateTests(unittest.TestCase):
         np.testing.assert_array_equal(root[0].get_center(), .25 * m.RIGHT)
         animation.finish()
 
+    def test_admission_scan_resolves_each_class_once(self):
+        # fm-5wq.31: every frame's admission scan compared each hook of each
+        # family member through inspect.getattr_static, O(members x hooks x
+        # MRO) static lookups per frame (9.3M in 240 s of clt_proof's
+        # DirectMGFInterpretation). The count must not grow with the family.
+        import inspect
+        original = inspect.getattr_static
+        calls = []
+
+        def counting(obj, name, *default):
+            calls.append(name)
+            return original(obj, name, *default)
+
+        def lookups(count):
+            scene = m.Scene()
+            scene.add(*(m.Square() for _ in range(count)))
+            calls.clear()
+            inspect.getattr_static = counting
+            try:
+                self.assertFalse(scene._fmn_requires_public_scene_update())
+            finally:
+                inspect.getattr_static = original
+            return len(calls)
+
+        few, many = lookups(4), lookups(64)
+        self.assertEqual(few, many)
+        # An instance-level override still defeats the per-class answer.
+        scene = m.Scene()
+        squares = [m.Square() for _ in range(8)]
+        squares[5].update = lambda dt=0: None
+        scene.add(*squares)
+        self.assertTrue(scene._fmn_requires_public_scene_update())
+
     def test_scene_public_update_mobjects_dispatches_children(self):
         child = MovingSquare(); scene = m.Scene().add(m.Group(child))
         scene.update_mobjects(.25)

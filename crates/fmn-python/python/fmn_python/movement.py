@@ -296,7 +296,98 @@ def _protocols(g, root, names):
     return {cls:{name:_implementation(cls, name) for name in names} for cls in classes}
 
 
-def _changed(obj, protocols):
+_class_dict = type.__dict__["__dict__"].__get__
+
+
+def _plain_instance_dict(cls):
+    """Whether getattr_static consults an instance's own __dict__ for `cls`.
+
+    This is inspect._shadowed_dict's test without its private API: the first
+    non-standard `__dict__` entry in the MRO decides, and only a slot keeps
+    the instance dictionary visible. Class dictionaries are read through
+    type's own descriptor, so no authored metaclass code runs.
+    """
+    for entry in cls.__mro__:
+        namespace = _class_dict(entry)
+        if "__dict__" in namespace:
+            attr = namespace["__dict__"]
+            if not (type(attr) is types.GetSetDescriptorType
+                    and attr.__name__ == "__dict__" and attr.__objclass__ is entry):
+                return type(attr) is types.MemberDescriptorType
+    return True
+
+
+def _scan_implementation(obj, name, memo):
+    """_implementation(obj, name), exact, with the per-class answer memoized.
+
+    For an instance, getattr_static depends on the object only through the
+    instance's own __dict__, and only when its class keeps the ordinary
+    `__dict__` descriptor. An object without its own `name` entry therefore
+    shares its class's answer, which is computed once per scan. `memo` must
+    not outlive a scan that executes no authored code: class mutation
+    between scans invalidates it.
+    """
+    if memo is None:
+        return _implementation(obj, name)
+    cls = type(obj)
+    plain = memo.get((cls, "__dict__"))
+    if plain is None:
+        plain = memo[(cls, "__dict__")] = _plain_instance_dict(cls)
+    if plain:
+        try:
+            own = object.__getattribute__(obj, "__dict__")
+        except AttributeError:
+            own = None
+        if own is not None and dict.__contains__(own, name):
+            return _implementation(obj, name)
+    key = (cls, name, False)
+    try:
+        return memo[key]
+    except KeyError:
+        value = memo[key] = _implementation(obj, name)
+        return value
+
+
+def _class_implementation(cls, name, memo):
+    """_implementation(cls, name), memoized for one scan (see _scan_implementation)."""
+    if memo is None:
+        return _implementation(cls, name)
+    key = (cls, name, True)
+    try:
+        return memo[key]
+    except KeyError:
+        value = memo[key] = _implementation(cls, name)
+        return value
+
+
+def _changed(obj, protocols, memo=None):
+    if memo is not None:
+        # Without its own entry for any hook, an object's verdict is its
+        # class's (see _scan_implementation): decide once per class per scan.
+        cls = type(obj)
+        names = memo.get(id(protocols))
+        if names is None:
+            names = memo[id(protocols)] = tuple(
+                {name for baseline in protocols.values() for name in baseline})
+        plain = memo.get((cls, "__dict__"))
+        if plain is None:
+            plain = memo[(cls, "__dict__")] = _plain_instance_dict(cls)
+        own = None
+        if plain:
+            try:
+                own = object.__getattribute__(obj, "__dict__")
+            except AttributeError:
+                own = None
+        if own is None or not any(dict.__contains__(own, name) for name in names):
+            key = (cls, id(protocols), "changed")
+            verdict = memo.get(key)
+            if verdict is None:
+                verdict = memo[key] = _changed_uncached(obj, protocols, memo)
+            return verdict
+    return _changed_uncached(obj, protocols, memo)
+
+
+def _changed_uncached(obj, protocols, memo):
     found = False
     for cls in type(obj).__mro__:
         baseline = protocols.get(cls)
@@ -304,10 +395,12 @@ def _changed(obj, protocols):
             continue
         if not found:
             found = True
-            if any(_implementation(obj, name) is not expected for name, expected in baseline.items()):
+            if any(_scan_implementation(obj, name, memo) is not expected
+                   for name, expected in baseline.items()):
                 return True
         # A shipped override may still call a changed base through super().
-        if any(_implementation(cls, name) is not expected for name, expected in baseline.items()):
+        if any(_class_implementation(cls, name, memo) is not expected
+               for name, expected in baseline.items()):
             return True
     return not found
 
