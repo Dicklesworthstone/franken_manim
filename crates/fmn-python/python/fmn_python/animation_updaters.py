@@ -165,11 +165,14 @@ class _PersistentAnimation:
     def detach(self):
         self.anchor.remove_updater(self.update)
 
-    def call(self, method, *args):
+    def call(self, method, *args, checked=False):
         # Authored hooks (including duration lookup and native lowering) can
         # adopt participants between phases. Never hand a foreign-owned
         # family to the next phase or commit that tick's elapsed time.
-        self.check_scene()
+        # `checked` means the previous phase's closing check just ran with
+        # nothing executed since; repeating it walks every family again.
+        if not checked:
+            self.check_scene()
         if self.needs_scene:
             with _composition_context(self.g, self.animation, self.scene, self.groups):
                 result = getattr(self.driver, method)(*args)
@@ -334,7 +337,7 @@ class _PersistentAnimation:
             self.call("interpolate", alpha)
             if self.closed:
                 return
-            self.call("update_mobjects", delta)
+            self.call("update_mobjects", delta, checked=True)
             if not self.closed:
                 self.animation.total_time = following
         except BaseException as error:

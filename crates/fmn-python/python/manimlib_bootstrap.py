@@ -993,7 +993,10 @@ class Mobject(_BridgeMobject):
         # engine's internal family walker intentionally deduplicates shared
         # descendants, so this compatibility-facing traversal must remain
         # separate.  Enter/exit markers keep the implementation iterative
-        # while still refusing genuine cycles.
+        # while still refusing genuine cycles.  A leaf's markers would be
+        # entered and exited with nothing between them, so leaves skip them
+        # (fm-5wq.31: persistent-animation ownership checks walk every
+        # participant's family several times per frame).
         family = []
         visiting = set()
         stack = [(True, self)]
@@ -1007,10 +1010,12 @@ class Mobject(_BridgeMobject):
                 raise TypeError("submobjects must be Mobject instances")
             if marker in visiting:
                 raise _FamilyCycleError("submobjects would create a family cycle")
-            visiting.add(marker)
             family.append(mobject)
-            stack.append((False, mobject))
-            stack.extend((True, child) for child in reversed(list(mobject.submobjects)))
+            children = list(mobject.submobjects)
+            if children:
+                visiting.add(marker)
+                stack.append((False, mobject))
+                stack.extend(zip(_itertools.repeat(True), reversed(children)))
         return family
 
     def family_members_with_points(self):
