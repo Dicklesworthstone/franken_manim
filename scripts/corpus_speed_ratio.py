@@ -109,17 +109,22 @@ def measure_scene(scene, reps, runners, log, done, lock, engines=ENGINES):
 
     A runner returns (exit code or None on timeout, stderr text). It is timed
     here, around the call, on the monotonic clock. A failed run keeps its last
-    stderr line as `error`, so an exclusion carries its cause. After the first failure on
-    either side the scene's remaining repetitions are not run: the scene is
-    already excluded from the ratio, and a timeout per repetition would only
-    burn the budget.
+    stderr line as `error`, so an exclusion carries its cause. A failure on
+    either side still completes its repetition's pair, so an excluded scene
+    records the other engine's time (a portal timeout next to the
+    Reference's seconds is the worst case's lower bound); the remaining
+    repetitions are not run, since a timeout per repetition would only burn
+    the budget.
     """
     module, name = scene
+    failed_rep = None
     for _, rep, engine in interleaved_plan([scene], reps, engines):
+        if failed_rep is not None and rep != failed_rep:
+            return False
         key = (module, name, engine, rep)
         if key in done:
             if done[key] != 0:
-                return False  # a logged failure already stopped this scene
+                failed_rep = rep  # a logged failure: finish its pair, then stop
             continue
         load_start = os.getloadavg()[0]
         start = time.monotonic()
@@ -135,8 +140,8 @@ def measure_scene(scene, reps, runners, log, done, lock, engines=ENGINES):
             log(record)
             done[key] = code
         if code != 0:
-            return False
-    return True
+            failed_rep = rep
+    return failed_rep is None
 
 
 def last_line(text, limit=200):
@@ -263,15 +268,24 @@ def write_dashboard(out_dir: pathlib.Path, dashboard: pathlib.Path):
                      f" {row['max']:.2f} | {row['pairs']} | {row['portal_s']:.1f} |"
                      f" {row['reference_s']:.1f} | {', '.join(row['failed'])} |")
     if excluded:
-        errors = {}
+        errors, sides = {}, {}
         for record in runs:
+            scene = (record["module"], record["scene"])
             if record["exit"] != 0 and record.get("error"):
-                errors.setdefault((record["module"], record["scene"]), record["error"])
+                errors.setdefault(scene, record["error"])
+            outcome = ("ok" if record["exit"] == 0 else
+                       "timeout" if record["exit"] is None else f"exit {record['exit']}")
+            sides.setdefault(scene, {}).setdefault(
+                record["engine"], f"{outcome} {record['seconds']:.1f} s")
         lines += ["", "## Excluded (never imputed)", "",
-                  "| scene | failed side | last stderr line |", "|---|---|---|"]
+                  "| scene | failed side | portal | Reference | last stderr line |",
+                  "|---|---|---|---|---|"]
         for scene, reasons in excluded.items():
             error = errors.get(scene, "").replace("|", "\\|")
-            lines.append(f"| {scene[0]}:{scene[1]} | {', '.join(reasons)} | {error} |")
+            portal = sides.get(scene, {}).get("portal", "not run")
+            reference = sides.get(scene, {}).get("reference", "not run")
+            lines.append(f"| {scene[0]}:{scene[1]} | {', '.join(reasons)} | {portal} |"
+                         f" {reference} | {error} |")
     dashboard.parent.mkdir(parents=True, exist_ok=True)
     dashboard.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return summary, len(excluded)

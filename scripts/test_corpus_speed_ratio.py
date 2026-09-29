@@ -162,6 +162,22 @@ class SpeedRatioTests(unittest.TestCase):
             args.scene = ["m.py:S1"]
             self.assertEqual(csr.select_scenes(args), ([("m.py", "S1")], "explicit --scene list"))
 
+    def test_a_failure_still_measures_the_other_side_of_its_repetition(self):
+        # A portal timeout next to the Reference's time is the worst case's
+        # lower bound; without the pair it is only "excluded".
+        collect, calls = Collect(), []
+
+        def runner(engine, code):
+            def call(scene, rep):
+                calls.append((engine, rep))
+                return code, "boom" if code else ""
+            return call
+
+        runners = {"portal": runner("portal", None), "reference": runner("reference", 0)}
+        self.assertFalse(csr.measure_scene(("m.py", "A"), 3, runners, collect, collect.done,
+                                           collect.lock))
+        self.assertEqual(calls, [("portal", 0), ("reference", 0)])
+
     def test_a_logged_failure_stops_the_scene_on_resume(self):
         collect = Collect()
         collect.done[("m.py", "A", "portal", 0)] = 0
@@ -208,7 +224,7 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertEqual((summary["scenes"], excluded, summary["median"]), (3, 1, 1.0))
         self.assertIn(csr.LABEL, text)
         self.assertIn("| m.py:B | 2.00 |", text)
-        self.assertIn("| m.py:D | portal:timeout | stuck \\| in a loop |", text)
+        self.assertIn("| m.py:D | portal:timeout | timeout 9.0 s | not run | stuck \\| in a loop |", text)
 
 
 if __name__ == "__main__":
