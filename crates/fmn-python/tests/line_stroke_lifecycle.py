@@ -165,11 +165,15 @@ class LineStrokeLifecycleTests(unittest.TestCase):
         obj.masses[:] = 9
         np.testing.assert_array_equal(obj.data['mass'], 9)
         scene = m.Scene(); scene.add(obj)
-        # Nursery-to-Scene adoption creates a new generation by design. The
-        # view remains live within each owner, not across that copy boundary.
+        # Nursery-to-Scene adoption moves the records (Stage::move_into,
+        # c03206ca): a view exported before scene.add stays attached and live
+        # (plan section 8.2).
         nursery_view = obj.masses
         obj.masses = obj.data['mass']
-        self.assertFalse(np.shares_memory(nursery_view, obj.masses))
+        self.assertTrue(np.shares_memory(nursery_view, obj.masses))
+        nursery_view[:] = 10
+        np.testing.assert_array_equal(obj.data['mass'], 10)
+        nursery_view[:] = 9
         for action in (lambda: obj.set_stroke(width=3), lambda: obj.scale(2),
                        lambda: obj.set_points_by_ends(m.DOWN, m.UP)):
             action()

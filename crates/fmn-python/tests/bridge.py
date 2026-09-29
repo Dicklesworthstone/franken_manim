@@ -10913,12 +10913,14 @@ except bridge_errors.TexError as error:
 else:
     raise AssertionError("unsupported TeX did not raise the named TexError")
 
+# A visible string whose span map was dropped keeps its provenance refusal
+# (383813b5 animates genuinely empty content, not missing maps).
 empty_span_source = manimlib.Tex("x")
 empty_span_source._string_sub_spans = []
 try:
     matching_module.TransformMatchingTex(empty_span_source, manimlib.Tex("x"))
 except bridge_errors.TexError as error:
-    assert "non-empty native span maps" in str(error)
+    assert "native span" in str(error), error
 else:
     raise AssertionError("TransformMatchingTex accepted an empty span map")
 
@@ -15992,7 +15994,8 @@ pinned_params = matching_module.TransformMatchingStrings(
 assert "b" in [key for _, key in pinned_params["source_keys"]]
 assert "b" in [key for _, key in pinned_params["target_keys"]]
 
-# Empty span maps cannot claim success: the refusal is named for the class.
+# A dropped span map on visible text cannot claim success (383813b5 keeps
+# this provenance refusal while animating genuinely empty content).
 strings_blank_source = manimlib.Text("stub")
 strings_blank_source._string_sub_spans = []
 try:
@@ -16000,9 +16003,7 @@ try:
         strings_blank_source, manimlib.Text("x")
     )
 except bridge_errors.TexError as error:
-    assert "TransformMatchingStrings requires non-empty native span maps" in str(
-        error
-    ), error
+    assert "native span" in str(error), error
 else:
     raise AssertionError(
         "TransformMatchingStrings accepted an empty span map"
@@ -16639,13 +16640,13 @@ parts_scene.play(
 assert np.allclose(parts_circle.get_center(), [2.0, 1.0, 0.0], atol=1e-9)
 assert np.allclose(parts_square.get_center(), [2.0, 0.0, 0.0], atol=1e-9)
 
-# Point-less or non-Mobject sides are named errors, never silent groups.
-try:
-    matching_module.TransformMatchingParts(manimlib.VGroup(), manimlib.VGroup())
-except ValueError as error:
-    assert "point-bearing families" in str(error), error
-else:
-    raise AssertionError("TransformMatchingParts accepted empty families")
+# Empty families are ordinary states of a changing group (383813b5): no leaf
+# animation, and the composition still owns its declared time. A non-Mobject
+# side stays a named error.
+parts_empty = matching_module.TransformMatchingParts(
+    manimlib.VGroup(), manimlib.VGroup(), run_time=3
+)
+assert list(parts_empty.animations) == [], parts_empty.animations
 
 try:
     matching_module.TransformMatchingParts(manimlib.Square(), "target")

@@ -115,6 +115,14 @@ class DerivedLineLifecycleTests(unittest.TestCase):
             self.assertEqual(len(cloned), len(original))
             for left, right in zip(original, cloned):
                 np.testing.assert_array_equal(left.get_points(), right.get_points())
+        # Each dash records its owner (FamilyRefs). Unpickling restores that
+        # back-edge to the unpickled owner itself; it used to recurse without
+        # end (fm-5wq.42).
+        dashed = m.DashedVMobject(m.Circle())
+        restored = pickle.loads(pickle.dumps(dashed))
+        self.assertEqual(len(restored), len(dashed))
+        for dash in restored:
+            self.assertIs(vars(dash)["_fmn_derived_owner"][0], restored)
         scene = m.Scene(); scene.add(original)
         target = m.DashedLine(m.LEFT * 2, m.RIGHT * 2, dash_length=.1)
         original.become(target)

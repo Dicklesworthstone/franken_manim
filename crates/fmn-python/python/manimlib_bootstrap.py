@@ -772,15 +772,23 @@ def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
     return mapping[root]
 
 
-def _restore_mobject(cls, engine_state, attributes, children, extras, updaters):
+def _restore_mobject_shell(cls, engine_state):
+    """Unpickling, phase one: the object with its native records only."""
     result = cls.__new__(cls)
     result._restore_engine_state(engine_state)
     _install_live_state(result)
+    return result
+
+
+def _restore_mobject_state(result, state):
+    """Unpickling, phase two, after pickle has memoized the shell: attributes
+    and children may refer back to this object (a dash's owner, a glyph's
+    string) and resolve to it instead of reducing it again (fm-5wq.42)."""
+    attributes, children, extras, updaters = state
     result.__dict__.update(attributes)
     result.uniforms._extras = extras
     result.updaters = updaters
     result.submobjects.extend(children)
-    return result
 
 
 def _arrays_match(arr1, arr2):
@@ -3125,16 +3133,20 @@ class Mobject(_BridgeMobject):
             for key, value in self.__dict__.items()
             if key not in internal
         }
+        # The state is pickled after the shell is memoized, so an attribute
+        # that refers back up the family (FamilyRefs owners) terminates.
         return (
-            _restore_mobject,
+            _restore_mobject_shell,
+            (type(self), self._engine_state()),
             (
-                type(self),
-                self._engine_state(),
                 attributes,
                 list(self.submobjects),
                 dict(self.uniforms._extras),
                 list(self.updaters),
             ),
+            None,
+            None,
+            _restore_mobject_state,
         )
 
 
