@@ -39,6 +39,47 @@ def y4m_frames(data):
     return width, height, frames
 
 
+class RecordComparison(unittest.TestCase):
+    def test_record_comparison_is_array_equal(self):
+        # fm-5wq.31: the per-frame "changed during sampling" check compares
+        # bytes first; np.array_equal still decides every other case.
+        from fmn_python.graphing import _records_equal
+        graph = m.Square()
+        before = graph.data.copy()
+        nan = before.copy()
+        nan["point"][0, 0] = np.nan
+        signed = before.copy()
+        signed["point"][0, 2] = -0.0
+        zero = before.copy()
+        zero["point"][0, 2] = 0.0
+        changed = before.copy()
+        changed["point"][1, 0] += 1
+        renamed = before.copy()
+        renamed.dtype.names = tuple(f"renamed_{index}" for index in range(len(before.dtype.names)))
+        cases = {
+            "identical live view": (graph.data, before),
+            "identical copies": (before.copy(), before),
+            "one value changed": (changed, before),
+            "identical NaN records": (nan, nan.copy()),
+            "-0.0 against 0.0": (signed, zero),
+            "shorter": (before[:-1], before),
+            "renamed fields": (renamed, before),
+            "plain arrays": (graph.get_points(), graph.get_points().copy()),
+            "plain arrays with NaN": (np.array([np.nan]), np.array([np.nan])),
+        }
+        for name, (current, previous) in cases.items():
+            with self.subTest(name):
+                try:
+                    expected = bool(np.array_equal(current, previous))
+                except Exception as error:
+                    with self.assertRaises(type(error)):
+                        _records_equal(np, current, previous)
+                    continue
+                self.assertIs(_records_equal(np, current, previous), expected)
+        self.assertIs(_records_equal(np, nan, nan.copy()), False)
+        self.assertIs(_records_equal(np, signed, zero), True)
+
+
 class LiveGraphingAcceptance(unittest.TestCase):
     def axes(self):
         return m.Axes(x_range=(-2, 2, 1), y_range=(-2, 2, 1), width=8, height=4)
@@ -326,8 +367,8 @@ class RiemannAcceptance(unittest.TestCase):
 
 
 suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
-                           for cls in (LiveGraphingAcceptance, RiemannAcceptance))
-if suite.countTestCases() != 17:
+                           for cls in (RecordComparison, LiveGraphingAcceptance, RiemannAcceptance))
+if suite.countTestCases() != 18:
     raise AssertionError('live graph native acceptance inventory drift')
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():

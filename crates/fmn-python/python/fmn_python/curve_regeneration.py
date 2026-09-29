@@ -1,7 +1,8 @@
 """In-place refresh of sampled 2D/3D paths through the native Atlas builder."""
 from __future__ import annotations
 
-from .graphing import _BINDING, _GRAPH_UPDATES, _MAX_SAMPLES, _bind_method, _finite
+from .graphing import (_BINDING, _GRAPH_UPDATES, _MAX_SAMPLES, _bind_method, _finite,
+                       _records_equal)
 
 
 def install_curve_regeneration(native):
@@ -71,7 +72,7 @@ def install_curve_regeneration(native):
                     or vars(self).get("_scene") is not owner or self._is_bound() != bound
                     or tuple(self.get_family()) != family
                     or tuple(self.pointlike_data_keys) != ("point",)
-                    or not np.array_equal(self.data, before)):
+                    or not _records_equal(np, self.data, before)):
                 raise RuntimeError("curve changed during sampling; candidate was not published")
             points = candidate.get_points()
             if not np.isfinite(points).all():

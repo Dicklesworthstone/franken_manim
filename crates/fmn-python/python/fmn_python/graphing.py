@@ -25,6 +25,29 @@ _GRAPH_UPDATES = InvocationGuard()
 _SCALAR_BIND = ContextVar("fmn_scalar_graph_binding", default=None)
 
 
+def _records_equal(np, current, before):
+    """np.array_equal(current, before), exactly, for the structured all-f32
+    record arrays the live regenerators compare every frame.
+
+    NumPy compares structured arrays field by field (2 ms per 2,000-record
+    graph, fm-5wq.31). Identical bytes with no NaN anywhere make every
+    element compare equal; any other case, including -0.0 against 0.0 or a
+    NaN, is decided by np.array_equal itself.
+    """
+    fields = getattr(before, "dtype", None) is not None and before.dtype.fields
+    # Exactly ndarray, not isinstance: a subclass may define its own
+    # comparison or tobytes, and then only np.array_equal is exact.
+    if (type(current) is np.ndarray and type(before) is np.ndarray and fields
+            and current.dtype == before.dtype and current.shape == before.shape
+            and all(spec[0].base == np.float32 for spec in fields.values())
+            and before.dtype.itemsize == sum(spec[0].itemsize for spec in fields.values())):
+        raw = before.tobytes()
+        if (current.tobytes() == raw
+                and not np.isnan(np.frombuffer(raw, dtype=np.float32)).any()):
+            return True
+    return bool(np.array_equal(current, before))
+
+
 def _finite(value: Any, name: str) -> float:
     result = float(value)
     if not math.isfinite(result):
@@ -217,7 +240,7 @@ def install_graphing(native):
                         or vars(current).get(_BINDING) is not binding
                         or tuple(id(member) for member in current.get_family()) != family
                         or tuple(current.pointlike_data_keys) != pointlike
-                        or not np.array_equal(current.data, before)):
+                        or not _records_equal(np, current.data, before)):
                     raise RuntimeError("live graph changed during sampling; candidate was not published")
                 current.set_points(candidate.get_points())
 
@@ -315,7 +338,7 @@ def install_implicit_regeneration(native):
                     or vars(self).get("_scene") is not owner or self._is_bound() != bound
                     or tuple(self.get_family()) != family
                     or tuple(self.pointlike_data_keys) != ("point",)
-                    or not np.array_equal(self.data, before)):
+                    or not _records_equal(np, self.data, before)):
                 raise RuntimeError("implicit graph changed during sampling; candidate was not published")
             points = candidate.get_points()
             if not np.isfinite(points).all():
