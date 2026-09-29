@@ -284,6 +284,76 @@ class DistributionTests(unittest.TestCase):
             identity._python_library()
 
 
+_PORTAL_PATH = Path(__file__).resolve().parents[1] / "python/fmn_python/__init__.py"
+_PORTAL_SPEC = importlib.util.spec_from_file_location("fmn_python_namespace_under_test", _PORTAL_PATH)
+portal = importlib.util.module_from_spec(_PORTAL_SPEC)
+_PORTAL_SPEC.loader.exec_module(portal)
+
+
+class NamespaceCollisionTests(unittest.TestCase):
+    """The exclusive-manimlib scan over real dist-info trees (fm-5wq.38)."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(dir=_ROOT))
+        (self.root / "manimlib").mkdir()
+        (self.root / "manimlib" / "__init__.py").write_text("")
+        self.stats = 0
+        locate = metadata.PathDistribution.locate_file
+
+        def counted(distribution, path):
+            self.stats += 1
+            return locate(distribution, path)
+
+        patcher = patch.object(metadata.PathDistribution, "locate_file", counted)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def install(self, name, paths):
+        info = self.root / f"{name}-1.0.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n")
+        with (info / "RECORD").open("w", newline="") as stream:
+            csv.writer(stream).writerows((path, "", "") for path in paths)
+
+    def providers(self):
+        with patch.object(portal, "_distributions",
+                          lambda: metadata.distributions(path=[str(self.root)])):
+            return portal._foreign_manimlib_providers()
+
+    def test_an_existing_claim_is_a_collision_and_a_missing_one_is_not(self):
+        self.install("franken-manim", ["manimlib/__init__.py"])
+        self.install("claims-existing", ["manimlib/__init__.py"])
+        self.install("claims-missing", ["manimlib/gone.py"])
+        # Distribution.files drops RECORD rows missing on disk; so does the scan.
+        self.assertEqual(self.providers(), ("claims-existing",))
+
+    def test_unrelated_files_are_never_statted(self):
+        many = [f"bulky/module_{index}.py" for index in range(500)]
+        for index in range(0, 500, 50):
+            (self.root / "bulky").mkdir(exist_ok=True)
+            (self.root / many[index]).write_text("")
+        self.install("bulky", many)
+        self.install("claims-existing", ["manimlib/__init__.py", *many[:3]])
+        self.assertEqual(self.providers(), ("claims-existing",))
+        # One located claim. Filtering Distribution.files stats all 503 rows.
+        self.assertEqual(self.stats, 1)
+
+    def test_the_installed_set_is_scanned_once_per_process(self):
+        calls = []
+
+        def scan():
+            calls.append(1)
+            return ("other-provider",)
+
+        with patch.object(portal, "_scanned_providers", None), \
+                patch.object(portal, "_foreign_manimlib_providers", scan):
+            for _ in range(3):
+                with self.assertRaises(portal._ManimlibNamespaceCollision) as refused:
+                    portal._ensure_exclusive_manimlib_namespace()
+                self.assertEqual(refused.exception.providers, ("other-provider",))
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     print("retaining runtime-identity fixture inputs:", _ROOT)
     unittest.main()
