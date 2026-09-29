@@ -1851,27 +1851,91 @@ fn numpy_array<'py>(
         .stride()
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| PyOverflowError::new_err("NumPy stride overflows usize"))?;
-    let descriptors = PyList::empty(py);
-    for field in view.schema().fields() {
-        descriptors.append((field.name.as_str(), "=f4", (field.width,)))?;
-    }
-    let owner = Py::new(py, PyRecordView { view })?;
     let numpy = py.import("numpy").map_err(|error| {
         PyImportError::new_err(format!(
             "NumPy is required for the live `data` view: {error}"
         ))
     })?;
+    let dtype = record_dtype(py, &numpy, view.schema(), stride_bytes)?;
+    let owner = Py::new(py, PyRecordView { view })?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype)?;
+    kwargs.set_item("buffer", owner)?;
+    kwargs.set_item("strides", (stride_bytes,))?;
+    numpy.getattr("ndarray")?.call(((len,),), Some(&kwargs))
+}
+
+/// The NumPy dtype of each RecordBuffer layout seen so far, keyed by its
+/// record stride and (field name, lane count) list. Building the structured
+/// dtype was about half of every `.data` access (fm-5wq.31); dtypes are
+/// immutable, so one per layout is shared by every view of it. A static is
+/// never dropped, so no reference is released after interpreter shutdown.
+type DtypeKey = (usize, Vec<(String, usize)>);
+static RECORD_DTYPES: Mutex<Vec<(DtypeKey, Py<PyAny>)>> = Mutex::new(Vec::new());
+
+fn record_dtype<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    schema: &RecordSchema,
+    stride_bytes: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let same = |(stride, fields): &DtypeKey| {
+        *stride == stride_bytes
+            && fields.len() == schema.fields().len()
+            && fields
+                .iter()
+                .zip(schema.fields())
+                .all(|((name, width), field)| *name == field.name && *width == field.width)
+    };
+    let cached = RECORD_DTYPES
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("the record dtype cache was poisoned"))?
+        .iter()
+        .find(|(key, _)| same(key))
+        .map(|(_, dtype)| dtype.clone_ref(py));
+    if let Some(dtype) = cached {
+        let dtype = dtype.into_bound(py);
+        // `dtype.names` is the one assignable dtype property: a view whose
+        // fields an author renamed must not rename every later view.
+        let names = dtype.getattr("names")?;
+        let kept = names.len()? == schema.fields().len()
+            && names
+                .try_iter()?
+                .zip(schema.fields())
+                .map(|(name, field)| name.and_then(|name| name.eq(field.name.as_str())))
+                .collect::<PyResult<Vec<bool>>>()?
+                .into_iter()
+                .all(|equal| equal);
+        if kept {
+            return Ok(dtype);
+        }
+    }
+    // Built outside the lock: numpy.dtype runs Python code.
+    let descriptors = PyList::empty(py);
+    for field in schema.fields() {
+        descriptors.append((field.name.as_str(), "=f4", (field.width,)))?;
+    }
     let dtype = numpy.getattr("dtype")?.call1((descriptors,))?;
     if dtype.getattr("itemsize")?.extract::<usize>()? != stride_bytes {
         return Err(PyRuntimeError::new_err(
             "NumPy packed the all-f32 RecordBuffer dtype at an unexpected itemsize",
         ));
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype)?;
-    kwargs.set_item("buffer", owner)?;
-    kwargs.set_item("strides", (stride_bytes,))?;
-    numpy.getattr("ndarray")?.call(((len,),), Some(&kwargs))
+    let mut cache = RECORD_DTYPES
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("the record dtype cache was poisoned"))?;
+    match cache.iter_mut().find(|(key, _)| same(key)) {
+        Some((_, entry)) => *entry = dtype.clone().unbind(),
+        None => {
+            let fields = schema
+                .fields()
+                .iter()
+                .map(|field| (field.name.clone(), field.width))
+                .collect();
+            cache.push(((stride_bytes, fields), dtype.clone().unbind()));
+        }
+    }
+    Ok(dtype)
 }
 
 fn flat_records(proxy: &Bound<'_, BridgeMobject>) -> PyResult<(RecordSchema, usize, Vec<f32>)> {

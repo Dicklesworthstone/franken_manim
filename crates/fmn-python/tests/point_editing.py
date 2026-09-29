@@ -52,6 +52,26 @@ class PointEditingTests(unittest.TestCase):
                 view[0] += 1
                 np.testing.assert_array_equal(mob.get_points()[0], view[0])
 
+    def test_record_views_share_a_layout_but_not_a_renamed_one(self):
+        # fm-5wq.31: one dtype per record layout, not one per `.data` access.
+        first, second = m.Square(), m.Square()
+        names = first.data.dtype.names
+        self.assertEqual(second.data.dtype, first.data.dtype)
+        self.assertIsNot(first.data, first.data)
+        view = first.data
+        view["point"][0] = [7., 8., 9.]
+        np.testing.assert_array_equal(first.get_points()[0], [7., 8., 9.])
+        self.assertFalse(np.any(second.get_points() == 7.))
+        # dtype.names is assignable: renaming one view's fields must not
+        # rename the fields of any later view of the same layout.
+        view.dtype.names = tuple(f"renamed_{index}" for index in range(len(names)))
+        self.assertEqual(first.data.dtype.names, names)
+        self.assertEqual(second.data.dtype.names, names)
+        self.assertEqual(view.dtype.names[0], "renamed_0")
+        np.testing.assert_array_equal(first.data["point"][0], [7., 8., 9.])
+        other_layout = m.Sphere(resolution=(4, 4)).data.dtype
+        self.assertNotEqual(other_layout, first.data.dtype)
+
     def test_first_append_uses_retained_style_defaults(self):
         mob = m.Square(fill_color=m.RED, fill_opacity=.25, stroke_width=7)
         saved = mob.data[0].copy()
@@ -161,7 +181,7 @@ class PointEditingTests(unittest.TestCase):
 
 
 _suite = unittest.defaultTestLoader.loadTestsFromTestCase(PointEditingTests)
-assert _suite.countTestCases() == 10, "native point-editing inventory changed"
+assert _suite.countTestCases() == 11, "native point-editing inventory changed"
 _result = unittest.TextTestRunner(verbosity=2).run(_suite)
 gc.collect()
 if not _result.wasSuccessful():
