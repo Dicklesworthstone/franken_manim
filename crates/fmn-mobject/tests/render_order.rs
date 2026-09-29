@@ -9,9 +9,10 @@
 use fmn_mobject::order::{PassOrder, ProgramKind};
 use fmn_mobject::{JointType, Mob, Mobject, RenderPrimitive, Stage, Uniforms};
 
-/// A pointful mobject (one record) — only pointful family members draw.
+/// A pointful vector mobject (one record) — only pointful, paint-bearing
+/// family members draw.
 fn dot(stage: &mut Stage) -> Mob {
-    stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]))
+    stage.add(Mobject::vector_from_points(&[[0.0, 0.0, 0.0]]))
 }
 
 /// A pointful mobject with an explicit uniform inventory.
@@ -217,6 +218,37 @@ fn families_draw_depth_first_with_pointless_members_skipped() {
         !plan.sequence().contains(&outer) && !plan.sequence().contains(&inner),
         "a pointless member is skipped, not drawn empty"
     );
+}
+
+#[test]
+fn a_bare_mobjects_points_never_draw_and_end_the_batch() {
+    // R-13: the Reference's base Mobject has an empty shader_folder
+    // (mobject.py:69), so its wrapper compiles no program
+    // (shader_wrapper.py:83-88) but still carries its own shader id.
+    let mut stage = Stage::new();
+    let before = dot(&mut stage);
+    let bare = stage.add(Mobject::from_points(&[[0.0; 3], [1.0, 0.0, 0.0]]));
+    let after = dot(&mut stage);
+    let root = group(&mut stage, &[before, bare, after]);
+    stage.add_to_scene(root).expect("root");
+    let plan = stage.draw_plan();
+    assert_eq!(plan.sequence(), [before, after], "bare points are data");
+    assert_eq!(
+        plan.batch_trace(),
+        [0, 1],
+        "the bare member splits the batch"
+    );
+
+    // Control: the same record as a vector mobject draws, in one batch.
+    let mut stage = Stage::new();
+    let before = dot(&mut stage);
+    let vector = stage.add(Mobject::vector_from_points(&[[0.0; 3], [1.0, 0.0, 0.0]]));
+    let after = dot(&mut stage);
+    let root = group(&mut stage, &[before, vector, after]);
+    stage.add_to_scene(root).expect("root");
+    let plan = stage.draw_plan();
+    assert_eq!(plan.sequence(), [before, vector, after]);
+    assert_eq!(plan.batch_trace(), [0, 0, 0]);
 }
 
 #[test]

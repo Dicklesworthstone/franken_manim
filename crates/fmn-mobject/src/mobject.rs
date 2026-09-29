@@ -319,12 +319,25 @@ impl Mobject {
     }
 
     /// A mobject whose `point` records are the given points (semantic f64
-    /// in, record f32 stored, per §6.1).
+    /// in, record f32 stored, per §6.1). Its schema is the Reference's base
+    /// `Mobject` dtype, so it carries no paint and never draws
+    /// ([`Entry::paints`](crate::stage::Entry::paints)).
     #[must_use]
     pub fn from_points(points: &[Vec3]) -> Self {
+        Self::points_over(RecordSchema::mobject(), points)
+    }
+
+    /// A vector mobject over the given points: the Reference's `VMobject`
+    /// dtype, paint lanes zero (transparent, width 0) until styled.
+    #[must_use]
+    pub fn vector_from_points(points: &[Vec3]) -> Self {
+        Self::points_over(RecordSchema::vmobject(), points)
+    }
+
+    fn points_over(schema: RecordSchema, points: &[Vec3]) -> Self {
         // A slice of 24-byte Vec3s holds at most isize::MAX/24 records, so
-        // seven f32 lanes per record always fit one allocation.
-        let mut buffer = RecordBuffer::new(RecordSchema::mobject(), points.len())
+        // seventeen f32 lanes per record always fit one allocation.
+        let mut buffer = RecordBuffer::new(schema, points.len())
             .expect("record sizing bounded by the input slice");
         for (i, p) in points.iter().enumerate() {
             buffer.write(i, "point", &[p[0] as f32, p[1] as f32, p[2] as f32]);

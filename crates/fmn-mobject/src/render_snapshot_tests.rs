@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 fn line(stage: &mut Stage, x: f64) -> Mob {
-    stage.add(Mobject::from_points(&[
+    stage.add(Mobject::vector_from_points(&[
         [x, 0.0, 0.0],
         [x + 0.5, 0.0, 0.0],
         [x + 1.0, 0.0, 0.0],

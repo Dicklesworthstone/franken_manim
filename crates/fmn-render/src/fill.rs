@@ -3312,7 +3312,7 @@ mod tests {
         // The x and y extrema are distinct, so the quadratic becomes three
         // monotone pieces. The open subpath contributes one closing chord.
         let mut stage = fmn_mobject::Stage::new();
-        let curve = stage.add(fmn_mobject::Mobject::from_points(&[
+        let curve = stage.add(fmn_mobject::Mobject::vector_from_points(&[
             [0.0, 0.0, 0.0],
             [2.0, 3.0, 0.0],
             [1.0, 1.0, 0.0],
@@ -3864,7 +3864,7 @@ mod tests {
                 .iter()
                 .map(|p| [p[0] + 4.0 * f64::from(k), p[1], p[2]])
                 .collect();
-            let mob = stage.add(fmn_mobject::Mobject::from_points(&shifted));
+            let mob = stage.add(fmn_mobject::Mobject::vector_from_points(&shifted));
             stage.add_to_scene(mob).expect("live");
             mobs.push(mob);
         }
@@ -3947,7 +3947,7 @@ mod tests {
         assert_eq!(table.pieces(), pieces_before);
 
         let mut changed_stage = fmn_mobject::Stage::new();
-        let changed_curve = changed_stage.add(fmn_mobject::Mobject::from_points(&[
+        let changed_curve = changed_stage.add(fmn_mobject::Mobject::vector_from_points(&[
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
             [2.0, 0.0, 0.0],

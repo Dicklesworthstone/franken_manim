@@ -259,6 +259,12 @@ impl Stage {
                     if entry.buffer.is_empty() {
                         continue; // family_members_with_points
                     }
+                    if !entry.paints() {
+                        // A bare Mobject's programless wrapper has its own
+                        // shader id: it ends the batch and draws nothing.
+                        open = None;
+                        continue;
+                    }
                     let key = BatchKey {
                         program: entry.render_primitive().program_kind(),
                         uniforms: *entry.uniforms(),

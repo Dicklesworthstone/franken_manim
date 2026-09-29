@@ -35,6 +35,18 @@ are two groups even when their first family members share a key, so the two
 sides cannot merge into one call. Pinned by
 `render_order.rs::a_batch_never_crosses_a_group_boundary`.
 
+**R-13. A bare `Mobject`'s points never draw, and it ends the batch.** The
+Reference's base `Mobject` (so `Group`, `Point`, a bare `PMobject`) has an
+empty `shader_folder` (`mobject.py:69`); its wrapper compiles no program
+(`shader_wrapper.py:83-88`) but keeps its own shader id in the batching. Its
+points, set by `Group.set_points(...)` for example, are data. Here such a
+record has the Reference's base dtype (`point`, `rgba`) on the vector
+primitive: `Entry::paints` is false, it yields no draw item, and it closes
+the open batch. Before this ruling the vector plan validated those points
+as a quad path and refused the whole frame on an even count (corpus
+`DirectMGFInterpretation`, fm-5wq.37). Pinned by
+`render_order.rs::a_bare_mobjects_points_never_draw_and_end_the_batch`.
+
 **R-2. The plan is a pure function of scene state.** `Stage::draw_plan()`
 reads the draw list and the entries and nothing else — no map iteration
 order, no allocation addresses, no handle numbers leaking into ordering. The

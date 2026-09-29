@@ -1585,6 +1585,26 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_mobjects_even_point_run_is_data_not_geometry() {
+        // R-13 (fm-5wq.37): `Group(...).set_points(30 points)` in corpus
+        // DirectMGFInterpretation. The Reference's bare Mobject draws nothing;
+        // its points must not reach the shared-anchor validator.
+        let mut stage = Stage::new();
+        let child = stage.add(tri_at(0.0, 0.0));
+        let points: Vec<[f64; 3]> = (0..30).map(|i| [f64::from(i), 1.0, 0.0]).collect();
+        let group = stage.add(Mobject::from_points(&points));
+        stage.attach(group, child).expect("attach");
+        stage.add_to_scene(group).expect("live");
+        let mut plan = RenderPlan::new();
+        sync_valid(&mut plan, &stage, 0);
+        assert_eq!(
+            plan.shapes().instances().len(),
+            1,
+            "only the vector child draws"
+        );
+    }
+
+    #[test]
     fn retained_limits_count_deduplicated_rows_not_draw_items() {
         let (stage, _) = staged(8);
         let mut plan = RenderPlan::new();

@@ -299,6 +299,23 @@ impl Entry {
         self.render_primitive
     }
 
+    /// Whether a program can paint this entry's records. A vector record
+    /// needs the vector paint fields. The Reference's base `Mobject`, and
+    /// so `Group`, `Point` and a bare `PMobject`, has an empty
+    /// `shader_folder` (`mobject.py:69`), so its wrapper compiles no
+    /// program (`shader_wrapper.py:83-88`) and its points are data that
+    /// never draw. Its dtype is [`RecordSchema::mobject`]: point and rgba,
+    /// no stroke or fill.
+    ///
+    /// [`RecordSchema::mobject`]: crate::record::RecordSchema::mobject
+    #[must_use]
+    pub fn paints(&self) -> bool {
+        self.render_primitive != RenderPrimitive::Vector
+            || ["stroke_rgba", "fill_rgba"]
+                .iter()
+                .any(|field| self.buffer.schema().field_width(field).is_some())
+    }
+
     /// Immutable image bytes, when this is an image primitive.
     #[must_use]
     pub fn image_resource(&self) -> Option<&ImageResource> {
