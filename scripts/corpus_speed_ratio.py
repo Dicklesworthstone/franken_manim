@@ -118,6 +118,8 @@ def measure_scene(scene, reps, runners, log, done, lock, engines=ENGINES):
     for _, rep, engine in interleaved_plan([scene], reps, engines):
         key = (module, name, engine, rep)
         if key in done:
+            if done[key] != 0:
+                return False  # a logged failure already stopped this scene
             continue
         load_start = os.getloadavg()[0]
         start = time.monotonic()
@@ -131,7 +133,7 @@ def measure_scene(scene, reps, runners, log, done, lock, engines=ENGINES):
             record["error"] = last_line(stderr)
         with lock:
             log(record)
-            done.add(key)
+            done[key] = code
         if code != 0:
             return False
     return True
@@ -241,7 +243,7 @@ def write_dashboard(out_dir: pathlib.Path, dashboard: pathlib.Path):
         "|---|---|",
     ]
     for key in ("cpu", "logical_cpus", "governor", "platform", "portal_id", "reference_id",
-                "reps", "timeout_s", "mode"):
+                "reps", "timeout_s", "mode", "selection"):
         if key in header:
             lines.append(f"| {key} | {header[key]} |")
     lines += ["", "| measure | value |", "|---|---|",
@@ -344,8 +346,9 @@ def make_runners(args, display):
 
 
 def select_scenes(args):
+    """The scenes to measure and a description of how they were chosen."""
     if args.scene:
-        return [tuple(item.split(":", 1)) for item in args.scene]
+        return [tuple(item.split(":", 1)) for item in args.scene], "explicit --scene list"
     scenes = []
     for line in args.candidates.read_text(encoding="utf-8").splitlines():
         if line.strip():
@@ -353,9 +356,11 @@ def select_scenes(args):
             if record.get("outcome", "ok") == "ok":
                 scenes.append((record["module"], record["scene"]))
     scenes = sorted(set(scenes))
-    if args.sample:
-        scenes = sorted(random.Random(args.sample_seed).sample(scenes, min(args.sample, len(scenes))))
-    return scenes
+    source = f"{len(scenes)} candidates in {args.candidates.name}"
+    if args.sample and args.sample < len(scenes):
+        chosen = random.Random(args.sample_seed).sample(scenes, args.sample)
+        return sorted(chosen), f"seeded sample of {args.sample} (seed {args.sample_seed}) of {source}"
+    return scenes, f"all {source}"
 
 
 def main():
@@ -393,9 +398,10 @@ def main():
     if args.config:
         (args.workdir / "custom_config.yml").write_text(args.config.read_text(encoding="utf-8"),
                                                         encoding="utf-8")
+    scenes, selection = select_scenes(args)
     header = dict(host_facts(), portal_id=args.portal_id, reference_id=args.reference_id,
                   reps=args.reps, timeout_s=args.timeout, mode="final-state -s, 320x180",
-                  label=LABEL, schema=SCHEMA, version=VERSION)
+                  selection=selection, label=LABEL, schema=SCHEMA, version=VERSION)
     header_path, log_path = args.out / "header.json", args.out / "runs.ndjson"
     if log_path.exists() and header_path.exists():
         conflicts = resume_conflicts(json.loads(header_path.read_text(encoding="utf-8")), header)
@@ -403,7 +409,7 @@ def main():
             parser.error(f"{args.out} was started with different {', '.join(conflicts)};"
                          " resume with the same settings or use a new --out")
     header_path.write_text(json.dumps(header, indent=1) + "\n", encoding="utf-8")
-    done = {run_key(record) for record in load_runs(log_path)}
+    done = {run_key(record): record["exit"] for record in load_runs(log_path)}
     lock = threading.Lock()
     handle = log_path.open("a", encoding="utf-8")
 
@@ -411,7 +417,6 @@ def main():
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
 
-    scenes = select_scenes(args)
     with XvfbServer() as xvfb:
         runners = make_runners(args, xvfb.display)
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:

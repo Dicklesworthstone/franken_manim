@@ -24,7 +24,7 @@ def run(module, scene, engine, rep, seconds, exit_code=0):
 
 class Collect:
     def __init__(self):
-        self.records, self.done, self.lock = [], set(), threading.Lock()
+        self.records, self.done, self.lock = [], {}, threading.Lock()
 
     def __call__(self, record):
         self.records.append(record)
@@ -107,7 +107,7 @@ class SpeedRatioTests(unittest.TestCase):
 
     def test_resume_skips_finished_runs_and_failure_stops_the_scene(self):
         collect = Collect()
-        collect.done.add(("m.py", "A", "portal", 0))
+        collect.done[("m.py", "A", "portal", 0)] = 0
         calls = []
 
         def runner(engine, code):
@@ -141,6 +141,37 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertEqual(csr.resume_conflicts(header, dict(header, cpu="y")), [])
         self.assertEqual(csr.resume_conflicts(header, dict(header, portal_id="b", reps=5)),
                          ["portal_id", "reps"])
+
+    def test_the_selection_is_described_as_it_was_made(self):
+        json = __import__("json")
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates = pathlib.Path(tmp) / "ok.ndjson"
+            candidates.write_text("".join(
+                json.dumps({"module": "m.py", "scene": f"S{i}", "outcome": "ok"}) + "\n"
+                for i in range(10)) + json.dumps({"module": "m.py", "scene": "Bad",
+                                                   "outcome": "error"}) + "\n")
+            args = type("Args", (), {"scene": [], "candidates": candidates,
+                                     "sample": 4, "sample_seed": 35})()
+            sampled, described = csr.select_scenes(args)
+            self.assertEqual(len(sampled), 4)
+            self.assertEqual(described, "seeded sample of 4 (seed 35) of 10 candidates in ok.ndjson")
+            self.assertEqual(sampled, csr.select_scenes(args)[0])
+            args.sample = 0
+            everything, described = csr.select_scenes(args)
+            self.assertEqual((len(everything), described), (10, "all 10 candidates in ok.ndjson"))
+            args.scene = ["m.py:S1"]
+            self.assertEqual(csr.select_scenes(args), ([("m.py", "S1")], "explicit --scene list"))
+
+    def test_a_logged_failure_stops_the_scene_on_resume(self):
+        collect = Collect()
+        collect.done[("m.py", "A", "portal", 0)] = 0
+        collect.done[("m.py", "A", "reference", 0)] = 1
+        calls = []
+        runners = {engine: (lambda scene, rep, engine=engine: calls.append((engine, rep)) or (0, ""))
+                   for engine in csr.ENGINES}
+        self.assertFalse(csr.measure_scene(("m.py", "A"), 3, runners, collect, collect.done,
+                                           collect.lock))
+        self.assertEqual(calls, [], "no repetition after the logged reference failure")
 
     def test_planted_portal_sleep_moves_the_ratio_by_the_expected_amount(self):
         base, planted = 0.05, 0.10
