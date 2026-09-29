@@ -151,6 +151,19 @@ def _vec3(value):
     return (float(value[0]), float(value[1]), float(value[2]))
 
 
+def _vec3_rows(points):
+    """[_vec3(point) for point in points], exactly, computed in C for an
+    (N, 3) float32/float64 array (both widen to a double exactly). A live
+    graph's per-frame redraw passed thousands of native point rows through
+    _vec3 (28M calls, a quarter of one corpus scene's time, fm-5wq.31);
+    every other input keeps the per-point path."""
+    if (type(points) is _np.ndarray and points.dtype.kind == "f"
+            and points.dtype.itemsize in (4, 8)
+            and points.ndim == 2 and points.shape[1] == 3):
+        return points.tolist()
+    return [_vec3(point) for point in points]
+
+
 def _interpolate(start, end, alpha):
     # manimlib/utils/bezier.py interpolate, verbatim.
     return (1 - alpha) * start + alpha * end
@@ -3636,16 +3649,14 @@ class VMobject(Mobject):
         return self
 
     def add_points_as_corners(self, points):
-        new_points = self._add_points_as_corners_points(
-            [_vec3(point) for point in points]
-        )
+        new_points = self._add_points_as_corners_points(_vec3_rows(points))
         if len(new_points) > 0:
             self.append_points(new_points)
         return self
 
     def add_subpath(self, points):
         was_empty = self.get_num_points() == 0
-        new_points = self._add_subpath_points([_vec3(point) for point in points])
+        new_points = self._add_subpath_points(_vec3_rows(points))
         if len(new_points) > 0:
             if was_empty:
                 self.set_points(new_points)
@@ -3692,7 +3703,7 @@ class VMobject(Mobject):
         # lanes while Chisel remains the sole owner of corner-path geometry and
         # joint-angle derivation.
         defaults = self._style_data().copy() if self.get_num_points() == 0 else None
-        self._set_points_as_corners([_vec3(point) for point in points])
+        self._set_points_as_corners(_vec3_rows(points))
         if defaults is not None and self.get_num_points() > 0:
             data = self.data
             for field in (
@@ -3788,7 +3799,7 @@ class VMobject(Mobject):
         return _np.array(
             self._insert_n_curves_to_point_list(
                 n,
-                [_vec3(point) for point in points],
+                _vec3_rows(points),
                 self.tolerance_for_point_equality,
             )
         )
@@ -3851,7 +3862,7 @@ class VMobject(Mobject):
         return self
 
     def subdivide_intersections(self, recurse=True, n_subdivisions=1):
-        path = [_vec3(point) for point in self.get_anchors()]
+        path = _vec3_rows(self.get_anchors())
         targets = _family_preorder(self) if recurse else [self]
         planned = [
             (
@@ -11547,7 +11558,7 @@ class DotCloud(PMobject):
         if points is None:
             point_rows = [[0.0, 0.0, 0.0]]
         else:
-            point_rows = [_vec3(p) for p in points]
+            point_rows = _vec3_rows(points)
         specs = self._build_dot_cloud(
             _native_shell_factory,
             point_rows,
@@ -22419,12 +22430,12 @@ def _install_bezier_functions():
 
     def approx_smooth_quadratic_bezier_handles(points):
         return _np.asarray(_BridgeMobject._approx_smooth_quadratic_handles(
-            [_vec3(point) for point in points]
+            _vec3_rows(points)
         ))
 
     def get_smooth_cubic_bezier_handle_points(points):
         firsts, seconds = _BridgeMobject._smooth_cubic_handles(
-            [_vec3(point) for point in _np.asarray(points, dtype=float)]
+            _vec3_rows(_np.asarray(points, dtype=float))
         )
         dim = _np.asarray(points, dtype=float).shape[-1]
         empty = _np.zeros((0, dim))
@@ -22493,7 +22504,7 @@ def _install_bezier_functions():
     def smooth_quadratic_path(anchors):
         anchors = _np.asarray(anchors, dtype=float)
         path = _BridgeMobject._smooth_quadratic_path(
-            [_vec3(point) for point in anchors],
+            _vec3_rows(anchors),
             1e9,
         )
         return _np.asarray(path)
@@ -23035,9 +23046,7 @@ def _install_space_ops():
         return sum(x * x for x in vect)
 
     def poly_line_length(points):
-        return _BridgeMobject._poly_line_length(
-            [_vec3(point) for point in points]
-        )
+        return _BridgeMobject._poly_line_length(_vec3_rows(points))
 
     def project_along_vector(point, vector):
         return _np.array(

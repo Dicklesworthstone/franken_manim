@@ -1,5 +1,6 @@
 """Native point editing across empty paths, field views and animation families."""
 import gc
+import struct
 import unittest
 
 import numpy as np
@@ -119,9 +120,48 @@ class PointEditingTests(unittest.TestCase):
         self.assertEqual(source.get_points().shape, (0, 3))
         self.assertFalse(source._is_updating_suspended())
 
+    def test_array_point_rows_convert_bit_for_bit_like_the_per_point_path(self):
+        # fm-5wq.31: float32/float64 (N, 3) arrays skip the per-point _vec3 loop.
+        def bits(rows):
+            return [struct.pack("<3d", *row) for row in rows]
+        wide = np.array([[0., -0., 5e-324, 1., 2., 3.], [1.5, -2.25, 3e300, 4., 5., 6.],
+                         [np.nan, np.inf, -np.inf, 7., 8., 9.], [.1, 2. ** 53, -1e-310, 0., 0., 0.]])
+        rows = wide[:, :3].copy()
+        for points in (rows, rows[::-1], wide[:, ::2], wide[:, :3], np.asfortranarray(rows),
+                       rows.astype(np.float32), rows.astype(">f8"), wide, rows.tolist(),
+                       [tuple(row) for row in rows], list(rows), np.empty((0, 3)),
+                       m.Circle().get_points(), m.Circle().get_points()[::-2]):
+            with self.subTest(points=repr(points)):
+                self.assertEqual(bits(m._vec3_rows(points)), bits([m._vec3(p) for p in points]))
+        for short in (np.zeros((2, 2)), [[0., 0.]]):
+            with self.assertRaises(IndexError):
+                m._vec3_rows(short)
+        corners = np.array([[0., -0., 0.], [1., .1, -0.], [2.5, 1e-310, 3.]])
+        for method in ("set_points_as_corners", "add_points_as_corners"):
+            for other in (corners.tolist(), [tuple(row) for row in corners]):
+                with self.subTest(method=method, other=type(other[0]).__name__):
+                    from_array, from_rows = (m.VMobject().set_points_as_corners([[9., 9., 0.], [9., 8., 0.]])
+                                             for _ in range(2))
+                    getattr(from_array, method)(corners)
+                    getattr(from_rows, method)(other)
+                    self.assertEqual(from_array.get_points().tobytes(), from_rows.get_points().tobytes())
+        path, other = m.VMobject().set_points_as_corners(corners), m.VMobject().set_points_as_corners(corners)
+        path.add_subpath(corners[:, ::-1][:3] + 4.)
+        other.add_subpath((corners[:, ::-1][:3] + 4.).tolist())
+        self.assertEqual(path.get_points().tobytes(), other.get_points().tobytes())
+        refusals = []
+        for bad in (np.array([[np.nan, 0., 0.], [1., 1., 0.]]), [[np.nan, 0., 0.], [1., 1., 0.]]):
+            try:
+                m.VMobject().set_points_as_corners(bad)
+            except Exception as error:
+                refusals.append((type(error), str(error)))
+            else:
+                refusals.append(None)
+        self.assertEqual(refusals[0], refusals[1])
+
 
 _suite = unittest.defaultTestLoader.loadTestsFromTestCase(PointEditingTests)
-assert _suite.countTestCases() == 9, "native point-editing inventory changed"
+assert _suite.countTestCases() == 10, "native point-editing inventory changed"
 _result = unittest.TextTestRunner(verbosity=2).run(_suite)
 gc.collect()
 if not _result.wasSuccessful():
