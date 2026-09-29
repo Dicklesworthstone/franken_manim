@@ -326,6 +326,101 @@ class PublicUpdateTests(unittest.TestCase):
         scene.add(*squares)
         self.assertTrue(scene._fmn_requires_public_scene_update())
 
+    def test_admission_scan_matches_the_per_member_oracle(self):
+        # fm-5wq.31: the scan decides each class once and checks only the
+        # instance dictionaries per member. The oracle is the previous loop,
+        # which asked the movement helpers about every member.
+        scan = m.Scene._fmn_requires_public_scene_update
+        cells = dict(zip(scan.__code__.co_freevars, (cell.cell_contents for cell in scan.__closure__)))
+
+        def oracle(scene):
+            memo = {}
+            changed, implementation = cells["_changed"], cells["_class_implementation"]
+            if changed(scene, cells["scene_protocols"], memo):
+                return True
+            expected = next(cells["scene_descriptors"][cls] for cls in type(scene).__mro__
+                            if cls in cells["scene_descriptors"])
+            if any(implementation(type(scene), name, memo) is not method
+                   for name, method in expected.items()):
+                return True
+            pending, seen = [scene.frame, *scene.mobjects], set()
+            while pending:
+                member = pending.pop()
+                if id(member) in seen:
+                    continue
+                seen.add(id(member))
+                if not isinstance(member, cells["Mobject"]) or changed(
+                        member, cells["object_protocols"], memo):
+                    return True
+                expected = next(cells["child_descriptors"][cls] for cls in type(member).__mro__
+                                if cls in cells["child_descriptors"])
+                if implementation(type(member), "submobjects", memo) is not expected:
+                    return True
+                children = member.submobjects
+                methods = cells["child_protocols"].get(type(children))
+                if methods is None or any(
+                        cells["_scan_implementation"](children, name, memo) is not method
+                        for name, method in methods.items()):
+                    return True
+                pending.extend(children)
+            return False
+
+        class Authored(m.Square):
+            def update(self, dt=0, recurse=True):
+                return super().update(dt, recurse)
+
+        class Late(m.Square):
+            pass
+
+        class Children(list):
+            pass
+
+        def scene_with(edit):
+            squares = [m.Square() for _ in range(64)]
+            scene = m.Scene()
+            scene.add(m.VGroup(*squares[:32]), m.VGroup(m.VGroup(*squares[32:])), m.Circle())
+            edit(scene, squares)
+            return scene
+
+        edits = {
+            "plain": lambda scene, squares: None,
+            "ordinary instance attributes": lambda scene, squares: [
+                setattr(square, "label", index) for index, square in enumerate(squares)],
+            "authored class deep in a group": lambda scene, squares: squares[40].add(Authored()),
+            "instance hook on one member": lambda scene, squares: setattr(
+                squares[50], "update", lambda dt=0: None),
+            "instance entry that is the class method": lambda scene, squares: setattr(
+                squares[7], "update", squares[7].update),
+            # The first Square the scan visits holds the class's own function:
+            # decided per object, never as the class's answer.
+            "shipped function in the first member's dict": lambda scene, squares: vars(
+                squares[-1]).__setitem__("update", m.Square.update),
+            "shipped function first, a real hook later": lambda scene, squares: (
+                vars(squares[-1]).__setitem__("update", m.Square.update),
+                setattr(squares[33], "update", lambda dt=0: None)),
+            "class patched after construction": lambda scene, squares: (
+                squares[3].add(Late()), setattr(Late, "update", lambda self, dt=0: None)),
+            "foreign container type": lambda scene, squares: setattr(
+                squares[9], "submobjects", Children()),
+            "container with its own __iter__": lambda scene, squares: vars(
+                squares[11].submobjects).__setitem__("__iter__", lambda: iter(())),
+        }
+        verdicts = {}
+        for name, edit in edits.items():
+            with self.subTest(name):
+                try:
+                    scene = scene_with(edit)
+                except Exception as error:  # a refusal at authoring time is not a scan case
+                    verdicts[name] = f"refused: {type(error).__name__}"
+                    continue
+                verdicts[name] = oracle(scene)
+                self.assertEqual(scene._fmn_requires_public_scene_update(), verdicts[name])
+        self.assertIs(verdicts["plain"], False)
+        self.assertIs(verdicts["ordinary instance attributes"], False)
+        self.assertIs(verdicts["authored class deep in a group"], True)
+        self.assertIs(verdicts["instance hook on one member"], True)
+        self.assertIs(verdicts["shipped function first, a real hook later"], True)
+
     def test_play_admission_walks_resolve_each_class_once(self):
         # fm-5wq.31: every play walked its animations' families four times
         # (playback's authored_family, rotation, and indication's two

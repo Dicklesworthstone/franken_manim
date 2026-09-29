@@ -182,18 +182,23 @@ def install_updater_dispatch(native):
         function.__qualname__ = Scene.__qualname__ + "." + name
         function.__module__ = Scene.__module__
         setattr(Scene, name, function)
-    from .movement import (_changed, _class_implementation, _implementation, _protocols,
-                           _scan_implementation)
+    from .movement import (_changed, _class_implementation, _implementation,
+                           _plain_instance_dict, _protocols, _scan_implementation)
 
     object_hooks = ("update", "_update_python_family", "_update_native_mobject",
                     "_is_updating_suspended", "__getattribute__", "__getattr__")
     scene_hooks = ("update_mobjects", "__getattribute__", "__getattr__")
     object_protocols = scene_protocols = child_descriptors = scene_descriptors = None
+    hook_names = ()
     child_protocols = {}
+    _instance_dict, _dict_keys = object.__getattribute__, dict.keys
 
     def finalize():
         nonlocal object_protocols, scene_protocols, child_descriptors, scene_descriptors
+        nonlocal hook_names
         object_protocols = _protocols(g, Mobject, object_hooks)
+        # The names movement._changed looks for in an object's own __dict__.
+        hook_names = tuple({name for baseline in object_protocols.values() for name in baseline})
         scene_protocols = _protocols(g, Scene, scene_hooks)
         child_descriptors = {cls: _implementation(cls, "submobjects")
                              for cls in object_protocols}
@@ -220,23 +225,75 @@ def install_updater_dispatch(native):
         if any(_class_implementation(type(self), name, memo) is not method
                for name, method in expected.items()):
             return True
+        # An object's answer is its class's unless its own __dict__ holds a
+        # name the lookup reads (movement._changed, _scan_implementation).
+        # Decide each class once, from an object without such an entry, and
+        # take the exact per-object path only for objects that have one: the
+        # per-member helper calls cost ~9 us, and this runs every frame over
+        # every member (PrimePanning: 2,400 members, a third of its time).
+        plain, class_changed, descriptor_kept, container_changed = {}, {}, {}, {}
         pending, seen = [self.frame, *self.mobjects], set()
         while pending:
             member = pending.pop()
-            if id(member) in seen:
+            marker = id(member)
+            if marker in seen:
                 continue
-            seen.add(id(member))
-            if not isinstance(member, Mobject) or _changed(member, object_protocols, memo):
+            seen.add(marker)
+            if not isinstance(member, Mobject):
                 return True
-            expected = next(child_descriptors[cls] for cls in type(member).__mro__
-                            if cls in child_descriptors)
-            if _class_implementation(type(member), "submobjects", memo) is not expected:
+            cls = type(member)
+            visible = plain.get(cls)
+            if visible is None:
+                visible = plain[cls] = _plain_instance_dict(cls)
+            own = None
+            if visible:
+                try:
+                    own = _instance_dict(member, "__dict__")
+                except AttributeError:
+                    own = None
+            if own is not None and not _dict_keys(own).isdisjoint(hook_names):
+                if _changed(member, object_protocols, memo):
+                    return True
+            else:
+                changed = class_changed.get(cls)
+                if changed is None:
+                    changed = class_changed[cls] = _changed(member, object_protocols, memo)
+                if changed:
+                    return True
+            kept = descriptor_kept.get(cls)
+            if kept is None:
+                expected = next(child_descriptors[base] for base in cls.__mro__
+                                if base in child_descriptors)
+                kept = descriptor_kept[cls] = (
+                    _class_implementation(cls, "submobjects", memo) is expected)
+            if not kept:
                 return True
             children = member.submobjects
-            methods = child_protocols.get(type(children))
-            if methods is None or any(_scan_implementation(children, name, memo) is not method
-                                      for name, method in methods.items()):
+            kind = type(children)
+            methods = child_protocols.get(kind)
+            if methods is None:
                 return True
+            visible = plain.get(kind)
+            if visible is None:
+                visible = plain[kind] = _plain_instance_dict(kind)
+            own = None
+            if visible:
+                try:
+                    own = _instance_dict(children, "__dict__")
+                except AttributeError:
+                    own = None
+            if own is not None and not _dict_keys(own).isdisjoint(methods):
+                if any(_scan_implementation(children, name, memo) is not method
+                       for name, method in methods.items()):
+                    return True
+            else:
+                changed = container_changed.get(kind)
+                if changed is None:
+                    changed = container_changed[kind] = any(
+                        _scan_implementation(children, name, memo) is not method
+                        for name, method in methods.items())
+                if changed:
+                    return True
             pending.extend(children)
         return False
 
