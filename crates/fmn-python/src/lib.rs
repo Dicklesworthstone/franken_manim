@@ -12207,6 +12207,49 @@ mod tests {
         });
     }
 
+    /// fm-5wq.15: the committed effective dispatch table (which layer
+    /// implements each Reference method, through how many installer wraps)
+    /// is what the embedded portal actually builds. A change to that
+    /// layering must change docs/api/portal_dispatch.tsv in the same diff.
+    #[test]
+    fn portal_dispatch_table_matches_the_embedded_portal() {
+        crate::with_python_test_module("portal dispatch table", |py, module, globals| {
+            globals
+                .set_item("__name__", "portal_dispatch_table")
+                .expect("generator module name");
+            let source = CString::new(include_str!("../../../scripts/portal_dispatch_table.py"))
+                .expect("generator contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("dispatch table generator loads");
+            let generated: String = globals
+                .get_item("table")
+                .expect("generator globals")
+                .expect("table function")
+                .call1((module,))
+                .and_then(|table| table.extract())
+                .inspect_err(|error| error.print(py))
+                .expect("dispatch table generates");
+            let committed = include_str!("../../../docs/api/portal_dispatch.tsv");
+            if let Some((line, (built, recorded))) = generated
+                .lines()
+                .zip(committed.lines())
+                .enumerate()
+                .find(|(_, (built, recorded))| built != recorded)
+            {
+                panic!(
+                    "docs/api/portal_dispatch.tsv drifted at line {}:\n  embedded portal: {built}\n  committed:       {recorded}\nregenerate with `python scripts/portal_dispatch_table.py > docs/api/portal_dispatch.tsv` against a wheel of this tree",
+                    line + 1
+                );
+            }
+            assert_eq!(
+                generated.lines().count(),
+                committed.lines().count(),
+                "docs/api/portal_dispatch.tsv has a different number of rows than the embedded portal"
+            );
+        });
+    }
+
     #[test]
     fn production_animation_semantics_acceptance_suite() {
         crate::with_python_test_module("animation acceptance", |py, module, globals| {
