@@ -187,10 +187,10 @@ def scene_ratios(runs):
             if portal and reference and portal["exit"] == 0 and reference["exit"] == 0 \
                     and reference["seconds"] > 0:
                 pairs.append((portal["seconds"], reference["seconds"]))
+        failed = sorted({record["engine"] + (":timeout" if record["exit"] is None else
+                                             f":exit{record['exit']}")
+                         for record in cells.values() if record["exit"] != 0})
         if not pairs:
-            failed = sorted({record["engine"] + (":timeout" if record["exit"] is None else
-                                                 f":exit{record['exit']}")
-                             for record in cells.values() if record["exit"] != 0})
             excluded[scene] = failed or ["incomplete"]
             continue
         ratios = [portal / reference for portal, reference in pairs]
@@ -201,6 +201,9 @@ def scene_ratios(runs):
             "pairs": len(pairs),
             "portal_s": statistics.median(p for p, _ in pairs),
             "reference_s": statistics.median(r for _, r in pairs),
+            # A later repetition that failed after complete pairs: the ratio
+            # stands on the pairs, and the failure stays visible beside it.
+            "failed": failed,
         }
     return included, excluded
 
@@ -251,12 +254,12 @@ def write_dashboard(out_dir: pathlib.Path, dashboard: pathlib.Path):
                          f" ({low:.2f}-{high:.2f}) |")
         lines.append(f"| scenes above 1x | {summary['above_1x']} |")
     lines += ["", "## Per scene (slowest first)", "",
-              "| scene | ratio | min | max | pairs | portal s | Reference s |",
-              "|---|---:|---:|---:|---:|---:|---:|"]
+              "| scene | ratio | min | max | pairs | portal s | Reference s | later failures |",
+              "|---|---:|---:|---:|---:|---:|---:|---|"]
     for (module, name), row in sorted(included.items(), key=lambda item: -item[1]["ratio"]):
         lines.append(f"| {module}:{name} | {row['ratio']:.2f} | {row['min']:.2f} |"
                      f" {row['max']:.2f} | {row['pairs']} | {row['portal_s']:.1f} |"
-                     f" {row['reference_s']:.1f} |")
+                     f" {row['reference_s']:.1f} | {', '.join(row['failed'])} |")
     if excluded:
         errors = {}
         for record in runs:

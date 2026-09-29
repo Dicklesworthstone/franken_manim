@@ -76,6 +76,22 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertEqual(excluded[("m.py", "Refail")], ["reference:exit1"])
         self.assertEqual(excluded[("m.py", "Half")], ["incomplete"])
         self.assertEqual(csr.corpus_summary(included)["scenes"], 1)
+        self.assertEqual(included[("m.py", "Ok")]["failed"], [])
+
+    def test_a_later_failure_keeps_the_pairs_and_stays_visible(self):
+        runs = [run("m.py", "A", "portal", 0, 2.0), run("m.py", "A", "reference", 0, 1.0),
+                run("m.py", "A", "portal", 1, 300.0, None)]
+        included, excluded = csr.scene_ratios(runs)
+        self.assertEqual(excluded, {})
+        self.assertEqual((included[("m.py", "A")]["ratio"], included[("m.py", "A")]["pairs"]),
+                         (2.0, 1))
+        self.assertEqual(included[("m.py", "A")]["failed"], ["portal:timeout"])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "runs.ndjson").write_text("\n".join(
+                __import__("json").dumps(r) for r in runs) + "\n")
+            csr.write_dashboard(out, out / "dash.md")
+            self.assertIn("| 1 | 2.0 | 1.0 | portal:timeout |", (out / "dash.md").read_text())
 
     def test_runs_interleave_engines_in_the_log(self):
         self.assertEqual(csr.interleaved_plan([("m.py", "A")], 2),
