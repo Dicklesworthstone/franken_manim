@@ -21,8 +21,8 @@ defined:
 - any other module name: code defined elsewhere (stdlib, third party).
 
 `layers` follows the installer wrap pattern to the innermost implementation:
-a function whose closure holds a callable of the same name (the one it
-replaced), or `__wrapped__`. `depth` counts them. Origins come from each
+a function whose closure holds a callable named like the symbol or like the
+wrapper itself (the one it replaced), or `__wrapped__`. `depth` counts them. Origins come from each
 function's globals, never from file paths, so an installed wheel and the
 embedded interpreter produce the same table.
 
@@ -90,6 +90,9 @@ def layers(function, name, native_globals):
         seen.add(id(function))
         chain.append(origin(function, native_globals))
         inner = getattr(function, "__wrapped__", None)
+        # The replaced callable carries the symbol's name or the wrapper's own
+        # (an installer's `def requires` wrapping the previous `requires`).
+        names = {name, getattr(function, "__name__", None)}
         if inner is None and isinstance(function, types.FunctionType):
             for cell in function.__closure__ or ():
                 try:
@@ -98,7 +101,7 @@ def layers(function, name, native_globals):
                     continue
                 candidate = getattr(candidate, "__func__", candidate)
                 if (callable(candidate) and candidate is not function
-                        and getattr(candidate, "__name__", None) == name):
+                        and getattr(candidate, "__name__", None) in names):
                     inner = candidate
                     break
         function = inner
