@@ -15,8 +15,9 @@
 //!   carry a cross-platform lock. Measured 2026-09-28 at frankenscipy
 //!   `85edd7a9`: blessed on linux-x86_64 (glibc, debug) as `48d9c4cf…`
 //!   (12,012 bytes). It passes unchanged on macos-aarch64 (Darwin, M4 Pro,
-//!   `--release`). linux-aarch64 has NOT been run: the binfmt/qemu leg below is
-//!   not registered on the dev box since its 2026-08-29 reboot.
+//!   native, `--release`) and on linux-aarch64 (static musl ELF cross-compiled
+//!   with `--release`, run under binfmt/qemu on the dev box). One lock, three
+//!   certified platforms, two profiles.
 //!
 //! Snapshots are serialized through fmn-hash's canonical Writer (versioned
 //! schema, defined field order, float canonicalization, trailing checksum),
