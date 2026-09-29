@@ -552,3 +552,74 @@ _path_result = _unittest.TextTestRunner(verbosity=2).run(
     _unittest.defaultTestLoader.loadTestsFromTestCase(PathObjectProtocols))
 if not _path_result.wasSuccessful():
     raise AssertionError('path object protocols failed')
+
+
+class ProtocolTables(_unittest.TestCase):
+    """fm-5wq.39: install-time protocol tables equal getattr_static's answer
+    over the live namespace, without calling it."""
+
+    NAMES = ("abort", "begin", "copy", "create_starting_mobject", "finish", "__getattr__",
+             "__getattribute__", "get_center", "get_family", "interpolate", "interpolate_mobject",
+             "interpolate_submobject", "match_points", "match_style", "move_to",
+             "point_from_proportion", "rotate", "scale", "set_color", "shift", "suspend_updating",
+             "update", "update_mobjects", "mro", "__call__", "no_such_protocol")
+
+    def namespace(self):
+        native = vars(getattr(_m, "_native", _m))
+        meta = type(_m.Mobject)
+
+        class Shadowing(meta):
+            __dict__ = property(lambda cls: {})
+
+        class Hidden(_m.VMobject, metaclass=Shadowing):
+            def update(self, dt=0):
+                return self
+
+        class Wrapped(_m.VMobject):
+            shift = staticmethod(lambda *args: None)
+            scale = classmethod(lambda cls, *args: None)
+
+        class AuthoredAnimation(_m.Animation):
+            def interpolate_mobject(self, alpha):
+                pass
+
+        return dict(native, Hidden=Hidden, Wrapped=Wrapped, AuthoredAnimation=AuthoredAnimation)
+
+    def test_tables_equal_getattr_static(self):
+        from fmn_python import movement
+        g = self.namespace()
+        for root in (_m.Mobject, _m.VMobject, _m.Animation, _m.DecimalNumber):
+            classes = {base for cls in tuple(g.values())
+                       if isinstance(cls, type) and issubclass(cls, root)
+                       for base in cls.__mro__ if issubclass(base, root)}
+            expected = {cls: {name: movement._implementation(cls, name) for name in self.NAMES}
+                        for cls in classes}
+            table = movement._protocols(g, root, self.NAMES)
+            self.assertEqual(set(table), set(expected), root)
+            for cls, row in expected.items():
+                for name, value in row.items():
+                    self.assertIs(table[cls][name], value, (root.__name__, cls.__name__, name))
+        # The shadowed metaclass hides Hidden's own update from getattr_static.
+        own = type.__dict__["__dict__"].__get__(g["Hidden"])["update"]
+        self.assertIsNot(movement._protocols(g, _m.VMobject, ("update",))[g["Hidden"]]["update"],
+                         own)
+
+    def test_tables_make_no_getattr_static_calls(self):
+        import inspect
+        from fmn_python import movement
+        original, calls = inspect.getattr_static, []
+
+        def counting(*args):
+            calls.append(args[1])
+            return original(*args)
+
+        g = self.namespace()
+        with _patch.object(inspect, "getattr_static", counting):
+            movement._protocols(g, _m.Mobject, self.NAMES)
+        self.assertEqual(calls, [])
+
+
+_tables_result = _unittest.TextTestRunner(verbosity=2).run(
+    _unittest.defaultTestLoader.loadTestsFromTestCase(ProtocolTables))
+if not _tables_result.wasSuccessful():
+    raise AssertionError('protocol tables failed')

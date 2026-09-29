@@ -40,10 +40,13 @@ def _manimlib_claims(distribution):
     record = distribution.read_text("RECORD")
     if not record:
         return [path for path in (distribution.files or ()) if _claims_manimlib(path)]
+    # A path whose first part is manimlib contains the substring; the
+    # substring test spares building a path for every unrelated row.
     return [
         row[0]
         for row in _csv.reader(record.splitlines())
         if row
+        and "manimlib" in row[0]
         and _claims_manimlib(row[0])
         and distribution.locate_file(row[0]).exists()
     ]
