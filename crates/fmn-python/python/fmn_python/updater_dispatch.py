@@ -11,7 +11,46 @@ from __future__ import annotations
 
 from inspect import getattr_static
 from threading import local
-from types import MethodType
+from types import GetSetDescriptorType, MemberDescriptorType, MethodType
+
+_class_dict = type.__dict__["__dict__"].__get__
+_MISSING = object()
+
+
+def _static_is(obj, name, expected):
+    """`getattr_static(obj, name, None) is expected`, exact, in one MRO walk.
+
+    The ordinary case needs no full static lookup: every class in the MRO has
+    metaclass `type`, the first class defining `name` defines `expected`, the
+    class keeps the standard `__dict__` descriptor (inspect._shadowed_dict's
+    test), and the instance's own __dict__ does not hold `name`. Anything else
+    takes getattr_static itself. Class dictionaries are read through type's
+    own descriptor, and the instance's through the standard slot, so no
+    authored descriptor runs (fm-5wq.31).
+    """
+    found, plain, shadow_seen = _MISSING, True, False
+    for base in type(obj).__mro__:
+        if type(base) is not type:
+            return getattr_static(obj, name, None) is expected
+        namespace = _class_dict(base)
+        if found is _MISSING and name in namespace:
+            found = namespace[name]
+        if not shadow_seen and "__dict__" in namespace:
+            attr = namespace["__dict__"]
+            if not (type(attr) is GetSetDescriptorType
+                    and attr.__name__ == "__dict__" and attr.__objclass__ is base):
+                shadow_seen = True
+                plain = type(attr) is MemberDescriptorType
+    if found is not expected:
+        return getattr_static(obj, name, None) is expected
+    if plain:
+        try:
+            own = object.__getattribute__(obj, "__dict__")
+        except AttributeError:
+            own = None
+        if own is not None and dict.__contains__(own, name):
+            return getattr_static(obj, name, None) is expected
+    return True
 
 
 def install_updater_dispatch(native):
@@ -55,7 +94,7 @@ def install_updater_dispatch(native):
             # Only pass dt: authored overrides choose their own recurse value.
             callback = member.update
             if (type(callback) is not MethodType or callback.__func__ is not update
-                    or getattr_static(member, "_update_native_mobject") is not native_update):
+                    or not _static_is(member, "_update_native_mobject", native_update)):
                 jobs.authored = True
             callback(dt)
         finally:

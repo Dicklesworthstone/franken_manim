@@ -301,6 +301,24 @@ class PublicUpdateTests(unittest.TestCase):
 
         few, many = lookups(4), lookups(64)
         self.assertEqual(few, many)
+
+        # The public update walk checked each member's _update_native_mobject
+        # through getattr_static every frame (19 s of PrimeRace's first 120 s).
+        import fmn_python.updater_dispatch as dispatch
+
+        def walk_lookups(count):
+            scene = m.Scene()
+            scene.add(m.VGroup(*(m.Square() for _ in range(count))))
+            calls.clear()
+            # updater_dispatch binds getattr_static at import; count both names.
+            inspect.getattr_static = dispatch.getattr_static = counting
+            try:
+                scene.update_mobjects(1 / 30)
+            finally:
+                inspect.getattr_static = dispatch.getattr_static = original
+            return len(calls)
+
+        self.assertEqual(walk_lookups(4), walk_lookups(64))
         # An instance-level override still defeats the per-class answer.
         scene = m.Scene()
         squares = [m.Square() for _ in range(8)]
