@@ -17,7 +17,7 @@ def install_arrow_geometry(native):
 
     def arrow_init(
         self, start=g["_LEFT"], end=g["_LEFT"], buff=0.25, path_arc=0.0,
-        fill_color=g["_DEFAULT_LIGHT_COLOR"], fill_opacity=1.0, stroke_width=0.0,
+        fill_color=g["_StyleDefault"](g["_DEFAULT_LIGHT_COLOR"]), fill_opacity=1.0, stroke_width=0.0,
         thickness=3.0, tip_width_ratio=5, tip_angle=g["_math"].pi / 3,
         max_tip_length_to_length_ratio=0.5, max_width_to_length_ratio=0.1,
         **kwargs,
@@ -95,7 +95,7 @@ def _install_stroke_arrow(g):
     Stroke = g["StrokeArrow"]
 
     def initialize(
-        self, start, end, stroke_color=g["_DEFAULT_LIGHT_COLOR"], stroke_width=5,
+        self, start, end, stroke_color=g["_StyleDefault"](g["_DEFAULT_LIGHT_COLOR"]), stroke_width=5,
         buff=0.25, tip_width_ratio=5, tip_len_to_width=0.0075,
         max_tip_length_to_length_ratio=0.3, max_width_to_length_ratio=8.0,
         **kwargs,

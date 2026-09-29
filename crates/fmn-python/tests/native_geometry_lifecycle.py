@@ -220,10 +220,13 @@ class NativeGeometryLifecycle(unittest.TestCase):
         self.assertEqual(ellipse.get_stroke_color(), m.RED)
 
     def test_style_shorthand_and_explicit_native_flags(self):
+        # fm-qead (BN-07 C-19): explicit channels beat color=, as the
+        # Reference's `fill_color or color` does; color= fills only the rest.
         obj = m.Dot(color=m.GREEN, fill_color=m.BLUE, stroke_color=m.RED,
                     stroke_width=3, is_fixed_in_frame=True)
-        self.assertEqual(obj.get_fill_color(), m.GREEN)
-        self.assertEqual(obj.get_stroke_color(), m.GREEN)
+        self.assertEqual(obj.get_fill_color(), m.BLUE)
+        self.assertEqual(obj.get_stroke_color(), m.RED)
+        self.assertEqual(m.Dot(color=m.GREEN).get_fill_color(), m.GREEN)
         self.assertAlmostEqual(obj.get_stroke_width(), 3)
         obj = m.Circle(opacity=0.25)
         self.assertAlmostEqual(obj.get_fill_opacity(), 0.25)

@@ -21088,6 +21088,53 @@ for _made, _fill, _stroke in (
         (type(_made).__name__, _made.get_fill_color(), _made.get_stroke_color())
 # A resolved default is a plain str: the marker never reaches copies.
 assert type(manimlib.Dot().fill_color) is str
+
+
+# fm-qead incident (2026-09-29): an installer that re-defines a constructor
+# must mark its channel defaults too. Unmarked, they masked color= again on
+# Arrow, Vector, StrokeArrow, VCube, VPrism, Dodecahedron and
+# SingleStringTex. color= colors every visible channel of a plain class; the
+# composites below color only some members, as before fm-qead.
+def _c19_unmasked(made):
+    red = manimlib.RED.upper()
+    for member in made.family_members_with_points():
+        data = member.data
+        for key in ("fill_rgba", "stroke_rgba"):
+            if key in data.dtype.names and len(data) and float(data[key][0][3]) > 0:
+                hex_color = manimlib.rgb_to_hex(data[key][0][:3]).upper()
+                if hex_color != red:
+                    return f"{type(member).__name__} {key} {hex_color}"
+    return None
+
+
+for _made in (
+    manimlib.Arrow(manimlib.LEFT, manimlib.RIGHT, color=manimlib.RED),
+    manimlib.Vector(manimlib.RIGHT + manimlib.UP, color=manimlib.RED),
+    manimlib.StrokeArrow(manimlib.LEFT, manimlib.RIGHT, color=manimlib.RED),
+    manimlib.VCube(color=manimlib.RED),
+    manimlib.VPrism(color=manimlib.RED),
+    manimlib.Dodecahedron(color=manimlib.RED),
+    _old_tex_module.SingleStringTex("x", color=manimlib.RED),
+):
+    assert _c19_unmasked(_made) is None, (type(_made).__name__, _c19_unmasked(_made))
+_c19_composites = {
+    "Axes", "Clock", "ComplexPlane", "Dartboard", "DoubleSpeechBubble",
+    "FullScreenFadeRectangle", "Laptop", "NumberPlane", "Piano", "Piano3D",
+    "SpeechBubble", "Speedometer", "ThoughtBubble", "ThreeDAxes", "Title",
+}
+_c19_checked = 0
+for _name in sorted(dir(manimlib)):
+    _cls = getattr(manimlib, _name)
+    if (_name.startswith("_") or _name in _c19_composites or not isinstance(_cls, type)
+            or not issubclass(_cls, manimlib.VMobject)):
+        continue
+    try:
+        _made = _cls(color=manimlib.RED)
+    except Exception:
+        continue  # needs arguments; the sweep-call rows above cover those at risk
+    assert _c19_unmasked(_made) is None, (_name, _c19_unmasked(_made))
+    _c19_checked += 1
+assert _c19_checked >= 40, _c19_checked
 assert len(_old_tex_module.OldTex("a", "+", "b")) == 3
 # OldTex selects parts the way the Reference does (old_tex_mobject.py:248-305).
 # Each part carries its piece's source. A lookup tests substrings of that

@@ -164,9 +164,15 @@ class VectorSolidLifecycleTests(unittest.TestCase):
                 scene=m.Scene();scene.add(front,back)
                 self.assertEqual(scene.get_mobjects(),[back,front])
 
-    def test_color_shorthand_preserves_established_precedence(self):
+    def test_explicit_channels_beat_the_color_shorthand_which_beats_defaults(self):
+        # fm-qead (BN-07 C-19): explicit fill_color/stroke_color > color= >
+        # constructor default. The Reference builds these faces through
+        # VMobject's `fill_color or color`, so explicit channels win there
+        # too; before fm-qead the portal let color= override them.
         for cls in (m.VCube,m.VPrism,m.Dodecahedron):
             obj=cls(color=m.GREEN,fill_color=m.RED,stroke_color=m.BLUE)
+            self.assertTrue(all(p.get_fill_color()==m.RED and p.get_stroke_color()==m.BLUE for p in obj))
+            obj=cls(color=m.GREEN)
             self.assertTrue(all(p.get_fill_color()==m.GREEN and p.get_stroke_color()==m.GREEN for p in obj))
 
     def test_prismify_uses_live_source_geometry_and_keeps_each_source_paint(self):

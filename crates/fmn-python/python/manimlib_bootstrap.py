@@ -10651,7 +10651,7 @@ class SingleStringTex(SVGMobject):
         self,
         tex_string,
         height=None,
-        fill_color=_WHITE,
+        fill_color=_StyleDefault(_WHITE),
         fill_opacity=1.0,
         stroke_width=0,
         svg_default={"fill_color": _WHITE},

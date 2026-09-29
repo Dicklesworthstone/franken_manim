@@ -73,7 +73,7 @@ def install_vector_solid_groups(native):
     def symbol(name):
         return getattr(sys.modules.get(VCube.__module__), name, g[name])
 
-    def vcube(self, side_length=2.0, fill_color=g['_BLUE_D'], fill_opacity=1,
+    def vcube(self, side_length=2.0, fill_color=g['_StyleDefault'](g['_BLUE_D']), fill_opacity=1,
               stroke_width=0, **kwargs):
         side_length = _finite(side_length, 'VCube side_length')
         config = options(type(self).__name__ + '()', kwargs,
@@ -92,8 +92,8 @@ def install_vector_solid_groups(native):
         for dim, length in enumerate(dimensions):
             self.rescale_to_fit(length, dim, stretch=True)
 
-    def dodecahedron(self, fill_color=g['_BLUE_E'], fill_opacity=1,
-                     stroke_color=g['_BLUE_E'], stroke_width=1, shading=(.2, .2, .2), **kwargs):
+    def dodecahedron(self, fill_color=g['_StyleDefault'](g['_BLUE_E']), fill_opacity=1,
+                     stroke_color=g['_StyleDefault'](g['_BLUE_E']), stroke_width=1, shading=(.2, .2, .2), **kwargs):
         config = options('Dodecahedron()', kwargs, dict(fill_color=fill_color,
                          fill_opacity=fill_opacity, stroke_color=stroke_color, stroke_width=stroke_width),
                          default_shading=shading)

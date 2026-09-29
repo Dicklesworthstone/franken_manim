@@ -55,7 +55,7 @@ def install_legacy_tex_lifecycle(native):
         return text, size, mode, self.template, self.additional_preamble, alignment
 
     @wraps(previous)
-    def initialize(self, tex_string, height=None, fill_color=g["_WHITE"], fill_opacity=1.0,
+    def initialize(self, tex_string, height=None, fill_color=g["_StyleDefault"](g["_WHITE"]), fill_opacity=1.0,
                    stroke_width=0, svg_default={"fill_color": g["_WHITE"]},
                    path_string_config={}, font_size=48, alignment=r"\centering",
                    math_mode=True, organize_left_to_right=False, template="",
@@ -76,7 +76,10 @@ def install_legacy_tex_lifecycle(native):
                                    scalar(stroke_width, "SingleStringTex stroke_width")))
         # Scribe glyphs use a white stroke and a half-pixel fill border;
         # VMobject's generic grey/zero defaults must not change legacy ink.
-        for key, fallback in (("fill_color", g["_WHITE"]), ("stroke_color", g["_WHITE"]),
+        # The colors are constructor defaults: a caller's color= beats them
+        # (BN-07 C-19, fm-qead).
+        white = g["_StyleDefault"](g["_WHITE"])
+        for key, fallback in (("fill_color", white), ("stroke_color", white),
                               ("fill_border_width", 0.5), ("stroke_width", 0.0)):
             if style.get(key) is None:
                 style[key] = fallback

@@ -220,7 +220,9 @@ class LineStrokeLifecycleTests(unittest.TestCase):
                             stroke_width=3, opacity=.4, flat_stroke=True,
                             scale_stroke_with_zoom=True, joint_type='bevel',
                             anti_alias_width=2, depth_test=True, is_fixed_in_frame=True)
-        self.assertEqual(obj.get_stroke_color(), m.RED)
+        # fm-qead (BN-07 C-19): the explicit stroke_color beats color=.
+        self.assertEqual(obj.get_stroke_color(), m.BLUE)
+        self.assertEqual(m.StrokeArrow(m.LEFT, m.RIGHT, color=m.RED).get_stroke_color(), m.RED)
         self.assertAlmostEqual(obj.get_stroke_opacity(), .4, places=6)
         self.assertTrue(obj.get_flat_stroke())
         self.assertTrue(obj.get_scale_stroke_with_zoom())

@@ -19,7 +19,9 @@ def native_tex(source, *, math_mode=True, font_size=48, height=None, **style):
     specs = target._build_tex(m._native_shell_factory, [source], '', not math_mode,
                              float(font_size), None, False, '', '', 'center')
     m._hang_native_children(target, specs)
-    defaults = dict(fill_color=m.WHITE, fill_opacity=1., stroke_width=0.)
+    # SingleStringTex's own white fill is a constructor default: a caller's
+    # color= beats it (BN-07 C-19, fm-qead).
+    defaults = dict(fill_color=m._StyleDefault(m.WHITE), fill_opacity=1., stroke_width=0.)
     defaults.update(style)
     m._apply_vmobject_style_kwargs(target, defaults)
     if height is not None:
