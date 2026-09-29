@@ -45,6 +45,7 @@ import os
 import pathlib
 import platform
 import random
+import re
 import signal
 import statistics
 import subprocess
@@ -106,8 +107,9 @@ def run_key(record):
 def measure_scene(scene, reps, runners, log, done, lock, engines=ENGINES):
     """Run one scene's interleaved plan with `runners[engine](scene, rep)`.
 
-    A runner returns the child's exit code, or None on timeout. It is timed
-    here, around the call, on the monotonic clock. After the first failure on
+    A runner returns (exit code or None on timeout, stderr text). It is timed
+    here, around the call, on the monotonic clock. A failed run keeps its last
+    stderr line as `error`, so an exclusion carries its cause. After the first failure on
     either side the scene's remaining repetitions are not run: the scene is
     already excluded from the ratio, and a timeout per repetition would only
     burn the budget.
@@ -119,18 +121,27 @@ def measure_scene(scene, reps, runners, log, done, lock, engines=ENGINES):
             continue
         load_start = os.getloadavg()[0]
         start = time.monotonic()
-        code = runners[engine](scene, rep)
+        code, stderr = runners[engine](scene, rep)
         seconds = time.monotonic() - start
         record = {"schema": SCHEMA, "version": VERSION, "label": LABEL, "module": module,
                   "scene": name, "engine": engine, "rep": rep, "exit": code,
                   "seconds": round(seconds, 4), "load_start": round(load_start, 2),
                   "load_end": round(os.getloadavg()[0], 2)}
+        if code != 0:
+            record["error"] = last_line(stderr)
         with lock:
             log(record)
             done.add(key)
         if code != 0:
             return False
     return True
+
+
+def last_line(text, limit=200):
+    """The last non-blank line of a child's stderr, ANSI color codes removed."""
+    lines = [line for line in re.sub(r"\x1b\[[0-9;]*m", "", text or "").splitlines()
+             if line.strip()]
+    return lines[-1].strip()[:limit] if lines else ""
 
 
 # ------------------------------------------------------------------- stats
@@ -247,9 +258,15 @@ def write_dashboard(out_dir: pathlib.Path, dashboard: pathlib.Path):
                      f" {row['max']:.2f} | {row['pairs']} | {row['portal_s']:.1f} |"
                      f" {row['reference_s']:.1f} |")
     if excluded:
-        lines += ["", "## Excluded (never imputed)", "", "| scene | failed side |", "|---|---|"]
-        for (module, name), reasons in excluded.items():
-            lines.append(f"| {module}:{name} | {', '.join(reasons)} |")
+        errors = {}
+        for record in runs:
+            if record["exit"] != 0 and record.get("error"):
+                errors.setdefault((record["module"], record["scene"]), record["error"])
+        lines += ["", "## Excluded (never imputed)", "",
+                  "| scene | failed side | last stderr line |", "|---|---|---|"]
+        for scene, reasons in excluded.items():
+            error = errors.get(scene, "").replace("|", "\\|")
+            lines.append(f"| {scene[0]}:{scene[1]} | {', '.join(reasons)} | {error} |")
     dashboard.parent.mkdir(parents=True, exist_ok=True)
     dashboard.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return summary, len(excluded)
@@ -307,7 +324,7 @@ def make_runners(args, display):
         env = dict(os.environ, PYTHONPATH=str(args.videos))
         argv = [args.portal_python, "-m", "fmn_python", str(args.videos / module), name, "-s",
                 "--format", "png", "--resolution", "320x180", "--video_dir", str(target)]
-        return run_child(argv, args.workdir, env, args.timeout)[0]
+        return run_child(argv, args.workdir, env, args.timeout)[:2]
 
     def reference(scene, rep):
         module, name = scene
@@ -318,7 +335,7 @@ def make_runners(args, display):
                "PYTHONPATH": f"{args.reference_root}{os.pathsep}{args.videos}"}
         argv = [args.reference_python, "-m", "manimlib", str(args.videos / module), name, "-s",
                 "-w", "-r", "320x180", "--video_dir", str(target)]
-        return run_child(argv, args.workdir, env, args.timeout)[0]
+        return run_child(argv, args.workdir, env, args.timeout)[:2]
 
     return {"portal": portal, "reference": reference}
 

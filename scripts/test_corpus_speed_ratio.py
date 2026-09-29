@@ -82,7 +82,7 @@ class SpeedRatioTests(unittest.TestCase):
                          [(("m.py", "A"), 0, "portal"), (("m.py", "A"), 0, "reference"),
                           (("m.py", "A"), 1, "portal"), (("m.py", "A"), 1, "reference")])
         collect = Collect()
-        runners = {engine: (lambda scene, rep: 0) for engine in csr.ENGINES}
+        runners = {engine: (lambda scene, rep: (0, "")) for engine in csr.ENGINES}
         csr.measure_scene(("m.py", "A"), 3, runners, collect, collect.done, collect.lock)
         self.assertEqual([(r["engine"], r["rep"]) for r in collect.records],
                          [("portal", 0), ("reference", 0), ("portal", 1), ("reference", 1),
@@ -97,7 +97,7 @@ class SpeedRatioTests(unittest.TestCase):
         def runner(engine, code):
             def call(scene, rep):
                 calls.append((engine, rep))
-                return code
+                return code, "Traceback ...\n\x1b[31mTypeError: bad x_min\x1b[0m\n\n"
             return call
 
         runners = {"portal": runner("portal", 0), "reference": runner("reference", 2)}
@@ -105,6 +105,8 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertFalse(finished)
         # portal rep 0 was already done; the reference failure stops later reps.
         self.assertEqual(calls, [("reference", 0)])
+        # The failure keeps its cause; a success records none.
+        self.assertEqual(collect.records[0]["error"], "TypeError: bad x_min")
 
     def test_a_truncated_last_line_is_dropped_but_other_damage_raises(self):
         json = __import__("json")
@@ -130,7 +132,7 @@ class SpeedRatioTests(unittest.TestCase):
         def sleeper(extra):
             def call(scene, rep):
                 time.sleep(base + (extra if scene[1] == "Planted" else 0.0))
-                return 0
+                return 0, ""
             return call
 
         collect = Collect()
@@ -149,7 +151,7 @@ class SpeedRatioTests(unittest.TestCase):
         runs = [run("m.py", s, e, r, sec)
                 for s, factor in (("A", 0.5), ("B", 2.0), ("C", 1.0))
                 for r in range(2) for e, sec in (("portal", factor), ("reference", 1.0))]
-        runs.append(run("m.py", "D", "portal", 0, 9.0, None))
+        runs.append(dict(run("m.py", "D", "portal", 0, 9.0, None), error="stuck | in a loop"))
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp)
             (out / "runs.ndjson").write_text("\n".join(
@@ -159,7 +161,7 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertEqual((summary["scenes"], excluded, summary["median"]), (3, 1, 1.0))
         self.assertIn(csr.LABEL, text)
         self.assertIn("| m.py:B | 2.00 |", text)
-        self.assertIn("m.py:D | portal:timeout", text)
+        self.assertIn("| m.py:D | portal:timeout | stuck \\| in a loop |", text)
 
 
 if __name__ == "__main__":
