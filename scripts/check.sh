@@ -74,6 +74,12 @@ python3 -m py_compile \
 python3 scripts/test_audit_portal_refusals.py
 python3 scripts/audit_portal_refusals.py --check >/dev/null
 
+echo "==> corpus speed-ratio producer statistics"
+python3 -m py_compile \
+    scripts/corpus_speed_ratio.py \
+    scripts/test_corpus_speed_ratio.py
+python3 scripts/test_corpus_speed_ratio.py
+
 echo "==> Python portal runtime-parity audit contract"
 python3 -m py_compile \
     crates/fmn-python/python/fmn_python/schema_provenance.py \
