@@ -153,6 +153,12 @@ class PointEditingTests(unittest.TestCase):
                        m.Circle().get_points(), m.Circle().get_points()[::-2]):
             with self.subTest(points=repr(points)):
                 self.assertEqual(bits(m._vec3_rows(points)), bits([m._vec3(p) for p in points]))
+                handed = m._point_array(points)
+                if isinstance(handed, np.ndarray):
+                    self.assertEqual((handed.dtype, handed.ndim, handed.flags["C_CONTIGUOUS"]),
+                                     (np.dtype(np.float64), 2, True))
+                    handed = handed.tolist()
+                self.assertEqual(bits(handed), bits([m._vec3(p) for p in points]))
         for short in (np.zeros((2, 2)), [[0., 0.]]):
             with self.assertRaises(IndexError):
                 m._vec3_rows(short)
@@ -178,6 +184,34 @@ class PointEditingTests(unittest.TestCase):
             else:
                 refusals.append(None)
         self.assertEqual(refusals[0], refusals[1])
+        # The appended rows reach authored set_points/append_points as a
+        # writable float64 (N, 3) array (the Reference passes array slices),
+        # holding exactly the rows the engine appended.
+        received = []
+
+        class Recording(m.VMobject):
+            def set_points(self, points):
+                received.append(("set", points))
+                return super().set_points(points)
+
+            def append_points(self, points):
+                received.append(("append", points))
+                return super().append_points(points)
+
+        path = Recording()
+        path.add_subpath(corners)
+        path.add_subpath(corners[:, ::-1] + 4.)
+        path.add_points_as_corners(corners + 8.)
+        self.assertEqual([kind for kind, _ in received], ["set", "append", "append"])
+        tail = 0
+        for kind, points in received:
+            self.assertIsInstance(points, np.ndarray)
+            self.assertEqual((points.dtype, points.shape[1], points.flags["WRITEABLE"]),
+                             (np.dtype(np.float64), 3, True))
+            tail += len(points)
+        self.assertEqual(tail, path.get_num_points())
+        np.testing.assert_array_equal(np.vstack([points for _, points in received]).astype(np.float32),
+                                      path.get_points())
 
 
 _suite = unittest.defaultTestLoader.loadTestsFromTestCase(PointEditingTests)

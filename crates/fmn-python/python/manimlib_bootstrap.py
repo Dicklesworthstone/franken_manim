@@ -164,6 +164,18 @@ def _vec3_rows(points):
     return [_vec3(point) for point in points]
 
 
+def _point_array(points):
+    """_vec3_rows(points) for the natives that read a float64 (N, 3) buffer
+    directly: the same doubles as one C-contiguous array, with no Python
+    float per coordinate (fm-5wq.31). Every other input keeps the
+    per-point path."""
+    if (type(points) is _np.ndarray and points.dtype.kind == "f"
+            and points.dtype.itemsize in (4, 8)
+            and points.ndim == 2 and points.shape[1] == 3):
+        return _np.ascontiguousarray(points, dtype=_np.float64)
+    return [_vec3(point) for point in points]
+
+
 def _interpolate(start, end, alpha):
     # manimlib/utils/bezier.py interpolate, verbatim.
     return (1 - alpha) * start + alpha * end
@@ -3654,14 +3666,14 @@ class VMobject(Mobject):
         return self
 
     def add_points_as_corners(self, points):
-        new_points = self._add_points_as_corners_points(_vec3_rows(points))
+        new_points = self._add_points_as_corners_points(_point_array(points))
         if len(new_points) > 0:
             self.append_points(new_points)
         return self
 
     def add_subpath(self, points):
         was_empty = self.get_num_points() == 0
-        new_points = self._add_subpath_points(_vec3_rows(points))
+        new_points = self._add_subpath_points(_point_array(points))
         if len(new_points) > 0:
             if was_empty:
                 self.set_points(new_points)
@@ -3708,7 +3720,7 @@ class VMobject(Mobject):
         # lanes while Chisel remains the sole owner of corner-path geometry and
         # joint-angle derivation.
         defaults = self._style_data().copy() if self.get_num_points() == 0 else None
-        self._set_points_as_corners(_vec3_rows(points))
+        self._set_points_as_corners(_point_array(points))
         if defaults is not None and self.get_num_points() > 0:
             data = self.data
             for field in (

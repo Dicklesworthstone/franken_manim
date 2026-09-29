@@ -89,6 +89,7 @@ use fmn_render::{
 };
 use fmn_scene::{RuntimeConfig, Scene};
 use pyo3::basic::CompareOp;
+use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
 use pyo3::exceptions::{
     PyBufferError, PyException, PyImportError, PyKeyError, PyOSError, PyOverflowError,
@@ -96,7 +97,7 @@ use pyo3::exceptions::{
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyList, PyModule, PyTuple};
 
 create_exception!(
     manimlib,
@@ -1138,6 +1139,37 @@ fn positive_subdivision_count(value: &Bound<'_, PyAny>) -> PyResult<usize> {
 /// existing `append_points` surface so all non-geometry RecordBuffer lanes
 /// follow the Reference's resize/copy rules.  Computing first also makes
 /// every typed refusal atomic at the portal boundary.
+/// Point rows from a C-contiguous float64 (N, 3) buffer (the bootstrap's
+/// `_point_array`) without one Python float per coordinate, else through the
+/// ordinary sequence extraction with its ordinary errors (fm-5wq.31: a live
+/// graph's redraw converted every row array to lists and back each frame).
+fn point_rows(points: &Bound<'_, PyAny>) -> PyResult<Vec<[f64; 3]>> {
+    if let Ok(buffer) = PyBuffer::<f64>::get(points)
+        && buffer.dimensions() == 2
+        && buffer.shape().get(1) == Some(&3)
+        && buffer.is_c_contiguous()
+    {
+        let flat = buffer.to_vec(points.py())?;
+        // A C-contiguous (N, 3) buffer holds exactly 3N values.
+        return Ok(flat.as_chunks::<3>().0.to_vec());
+    }
+    points.extract()
+}
+
+/// Point rows as a writable float64 (N, 3) ndarray, built from packed bytes
+/// rather than N lists of three Python floats.
+fn point_array<'py>(py: Python<'py>, rows: &[[f64; 3]]) -> PyResult<Bound<'py, PyAny>> {
+    let mut bytes = Vec::with_capacity(rows.len() * 3 * std::mem::size_of::<f64>());
+    for value in rows.iter().flatten() {
+        bytes.extend_from_slice(&value.to_ne_bytes());
+    }
+    let numpy = py.import("numpy")?;
+    numpy
+        .getattr("frombuffer")?
+        .call1((PyByteArray::new(py, &bytes), "=f8"))?
+        .call_method1("reshape", ((rows.len(), 3),))
+}
+
 fn quad_path_tail(
     proxy: &Bound<'_, BridgeMobject>,
     operation: impl FnOnce(&mut fmn_library::QuadPath) -> PyResult<()>,
@@ -2713,7 +2745,8 @@ impl BridgeMobject {
 
     /// Chisel's shared-anchor encoding for a corner polyline, installed
     /// into the current Stage entry with the normal schema/revision rules.
-    fn _set_points_as_corners(slf: &Bound<'_, Self>, anchors: Vec<[f64; 3]>) -> PyResult<()> {
+    fn _set_points_as_corners(slf: &Bound<'_, Self>, anchors: &Bound<'_, PyAny>) -> PyResult<()> {
+        let anchors = point_rows(anchors)?;
         crossing::record(CrossingClass::FieldWrite);
         let mut path = fmn_library::QuadPath::new();
         path.set_points_as_corners(&anchors).map_err(native_error)?;
@@ -2859,27 +2892,31 @@ impl BridgeMobject {
     }
 
     /// Append a sequence of native straight quadratic segments atomically.
-    fn _add_points_as_corners_points(
-        slf: &Bound<'_, Self>,
-        points: Vec<[f64; 3]>,
-    ) -> PyResult<Vec<[f64; 3]>> {
+    fn _add_points_as_corners_points<'py>(
+        slf: &Bound<'py, Self>,
+        points: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let points = point_rows(points)?;
         crossing::record(CrossingClass::Other);
-        quad_path_tail(slf, |path| {
+        let rows = quad_path_tail(slf, |path| {
             path.add_points_as_corners(&points)
                 .map(|_| ())
                 .map_err(native_error)
-        })
+        })?;
+        point_array(slf.py(), &rows)
     }
 
     /// Append a complete validated native subpath atomically.
-    fn _add_subpath_points(
-        slf: &Bound<'_, Self>,
-        points: Vec<[f64; 3]>,
-    ) -> PyResult<Vec<[f64; 3]>> {
+    fn _add_subpath_points<'py>(
+        slf: &Bound<'py, Self>,
+        points: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let points = point_rows(points)?;
         crossing::record(CrossingClass::Other);
-        quad_path_tail(slf, |path| {
+        let rows = quad_path_tail(slf, |path| {
             path.add_subpath(&points).map(|_| ()).map_err(native_error)
-        })
+        })?;
+        point_array(slf.py(), &rows)
     }
 
     /// Close only the current native subpath and return its appended rows.
