@@ -4881,11 +4881,11 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_structural_facts_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("structural_subjects", 25),
+            counter_eq("structural_subjects", 26),
         ],
         vec![LogExpect::span_present(
             "e2e.python.structural_facts",
-            vec![FieldPred::u64_eq("compared", 25)],
+            vec![FieldPred::u64_eq("compared", 26)],
         )],
     ));
     specs.push(spec(

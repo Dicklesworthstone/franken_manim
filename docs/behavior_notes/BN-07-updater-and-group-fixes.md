@@ -1,10 +1,10 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
 surface presents these semantics), and the Parity Ledger.
 
-Four Appendix-C rulings owned by the mobject surface. All are deliberate,
+The Appendix-C rulings owned by the mobject surface. All are deliberate,
 correct divergences from the pinned Reference (D-05); the
 API names and everything around them carry over exactly.
 
@@ -199,3 +199,44 @@ Locked by the C-19 and fm-qead assertions in
 
 **Migration:** scenes that relied on the defect to keep text or dots white
 while passing `color=` should drop the keyword.
+
+## C-20 — `make_number_changeable(value, index=k)` returns the number it installed
+
+The pinned Reference (`tex_mobject.py:249-273`) narrows `parts` to
+`[parts[index]]` when `replace_all` is false, splices that one
+`DecimalNumber` into the formula, and then returns `decimal_mobs[index]`
+from the one-element list. Any `index > 0` raises `IndexError`, after the
+formula has already been changed. `Tex("1 + 1").make_number_changeable("1",
+index=1)` leaves a `DecimalNumber` in the family and hands the caller an
+exception. Negative indices happen to work.
+
+**FrankenManim:** the call returns the `DecimalNumber` it installed at the
+`index`-th occurrence.
+
+Locked by `test_index_selects_the_matching_source_occurrence` in
+`crates/fmn-python/tests/live_tex.py`.
+
+**Migration:** none needed. Such calls could only have raised in the
+Reference.
+
+## C-21 — a changeable number reports the style it draws with
+
+The Reference styles the new number with `decimal_mob.match_style(part)`,
+where `part` is the temporary `VGroup` that `select_parts` built. The
+number's root takes that group's defaults: white, stroke width 4. Its digits
+take the glyphs' style through the recursive match. In
+`Tex("x = 1").set_color(RED)`, the number's digits render red while
+`number.get_color()` reports white and `get_stroke_width()` reports 4. Code
+that reads the number's color to style something else gets white.
+
+**FrankenManim:** the root takes the selected glyph's style, so
+`get_color()` reports the color the digits draw with, and the root's stroke
+width is the glyph's (0). The rendered digits are the same in both engines.
+After `set_value` the Reference restyles the root from its first glyph, so
+from then on the two engines agree.
+
+Locked by `test_preserves_live_scene_identity_and_style` in
+`crates/fmn-python/tests/live_tex.py` (`first.get_color() == RED`).
+
+**Migration:** none needed, unless a scene depended on reading white from a
+number inside a colored formula.

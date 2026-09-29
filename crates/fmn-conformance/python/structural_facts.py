@@ -89,6 +89,11 @@ CONSTRUCTIONS = (
     ("sphere", "Sphere()"),
     ("cone", "Cone()"),
     ("vcube", "VCube()"),
+    # fm-5wq.28 (corpus _2023/gauss_int/herschel.py RationalNumbers): live
+    # numbers at the Reference's family indices survive copy() as DecimalNumber.
+    ("tex_changeable_fraction_copy",
+     r'(t := Tex(r"1 \over 2"), t.make_number_changeable("1"), t.make_number_changeable("2"),'
+     r' c := t.copy(), c[0].set_value(3), c[2].set_value(7), c)[-1]'),
 )
 
 

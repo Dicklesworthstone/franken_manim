@@ -123,10 +123,10 @@ mod tests {
     #[test]
     fn embedded_portal_matches_the_reference_structure() {
         let report = super::run_portal_gauntlet_structural_facts().unwrap();
-        assert_eq!(report.compared, 25, "{}", report.summary);
+        assert_eq!(report.compared, 26, "{}", report.summary);
         assert_eq!(
             report.equal + report.equal_with_exclusions,
-            25,
+            26,
             "{}",
             report.summary
         );
