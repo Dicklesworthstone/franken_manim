@@ -228,6 +228,229 @@ class DecimalLifecycleTests(unittest.TestCase):
         self.assertEqual(len(first), 4)
         self.assertGreater(len(set(first)), 1)
 
+    def test_compatible_native_digit_slots_keep_identity_and_authored_attributes(self):
+        for bound in (False, True):
+            number = m.DecimalNumber(12, num_decimal_places=0, color=m.GREEN)
+            if bound:
+                scene = m.Scene().add(number)
+            digits = tuple(number.submobjects)
+            for i, digit in enumerate(digits):
+                digit.user_label = ('slot', i)
+            edge = number.get_left().copy()
+            for value in (21, 98, 11):
+                number.set_value(value)
+                self.assertEqual(tuple(number.submobjects), digits)
+                self.assertEqual(tuple(number._fmn_decimal_children), digits)
+                expected = m.DecimalNumber(value, num_decimal_places=0, color=m.GREEN)
+                expected.move_to(edge, m.LEFT)
+                for i, (actual, literal) in enumerate(zip(digits, expected.submobjects)):
+                    self.assertEqual(actual.user_label, ('slot', i))
+                    np.testing.assert_array_equal(actual.data, literal.data)
+
+    def test_same_record_count_keeps_live_numpy_views(self):
+        for bound in (False, True):
+            number = m.DecimalNumber(11, num_decimal_places=0)
+            if bound:
+                scene = m.Scene().add(number)
+            digit = number[0]
+            view = digit.get_points()
+            before = view.copy()
+            number.font_size *= 1.5
+            number.set_value(11)
+            self.assertIs(number[0], digit)
+            self.assertFalse(np.array_equal(view, before))
+            np.testing.assert_array_equal(view, digit.get_points())
+            view[:] += m.UP
+            np.testing.assert_array_equal(view, digit.get_points())
+
+    def test_changed_glyph_record_count_preserves_proxy_but_detaches_old_view(self):
+        number = m.DecimalNumber(12, num_decimal_places=0)
+        scene = m.Scene().add(number)
+        digit = number[0]
+        view = digit.get_points()
+        before = view.copy()
+        number.set_value(21)
+        self.assertIs(number[0], digit)
+        self.assertNotEqual(len(view), len(digit.data))
+        np.testing.assert_array_equal(view, before)
+        current = digit.get_points().copy()
+        view[:] += m.RIGHT
+        np.testing.assert_array_equal(digit.get_points(), current)
+
+    def test_growing_and_shrinking_rows_use_exact_replacement_not_padding(self):
+        number = m.DecimalNumber(12, num_decimal_places=0, group_with_commas=False)
+        scene = m.Scene().add(number)
+        for value in (1234, 1, 23, 0):
+            old = tuple(number.submobjects)
+            number.set_value(value)
+            self.assertEqual(len(number), len(str(value)))
+            self.assertFalse(any(child in number.submobjects for child in old))
+            self.assertEqual(tuple(number._fmn_decimal_children), tuple(number.submobjects))
+            self.assertEqual(len(number.family_members_with_points()), len(str(value)))
+
+    def test_native_complex_digits_ellipsis_and_units_retain_compatible_slots(self):
+        for start, end, options in (
+            (1+2j, 3+4j, {}), (1200, 3400, {'show_ellipsis': True}),
+            (12, 34, {'unit': 'Hz'}), (-12, -34, {'unit': '^V'}),
+        ):
+            number = m.DecimalNumber(start, num_decimal_places=0, **options)
+            old = tuple(number.submobjects)
+            edge = number.get_left().copy()
+            number.set_value(end)
+            literal = m.DecimalNumber(end, num_decimal_places=0, **options).move_to(edge, m.LEFT)
+            self.assertEqual(len(old), len(number))
+            for previous, actual, expected in zip(old, number.submobjects, literal.submobjects):
+                if not previous.submobjects:
+                    self.assertIs(actual, previous)
+                else:
+                    self.assertIsNot(actual, previous)  # Unit group metadata/topology owns replacement.
+                for a, b in zip(actual.get_family(), expected.get_family()):
+                    np.testing.assert_array_equal(a.data, b.data)
+
+    def test_decorated_background_slot_and_root_records_survive_recycling(self):
+        number = DecoratedNumber(12, num_decimal_places=0, include_background_rectangle=True)
+        scene = m.Scene().add(number)
+        previous = tuple(number._fmn_decimal_children)
+        background = number._fmn_decimal_background_child
+        points = number.get_points().copy()
+        number.set_submobjects_from_number(21)
+        self.assertIs(number._fmn_decimal_background_child, background)
+        self.assertEqual(tuple(number._fmn_decimal_children), previous)
+        self.assertIn(number.decoration, number.submobjects)
+        np.testing.assert_array_equal(number.data['mass'], 7)
+        np.testing.assert_array_equal(number.get_points(), points)
+        self.assertEqual(background.get_fill_color(), m.BLACK)
+
+    def test_generated_copies_recycle_their_own_digits_only(self):
+        source = DecoratedNumber(12, num_decimal_places=0)
+        originals = tuple(source._fmn_decimal_children)
+        source_points = [x.data.copy() for x in originals]
+        for clone in (source.copy(), copy.deepcopy(source), pickle.loads(pickle.dumps(source))):
+            digits = tuple(clone._fmn_decimal_children)
+            self.assertFalse(any(x in originals for x in digits))
+            clone.set_value(21)
+            self.assertEqual(tuple(clone._fmn_decimal_children), digits)
+            self.assertEqual(source.get_value(), 12)
+            for old, points in zip(originals, source_points):
+                np.testing.assert_array_equal(old.data, points)
+
+    def test_matrix_cell_digits_and_attached_updaters_remain_live(self):
+        matrix = m.DecimalMatrix([[12, 13]], num_decimal_places=0)
+        cell = matrix.get_entries()[0]
+        scene = m.Scene().add(matrix)
+        digit = cell[0]
+        calls = []
+        def tick(obj, dt):
+            calls.append(obj)
+        digit.add_updater(tick, call=False)
+        cell.set_value(21)
+        self.assertIs(cell[0], digit)
+        self.assertIn(tick, digit.updaters)
+        calls.clear()
+        scene.wait(.125)
+        self.assertTrue(calls)
+        self.assertTrue(all(obj is digit for obj in calls))
+
+    def test_failed_digit_writer_rolls_back_all_preceding_native_writes(self):
+        number = DecoratedNumber(12, num_decimal_places=0, include_background_rectangle=True)
+        scene = m.Scene().add(number)
+        members = tuple(number.get_family())
+        before = [member.data.copy() for member in members]
+        generated = tuple(number._fmn_decimal_children)
+        failure = RuntimeError('digit writer committed then failed')
+        digit = generated[-1]
+        original = digit.set_data
+        first = [True]
+        def fail_once(data):
+            original(data)
+            if first[0]:
+                first[0] = False
+                raise failure
+            return digit
+        digit.set_data = fail_once
+        with self.assertRaises(RuntimeError) as caught:
+            number.set_submobjects_from_number(21)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(number.get_value(), 12)
+        self.assertEqual(number.num_string, '12')
+        self.assertEqual(tuple(number.get_family()), members)
+        self.assertEqual(tuple(number._fmn_decimal_children), generated)
+        for member, data in zip(members, before):
+            np.testing.assert_array_equal(member.data, data)
+        number.set_value(21)
+        self.assertEqual(tuple(number._fmn_decimal_children), generated)
+
+    def test_failed_parent_splice_restores_recycled_digits_and_metadata(self):
+        number = m.DecimalNumber(12, num_decimal_places=0, include_background_rectangle=True)
+        scene = m.Scene().add(number)
+        members = tuple(number.get_family())
+        before = [member.data.copy() for member in members]
+        original, first = number.set_submobjects, [True]
+        failure = RuntimeError('parent splice committed then failed')
+        def fail_once(children):
+            result = original(children)
+            if first[0]:
+                first[0] = False
+                raise failure
+            return result
+        number.set_submobjects = fail_once
+        with self.assertRaises(RuntimeError) as caught:
+            number.set_value(21)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(number.get_value(), 12)
+        self.assertEqual(tuple(number.get_family()), members)
+        for member, data in zip(members, before):
+            np.testing.assert_array_equal(member.data, data)
+        number.set_value(21)
+        self.assertEqual(number.get_value(), 21)
+
+    def test_authored_text_glyphs_keep_their_source_metadata_replacement(self):
+        number = m.DecimalNumber(12, num_decimal_places=0, text_config={'font': 'IBM Plex Sans'})
+        old = tuple(number.submobjects)
+        number.set_value(21)
+        self.assertEqual([child.get_string() for child in number.submobjects], ['2', '1'])
+        self.assertTrue(all(isinstance(child, m.Text) for child in number.submobjects))
+        self.assertFalse(any(child in number.submobjects for child in old))
+        self.assertEqual([child.get_string() for child in old], ['1', '2'])
+
+    def test_removed_digit_reference_is_not_mutated_or_reinserted(self):
+        number = m.DecimalNumber(12, num_decimal_places=0)
+        removed, retained = number[0], number[1]
+        number.remove(removed)
+        before = removed.data.copy()
+        number.set_submobjects_from_number(21)
+        self.assertIsNot(number[0], removed)
+        self.assertIs(number[1], retained)
+        np.testing.assert_array_equal(removed.data, before)
+        self.assertEqual(len(number), 2)
+
+    def test_recycled_animation_keeps_digit_references_and_matches_native_literals(self):
+        def render(path, threads, animated):
+            scene = m.Scene()
+            with scene.render_session(path, format='png_sequence', resolution=(128, 72), fps=4, threads=threads):
+                number = m.DecimalNumber(10, num_decimal_places=0, color=m.BLUE).scale(2)
+                edge, digits = number.get_left().copy(), tuple(number.submobjects)
+                if animated:
+                    scene.add(number)
+                    seen = []
+                    number.add_updater(lambda obj: seen.append(tuple(obj.submobjects)) if obj is number else None, call=False)
+                    scene.play(m.ChangeDecimalToValue(number, 19), run_time=1, rate_func=m.linear)
+                    self.assertTrue(seen)
+                    self.assertTrue(all(row == digits for row in seen))
+                else:
+                    for value in (12, 14, 16, 19):
+                        literal = m.DecimalNumber(value, num_decimal_places=0, color=m.BLUE).scale(2)
+                        literal.move_to(edge, m.LEFT)
+                        scene.clear().add(literal)
+                        scene.wait(.25)
+            return [p.read_bytes() for p in sorted(path.glob('*.png'))]
+        root = Path(tempfile.mkdtemp(prefix='fmn-recycled-decimal-'))
+        control = render(root/'literal', 1, False)
+        self.assertEqual(len(control), 4)
+        self.assertGreater(len(set(control)), 1)
+        for threads in (1, 4, 16):
+            self.assertEqual(render(root/str(threads), threads, True), control)
+
 
 if __name__ in ('__main__', '<run_path>'):
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(DecimalLifecycleTests)

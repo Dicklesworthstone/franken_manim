@@ -275,8 +275,9 @@ def install_decimal_authoring(native):
             for child in scratch.submobjects:
                 child.set_style(**style)
         # All value/format/resource/typography validation and glyph styling
-        # finish before the first write to the live receiver. Replace the exact
-        # child list: become's family padding leaves stale glyphs after shrink.
+        # finish before the first write to the live receiver. Compatible native
+        # glyph slots retain their records; a changed family still uses exact
+        # replacement, never become's invisible padding after a shrink.
         publish(self, scratch, previous)
         self.number, self.num_string = number, text
         self._complex_imag_mode = len(parts) == 1 and parts[0][2]
@@ -290,26 +291,79 @@ def install_decimal_authoring(native):
             if name != "point" and name in destination.dtype.names:
                 destination[name][:] = source[name]
 
+    def recycle_plan(self, previous, children, background):
+        # Reuse native glyph slots only when the displayed row has the same
+        # cardinality. Native unit groups and authored Text/custom glyphs keep
+        # their existing replacement path: their internal source metadata and
+        # family topology cannot be updated by copying a plain glyph record.
+        if (len(previous) != len(children)
+                or (getattr(self, "_fmn_decimal_background_child", None) is not None) != (background is not None)):
+            return []
+        attached = {id(child) for child in self.submobjects}
+        seen, plan = set(), []
+        for index, (old, new) in enumerate(zip(previous, children)):
+            if id(old) in seen:
+                return []  # A shared slot cannot receive two different digits.
+            seen.add(id(old))
+            if (id(old) in attached and type(old) is VMobject and type(new) is VMobject
+                    and not old.submobjects and not new.submobjects
+                    and old.data.dtype == new.data.dtype):
+                # Materialize both sides before any live writes. Public record
+                # writers preserve native handles and same-size NumPy views;
+                # unlike become, they do not adopt a scratch glyph into Scene.
+                plan.append((index, old, new.data.copy(), new.uniforms.copy(),
+                             old.data.copy(), old.uniforms.copy()))
+        return plan
+
     def publish(self, candidate, previous):
         claimed = {id(child) for child in previous}
-        retained = [child for child in self.submobjects if id(child) not in claimed]
+        old_children = list(self.submobjects)
+        retained = [child for child in old_children if id(child) not in claimed]
         children = list(candidate.submobjects)
         root_owned = getattr(self, "_fmn_decimal_root_generated", bool(self.has_points()))
         background = None
-        if candidate.has_points():
-            if root_owned or not self.has_points():
+        if candidate.has_points() and not root_owned and self.has_points():
+            # An authored root can coexist with a generated background.
+            background = VMobject()
+            copy_root(background, candidate)
+            children.insert(0, background)
+        plan = recycle_plan(self, previous, children, background)
+        root_changes = (candidate.has_points() and background is None) or root_owned
+        root_before = self.data.copy() if root_changes else None
+        attempted, family_attempted = [], False
+        try:
+            if candidate.has_points() and background is None:
                 copy_root(self, candidate)
                 root_owned = True
-            else:
-                # A subclass may draw on its own root in init_points. Keep it:
-                # only this decorated case needs a separate background child.
-                background = VMobject()
-                copy_root(background, candidate)
-                children.insert(0, background)
-        elif root_owned:
-            self.clear_points()
-            root_owned = False
-        self.set_submobjects([*retained, *children])
+            elif not candidate.has_points() and root_owned:
+                self.clear_points()
+                root_owned = False
+            for index, old, data, uniforms, old_data, old_uniforms in plan:
+                attempted.append((old, old_data, old_uniforms))
+                old.set_data(data)
+                old.set_uniforms(uniforms)
+                if children[index] is background:
+                    background = old
+                children[index] = old
+            family_attempted = True
+            self.set_submobjects([*retained, *children])
+        except BaseException as error:
+            # Include a failing authored writer: it may raise after committing
+            # its native write. Restore ordinary record/family state through
+            # the same public protocols, preserving the original exception.
+            def restore(operation, value):
+                try:
+                    operation(value)
+                except BaseException as cleanup:
+                    BaseException.add_note(error, "decimal publication rollback also failed: " + type(cleanup).__name__)
+            for old, data, uniforms in reversed(attempted):
+                restore(old.set_data, data)
+                restore(old.set_uniforms, uniforms)
+            if root_before is not None:
+                restore(self.set_data, root_before)
+            if family_attempted:
+                restore(self.set_submobjects, old_children)
+            raise
         # The shared copier remaps FamilyRefs to the copy's own members; plain
         # Python containers intentionally retain shallow-copy semantics.
         self._fmn_decimal_children = FamilyRefs(children)
