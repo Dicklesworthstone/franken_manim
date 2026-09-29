@@ -74,7 +74,12 @@ class LiveEquations(m.Scene):
         self.values = first, second, third
         assert all(isinstance(value, m.DecimalNumber) for value in self.values)
         assert first.get_color() == m.RED and second.get_color() == m.RED
-        assert self.formula[0] is wrapper and list(wrapper[0]) == parts
+        # The authored nested wrapper survives. Each number's glyph run is
+        # replaced in place by its DecimalNumber, as the Reference's
+        # make_number_changeable does, now inside the wrapper: modern Tex is a
+        # flat glyph family since f3555bf9 (y, =, 1.00, x, +, 2.00).
+        assert self.formula[0] is wrapper
+        assert list(wrapper[0]) == [parts[0], parts[1], first, parts[6], parts[7], second]
         assert self.matrix.get_mob_matrix()[0][0] is entry
         self.wait(1 / 8)
         self.play(*(m.ChangeDecimalToValue(value, target) for value, target in
