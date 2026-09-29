@@ -370,6 +370,31 @@ def _identity_family(owner, children):
 _class_namespace = type.__dict__["__dict__"].__get__
 
 
+def _refuse_detached_cycle(owner, candidate, current):
+    """Raise if a child newly placed under `owner` already contains `owner`.
+
+    Only the added children's families are walked, so a batch of leaves costs
+    one check each; children already present were checked when they came.
+    """
+    present = {id(child) for child in current}
+    stack = [child for child in candidate
+             if id(child) not in present and isinstance(child, _BridgeMobject)]
+    seen = set()
+    while stack:
+        mobject = stack.pop()
+        if mobject is owner:
+            raise _FamilyCycleError("attachment would create a cycle in the family graph")
+        if id(mobject) in seen:
+            continue
+        seen.add(id(mobject))
+        # An uninitialized mobject has no child list yet; Marionette refuses
+        # it with its own error when the commit reaches it.
+        children = getattr(mobject, "submobjects", None)
+        if children is not None:
+            stack.extend(child for child in list(children)
+                         if isinstance(child, _BridgeMobject))
+
+
 class _LiveSubmobjects(list):
     """A list whose accepted mutations are mirrored into Marionette."""
 
@@ -382,6 +407,12 @@ class _LiveSubmobjects(list):
         owner = self._owner_ref()
         if owner is None:
             raise ReferenceError("the owning Mobject has been collected")
+        if not owner._is_bound():
+            # Marionette validates a bound graph. A detached one lives only in
+            # these live lists until Scene.add binds it, so refuse a cycle
+            # here, before it forms: note_changed_family's walk up the
+            # parents would never end (fm-5wq.41).
+            _refuse_detached_cycle(owner, candidate, self)
         owner._replace_submobjects(candidate)
         self._replace_projection(candidate)
 

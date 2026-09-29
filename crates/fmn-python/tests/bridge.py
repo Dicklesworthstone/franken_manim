@@ -923,6 +923,46 @@ try:
 finally:
     family_add_live._commit = family_add_commit
 
+# fm-5wq.41: a cycle on a detached graph (no Scene yet) is refused before it
+# forms, as on a bound graph; it used to hang in note_changed_family.
+cycle_leaf = Mobject()
+cycle_mid = manimlib.Group(cycle_leaf)
+cycle_top = manimlib.Group(cycle_mid)
+for cycle_child, cycle_ancestor in ((cycle_leaf, cycle_mid), (cycle_leaf, cycle_top)):
+    try:
+        cycle_child.add(cycle_ancestor)
+    except bridge_errors.FamilyCycleError as error:
+        assert "cycle" in str(error), error
+    else:
+        raise AssertionError("Mobject.add accepted a detached family cycle")
+    assert cycle_child.submobjects == []
+cycle_prefix = Mobject()
+try:
+    cycle_leaf.add(cycle_prefix, cycle_top)
+except bridge_errors.FamilyCycleError:
+    pass
+else:
+    raise AssertionError("Mobject.add accepted a detached family cycle")
+assert cycle_leaf.submobjects == [cycle_prefix]
+assert cycle_top.parents == [] and cycle_mid.parents == [cycle_top]
+
+
+# The cycle check never replaces Marionette's own refusal of an
+# uninitialized child (no child list yet), nor its prefix.
+class CycleUninitialized(Mobject):
+    def __init__(self):
+        pass
+
+
+cycle_owner = Mobject()
+try:
+    cycle_owner.add(Mobject(), CycleUninitialized())
+except Exception as error:
+    assert type(error).__name__ == "ForeignStageError", error
+else:
+    raise AssertionError("Mobject.add accepted an uninitialized mobject")
+assert len(cycle_owner.submobjects) == 1
+
 # set_submobjects is Reference clear-then-add, including identity dedup and
 # its observable prefix on a later failure.
 assert family_add_root.set_submobjects(
