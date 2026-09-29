@@ -108,6 +108,85 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertIn("| ratio p90 counting 2 portal timeouts at their lower bounds |"
                       " not determinable (a timeout bound reaches it) |", text)
 
+    def test_frame_grid_mode_runs_the_reference_through_the_replacement_program(self):
+        args = type("Args", (), {"reference_python": "py", "videos": pathlib.Path("/v"),
+                                 "reference_frame_grid": False})()
+        plain = csr.reference_argv(args, "m.py", "A", pathlib.Path("/t"))
+        self.assertEqual(plain[:3], ["py", "-m", "manimlib"])
+        args.reference_frame_grid = True
+        grid = csr.reference_argv(args, "m.py", "A", pathlib.Path("/t"))
+        self.assertEqual(grid[:3], ["py", "-c", csr.REFERENCE_FRAME_GRID])
+        # Everything after the entry point is the same Reference command line.
+        self.assertEqual(grid[3:], plain[3:])
+        self.assertNotEqual(csr.FRAME_GRID_MODE, csr.SKIP_MODE)
+        self.assertIn("mode", csr.IDENTITY)
+        runs = [run("m.py", "A", "portal", 0, 2.0), run("m.py", "A", "reference", 0, 1.0)]
+        for mode, note in ((csr.FRAME_GRID_MODE, "same updater work"),
+                           (csr.SKIP_MODE, "one step per skipped segment")):
+            with tempfile.TemporaryDirectory() as tmp:
+                out = pathlib.Path(tmp)
+                (out / "header.json").write_text(__import__("json").dumps({"mode": mode}))
+                (out / "runs.ndjson").write_text("\n".join(
+                    __import__("json").dumps(r) for r in runs) + "\n")
+                csr.write_dashboard(out, out / "dash.md")
+                text = (out / "dash.md").read_text()
+            self.assertIn(note, text)
+            self.assertIn(f"| mode | {mode} |", text)
+
+    def test_frame_grid_program_steps_skipped_segments_like_playback(self):
+        # Run the program exactly as the producer does (python -c), over
+        # stand-in Reference modules with its skip behavior (scene.py:467,
+        # :567). The stand-in entry point reports what the program installed.
+        import json
+        import subprocess
+        stand_ins = {
+            "manimlib/__init__.py": "",
+            "manimlib/scene/__init__.py": "",
+            "manimlib/scene/scene.py": (
+                "class Scene:\n"
+                "    skip_animations, fps = True, 4\n"
+                "    def get_time_progression(self, run_time, n_iterations=None, desc='',\n"
+                "                             override_skip_animations=False):\n"
+                "        if self.skip_animations and not override_skip_animations:\n"
+                "            return [run_time]\n"
+                "        return [(i + 1) / self.fps for i in range(int(run_time * self.fps))]\n"
+                "    def finish_animations(self, animations):\n"
+                "        for animation in animations:\n"
+                "            animation.finish()\n"
+                "        self.update_mobjects(self.get_time_progression(1.0)[-1])\n"
+                "    def update_mobjects(self, dt):\n"
+                "        self.calls.append(['update_mobjects', dt])\n"),
+            "manimlib/__main__.py": (
+                "import json, sys\n"
+                "from manimlib.scene.scene import Scene\n"
+                "class Animation:\n"
+                "    def __init__(self, calls): self.calls = calls\n"
+                "    def finish(self): self.calls.append('finish')\n"
+                "    def clean_up_from_scene(self, scene): self.calls.append('clean_up')\n"
+                "def main():\n"
+                "    scene = Scene()\n"
+                "    scene.calls = []\n"
+                "    grid = scene.get_time_progression(1.0)\n"
+                "    scene.finish_animations([Animation(scene.calls)])\n"
+                "    print(json.dumps({'argv': sys.argv, 'grid': grid, 'finish': scene.calls}))\n"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for relative, text in stand_ins.items():
+                path = pathlib.Path(tmp) / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            proc = subprocess.run([sys.executable, "-c", csr.REFERENCE_FRAME_GRID, "/v/m.py", "A", "-s"],
+                                  env={"PYTHONPATH": tmp, "PATH": "/usr/bin:/bin"},
+                                  capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        try:
+            report = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            self.fail(f"the stand-in entry point printed no report: {proc.stdout!r} {proc.stderr!r}")
+        self.assertEqual(report["argv"], ["manimlib", "/v/m.py", "A", "-s"])
+        self.assertEqual(report["grid"], [0.25, 0.5, 0.75, 1.0])
+        self.assertEqual(report["finish"], ["finish", "clean_up", ["update_mobjects", 0]])
+
     def test_a_later_failure_keeps_the_pairs_and_stays_visible(self):
         runs = [run("m.py", "A", "portal", 0, 2.0), run("m.py", "A", "reference", 0, 1.0),
                 run("m.py", "A", "portal", 1, 300.0, None)]
