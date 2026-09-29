@@ -129,12 +129,16 @@ impl BundleCapture {
                     "depth, raster primitives, lighting or clip planes require a camera-bearing bundle",
                 ));
             }
+            // Test world z: positional operations compose into the entry's
+            // object-to-world placement, so a shift(OUT) leaves the stored
+            // record points planar while the drawn geometry is not.
+            let placement = entry.placement();
             if let Some(points) = entry.buffer.read_column("point")
                 && points
                     .as_chunks::<3>()
                     .0
                     .iter()
-                    .any(|point| point[2] != 0.0)
+                    .any(|point| placement.apply_point(point.map(f64::from))[2] != 0.0)
             {
                 return Err(capability(
                     "nonplanar geometry requires a camera-bearing bundle",
@@ -267,11 +271,17 @@ fn begin_bundle(
         1, // The unused Studio history is empty; only recorder limits apply.
         1,
     )?;
+    // The capture camera's frame was resized to the export's pixel aspect, but
+    // the Scene's CameraFrame keeps its configured shape. A planar bundle
+    // refuses any departure from that default; comparing against the resized
+    // frame instead refused every export whose aspect is not 16:9.
+    let mut expected_camera = capture.camera.clone();
+    *expected_camera.frame_mut() = CameraConfig::default().frame;
     capture.bundle = Some(BundleCapture {
         recorder,
         destination,
         max_output_bytes,
-        expected_camera: capture.camera.clone(),
+        expected_camera,
         camera_track,
         active: None,
         failure: None,
@@ -446,7 +456,16 @@ fn _portal_finish_bundle(
         .prepare()
         .map_err(native_error)?
         .commit_new()
-        .map_err(native_error)?;
+        .map_err(|error| match &error {
+            // Losing the create-only race is the same condition begin_bundle
+            // reports for an occupied destination.
+            fmn_platform::fs::FsError::Io { err, .. }
+                if err.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                pyo3::exceptions::PyFileExistsError::new_err(error.to_string())
+            }
+            _ => native_error(error),
+        })?;
     Ok(result)
 }
 

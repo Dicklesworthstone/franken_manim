@@ -102,9 +102,9 @@ with tempfile.TemporaryDirectory(prefix="fmn-python-fmtl-") as temporary:
         raise AssertionError("swallowed capture failure published a partial bundle")
     assert not path.exists()
 
-    for change in (lambda scene: scene.camera.frame.shift(m.RIGHT),
-                   lambda scene: scene.add(m.Square().shift(m.OUT)),
-                   lambda scene: scene.add_sound("not-decoded-for-fmtl.wav")):
+    for name, change in (("camera shift", lambda scene: scene.camera.frame.shift(m.RIGHT)),
+                         ("depth", lambda scene: scene.add(m.Square().shift(m.OUT))),
+                         ("audio", lambda scene: scene.add_sound("not-decoded-for-fmtl.wav"))):
         path = root / "unsupported.fmtl"
         try:
             with BundleExportSession(m.Scene(), path, resolution=(96, 54), fps=24) as session:
@@ -112,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-python-fmtl-") as temporary:
         except (m._CapabilityError, RuntimeError):
             pass
         else:
-            raise AssertionError("unrepresentable side channel was dropped")
+            raise AssertionError(f"unrepresentable side channel was dropped: {name}")
         assert not path.exists()
 
     protected = root / "protected.fmtl"
@@ -131,7 +131,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-python-fmtl-") as temporary:
         with BundleExportSession(m.Scene(), raced) as session:
             session.scene.add(m.Square())
             raced.write_bytes(b"concurrent winner")
-    except RuntimeError:
+    except FileExistsError:
         pass
     else:
         raise AssertionError("publication race overwrote another writer")

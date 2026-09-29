@@ -148,7 +148,7 @@ def native_acceptance(replay_frames, png_pixels):
         with BundleExportSession(m.Scene(), raced, camera=True) as session:
             session.scene.add(m.Cube())
             raced.write_bytes(b"concurrent winner")
-    except RuntimeError:
+    except FileExistsError:
         pass
     else:
         raise AssertionError("camera export won an occupied destination")

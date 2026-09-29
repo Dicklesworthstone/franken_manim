@@ -10434,9 +10434,13 @@ curved_double = geometry.CurvedDoubleArrow(
 )
 assert curved_double.submobjects == [curved_double.tip, curved_double.start_tip]
 assert all(tip.has_points() for tip in curved_double.submobjects)
+# Fitting the shaft to the start tip moves the already attached end tip (the
+# Reference's order, a2c9c31c). It then lands on the endpoint only to within
+# the f32 records: one f32 ulp at magnitude 2 is 2.4e-7. Measured on
+# 2026-09-28: the pinned Reference 1.14e-7, the portal 1.48e-8.
 assert np.min(
     np.linalg.norm(curved_double.tip.get_points() - [2.0, 0.0, 0.0], axis=1)
-) < 1e-9
+) < 2.4e-7
 assert np.min(
     np.linalg.norm(curved_double.start_tip.get_points() - [-2.0, 0.0, 0.0], axis=1)
 ) < 1e-9
@@ -11396,9 +11400,11 @@ assert vectorized.VectorizedPoint.__mro__[:4] == (
     VMobject,
     Mobject,
 )
-assert vectorized.CurvesAsSubmobjects.__mro__[:3] == (
+# The Reference's VGroup is VGroup(Group, VMobject) (d0b424f5 restored it).
+assert vectorized.CurvesAsSubmobjects.__mro__[:4] == (
     vectorized.CurvesAsSubmobjects,
     manimlib.VGroup,
+    manimlib.Group,
     VMobject,
 )
 assert list(inspect.signature(vectorized.VectorizedPoint).parameters) == [
