@@ -12,11 +12,15 @@ permissions:
   contents: write
 concurrency:
   group: native-fmtl-rate-validation
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   native-render:
     if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 55
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
@@ -146,7 +150,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: fmtl-rate-validation-${{ github.run_id }}
+          name: fmtl-rate-validation-${{ github.run_id }}-${{ runner.arch }}
           path: ${{ runner.temp }}/fmtl-rate-validation
           retention-days: 7
           if-no-files-found: error
