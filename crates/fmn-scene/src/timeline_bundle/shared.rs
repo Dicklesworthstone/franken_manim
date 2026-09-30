@@ -23,7 +23,9 @@ enum Source {
         begin: Arc<[u8]>,
         end: Arc<[u8]>,
         path: PathFunc,
-        rate_tag: u8,
+        // Already resolved and validated by the wire reader. Re-identifying
+        // this callable by address can fail across codegen units (fm-34mh).
+        rate: RateFunc,
     },
     Recorded(Arc<[u8]>),
 }
@@ -97,17 +99,12 @@ impl TimelineBundle {
                     end,
                     path,
                     rate,
-                } => {
-                    let rate_tag = fmn_anim::rate_tag(&rate).ok_or(
-                        BundleReadError::PlanInconsistent("shared pure rate is not in the catalog"),
-                    )?;
-                    Segment::Pure(Arc::new(Source::Pure {
-                        begin: freeze(*begin, &mut snapshot_bytes)?,
-                        end: freeze(*end, &mut snapshot_bytes)?,
-                        path,
-                        rate_tag,
-                    }))
-                }
+                } => Segment::Pure(Arc::new(Source::Pure {
+                    begin: freeze(*begin, &mut snapshot_bytes)?,
+                    end: freeze(*end, &mut snapshot_bytes)?,
+                    path,
+                    rate,
+                })),
                 SegmentData::Stateful { frames } => {
                     let mut shared = Vec::new();
                     shared.try_reserve_exact(frames.len()).map_err(|_| {
@@ -337,7 +334,7 @@ impl TimelineFrameCache {
                 begin,
                 end,
                 path,
-                rate_tag,
+                rate,
             } => {
                 if self
                     .pure
@@ -351,14 +348,12 @@ impl TimelineFrameCache {
                     let end = Snapshot::from_bytes(end, &binding)
                         .map_err(BundleReadError::Snapshot)?
                         .snapshot;
-                    let rate = fmn_anim::rate_from_tag(*rate_tag)
-                        .ok_or(BundleReadError::PlanInconsistent("shared pure rate tag"))?;
                     self.pure = Some(DecodedPure {
                         key: Arc::clone(&job.source),
                         begin,
                         end,
                         path: *path,
-                        rate,
+                        rate: rate.clone(),
                     });
                     self.decoded_snapshots = self.decoded_snapshots.saturating_add(2);
                 }

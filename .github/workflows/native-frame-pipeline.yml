@@ -62,6 +62,7 @@ jobs:
         run: |
           cargo test --locked -p fmn-scene --lib timeline_bundle
           cargo test --locked -p fmn-scene --test shared_bundle
+          cargo test --locked -p fmn-scene --test shared_rate_catalog
       - name: Runtime bounds, ordering, cancellation and barriers
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-runtime --lib
