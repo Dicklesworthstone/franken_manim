@@ -972,6 +972,31 @@ class TimingContract(_timing_unittest.TestCase):
                     self.assertAlmostEqual(second, expected, places=6)
 
 
+def _check_interpolate_record_view_reads():
+    # fm-5wq.31: mobject_interpolate builds each `.data` view once per call
+    # under the shipped straight_path, and rebuilds them after an authored
+    # path_func, which may replace the records it was handed.
+    data_property = Mobject.__dict__["data"]
+    reads = []
+    Mobject.data = property(lambda self: (reads.append(self), data_property.fget(self))[1])
+    try:
+        square, start, end = Square(), Square(), Square().shift(np.array([1., 0., 0.]))
+        square.interpolate(start, end, .25)  # first-call work is not the steady state
+        counts = {}
+        for label, path_func in (("default", None), ("authored", lambda a, b, t: (1 - t) * a + t * b)):
+            reads.clear()
+            square.interpolate(start, end, .5, path_func=path_func)
+            counts[label] = len(reads)
+    finally:
+        Mobject.data = data_property
+    pointlike = len(square.pointlike_data_keys)
+    assert counts == {"default": 3, "authored": 3 + 3 * pointlike}, counts
+    np.testing.assert_allclose(square.get_points(), (start.get_points() + end.get_points()) / 2, atol=1e-6)
+
+
+_check_interpolate_record_view_reads()
+
+
 _timing_result = _timing_unittest.TextTestRunner(verbosity=2).run(
     _timing_unittest.defaultTestLoader.loadTestsFromTestCase(TimingContract)
 )

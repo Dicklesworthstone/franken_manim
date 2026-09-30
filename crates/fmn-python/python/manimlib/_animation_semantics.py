@@ -25,6 +25,9 @@ def install(native, subsystems=True):
     FadeTransformPieces = g["FadeTransformPieces"]
     original_transform_init = Transform.__init__
     original_requires_python = g["_requires_python_animation"]
+    # Captured before any authored code runs: a later reassignment of
+    # g["straight_path"] is authored and keeps the per-call view re-read.
+    shipped_straight_path = g.get("straight_path")
 
     def uses_python_path(animation):
         path = getattr(animation, "path_func", None)
@@ -128,7 +131,8 @@ def install(native, subsystems=True):
         # (the Reference's is a plain attribute), so read each once per call
         # (fm-5wq.31: ~23 view constructions per call was 30% of a large
         # Transform). Only an authored path_func could replace the records
-        # mid-loop; the views are re-read after each call to one.
+        # mid-loop; the views are re-read after each call to one, but not
+        # after the shipped straight_path, which is NumPy arithmetic.
         data = self.data
         start_data, end_data = mobject1.data, mobject2.data
         data_keys = [
@@ -149,7 +153,8 @@ def install(native, subsystems=True):
                 end = end[0]
             if key in pointlike:
                 value = path_func(start, end, alpha)
-                data, start_data, end_data = self.data, mobject1.data, mobject2.data
+                if path_func is not shipped_straight_path:
+                    data, start_data, end_data = self.data, mobject1.data, mobject2.data
             else:
                 value = interpolate_value(start, end, alpha)
             data[key][:] = value
