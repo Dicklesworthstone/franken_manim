@@ -11254,6 +11254,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(crossing::_crossing_stats_reset, module)?)?;
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_stats, module)?)?;
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_reset, module)?)?;
+    module.add_function(wrap_pyfunction!(method_cache::_type_version_tags, module)?)?;
     module.add_function(wrap_pyfunction!(report::_crossing_report, module)?)?;
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_directories, module)?)?;

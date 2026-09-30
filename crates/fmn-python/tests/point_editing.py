@@ -72,6 +72,74 @@ class PointEditingTests(unittest.TestCase):
         other_layout = m.Sphere(resolution=(4, 4)).data.dtype
         self.assertNotEqual(other_layout, first.data.dtype)
 
+    def test_override_checks_follow_class_edits_between_calls(self):
+        # fm-xte3: rotate's authored-mapping check keeps each class's verdict
+        # while CPython's version tags of the class and metaclass hold. Every
+        # edit below must be seen, and the cached answer must always equal the
+        # uncached one.
+        from fmn_python import movement
+        cells = dict(zip(m.Mobject.rotate.__code__.co_freevars,
+                         (cell.cell_contents for cell in m.Mobject.rotate.__closure__)))
+        mapping = cells["rotation_mapping"]
+        self.assertIsNotNone(mapping.tags)
+
+        def agrees(obj):
+            cached = movement._changed(obj, mapping)
+            self.assertIs(cached, movement._changed_uncached(obj, mapping, None))
+            return cached
+
+        class Local(m.Square):
+            pass
+        square = Local()
+        self.assertIs(agrees(square), False)
+        self.assertIn(Local, mapping.verdicts)  # the cache is live, not bypassed
+        self.assertIs(agrees(square), False)
+        calls = []
+        shipped = m.Mobject.apply_points_function
+
+        def authored(self, *args, **kwargs):
+            calls.append(self)
+            return shipped(self, *args, **kwargs)
+        m.Square.apply_points_function = authored  # a base of Local
+        try:
+            self.assertIs(agrees(square), True)
+            square.rotate(.1)
+            self.assertEqual(calls, [square])
+        finally:
+            del m.Square.apply_points_function
+        self.assertIs(agrees(square), False)
+        Local.get_family = lambda self, recurse=True: m.Square.get_family(self, recurse)
+        self.assertIs(agrees(square), True)
+        del Local.get_family
+        self.assertIs(agrees(square), False)
+
+        class Other(m.Square):
+            def apply_points_function(self, *args, **kwargs):
+                return shipped(self, *args, **kwargs)
+        Local.__bases__ = (Other,)
+        self.assertIs(agrees(square), True)
+        Local.__bases__ = (m.Square,)
+        self.assertIs(agrees(square), False)
+        square.get_family = lambda recurse=True: [square]
+        self.assertIs(agrees(square), True)
+        del square.get_family
+        self.assertIs(agrees(square), False)
+
+        class Meta(type):
+            pass
+
+        class Metered(m.Square, metaclass=Meta):
+            pass
+        metered = Metered()
+        self.assertIs(agrees(metered), False)
+        # A heap metaclass could be swapped by __class__ assignment without
+        # changing any tag, so such classes are decided every call.
+        self.assertNotIn(Metered, mapping.verdicts)
+        before = mapping.tags(Metered)
+        Meta.marker = 1
+        self.assertNotEqual(mapping.tags(Metered)[1], before[1])
+        self.assertIs(agrees(metered), False)
+
     def test_first_append_uses_retained_style_defaults(self):
         mob = m.Square(fill_color=m.RED, fill_opacity=.25, stroke_width=7)
         saved = mob.data[0].copy()
@@ -215,7 +283,7 @@ class PointEditingTests(unittest.TestCase):
 
 
 _suite = unittest.defaultTestLoader.loadTestsFromTestCase(PointEditingTests)
-assert _suite.countTestCases() == 11, "native point-editing inventory changed"
+assert _suite.countTestCases() == 12, "native point-editing inventory changed"
 _result = unittest.TextTestRunner(verbosity=2).run(_suite)
 gc.collect()
 if not _result.wasSuccessful():

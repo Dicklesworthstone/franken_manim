@@ -369,6 +369,9 @@ def _protocols(g, root, names):
     instead of once per (class, name, MRO entry): 58,964 getattr_static
     calls at import became none. Nothing is kept across calls, since
     installers change classes between them.
+
+    The table also carries the memo-less _changed cache (see _ProtocolTable),
+    so it must not change once a check has run on it.
     """
     classes = {base for cls in tuple(g.values())
                if isinstance(cls, type) and issubclass(cls, root)
@@ -386,7 +389,8 @@ def _protocols(g, root, names):
             defined[entry] = found
         return found
 
-    table = {}
+    table = _ProtocolTable()
+    table.tags, table.verdicts = g.get("_type_version_tags"), {}
     for cls in classes:
         row = {}
         for entry in _class_mro(cls):
@@ -516,7 +520,61 @@ def _changed(obj, protocols, memo=None):
             if verdict is None:
                 verdict = memo[key] = _changed_uncached(obj, protocols, memo)
             return verdict
+    elif type(protocols) is _ProtocolTable and protocols.tags is not None:
+        return _changed_across_calls(obj, protocols)
     return _changed_uncached(obj, protocols, memo)
+
+
+class _ProtocolTable(dict):
+    """A _protocols table with its own cache of memo-less _changed verdicts.
+
+    fm-xte3: memo-less checks (Mobject.rotate, DecimalNumber updates, per-play
+    admission) run inside authored code, so no per-scan memo applies, and
+    each re-derived its static lookups over the whole MRO: 93 of rotate's
+    151 us. `verdicts` keeps a class's verdict with CPython's version tags of
+    the class and its metaclass (`tags`, the ratified method-cache read,
+    ADR-0015 Amendment 1): any mutation of either MRO changes a tag or zeroes
+    it, and a zero tag never caches. The cache lives on the table, which the
+    installer closures own, so it never outlives the module that built it.
+    """
+    __slots__ = ("tags", "verdicts")
+
+
+def _changed_across_calls(obj, protocols):
+    """_changed(obj, protocols) without a memo, exactly.
+
+    As in the per-scan path, an object whose own __dict__ holds none of the
+    looked-up names has its class's verdict; one that holds any is decided
+    alone. Only classes whose whole MRO has metaclass `type` are cached: tags
+    cover edits to a class, its bases, and `__bases__`, but not `__class__`
+    assignment on a base, which only a base with a heap metaclass allows. A
+    class passed as `obj` is never cached. Nothing here runs authored code:
+    tags are read, never forced.
+    """
+    cls = type(obj)
+    tags = protocols.tags(cls)
+    entry = protocols.verdicts.get(cls)
+    if entry is None or entry[0] != tags or not (tags[0] and tags[1]):
+        entry = None
+        names = tuple({name for baseline in protocols.values() for name in baseline})
+        plain = _plain_instance_dict(cls)
+    else:
+        names, plain = entry[1], entry[2]
+    own = None
+    if plain:
+        try:
+            own = object.__getattribute__(obj, "__dict__")
+        except AttributeError:
+            own = None
+    if own is not None and (type(own) is not dict or not dict.keys(own).isdisjoint(names)):
+        return _changed_uncached(obj, protocols, None)
+    if entry is not None:
+        return entry[3]
+    verdict = _changed_uncached(obj, protocols, None)
+    if (tags[0] and tags[1] and _plain_mro(cls) is not None
+            and type not in _class_mro(cls)):
+        protocols.verdicts[cls] = (tags, names, plain, verdict)
+    return verdict
 
 
 def _changed_uncached(obj, protocols, memo):

@@ -232,6 +232,17 @@ pub(crate) fn _method_cache_reset() {
     reset_stats();
 }
 
+/// `(tag(cls), tag(type(cls)))`, the same ratified read the method cache
+/// uses. A class's tag changes (or reads `0`) after any mutation of it or of
+/// a base; the metaclass's tag covers the metaclass MRO. The Python
+/// authored-override checks key their per-class verdicts on this pair
+/// (fm-xte3): a verdict is reused only while both tags are unchanged and
+/// nonzero.
+#[pyfunction]
+pub(crate) fn _type_version_tags(cls: &Bound<'_, PyType>) -> (u32, u32) {
+    (type_version_tag(cls), type_version_tag(&cls.get_type()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
