@@ -4,7 +4,8 @@
 //! routine must either refuse with a typed `BooleanMobjectError` or
 //! produce a `BooleanBuild` — never panic, never hang. The admitted
 //! routes (Plan §7.4: separated-control-hulls + transversal-interiors)
-//! are the target; forced-fallback differential is also asserted.
+//! are the target. Only totality is asserted: the results are discarded,
+//! with no differential against the forced-fallback route.
 //!
 //! The input bytes are split into two point lists; each list seeds a
 //! minimal `QuadPath` via the typed `from_points` builder. The boolean

@@ -24,7 +24,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SECONDS="${FMN_FUZZ_SECONDS:-60}"
+# Not SECONDS: bash counts that variable up from any value assigned to it,
+# so every later "(Ns)" progress line reported a growing budget.
+BUDGET_SECONDS="${FMN_FUZZ_SECONDS:-60}"
 TIMEOUT="${FMN_FUZZ_TIMEOUT:-25}"
 RSS_MB="${FMN_FUZZ_RSS_MB:-2048}"
 FALLBACK_TARGET_DIR="${FMN_FUZZ_TARGET_DIR:-fuzz/target}"
@@ -33,7 +35,7 @@ TARGETS=(inflate_bytes decode_png decode_jpeg decode_entry_envelope namespace_an
 mkdir -p fuzz/artifacts
 
 run_flags=(
-    "-max_total_time=${SECONDS}"
+    "-max_total_time=${BUDGET_SECONDS}"
     "-timeout=${TIMEOUT}"
     "-rss_limit_mb=${RSS_MB}"
     "-artifact_prefix=fuzz/artifacts/"
@@ -46,7 +48,7 @@ if cargo fuzz --version >/dev/null 2>&1; then
     # Primary path: cargo-fuzz builds with sanitizer-coverage
     # instrumentation (the coverage-guided mode this campaign is for).
     for target in "${TARGETS[@]}"; do
-        echo "==> cargo fuzz run ${target} (${SECONDS}s)"
+        echo "==> cargo fuzz run ${target} (${BUDGET_SECONDS}s)"
         if ! cargo fuzz run "${target}" -- "${run_flags[@]}"; then
             echo "==> FINDING: ${target} crashed — reproducer in fuzz/artifacts/" >&2
             status=1
@@ -62,7 +64,7 @@ else
     cargo build --release --manifest-path fuzz/Cargo.toml \
         --target-dir "${FALLBACK_TARGET_DIR}"
     for target in "${TARGETS[@]}"; do
-        echo "==> ${target} (${SECONDS}s)"
+        echo "==> ${target} (${BUDGET_SECONDS}s)"
         if ! "${FALLBACK_TARGET_DIR}/release/${target}" \
             "fuzz/corpus/${target}" "${run_flags[@]}"; then
             echo "==> FINDING: ${target} crashed — reproducer in fuzz/artifacts/" >&2
