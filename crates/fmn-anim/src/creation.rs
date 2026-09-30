@@ -676,12 +676,17 @@ impl ShowIncreasingSubsets {
         if current == desired {
             return; // set_submobjects' identity short-circuit
         }
-        for &child in &current {
-            stage.detach(root, child);
-        }
-        for &child in &desired {
-            // Re-attaching a construction-time child cannot form a cycle.
-            let _ = stage.attach(root, child);
+        // One pass for the usual case; a child `attach` would refuse (a
+        // stale construction-time child) keeps the per-edge loop, which
+        // skips it.
+        if stage.replace_children(root, &desired).is_err() {
+            for &child in &current {
+                stage.detach(root, child);
+            }
+            for &child in &desired {
+                // Re-attaching a construction-time child cannot form a cycle.
+                let _ = stage.attach(root, child);
+            }
         }
     }
 }

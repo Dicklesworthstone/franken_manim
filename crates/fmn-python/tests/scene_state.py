@@ -139,6 +139,23 @@ def scene_mobjects_follow_every_structural_change():
     assert scene.mobjects[1] is kept
 
 
+def native_only_edits_reach_python_through_scene_mobjects():
+    # fm-5wq.31: after an edge change, Scene.mobjects re-verifies only the
+    # lists whose native child epoch moved. A native-only edit (as Choreo
+    # makes, here through the binding's own commit primitive, so the live
+    # list is not told) must still reach the Python list and back-edges.
+    scene = m.Scene()
+    a, b, c = m.Square(), m.Circle(), m.Dot()
+    group = m.VGroup(a, b)
+    scene.add(group, c)
+    scene.mobjects
+    group._replace_submobjects([b, c])
+    assert [id(x) for x in group.submobjects] == [id(a), id(b)]  # not yet told
+    scene.mobjects
+    assert [id(x) for x in group.submobjects] == [id(b), id(c)]
+    assert group not in a.parents and group in c.parents
+
+
 def camera_pose_and_callbacks():
     scene = m.Scene()
     frame, core, events = scene.frame, scene.frame._core, []
@@ -520,6 +537,7 @@ def ignored_camera_keeps_its_authored_attributes():
 CASES = (
     captured_families_styles_and_arrays, shared_child_identity, updater_restoration,
     ordered_roots, scene_mobjects_follow_every_structural_change,
+    native_only_edits_reach_python_through_scene_mobjects,
     camera_pose_and_callbacks, native_clock_and_bytes,
     repeated_history, history_branch_and_limit, rejected_checkpoint_preserves_history,
     foreign_owner_refusal, ignored_camera, rendered_restore,
@@ -533,7 +551,7 @@ CASES = (
     capture_refusal_preserves_history_and_native_arena,
     ignored_camera_keeps_its_authored_attributes,
 )
-assert len(CASES) == 22
+assert len(CASES) == 23
 for case in CASES:
     case()
     print("scene snapshot acceptance:", case.__name__)

@@ -47,6 +47,115 @@ fn the_scene_list_is_the_draw_order_back_to_front() {
     assert_eq!(stage.draw_plan().sequence(), [a, b, c]);
 }
 
+/// A deterministic scene of shared-child DAG families: `leaves` pointful
+/// members and `groups` containers, each over 1-3 earlier members, with a
+/// few of them rooted. `seed` drives a 64-bit LCG.
+fn random_dag(stage: &mut Stage, seed: u64, leaves: usize, groups: usize) -> Vec<Mob> {
+    let mut state = seed;
+    let mut next = |bound: usize| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(state >> 33).expect("31 bits") % bound
+    };
+    let mut members: Vec<Mob> = (0..leaves).map(|_| dot(stage)).collect();
+    for _ in 0..groups {
+        let children: Vec<Mob> = (0..=next(3))
+            .map(|_| members[next(members.len())])
+            .collect();
+        let mut unique = Vec::new();
+        for child in children {
+            if !unique.contains(&child) {
+                unique.push(child);
+            }
+        }
+        members.push(group(stage, &unique));
+    }
+    for _ in 0..4 {
+        stage
+            .add_to_scene(members[next(members.len())])
+            .expect("root");
+    }
+    members
+}
+
+/// The previous `Stage::family`: depth-first, each member once, found by a
+/// linear search over the output.
+fn family_oracle(stage: &Stage, mob: Mob) -> Vec<Mob> {
+    let mut out = Vec::new();
+    let mut stack = vec![mob];
+    while let Some(current) = stack.pop() {
+        if out.contains(&current) {
+            continue;
+        }
+        if let Some(entry) = stage.get(current) {
+            out.push(current);
+            stack.extend(entry.submobjects().iter().rev());
+        }
+    }
+    out
+}
+
+/// The previous `recursive_remove`: descends into every member.
+fn remove_oracle(stage: &Stage, members: &[Mob], targets: &[Mob]) -> (Vec<Mob>, bool) {
+    let mut kept = Vec::new();
+    let mut found = false;
+    for &member in members {
+        if targets.contains(&member) {
+            found = true;
+            continue;
+        }
+        let children = stage
+            .get(member)
+            .map(|entry| entry.submobjects().to_vec())
+            .unwrap_or_default();
+        let (sub, below) = remove_oracle(stage, &children, targets);
+        if below {
+            kept.extend(sub);
+            found = true;
+        } else {
+            kept.push(member);
+        }
+    }
+    (kept, found)
+}
+
+#[test]
+fn family_and_removal_match_the_linear_search_walks() {
+    // fm-5wq.31: `family` deduplicates through a set, and removal descends
+    // only into the removed members' ancestors. Both must reproduce the
+    // previous walks exactly, diamonds and shared children included.
+    let mut shared = 0;
+    for seed in 1..=60_u64 {
+        let mut stage = Stage::new();
+        let members = random_dag(&mut stage, seed, 8, 14);
+        for &mob in &members {
+            assert_eq!(stage.family(mob), family_oracle(&stage, mob), "seed {seed}");
+        }
+        shared += usize::from(
+            members
+                .iter()
+                .any(|&m| stage.get(m).is_some_and(|e| e.parents().len() > 1)),
+        );
+        let removed = [
+            members[(seed as usize * 7) % members.len()],
+            members[seed as usize % members.len()],
+        ];
+        let mut targets = Vec::new();
+        for &mob in &removed {
+            for member in family_oracle(&stage, mob) {
+                if !targets.contains(&member) {
+                    targets.push(member);
+                }
+            }
+        }
+        let (expected, _) = remove_oracle(&stage, stage.roots(), &targets);
+        stage.remove_many_from_scene(&removed);
+        assert_eq!(stage.roots(), expected.as_slice(), "seed {seed}");
+    }
+    assert!(shared > 0, "no generated scene shared a child");
+}
+
 #[test]
 fn the_topology_epoch_moves_with_every_draw_list_or_edge_change() {
     // fm-5wq.31: the Python binding reuses its projection of the scene while
@@ -89,6 +198,113 @@ fn the_topology_epoch_moves_with_every_draw_list_or_edge_change() {
     stage.unpin(g);
     assert_eq!(stage.topology_epoch(), still);
     assert_ne!(Stage::new().topology_epoch(), still);
+}
+
+/// Every member's children and parents, and the draw list, as indices into
+/// `members`, so two stages built from one seed compare structurally.
+fn graph_shape(stage: &Stage, members: &[Mob]) -> Vec<Vec<usize>> {
+    let index = |mob: &Mob| members.iter().position(|m| m == mob).expect("known member");
+    let mut shape: Vec<Vec<usize>> = Vec::new();
+    for &mob in members {
+        let entry = stage.get(mob).expect("live");
+        shape.push(entry.submobjects().iter().map(index).collect());
+        shape.push(entry.parents().iter().map(index).collect());
+    }
+    shape.push(stage.roots().iter().map(index).collect());
+    shape
+}
+
+#[test]
+fn replace_children_leaves_the_graph_detach_then_attach_leaves() {
+    // fm-5wq.31: `replace_children` must end where detaching every child and
+    // attaching each new one ends, parents order included, and a refusal
+    // must change nothing.
+    let mut refused = 0;
+    for seed in 1..=60_u64 {
+        let mut ours = Stage::new();
+        let mut theirs = Stage::new();
+        let a = random_dag(&mut ours, seed, 8, 14);
+        let b = random_dag(&mut theirs, seed, 8, 14);
+        let pick = |salt: usize| (seed as usize).wrapping_mul(31).wrapping_add(salt * 17) % a.len();
+        let parent = pick(1);
+        // Current children reordered and thinned, plus new ones and a repeat.
+        let mut chosen: Vec<usize> = ours
+            .get(a[parent])
+            .expect("live")
+            .submobjects()
+            .iter()
+            .rev()
+            .map(|mob| a.iter().position(|m| m == mob).expect("known"))
+            .skip(seed as usize % 2)
+            .collect();
+        chosen.extend([pick(2), pick(3), pick(2)]);
+        let before = graph_shape(&ours, &a);
+        let result =
+            ours.replace_children(a[parent], &chosen.iter().map(|&i| a[i]).collect::<Vec<_>>());
+        if result.is_err() {
+            refused += 1;
+            assert_eq!(
+                graph_shape(&ours, &a),
+                before,
+                "seed {seed}: a refusal changed the graph"
+            );
+            continue;
+        }
+        let current = theirs.get(b[parent]).expect("live").submobjects().to_vec();
+        for child in current {
+            theirs.detach(b[parent], child);
+        }
+        for &i in &chosen {
+            theirs.attach(b[parent], b[i]).expect("ours accepted it");
+        }
+        assert_eq!(
+            graph_shape(&ours, &a),
+            graph_shape(&theirs, &b),
+            "seed {seed}"
+        );
+    }
+    assert!(refused < 60, "every generated replacement was refused");
+}
+
+#[test]
+fn an_entry_children_epoch_moves_exactly_with_its_child_list() {
+    // fm-5wq.31: the binding re-verifies only members whose child list
+    // moved, so each edit must move the edited parent's epoch, and nothing
+    // else need move a bystander's.
+    let mut stage = Stage::new();
+    let a = dot(&mut stage);
+    let b = dot(&mut stage);
+    let g = group(&mut stage, &[a]);
+    let h = group(&mut stage, &[b]);
+    stage.add_to_scene(g).expect("root");
+    stage.add_to_scene(h).expect("root");
+    let epoch = |stage: &Stage, mob: Mob| stage.get(mob).expect("live").children_epoch();
+    let (g0, h0) = (epoch(&stage, g), epoch(&stage, h));
+    stage.attach(g, b).expect("attach");
+    let g1 = epoch(&stage, g);
+    assert_ne!(g1, g0, "attach");
+    assert_eq!(epoch(&stage, h), h0, "a bystander moved on attach");
+    stage.attach(g, b).expect("repeat attach is a no-op");
+    assert_eq!(epoch(&stage, g), g1, "a no-op attach moved the epoch");
+    stage.detach(g, b);
+    let g2 = epoch(&stage, g);
+    assert_ne!(g2, g1, "detach");
+    stage.bring_to_back(h).expect("back");
+    stage.pin(g).expect("pin");
+    stage.unpin(g);
+    assert_eq!(
+        (epoch(&stage, g), epoch(&stage, h)),
+        (g2, h0),
+        "draw-list edits"
+    );
+    let copy = stage.copy_family(g).expect("copy");
+    assert_ne!(epoch(&stage, copy), g2, "a copy shares its source's epoch");
+    let snapshot = stage.snapshot();
+    stage.restore(&snapshot);
+    assert_ne!(epoch(&stage, g), g2, "restore kept a pre-restore epoch");
+    let g3 = epoch(&stage, g);
+    stage.delete(a).expect("delete");
+    assert_ne!(epoch(&stage, g), g3, "deleting a child");
 }
 
 #[test]

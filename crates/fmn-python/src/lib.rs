@@ -1471,6 +1471,119 @@ struct RootsProjection {
     key: (u64, u64),
     /// The registry's weakrefs to the root proxies, in draw order.
     roots: Vec<Py<PyAny>>,
+    /// Each member's `Entry::children_epoch` when its Python child list was
+    /// last seen to hold exactly its native children.
+    verified: HashMap<Mob, u64, ByAddress>,
+}
+
+/// Keep a finished projection when nothing moved while it ran: shells
+/// registered during it, or Python run by `_replace_projection`, change the
+/// key, and the next read then projects again.
+fn store_projection(
+    scene: &Bound<'_, PyScene>,
+    key: (u64, u64),
+    roots: &[Mob],
+    verified: HashMap<Mob, u64, ByAddress>,
+) {
+    let py = scene.py();
+    let finished = projection_key(scene);
+    let scene = scene.borrow();
+    let weakrefs: Option<Vec<Py<PyAny>>> = {
+        let registry = scene.proxies.borrow();
+        roots
+            .iter()
+            .map(|mob| registry.get(mob).map(|weak| weak.clone_ref(py)))
+            .collect()
+    };
+    *scene.roots_projection.borrow_mut() = match weakrefs {
+        Some(roots) if finished == key => Some(RootsProjection {
+            key,
+            roots,
+            verified,
+        }),
+        _ => None,
+    };
+}
+
+/// `_engine_roots` after a topology change that left every proxy identity in
+/// place. A member whose child list still has the epoch it was verified at
+/// holds exactly its native children, so only members whose list moved are
+/// compared, and re-projected where they differ, in the full walk's order.
+/// `None` when a needed proxy is not live: creating shells is the full
+/// walk's job, since a new shell's own list starts empty.
+fn reproject_moved<'py>(
+    scene: &Bound<'py, PyScene>,
+    key: (u64, u64),
+    verified: &HashMap<Mob, u64, ByAddress>,
+) -> PyResult<Option<Vec<Py<PyAny>>>> {
+    let py = scene.py();
+    let engine = Rc::clone(&scene.borrow().engine);
+    let mut epochs: HashMap<Mob, u64, ByAddress> = HashMap::default();
+    epochs.reserve(verified.len());
+    let mut moved = Vec::new();
+    let roots = {
+        let runtime = engine.borrow();
+        let stage = runtime.stage();
+        let roots = stage.roots().to_vec();
+        for root in &roots {
+            for mob in stage.family(*root) {
+                if epochs.contains_key(&mob) {
+                    continue;
+                }
+                let entry = stage.get(mob).ok_or_else(|| {
+                    StaleHandleError::new_err("scene family contains a stale handle")
+                })?;
+                let epoch = entry.children_epoch();
+                if verified.get(&mob) != Some(&epoch) {
+                    moved.push((mob, entry.submobjects().to_vec()));
+                }
+                epochs.insert(mob, epoch);
+            }
+        }
+        roots
+    };
+    let mut proxies: HashMap<Mob, Bound<'py, PyAny>, ByAddress> = HashMap::default();
+    let mut proxy = |mob: Mob| -> Option<Bound<'py, PyAny>> {
+        if let Some(found) = proxies.get(&mob) {
+            return Some(found.clone());
+        }
+        let found = live_proxy(py, scene, mob)?;
+        proxies.insert(mob, found.clone());
+        Some(found)
+    };
+    let mut root_proxies = Vec::with_capacity(roots.len());
+    for &root in &roots {
+        let Some(found) = proxy(root) else {
+            return Ok(None);
+        };
+        root_proxies.push(found);
+    }
+    let submobjects = pyo3::intern!(py, "submobjects");
+    for (mob, children) in &moved {
+        let Some(owner) = proxy(*mob) else {
+            return Ok(None);
+        };
+        let mut expected = Vec::with_capacity(children.len());
+        for &child in children {
+            let Some(found) = proxy(child) else {
+                return Ok(None);
+            };
+            expected.push(found);
+        }
+        let live = owner.getattr(submobjects)?;
+        if let Ok(current) = live.cast::<PyList>()
+            && current.len() == expected.len()
+            && current
+                .iter()
+                .zip(&expected)
+                .all(|(item, child)| item.is(child))
+        {
+            continue;
+        }
+        live.call_method1("_replace_projection", (PyList::new(py, &expected)?,))?;
+    }
+    store_projection(scene, key, &roots, epochs);
+    Ok(Some(root_proxies.into_iter().map(Bound::unbind).collect()))
 }
 
 fn projection_key(scene: &Bound<'_, PyScene>) -> (u64, u64) {
@@ -7370,32 +7483,16 @@ impl BridgeMobject {
         }
 
         let mut runtime = engine.borrow_mut();
-        let old = runtime
-            .stage()
-            .get(parent)
-            .ok_or_else(|| StaleHandleError::new_err("parent handle no longer resolves"))?
-            .submobjects()
-            .to_vec();
-        for child in &old {
-            runtime.stage_mut().detach(parent, *child);
+        if runtime.stage().get(parent).is_none() {
+            return Err(StaleHandleError::new_err(
+                "parent handle no longer resolves",
+            ));
         }
-        let mut attached = Vec::new();
-        for child in &candidate {
-            if let Err(error) = runtime.stage_mut().attach(parent, *child) {
-                for added in attached {
-                    runtime.stage_mut().detach(parent, added);
-                }
-                for original in old {
-                    runtime
-                        .stage_mut()
-                        .attach(parent, original)
-                        .expect("previously valid family edge restores");
-                }
-                return Err(stage_error(error));
-            }
-            attached.push(*child);
-        }
-        Ok(())
+        // One pass; a refused child leaves the graph exactly as it was.
+        runtime
+            .stage_mut()
+            .replace_children(parent, &candidate)
+            .map_err(stage_error)
     }
 
     fn family_size(slf: &Bound<'_, Self>) -> PyResult<usize> {
@@ -8461,12 +8558,21 @@ impl PyScene {
         // fm-5wq.31: this projection walks the whole scene family, and
         // per-frame admission reads `Scene.mobjects` every frame (62 ms of
         // PrimeRace's frames at ~19K members). Skip it while no root, edge
-        // or proxy identity has changed since the last complete one. The
-        // one thing that skip forgoes: a Python child list edited around its
+        // or proxy identity has changed since the last complete one, and
+        // after edge changes re-verify only the lists whose child epoch
+        // moved. What that forgoes: a Python child list edited around its
         // live-list methods (`list.append(mob.submobjects, x)`) is re-synced
-        // at the next topology change instead of this read.
+        // when its native list next changes, not at this read.
         let key = projection_key(slf);
         if let Some(roots) = projected_roots(slf, key) {
+            return Ok(roots);
+        }
+        // An edge or root change with no proxy-identity change (most
+        // frames of an edited scene) re-verifies only the moved lists.
+        let previous = slf.borrow().roots_projection.borrow_mut().take();
+        if let Some(previous) = previous.filter(|previous| previous.key.1 == key.1)
+            && let Some(roots) = reproject_moved(slf, key, &previous.verified)?
+        {
             return Ok(roots);
         }
         let engine = Rc::clone(&slf.borrow().engine);
@@ -8489,6 +8595,7 @@ impl PyScene {
                             mob,
                             entry.buffer.schema().offset("fill_rgba").is_some(),
                             entry.submobjects().to_vec(),
+                            entry.children_epoch(),
                         ));
                     }
                 }
@@ -8496,7 +8603,7 @@ impl PyScene {
             (roots, graph)
         };
         let mut proxies = HashMap::with_capacity(graph.len());
-        for (mob, vector_records, _) in &graph {
+        for (mob, vector_records, _, _) in &graph {
             let proxy = if let Some(proxy) = live_proxy(py, slf, *mob) {
                 proxy
             } else {
@@ -8520,7 +8627,7 @@ impl PyScene {
             };
             proxies.insert(*mob, proxy);
         }
-        for (mob, _, children) in &graph {
+        for (mob, _, children, _) in &graph {
             let submobjects = proxies[mob].getattr("submobjects")?;
             // Re-projecting a list that already holds exactly these proxies
             // in this order clears and re-extends the same items with no
@@ -8539,22 +8646,11 @@ impl PyScene {
             let children = PyList::new(py, children.iter().map(|child| &proxies[child]))?;
             submobjects.call_method1("_replace_projection", (children,))?;
         }
-        // Keep the projection only when nothing moved while it ran: shells
-        // registered here, or Python run by `_replace_projection`, change
-        // the key, and the next read then re-projects once more.
-        let finished = projection_key(slf);
-        let weakrefs: Option<Vec<Py<PyAny>>> = {
-            let scene = slf.borrow();
-            let registry = scene.proxies.borrow();
-            roots
-                .iter()
-                .map(|mob| registry.get(mob).map(|weak| weak.clone_ref(py)))
-                .collect()
-        };
-        *slf.borrow().roots_projection.borrow_mut() = match weakrefs {
-            Some(roots) if finished == key => Some(RootsProjection { key, roots }),
-            _ => None,
-        };
+        let verified = graph
+            .iter()
+            .map(|(mob, _, _, epoch)| (*mob, *epoch))
+            .collect();
+        store_projection(slf, key, &roots, verified);
         Ok(roots
             .into_iter()
             .map(|mob| proxies[&mob].clone().unbind())
@@ -11219,10 +11315,18 @@ fn _path_family<'py>(root: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
     PyList::new(py, family)
 }
 
-/// Hashes an object address (Fibonacci hashing) for the per-scan maps below:
-/// addresses are unique while their objects live, so no keyed hash is needed.
+/// Fibonacci-mixes integer keys (object addresses, `Mob` handles) for the
+/// per-call maps of the admission scan and the scene projection. The keys
+/// are unique identities chosen by the engine, not by callers, so no keyed
+/// hash is needed.
 #[derive(Default)]
 struct AddressHasher(u64);
+
+impl AddressHasher {
+    fn mix(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(29) ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
 
 impl std::hash::Hasher for AddressHasher {
     fn finish(&self) -> u64 {
@@ -11231,12 +11335,20 @@ impl std::hash::Hasher for AddressHasher {
 
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            self.0 = (self.0.rotate_left(8) ^ u64::from(byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            self.mix(u64::from(byte));
         }
     }
 
+    fn write_u32(&mut self, value: u32) {
+        self.mix(u64::from(value));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.mix(value);
+    }
+
     fn write_usize(&mut self, address: usize) {
-        self.0 = (address as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.mix(address as u64);
     }
 }
 

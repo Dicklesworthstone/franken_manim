@@ -21,7 +21,7 @@
 //!   copies, verified by test.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -39,6 +39,11 @@ static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
 /// equal epochs never name two different topologies, even across a
 /// [`Snapshot::materialize`] that reuses a stage id.
 static NEXT_TOPOLOGY_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+/// A value no stage topology or entry child list has held before.
+fn fresh_epoch() -> u64 {
+    NEXT_TOPOLOGY_EPOCH.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Generational, stage-scoped, `Copy` mobject handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -138,6 +143,8 @@ pub struct Entry {
     placement: Placement,
     placement_revision: u64,
     submobjects: Vec<Mob>,
+    /// [`Entry::children_epoch`]: moves whenever `submobjects` changes.
+    children_epoch: u64,
     parents: Vec<Mob>,
     updaters: Vec<UpdaterSlot>,
     /// `suspend_updating` state: while set, [`Stage::update`] prunes this
@@ -193,6 +200,7 @@ impl Entry {
             placement: Placement::IDENTITY,
             placement_revision: 0,
             submobjects: Vec::new(),
+            children_epoch: fresh_epoch(),
             parents: Vec::new(),
             updaters: Vec::new(),
             updating_suspended: false,
@@ -236,6 +244,7 @@ impl Entry {
             placement: self.placement,
             placement_revision: 0,
             submobjects: self.submobjects.clone(),
+            children_epoch: fresh_epoch(),
             parents: self.parents.clone(),
             updaters: self.updaters.clone(),
             updating_suspended: self.updating_suspended,
@@ -351,6 +360,15 @@ impl Entry {
         &self.submobjects
     }
 
+    /// Changes whenever [`Entry::submobjects`] changes, and is new for every
+    /// constructed, copied, moved or restored entry: an unchanged value means
+    /// an unchanged child list (fm-5wq.31, the binding's incremental scene
+    /// projection).
+    #[must_use]
+    pub fn children_epoch(&self) -> u64 {
+        self.children_epoch
+    }
+
     /// Parents (a submobject may have several — the family is a DAG).
     #[must_use]
     pub fn parents(&self) -> &[Mob] {
@@ -398,7 +416,7 @@ impl Snapshot {
             roots: Vec::new(),
             time: 0.0,
             next_updater_id: self.next_updater_id,
-            topology_epoch: NEXT_TOPOLOGY_EPOCH.fetch_add(1, Ordering::Relaxed),
+            topology_epoch: fresh_epoch(),
         };
         stage.restore(self);
         stage
@@ -499,7 +517,7 @@ impl Stage {
             roots: Vec::new(),
             time: 0.0,
             next_updater_id: 1,
-            topology_epoch: NEXT_TOPOLOGY_EPOCH.fetch_add(1, Ordering::Relaxed),
+            topology_epoch: fresh_epoch(),
         }
     }
 
@@ -513,7 +531,7 @@ impl Stage {
     }
 
     fn touch_topology(&mut self) {
-        self.topology_epoch = NEXT_TOPOLOGY_EPOCH.fetch_add(1, Ordering::Relaxed);
+        self.topology_epoch = fresh_epoch();
     }
 
     /// Scene time advanced by [`Stage::update`]. (The RationalFrameClock
@@ -746,23 +764,38 @@ impl Stage {
     /// Remove the union of several complete families in one recursive pass,
     /// matching one `Scene.remove(*mobs)` call.
     pub fn remove_many_from_scene(&mut self, mobs: &[Mob]) {
-        let mut family = Vec::new();
-        for &mob in mobs {
-            for member in self.family(mob) {
-                if !family.contains(&member) {
-                    family.push(member);
+        let targets: HashSet<Mob> = mobs.iter().flat_map(|&mob| self.family(mob)).collect();
+        // Only a target's ancestors can change. `recursive_remove` finds a
+        // target below a member exactly when the member is one, since
+        // `parents` mirrors `submobjects`; every other member keeps itself,
+        // so it is not descended into. Every `add` removes first, so this
+        // walk used to visit the whole scene on each add (fm-5wq.31).
+        let mut ancestors = HashSet::new();
+        let mut stack: Vec<Mob> = targets.iter().copied().collect();
+        while let Some(current) = stack.pop() {
+            if let Some(entry) = self.get(current) {
+                for &parent in &entry.parents {
+                    if ancestors.insert(parent) {
+                        stack.push(parent);
+                    }
                 }
             }
         }
         let roots = std::mem::take(&mut self.roots);
-        let (kept, _) = self.recursive_remove(&roots, &family);
+        let (kept, _) = self.recursive_remove(&roots, &targets, &ancestors);
         self.roots = kept;
         self.touch_topology();
     }
 
     /// `recursive_mobject_remove`, structure for structure: returns the
-    /// surviving list and whether anything was removed from it.
-    fn recursive_remove(&self, members: &[Mob], targets: &[Mob]) -> (Vec<Mob>, bool) {
+    /// surviving list and whether anything was removed from it. A member
+    /// outside `ancestors` has no target below it and is kept unvisited.
+    fn recursive_remove(
+        &self,
+        members: &[Mob],
+        targets: &HashSet<Mob>,
+        ancestors: &HashSet<Mob>,
+    ) -> (Vec<Mob>, bool) {
         let mut kept = Vec::with_capacity(members.len());
         let mut found = false;
         for &member in members {
@@ -770,11 +803,15 @@ impl Stage {
                 found = true;
                 continue;
             }
+            if !ancestors.contains(&member) {
+                kept.push(member);
+                continue;
+            }
             let children = self
                 .get(member)
                 .map(|entry| entry.submobjects.clone())
                 .unwrap_or_default();
-            let (sub, found_below) = self.recursive_remove(&children, targets);
+            let (sub, found_below) = self.recursive_remove(&children, targets, ancestors);
             if found_below {
                 kept.extend(sub);
                 found = true;
@@ -907,8 +944,59 @@ impl Stage {
                 return Ok(());
             }
             entry.submobjects.push(child);
+            entry.children_epoch = fresh_epoch();
         }
         {
+            let entry = self.get_mut(child).expect("checked above");
+            if !entry.parents.contains(&parent) {
+                entry.parents.push(parent);
+            }
+        }
+        self.invalidate_family_caches(parent);
+        self.touch_topology();
+        Ok(())
+    }
+
+    /// Replace `parent`'s children with `children`, in order: the graph that
+    /// detaching every current child and then attaching each new one leaves,
+    /// including a kept child's `parent` edge moving to the end of its
+    /// `parents` (where a re-attach puts it) and a repeated child counting
+    /// once. One pass, instead of one scan of the child list per edge: a
+    /// 2,900-child subset reveal made each frame quadratic (fm-5wq.31).
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] or [`StageError::CycleDetected`] for the
+    /// first child [`Stage::attach`] would refuse, with the graph unchanged.
+    pub fn replace_children(&mut self, parent: Mob, children: &[Mob]) -> Result<(), StageError> {
+        if !self.contains(parent) {
+            return Err(StageError::StaleHandle);
+        }
+        let mut unique = Vec::with_capacity(children.len());
+        let mut seen = HashSet::with_capacity(children.len());
+        for &child in children {
+            if !self.contains(child) {
+                return Err(StageError::StaleHandle);
+            }
+            // Removing the parent's own edges cannot open or close a path
+            // from `child` back to it, so this is attach's check as is.
+            if parent == child || self.family(child).contains(&parent) {
+                return Err(StageError::CycleDetected);
+            }
+            if seen.insert(child) {
+                unique.push(child);
+            }
+        }
+        let old = {
+            let entry = self.get_mut(parent).expect("checked above");
+            entry.children_epoch = fresh_epoch();
+            std::mem::replace(&mut entry.submobjects, unique.clone())
+        };
+        for child in old {
+            if let Some(entry) = self.get_mut(child) {
+                entry.parents.retain(|m| *m != parent);
+            }
+        }
+        for child in unique {
             let entry = self.get_mut(child).expect("checked above");
             if !entry.parents.contains(&parent) {
                 entry.parents.push(parent);
@@ -923,6 +1011,7 @@ impl Stage {
     pub fn detach(&mut self, parent: Mob, child: Mob) {
         if let Some(entry) = self.get_mut(parent) {
             entry.submobjects.retain(|m| *m != child);
+            entry.children_epoch = fresh_epoch();
         }
         if let Some(entry) = self.get_mut(child) {
             entry.parents.retain(|m| *m != parent);
@@ -942,10 +1031,13 @@ impl Stage {
         if let Some(cached) = entry.family_cache.borrow().as_ref() {
             return cached.clone();
         }
+        // Membership through a set: a linear `out.contains` made each cache
+        // miss quadratic, ~60 ms for a 19K-member family (fm-5wq.31).
         let mut out = Vec::new();
+        let mut seen = HashSet::new();
         let mut stack = vec![mob];
         while let Some(current) = stack.pop() {
-            if out.contains(&current) {
+            if !seen.insert(current) {
                 continue;
             }
             if let Some(e) = self.get(current) {
@@ -1028,6 +1120,7 @@ impl Stage {
         for parent in parents {
             if let Some(p) = self.get_mut(parent) {
                 p.submobjects.retain(|m| *m != mob);
+                p.children_epoch = fresh_epoch();
             }
         }
         for child in children {
@@ -1123,6 +1216,8 @@ impl Stage {
                     None => false,
                 });
             }
+            // A moved entry arrives with its old stage's value.
+            entry.children_epoch = fresh_epoch();
         }
         CopyMap { pairs }
     }
@@ -1964,6 +2059,7 @@ impl Stage {
                     placement: e.placement,
                     placement_revision: e.placement_revision,
                     submobjects: e.submobjects.clone(),
+                    children_epoch: fresh_epoch(),
                     parents: e.parents.clone(),
                     updaters: e.updaters.clone(),
                     updating_suspended: e.updating_suspended,
