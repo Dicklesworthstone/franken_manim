@@ -96,6 +96,49 @@ def ordered_roots():
     assert scene.mobjects[0] is left and scene.mobjects[1] is right
 
 
+def scene_mobjects_follow_every_structural_change():
+    # fm-5wq.31: Scene.mobjects reuses its projection of the native roots
+    # while the Stage topology and the proxy registry are unchanged. Every
+    # read below follows a change the projection must see.
+    import gc
+
+    def roots(scene):
+        return [id(mob) for mob in scene.mobjects]
+
+    scene = m.Scene()
+    a, b, c = m.Square(), m.Circle(), m.Dot()
+    group = m.Group(a)
+    scene.add(group, b)
+    assert roots(scene) == [id(group), id(b)] == roots(scene)
+    assert all(x is y for x, y in zip(scene.mobjects, scene.mobjects))
+    scene.remove(b)
+    assert roots(scene) == [id(group)]
+    scene.add(c)
+    assert roots(scene) == [id(group), id(c)]
+    scene.bring_to_back(c)
+    assert roots(scene) == [id(c), id(group)]
+    group.add(b)
+    assert roots(scene) == [id(c), id(group)]
+    assert [id(x) for x in group.submobjects] == [id(a), id(b)]
+    group.set_submobjects([b, a])
+    assert [id(x) for x in scene.mobjects[1].submobjects] == [id(b), id(a)]
+    group.remove(b)
+    assert [id(x) for x in scene.mobjects[1].submobjects] == [id(a)]
+    # Removing a rooted member ungroups its ancestor in place.
+    scene.remove(a)
+    assert roots(scene) == [id(c)]
+    # A root whose proxy may die with its last Python reference: the next
+    # read must still project it, then reuse whatever proxy it projected.
+    scene.add(m.Square())
+    gc.collect()
+    shells = scene.mobjects
+    assert len(shells) == 2 and shells[0] is c and isinstance(shells[1], m.Mobject)
+    kept = shells[1]
+    del shells
+    gc.collect()
+    assert scene.mobjects[1] is kept
+
+
 def camera_pose_and_callbacks():
     scene = m.Scene()
     frame, core, events = scene.frame, scene.frame._core, []
@@ -476,7 +519,8 @@ def ignored_camera_keeps_its_authored_attributes():
 
 CASES = (
     captured_families_styles_and_arrays, shared_child_identity, updater_restoration,
-    ordered_roots, camera_pose_and_callbacks, native_clock_and_bytes,
+    ordered_roots, scene_mobjects_follow_every_structural_change,
+    camera_pose_and_callbacks, native_clock_and_bytes,
     repeated_history, history_branch_and_limit, rejected_checkpoint_preserves_history,
     foreign_owner_refusal, ignored_camera, rendered_restore,
     numeric_history_restores_values_and_rendered_glyphs,
@@ -489,7 +533,7 @@ CASES = (
     capture_refusal_preserves_history_and_native_arena,
     ignored_camera_keeps_its_authored_attributes,
 )
-assert len(CASES) == 21
+assert len(CASES) == 22
 for case in CASES:
     case()
     print("scene snapshot acceptance:", case.__name__)

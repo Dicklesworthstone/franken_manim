@@ -373,6 +373,35 @@ class PublicUpdateTests(unittest.TestCase):
         scene.add(*squares)
         self.assertTrue(scene._fmn_requires_public_scene_update())
 
+    def test_admission_runs_no_authored_attribute_hook(self):
+        # fm-5wq.31: the native admission scan reads own dictionaries with
+        # plain getattr only for classes whose lookup is object's own. A
+        # member whose class authors __getattribute__ or __getattr__ is
+        # decided without calling either, and still needs the public path.
+        calls = []
+
+        class Intercepting(m.Square):
+            def __getattribute__(self, name):
+                calls.append(name)
+                return object.__getattribute__(self, name)
+
+        class Fallback(m.Square):
+            def __getattr__(self, name):
+                calls.append(name)
+                raise AttributeError(name)
+
+        for cls in (Intercepting, Fallback):
+            with self.subTest(cls.__name__):
+                scene = m.Scene()
+                scene.add(m.VGroup(m.Square(), cls()))
+                # Projecting the new roots reads each member's `submobjects`
+                # by ordinary attribute access; that happens once per
+                # topology change. This pins the scan itself.
+                scene.mobjects
+                calls.clear()
+                self.assertTrue(scene._fmn_requires_public_scene_update())
+                self.assertEqual(calls, [])
+
     def test_admission_scan_matches_the_per_member_oracle(self):
         # fm-5wq.31: the scan decides each class once and checks only the
         # instance dictionaries per member. The oracle is the previous loop,

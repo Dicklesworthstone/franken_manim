@@ -48,6 +48,50 @@ fn the_scene_list_is_the_draw_order_back_to_front() {
 }
 
 #[test]
+fn the_topology_epoch_moves_with_every_draw_list_or_edge_change() {
+    // fm-5wq.31: the Python binding reuses its projection of the scene while
+    // this epoch holds, so every change a root-family walk can see must move
+    // it. Detached copies and pins are invisible to that walk.
+    let mut stage = Stage::new();
+    let a = dot(&mut stage);
+    let b = dot(&mut stage);
+    let g = group(&mut stage, &[a]);
+    let mut last = stage.topology_epoch();
+    let mut moved = |stage: &Stage, what: &str| {
+        let now = stage.topology_epoch();
+        assert_ne!(now, last, "{what} left the topology epoch unchanged");
+        last = now;
+    };
+    stage.add_to_scene(g).expect("root");
+    moved(&stage, "add_to_scene");
+    stage.attach(g, b).expect("attach");
+    moved(&stage, "attach");
+    stage.detach(g, b);
+    moved(&stage, "detach");
+    stage.add_to_scene(b).expect("root");
+    moved(&stage, "a second add_to_scene");
+    stage.bring_to_back(b).expect("back");
+    moved(&stage, "bring_to_back");
+    let c = dot(&mut stage);
+    stage.replace_in_scene(b, &[c]).expect("replace");
+    moved(&stage, "replace_in_scene");
+    let snapshot = stage.snapshot();
+    stage.remove_from_scene(c);
+    moved(&stage, "remove_from_scene");
+    stage.restore(&snapshot);
+    moved(&stage, "restore");
+    stage.delete(a).expect("delete");
+    moved(&stage, "delete");
+
+    let still = stage.topology_epoch();
+    stage.copy_family(g).expect("detached copy");
+    stage.pin(g).expect("pin");
+    stage.unpin(g);
+    assert_eq!(stage.topology_epoch(), still);
+    assert_ne!(Stage::new().topology_epoch(), still);
+}
+
+#[test]
 fn equal_z_index_keeps_insertion_order() {
     // R-6: the sort key is (z_index, position), so it is stable.
     let mut stage = Stage::new();

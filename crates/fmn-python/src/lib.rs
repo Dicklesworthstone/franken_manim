@@ -941,6 +941,12 @@ struct PyScene {
     engine: Engine,
     /// Handle → weakref(proxy), preserving one Python identity per live entry.
     proxies: RefCell<HashMap<Mob, Py<PyAny>>>,
+    /// Bumped by every `register_proxy`, so a reseated handle→proxy mapping
+    /// invalidates `roots_projection`.
+    proxy_generation: Cell<u64>,
+    /// `_engine_roots`' last complete projection, keyed by the Stage topology
+    /// epoch and `proxy_generation` it was made at (fm-5wq.31).
+    roots_projection: RefCell<Option<RootsProjection>>,
     /// Optional production output session shared by every play/wait sink.
     render: Arc<Mutex<Option<PortalRenderSession>>>,
     render_invocations: Vec<fmn_output::InvocationReport>,
@@ -1449,12 +1455,54 @@ fn register_proxy(
     proxy: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let weakref = py.import("weakref")?.call_method1("ref", (proxy,))?;
+    let scene = scene.borrow();
+    scene.proxies.borrow_mut().insert(mob, weakref.unbind());
     scene
-        .borrow()
-        .proxies
-        .borrow_mut()
-        .insert(mob, weakref.unbind());
+        .proxy_generation
+        .set(scene.proxy_generation.get().wrapping_add(1));
     Ok(())
+}
+
+/// A complete `_engine_roots` projection: every member of every root family
+/// had a registered live proxy whose Python `submobjects` list held exactly
+/// its native children, in order.
+struct RootsProjection {
+    /// (Stage topology epoch, proxy generation) when the projection finished.
+    key: (u64, u64),
+    /// The registry's weakrefs to the root proxies, in draw order.
+    roots: Vec<Py<PyAny>>,
+}
+
+fn projection_key(scene: &Bound<'_, PyScene>) -> (u64, u64) {
+    let scene = scene.borrow();
+    let epoch = scene.engine.borrow().stage().topology_epoch();
+    (epoch, scene.proxy_generation.get())
+}
+
+/// The cached roots, when nothing a projection reads has changed since it
+/// was made: the same topology epoch (no root or edge change), the same
+/// proxy generation (no reseated identity), and every root proxy alive.
+/// Then every member's registered proxy and Python child list are still the
+/// ones the projection established, so re-projecting would change nothing.
+fn projected_roots(scene: &Bound<'_, PyScene>, key: (u64, u64)) -> Option<Vec<Py<PyAny>>> {
+    let py = scene.py();
+    let weakrefs: Vec<Py<PyAny>> = {
+        let scene = scene.borrow();
+        let cache = scene.roots_projection.borrow();
+        let projection = cache.as_ref().filter(|projection| projection.key == key)?;
+        projection
+            .roots
+            .iter()
+            .map(|weak| weak.clone_ref(py))
+            .collect()
+    };
+    weakrefs
+        .iter()
+        .map(|weak| {
+            let target = weak.bind(py).call0().ok()?;
+            (!target.is_none()).then(|| target.unbind())
+        })
+        .collect()
 }
 
 fn live_proxy<'py>(
@@ -7929,6 +7977,8 @@ impl PyScene {
         Ok(Self {
             engine: Rc::new(EngineState::new(runtime)),
             proxies: RefCell::new(HashMap::new()),
+            proxy_generation: Cell::new(0),
+            roots_projection: RefCell::new(None),
             render: Arc::new(Mutex::new(None)),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
@@ -8408,6 +8458,17 @@ impl PyScene {
         shell_factory: &Bound<'py, PyAny>,
     ) -> PyResult<Vec<Py<PyAny>>> {
         let py = slf.py();
+        // fm-5wq.31: this projection walks the whole scene family, and
+        // per-frame admission reads `Scene.mobjects` every frame (62 ms of
+        // PrimeRace's frames at ~19K members). Skip it while no root, edge
+        // or proxy identity has changed since the last complete one. The
+        // one thing that skip forgoes: a Python child list edited around its
+        // live-list methods (`list.append(mob.submobjects, x)`) is re-synced
+        // at the next topology change instead of this read.
+        let key = projection_key(slf);
+        if let Some(roots) = projected_roots(slf, key) {
+            return Ok(roots);
+        }
         let engine = Rc::clone(&slf.borrow().engine);
         // Choreo can create composition containers without a Python proxy.
         // Snapshot the native graph first, then release the Stage borrow
@@ -8478,6 +8539,22 @@ impl PyScene {
             let children = PyList::new(py, children.iter().map(|child| &proxies[child]))?;
             submobjects.call_method1("_replace_projection", (children,))?;
         }
+        // Keep the projection only when nothing moved while it ran: shells
+        // registered here, or Python run by `_replace_projection`, change
+        // the key, and the next read then re-projects once more.
+        let finished = projection_key(slf);
+        let weakrefs: Option<Vec<Py<PyAny>>> = {
+            let scene = slf.borrow();
+            let registry = scene.proxies.borrow();
+            roots
+                .iter()
+                .map(|mob| registry.get(mob).map(|weak| weak.clone_ref(py)))
+                .collect()
+        };
+        *slf.borrow().roots_projection.borrow_mut() = match weakrefs {
+            Some(roots) if finished == key => Some(RootsProjection { key, roots }),
+            _ => None,
+        };
         Ok(roots
             .into_iter()
             .map(|mob| proxies[&mob].clone().unbind())
@@ -11095,6 +11172,257 @@ fn install_animation_semantics(
     Ok(())
 }
 
+/// The shipped `Mobject.get_family()` walk: the Reference's path-wise
+/// preorder, where a shared descendant appears once per path that reaches it
+/// and a genuine cycle raises. Each step is the bootstrap loop's own
+/// operation in its order (`isinstance(member, _BridgeMobject)`, the cycle
+/// check, `list(member.submobjects)`), so authored `submobjects` properties
+/// and list subclasses run exactly as before; only the interpreter overhead
+/// goes (fm-5wq.31: `has_updaters` walks large animation copies every frame).
+/// No Stage is borrowed, so an authored getter may reenter freely.
+#[pyfunction]
+fn _path_family<'py>(root: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
+    let py = root.py();
+    let bridge = py.get_type::<BridgeMobject>();
+    let list = py.get_type::<PyList>();
+    let submobjects = pyo3::intern!(py, "submobjects");
+    let mut family = Vec::new();
+    let mut visiting = HashSet::new();
+    let mut stack = vec![(true, root.clone())];
+    while let Some((entering, mobject)) = stack.pop() {
+        // Every marked object is held by `family`, so its address is its id.
+        let marker = mobject.as_ptr() as usize;
+        if !entering {
+            visiting.remove(&marker);
+            continue;
+        }
+        if !mobject.is_instance(&bridge)? {
+            return Err(PyTypeError::new_err(
+                "submobjects must be Mobject instances",
+            ));
+        }
+        if visiting.contains(&marker) {
+            return Err(FamilyCycleError::new_err(
+                "submobjects would create a family cycle",
+            ));
+        }
+        family.push(mobject.clone());
+        let children = list
+            .call1((mobject.getattr(submobjects)?,))?
+            .cast_into::<PyList>()?;
+        if !children.is_empty() {
+            visiting.insert(marker);
+            stack.push((false, mobject));
+            stack.extend(children.iter().rev().map(|child| (true, child)));
+        }
+    }
+    PyList::new(py, family)
+}
+
+/// Hashes an object address (Fibonacci hashing) for the per-scan maps below:
+/// addresses are unique while their objects live, so no keyed hash is needed.
+#[derive(Default)]
+struct AddressHasher(u64);
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    fn write_usize(&mut self, address: usize) {
+        self.0 = (address as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type ByAddress = std::hash::BuildHasherDefault<AddressHasher>;
+
+/// The per-member loop of `Scene._fmn_requires_public_scene_update`
+/// (updater_dispatch.py): whether any member reachable from `pending` needs
+/// the public update path. `helpers` holds that scan's Python decisions,
+/// `(Mobject, hook_names, child_protocols, object.__getattribute__,
+/// plain_instance_dict, member_changed, submobjects_kept, container_changed,
+/// generic_getattr)`. Each is called at the same point, and cached per class
+/// for this scan, exactly as the Python loop did it. Own dictionaries are
+/// read through `object.__getattribute__`, or through plain `getattr` for a
+/// class whose lookup `generic_getattr` shows is object's own (the same C
+/// lookup), so no authored getter runs. Only the walk and its bookkeeping
+/// moved (fm-5wq.31: about 3 us per member per frame).
+#[pyfunction]
+fn _public_update_scan<'py>(
+    pending: Vec<Bound<'py, PyAny>>,
+    helpers: &Bound<'py, PyTuple>,
+) -> PyResult<bool> {
+    type Helpers<'py> = (
+        Bound<'py, PyAny>,
+        Bound<'py, PyTuple>,
+        Bound<'py, PyDict>,
+        Bound<'py, PyAny>,
+        Bound<'py, PyAny>,
+        Bound<'py, PyAny>,
+        Bound<'py, PyAny>,
+        Bound<'py, PyAny>,
+        Bound<'py, PyAny>,
+    );
+    let py = helpers.py();
+    let (
+        mobject,
+        hook_names,
+        child_protocols,
+        instance_dict,
+        plain,
+        member_changed,
+        submobjects_kept,
+        container_changed,
+        generic_getattr,
+    ): Helpers<'py> = helpers.extract()?;
+    let submobjects = pyo3::intern!(py, "submobjects");
+    let dict_name = pyo3::intern!(py, "__dict__");
+    // `try: own = _instance_dict(obj, "__dict__") except AttributeError: None`
+    let own_dict =
+        |obj: &Bound<'py, PyAny>, generic: bool| -> PyResult<Option<Bound<'py, PyDict>>> {
+            let own = if generic {
+                obj.getattr(dict_name)
+            } else {
+                instance_dict.call1((obj, dict_name))
+            };
+            match own {
+                Ok(own) if own.is_none() => Ok(None),
+                Ok(own) => Ok(Some(own.cast_into::<PyDict>()?)),
+                Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        };
+    // `not dict.keys(own).isdisjoint(names)` iterates `names` and asks
+    // PyDict_Contains of each, stopping at the first hit. The names are
+    // read once per scan; a methods table is iterated in place (PyDict_Next
+    // is its iteration order), so no per-member iterator is allocated.
+    let hook_names: Vec<Bound<'py, PyAny>> = hook_names.iter().collect();
+    let holds_any = |own: &Bound<'py, PyDict>, names: &[Bound<'py, PyAny>]| -> PyResult<bool> {
+        for name in names {
+            if own.contains(name)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    let holds_any_key = |own: &Bound<'py, PyDict>, table: &Bound<'py, PyDict>| -> PyResult<bool> {
+        for (name, _) in table.iter() {
+            if own.contains(name)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    // Per-class answers for this scan, keyed by type; `classes` keeps each
+    // keyed type alive, and `visited` each member, so no address is reused.
+    let mut classes: Vec<Bound<'py, pyo3::types::PyType>> = Vec::new();
+    let mut cached = |cache: &mut HashMap<usize, bool, ByAddress>,
+                      cls: &Bound<'py, pyo3::types::PyType>,
+                      decide: &dyn Fn() -> PyResult<bool>|
+     -> PyResult<bool> {
+        let key = cls.as_ptr() as usize;
+        if let Some(&answer) = cache.get(&key) {
+            return Ok(answer);
+        }
+        let answer = decide()?;
+        cache.insert(key, answer);
+        classes.push(cls.clone());
+        Ok(answer)
+    };
+    let mut visible = HashMap::default();
+    let mut generic = HashMap::default();
+    let mut class_changed = HashMap::default();
+    let mut kept = HashMap::default();
+    let mut container = HashMap::default();
+    let mut pending = pending;
+    let mut seen: HashSet<usize, ByAddress> = HashSet::default();
+    let mut visited = Vec::new();
+    while let Some(member) = pending.pop() {
+        if !seen.insert(member.as_ptr() as usize) {
+            continue;
+        }
+        if !member.is_instance(&mobject)? {
+            return Ok(true);
+        }
+        let cls = member.get_type();
+        let own = if cached(&mut visible, &cls, &|| plain.call1((&cls,))?.is_truthy())? {
+            let generic = cached(&mut generic, &cls, &|| {
+                generic_getattr.call1((&cls,))?.is_truthy()
+            })?;
+            own_dict(&member, generic)?
+        } else {
+            None
+        };
+        let changed = match own {
+            Some(own) if holds_any(&own, &hook_names)? => {
+                member_changed.call1((&member,))?.is_truthy()?
+            }
+            _ => cached(&mut class_changed, &cls, &|| {
+                member_changed.call1((&member,))?.is_truthy()
+            })?,
+        };
+        if changed
+            || !cached(&mut kept, &cls, &|| {
+                submobjects_kept.call1((&cls,))?.is_truthy()
+            })?
+        {
+            return Ok(true);
+        }
+        let children = member.getattr(submobjects)?;
+        let kind = children.get_type();
+        let Some(methods) = child_protocols.get_item(&kind)? else {
+            return Ok(true);
+        };
+        let methods = methods.cast_into::<PyDict>()?;
+        let own = if cached(&mut visible, &kind, &|| plain.call1((&kind,))?.is_truthy())? {
+            let generic = cached(&mut generic, &kind, &|| {
+                generic_getattr.call1((&kind,))?.is_truthy()
+            })?;
+            own_dict(&children, generic)?
+        } else {
+            None
+        };
+        let changed = match own {
+            Some(own) if holds_any_key(&own, &methods)? => container_changed
+                .call1((&children, &methods))?
+                .is_truthy()?,
+            _ => cached(&mut container, &kind, &|| {
+                container_changed.call1((&children, &methods))?.is_truthy()
+            })?,
+        };
+        if changed {
+            return Ok(true);
+        }
+        for child in children.try_iter()? {
+            pending.push(child?);
+        }
+        visited.push(member);
+    }
+    Ok(false)
+}
+
+/// `any(member.updaters for member in family)`, the shipped
+/// `Mobject.has_updaters` scan, in order and short-circuiting, so an authored
+/// `updaters` property or `__bool__` runs exactly as before (fm-5wq.31).
+#[pyfunction]
+fn _any_updaters(family: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let updaters = pyo3::intern!(family.py(), "updaters");
+    for member in family.try_iter()? {
+        if member?.getattr(updaters)?.is_truthy()? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[pyfunction]
 fn _composition_intervals(run_times: Vec<f64>, lag_ratio: f64) -> Vec<(f64, f64)> {
     fmn_anim::composition::build_timings(&run_times, lag_ratio)
@@ -11256,6 +11584,9 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(method_cache::_method_cache_reset, module)?)?;
     module.add_function(wrap_pyfunction!(method_cache::_type_version_tags, module)?)?;
     module.add_function(wrap_pyfunction!(report::_crossing_report, module)?)?;
+    module.add_function(wrap_pyfunction!(_path_family, module)?)?;
+    module.add_function(wrap_pyfunction!(_any_updaters, module)?)?;
+    module.add_function(wrap_pyfunction!(_public_update_scan, module)?)?;
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_directories, module)?)?;
     module.add_function(wrap_pyfunction!(

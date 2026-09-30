@@ -35,6 +35,10 @@ use crate::shape::ShapeSlot;
 use crate::uniforms::Uniforms;
 
 static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
+/// Source of [`Stage::topology_epoch`] values, shared by every stage so that
+/// equal epochs never name two different topologies, even across a
+/// [`Snapshot::materialize`] that reuses a stage id.
+static NEXT_TOPOLOGY_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 /// Generational, stage-scoped, `Copy` mobject handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -394,6 +398,7 @@ impl Snapshot {
             roots: Vec::new(),
             time: 0.0,
             next_updater_id: self.next_updater_id,
+            topology_epoch: NEXT_TOPOLOGY_EPOCH.fetch_add(1, Ordering::Relaxed),
         };
         stage.restore(self);
         stage
@@ -475,6 +480,7 @@ pub struct Stage {
     roots: Vec<Mob>,
     time: f64,
     next_updater_id: u64,
+    topology_epoch: u64,
 }
 
 impl Default for Stage {
@@ -493,7 +499,21 @@ impl Stage {
             roots: Vec::new(),
             time: 0.0,
             next_updater_id: 1,
+            topology_epoch: NEXT_TOPOLOGY_EPOCH.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// Changes whenever the draw list or any parent/child edge changes:
+    /// equal values mean every root's family has the same members in the
+    /// same order. Detached families (copies not yet attached) do not move
+    /// it; their attach or add does.
+    #[must_use]
+    pub fn topology_epoch(&self) -> u64 {
+        self.topology_epoch
+    }
+
+    fn touch_topology(&mut self) {
+        self.topology_epoch = NEXT_TOPOLOGY_EPOCH.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Scene time advanced by [`Stage::update`]. (The RationalFrameClock
@@ -683,6 +703,7 @@ impl Stage {
         self.remove_many_from_scene(mobs);
         self.roots.extend_from_slice(mobs);
         self.sort_scene_by_z_index();
+        self.touch_topology();
         Ok(())
     }
 
@@ -736,6 +757,7 @@ impl Stage {
         let roots = std::mem::take(&mut self.roots);
         let (kept, _) = self.recursive_remove(&roots, &family);
         self.roots = kept;
+        self.touch_topology();
     }
 
     /// `recursive_mobject_remove`, structure for structure: returns the
@@ -794,6 +816,7 @@ impl Stage {
         }
         self.remove_many_from_scene(mobs);
         self.roots.splice(0..0, mobs.iter().copied());
+        self.touch_topology();
         Ok(())
     }
 
@@ -812,6 +835,7 @@ impl Stage {
         }
         if let Some(at) = self.roots.iter().position(|&m| m == mob) {
             self.roots.splice(at..=at, replacements.iter().copied());
+            self.touch_topology();
         }
         Ok(())
     }
@@ -891,6 +915,7 @@ impl Stage {
             }
         }
         self.invalidate_family_caches(parent);
+        self.touch_topology();
         Ok(())
     }
 
@@ -903,6 +928,7 @@ impl Stage {
             entry.parents.retain(|m| *m != parent);
         }
         self.invalidate_family_caches(parent);
+        self.touch_topology();
     }
 
     /// The family under `mob` in depth-first order, each member exactly
@@ -1014,6 +1040,7 @@ impl Stage {
         slot.entry = None;
         slot.generation = slot.generation.wrapping_add(1);
         self.free.push(mob.index);
+        self.touch_topology();
     }
 
     // --------------------------------------------------------------- copy
@@ -1960,6 +1987,7 @@ impl Stage {
         self.free = snapshot.free.clone();
         self.roots = snapshot.roots.clone();
         self.next_updater_id = snapshot.next_updater_id;
+        self.touch_topology();
     }
 }
 

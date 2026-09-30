@@ -1004,31 +1004,11 @@ class Mobject(_BridgeMobject):
         # descendant appears once for every path that reaches it.  The
         # engine's internal family walker intentionally deduplicates shared
         # descendants, so this compatibility-facing traversal must remain
-        # separate.  Enter/exit markers keep the implementation iterative
-        # while still refusing genuine cycles.  A leaf's markers would be
-        # entered and exited with nothing between them, so leaves skip them
-        # (fm-5wq.31: persistent-animation ownership checks walk every
-        # participant's family several times per frame).
-        family = []
-        visiting = set()
-        stack = [(True, self)]
-        while stack:
-            entering, mobject = stack.pop()
-            marker = id(mobject)
-            if not entering:
-                visiting.remove(marker)
-                continue
-            if not isinstance(mobject, _BridgeMobject):
-                raise TypeError("submobjects must be Mobject instances")
-            if marker in visiting:
-                raise _FamilyCycleError("submobjects would create a family cycle")
-            family.append(mobject)
-            children = list(mobject.submobjects)
-            if children:
-                visiting.add(marker)
-                stack.append((False, mobject))
-                stack.extend(zip(_itertools.repeat(True), reversed(children)))
-        return family
+        # separate.  _path_family runs this loop natively, step for step:
+        # enter/exit markers refuse genuine cycles, and each member's
+        # `submobjects` is read and listed exactly as Python would
+        # (fm-5wq.31: has_updaters walks large animation copies every frame).
+        return _path_family(self)
 
     def family_members_with_points(self):
         return [mobject for mobject in self.get_family() if mobject.has_points()]
@@ -2432,8 +2412,9 @@ class Mobject(_BridgeMobject):
     def has_updaters(self):
         # Reference caches `_has_updaters_in_family`; the engine answers by
         # walking the live family directly, so every call observes current
-        # truth with no invalidation protocol to keep coherent.
-        return any(mob.updaters for mob in self.get_family())
+        # truth with no invalidation protocol to keep coherent. _any_updaters
+        # is `any(mob.updaters for mob in family)`, run natively.
+        return _any_updaters(self.get_family())
 
     def insert_updater(self, update_func, index=0):
         if not callable(update_func):

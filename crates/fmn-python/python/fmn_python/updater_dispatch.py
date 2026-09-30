@@ -14,7 +14,25 @@ from threading import local
 from types import GetSetDescriptorType, MemberDescriptorType, MethodType
 
 _class_dict = type.__dict__["__dict__"].__get__
+_class_mro = type.__dict__["__mro__"].__get__
 _MISSING = object()
+_OBJECT_GETATTRIBUTE = _class_dict(object)["__getattribute__"]
+
+
+def _generic_getattr(cls):
+    """Whether attribute lookup on cls is object's own: the first
+    __getattribute__ in its MRO is object's and no class defines __getattr__.
+    Then `getattr(obj, "__dict__")` is `object.__getattribute__(obj,
+    "__dict__")`, the same C lookup, and no authored code can run in it.
+    Class namespaces are read through type's own descriptors."""
+    getattribute = _MISSING
+    for base in _class_mro(cls):
+        namespace = _class_dict(base)
+        if "__getattr__" in namespace:
+            return False
+        if getattribute is _MISSING and "__getattribute__" in namespace:
+            getattribute = namespace["__getattribute__"]
+    return getattribute is _OBJECT_GETATTRIBUTE
 
 
 def _static_is(obj, name, expected):
@@ -206,7 +224,8 @@ def install_updater_dispatch(native):
     object_protocols = scene_protocols = child_descriptors = scene_descriptors = None
     hook_names = ()
     child_protocols = {}
-    _instance_dict, _dict_keys = object.__getattribute__, dict.keys
+    _instance_dict = object.__getattribute__
+    public_update_scan = g["_public_update_scan"]
 
     def finalize():
         nonlocal object_protocols, scene_protocols, child_descriptors, scene_descriptors
@@ -246,71 +265,26 @@ def install_updater_dispatch(native):
         # take the exact per-object path only for objects that have one: the
         # per-member helper calls cost ~9 us, and this runs every frame over
         # every member (PrimePanning: 2,400 members, a third of its time).
-        plain, class_changed, descriptor_kept, container_changed = {}, {}, {}, {}
-        pending, seen = [self.frame, *self.mobjects], set()
-        while pending:
-            member = pending.pop()
-            marker = id(member)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            if not isinstance(member, Mobject):
-                return True
-            cls = type(member)
-            visible = plain.get(cls)
-            if visible is None:
-                visible = plain[cls] = _plain_instance_dict(cls)
-            own = None
-            if visible:
-                try:
-                    own = _instance_dict(member, "__dict__")
-                except AttributeError:
-                    own = None
-            if own is not None and not _dict_keys(own).isdisjoint(hook_names):
-                if _changed(member, object_protocols, memo):
-                    return True
-            else:
-                changed = class_changed.get(cls)
-                if changed is None:
-                    changed = class_changed[cls] = _changed(member, object_protocols, memo)
-                if changed:
-                    return True
-            kept = descriptor_kept.get(cls)
-            if kept is None:
-                expected = next(child_descriptors[base] for base in cls.__mro__
-                                if base in child_descriptors)
-                kept = descriptor_kept[cls] = (
-                    _class_implementation(cls, "submobjects", memo) is expected)
-            if not kept:
-                return True
-            children = member.submobjects
-            kind = type(children)
-            methods = child_protocols.get(kind)
-            if methods is None:
-                return True
-            visible = plain.get(kind)
-            if visible is None:
-                visible = plain[kind] = _plain_instance_dict(kind)
-            own = None
-            if visible:
-                try:
-                    own = _instance_dict(children, "__dict__")
-                except AttributeError:
-                    own = None
-            if own is not None and not _dict_keys(own).isdisjoint(methods):
-                if any(_scan_implementation(children, name, memo) is not method
-                       for name, method in methods.items()):
-                    return True
-            else:
-                changed = container_changed.get(kind)
-                if changed is None:
-                    changed = container_changed[kind] = any(
-                        _scan_implementation(children, name, memo) is not method
-                        for name, method in methods.items())
-                if changed:
-                    return True
-            pending.extend(children)
-        return False
+        # _public_update_scan runs that loop natively, calling these
+        # decisions where the Python loop did and caching them per class for
+        # this scan (fm-5wq.31: the loop itself cost ~3 us per member).
+
+        def member_changed(member):
+            return _changed(member, object_protocols, memo)
+
+        def submobjects_kept(cls):
+            expected = next(child_descriptors[base] for base in cls.__mro__
+                            if base in child_descriptors)
+            return _class_implementation(cls, "submobjects", memo) is expected
+
+        def container_changed(children, methods):
+            return any(_scan_implementation(children, name, memo) is not method
+                       for name, method in methods.items())
+
+        return public_update_scan(
+            [self.frame, *self.mobjects],
+            (Mobject, hook_names, child_protocols, _instance_dict, _plain_instance_dict,
+             member_changed, submobjects_kept, container_changed, _generic_getattr))
 
     def dispatch_public_update(self, dt):
         # A true result means BOTH host and native slots have completed. The
