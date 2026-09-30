@@ -5,7 +5,10 @@ Only input registration and live-control transitions are assembled here.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import wraps
+import inspect
+import math
 from typing import Any
 
 from .interaction import _method
@@ -52,7 +55,7 @@ def _connect(g, owner, specifications):
         raise
 
 
-def _bind_constructor(g, name, specifications):
+def _bind_constructor(g, name, specifications, constructor=None):
     cls = g.get(name)
     if cls is None:
         return
@@ -60,7 +63,7 @@ def _bind_constructor(g, name, specifications):
 
     @wraps(original)
     def initialize(self, *args, **kwargs):
-        original(self, *args, **kwargs)
+        (original if constructor is None else constructor)(self, *args, **kwargs)
         if name == "Button" and not callable(self.on_click):
             raise TypeError("Button.on_click must be callable")
         if name == "ControlPanel":
@@ -69,6 +72,100 @@ def _bind_constructor(g, name, specifications):
         _connect(g, self, specifications)
 
     _method(cls, "__init__", initialize)
+
+
+def _typed_scalar_constructors(g):
+    """Compose actual public primitive classes before the tracker hook pass.
+
+    Atlas still owns every shape. Anonymous widget-builder shells cannot
+    substitute for Rectangle/Circle/Line: those classes have public methods
+    and authorable constructors of their own. Reduced event-only embedding
+    tables supply their own constructors and do not include this geometry.
+    """
+    names = ("ControlMobject", "Rectangle", "RoundedRectangle", "Circle", "Line")
+    if not all(name in g for name in names):
+        return {}
+    root_keys = {"color", "opacity", "shading", "texture_paths",
+                 "is_fixed_in_frame", "depth_test", "z_index"}
+
+    def options(value, name):
+        if not isinstance(value, Mapping):
+            raise TypeError(name + " must be a mapping")
+        if len(value) > 4096:
+            raise ValueError(name + " exceeds 4096 entries")
+        return dict(value)
+
+    def finite(value, name):
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(name + " must be finite")
+        return value
+
+    def make_constructor(name, cls):
+        signature = inspect.signature(cls.__init__)
+
+        def initialize(self, *args, **kwargs):
+            bound = signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            p = bound.arguments
+            root = dict(p["kwargs"])
+            # Retain the existing slider's user attributes (e.g. name=), while
+            # passing actual base options into its one cooperative lifecycle.
+            extra = {key: value for key, value in root.items() if key not in root_keys}
+            if name != "LinearNumberSlider" and extra:
+                raise TypeError("unexpected keyword arguments: " + ", ".join(sorted(extra)))
+            root = {key: value for key, value in root.items() if key in root_keys}
+            value_type = g["_np"].dtype(p["value_type"]).type
+            if name == "EnableDisableButton":
+                if not isinstance(p["value"], bool):
+                    raise AssertionError("EnableDisableButton value must be bool")
+                rect = options(p["rect_kwargs"], "rect_kwargs")
+                enable, disable = p["enable_color"], p["disable_color"]
+                rgb = [g["_color_to_rgb"](color) for color in (enable, disable)]
+                if not all(g["_np"].isfinite(color).all() for color in rgb):
+                    raise ValueError("control colors must be finite")
+                style = dict(rect)
+                # Preserve the existing native white-at-construction default;
+                # genuine caller paints and custom state colors still win.
+                if style.get("fill_color") is None and style.get("color") is None:
+                    style["fill_color"] = g["WHITE"]
+                box = g["Rectangle"](**style)
+                if any(not g["_np"].array_equal(actual, g["_color_to_rgb"](default))
+                       for actual, default in zip(rgb, (g["GREEN"], g["RED"]))):
+                    box.set_fill(enable if p["value"] else disable)
+                self.rect_kwargs = rect
+                self.enable_color, self.disable_color = enable, disable
+                self.value_type, self.box = value_type, box
+                super(cls, self).__init__(p["value"], box, **root)
+            else:
+                low, high = (finite(p[key], "slider bound")
+                             for key in ("min_value", "max_value"))
+                step, value = finite(p["step"], "slider step"), finite(p["value"], "slider value")
+                if (low >= high or not math.isfinite(high - low) or step <= 0
+                        or not math.isfinite((high - low) / step)):
+                    raise ValueError("slider bounds must be finite, ordered and step positive")
+                if not low <= value <= high:
+                    raise ValueError("slider value must lie within its bounds")
+                rect = options(p["rounded_rect_kwargs"], "rounded_rect_kwargs")
+                circle = options(p["circle_kwargs"], "circle_kwargs")
+                bar, handle = g["RoundedRectangle"](**rect), g["Circle"](**circle)
+                axis = g["Line"](bar.get_bounding_box_point(g["LEFT"]),
+                                 bar.get_bounding_box_point(g["RIGHT"]))
+                if not math.isfinite(axis.get_length()) or axis.get_length() == 0:
+                    raise ValueError("slider axis must have distinct finite endpoints")
+                axis.set_opacity(0.)
+                handle.move_to(axis)
+                self.value_type = value_type
+                self.min_value, self.max_value, self.step = low, high, step
+                self.rounded_rect_kwargs, self.circle_kwargs = rect, circle
+                self.bar, self.slider, self.slider_axis = bar, handle, axis
+                super(cls, self).__init__(value, bar, handle, axis, **root)
+                for key, value in extra.items():
+                    setattr(self, key, value)
+        return initialize
+
+    return {name: make_constructor(name, g[name])
+            for name in ("EnableDisableButton", "LinearNumberSlider") if name in g}
 
 
 def _install_transitions(g):
@@ -146,6 +243,7 @@ def install_control_events(native: Any) -> None:
     g = vars(native)
     if g.get("_FMN_CONTROL_EVENTS_INSTALLED", False):
         return
+    constructors = _typed_scalar_constructors(g)
     _install_transitions(g)
     bindings = {
         "MotionMobject": (("mobject", "MouseDragEvent", "add_mouse_drag_listner", "mob_on_mouse_drag"),),
@@ -163,5 +261,5 @@ def install_control_events(native: Any) -> None:
         ),
     }
     for name, specifications in bindings.items():
-        _bind_constructor(g, name, specifications)
+        _bind_constructor(g, name, specifications, constructors.get(name))
     g["_FMN_CONTROL_EVENTS_INSTALLED"] = True

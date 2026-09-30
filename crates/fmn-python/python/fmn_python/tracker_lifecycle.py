@@ -7,6 +7,13 @@ ControlMobject.set_value or a float32 point-field encoding.
 from __future__ import annotations
 
 
+def _keep_control_dynamic(mobject):
+    """Keep controls active during waits without an unpickleable closure."""
+    # The dynamic marker is the Reference control contract. A module-level
+    # callable also survives the normal graph copier and pickle protocol.
+    return None
+
+
 def install_tracker_lifecycle(native):
     g = vars(native)
     if g.get("_FMN_TRACKER_LIFECYCLE_INSTALLED", False):
@@ -85,7 +92,7 @@ def install_tracker_lifecycle(native):
         # neither their colors nor an authored child should be replaced.
         super(Control, self).__init__(value, **kwargs)
         self.add(*mobjects)
-        self.add_updater(lambda mob: None)
+        self.add_updater(_keep_control_dynamic)
         self.fix_in_frame()
 
     for cls, methods in (

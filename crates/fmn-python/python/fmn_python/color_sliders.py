@@ -7,6 +7,7 @@ input dispatch nor the frame loop is reimplemented here.
 from __future__ import annotations
 
 from functools import wraps
+import inspect
 from typing import Any
 
 
@@ -26,10 +27,13 @@ def _refresh_swatch(bank):
     )
 
 
-def _channel_config(bank, index):
+def _channel_config(bank, index, defaults):
     config = dict(bank.sliders_kwargs)
-    config["rounded_rect_kwargs"] = dict(config.get("rounded_rect_kwargs", {}))
-    config["circle_kwargs"] = dict(config.get("circle_kwargs", {}))
+    # Bank options are overrides of Atlas's slider defaults, not complete
+    # primitive recipes. Fill absent keys from the public slider signature
+    # before calling it: an empty Circle recipe otherwise means radius=1.
+    for key in ("rounded_rect_kwargs", "circle_kwargs"):
+        config[key] = dict(defaults.get(key, {}), **config.get(key, {}))
     config.setdefault("min_value", 0.0)
     config.setdefault("max_value", 1.0 if index == 3 else 255.0)
     step = config.get("step", 0.04 if index == 3 else 1.0)
@@ -85,6 +89,10 @@ def install_color_sliders(native: Any) -> None:
     if g.get("_FMN_COLOR_SLIDERS_INSTALLED", False):
         return
     Bank, Group, Slider = g["ColorSliders"], g["Group"], g["LinearNumberSlider"]
+    slider_signature = inspect.signature(Slider)
+    defaults = {key: dict(parameter.default)
+                for key, parameter in slider_signature.parameters.items()
+                if key in ("rounded_rect_kwargs", "circle_kwargs")}
     original_init = Bank.__init__
     original_get_value = Bank.get_value
     np = g["_np"]
@@ -99,7 +107,7 @@ def install_color_sliders(native: Any) -> None:
         created = []
         try:
             for index, (template, value) in enumerate(zip(templates, values)):
-                channel = Slider(value=value, **_channel_config(self, index))
+                channel = Slider(value=value, **_channel_config(self, index, defaults))
                 created.append(channel)
                 # Atlas's bank builder owns layout and the RGB/alpha handle
                 # palette. Match axis centers, not bounding-box centers that
