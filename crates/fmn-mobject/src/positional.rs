@@ -183,8 +183,12 @@ impl Stage {
     }
 
     /// Recompute the box from the family's `point` records (in f64).
+    /// A point-free family has a degenerate box at its retained anchor; an
+    /// empty parent or sibling must not contribute an artificial origin to a
+    /// family that does contain geometry.
     fn compute_bounding_box(&self, mob: Mob) -> BoundingBox {
         let mut acc = BoxAccum::new();
+        let mut has_points = false;
         for m in self.family(mob) {
             if let Some(e) = self.get(m)
                 && let Some(col) = e.buffer.read_column("point")
@@ -192,6 +196,7 @@ impl Stage {
                 let placement = e.placement();
                 let (tris, _rem) = col.as_chunks::<3>();
                 for tri in tris {
+                    has_points = true;
                     acc.push(placement.apply_point([
                         f64::from(tri[0]),
                         f64::from(tri[1]),
@@ -199,6 +204,11 @@ impl Stage {
                     ]));
                 }
             }
+        }
+        if !has_points
+            && let Some(entry) = self.get(mob)
+        {
+            acc.push(entry.placement().apply_point(ORIGIN));
         }
         acc.finish()
     }
@@ -591,8 +601,11 @@ impl Stage {
     /// generally representable by one affine map. Affine positional operations
     /// never call it.
     pub fn bake_placement(&mut self, mob: Mob) -> Result<bool, StageError> {
-        let placement = self.get(mob).ok_or(StageError::StaleHandle)?.placement();
-        if placement.is_identity() {
+        let entry = self.get(mob).ok_or(StageError::StaleHandle)?;
+        let placement = entry.placement();
+        // An empty record has nowhere to store a baked anchor. Keep its
+        // placement, including when a Python points/data view is requested.
+        if placement.is_identity() || entry.buffer.is_empty() {
             return Ok(false);
         }
         let Some(points) = self.get_points(mob) else {
@@ -685,9 +698,9 @@ impl Stage {
             }
         }
         for member in members {
-            let has_live_view = self
-                .get(member)
-                .is_some_and(|entry| entry.buffer.live_view_count() > 0);
+            let has_live_view = self.get(member).is_some_and(|entry| {
+                !entry.buffer.is_empty() && entry.buffer.live_view_count() > 0
+            });
             if has_live_view {
                 let _ = self.map_world_pointlikes(member, |point| affine.apply_point(point));
                 continue;
