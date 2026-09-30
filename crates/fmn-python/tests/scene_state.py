@@ -156,6 +156,33 @@ def native_only_edits_reach_python_through_scene_mobjects():
     assert group not in a.parents and group in c.parents
 
 
+def projection_rereads_only_moved_child_lists():
+    # fm-5wq.31 work counter: after an edge change among already-projected
+    # members, Scene.mobjects reads the moved list only. The previous
+    # projection read every member's `submobjects` on every such read.
+    reads = []
+
+    class Counted(m.VGroup):
+        @property
+        def submobjects(self):
+            reads.append(self)
+            return self.__dict__["submobjects"]
+
+        @submobjects.setter
+        def submobjects(self, value):
+            self.__dict__["submobjects"] = value
+
+    leaves = [Counted() for _ in range(40)]
+    root = Counted(*leaves)
+    scene = m.Scene()
+    scene.add(root)
+    scene.mobjects
+    leaves[3].add(leaves[4])  # a bound member gains a second parent
+    reads.clear()
+    scene.mobjects
+    assert reads == [leaves[3]], len(reads)
+
+
 def camera_pose_and_callbacks():
     scene = m.Scene()
     frame, core, events = scene.frame, scene.frame._core, []
@@ -538,6 +565,7 @@ CASES = (
     captured_families_styles_and_arrays, shared_child_identity, updater_restoration,
     ordered_roots, scene_mobjects_follow_every_structural_change,
     native_only_edits_reach_python_through_scene_mobjects,
+    projection_rereads_only_moved_child_lists,
     camera_pose_and_callbacks, native_clock_and_bytes,
     repeated_history, history_branch_and_limit, rejected_checkpoint_preserves_history,
     foreign_owner_refusal, ignored_camera, rendered_restore,
@@ -551,7 +579,7 @@ CASES = (
     capture_refusal_preserves_history_and_native_arena,
     ignored_camera_keeps_its_authored_attributes,
 )
-assert len(CASES) == 23
+assert len(CASES) == 24
 for case in CASES:
     case()
     print("scene snapshot acceptance:", case.__name__)
