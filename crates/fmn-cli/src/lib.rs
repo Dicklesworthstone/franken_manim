@@ -2160,6 +2160,13 @@ pub const fn active_compiled_simd_tier() -> &'static str {
 /// Under §17.3 and §20.2 W11, wrong-tier launches must fail cleanly with guidance and exit code 4
 /// (capability), never crashing or causing a SIGILL illegal-instruction signal.
 ///
+/// This check alone cannot meet that on a tier binary. ADR-0016's crate-wide target features
+/// reach code that runs before it: an x86-64-v4 release build on an AVX2-only host stops with
+/// SIGILL in `std::rt::lang_start_internal` (a `vmovups %zmm0` store after thin LTO) on every
+/// invocation, including `--version`. Only a portable-compiled first stage can refuse a
+/// wrong-tier launch (fm-7wm.10). On a portable binary, or a tier binary on capable hardware,
+/// the check is exact.
+///
 /// # Errors
 /// Returns a capability `CliError` if the host CPU lacks required vector features.
 pub fn check_simd_tier_support() -> Result<(), CliError> {

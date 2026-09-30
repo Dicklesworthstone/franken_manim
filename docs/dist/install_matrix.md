@@ -73,6 +73,11 @@ before any render:
 - `active_compiled_tier` — the tier compiled into the running binary
   (`portable`, `x86-64-v3`, `x86-64-v4`, `aarch64+neon`).
 
+This works only where the binary can start. On unsupported hardware a tier
+binary cannot run `fmn doctor` either. An x86-64-v4 build stops with SIGILL in
+Rust's runtime startup, before `main`, measured on an AVX2-only host
+(ADR-0027). Choose with the portable binary's doctor, or let `install.sh` pick.
+
 **Naming divergence, recorded honestly:** the two reports use different
 spellings for the ARM tier — `aarch64-neon` (hardware side, from
 `fmn-platform`) versus `aarch64+neon` (compiled side, from `fmn-cli`). They

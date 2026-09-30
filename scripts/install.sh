@@ -327,7 +327,7 @@ select_simd_tier() {
                     ;;
             esac
             if [[ "$HOST_TIER" != "x86-64-v3" && "$HOST_TIER" != "x86-64-v4" ]]; then
-                warn "requested SIMD tier 'x86-64-v3' exceeds host CPU capability (hardware supports: '$HOST_TIER'); running this binary will fail with capability exit 4"
+                warn "requested SIMD tier 'x86-64-v3' exceeds host CPU capability (hardware supports: '$HOST_TIER'); this binary will not start on this CPU: it stops with SIGILL (illegal instruction) before printing anything. Install --tier auto or portable to run here."
             fi
             ;;
         x86-64-v4)
@@ -340,7 +340,7 @@ select_simd_tier() {
                     ;;
             esac
             if [[ "$HOST_TIER" != "x86-64-v4" ]]; then
-                warn "requested SIMD tier 'x86-64-v4' exceeds host CPU capability (hardware supports: '$HOST_TIER'); running this binary will fail with capability exit 4"
+                warn "requested SIMD tier 'x86-64-v4' exceeds host CPU capability (hardware supports: '$HOST_TIER'); this binary will not start on this CPU: it stops with SIGILL (illegal instruction) before printing anything. Install --tier auto or portable to run here."
             fi
             ;;
         aarch64-neon|aarch64+neon)
