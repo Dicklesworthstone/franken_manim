@@ -3204,6 +3204,14 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.clear_updaters(mob, recurse))
     }
 
+    /// Whether this mobject's Stage family holds any Marionette-owned
+    /// updater. Python callables live in `updaters`; this answers for the
+    /// native slots engine-backed features install.
+    fn _has_native_updaters_in_family(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| stage.has_updaters_in_family(mob))
+    }
+
     /// Run only Marionette-owned updaters for this mobject. The bootstrap
     /// first performs the matching Python family pass outside any Stage
     /// borrow, preserving the portal's callback-safety boundary.

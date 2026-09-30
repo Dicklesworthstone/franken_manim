@@ -37,7 +37,10 @@ class NativeSceneUpdateTests(unittest.TestCase):
         np.testing.assert_allclose([time for _, _, time in seen], [0, 1/30, 2/30, 3/30, 4/30])
 
     def test_wait_reaches_nested_dt_only_children(self):
-        leaf = Moving(); scene = m.Scene().add(m.Group(m.Group(leaf)))
+        # The Reference reaches a nested override only through a family that
+        # has updaters (mobject.py:826); the leaf's own updater provides one.
+        leaf = Moving(); leaf.add_updater(lambda obj, dt: None, call=False)
+        scene = m.Scene().add(m.Group(m.Group(leaf)))
         scene.wait(.1)
         np.testing.assert_allclose(leaf.get_center(), [4/30, 0, 0], atol=1e-6)
 

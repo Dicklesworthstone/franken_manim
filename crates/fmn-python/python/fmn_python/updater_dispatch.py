@@ -116,8 +116,23 @@ def install_updater_dispatch(native):
             if not cursor:
                 member._update_native_mobject(elapsed, False)
 
+    def native_slots(self):
+        # A bound family is one Stage family. A detached one keeps each
+        # member's native entry in its own nursery, so ask each member.
+        if self._is_bound():
+            return self._has_native_updaters_in_family()
+        return any(member._has_native_updaters_in_family()
+                   for member in g["_family_preorder"](self))
+
     def update(self, dt=0, recurse=True):
         dt, recurse = float(dt), bool(recurse)
+        # Reference Mobject.update (mobject.py:826) returns before recursing
+        # when its family has no updaters, so no descendant update runs: an
+        # authored override in an updater-free family is not called. The
+        # native slots engine-backed features install keep the walk that
+        # runs them.
+        if not self.has_updaters() and not native_slots(self):
+            return self
         delegate = getattr(state, "delegate", None)
         joined = delegate is not None and delegate[0] is self
         jobs, ancestors = (delegate[1], delegate[2]) if joined else (NativePass(), ())

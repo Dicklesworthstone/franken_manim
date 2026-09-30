@@ -16,6 +16,13 @@ class MovingSquare(m.Square):
         return super().update(dt)
 
 
+def ticking(mobject):
+    # Reference Mobject.update (mobject.py:826) returns before recursing when
+    # the family has no updaters, so an override below it never runs. A no-op
+    # updater on the override's own subtree keeps the dispatch under test live.
+    return mobject.add_updater(lambda obj, dt: None, call=False)
+
+
 class CopyMotion(m.Animation):
     def interpolate_submobject(self, current, starting, alpha):
         current.set_points(starting.get_points())
@@ -28,7 +35,7 @@ class LiteralCopyMotion(CopyMotion):
 
 def render_copy_motion(path, authored, threads):
     scene = m.Scene()
-    leaf = MovingSquare() if authored else m.Square()
+    leaf = ticking(MovingSquare()) if authored else m.Square()
     root = m.Group(leaf)
     animation = (CopyMotion if authored else LiteralCopyMotion)(
         root, run_time=.125, rate_func=m.linear, suspend_mobject_updating=True)
@@ -41,7 +48,7 @@ class PublicUpdateTests(unittest.TestCase):
     def test_nested_dt_only_override_changes_native_geometry(self):
         for bound in (False, True):
             with self.subTest(bound=bound):
-                child = MovingSquare()
+                child = ticking(MovingSquare())
                 root = m.Group(m.Group(child))
                 before = child.get_points().copy()
                 if bound:
@@ -49,6 +56,42 @@ class PublicUpdateTests(unittest.TestCase):
                 self.assertIs(root.update(.25), root)
                 np.testing.assert_array_equal(child.get_points(), before + .25 * m.RIGHT)
                 self.assertIs(root[0][0], child)
+
+    def test_updater_free_family_returns_before_descendant_updates(self):
+        # Reference Mobject.update (mobject.py:826): `if not self.has_updaters()
+        # ...: return self`. The pinned Reference (6199a00d) leaves each of these
+        # untouched; an updater in the override's subtree makes it run.
+        child = MovingSquare()
+        m.Group(m.Group(child)).update(.25)
+        np.testing.assert_array_equal(child.get_center(), m.ORIGIN)
+        child = MovingSquare()
+        m.Group(ticking(m.Group(child))).update(.25)
+        np.testing.assert_array_equal(child.get_center(), .25 * m.RIGHT)
+        # Called directly, an override is the receiver and runs.
+        alone = MovingSquare().update(.25)
+        np.testing.assert_array_equal(alone.get_center(), .25 * m.RIGHT)
+        events = []
+        child = m.Square(); root = m.Group(child)
+        child.update = lambda dt: events.append(('instance', dt))
+        root.update(.2)
+        self.assertEqual(events, [])
+        class Failing(m.Square):
+            def update(self, dt):
+                raise RuntimeError('an updater-free family must not reach this')
+        self.assertIsInstance(m.Group(Failing()).update(.1), m.Group)
+        child = MovingSquare(); scene = m.Scene().add(m.Group(child))
+        scene.update_mobjects(.25)
+        np.testing.assert_array_equal(child.get_center(), m.ORIGIN)
+        root = m.Group(MovingSquare())
+        animation = CopyMotion(root, rate_func=m.linear)
+        animation.begin(); animation.update_mobjects(.25); animation.interpolate(.5)
+        np.testing.assert_array_equal(root[0].get_center(), m.ORIGIN)
+        animation.finish()
+        # A native slot in the family keeps the walk that runs it.
+        leaf = m.Square(); root = m.Group(m.Group(leaf)); scene = m.Scene().add(root)
+        probe = scene._record_field_probe(leaf, 'point', 0)
+        root.update(.25)
+        self.assertEqual(len(probe.values()), 1)
 
     def test_virtual_entry_super_and_exit_order(self):
         events = []
@@ -91,9 +134,13 @@ class PublicUpdateTests(unittest.TestCase):
             def _update_native_mobject(self, dt, recurse):
                 events.append((dt, recurse))
                 return super()._update_native_mobject(dt, recurse)
-        root = Root(m.Group(m.Square(), m.Circle()))
+        root = Root(m.Group(ticking(m.Square()), m.Circle()))
         root.update(.25)
         self.assertEqual(events, [(.25, True)])
+        # With no updater anywhere there is nothing to run: no crossing.
+        events.clear()
+        Root(m.Group(m.Square(), m.Circle())).update(.25)
+        self.assertEqual(events, [])
 
     def test_override_selects_nonrecursive_super_for_both_phases(self):
         events = []
@@ -125,7 +172,7 @@ class PublicUpdateTests(unittest.TestCase):
         np.testing.assert_array_equal(child[0].get_center(), m.ORIGIN)
 
     def test_shared_children_keep_pathwise_public_visits(self):
-        child = MovingSquare()
+        child = ticking(MovingSquare())
         root = m.Group(m.Group(child), m.Group(child))
         root.update(.125)
         np.testing.assert_array_equal(child.get_center(), .25 * m.RIGHT)
@@ -133,7 +180,7 @@ class PublicUpdateTests(unittest.TestCase):
 
     def test_suspension_and_self_only_scope_preserve_pruning(self):
         child = MovingSquare()
-        root = m.Group(child)
+        root = ticking(m.Group(child))
         root.update(.2, recurse=False)
         root.suspend_updating(recurse=False).update(.2)
         np.testing.assert_array_equal(child.get_center(), m.ORIGIN)
@@ -166,7 +213,7 @@ class PublicUpdateTests(unittest.TestCase):
                 return super().update(dt)
         a, b, c = Child(), Child(), Child()
         a.label, b.label, c.label = 'a', 'b', 'c'
-        root = m.Group(a, b)
+        root = ticking(m.Group(a, b))
         root.update(.1)
         self.assertEqual(events, ['a', 'b'])
         events.clear(); root.update(.1)
@@ -174,11 +221,11 @@ class PublicUpdateTests(unittest.TestCase):
 
     def test_late_instance_and_class_updates_are_live(self):
         events = []
-        child = m.Square(); root = m.Group(child)
+        child = m.Square(); root = ticking(m.Group(child))
         child.update = lambda dt: events.append(('instance', dt))
         root.update(.2)
         class Child(m.Square): pass
-        child = Child(); root = m.Group(child)
+        child = Child(); root = ticking(m.Group(child))
         Child.update = lambda self, dt: events.append(('class', dt))
         root.update(.3)
         self.assertEqual(events, [('instance', .2), ('class', .3)])
@@ -193,7 +240,7 @@ class PublicUpdateTests(unittest.TestCase):
             def _update_native_mobject(self, dt, recurse):
                 events.append(dt)
                 return super()._update_native_mobject(dt, recurse)
-        child = Child(); root = m.Group(child)
+        child = ticking(Child()); root = m.Group(child)
         with self.assertRaises(RuntimeError) as caught: root.update(.1)
         self.assertIs(caught.exception, failure)
         self.assertEqual(events, [])
@@ -244,7 +291,7 @@ class PublicUpdateTests(unittest.TestCase):
             def _update_native_mobject(self, dt, recurse):
                 events.append(dt)
                 return super()._update_native_mobject(dt, recurse)
-        child = Child()
+        child = ticking(Child())
         other = m.Group(child)
         root = m.Group()
         root.add_updater(lambda obj, dt: other._update_python_family(dt, True), call=False)
@@ -267,7 +314,7 @@ class PublicUpdateTests(unittest.TestCase):
         self.assertTrue(all(ref() is None for ref in references))
 
     def test_animation_helper_updates_reach_descendant_override(self):
-        root = m.Group(MovingSquare())
+        root = m.Group(ticking(MovingSquare()))
         animation = CopyMotion(root, rate_func=m.linear)
         animation.begin()
         animation.update_mobjects(.25)
@@ -456,7 +503,7 @@ class PublicUpdateTests(unittest.TestCase):
         self.assertTrue(requires(m.Rotate(group, 0.1)))
 
     def test_scene_public_update_mobjects_dispatches_children(self):
-        child = MovingSquare(); scene = m.Scene().add(m.Group(child))
+        child = ticking(MovingSquare()); scene = m.Scene().add(m.Group(child))
         scene.update_mobjects(.25)
         np.testing.assert_array_equal(child.get_center(), .25 * m.RIGHT)
 

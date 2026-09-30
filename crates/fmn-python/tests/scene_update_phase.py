@@ -71,7 +71,10 @@ class SceneUpdatePhaseTests(unittest.TestCase):
         class Leaf(m.Square):
             def update(self, dt):
                 seen.append((self, dt)); return super().update(dt)
-        leaf = Leaf(); scene = m.Scene().add(m.Group(m.Group(leaf)))
+        # The Reference reaches a nested override only through a family that
+        # has updaters (mobject.py:826); the leaf's own updater provides one.
+        leaf = Leaf(); leaf.add_updater(lambda obj, dt: None, call=False)
+        scene = m.Scene().add(m.Group(m.Group(leaf)))
         self.assertTrue(scene._fmn_requires_public_scene_update())
         self.assertEqual(seen, [])
         self.assertTrue(scene._fmn_dispatch_public_scene_update(.125))
