@@ -168,6 +168,34 @@ class PointCloudLifecycleTests(unittest.TestCase):
                               radius=.3, color=m.YELLOW, glow=2., opacity=1.))
             self.assertEqual(actual, expected)
 
+    def test_finite_point_tables_take_one_reduction(self):
+        # fm-ztjj work counter: a finite table is proven finite and
+        # f32-representable by one reduction, so constructing a GlowDot calls
+        # neither isfinite nor finfo (the earlier check called both every
+        # time). A non-finite table still gets the exact refusal.
+        m.GlowDot()
+        calls = []
+        originals = {name: getattr(np, name) for name in ("isfinite", "finfo")}
+
+        def counting(name):
+            def wrapper(*args, **kwargs):
+                calls.append(name)
+                return originals[name](*args, **kwargs)
+            return wrapper
+
+        for name in originals:
+            setattr(np, name, counting(name))
+        try:
+            m.GlowDot(m.ORIGIN, radius=.075, glow_factor=1)
+        finally:
+            for name, original in originals.items():
+                setattr(np, name, original)
+        self.assertEqual(calls, [])
+        for points, message in (([[np.nan, 0, 0]], "finite"),
+                                ([[1e39, 0, 0]], "f32-representable")):
+            with self.assertRaisesRegex(ValueError, message):
+                m.DotCloud(points)
+
     def test_invalid_parameters_refuse_before_hooks(self):
         events = []
         class Cloud(m.DotCloud):

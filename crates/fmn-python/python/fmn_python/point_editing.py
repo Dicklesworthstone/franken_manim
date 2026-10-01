@@ -6,6 +6,10 @@ valid empty point tables, and authored point maps use the shared native matrices
 """
 from __future__ import annotations
 
+# The largest finite float32, exactly as `np.finfo(np.float32).max` compares
+# against float64 coordinates.
+_F32_MAX = 3.4028234663852886e38
+
 
 def _point_table(np, points):
     values = np.asarray(points)
@@ -18,6 +22,11 @@ def _point_table(np, points):
     # Own the input before resizing or invoking authored resize hooks. A view
     # can alias the live destination, including a reversed/strided field view.
     values = np.array(values, dtype=np.float64, copy=True)
+    # One reduction proves both checks below, since NaN fails the comparison;
+    # only a table that fails it takes them, in order, for the exact error
+    # (fm-ztjj: five NumPy calls per one-point table otherwise).
+    if values.size and np.abs(values).max() <= _F32_MAX:
+        return values
     if not np.isfinite(values).all():
         raise ValueError("points must be finite")
     if np.any(np.abs(values) > np.finfo(np.float32).max):

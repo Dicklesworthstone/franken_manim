@@ -64,6 +64,7 @@ def install_point_cloud_materials(native):
     Mobject = g["Mobject"]
     previous_interpolate = Mobject.interpolate
     missing = object()
+    float32 = np.dtype(np.float32)
 
     @wraps(previous)
     def setitem(self, key, value):
@@ -77,7 +78,7 @@ def install_point_cloud_materials(native):
         if "glow_factor" not in (records.dtype.names or ()):
             raise ValueError("point-cloud records have no native glow_factor field")
         column = records["glow_factor"]
-        if column.dtype != np.dtype(np.float32) or column.shape != (len(records), 1):
+        if column.dtype != float32 or column.shape != (len(records), 1):
             raise ValueError("native glow_factor requires one float32 lane per point")
         if not column.flags.writeable:
             raise ValueError("native glow_factor field is not writable")

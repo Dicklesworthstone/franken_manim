@@ -1310,12 +1310,28 @@ fn extract_shape_width(value: &Bound<'_, PyAny>) -> PyResult<usize> {
     Ok(width)
 }
 
+/// The `numpy` module, imported once (fm-ztjj: `.data` reads and schema
+/// parsing both resolved it on every call).
+fn numpy_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static NUMPY: pyo3::sync::PyOnceLock<Py<PyModule>> = pyo3::sync::PyOnceLock::new();
+    NUMPY
+        .get_or_try_init(py, || py.import("numpy").map(Bound::unbind))
+        .map(|numpy| numpy.bind(py))
+}
+
 fn validate_field_dtype(value: &Bound<'_, PyAny>) -> PyResult<()> {
-    let numpy = value.py().import("numpy").map_err(|error| {
+    static FLOAT32: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> = pyo3::sync::PyOnceLock::new();
+    let py = value.py();
+    let numpy = numpy_module(py).map_err(|error| {
         PyImportError::new_err(format!(
             "NumPy is required to interpret a three-item data_dtype entry: {error}"
         ))
     })?;
+    // `numpy.float32`, the field type stock data_dtypes name, is native
+    // float32 by definition; anything else takes the full check.
+    if value.is(FLOAT32.import(py, "numpy", "float32")?) {
+        return Ok(());
+    }
     let dtype = numpy.getattr("dtype")?.call1((value,))?;
     let kind: String = dtype.getattr("kind")?.extract()?;
     let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
@@ -2037,6 +2053,9 @@ fn numpy_array<'py>(
     proxy: &Bound<'py, BridgeMobject>,
     writable: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
+    // Every `.data` read builds one view (fm-ztjj: ~4 us each, 8 per
+    // GlowDot). The NumPy module and ndarray type are resolved once.
+    static NDARRAY: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> = pyo3::sync::PyOnceLock::new();
     let view = with_buffer(proxy, |buffer| buffer.export_view(writable))?;
     let len = view.len();
     let stride_bytes = view
@@ -2044,18 +2063,16 @@ fn numpy_array<'py>(
         .stride()
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| PyOverflowError::new_err("NumPy stride overflows usize"))?;
-    let numpy = py.import("numpy").map_err(|error| {
+    let numpy = numpy_module(py).map_err(|error| {
         PyImportError::new_err(format!(
             "NumPy is required for the live `data` view: {error}"
         ))
     })?;
-    let dtype = record_dtype(py, &numpy, view.schema(), stride_bytes)?;
+    let dtype = record_dtype(py, numpy, view.schema(), stride_bytes)?;
     let owner = Py::new(py, PyRecordView { view })?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype)?;
-    kwargs.set_item("buffer", owner)?;
-    kwargs.set_item("strides", (stride_bytes,))?;
-    numpy.getattr("ndarray")?.call(((len,),), Some(&kwargs))
+    let ndarray = NDARRAY.import(py, "numpy", "ndarray")?;
+    // ndarray(shape, dtype, buffer, offset, strides), positionally.
+    ndarray.call1(((len,), dtype, owner, 0, (stride_bytes,)))
 }
 
 /// The NumPy dtype of each RecordBuffer layout seen so far, keyed by its
@@ -2064,7 +2081,9 @@ fn numpy_array<'py>(
 /// immutable, so one per layout is shared by every view of it. A static is
 /// never dropped, so no reference is released after interpreter shutdown.
 type DtypeKey = (usize, Vec<(String, usize)>);
-static RECORD_DTYPES: Mutex<Vec<(DtypeKey, Py<PyAny>)>> = Mutex::new(Vec::new());
+/// (layout, dtype, the `names` tuple the dtype was built with).
+type DtypeEntry = (DtypeKey, Py<PyAny>, Py<PyAny>);
+static RECORD_DTYPES: Mutex<Vec<DtypeEntry>> = Mutex::new(Vec::new());
 
 fn record_dtype<'py>(
     py: Python<'py>,
@@ -2084,13 +2103,18 @@ fn record_dtype<'py>(
         .lock()
         .map_err(|_| PyRuntimeError::new_err("the record dtype cache was poisoned"))?
         .iter()
-        .find(|(key, _)| same(key))
-        .map(|(_, dtype)| dtype.clone_ref(py));
-    if let Some(dtype) = cached {
+        .find(|(key, _, _)| same(key))
+        .map(|(_, dtype, names)| (dtype.clone_ref(py), names.clone_ref(py)));
+    if let Some((dtype, built_names)) = cached {
         let dtype = dtype.into_bound(py);
         // `dtype.names` is the one assignable dtype property: a view whose
-        // fields an author renamed must not rename every later view.
-        let names = dtype.getattr("names")?;
+        // fields an author renamed must not rename every later view. NumPy
+        // returns the same tuple until `names` is reassigned, so the tuple
+        // the dtype was built with, by identity, settles the common case.
+        let names = dtype.getattr(pyo3::intern!(py, "names"))?;
+        if names.is(&built_names) {
+            return Ok(dtype);
+        }
         let kept = names.len()? == schema.fields().len()
             && names
                 .try_iter()?
@@ -2114,18 +2138,22 @@ fn record_dtype<'py>(
             "NumPy packed the all-f32 RecordBuffer dtype at an unexpected itemsize",
         ));
     }
+    let names = dtype.getattr(pyo3::intern!(py, "names"))?.unbind();
     let mut cache = RECORD_DTYPES
         .lock()
         .map_err(|_| PyRuntimeError::new_err("the record dtype cache was poisoned"))?;
-    match cache.iter_mut().find(|(key, _)| same(key)) {
-        Some((_, entry)) => *entry = dtype.clone().unbind(),
+    match cache.iter_mut().find(|(key, _, _)| same(key)) {
+        Some((_, entry, entry_names)) => {
+            *entry = dtype.clone().unbind();
+            *entry_names = names;
+        }
         None => {
             let fields = schema
                 .fields()
                 .iter()
                 .map(|field| (field.name.clone(), field.width))
                 .collect();
-            cache.push(((stride_bytes, fields), dtype.clone().unbind()));
+            cache.push(((stride_bytes, fields), dtype.clone().unbind(), names));
         }
     }
     Ok(dtype)
