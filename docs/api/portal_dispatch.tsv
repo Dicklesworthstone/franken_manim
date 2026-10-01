@@ -433,8 +433,8 @@ Button.__init__	Button	fmn_python.control_events	2	fmn_python.control_events > b
 Button.mob_on_mouse_press	Button	bootstrap	1	bootstrap
 Checkbox.__init__	Checkbox	fmn_python.control_events	2	fmn_python.control_events > bootstrap
 Checkbox.assert_value	Checkbox	bootstrap	1	bootstrap
-Checkbox.get_checkmark	Checkbox	fmn_python.control_events	2	fmn_python.control_events > bootstrap
-Checkbox.get_cross	Checkbox	fmn_python.control_events	2	fmn_python.control_events > bootstrap
+Checkbox.get_checkmark	Checkbox	fmn_python.control_events	2	fmn_python.control_events > fmn_python.control_events
+Checkbox.get_cross	Checkbox	fmn_python.control_events	2	fmn_python.control_events > fmn_python.control_events
 Checkbox.on_mouse_press	Checkbox	bootstrap	1	bootstrap
 Checkbox.set_value_anim	Checkbox	bootstrap	1	bootstrap
 Checkbox.toggle_value	Checkbox	bootstrap	1	bootstrap
