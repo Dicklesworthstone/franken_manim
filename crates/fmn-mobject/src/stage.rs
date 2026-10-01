@@ -45,6 +45,46 @@ fn fresh_epoch() -> u64 {
     NEXT_TOPOLOGY_EPOCH.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Fibonacci-mixes integer keys ([`Mob`] handles, object addresses) for
+/// per-call identity sets and maps. The keys are identities the engine
+/// chose, not caller data, so the keyed SipHash default buys nothing here
+/// and cost ~5% of a large scene's main thread (fm-5wq.31).
+#[derive(Default)]
+pub struct IdHasher(u64);
+
+impl IdHasher {
+    fn mix(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(29) ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.mix(u64::from(byte));
+        }
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.mix(u64::from(value));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.mix(value);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.mix(value as u64);
+    }
+}
+
+/// [`IdHasher`] as a `HashMap`/`HashSet` hasher parameter.
+pub type IdBuildHasher = std::hash::BuildHasherDefault<IdHasher>;
+
 /// Generational, stage-scoped, `Copy` mobject handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Mob {
@@ -764,13 +804,14 @@ impl Stage {
     /// Remove the union of several complete families in one recursive pass,
     /// matching one `Scene.remove(*mobs)` call.
     pub fn remove_many_from_scene(&mut self, mobs: &[Mob]) {
-        let targets: HashSet<Mob> = mobs.iter().flat_map(|&mob| self.family(mob)).collect();
+        let targets: HashSet<Mob, IdBuildHasher> =
+            mobs.iter().flat_map(|&mob| self.family(mob)).collect();
         // Only a target's ancestors can change. `recursive_remove` finds a
         // target below a member exactly when the member is one, since
         // `parents` mirrors `submobjects`; every other member keeps itself,
         // so it is not descended into. Every `add` removes first, so this
         // walk used to visit the whole scene on each add (fm-5wq.31).
-        let mut ancestors = HashSet::new();
+        let mut ancestors: HashSet<Mob, IdBuildHasher> = HashSet::default();
         let mut stack: Vec<Mob> = targets.iter().copied().collect();
         while let Some(current) = stack.pop() {
             if let Some(entry) = self.get(current) {
@@ -793,8 +834,8 @@ impl Stage {
     fn recursive_remove(
         &self,
         members: &[Mob],
-        targets: &HashSet<Mob>,
-        ancestors: &HashSet<Mob>,
+        targets: &HashSet<Mob, IdBuildHasher>,
+        ancestors: &HashSet<Mob, IdBuildHasher>,
     ) -> (Vec<Mob>, bool) {
         let mut kept = Vec::with_capacity(members.len());
         let mut found = false;
@@ -972,7 +1013,8 @@ impl Stage {
             return Err(StageError::StaleHandle);
         }
         let mut unique = Vec::with_capacity(children.len());
-        let mut seen = HashSet::with_capacity(children.len());
+        let mut seen: HashSet<Mob, IdBuildHasher> =
+            HashSet::with_capacity_and_hasher(children.len(), IdBuildHasher::default());
         for &child in children {
             if !self.contains(child) {
                 return Err(StageError::StaleHandle);
@@ -1034,7 +1076,7 @@ impl Stage {
         // Membership through a set: a linear `out.contains` made each cache
         // miss quadratic, ~60 ms for a 19K-member family (fm-5wq.31).
         let mut out = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen: HashSet<Mob, IdBuildHasher> = HashSet::default();
         let mut stack = vec![mob];
         while let Some(current) = stack.pop() {
             if !seen.insert(current) {

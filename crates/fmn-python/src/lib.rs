@@ -940,7 +940,7 @@ struct BridgeMobject {
 struct PyScene {
     engine: Engine,
     /// Handle → weakref(proxy), preserving one Python identity per live entry.
-    proxies: RefCell<HashMap<Mob, Py<PyAny>>>,
+    proxies: RefCell<HashMap<Mob, Py<PyAny>, ByAddress>>,
     /// Bumped by every `register_proxy`, so a reseated handle→proxy mapping
     /// invalidates `roots_projection`.
     proxy_generation: Cell<u64>,
@@ -8073,7 +8073,7 @@ impl PyScene {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Self {
             engine: Rc::new(EngineState::new(runtime)),
-            proxies: RefCell::new(HashMap::new()),
+            proxies: RefCell::new(HashMap::default()),
             proxy_generation: Cell::new(0),
             roots_projection: RefCell::new(None),
             render: Arc::new(Mutex::new(None)),
@@ -8583,7 +8583,7 @@ impl PyScene {
             let runtime = engine.borrow();
             let stage = runtime.stage();
             let roots = stage.roots().to_vec();
-            let mut seen = HashSet::new();
+            let mut seen: HashSet<Mob, ByAddress> = HashSet::default();
             let mut graph = Vec::new();
             for root in &roots {
                 for mob in stage.family(*root) {
@@ -8602,7 +8602,8 @@ impl PyScene {
             }
             (roots, graph)
         };
-        let mut proxies = HashMap::with_capacity(graph.len());
+        let mut proxies: HashMap<Mob, Bound<'py, PyAny>, ByAddress> =
+            HashMap::with_capacity_and_hasher(graph.len(), ByAddress::default());
         for (mob, vector_records, _, _) in &graph {
             let proxy = if let Some(proxy) = live_proxy(py, slf, *mob) {
                 proxy
@@ -11315,44 +11316,9 @@ fn _path_family<'py>(root: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
     PyList::new(py, family)
 }
 
-/// Fibonacci-mixes integer keys (object addresses, `Mob` handles) for the
-/// per-call maps of the admission scan and the scene projection. The keys
-/// are unique identities chosen by the engine, not by callers, so no keyed
-/// hash is needed.
-#[derive(Default)]
-struct AddressHasher(u64);
-
-impl AddressHasher {
-    fn mix(&mut self, value: u64) {
-        self.0 = (self.0.rotate_left(29) ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    }
-}
-
-impl std::hash::Hasher for AddressHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.mix(u64::from(byte));
-        }
-    }
-
-    fn write_u32(&mut self, value: u32) {
-        self.mix(u64::from(value));
-    }
-
-    fn write_u64(&mut self, value: u64) {
-        self.mix(value);
-    }
-
-    fn write_usize(&mut self, address: usize) {
-        self.mix(address as u64);
-    }
-}
-
-type ByAddress = std::hash::BuildHasherDefault<AddressHasher>;
+/// Identity keys (object addresses, `Mob` handles) for the binding's
+/// per-call maps and the proxy registry.
+type ByAddress = fmn_mobject::IdBuildHasher;
 
 /// The per-member loop of `Scene._fmn_requires_public_scene_update`
 /// (updater_dispatch.py): whether any member reachable from `pending` needs

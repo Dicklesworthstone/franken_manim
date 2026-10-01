@@ -61,7 +61,10 @@ pub use positional::PosTarget;
 pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordError, RecordSchema, RecordView};
 pub use render_snapshot::{RenderSnapshotError, RenderSnapshotLimits};
 pub use shape::ShapeTag;
-pub use stage::{CopyMap, Entry, Mob, Snapshot, Stage, UpdaterFn, UpdaterId, UpdaterSlot};
+pub use stage::{
+    CopyMap, Entry, IdBuildHasher, IdHasher, Mob, Snapshot, Stage, UpdaterFn, UpdaterId,
+    UpdaterSlot,
+};
 pub use uniforms::{JointType, Uniforms};
 
 /// Errors from the mobject engine's ownership layer.
