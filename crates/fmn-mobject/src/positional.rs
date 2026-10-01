@@ -205,9 +205,7 @@ impl Stage {
                 }
             }
         }
-        if !has_points
-            && let Some(entry) = self.get(mob)
-        {
+        if !has_points && let Some(entry) = self.get(mob) {
             acc.push(entry.placement().apply_point(ORIGIN));
         }
         acc.finish()

@@ -6,10 +6,7 @@ use fmn_mobject::{Mobject, Placement, Snapshot, Stage};
 fn empty_layout_anchor_supports_shift_move_to_and_next_to() {
     let mut stage = Stage::new();
     let anchor = stage.add(Mobject::new());
-    let square = stage.add(Mobject::from_points(&[
-        [-1.0, -1.0, 0.0],
-        [1.0, 1.0, 0.0],
-    ]));
+    let square = stage.add(Mobject::from_points(&[[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]]));
     let revision = stage.get(anchor).unwrap().buffer.revision();
     assert_eq!(stage.get_center(anchor), ORIGIN);
 
@@ -36,13 +33,7 @@ fn empty_anchor_affine_operations_use_the_requested_pivot() {
     assert_eq!(stage.get_center(anchor), [2.0, 3.0, 0.0]);
     stage.scale_about(anchor, 2.0, Some(ORIGIN), None);
     assert_eq!(stage.get_center(anchor), [4.0, 6.0, 0.0]);
-    stage.rotate(
-        anchor,
-        std::f64::consts::FRAC_PI_2,
-        OUT,
-        Some(ORIGIN),
-        None,
-    );
+    stage.rotate(anchor, std::f64::consts::FRAC_PI_2, OUT, Some(ORIGIN), None);
     for (actual, expected) in stage.get_center(anchor).into_iter().zip([-6.0, 4.0, 0.0]) {
         assert!((actual - expected).abs() < 1e-12);
     }
@@ -83,11 +74,17 @@ fn empty_parents_and_siblings_do_not_expand_real_geometry_bounds() {
     stage.shift(empty, [100.0, 100.0, 0.0]);
     stage.attach(parent, empty).unwrap();
     stage.attach(parent, child).unwrap();
-    assert_eq!(stage.get_bounding_box(parent), stage.get_bounding_box(child));
+    assert_eq!(
+        stage.get_bounding_box(parent),
+        stage.get_bounding_box(child)
+    );
     assert_eq!(stage.get_center(parent), [15.0, 13.0, 0.0]);
     stage.shift(parent, [1.0, 2.0, 3.0]);
     assert_eq!(stage.get_center(parent), [16.0, 15.0, 3.0]);
-    assert_eq!(stage.get_bounding_box(parent), stage.get_bounding_box(child));
+    assert_eq!(
+        stage.get_bounding_box(parent),
+        stage.get_bounding_box(child)
+    );
     assert_eq!(stage.get_center(empty), [101.0, 102.0, 3.0]);
 }
 
