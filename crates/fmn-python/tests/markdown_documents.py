@@ -65,8 +65,10 @@ class MathematicalDocumentTests(unittest.TestCase):
         np.testing.assert_array_equal(view, old)
         self.assertEqual(doc.line_width, 2.5)
         self.assertEqual(doc.body_color, tuple(m.color_to_rgb(m.GREEN)))
+        # `$…$` is inline (text-style) math; Tex itself is display style like
+        # the Reference's align*, so the oracle names the inline style.
         np.testing.assert_allclose(shape(content(doc, 1)[3]),
-                                   shape(m.Tex(r'\frac{1}{x}', font_size=32)), atol=4e-6)
+                                   shape(m.Tex(r'\textstyle\frac{1}{x}', font_size=32)), atol=4e-6)
         for glyph in content(doc, 1)[3].family_members_with_points():
             np.testing.assert_allclose(glyph.data['fill_rgba'][:, :3],
                                        np.tile(m.color_to_rgb(m.GREEN), (len(glyph.data), 1)), atol=1e-6)

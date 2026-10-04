@@ -576,7 +576,11 @@ fn text_styled_spans(corpus: &Corpus) -> Built {
 }
 
 fn tex_fraction(corpus: &Corpus) -> Built {
+    // The corpus's text-style fraction (inline math); tex_display_sum is the
+    // display-style case. `Tex::new` itself defaults to display, like the
+    // Reference's align* (fm-tex-display-style-nclg).
     let frac = Tex::new(r"\frac{a+b}{c-d}")
+        .math_style(fmn_tex::Style::Text)
         .font_size(40.0)
         .build(&corpus.tex)
         .expect("fraction typesets")
