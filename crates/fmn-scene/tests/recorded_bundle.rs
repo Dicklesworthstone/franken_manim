@@ -5,7 +5,7 @@ use std::rc::Rc;
 use fmn_anim::{FramePacket, RationalFrameClock, prepare_animation};
 use fmn_core::rng::RngRoot;
 use fmn_hash::sha256;
-use fmn_mobject::{AnimateArgs, Mobject, Stage};
+use fmn_mobject::{AnimateArgs, Mobject, Snapshot, Stage};
 use fmn_scene::recording::{RecordingError, SceneBundleRecorder};
 use fmn_scene::{
     BundleError, BundleExportLimits, BundleSegmentKind, CaptureReason, IntegrationError,
@@ -102,15 +102,51 @@ fn imperative_play_wait_and_show_replay_every_observed_snapshot_without_callback
         );
     }
     // Reverse/random-access playback must not execute the original updater.
+    // The persist honesty clause (fmn-mobject persist.rs): updater callables
+    // never serialize, so a replayed stage carries the observed state with no
+    // callables, and its re-encoding is the observed capture decoded and
+    // re-encoded — not the live bytes, which also name the bound updater
+    // (fm-sa9o: 9 bytes = one `(u64 id, u8 kind)` updater slot). Compare to
+    // that contract, and prove the capture did record the follow-updater.
     for index in (0..artifact.frame_count).rev() {
-        let replayed = bundle
-            .stage_at(index)
+        let replayed_stage = bundle.stage_at(index).unwrap();
+        let replayed = replayed_stage.snapshot().to_bytes().unwrap();
+        let observed = Snapshot::from_bytes(&sink.frames[index as usize], &replayed_stage)
+            .expect("the observed capture decodes");
+        assert_eq!(
+            observed.updaters.entries.len(),
+            1,
+            "frame {index}: the live capture names exactly the follow-updater's mobject"
+        );
+        assert_eq!(observed.updaters.entries[0].1.len(), 1);
+        let observed_without_callables = observed.snapshot.materialize().snapshot();
+        assert_eq!(
+            replayed,
+            observed_without_callables.to_bytes().unwrap(),
+            "frame {index}: replay differs from the observed state"
+        );
+    }
+    // Planted negative: the comparison sees real state. Replaying frame 0
+    // against a later observed frame whose state differs (the follower moved)
+    // must fail, so a dropped or stale state field cannot pass unnoticed.
+    let replayed_first = bundle.stage_at(0).unwrap();
+    let decode = |bytes: &[u8]| {
+        Snapshot::from_bytes(bytes, &replayed_first)
             .unwrap()
+            .snapshot
+            .materialize()
             .snapshot()
             .to_bytes()
-            .unwrap();
-        assert_eq!(replayed, sink.frames[index as usize]);
-    }
+            .unwrap()
+    };
+    let first = decode(&sink.frames[0]);
+    let different = sink
+        .frames
+        .iter()
+        .map(|bytes| decode(bytes))
+        .find(|bytes| *bytes != first)
+        .expect("the follow-updater changes the observed state across frames");
+    assert_ne!(replayed_first.snapshot().to_bytes().unwrap(), different);
     assert_eq!(calls.get(), calls_before_playback);
 }
 
