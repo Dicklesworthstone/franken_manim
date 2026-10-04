@@ -36,7 +36,7 @@ layouter; cell text is retained but inline cell styling and column alignment
 hints are not applied. Lists and block quotes flatten with explicit prefixes,
 retaining nested non-paragraph content. Nested tables and header-only tables
 use a textual presentation. Thematic breaks are a textual rule. Default-mode
- table rules use `GREY_B` so they remain visible on the scene's black background;
+ table rules use `GREY_B` so they remain visible on the scene's default #333333 background (and on black);
 cell fills, native stroke widths and syntax colors are otherwise retained.
 
 The source is bounded to 32,768 UTF-8 bytes, 256 top-level blocks and 24 levels

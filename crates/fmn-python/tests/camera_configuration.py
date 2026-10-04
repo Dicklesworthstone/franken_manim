@@ -116,14 +116,18 @@ class CameraConfigurationTests(unittest.TestCase):
         config = {"resolution": (96, 54), "samples": 1, "frame_config": {
             "frame_shape": (5., 3.), "center_point": (2., 1., 0.), "fovy": .8,
         }}
-        direct = m.Camera(**config)
+        # A Scene's camera also inherits manim_config.camera (#333333); a
+        # directly constructed Camera keeps the class default, as in the
+        # Reference, so state the scene background for a pose-only comparison.
+        direct = m.Camera(**config, background_color="#333333")
         scene = m.Scene(camera_config=config)
         obj = m.VGroup(m.Square(side_length=1.3, fill_color=m.RED, fill_opacity=1).move_to((2., 1., 0.)),
                        m.Triangle(fill_color=m.BLUE, fill_opacity=1).scale(.3).move_to((3., 1.5, 0.)))
         expected = direct.capture_snapshot(obj).png()
         actual = scene.camera.capture_snapshot(obj).png()
         self.assertEqual(actual, expected)
-        wrong = m.Camera(resolution=(96, 54), samples=1).capture_snapshot(obj).png()
+        wrong = m.Camera(resolution=(96, 54), samples=1,
+                         background_color="#333333").capture_snapshot(obj).png()
         self.assertNotEqual(actual, wrong, "a discarded configured pose must visibly fail")
 
     def test_configured_frame_animation_matches_manual_pose_at_one_four_threads(self):
@@ -179,7 +183,7 @@ class CameraConfigurationTests(unittest.TestCase):
         shape[:] = [0., float('nan')]
         center[:] = float('nan')
         obj = m.Square(side_length=1., fill_color=m.RED, fill_opacity=1).move_to((2., 1., 0.))
-        expected = m.Camera(resolution=(96, 54), samples=1,
+        expected = m.Camera(resolution=(96, 54), samples=1, background_color="#333333",
             frame_config={"frame_shape": (5., 3.), "center_point": (2., 1., 0.), "fovy": .8})
         self.assertEqual(scene.camera.capture_snapshot(obj).png(), expected.capture_snapshot(obj).png())
         np.testing.assert_array_equal(scene.frame.get_center(), (2., 1., 0.))

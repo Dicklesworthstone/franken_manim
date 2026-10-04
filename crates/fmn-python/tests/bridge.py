@@ -19097,12 +19097,16 @@ assert np.isclose(aspect_camera.get_frame_height(), 10.0)
 assert np.isclose(aspect_camera.get_frame_width(), 10.0 * 4.0 / 3.0)
 
 # fm-5wq.4: Scene.camera_config is the remaining constructor seam that
-# builds Lumen's Camera — class default_camera_config, constructor
-# camera_config, and Scene.samples (ThreeDScene still defaults to 4).
+# builds Lumen's Camera — manim_config.camera (default_config.yml plus the
+# cwd custom_config.yml; fm-5wq.44), class default_camera_config,
+# constructor camera_config, and Scene.samples (ThreeDScene defaults to 4).
 assert scene_module.Scene.default_camera_config == {}
 assert scene_module.Scene.samples == 0
 assert scene_module.ThreeDScene.samples == 4
-assert Scene().camera_config == {}
+assert Scene().camera_config == {
+    "resolution": (1920, 1080), "fps": 30,
+    "background_color": "#333333", "background_opacity": 1.0,
+}, Scene().camera_config
 assert Scene().camera.samples == 0
 config_scene = Scene(camera_config=dict(resolution=(640, 360), fps=24))
 assert config_scene.camera_config["resolution"] == (640, 360)

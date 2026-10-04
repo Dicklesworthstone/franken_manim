@@ -243,8 +243,10 @@ class GraphAreaAcceptance(unittest.TestCase):
                 data, images = frames(path)
                 self.assertEqual(len(images), 2)
                 self.assertGreater(np.count_nonzero(images[0] > 100), 200)
-                # No fill should be visible in the missing middle interval.
-                self.assertLess(int(images[0][:, 75:85].max()), 40)
+                # No fill should be visible in the missing middle interval:
+                # nothing there may rise more than 24 luma codes above the
+                # background (16 on black, ~60 on the default #333333).
+                self.assertLess(int(images[0][:, 75:85].max()), int(images[0][0, 0]) + 24)
                 outputs.append(data)
             self.assertEqual(outputs[0], outputs[1])
             self.assertEqual(outputs[1], outputs[2])

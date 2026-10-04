@@ -90,9 +90,16 @@ impl Capture {
                 ));
             }
         };
+        // The configured background (default #333333), as standalone fmn and
+        // the planar FMTL player use: a planar bundle has no background track,
+        // so this is the baseline the scene's camera must match on export.
+        let background = fmn_core::color::Srgb::from_hex(&config.camera.background_color)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
+            .to_linear(config.camera.background_opacity);
         let camera = Camera::new(CameraConfig {
             resolution: (width, height),
             fps,
+            background,
             ..CameraConfig::default()
         })
         .map_err(camera_error)?;

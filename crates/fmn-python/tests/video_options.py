@@ -11,6 +11,11 @@ from fmn_python import render_scene
 
 
 class Swatch(m.Scene):
+    # The wire-format fidelity checks below were calibrated on a black field:
+    # against the default #333333 the red swatch differs almost only in
+    # chroma, which x264 smears at 96x54.
+    default_camera_config = {"background_color": "#000000"}
+
     def construct(self):
         self.add(m.Square(side_length=2, fill_color="#FF0000", fill_opacity=1,
                           stroke_width=0).shift(m.UP))

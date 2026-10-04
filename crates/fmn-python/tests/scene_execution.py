@@ -275,6 +275,10 @@ def end_at_animation_terminates_before_the_excluded_segment_and_publishes():
 
 def hooks_drive_real_frames_and_preserve_one_four_thread_output():
     class HookMotion(Scene):
+        # Luma-only detection below needs a black field: the red fill set in
+        # pre_play has nearly the default #333333 background's luma.
+        default_camera_config = {"background_color": "#000000"}
+
         def pre_play(self):
             super().pre_play()
             self.hooks.append(("pre", self.num_plays))
