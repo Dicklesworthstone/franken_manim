@@ -24,11 +24,11 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--finder` | render | `finder` | improved | BN-15 | store_true | false | portable reveal-in-file-manager action |
 | `--fps` | render | `fps` | same | - | store | — | positive integer frame rate |
 | `--hd` | render | `hd` | same | - | store_true | false | 1080p resolution preset |
-| `--leave_progress_bars` | render | `leave_progress_bars` | same | - | store_true | false | human progress policy |
+| `--leave_progress_bars` | render | `leave_progress_bars` | tiered | OOT-CLI-PROGRESS | store_true | false | no per-animation progress bars; refused by name |
 | `--log-level` | global | `log_level` | same | - | store | — | stable log-level vocabulary |
 | `--pix_fmt` | render | `pix_fmt` | same | - | store | — | explicit ffmpeg wire pixel format |
 | `--prerun` | render | `prerun` | improved | BN-15 | store_true | false | deterministic count-only scene pass |
-| `--show_animation_progress` | render | `show_animation_progress` | same | - | store_true | false | per-animation human progress |
+| `--show_animation_progress` | render | `show_animation_progress` | tiered | OOT-CLI-PROGRESS | store_true | false | no per-animation progress bars; refused by name |
 | `--subdivide` | render | `subdivide` | same | - | store_true | false | one output per animation segment |
 | `--uhd` | render | `uhd` | same | - | store_true | false | 2160p resolution preset |
 | `--vcodec` | render | `vcodec` | same | - | store | — | explicit ffmpeg encoder |
@@ -36,13 +36,13 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `-a,--write_all` | render | `write_all` | same | - | store_true | false | select every scene in declaration order |
 | `-c,--color` | render | `background` | same | - | store | — | explicit background color |
 | `-e,--embed` | render | `embed` | tiered | OOT-CLI-EMBED | store | — | Python front door or Studio breakpoint only |
-| `-f,--full_screen` | render | `full_screen` | same | - | store_true | false | fullscreen interactive presentation |
+| `-f,--full_screen` | render | `full_screen` | tiered | OOT-CLI-WINDOW | store_true | false | live-window control; file renders refuse it |
 | `-i,--gif` | render | `gif` | same | - | store_true | false | native GIF output |
 | `-l,--low_quality` | render | `low_quality` | same | - | store_true | false | 480p resolution preset |
 | `-m,--medium_quality` | render | `medium_quality` | same | - | store_true | false | 720p resolution preset |
 | `-n,--start_at_animation_number` | render | `animation_range` | improved | BN-15 | store | — | validated start or half-open start,end play range |
 | `-o,--open` | render | `open` | improved | BN-15 | store_true | false | portable host open action |
-| `-p,--presenter_mode` | render | `presenter_mode` | same | - | store_true | false | presenter-controlled waits |
+| `-p,--presenter_mode` | render | `presenter_mode` | tiered | OOT-CLI-WINDOW | store_true | false | live-window control; file renders refuse it |
 | `-q,--quiet` | global | `quiet` | same | - | store_true | false | suppress human decoration only |
 | `-r,--resolution` | render | `resolution` | improved | BN-15 | store | — | validated WIDTHxHEIGHT override |
 | `-s,--skip_animations` | render | `skip_animations` | same | - | store_true | false | capture the final state |

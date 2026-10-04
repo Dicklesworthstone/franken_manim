@@ -374,3 +374,76 @@ fn compiled_simd_tier_matches_host_or_fails_cleanly_with_guidance() {
         }
     }
 }
+
+#[cfg(feature = "batch")]
+fn y4m_rate_and_frames(path: &Path) -> (String, usize) {
+    let bytes = fs::read(path).expect("read y4m artifact");
+    let header_end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .expect("y4m header line");
+    let header = std::str::from_utf8(&bytes[..header_end]).expect("ASCII y4m header");
+    let rate = header
+        .split(' ')
+        .find_map(|field| field.strip_prefix('F'))
+        .expect("y4m frame rate field")
+        .to_owned();
+    let frames = bytes
+        .windows(6)
+        .filter(|window| window == b"FRAME\n")
+        .count();
+    (rate, frames)
+}
+
+/// fm-cli-flag-timing-ht01: window-only flags once switched the scene clock
+/// to the 30 fps preview rate while the y4m kept the configured rate (`-f
+/// --fps 60` wrote 12 frames into an `F60:1` file); progress flags were
+/// accepted and ignored. A file render now refuses them by name with the
+/// capability exit and publishes nothing; the plain render keeps its timing.
+#[cfg(feature = "batch")]
+#[test]
+fn window_and_progress_flags_are_refused_and_never_mistime_a_file_render() {
+    let fixture = Fixture::new();
+    let render = |name: &str, extra: &[&str]| {
+        let output = fixture.root.join(name);
+        let mut argv = args(&[
+            "--robot",
+            "--format",
+            "y4m",
+            "--resolution",
+            "64x36",
+            "--fps",
+            "60",
+        ]);
+        argv.extend(extra.iter().map(|value| OsString::from(*value)));
+        argv.extend(args(&["--video_dir"]));
+        argv.push(output.clone().into_os_string());
+        argv.extend(args(&["@builtin", "circle_shift.v1"]));
+        (run(&fixture, argv), output)
+    };
+
+    let (plain, plain_dir) = render("plain", &[]);
+    assert_code(&plain, 0);
+    let artifact = fs::read_dir(&plain_dir)
+        .expect("plain output directory")
+        .map(|entry| entry.expect("directory entry").path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "y4m"))
+        .expect("a y4m artifact");
+    assert_eq!(y4m_rate_and_frames(&artifact), ("60:1".to_owned(), 23));
+
+    for (name, flags) in [
+        ("presenter", &["-p"][..]),
+        ("fullscreen", &["-f"][..]),
+        ("reload", &["--autoreload"][..]),
+        ("embed", &["-e", "3"][..]),
+        ("progress", &["--show_animation_progress"][..]),
+        ("bars", &["--leave_progress_bars"][..]),
+    ] {
+        let (refused, dir) = render(name, flags);
+        assert_code(&refused, 4);
+        assert!(
+            !dir.exists() || fs::read_dir(&dir).expect("output dir").next().is_none(),
+            "{flags:?} published output before refusing"
+        );
+    }
+}

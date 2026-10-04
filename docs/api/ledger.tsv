@@ -35,11 +35,11 @@ fmn.cli.render	--finder	finder	cli_flag	0	action=store_true;nargs=-;type=-;defau
 fmn.cli.render	--format	format	cli_flag	0	action=store;nargs=-;type=output_format;default=auto	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues
 fmn.cli.render	--fps	fps	cli_flag	0	action=store;nargs=-;type=int;default=-	same	-	crates/fmn-cli/src/lib.rs#tests	positive integer frame rate
 fmn.cli.render	--hd	hd	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	1080p resolution preset
-fmn.cli.render	--leave_progress_bars	leave_progress_bars	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	human progress policy
+fmn.cli.render	--leave_progress_bars	leave_progress_bars	cli_flag	0	action=store_true;nargs=-;type=-;default=False	tiered	OOT-CLI-PROGRESS	crates/fmn-cli/src/lib.rs#tests	no per-animation progress bars; refused by name
 fmn.cli.render	--math-pack	math_pack	cli_flag	0	action=store;nargs=-;type=pack;default=default	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select an fmd-math preamble pack
 fmn.cli.render	--pix_fmt	pix_fmt	cli_flag	0	action=store;nargs=-;type=-;default=-	same	-	crates/fmn-cli/src/lib.rs#tests	explicit ffmpeg wire pixel format
 fmn.cli.render	--prerun	prerun	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	deterministic count-only scene pass
-fmn.cli.render	--show_animation_progress	show_animation_progress	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	per-animation human progress
+fmn.cli.render	--show_animation_progress	show_animation_progress	cli_flag	0	action=store_true;nargs=-;type=-;default=False	tiered	OOT-CLI-PROGRESS	crates/fmn-cli/src/lib.rs#tests	no per-animation progress bars; refused by name
 fmn.cli.render	--subdivide	subdivide	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	one output per animation segment
 fmn.cli.render	--uhd	uhd	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	2160p resolution preset
 fmn.cli.render	--vcodec	vcodec	cli_flag	0	action=store;nargs=-;type=-;default=-	same	-	crates/fmn-cli/src/lib.rs#tests	explicit ffmpeg encoder
@@ -47,13 +47,13 @@ fmn.cli.render	--video_dir	video_dir	cli_flag	0	action=store;nargs=-;type=-;defa
 fmn.cli.render	-a,--write_all	write_all	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	select every scene in declaration order
 fmn.cli.render	-c,--color	background	cli_flag	0	action=store;nargs=-;type=-;default=-	same	-	crates/fmn-cli/src/lib.rs#tests	explicit background color
 fmn.cli.render	-e,--embed	embed	cli_flag	0	action=store;nargs=-;type=-;default=-	tiered	OOT-CLI-EMBED	crates/fmn-cli/src/lib.rs#tests	Python front door or Studio breakpoint only
-fmn.cli.render	-f,--full_screen	full_screen	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	fullscreen interactive presentation
+fmn.cli.render	-f,--full_screen	full_screen	cli_flag	0	action=store_true;nargs=-;type=-;default=False	tiered	OOT-CLI-WINDOW	crates/fmn-cli/src/lib.rs#tests	live-window control; file renders refuse it
 fmn.cli.render	-i,--gif	gif	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	native GIF output
 fmn.cli.render	-l,--low_quality	low_quality	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	480p resolution preset
 fmn.cli.render	-m,--medium_quality	medium_quality	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	720p resolution preset
 fmn.cli.render	-n,--start_at_animation_number	animation_range	cli_flag	0	action=store;nargs=-;type=-;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	validated start or half-open start,end play range
 fmn.cli.render	-o,--open	open	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	portable host open action
-fmn.cli.render	-p,--presenter_mode	presenter_mode	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	presenter-controlled waits
+fmn.cli.render	-p,--presenter_mode	presenter_mode	cli_flag	0	action=store_true;nargs=-;type=-;default=False	tiered	OOT-CLI-WINDOW	crates/fmn-cli/src/lib.rs#tests	live-window control; file renders refuse it
 fmn.cli.render	-r,--resolution	resolution	cli_flag	0	action=store;nargs=-;type=-;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	validated WIDTHxHEIGHT override
 fmn.cli.render	-s,--skip_animations	skip_animations	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	capture the final state
 fmn.cli.render	-t,--transparent	transparent	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	alpha-capable output negotiation
