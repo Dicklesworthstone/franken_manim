@@ -60,6 +60,10 @@ def verify_texture_pairs():
 
         def still(template, name, flipped=False, opacity=1):
             class Still(m.Scene):
+                # The half-opacity check below reads "no red" against a black
+                # field; the default #333333 would contribute red 25.
+                default_camera_config = {"background_color": "#000000"}
+
                 def construct(self):
                     surface = template.copy().set_opacity(opacity)
                     if flipped:
