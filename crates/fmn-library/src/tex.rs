@@ -164,14 +164,16 @@ pub struct Tex<'a> {
 }
 
 impl<'a> Tex<'a> {
-    /// A `Tex` with the Reference's defaults: text-style mathematics,
-    /// font size 48 over 144-per-unit, the tex style, no color map.
+    /// A `Tex` with the Reference's defaults: display-style mathematics
+    /// (the Reference wraps every `Tex` in `\begin{align*}`, which is display
+    /// math), font size 48 over 144-per-unit, the tex style, no color map.
+    /// Inline (text-style) mathematics is `.math_style(MathStyle::Text)`.
     #[must_use]
     pub fn new(source: &'a str) -> Self {
         Self {
             source,
             preamble: "",
-            mode: Mode::Math(MathStyle::Text),
+            mode: Mode::Math(MathStyle::Display),
             font_size: DEFAULT_FONT_SIZE,
             font_size_for_unit_height: DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
             style: text_style(),
@@ -574,7 +576,10 @@ mod tests {
     #[test]
     fn display_style_changes_the_layout() {
         let engine = engine();
-        let text = Tex::new(r"\frac{a}{b}").build(&engine).expect("builds");
+        let text = Tex::new(r"\frac{a}{b}")
+            .math_style(MathStyle::Text)
+            .build(&engine)
+            .expect("builds");
         let display = Tex::new(r"\frac{a}{b}")
             .display()
             .build(&engine)
@@ -588,6 +593,63 @@ mod tests {
             "display fractions are taller: {} vs {}",
             extent(&display),
             extent(&text)
+        );
+    }
+
+    /// The Reference typesets every `Tex` inside `align*`, i.e. display
+    /// math (fm-tex-display-style-nclg): the default must be display style,
+    /// so big-operator limits stack and fractions take display size.
+    #[test]
+    fn the_default_is_the_references_display_style() {
+        let engine = engine();
+        let height = |m: &TexMobject| {
+            let (min, max) = m.vmob.extent().expect("has extent");
+            max[1] - min[1]
+        };
+        let source = r"\sum_{n=1}^{N} \frac{1}{n^2}";
+        let default = Tex::new(source).build(&engine).expect("builds");
+        let display = Tex::new(source).display().build(&engine).expect("builds");
+        let text = Tex::new(source)
+            .math_style(MathStyle::Text)
+            .build(&engine)
+            .expect("builds");
+        assert_eq!(dump_family(&default.vmob), dump_family(&display.vmob));
+        // Reference (6199a00d, TeX Live 2025): 1.331 tall in display style;
+        // the text-style layout is under half that.
+        assert!(
+            height(&default) > 1.8 * height(&text),
+            "display {} vs text {}",
+            height(&default),
+            height(&text)
+        );
+        // Limits stack: the lower limit is centred on the summation sign
+        // (TeX centres limits on the operator) and lies entirely below it.
+        let sigma = default
+            .typeset
+            .subs
+            .iter()
+            .position(|sub| {
+                matches!(sub.prim, Prim::Glyph(g) if default.typeset.layout.glyphs[g].ch == '∑')
+            })
+            .expect("a summation glyph");
+        let (sigma_min, sigma_max) = default.vmob.children()[sigma]
+            .extent()
+            .expect("sigma extent");
+        let lower = default.occurrences("n=1");
+        let lower: Vec<usize> = lower.into_iter().flatten().collect();
+        assert!(!lower.is_empty(), "the lower limit selects glyphs");
+        let (mut left, mut right) = (f64::INFINITY, f64::NEG_INFINITY);
+        for ord in lower {
+            let (min, max) = default.vmob.children()[ord].extent().expect("limit extent");
+            assert!(max[1] < sigma_min[1], "lower-limit glyph not below the sign");
+            left = left.min(min[0]);
+            right = right.max(max[0]);
+        }
+        let limit_centre = 0.5 * (left + right);
+        let sign_centre = 0.5 * (sigma_min[0] + sigma_max[0]);
+        assert!(
+            (limit_centre - sign_centre).abs() < 0.03,
+            "lower limit centred at {limit_centre}, sign at {sign_centre}"
         );
     }
 

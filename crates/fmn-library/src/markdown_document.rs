@@ -776,11 +776,16 @@ impl<'a> Composer<'a> {
             "Markdown mathematics requires build_with_math",
         ))?;
         budget.input(source)?;
-        let mut builder = Tex::new(source).font_size(size);
-        if display {
-            builder = builder.display();
-        }
-        let built = builder.build(engine)?;
+        // `$…$` is inline (text-style) mathematics; `$$…$$` is display.
+        let style = if display {
+            fmn_tex::Style::Display
+        } else {
+            fmn_tex::Style::Text
+        };
+        let built = Tex::new(source)
+            .font_size(size)
+            .math_style(style)
+            .build(engine)?;
         let scale = crate::tex::calibrate(engine, size, DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT)?;
         let geometry = built.vmob.map_style_deep(|s| s.color(self.color));
         budget.output(&geometry)?;
