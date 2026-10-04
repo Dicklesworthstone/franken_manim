@@ -30,8 +30,8 @@ The native front door also exposes capabilities that classic manim did not:
 
 - `fmn render` is the default command when a scene path appears first.
 - Quality presets, frame rate, background colour, scene selection, skip mode,
-  presenter mode, GIF selection, output naming, and ffmpeg codec/pixel-format
-  flags retain their recognizable meanings.
+  GIF selection, output naming, and ffmpeg codec/pixel-format flags retain
+  their recognizable meanings.
 - Configuration precedence remains defaults, then the user config file, then
   explicit CLI values.
 - Human help and progress remain human-facing; robot mode never mixes them
@@ -46,6 +46,15 @@ does not embed an interpreter. Their stable boundaries and revisit conditions
 are recorded as `OOT-CLI-AUTORELOAD` and `OOT-CLI-EMBED` in the out-of-tier
 ledger rather than being described as improvements here.
 
+Amendment (2026-10-04, fm-cli-flag-timing-ht01): a standalone file render opens
+no window, so `-p/--presenter_mode` and `-f/--full_screen` (`OOT-CLI-WINDOW`)
+and `--show_animation_progress`/`--leave_progress_bars` (`OOT-CLI-PROGRESS`)
+are refused by name with a capability exit, as `-e` and `--autoreload` already
+were. They had been accepted and ignored, and the window flags were worse than
+ignored: they switched the scene clock to the Reference's 30 fps preview rate
+while the file kept its configured rate, so `-f --fps 60` wrote 12 frames into a
+60 fps file and `-p` dropped frames. The Studio keeps the preview semantics.
+
 ## Migration guidance
 
 - Treat a nonzero exit as a stable category, not as arbitrary argparse text;
@@ -55,8 +64,10 @@ ledger rather than being described as improvements here.
   output format.
 - Use `fmn doctor --robot` to inspect capabilities in automation before asking
   for optional ffmpeg output.
-- Move live-reload workflows to `fmn studio`; use fmn-python or a Studio
-  breakpoint for interactive embed points.
+- Move live-reload, presenter and fullscreen workflows to `fmn studio`; use
+  fmn-python or a Studio breakpoint for interactive embed points. Drop
+  `-p`, `-f`, `--show_animation_progress` and `--leave_progress_bars` from file
+  renders.
 - Do not scrape decorated human output. Select `--robot` and consume its
   versioned NDJSON records.
 
