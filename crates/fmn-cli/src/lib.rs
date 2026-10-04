@@ -5644,6 +5644,26 @@ fn execute_native_render_with_cancellation(
             "host open/reveal integration is not registered; the render artifact can still be written without `--open` or `--finder`",
         ));
     }
+    // A file render opens no window. The Reference's window-only controls
+    // would otherwise switch the scene clock to its 30 fps preview rate while
+    // the sinks keep the configured rate, mistiming the written artifact
+    // (fm-cli-flag-timing-ht01). Refuse them rather than accept them silently.
+    if command.presenter_mode
+        || command.full_screen
+        || command.autoreload
+        || command.embed_line.is_some()
+    {
+        return Err(CliError::new(
+            "capability",
+            "presenter (-p), fullscreen (-f), --autoreload and embed (-e) drive a live preview window, which a standalone file render never opens; use `fmn studio` for live iteration",
+        ));
+    }
+    if command.show_animation_progress || command.leave_progress_bars {
+        return Err(CliError::new(
+            "capability",
+            "standalone fmn draws no per-animation progress bars; omit --show_animation_progress and --leave_progress_bars",
+        ));
+    }
     let input = resolve_native_render_input(fs.as_ref(), command)?;
     let requested_format = requested_render_format(command)?;
     let mut config = resolve_render_config(fs.as_ref(), command)?;
