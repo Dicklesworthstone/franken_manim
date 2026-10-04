@@ -641,7 +641,10 @@ mod tests {
         let (mut left, mut right) = (f64::INFINITY, f64::NEG_INFINITY);
         for ord in lower {
             let (min, max) = default.vmob.children()[ord].extent().expect("limit extent");
-            assert!(max[1] < sigma_min[1], "lower-limit glyph not below the sign");
+            assert!(
+                max[1] < sigma_min[1],
+                "lower-limit glyph not below the sign"
+            );
             left = left.min(min[0]);
             right = right.max(max[0]);
         }
