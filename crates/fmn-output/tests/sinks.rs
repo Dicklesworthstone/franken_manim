@@ -8,7 +8,7 @@ use fmn_codec::{
 };
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_hash::{Sha256, sha256};
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use fmn_output::{
     ColorDescription, Container, EncoderCapabilities, EncoderChoice, FfmpegSink, FfmpegSinkConfig,
     FfmpegTool, JobLimits, VideoJob, WireFormat,
@@ -24,20 +24,20 @@ use fmn_platform::fs::{
     ATOMIC_DIRECTORY_COMPLETE_LEAF, AtomicDirectoryWriter, AtomicFileWriter, FileSystem, FsError,
     FsNodeKind, PreparedAtomicDirectory, PreparedAtomicFile, VirtualFs,
 };
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use fmn_platform::process::{
     ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
     ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
 };
 use fmn_platform::profile::{ProfilePath, ProfileRecorder};
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use std::time::Duration;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1419,7 +1419,7 @@ fn native_artifact_kinds_cover_still_and_audio_publications() {
     assert_eq!(unused.bytes, 0);
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 mod ffmpeg_boundary {
     use super::*;
 

@@ -881,17 +881,34 @@ fn create_private_directory(path: &Path) -> Result<(), std::io::Error> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
-#[cfg(windows)]
-fn create_private_directory(path: &Path) -> Result<(), std::io::Error> {
-    std::fs::create_dir(path)
-}
-
-#[cfg(not(any(unix, windows)))]
+/// Windows (and every other non-Unix target) fails closed before any ffmpeg
+/// probe or job is spawned, exactly as published v0.4.0 did.
+///
+/// DLL loader boundary (issue #3): the exact-image process mechanism launches
+/// the relocated `fmn-bound-ffmpeg.exe` with `CreateProcessW` and a NULL
+/// current-directory argument, so the child inherits the *caller's* working
+/// directory. Under the default `SafeDllSearchMode` the Windows loader searches
+/// the current directory for any non-KnownDLL that the executable imports or
+/// later loads by module name. Relocating and hashing the EXE binds only the
+/// EXE: its DLL closure is unbound, and a DLL planted in a directory the user
+/// happens to run `fmn doctor` from could be loaded into the probe.
+/// `SetDefaultDllDirectories` / `LOAD_LIBRARY_SEARCH_*` only govern the calling
+/// process, and mutating this process's cwd or DLL directory to influence the
+/// child would be a process-global race in a multithreaded renderer. `std::fs`
+/// also cannot create a directory with a provably private ACL.
+///
+/// Until the process mechanism can start the child with a controlled current
+/// directory and a bounded, verified DLL closure (proved on native Windows),
+/// the private workdir is refused here, so every `FfmpegTool::resolve` (the
+/// default `doctor` probe included) reports a `Workdir` refusal instead of
+/// executing a native image whose loader search we cannot bound.
+#[cfg(not(unix))]
 fn create_private_directory(path: &Path) -> Result<(), std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         format!(
-            "cannot prove a private ffmpeg workdir for {} on this target",
+            "cannot prove a private ffmpeg workdir for {} on this target \
+             (Windows child DLL search would include the caller's working directory)",
             path.display()
         ),
     ))
@@ -2101,7 +2118,7 @@ fn cleanup_workdir(limits: &JobLimits, workdir: &OwnedWorkdir) {
     }
 }
 
-#[cfg(all(test, any(unix, windows)))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use fmn_platform::process::{FfmpegLocator as _, ScriptedRunner, StdFfmpegLocator};

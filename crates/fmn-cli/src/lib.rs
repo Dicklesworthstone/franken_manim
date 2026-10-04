@@ -51,7 +51,7 @@ use fmn_output::{
     ManifestMode, ManifestOutput, NativeArtifactKind, NativeArtifactReport, OrderedEmitter,
     PngSink, PngSinkConfig, PngTarget, ProvenanceManifest, SinkLimits, SinkReceipt,
     StructuralField, SvgPublicationConfig, VideoJob, WavPublicationConfig, WireFormat, Y4mSink,
-    Y4mSinkConfig, frames_to_samples, publish_svg, publish_wav,
+    Y4mSinkConfig, frames_to_samples, publish_svg_new, publish_wav_new,
 };
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 #[cfg(test)]
@@ -4656,7 +4656,13 @@ fn publish_scene_soundtrack(
     let mix = mixer
         .mix(mix_threads.max(1))
         .map_err(|error| CliError::new("render", error.to_string()))?;
-    let report = publish_wav(
+    // Create-only publication (issue #4): the earlier absence preflight is
+    // advisory only. A competing render can publish the same artifact name
+    // after it, so the final commit must be the filesystem's atomic
+    // create-new (unique sibling temp file + no-clobber link) and never a
+    // replacing rename that could overwrite the winner's bytes out from under
+    // its provenance sidecar.
+    let report = publish_wav_new(
         fs,
         &WavPublicationConfig {
             destination: destination.to_owned(),
@@ -4721,7 +4727,8 @@ fn publish_scene_still_svg(
         viewport.frame_height,
     )
     .map_err(|error| CliError::new("scene", error.to_string()))?;
-    let report = publish_svg(
+    // Create-only for the same reason as the WAV soundtrack (issue #4).
+    let report = publish_svg_new(
         fs,
         &SvgPublicationConfig {
             destination: destination.to_owned(),
@@ -10077,5 +10084,284 @@ mod tests {
         assert_eq!(spans[0].source_bytes, 2);
         assert_eq!(spans[0].excerpt, "h");
         assert_eq!(spans[1].excerpt, "i");
+    }
+
+    /// Unit fault injection for issue #4: a filesystem capability that lets
+    /// the CLI's absence preflight for `target` observe "absent" and then, in
+    /// the same call, lets a competing render publish complete bytes there.
+    /// That is exactly the window between the advisory preflight and the
+    /// final publication; no sleeps or timing are involved.
+    struct CompetitorWinsAfterPreflightFs {
+        inner: Arc<VirtualFs>,
+        target: PathBuf,
+        competitor: Vec<u8>,
+        planted: std::sync::atomic::AtomicBool,
+    }
+
+    impl FileSystem for CompetitorWinsAfterPreflightFs {
+        fn identity(&self) -> &'static str {
+            self.inner.identity()
+        }
+
+        fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+            let observed = self.inner.node_kind_no_follow(path)?;
+            if path == self.target && !self.planted.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.inner
+                    .insert(self.target.clone(), self.competitor.clone());
+            }
+            Ok(observed)
+        }
+
+        fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+            self.inner.create_dir(path)
+        }
+
+        fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+            self.inner.read(path)
+        }
+
+        fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+            self.inner.read_bounded(path, max_bytes)
+        }
+
+        fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+            self.inner.write_atomic(path, bytes)
+        }
+
+        fn begin_atomic_file(
+            self: Arc<Self>,
+            path: &Path,
+        ) -> Result<Box<dyn fmn_platform::fs::AtomicFileWriter>, FsError> {
+            Arc::clone(&self.inner).begin_atomic_file(path)
+        }
+
+        fn begin_atomic_directory(
+            self: Arc<Self>,
+            path: &Path,
+        ) -> Result<Box<dyn fmn_platform::fs::AtomicDirectoryWriter>, FsError> {
+            Arc::clone(&self.inner).begin_atomic_directory(path)
+        }
+
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+            self.inner.create_new(path, bytes)
+        }
+
+        fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+            self.inner.remove_file(path)
+        }
+
+        fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.inner.exists(path)
+        }
+
+        fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+            self.inner.list_dir(path)
+        }
+
+        fn count_dir_entries_bounded(
+            &self,
+            path: &Path,
+            max_entries: usize,
+        ) -> Result<usize, FsError> {
+            self.inner.count_dir_entries_bounded(path, max_entries)
+        }
+    }
+
+    fn composition_args(format: &str, video_dir: &str, scene: &str) -> Vec<String> {
+        [
+            "--robot",
+            "--format",
+            format,
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            "--video_dir",
+            video_dir,
+            BUILTIN_SCENE_SOURCE,
+            scene,
+        ]
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect()
+    }
+
+    fn sound_cue_fixture_fs() -> Arc<VirtualFs> {
+        let fs = Arc::new(VirtualFs::new());
+        let samples: Vec<f32> = (0..12_000_u16)
+            .map(|index| 0.4 * (core::f32::consts::TAU * 440.0 * f32::from(index) / 48_000.0).sin())
+            .collect();
+        fs.insert(
+            fmn::builtins::SOUND_CUE_ASSET_NAME,
+            fmn_codec::encode_wav(1, 48_000, fmn_codec::SampleFormat::S16, &samples),
+        );
+        fs
+    }
+
+    #[test]
+    fn composition_publishers_never_replace_a_competitor_that_wins_after_preflight() {
+        for (format, scene, leaf) in [
+            ("svg", "circle_shift.v1", "circle_shift.svg"),
+            ("wav", "sound_cue.v1", "sound_cue.wav"),
+        ] {
+            // Control: a fresh destination still publishes artifact + sidecar.
+            let fs = sound_cue_fixture_fs();
+            let fresh = run_with_capabilities(
+                composition_args(format, "/fresh", scene),
+                fs_capability(&fs),
+                Arc::new(fmn_platform::process::ScriptedRunner::new()),
+                &no_ffmpeg_locator(),
+            );
+            assert_eq!(fresh.code, 0, "{format}: {}{}", fresh.stdout, fresh.stderr);
+            let fresh_artifact = Path::new("/fresh").join(leaf);
+            assert!(
+                !fs.read(&fresh_artifact)
+                    .expect("fresh artifact published")
+                    .is_empty()
+            );
+            assert!(
+                fs.exists(
+                    &adjacent_manifest_destination(&fresh_artifact)
+                        .expect("sidecar")
+                        .join("manifest.fmnp")
+                )
+            );
+
+            // Race: the competitor's complete artifact lands after this
+            // render's absence preflight but before its final publication.
+            let target = Path::new("/race").join(leaf);
+            let competitor = format!("competitor-owned {format} generation").into_bytes();
+            let racing = Arc::new(CompetitorWinsAfterPreflightFs {
+                inner: Arc::clone(&fs),
+                target: target.clone(),
+                competitor: competitor.clone(),
+                planted: std::sync::atomic::AtomicBool::new(false),
+            });
+            let raced = run_with_capabilities(
+                composition_args(format, "/race", scene),
+                racing as Arc<dyn FileSystem>,
+                Arc::new(fmn_platform::process::ScriptedRunner::new()),
+                &no_ffmpeg_locator(),
+            );
+            assert_ne!(
+                raced.code, 0,
+                "{format}: a lost race must not report success"
+            );
+            assert!(
+                !raced.stdout.contains("\"kind\":\"render\""),
+                "{format}: no success receipt: {}",
+                raced.stdout
+            );
+            assert!(
+                raced.stdout.contains("already exists") || raced.stderr.contains("already exists"),
+                "{format}: named create-only refusal: {}{}",
+                raced.stdout,
+                raced.stderr
+            );
+            assert_eq!(
+                fs.read(&target).expect("winner's artifact survives"),
+                competitor,
+                "{format}: the winner's bytes were replaced"
+            );
+            assert_eq!(
+                fs.node_kind_no_follow(&adjacent_manifest_destination(&target).expect("sidecar"))
+                    .expect("inspect sidecar"),
+                None,
+                "{format}: the loser must not publish provenance"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_svg_renders_to_one_destination_leave_exactly_one_consistent_generation() {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        const RACERS: usize = 6;
+
+        let root = std::env::temp_dir().join(format!(
+            "fmn-cli-composition-race-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("fresh race fixture directory");
+        let video_dir = root.join("out");
+        let video_dir_arg = video_dir.to_str().expect("UTF-8 temp path").to_owned();
+        let barrier = Arc::new(std::sync::Barrier::new(RACERS));
+        let handles: Vec<_> = (0..RACERS)
+            .map(|racer| {
+                let barrier = Arc::clone(&barrier);
+                let video_dir_arg = video_dir_arg.clone();
+                std::thread::spawn(move || {
+                    // Distinct resolutions give every racer distinct SVG bytes.
+                    let resolution = format!("{}x54", 96 + 2 * racer);
+                    let mut args = composition_args("svg", &video_dir_arg, "circle_shift.v1");
+                    let at = args
+                        .iter()
+                        .position(|arg| arg == "96x54")
+                        .expect("resolution argument");
+                    args[at] = resolution;
+                    barrier.wait();
+                    run_with_capabilities(
+                        args,
+                        Arc::new(fmn_platform::fs::StdFs),
+                        Arc::new(fmn_platform::process::ScriptedRunner::new()),
+                        &no_ffmpeg_locator(),
+                    )
+                })
+            })
+            .collect();
+        let outputs: Vec<RunOutput> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("racer thread"))
+            .collect();
+        let winners: Vec<&RunOutput> = outputs.iter().filter(|output| output.code == 0).collect();
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one racer may publish: {:?}",
+            outputs
+                .iter()
+                .map(|output| (output.code, output.stdout.as_str(), output.stderr.as_str()))
+                .collect::<Vec<_>>()
+        );
+        for loser in outputs.iter().filter(|output| output.code != 0) {
+            assert!(
+                !loser.stdout.contains("\"kind\":\"render\""),
+                "a losing racer reported success: {}",
+                loser.stdout
+            );
+        }
+        let record = winners[0].stdout.lines().next().expect("winner record");
+        let digest_key = "\"artifact_digest\":\"";
+        let start = record.find(digest_key).expect("winner digest") + digest_key.len();
+        let winner_digest = &record[start..start + 64];
+
+        let artifact = video_dir.join("circle_shift.svg");
+        let bytes = std::fs::read(&artifact).expect("published SVG");
+        assert!(
+            record.contains(&format!("\"bytes\":{}", bytes.len())),
+            "on-disk bytes are the winner's: {record}"
+        );
+        assert_eq!(
+            fmn_hash::sha256(&bytes).to_hex(),
+            winner_digest,
+            "on-disk artifact digest matches the winner's receipt"
+        );
+        let manifest_text = std::fs::read_to_string(
+            adjacent_manifest_destination(&artifact)
+                .expect("sidecar")
+                .join("manifest.txt"),
+        )
+        .expect("winner's provenance sidecar");
+        assert!(
+            manifest_text.contains(winner_digest),
+            "sidecar describes the published bytes: {manifest_text}"
+        );
     }
 }

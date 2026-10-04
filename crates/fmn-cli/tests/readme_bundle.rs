@@ -15,7 +15,10 @@ fn frames(directory: &Path) -> Vec<Vec<u8>> {
         .filter(|path| path.extension().is_some_and(|extension| extension == "png"))
         .collect();
     paths.sort();
-    paths.iter().map(|path| std::fs::read(path).unwrap()).collect()
+    paths
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect()
 }
 
 #[test]

@@ -3,8 +3,8 @@ use fmn_anim::{RateFunc, Timeline};
 use fmn_hash::Writer;
 use fmn_mobject::{Mobject, Stage};
 use fmn_scene::timeline_bundle::{
-    BundleReadError, BundleSegmentKind, SharedTimelineBundle, TIMELINE_BUNDLE_SCHEMA, TimelineBundle,
-    TimelineFrameCache, bundle_engine_version,
+    BundleReadError, BundleSegmentKind, SharedTimelineBundle, TIMELINE_BUNDLE_SCHEMA,
+    TimelineBundle, TimelineFrameCache, bundle_engine_version,
 };
 
 // Construct a wire vector independently of the exporter's function-address

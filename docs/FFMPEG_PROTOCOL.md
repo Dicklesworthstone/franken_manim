@@ -150,13 +150,16 @@ is no fallback to probing or executing the mutable configured path.
 On Unix, missing workdir-parent components and every claimed directory are
 created as mode `0700`. A canonical ancestor writable by group/other is
 accepted only when it has the sticky bit (as `/tmp` normally does).
-Parent-directory (`..`) components are refused before creation. On Windows,
-private directories are created in the caller's or temp tree and identified by
-volume serial number and file index; application-directory loader lookup is
-isolated by relocating `fmn-bound-ffmpeg.exe` into the dedicated private workdir so
-it cannot resolve untrusted sibling DLLs from the source executable folder. Other
-non-Unix/non-Windows targets fail earlier with `Workdir`, before any executable
-probe, because safe `std` cannot prove a private directory ACL there. This is separate
+Parent-directory (`..`) components are refused before creation. Windows and
+every other non-Unix target fail earlier with `Workdir`, before any executable
+probe (including the default `fmn doctor` probe), because safe `std` cannot
+prove a private directory ACL there and because the exact-image mechanism
+starts the child with a NULL `CreateProcessW` current directory: the child
+would inherit the caller's working directory, which the default Windows DLL
+search order consults for non-KnownDLL imports. Relocating and hashing the EXE
+does not bind its DLL closure, so the boundary stays fail-closed on Windows
+until a controlled child cwd and a verified DLL closure are proved natively
+(issue #3). This is separate
 from the process mechanism's own fail-closed requirement for complete process-tree
 cancellation.
 
