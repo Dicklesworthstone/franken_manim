@@ -142,8 +142,14 @@ either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
 - `SUITE.lock` SHA-256: `9858f2624322ed241cf02bce35fbe5d7d607d797e3a58ea521275830484053f6`
-- `Cargo.lock` SHA-256: `d3bec838d80da291ec9ef095b760e26de7815bd179bcfdf687cc3104a3855dae`
-- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `cb5eff12b8f8e26aec4e6f0660527c33939ef204f1c74891c707a6b2ff98905b`
+- `Cargo.lock` SHA-256: `dee4c3a240e5fa803da63fcd6da94b6317b2db49f4da7a41ed1f4c126d694f4d`
+- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `4c58a1bb52b3e6e833fcc0cc50cfbf086a3b8889e4790480c291b64b44382f1a`
+
+The 0.5.0 release bump re-bound both lock identities above. That bump changed
+only the lockstep workspace package versions (0.4.0 -> 0.5.0, path packages
+without a registry source); no third-party package, source or checksum in either
+lock changed, so the dependency graph audited here is unchanged. The full wasm
+package/browser gate was not re-run for that version-only change.
 
 Method labels are deliberately narrow:
 

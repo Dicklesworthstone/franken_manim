@@ -12,7 +12,7 @@ shopt -s lastpipe 2>/dev/null || true
 umask 022
 
 REPOSITORY="Dicklesworthstone/franken_manim"
-FALLBACK_VERSION="0.4.0"
+FALLBACK_VERSION="0.5.0"
 QUIET=0
 NO_GUM=0
 FORCE=0
@@ -145,7 +145,7 @@ Install the standalone CPython-free `fmn` binary from a FrankenManim release.
 Every archive is SHA-256 verified before extraction.
 
 Options:
-  --version VERSION     Install an exact release (for example 0.4.0 or v0.4.0)
+  --version VERSION     Install an exact release (for example 0.5.0 or v0.5.0)
   --tier TIER           SIMD build tier: auto (default), portable, x86-64-v3,
                         x86-64-v4, aarch64-neon
   --install-dir DIR     Destination directory (default: $HOME/.local/bin)

@@ -2,7 +2,7 @@
 
 This is the evidence-bounded project changelog for **franken_manim**, a sovereign deterministic rewrite of 3Blue1Brown's `manim` in pure Rust with a separately installed `manimlib`-compatible Python portal.
 
-The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` are prereleases. Source behavior, compatibility rulings, task state, and release evidence remain distinct:
+The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.5.0` are prereleases. Source behavior, compatibility rulings, task state, and release evidence remain distinct:
 
 - source code says what behavior exists;
 - `API_SCHEMA.tsv` plus `API_OVERLAY.tsv` say what compatibility status is claimed;
@@ -10,6 +10,71 @@ The repository remains **pre-1.0**. Tagged releases `v0.1.0` through `v0.4.0` ar
 - gates and retained artifacts say what was actually exercised.
 
 The latest repair checkpoint covered here is **`225b589d6281800723990479c991bc6e13e113fd`** on 2026-09-04. Its production animation changes are `ff49cd4b` and `dd2bdce0`; its executable runtime-audit test restoration is `225b589d`. The earlier **`7aeb3f40a763998d07b43b74613f3c6becc49207`** checkpoint remains documented below as historical runtime-audit work. None of these entries implies a clean-wheel parity pass that was not executed.
+
+---
+
+## v0.5.0 — 2026-10-04 (prerelease)
+
+Pre-1.0 preview cut from `main` (about 2,200 commits after `v0.4.0`). The
+lockstep workspace, allowlist rows, standalone locks and installer fallback move
+to 0.5.0.
+
+### Highlights since v0.4.0
+
+- Native CLI composition outputs: `--format wav` mixes a scene's sound cues into
+  a deterministic S16 soundtrack with FMNP provenance, and `--format svg`
+  publishes the final scene state as a deterministic SVG still.
+- Bounded multi-team CPU rendering for ordinary, camera-bearing and compiled
+  (FMTL) scenes. Native scenes can be exported as standalone, replayable FMTL
+  bundles, and camera-bearing bundles open in native Studio.
+- A large widening of the `manimlib` portal. Constructors, authoring hooks and
+  live updates now go through native-backed lifecycles for axes, planes, number
+  lines, text/Tex, braces, surfaces, 3D solids, SVG assets, images, trackers and
+  controls. There is also live editing/rebuild at IPython cell boundaries.
+- New native library surfaces: markdown documents with mathematics, tables and
+  CSV ingestion, graphs and networks, implicit contours, OBJ meshes with
+  materials, rasters and material transitions, and sound fades and trimming.
+- Conformance tooling: structural-facts differential harness, class sweep,
+  corpus speed-ratio producer and certified-arithmetic guard.
+
+### Fixed (release-review blockers)
+
+- **Concurrent WAV/SVG renders could corrupt provenance (#4).** The new
+  `--format wav` and `--format svg` CLI paths checked that the destination was
+  absent, then published through a *replacing* atomic rename. A competing render
+  that won after that check could have its artifact overwritten, leaving its
+  `.manifest` sidecar describing different bytes. Both paths now publish with the
+  filesystem's create-only primitive (`publish_wav_new` / `publish_svg_new`: a
+  synced unique sibling temp file, then an atomic no-clobber hard link), like the
+  PNG, GIF, Y4M and video outputs. A losing render is refused by name, leaves the
+  winner's bytes and sidecar untouched, and publishes no provenance. Regression
+  tests cover a deterministic "competitor wins after preflight" fault injection
+  for both formats, and six real concurrent SVG renders into one destination.
+  Both tests fail against the previous publishers.
+- **Windows `fmn doctor` could load DLLs from the working directory (#3).**
+  An unreleased change had enabled the private ffmpeg workdir on Windows, so the
+  default `doctor` probe would launch the user's installed ffmpeg. The child
+  inherited the caller's working directory, which the Windows loader searches
+  for non-KnownDLL imports, and hashing/relocating the EXE does not bind its DLL
+  closure. Windows (and every non-Unix target) is back to the v0.4.0 fail-closed
+  behavior: the private workdir is refused before any probe is spawned, and
+  `doctor` reports ffmpeg as unavailable. The native outputs (PNG, PNG sequence,
+  GIF, Y4M, WAV, SVG) need no ffmpeg.
+
+### Known limitations
+
+- Single-file artifacts are committed with a hard link, so an output directory
+  on a filesystem without hard links (for example FAT32/exFAT) refuses
+  publication after rendering. This is deliberately fail-closed rather than a
+  replacing fallback. Render to a native filesystem.
+- ffmpeg-backed video export and the ffmpeg doctor probe are unavailable on
+  Windows (as in v0.4.0).
+- `scripts/check.sh`'s library constructor-authority audit is stale after the
+  native `init_points` migrations (#6), and the ADR-0015 unsafe inventory has not
+  yet ratified the CPython GC traversal wrappers (#5). Both are tracked
+  governance follow-ups; neither is a known runtime defect.
+- Same exclusions as v0.4.0: no Linux arm64 artifact, no artifact signatures,
+  and no npm publication.
 
 ---
 
