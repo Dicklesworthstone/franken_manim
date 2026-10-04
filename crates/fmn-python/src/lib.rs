@@ -12136,6 +12136,8 @@ pub struct PortalDefaultsGauntletReport {
     pub brace_width: f64,
     /// That `VGroup`'s own width.
     pub target_width: f64,
+    /// A bare `Scene().camera_config`: resolution, fps, background, opacity.
+    pub scene_camera: ((u32, u32), u32, String, f64),
 }
 
 /// Reference-default parity through the production portal route
@@ -12167,6 +12169,9 @@ group = VGroup(Square(), Circle().shift(3 * RIGHT))
 brace = Brace(group, DOWN)
 _fmn_report = (int(receipt.fps), int(receipt.frame_count),
                float(brace.get_width()), float(group.get_width()))
+_camera = Scene().camera_config
+_fmn_camera = (tuple(int(n) for n in _camera["resolution"]), int(_camera["fps"]),
+               str(_camera["background_color"]), float(_camera["background_opacity"]))
 "#,
         )
         .expect("reference defaults scene contains no NUL");
@@ -12179,11 +12184,18 @@ _fmn_report = (int(receipt.fps), int(receipt.frame_count),
             .ok_or_else(|| "reference defaults scene emitted no report".to_owned())?
             .extract()
             .map_err(|error: PyErr| error.to_string())?;
+        let scene_camera: ((u32, u32), u32, String, f64) = globals
+            .get_item("_fmn_camera")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reference defaults scene emitted no camera config".to_owned())?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
         Ok(PortalDefaultsGauntletReport {
             fps,
             frame_count,
             brace_width,
             target_width,
+            scene_camera,
         })
     })
 }

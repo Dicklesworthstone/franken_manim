@@ -2581,6 +2581,17 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
     let frames_match = frames == 15 && report.frame_count == 15;
     let brace_spans =
         (report.brace_width - report.target_width).abs() < 1e-3 && report.target_width > 4.0;
+    // Cross-front-door: the portal Scene's first camera layer is the typed
+    // configuration standalone fmn resolves (defaults, no user file).
+    let native = fmn_config::Config::resolve(&[], None)
+        .map_err(|error| fail(format!("resolve native config: {error}")))?
+        .config
+        .camera;
+    let (resolution, fps, background, opacity) = &report.scene_camera;
+    let front_doors_agree = *resolution == native.resolution
+        && *fps == native.fps
+        && background.eq_ignore_ascii_case(&native.background_color)
+        && (*opacity - native.background_opacity).abs() < 1e-12;
     ctx.event(
         LogEvent::new("e2e.python.reference_defaults")
             .field("rate", rate.as_str())
@@ -2593,20 +2604,36 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
             )
             .field("background_is_reference", truth(background_is_reference))
             .field("rate_is_reference", truth(rate_is_reference))
-            .field("brace_spans", truth(brace_spans)),
+            .field("brace_spans", truth(brace_spans))
+            .field("front_doors_agree", truth(front_doors_agree)),
     );
-    if !(background_is_reference && rate_is_reference && frames_match && brace_spans) {
+    if !(background_is_reference
+        && rate_is_reference
+        && frames_match
+        && brace_spans
+        && front_doors_agree)
+    {
         return Err(fail(format!(
             "portal Reference defaults drifted: header={header:?} frames={frames} \
-             receipt_fps={} receipt_frames={} yuv=({y},{u},{v}) brace={} target={}",
-            report.fps, report.frame_count, report.brace_width, report.target_width
+             receipt_fps={} receipt_frames={} yuv=({y},{u},{v}) brace={} target={} \
+             portal_camera={:?} native_camera=({:?}, {}, {}, {})",
+            report.fps,
+            report.frame_count,
+            report.brace_width,
+            report.target_width,
+            report.scene_camera,
+            native.resolution,
+            native.fps,
+            native.background_color,
+            native.background_opacity
         )));
     }
     Ok(RunOutcome::ok()
         .with_artifact("python_portal_defaults.y4m", bytes)
         .with_counter("python_defaults_reference_background", 1)
         .with_counter("python_defaults_reference_rate", 1)
-        .with_counter("python_defaults_brace_spans_composite", 1))
+        .with_counter("python_defaults_brace_spans_composite", 1)
+        .with_counter("python_defaults_front_doors_agree", 1))
 }
 
 fn python_portal_png_still_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -5124,6 +5151,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             counter_eq("python_defaults_reference_background", 1),
             counter_eq("python_defaults_reference_rate", 1),
             counter_eq("python_defaults_brace_spans_composite", 1),
+            counter_eq("python_defaults_front_doors_agree", 1),
         ],
         vec![LogExpect::span_present(
             "e2e.python.reference_defaults",
@@ -5132,6 +5160,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("background_is_reference", "true"),
                 FieldPred::str_eq("rate_is_reference", "true"),
                 FieldPred::str_eq("brace_spans", "true"),
+                FieldPred::str_eq("front_doors_agree", "true"),
             ],
         )],
     ));
