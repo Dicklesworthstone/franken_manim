@@ -2546,6 +2546,69 @@ fn python_portal_sequence_run(
 /// The portal's final-state still route: semantic construction completes with
 /// intermediate raster work skipped, then the same Lumen/Reel composition root
 /// atomically publishes exactly one canonical PNG.
+/// Reference defaults and composite braces through the production portal
+/// route (fm-5wq.44, fm-5wq.43). The Reference's `Scene` merges
+/// `manim_config.camera` first (1920x1080, 30 fps, `#333333`); a portal scene
+/// with no camera configuration once rendered at 60 fps on black, and a brace
+/// around a detached `VGroup` once had width 0 at the origin.
+fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_reference_defaults")?;
+    let destination = root.join("defaults.y4m");
+    let report = manimlib::run_portal_gauntlet_reference_defaults(&destination)
+        .map_err(|error| fail(format!("run Python portal reference defaults: {error}")))?;
+    let bytes = std::fs::read(&destination)
+        .map_err(|error| fail(format!("read {}: {error}", destination.display())))?;
+    let header_end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| fail("y4m header line missing"))?;
+    let header = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
+    let rate = header
+        .split(' ')
+        .find_map(|field| field.strip_prefix('F'))
+        .unwrap_or("")
+        .to_owned();
+    let frames = bytes.windows(6).filter(|w| w == b"FRAME\n").count();
+    // First frame's first luma sample and first Cb/Cr samples (32x18, 4:2:0).
+    let first = header_end + 1 + 6;
+    let (luma, chroma) = (32 * 18, 16 * 9);
+    let sample = |offset: usize| bytes.get(first + offset).copied().unwrap_or(0);
+    let (y, u, v) = (sample(0), sample(luma), sample(luma + chroma));
+    // BT.709 limited range for #333333: 16 + 219 * 0x33 / 255 = 59.8.
+    let background_is_reference =
+        (58..=62).contains(&y) && u.abs_diff(128) <= 1 && v.abs_diff(128) <= 1;
+    let rate_is_reference = rate == "30:1" && report.fps == 30;
+    let frames_match = frames == 15 && report.frame_count == 15;
+    let brace_spans =
+        (report.brace_width - report.target_width).abs() < 1e-3 && report.target_width > 4.0;
+    ctx.event(
+        LogEvent::new("e2e.python.reference_defaults")
+            .field("rate", rate.as_str())
+            .field("frames", frames)
+            .field("background_yuv", format!("{y},{u},{v}").as_str())
+            .field("brace_width", format!("{:.4}", report.brace_width).as_str())
+            .field(
+                "target_width",
+                format!("{:.4}", report.target_width).as_str(),
+            )
+            .field("background_is_reference", truth(background_is_reference))
+            .field("rate_is_reference", truth(rate_is_reference))
+            .field("brace_spans", truth(brace_spans)),
+    );
+    if !(background_is_reference && rate_is_reference && frames_match && brace_spans) {
+        return Err(fail(format!(
+            "portal Reference defaults drifted: header={header:?} frames={frames} \
+             receipt_fps={} receipt_frames={} yuv=({y},{u},{v}) brace={} target={}",
+            report.fps, report.frame_count, report.brace_width, report.target_width
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("python_portal_defaults.y4m", bytes)
+        .with_counter("python_defaults_reference_background", 1)
+        .with_counter("python_defaults_reference_rate", 1)
+        .with_counter("python_defaults_brace_spans_composite", 1))
+}
+
 fn python_portal_png_still_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_portal_png_still")?;
     let destination = root.join("final.png");
@@ -5051,6 +5114,28 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.python_portal_reference_defaults.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_reference_defaults_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["python_portal_defaults.y4m".to_owned()]),
+            counter_eq("python_defaults_reference_background", 1),
+            counter_eq("python_defaults_reference_rate", 1),
+            counter_eq("python_defaults_brace_spans_composite", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.reference_defaults",
+            vec![
+                FieldPred::str_eq("rate", "30:1"),
+                FieldPred::str_eq("background_is_reference", "true"),
+                FieldPred::str_eq("rate_is_reference", "true"),
+                FieldPred::str_eq("brace_spans", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_png_still.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -5783,6 +5868,18 @@ fn python_studio_capture_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_studio_capture.v1")
         .expect("Python Studio capture is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Portal scenes default to the Reference's 30 fps on #333333; braces span
+/// detached composites (fm-5wq.44, fm-5wq.43).
+#[test]
+fn python_reference_defaults_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.python_portal_reference_defaults.v1")
+        .expect("Python reference defaults scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

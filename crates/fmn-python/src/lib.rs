@@ -12124,6 +12124,70 @@ pub fn run_portal_gauntlet_video_options() -> Result<(), String> {
     })
 }
 
+/// What [`run_portal_gauntlet_reference_defaults`] observed.
+#[cfg(feature = "gauntlet")]
+#[derive(Debug)]
+pub struct PortalDefaultsGauntletReport {
+    /// The receipt's frame rate for a scene with no camera configuration.
+    pub fps: u64,
+    /// Frames the receipt reports.
+    pub frame_count: u64,
+    /// Width of a `Brace` around a detached two-member `VGroup`.
+    pub brace_width: f64,
+    /// That `VGroup`'s own width.
+    pub target_width: f64,
+}
+
+/// Reference-default parity through the production portal route
+/// (fm-5wq.44, fm-5wq.43). A scene with no camera configuration renders a
+/// y4m to `destination` at the pinned config's 30 fps on `#333333`, and a
+/// brace around a detached composite spans the composite; the caller decodes
+/// the artifact independently.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_reference_defaults(
+    destination: &std::path::Path,
+) -> Result<PortalDefaultsGauntletReport, String> {
+    with_python_test_module("reference defaults Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_destination", destination.to_string_lossy().as_ref())
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(
+            r#"from manimlib import Brace, Circle, DOWN, RIGHT, Scene, Square, VGroup
+from fmn_python import render_scene
+
+
+class _ReferenceDefaults(Scene):
+    def construct(self):
+        self.wait(0.5)
+
+
+receipt = render_scene(_ReferenceDefaults, _fmn_destination, format="y4m",
+                       resolution=(32, 18), threads=1)
+group = VGroup(Square(), Circle().shift(3 * RIGHT))
+brace = Brace(group, DOWN)
+_fmn_report = (int(receipt.fps), int(receipt.frame_count),
+               float(brace.get_width()), float(group.get_width()))
+"#,
+        )
+        .expect("reference defaults scene contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let (fps, frame_count, brace_width, target_width): (u64, u64, f64, f64) = globals
+            .get_item("_fmn_report")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reference defaults scene emitted no report".to_owned())?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
+        Ok(PortalDefaultsGauntletReport {
+            fps,
+            frame_count,
+            brace_width,
+            target_width,
+        })
+    })
+}
+
 /// Observations from independently decoded portal artifacts and planted failures.
 #[cfg(feature = "gauntlet")]
 #[derive(Debug)]
