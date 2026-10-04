@@ -4642,17 +4642,22 @@ impl BridgeMobject {
     fn _build_brace<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
-        target: &Bound<'_, BridgeMobject>,
+        target: &Bound<'_, PyAny>,
         direction: [f64; 3],
         buff: f64,
     ) -> PyResult<(Bound<'py, PyList>, usize)> {
-        let points = with_stage(target, |stage, mob| {
-            stage
-                .family(mob)
-                .into_iter()
-                .flat_map(|member| stage.get_points(member).unwrap_or_default())
-                .collect::<Vec<_>>()
-        })?;
+        // The Reference sizes a brace from the target's corners, i.e. its
+        // whole family's points (`get_all_points`). Read them through the
+        // public surface: a detached composite's children live in their own
+        // nurseries, so the root's native stage family alone is empty and the
+        // brace collapsed to width 0 at the origin (fm-5wq.43).
+        let points: Vec<[f64; 3]> = target
+            .call_method0("get_all_points")?
+            .call_method1("tolist", ())?
+            .extract()?;
+        if points.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(PyValueError::new_err("brace target points must be finite"));
+        }
         let target = fmn_library::VMobject::from_points(points);
         let brace = fmn_library::Brace::around(&target, direction).buff(buff);
         install_brace_tree(slf, factory, brace)

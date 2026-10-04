@@ -22,6 +22,31 @@ def native_brace(source, direction=m.DOWN, buff=.2, *, line=False):
 
 
 class BraceLifecycleTests(unittest.TestCase):
+    def test_composite_targets_are_measured_over_their_whole_family(self):
+        # fm-5wq.43: the Reference sizes a brace from the target's corners
+        # (its family's points). A detached composite once yielded a width-0
+        # brace at the origin; the pinned Reference gives Brace(Matrix, DOWN)
+        # exactly the matrix's width, centred below it.
+        makers = {
+            "VGroup": lambda: m.VGroup(m.Square(), m.Circle().shift(3 * m.RIGHT)),
+            "Matrix": lambda: m.Matrix([[1, 2], [3, 4]]),
+            "Tex": lambda: m.Tex(r"a + b"),
+            "DecimalNumber": lambda: m.DecimalNumber(3.14),
+            "Axes": lambda: m.Axes(x_range=(-2, 2), y_range=(-1, 1), width=4, height=2),
+        }
+        for name, make in makers.items():
+            for bound in (False, True):
+                with self.subTest(target=name, bound=bound):
+                    target = make().to_corner(m.UR)
+                    if bound:
+                        m.Scene().add(target)
+                    brace = m.Brace(target, m.DOWN, buff=.2)
+                    self.assertAlmostEqual(brace.get_width(), target.get_width(), delta=1e-3)
+                    self.assertAlmostEqual(brace.get_center()[0], target.get_center()[0], delta=1e-3)
+                    self.assertAlmostEqual(brace.get_top()[1], target.get_bottom()[1] - .2, delta=1e-3)
+                    label = brace.get_text("A")
+                    self.assertLess(label.get_top()[1], target.get_bottom()[1])
+
     def test_native_geometry_tip_and_default_paint_are_preserved(self):
         target = m.Rectangle(width=3, height=.75).shift(m.RIGHT)
         for cls, target in ((m.Brace, target), (m.LineBrace, m.Line([-2,1,0],[1,3,0]))):
