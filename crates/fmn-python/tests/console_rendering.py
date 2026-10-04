@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import struct
 import sys
@@ -335,15 +336,92 @@ def wav_output_keeps_native_sample_units():
     assert np.max(np.abs(samples)) > 0, "native soundtrack must not be silent"
 
 
+def invoke_defaults(scene_source, destination, selector, cwd, extra=()):
+    # No --fps and no --resolution override of the camera colour: the run must
+    # inherit the Reference's manim_config.camera layer (fm-5wq.44).
+    argv = ["fmn-python", "--robot", str(scene_source), selector, "--format", "y4m",
+            "--resolution", "96x54", "--threads", "1", "--video_dir", str(destination), *extra]
+    out, err = io.StringIO(), io.StringIO()
+    original_argv, original_cwd = sys.argv, Path.cwd()
+    try:
+        sys.argv = argv
+        os.chdir(cwd)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main()
+    finally:
+        sys.argv = original_argv
+        os.chdir(original_cwd)
+    report = json.loads(out.getvalue().splitlines()[0])
+    assert code == 0, (report, err.getvalue())
+    return report
+
+
+def y4m_rate_and_background(path):
+    header, data = Path(path).read_bytes().split(b"\n", 1)
+    fields = dict((item[:1], item[1:]) for item in header.split()[1:])
+    width, height = int(fields[b"W"]), int(fields[b"H"])
+    luma, chroma = width * height, (width // 2) * (height // 2)
+    frames = len(data) // (luma + 2 * chroma + 6)
+    first = data[6:6 + luma + 2 * chroma]
+    return (fields[b"F"].decode(), frames, int(first[0]),
+            int(first[luma]), int(first[luma + chroma]))
+
+
+def bt709_limited_luma(hex_color):
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return 16 + 219 * (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+
+
+def reference_camera_defaults():
+    # The Reference's Scene merges manim_config.camera (default_config.yml:
+    # 30 fps on #333333, plus the cwd custom_config.yml) before the class
+    # default_camera_config and the constructor camera_config; --fps overrides.
+    path = source("still", '''\
+        class Still(m.Scene):
+            def construct(self):
+                self.wait(0.5)
+        class Authored(m.Scene):
+            default_camera_config = {"fps": 10, "background_color": "#440000"}
+            def construct(self):
+                self.wait(0.5)
+    ''')
+    plain = ROOT / "defaults_plain"
+    plain.mkdir()
+    report = invoke_defaults(path, plain / "still.y4m", "Still", plain)
+    rate, frames, y, u, v = y4m_rate_and_background(plain / "still.y4m")
+    print("defaults:", report["fps"], rate, frames, (y, u, v))
+    assert report["fps"] == 30 and rate == "30:1" and frames == 15, (report["fps"], rate, frames)
+    assert abs(y - bt709_limited_luma("#333333")) <= 2 and abs(u - 128) <= 1 and abs(v - 128) <= 1, (y, u, v)
+
+    override = invoke_defaults(path, plain / "still12.y4m", "Still", plain, extra=("--fps", "12"))
+    assert override["fps"] == 12 and y4m_rate_and_background(plain / "still12.y4m")[:2] == ("12:1", 6)
+
+    configured = ROOT / "defaults_custom"
+    configured.mkdir()
+    (configured / "custom_config.yml").write_text(
+        'camera:\n  background_color: "#112233"\n  fps: 24\n')
+    report = invoke_defaults(path, configured / "still.y4m", "Still", configured)
+    rate, frames, y, u, v = y4m_rate_and_background(configured / "still.y4m")
+    print("custom_config:", report["fps"], rate, frames, (y, u, v))
+    assert report["fps"] == 24 and rate == "24:1" and frames == 12, (report["fps"], rate, frames)
+    assert abs(y - bt709_limited_luma("#112233")) <= 2 and u > 128, (y, u, v)
+
+    report = invoke_defaults(path, configured / "authored.y4m", "Authored", configured)
+    rate, frames, y, u, v = y4m_rate_and_background(configured / "authored.y4m")
+    print("default_camera_config:", report["fps"], rate, frames, (y, u, v))
+    assert report["fps"] == 10 and rate == "10:1" and frames == 5, (report["fps"], rate, frames)
+    assert abs(y - bt709_limited_luma("#440000")) <= 2 and v > 128, (y, u, v)
+
+
 CASES = (
     ordinary_scene_capture, selected_order_and_output,
     write_all_alias_and_thread_repeatability, missing_selection_starts_no_scene,
     early_scene_termination_publishes, interrupt_after_capture_does_not_publish,
     system_exit_zero_is_not_success, batch_fail_fast_and_keep_going,
     batch_interrupt_retains_completed_artifacts, later_destination_preflight_preserves_files,
-    wav_output_keeps_native_sample_units,
+    wav_output_keeps_native_sample_units, reference_camera_defaults,
 )
-assert len(CASES) == 11
+assert len(CASES) == 12
 for case in CASES:
     case()
     print("native console acceptance:", case.__name__)

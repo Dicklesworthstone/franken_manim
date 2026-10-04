@@ -110,7 +110,8 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
         if len(positionals) != 1:
             raise ValueError("--write_all accepts SOURCE.py without an individual scene name")
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
-            _positive_integer(value, name)
+            if value is not None:  # fps None: the scene camera's fps
+                _positive_integer(value, name)
         source = positionals[0]
         source_path = Path(source).resolve()
         directory = options["video_dir"]

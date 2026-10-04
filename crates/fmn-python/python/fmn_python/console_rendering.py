@@ -211,7 +211,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             validate_subdivided_mode(native, options["format"],
                                     reproducible=bool(options.get("reproducible")))
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
-            _positive_integer(value, name)
+            if value is not None:  # fps None: the scene camera's fps
+                _positive_integer(value, name)
         source = positionals[0]
         requested = raw_positionals[1:]
         if write_all and requested:

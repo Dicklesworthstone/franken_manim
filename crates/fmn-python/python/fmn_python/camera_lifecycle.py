@@ -42,7 +42,11 @@ def install_scene_camera_configuration(native):
         camera_config = kwargs.get("camera_config", None)
         if camera_config is not None and not isinstance(camera_config, dict):
             raise TypeError("Scene camera_config must be a dict")
+        # Reference merge order: manim_config.camera (default_config.yml plus
+        # the cwd custom_config.yml: 1920x1080, 30 fps, #333333 by default),
+        # then the class default_camera_config, then the constructor's.
         self.camera_config = g["_FMN_ROOT"].merge_dicts_recursively(
+            g["_reference_camera_layer"](),
             type(self).default_camera_config,
             {} if camera_config is None else camera_config,
         )

@@ -15362,19 +15362,19 @@ class Scene(_SceneCore):
             kwargs.get("default_wait_time", type(self).default_wait_time)
         )
         self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", False))
-        # Reference Scene.__init__ merge: class default_camera_config, then
-        # the constructor camera_config. Camera construction stays lazy so
-        # a refused Camera seam (window, background_image, …) names itself
-        # on first camera access rather than at Scene().
+        # Reference Scene.__init__ merge: manim_config.camera (the pinned
+        # defaults plus the cwd custom_config.yml, resolved natively), then
+        # class default_camera_config, then the constructor camera_config.
+        # Camera construction stays lazy so a refused Camera seam (window,
+        # background_image, …) names itself on first camera access rather
+        # than at Scene().
         camera_config = kwargs.get("camera_config", None)
-        if camera_config is None:
-            self.camera_config = dict(type(self).default_camera_config)
-        elif not isinstance(camera_config, dict):
+        if camera_config is not None and not isinstance(camera_config, dict):
             raise TypeError("Scene camera_config must be a dict")
-        else:
-            merged = dict(type(self).default_camera_config)
-            merged.update(camera_config)
-            self.camera_config = merged
+        merged = _reference_camera_layer()
+        merged.update(type(self).default_camera_config)
+        merged.update(camera_config or {})
+        self.camera_config = merged
         # Reference Scene.__init__ merge: class default_file_writer_config,
         # then constructor file_writer_config. SceneFileWriter records
         # knobs without mkdir or ffmpeg.
@@ -23916,6 +23916,19 @@ def _cwd_custom_config():
     return payload.decode("utf-8")
 
 
+def _reference_camera_layer():
+    # The Reference's first Scene camera layer, manim_config.camera: resolution,
+    # fps and background from default_config.yml plus the cwd custom_config.yml,
+    # through the same typed native resolution standalone fmn uses.
+    camera = _FMN_ROOT._resolved_camera(_cwd_custom_config())
+    return {
+        "resolution": tuple(camera["resolution"]),
+        "fps": int(camera["fps"]),
+        "background_color": camera["background_color"],
+        "background_opacity": float(camera["background_opacity"]),
+    }
+
+
 def _user_cache_dir(name):
     # appdirs.user_cache_dir(name) without the refused appdirs dependency.
     if _sys.platform == "darwin":
@@ -24359,7 +24372,9 @@ def _portal_cli_render_arguments(arguments):
     values = {
         "format": "png_sequence",
         "resolution": "1920x1080",
-        "fps": "60",
+        # None: the scene camera's fps (manim_config.camera, then the class
+        # default_camera_config), as the Reference resolves it without --fps.
+        "fps": None,
         "threads": str(max(1, min(_os.cpu_count() or 1, 96))),
         "video_dir": None,
         "vcodec": None,
@@ -24430,13 +24445,13 @@ def _portal_cli_render_arguments(arguments):
         width_text, height_text = values["resolution"].lower().split("x", 1)
         width = int(width_text)
         height = int(height_text)
-        fps = int(values["fps"])
+        fps = None if values["fps"] is None else int(values["fps"])
         threads = int(values["threads"])
     except (TypeError, ValueError) as error:
         raise ValueError(
             "--resolution must be WIDTHxHEIGHT and --fps/--threads must be integers"
         ) from error
-    if width <= 0 or height <= 0 or fps <= 0 or threads <= 0:
+    if width <= 0 or height <= 0 or (fps is not None and fps <= 0) or threads <= 0:
         raise ValueError("resolution, fps, and threads must all be positive")
     # Final format checks follow -s/--skip_animations selection in the console
     # owner. Do not validate against the pre-selection default here.

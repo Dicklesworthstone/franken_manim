@@ -135,7 +135,7 @@ def try_bundle_cli(native, arguments):
         positionals, values, width, height, fps, _threads = native._portal_cli_render_arguments(
             (selectors[:1] if batch else selectors) + parser_options
         )
-        if width * height > 16_777_216 or not 1 <= fps <= 240:
+        if width * height > 16_777_216 or (fps is not None and not 1 <= fps <= 240):
             raise ValueError("bundle export requires at most 16M pixels and 1..240 FPS")
         source = str(Path(positionals[0]).resolve())
         selected = requested[0] if len(requested) == 1 else None

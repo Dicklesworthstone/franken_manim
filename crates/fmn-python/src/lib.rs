@@ -11573,6 +11573,35 @@ fn _resolved_directories<'py>(
     Ok(out)
 }
 
+/// The Reference's `manim_config.camera` layer from the same typed native
+/// resolution standalone `fmn` reads: the bundled defaults (1920x1080, 30 fps,
+/// `#333333`), then an optional `custom_config.yml`. The portal's `Scene`
+/// merges it first, ahead of `default_camera_config` and `camera_config`,
+/// as the Reference's `Scene.__init__` does.
+#[pyfunction]
+#[pyo3(signature = (custom_config = None))]
+fn _resolved_camera<'py>(
+    py: Python<'py>,
+    custom_config: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let layers: Vec<fmn_config::config::Layer<'_>> = custom_config
+        .map(|text| fmn_config::config::Layer {
+            name: "custom_config.yml",
+            text,
+        })
+        .into_iter()
+        .collect();
+    let resolved = fmn_config::Config::resolve(&layers, None)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let camera = &resolved.config.camera;
+    let out = PyDict::new(py);
+    out.set_item("resolution", camera.resolution)?;
+    out.set_item("fps", camera.fps)?;
+    out.set_item("background_color", &camera.background_color)?;
+    out.set_item("background_opacity", camera.background_opacity)?;
+    Ok(out)
+}
+
 // CPython's `subtype_traverse` skips visiting an instance's heap type when
 // the nearest non-Python base is itself a heap type with a traverse, trusting
 // that base to visit `Py_TYPE(self)`: since CPython 3.9, heap types visit
@@ -11695,6 +11724,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(_public_update_scan, module)?)?;
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_directories, module)?)?;
+    module.add_function(wrap_pyfunction!(_resolved_camera, module)?)?;
     module.add_function(wrap_pyfunction!(
         portal_assignment::_linear_sum_assignment,
         module
