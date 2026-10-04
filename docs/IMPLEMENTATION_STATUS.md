@@ -1,6 +1,6 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-09-27. The September 27 assessment below supersedes earlier current-state statements; the September 23, September 9 and September 7 assessments and earlier execution records remain historical evidence.
+**Status date:** 2026-10-04. The October 4 assessment below supersedes earlier current-state statements; the September 27, September 23, September 9 and September 7 assessments and earlier execution records remain historical evidence.
 
 **September 7 reality-check source:** `d784048148002acdb7d3a914a8e764afcfad3b1d` on `main`; initially clean. That audit changed this report and Beads only.
 
@@ -8,6 +8,140 @@
 **Historical runtime-audit checkpoint:** `7aeb3f40a763998d07b43b74613f3c6becc49207`.  
 **Agent-governance checkpoint:** ADR-0023 and `docs/GOVERNANCE.md` through `19e1e8b0014f5e4dd68aebc0520cd7ba9fb98283`.  
 **Authority rule:** this document summarizes evidence. `.beads/issues.jsonl` remains the task, status, and dependency authority; the Revision-4 comprehensive plan remains the design authority.
+
+## 2026-10-04 reality check
+
+**Verdict: v0.5.0 finally puts a correct, upright product in users' hands, and both front doors render real scenes well. But no gate moved in seven days, the release went out with `cargo test` red and a stale README, and an afternoon of hands-on comparison against the Reference and the README found five user-visible bugs that the measurement machinery cannot see: it excludes the very facts (text and brace size) where most of them live.**
+
+**Assessment source.** Tag `v0.5.0` = `8b6fdbf0`; HEAD later became `e5791015`, an empty-tree history merge with no source changes. Gates were run in an isolated worktree at `8b6fdbf0`. End-to-end runs used the published v0.5.0 assets (linux x86-64 binary and cp313 wheel, SHA256-verified). Beads at entry: 734 records (653 closed, 66 open, 15 in progress); 158 commits since the 09-27 check.
+
+**What improved since 09-27:**
+- v0.5.0 is published. Text is upright. The portal adds mp4/mov, gif, y4m, wav, svg and `--write_all`.
+- The embedded portal suites pass (65 failed on 09-27).
+- The README FMTL demo plays again.
+- frankenscipy is repinned with the `powf` leak narrowed. The certified-arithmetic guard now scans suite crates.
+- Class sweep, structural-facts schema, corpus differential and same-host speed ratio all exist.
+- Real fuzz campaigns are recorded.
+- Portal perf: PrimeRace 891 → 225 s, DirectMGFInterpretation 348 → 289 s.
+
+**What did not move:**
+- G2, G3, G4a, G4b and G5 are all still open.
+- Hosted `ci.yml`: no green run since 2026-08-10, including the tag.
+- No PG gate has a qualified number.
+- 11 of 15 in-progress beads have had no update in more than 5 days, the whole perf rig included.
+- Apart from the release, there have been no commits since 09-30.
+- The portal Python grew to 56.5k lines and 77 installer steps. ADR-0026 is still Proposed.
+- Bot-push workflows grew from 59 to 61 pushers, and from 96 to 109 workflow files.
+
+### Executed evidence
+
+| Observation | Result and proof boundary |
+|---|---|
+| Local gate at `8b6fdbf0` (isolated worktree, debug, local toolchain `nightly-2026-08-31`) | `cargo fmt --check` exit 0. `cargo clippy --all-targets -- -D warnings` exit 0; the only output is the known non-fatal asupersync fixture diagnostic. `cargo test --workspace --no-fail-fast`: **252 binaries, 3,757 passed, 1 failed, 11 ignored.** The failure is `fmn-scene/tests/recorded_bundle.rs:112` (fm-sa9o, open since 09-27): a replayed snapshot is 9 bytes short. v0.5.0 was therefore cut with `cargo test` red. The fmn-python lib binary (embedded portal suites) passed. Separately, `cargo fmt --check` was red at the previous HEAD `9f5b6ad2`: two files from `81164346`, written without a toolchain, fixed by the release commit. |
+| Native README matrix, shipped v0.5.0 `fmn` | Exit 0 for: `png_sequence`, `png`, `gif`, `y4m`, `video`, `--transparent` video, `--write_all` (25 builtins), `--reproducible`, `batch`, `doctor`, **the FMTL demo bundle** (fm-34mh symptom gone; the guard test `readme_bundle.rs` passes), and the four camera builtins. `doctor` reports `active build portable`: no SIMD-tier artifact ships. There is no linux-aarch64 binary, although it is a certified platform. |
+| Portal README scenes, shipped v0.5.0 wheel (CPython 3.13.1, NumPy 2.5.2, clean venv) | SquareToCircle, Hello, an Axes/Matrix/`cases`/Brace scene, a ValueTracker+TracedPath scene, a ThreeDScene and a subclassed Polygon all render: `png`, `png_sequence` (300 frames), `gif`, `mp4` (h264 1080p, ffprobe), `--reproducible`, and `--write_all` (6 of 6). Text is upright. `-o` and `--format video` exit 4 as documented. |
+| Certified identity, one host | Native `layered_polygon.v1` at 320×180: 12 PNGs byte-identical at `--threads 1` and `16`. Portal `Hello --reproducible` at 320×180: 180 PNGs byte-identical at `--threads 1` and `8`. |
+| **Portal vs Reference, same scenes, same host** (`refenv`, `-s -w`, xvfb) | Four README-class scenes, compared by eye and then by probe. Items 1–4 are bugs; 5 and 6 are expected:<br>1. **Every `Tex` is typeset in text style**, but the Reference's `align*` is display style: `Tex(\sum…\frac)` is 0.588 tall vs 1.331 (fm-tex-display-style-nclg).<br>2. **Formulas are 2–18% narrower** at equal `font_size`: `f(x)` 0.82×, `\alpha\beta\gamma` 0.83×, `x \geq 0` 0.85×. `≥ ≤ ≠` come from a heavy non-CM fallback face, and `f(` has no italic correction (fm-tex-metrics-glyphs-ru72).<br>3. **`Brace(Matrix)` has width 0 at the origin**, so its label lands mid-screen (fm-5wq.43).<br>4. **The portal defaults to 60 fps on black**, while the Reference and native `fmn` default to `#333333` (and the Reference to 30 fps) (fm-5wq.44).<br>5. The 3D surface and lighting match closely.<br>6. `Circle(color=YELLOW)` renders yellow where the Reference renders red, which is C-19/BN-07 working as designed. |
+| CLI flags, shipped `fmn`, `--fps 60 --format y4m` | No flag: 23 frames, `F60:1`. `-f`: 12 frames, `F60:1`. `--autoreload`: 12 frames, `F60:1`, so both play at 2× speed. `-p`: 8 frames. `-e 3`: accepted and ignored (fm-cli-flag-timing-ht01). |
+| Interleaved timing, `Hello` mp4 (calibration only; load 100–160) | Reference 9.0 s for 90 frames; portal 13.8 s for 180 frames (it renders at 60 fps by default). Peak RSS 1.12 GB vs 1.16 GB. |
+| Why the differential missed items 1–3 | `crates/fmn-conformance/fixtures/structural_facts/exclusions.json` rows `bn05-text-geometry`, `bn08-brace-path-family`, `bn08-drawn-natives`, `bn08-decimal-native-text` and `fm-fc53-empty-position` exclude **bbox**, not only glyph points, for Text/Tex/Brace/Matrix/Decimal/VGroup. Size and position are therefore never compared. Headline: 1 of 769 scenes strictly structurally equal; 611 equal only with exclusions (fm-5wq.45). |
+
+### Vision checklist (changes since 2026-09-27)
+
+| # | Goal | Status now | Evidence |
+|---|---|---|---|
+| 1 | One-binary native CLI | **WORKING** for 31 builtins (2D, camera, tex_span, sound_cue) and FMTL. The FMTL demo is repaired. **CLI flags are not trustworthy:** silent no-ops, and `-f`/`--autoreload`/`-p` change exported timing. User scenes reach `fmn` only as FMTL. | rows above; `fmn-cli/src/lib.rs:355-356, 1395-1409`; `fmn-scene/src/runtime.rs:113-116`. |
+| 2 | Native Rust front door | **PARTIAL.** `fmn::render` works (PNG/GIF/Y4M, CPU). The README example still renders nothing (`NullSceneSink`). 7 Appendix-A classes and 5 animations exist only as portal Python. Native `.animate` covers a fixed set of about 17 commands. | `crates/fmn/src/rendering.rs:264`; fm-native-front-door-gaps-0gwp. |
+| 3 | Native TeX (fmd-math), quality bar "indistinguishable at a glance from LaTeX" | **Engine WORKING; fidelity REGRESSED by measurement.** The parse/typeset ratchet is 99.994%, but oracle-checked layout is 0%. Display style is wrong for every `Tex`, formulas are 2–18% narrower, and relation glyphs come from a fallback face. The typeset cache and preflight are built but unused. fmd PDF inline math still prints source. | rows above; `fmn-library/src/tex.rs:166-181`; `fmn-tex/src/engine.rs:159,345` (no production caller); fm-djcw. |
+| 4 | Rev-4 scaling in the product | **PARTIAL.** The CLI 2D route is retained and pipelined across teams. **The portal renders every frame through the camera route**: per-frame plan clone, no tile cache or adaptive AA, one team. The comment justifying it is stale (fm-sq8.9 fixed 09-24). Pure-segment frame parallelism exists only for FMTL replay. The §8.2 SoA mirrors are dead code (fm-cus closed anyway). `FramePacket` is not `Send`. | `fmn-python/src/lib.rs:718-731`; `fmn-mobject/src/record.rs:1208` (no consumer); fm-sq8.11, fm-soa-mirrors-dead-p0gc, fm-sq8.5. |
+| 5 | Performance gates | **NOT MEASURED.** Same-host calibration: median 0.96×, work-matched 1.40× (target ≤0.5×). The PG-6 harness is tautological, there is no global allocation counter, and the default NV12 export allocates a full frame every frame. P010 is 8-bit in a 10-bit container. | `docs/ratchet/speed_ratio.md`; `crates/fmn/src/rendering/pipeline.rs` ~248-270; fm-p010-precision-transfer-tag-8n7u. |
+| 6 | Certified reproducibility | **WORKING on one host for both front doors.** Cross-platform is STALE: the CI matrix legs fail on portal tests before reaching the certified steps. Portal random helpers bypass the one RNG. 11 runtime crates from the fm-9esi repin are still `unsafe_audit=pending`. | rows above; `manimlib_bootstrap.py:22585, 24005`; fm-5wq.47; fm-9esi comment. |
+| 7 | Source-unedited Python scenes | **PARTIAL.** About 96% of Reference-renderable corpus scenes run (09-26 sweep, now about 100 commits stale). Only 1 of 769 is strictly structurally equal, and 436 differ in geometry under the current, too-broad exclusions. | `docs/ratchet/differential_dashboard.md`. |
+| 8 | Portal architecture | **WRONG_APPROACH, plateaued.** 77 installer steps. 1,046 of 1,454 Reference methods are resolved in bootstrap Python and 7 natively. ADR-0026 is unratified, and fm-dsxt is blocked on it. | `docs/api/portal_dispatch.tsv`; fm-5wq.15. |
+| 9 | Studio | **WORKING baseline, unchanged.** Native live input only for `interactive.v1`. Native `rebuild` returns the same binary. The Python Studio is ahead. | fm-studio-general-input-juh7. |
+| 10 | WASM | **PARTIAL, unchanged.** 3 scenes, no Scribe, over its size budget. The in-tree size test passes vacuously when no artifact exists. | fm-8j70, fm-5wq.48. |
+| 11 | Distribution | **IMPROVED, with process debt.** v0.5.0 is a pre-release, unsigned, portable tier only, with no linux-aarch64 build. It was cut from a red HEAD (`cargo test` and hosted CI red), and the README still describes v0.4.0. | fm-7wm.9, fm-7wm.7 comments. |
+| 12 | Engineering hygiene | **UNCHANGED.** Main went fmt-red again from 09-30 until the release commit. The land gate fm-0qvo is still undecided. Silent-skip tests hide missing inputs. AGENTS.md RULE 0.5 cites two sections that do not exist. | fm-0qvo, fm-5wq.48, fm-agents-md-phantom-rules-hqv9. |
+| 13 | Structural and visual fidelity vs the Reference (§16.3) | **PARTIAL, with a blind spot by construction.** Tooling exists (class sweep, structural facts, differential). Its exclusions drop bbox for text, braces and matrices. The Look Gallery is 7 static spike PNGs judged by agents. **G1 passed while the goldens bit-locked mirrored frames.** | fm-5wq.45, fm-5wq.46, fm-5wq.50. |
+
+### Would finishing the open beads close the gap?
+
+No. Before today, none of these had a bead:
+- the five bugs found by hands-on comparison with the Reference and by exercising the CLI (fm-tex-display-style-nclg, fm-tex-metrics-glyphs-ru72, fm-5wq.43, fm-5wq.44, fm-cli-flag-timing-ht01), plus the one-RNG bypass found in code review (fm-5wq.47);
+- the measurement blind spot: fm-5wq.45 (envelopes);
+- the missing check that goldens are *correct* rather than unchanged: fm-5wq.46;
+- a gallery that looks at shipped output: fm-5wq.50;
+- the portal's use of a weaker engine: fm-sq8.11;
+- dead §8.2 mirrors and per-frame allocations: fm-soa-mirrors-dead-p0gc;
+- the unused typeset cache and preflight, which overclaims G2 criterion 5: fm-typeset-cache-preflight-wiring-1sn0;
+- 10-bit and transfer tagging: fm-p010-precision-transfer-tag-8n7u;
+- silent-skip tests: fm-5wq.48;
+- Behavior Note register drift: fm-5wq.49;
+- native front-door gaps: fm-native-front-door-gaps-0gwp;
+- the planner preferring hot workstreams over gate blockers: fm-planner-gate-pressure-28o9 (owner decision);
+- AGENTS.md phantom rules: fm-agents-md-phantom-rules-hqv9 (owner);
+- the PG-1 lever: fm-5wq.51 (native segment offload).
+
+Wiring: G2 (fm-i1q) now also depends on fm-tex-display-style-nclg, fm-tex-metrics-glyphs-ru72, fm-typeset-cache-preflight-wiring-1sn0 and fm-5wq.50. G4a (fm-boe) depends on fm-5wq.45, fm-5wq.46 and fm-5wq.50. G4b (fm-yp0) depends on fm-5wq.47.
+
+Stale tracker states now carry evidence comments rather than being closed by this audit:
+- fm-34mh: symptom gone; the planted-negative acceptance is unproven.
+- fm-cli-camera-route-i1zc: camera builtins render; goldens, gallery and e2e still need verification.
+- fm-5wq.9: fix landed; idle since 09-24.
+- fm-fmd-repin-g2-truth-y3gr: repin landed; the packet is still inconsistent.
+- fm-certified-libm-leak-3aja: guard extended; tripwire weak.
+- fm-cus: closed without a consumer.
+
+### Bridge plan
+
+The plan was revised in place over three ambition rounds:
+1. **Per-gap fixes.** The first draft listed a fix per gap.
+2. **The common cause.** The second asked why a single afternoon of side-by-side comparison found five bugs that eleven weeks of gates did not. The answer is that the machinery measures *runs* and *unchanged*, and its exclusions remove *size and position*. Fidelity measurement therefore became item 1.
+3. **What makes PG-1 reachable at all.** The third asked this. The answer is to stop crossing into Python every frame, not to make each crossing cheaper.
+
+**0. Owner decisions this week.** They are cheap for the owner and unblock most of the rest.
+- **Land gate fm-0qvo.** A suggested design is on the bead: an owned-host lander that fast-forwards main only after `scripts/check.sh`. It also retires the bot-push workflows.
+- **Planner ranking ADR** fm-planner-gate-pressure-28o9. Today it recommends a P2 portal leaf over P0 gate blockers.
+- **Ratify or reject ADR-0026** (fm-5wq.15).
+- **Reboot one host** with the ADR-0024 isolation parameters (fm-inr.1).
+- **Restore the AGENTS.md sections** RULE 0.5 cites (fm-agents-md-phantom-rules-hqv9).
+
+**1. Fidelity first: "correct and beautiful" must be measured against the Reference, at scale.**
+- *Measurement:*
+  - fm-5wq.45 turns exclusions into envelopes, so a BN may excuse glyph points but never a 2× size;
+  - fm-5wq.46 adds semantic oracles (orientation, placement, colour, reading order) on every golden route, plus a re-bless protocol;
+  - fm-5wq.50 regenerates the gallery from shipped binaries with an owner verdict lane.
+  Then re-run the differential (fm-5wq.33) and file the top clusters.
+- *Typography sprint (G2's flagship):*
+  - fm-tex-display-style-nclg and fm-tex-metrics-glyphs-ru72, against a one-time, offline, Reference-derived box-size oracle that feeds fm-tex-layout-oracle-bkbc;
+  - then fm-djcw.
+- *Portal defaults and bugs:* fm-5wq.43, fm-5wq.44, fm-5wq.47.
+
+**2. Green, then shippable on a cadence.**
+- fm-sa9o, the one red test.
+- fm-restore-green-ci-tqsr.
+- fm-0qvo.
+- fm-7wm.11 nightly prerelease, whose acceptance verifies README *claims* (expected exits), not just commands.
+- fm-7wm.7 README truth for v0.5.0.
+- fm-5wq.48, so a green gate means complete inputs.
+
+**3. Put the Rev-4 performance architecture on the path users run.**
+- fm-sq8.11: the portal on the retained 2D route with all teams.
+- fm-sq8.5: a `Send`-able frozen frame.
+- fm-5wq.51: native segment offload, where a pure, override-free `play()` runs entirely in Choreo and Lumen. This is the PG-1 lever; the per-object shaving of fm-ztjj/fm-dsxt cannot reach 0.5×.
+- fm-soa-mirrors-dead-p0gc and fm-sq8.7: real allocation counts.
+- fm-typeset-cache-preflight-wiring-1sn0.
+- Then qualified measurement (fm-inr) once a host exists.
+
+**4. Remaining gate work, unchanged but still owned:**
+- G2: fm-fmd-repin-g2-truth-y3gr, fm-djcw.
+- G3: fm-sq8.6, fm-studio-general-input-juh7, fm-cli-camera-route-i1zc.
+- G4b: fm-5wq.16 (cross-platform re-run), fm-certified-libm-leak-3aja, and the fm-9esi audits.
+- G5: fm-7wm.10 (per-tier, signed, aarch64), fm-8j70, fm-sq8.8.
+
+**5. Hygiene:** fm-cli-flag-timing-ht01, fm-p010-precision-transfer-tag-8n7u, fm-5wq.49, fm-native-front-door-gaps-0gwp.
+
+Order: 0 (owner) first, then 1 and 2 in parallel. 3 starts once fm-5wq.15 is decided. 4 and 5 fill capacity. Re-check in a week against one question: did any gate milestone close?
 
 ## 2026-09-27 reality check
 
