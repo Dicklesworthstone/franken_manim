@@ -1,5 +1,7 @@
 # BN-19 — InteractiveScene gestures without a window toolkit
 
+**Status:** Draft.
+
 **Contract.** The Python `InteractiveScene` class uses its existing native
 selection `Group`, geometry operations, camera transforms, event dispatcher,
 and `SceneState` history. The optional Python Studio worker supplies keyboard

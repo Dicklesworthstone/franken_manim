@@ -37,10 +37,10 @@ migration guidance users read:
 | BN-01 | One RNG: PCG64DXSM with named substreams; seeded scenes reproduce within FrankenManim, not across engines | [BN-01-single-rng.md](BN-01-single-rng.md) | W1 | Draft |
 | BN-02 | The rational clock on manim's nominal sample points — no drift | [BN-02-rational-clock.md](BN-02-rational-clock.md) | W4 | Draft |
 | BN-03 | True arc length under the original names: constant-speed paths, length-true dashes and tips | [BN-03-true-arc-length.md](BN-03-true-arc-length.md) | W2 | Draft |
-| BN-04 | Colour: linear-light compositing, with manim's gradient formulas kept | [BN-04-color.md](BN-04-color.md) | W1 | Draft |
+| BN-04 | **Colour** — a family, see rule 2: linear-light compositing with manim's gradient formulas kept; callable color fields on every native record schema | [compositing and gradients](BN-04-color.md) · [callable color fields](BN-04-functional-color-fields.md) | W1/W10 | Draft |
 | BN-05 | Native typesetting: metrics differ from LaTeX; the quality bar is documented | [BN-05-native-text-typesetting.md](BN-05-native-text-typesetting.md) | W6 | Draft |
 | BN-06 | **The renderer** — a family, see rule 2: analytic coverage, round caps, arc-length stroke width | [the fill: analytic coverage, a defined gradient field, a border that does not grow the shape (fm-5oi)](BN-06-analytic-fill.md) · [strokes: curve distance, round caps, joins that mean what they are called (fm-oac)](BN-06-strokes.md) | W5 | Draft |
-| BN-07 | **Reference bugs fixed** (Appendix C rulings) — a family, see rule 2 | [stroke uniforms (C-2, C-7)](BN-07-stroke-uniform-fixes.md) · [updaters, group addition, grid sizing, FunctionGraph color, plane unit size, OldTex construction, text color keyword, live TeX numbers (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21)](BN-07-updater-and-group-fixes.md) · [frame-marker constants are unit directions (C-16)](BN-07-frame-marker-constants.md) | W3/W10 | Draft |
+| BN-07 | **Reference bugs fixed** (Appendix C rulings) — a family, see rule 2 | [stroke uniforms (C-2, C-7)](BN-07-stroke-uniform-fixes.md) · [updaters, group addition, grid sizing, FunctionGraph color, plane unit size, OldTex construction, text color keyword, live TeX numbers (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21)](BN-07-updater-and-group-fixes.md) · [frame-marker constants are unit directions (C-16)](BN-07-frame-marker-constants.md) · [functional movement lifecycle and flow replay](BN-07-functional-movement.md) | W3/W10 | Draft |
 | BN-08 | The de-TeX'd classes (§11.6): Brace, Matrix delimiters, DecimalNumber, the drawn marks | [BN-08-de-texed-natives.md](BN-08-de-texed-natives.md) | W7 | Draft |
 | BN-09 | One arc-density rule, never coarser than the Reference's | [BN-09-arc-density.md](BN-09-arc-density.md) | W2/W7 | **Final** |
 | BN-10 | Skip mode delivers the same updater time as playback (§9.3) | [BN-10-skip-mode-updater-time.md](BN-10-skip-mode-updater-time.md) | W4 | Draft |
@@ -52,9 +52,14 @@ migration guidance users read:
 | BN-16 | Polygon default corner rounding measures the complete cyclic edge set | [BN-16-polygon-corner-radius.md](BN-16-polygon-corner-radius.md) | W10 | Draft |
 | BN-17 | Image sampling rejects every outside point; image acquisition is explicit and bounded | [BN-17-image-input-and-sampling.md](BN-17-image-input-and-sampling.md) | W10 | Draft |
 | BN-18 | `PMobject.ingest_submobjects` consumes children instead of double-drawing stacked points | [BN-18-pmobject-ingest.md](BN-18-pmobject-ingest.md) | W10 | Draft |
+| BN-19 | InteractiveScene gestures without a window toolkit | [BN-19-interactive-editing.md](BN-19-interactive-editing.md) | W9/W10 | Draft |
 | BN-20 | Calculus helpers use transformed axes, bounded intervals and signed-area semantics | [BN-20-calculus-geometry.md](BN-20-calculus-geometry.md) | W7/W10 | Draft |
+| BN-21 | Live surfaces retain the axes chart; wireframes refresh in place | [BN-21-live-surface-plotting.md](BN-21-live-surface-plotting.md) | W7/W10 | Draft |
+| BN-22 | Bounded surface construction and first-error callback execution | [BN-22-surface-construction-admission.md](BN-22-surface-construction-admission.md) | W7/W10 | Draft |
+| BN-23 | First-error execution for native-backed mathematical plots | [BN-23-graph-construction-admission.md](BN-23-graph-construction-admission.md) | W7/W10 | Draft |
+| BN-24 | Live affine axes invert their chart instead of projecting onto each axis | [BN-24-live-affine-coordinate-inversion.md](BN-24-live-affine-coordinate-inversion.md) | W7/W10 | Draft |
 
-BN-10, BN-12, BN-13, BN-14, BN-15, BN-16, BN-17, and BN-18 grew past §16.8's seed list, which is expected — the
+BN-10 and BN-12 through BN-24 grew past §16.8's seed list, which is expected — the
 seed names the differences the plan could foresee, and a workstream that finds
 another deliberate divergence writes it a note rather than filing it nowhere.
 ADR-0009 trues §16.8 up to this table and fixes the numbering rules above so

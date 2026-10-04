@@ -1,5 +1,7 @@
 # BN-05 — Native text typesetting: bundled faces, owned shaping, no Pango
 
+**Status:** Draft.
+
 **Subsystem:** Scribe I (fmn-text) · **Plan:** §11.2, D-08 · **Bead:** fm-u1u
 
 ## What the Reference does

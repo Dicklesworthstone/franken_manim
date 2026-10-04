@@ -1,5 +1,7 @@
 # BN-24: Invert live affine axes instead of projecting onto each axis
 
+**Status:** Draft.
+
 ## Corrected behavior
 
 `Axes.point_to_coords` and its `p2c` alias now invert the actual live affine

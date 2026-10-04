@@ -1,5 +1,7 @@
 # BN-07: Functional movement lifecycle and flow replay
 
+**Status:** Draft.
+
 **Scope:** the optional Python wheel's `Homotopy`,
 `SmoothedVectorizedHomotopy`, `ComplexHomotopy`, `PhaseFlow`, and
 `MoveAlongPath`. The native Rust mechanisms are unchanged. Related contract:

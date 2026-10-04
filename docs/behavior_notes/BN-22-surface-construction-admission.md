@@ -1,5 +1,7 @@
 # BN-22: Bounded surface construction and first-error callback execution
 
+**Status:** Draft.
+
 ## Problem and scope
 
 The Python surface bridge delegates sampling and normals to Atlas. Its former

@@ -1,6 +1,6 @@
 # BN-08 — The de-TeX'd natives
 
-**Status:** Landed in two waves. W7 (fm-y69) landed the geometry half —
+**Status:** Draft. Landed in two waves. W7 (fm-y69) landed the geometry half —
 `Brace`/`BraceLabel`/`LineBrace`, `SurroundingRectangle`,
 `BackgroundRectangle`, `Cross`, `Underline`, `Checkmark`, `Exmark`. W7
 (fm-ebl, on the fm-p5d Scribe bridge) landed the text-backed half —

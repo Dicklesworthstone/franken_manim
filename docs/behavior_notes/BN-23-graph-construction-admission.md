@@ -1,5 +1,7 @@
 # BN-23: First-error execution for native-backed mathematical plots
 
+**Status:** Draft.
+
 ParametricCurve, FunctionGraph and ImplicitFunction delegate geometry to Atlas
 and Chisel. Their legacy construction bridges retained the first Python error
 but continued executing authored functions during the rest of native sampling.

@@ -1,6 +1,6 @@
 # BN-04 — Callable color fields on native record schemas
 
-**Status:** Implemented (native runtime witnesses; not a full certification gate)
+**Status:** Draft. Implemented with native runtime witnesses; not a full certification gate.
 **Plan:** §8.2, §10.2, §15 · **Related beads:** fm-sq8, fm-5wq.4.143
 
 
