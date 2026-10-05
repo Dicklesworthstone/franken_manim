@@ -90,9 +90,12 @@ EXPECTED: dict[str, set[str]] = {
     # The standalone composition root consumes the native facade, Lumen,
     # frame conversion, codecs, and Reel directly; it does not duplicate any
     # subsystem implementation (fm-ffj.67, plan sections 13.6 and 15.1).
+    # hash: the certified build identity digests its sources (ADR-0025,
+    # fm-certified-closure-integrity-4fei).
     "fmn-cli": {
         "fmn-core",
         "fmn-config",
+        "fmn-hash",
         "fmn-cache",
         "fmn-frame",
         "fmn-codec",
