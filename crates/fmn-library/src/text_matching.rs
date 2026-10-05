@@ -86,13 +86,19 @@ impl std::fmt::Display for TextMatchingError {
         match self {
             Self::Animation(error) => error.fmt(f),
             Self::InvalidSpan { side, index } => {
-                write!(f, "{side} native span {index} is not a nonempty UTF-8 source range")
+                write!(
+                    f,
+                    "{side} native span {index} is not a nonempty UTF-8 source range"
+                )
             }
             Self::InvalidLayout { side, reason } => {
                 write!(f, "{side} native span layout is invalid: {reason}")
             }
             Self::AliasedFamilies => {
-                write!(f, "matching operands share live members; copy the target first")
+                write!(
+                    f,
+                    "matching operands share live members; copy the target first"
+                )
             }
             Self::BudgetExceeded { resource, limit } => {
                 write!(f, "text matching exceeds the {limit} {resource} budget")
@@ -138,7 +144,9 @@ impl Binding {
             });
         }
         if !entry.buffer.is_empty() {
-            return Err(invalid("the source-mapped root must be a point-free container"));
+            return Err(invalid(
+                "the source-mapped root must be a point-free container",
+            ));
         }
         if spans.entries.len() > children.len() {
             return Err(invalid("there are more spans than direct children"));
@@ -146,7 +154,9 @@ impl Binding {
         for &child in children {
             let part = stage.get(child).ok_or(AnimError::StaleHandle(child))?;
             if !part.submobjects().is_empty() {
-                return Err(invalid("a native primitive was regrouped; rebuild its span map"));
+                return Err(invalid(
+                    "a native primitive was regrouped; rebuild its span map",
+                ));
             }
             if spans.entries.is_empty() && !part.buffer.is_empty() {
                 return Err(invalid("point-bearing strings require a native span map"));
@@ -157,16 +167,26 @@ impl Binding {
             .iter()
             .enumerate()
             .map(|(index, span)| {
-                spans.source.get(span.start..span.end)
+                spans
+                    .source
+                    .get(span.start..span.end)
                     .filter(|key| !key.is_empty())
                     .ok_or(TextMatchingError::InvalidSpan { side, index })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((Self { root, children: children.to_vec() }, keys))
+        Ok((
+            Self {
+                root,
+                children: children.to_vec(),
+            },
+            keys,
+        ))
     }
 
     fn validate(&self, stage: &Stage) -> Result<(), AnimError> {
-        let entry = stage.get(self.root).ok_or(AnimError::StaleHandle(self.root))?;
+        let entry = stage
+            .get(self.root)
+            .ok_or(AnimError::StaleHandle(self.root))?;
         if entry.submobjects() != self.children.as_slice() || !entry.buffer.is_empty() {
             return Err(AnimError::Stage(StageError::FamilyShapeMismatch));
         }
@@ -193,10 +213,14 @@ fn tex_pairs(source: &[&str], target: &[&str]) -> Vec<PartPair> {
     for (index, key) in target.iter().enumerate() {
         available.entry(*key).or_default().push_back(index);
     }
-    source.iter().enumerate().filter_map(|(index, key)| {
-        let other = available.get_mut(*key)?.pop_front()?;
-        Some((vec![index], vec![other]))
-    }).collect()
+    source
+        .iter()
+        .enumerate()
+        .filter_map(|(index, key)| {
+            let other = available.get_mut(*key)?.pop_front()?;
+            Some((vec![index], vec![other]))
+        })
+        .collect()
 }
 
 /// SequenceMatcher's longest contiguous block, with deterministic earliest
@@ -207,7 +231,10 @@ fn string_pairs(source: &[&str], target: &[&str]) -> Result<Vec<PartPair>, TextM
         return Ok(Vec::new());
     }
     if source == target {
-        return Ok(vec![((0..source.len()).collect(), (0..target.len()).collect())]);
+        return Ok(vec![(
+            (0..source.len()).collect(),
+            (0..target.len()).collect(),
+        )]);
     }
     let mut positions: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, key) in target.iter().enumerate() {
@@ -234,8 +261,12 @@ fn string_pairs(source: &[&str], target: &[&str]) -> Result<Vec<PartPair>, TextM
                             limit: MAX_MATCHING_COMPARISONS,
                         });
                     }
-                    let length = j.checked_sub(1)
-                        .and_then(|before| previous.get(&before)).copied().unwrap_or(0) + 1;
+                    let length = j
+                        .checked_sub(1)
+                        .and_then(|before| previous.get(&before))
+                        .copied()
+                        .unwrap_or(0)
+                        + 1;
                     current.insert(j, length);
                     if length > best.2 {
                         best = (i + 1 - length, j + 1 - length, length);
@@ -287,9 +318,12 @@ impl MatchingAnimation {
         let (source, source_keys) = Binding::read(stage, source, source_spans, "source")?;
         let (target, target_keys) = Binding::read(stage, target, target_spans, "target")?;
         let source_family: HashSet<Mob, IdBuildHasher> = std::iter::once(source.root)
-            .chain(source.children.iter().copied()).collect();
-        if std::iter::once(target.root).chain(target.children.iter().copied())
-            .any(|mob| source_family.contains(&mob)) {
+            .chain(source.children.iter().copied())
+            .collect();
+        if std::iter::once(target.root)
+            .chain(target.children.iter().copied())
+            .any(|mob| source_family.contains(&mob))
+        {
             return Err(TextMatchingError::AliasedFamilies);
         }
         // Finish every fallible provenance/search check before editing the arena.
@@ -306,8 +340,12 @@ impl MatchingAnimation {
             let from = part_group(stage, &source.children, &a)?;
             let to = part_group(stage, &target.children, &b)?;
             animations.push(Box::new(Transform::new(from, to)));
-            for index in a { used_source[index] = true; }
-            for index in b { used_target[index] = true; }
+            for index in a {
+                used_source[index] = true;
+            }
+            for index in b {
+                used_target[index] = true;
+            }
         }
         for (index, &mob) in source.children.iter().enumerate() {
             if !used_source[index] {
@@ -332,12 +370,22 @@ impl MatchingAnimation {
             .with_run_time(config.run_time)
             .with_rate_func(config.rate_func)
             .with_name(name);
-        Ok(Self { group, source, target, begun: false, finished: false, cleaned: false, error: None })
+        Ok(Self {
+            group,
+            source,
+            target,
+            begun: false,
+            finished: false,
+            cleaned: false,
+            error: None,
+        })
     }
 
     fn inventory(&self, mut members: Vec<Mob>) -> Vec<Mob> {
         for mob in [self.source.root, self.target.root] {
-            if !members.contains(&mob) { members.push(mob); }
+            if !members.contains(&mob) {
+                members.push(mob);
+            }
         }
         members
     }
@@ -357,11 +405,20 @@ macro_rules! matching_animation {
             /// # Errors
             /// Invalid/stale maps, shared operands, or exceeded search budgets.
             pub fn new(
-                stage: &mut Stage, source: Mob, target: Mob,
-                source_spans: &SpanMapData, target_spans: &SpanMapData,
+                stage: &mut Stage,
+                source: Mob,
+                target: Mob,
+                source_spans: &SpanMapData,
+                target_spans: &SpanMapData,
             ) -> Result<Self, TextMatchingError> {
-                Self::with_config(stage, source, target, source_spans, target_spans,
-                                  TextMatchingConfig::default())
+                Self::with_config(
+                    stage,
+                    source,
+                    target,
+                    source_spans,
+                    target_spans,
+                    TextMatchingConfig::default(),
+                )
             }
 
             /// Build with explicit composition timing.
@@ -369,26 +426,46 @@ macro_rules! matching_animation {
             /// # Errors
             /// As [`Self::new`].
             pub fn with_config(
-                stage: &mut Stage, source: Mob, target: Mob,
-                source_spans: &SpanMapData, target_spans: &SpanMapData,
+                stage: &mut Stage,
+                source: Mob,
+                target: Mob,
+                source_spans: &SpanMapData,
+                target_spans: &SpanMapData,
                 config: TextMatchingConfig,
             ) -> Result<Self, TextMatchingError> {
-                Ok(Self { inner: MatchingAnimation::new(stage, source, target,
-                    source_spans, target_spans, config, MatchingKind::$kind)? })
+                Ok(Self {
+                    inner: MatchingAnimation::new(
+                        stage,
+                        source,
+                        target,
+                        source_spans,
+                        target_spans,
+                        config,
+                        MatchingKind::$kind,
+                    )?,
+                })
             }
 
             /// The actual Transform/fade plan, in composition order.
             #[must_use]
-            pub fn animations(&self) -> &[Box<dyn Animation>] { self.inner.group.animations() }
+            pub fn animations(&self) -> &[Box<dyn Animation>] {
+                self.inner.group.animations()
+            }
 
             /// The original target, published on successful cleanup.
             #[must_use]
-            pub fn target(&self) -> Mob { self.inner.target.root }
+            pub fn target(&self) -> Mob {
+                self.inner.target.root
+            }
         }
 
         impl Animation for $name {
-            fn state(&self) -> &AnimState { self.inner.group.state() }
-            fn state_mut(&mut self) -> &mut AnimState { self.inner.group.state_mut() }
+            fn state(&self) -> &AnimState {
+                self.inner.group.state()
+            }
+            fn state_mut(&mut self) -> &mut AnimState {
+                self.inner.group.state_mut()
+            }
             fn all_mobjects(&self) -> Vec<Mob> {
                 self.inner.inventory(self.inner.group.all_mobjects())
             }
@@ -429,10 +506,13 @@ macro_rules! matching_animation {
                 self.inner.finished = false;
             }
             fn clean_up_from_scene(&mut self, stage: &mut Stage) {
-                if self.inner.cleaned { return; }
+                if self.inner.cleaned {
+                    return;
+                }
                 if !self.inner.finished {
                     self.inner.error = Some(AnimError::InvalidFramePhase(
-                        "text matching must finish before scene cleanup"));
+                        "text matching must finish before scene cleanup",
+                    ));
                     return;
                 }
                 if !stage.contains(self.inner.target.root) {
@@ -448,7 +528,10 @@ macro_rules! matching_animation {
                 self.inner.cleaned = true;
             }
             fn deferred_error(&self) -> Option<AnimError> {
-                self.inner.error.clone().or_else(|| self.inner.group.deferred_error())
+                self.inner
+                    .error
+                    .clone()
+                    .or_else(|| self.inner.group.deferred_error())
             }
             fn collect_resumed_updater_mobjects(&self, out: &mut Vec<Mob>) {
                 self.inner.group.collect_resumed_updater_mobjects(out);
@@ -460,10 +543,16 @@ macro_rules! matching_animation {
     };
 }
 
-matching_animation!(TransformMatchingTex, Tex,
-    "Match mathematical primitives by native source identity, never by outline similarity.");
-matching_animation!(TransformMatchingStrings, Strings,
-    "Move shared string runs together, including runs reordered between source and target.");
+matching_animation!(
+    TransformMatchingTex,
+    Tex,
+    "Match mathematical primitives by native source identity, never by outline similarity."
+);
+matching_animation!(
+    TransformMatchingStrings,
+    Strings,
+    "Move shared string runs together, including runs reordered between source and target."
+);
 
 #[cfg(test)]
 mod tests {
@@ -471,16 +560,22 @@ mod tests {
 
     #[test]
     fn tex_repeated_keys_claim_in_occurrence_order() {
-        assert_eq!(tex_pairs(&["x", "x", "+"], &["x", "+", "x"]),
-                   [(vec![0], vec![0]), (vec![1], vec![2]), (vec![2], vec![1])]);
+        assert_eq!(
+            tex_pairs(&["x", "x", "+"], &["x", "+", "x"]),
+            [(vec![0], vec![0]), (vec![1], vec![2]), (vec![2], vec![1])]
+        );
     }
 
     #[test]
     fn longest_block_ties_choose_earliest_source_then_target() {
-        assert_eq!(string_pairs(&["A", "B", "A"], &["B", "A", "B"]).unwrap(),
-                   [(vec![0, 1], vec![1, 2])]);
-        assert_eq!(string_pairs(&["A"], &["A", "A"]).unwrap(),
-                   [(vec![0], vec![0])]);
+        assert_eq!(
+            string_pairs(&["A", "B", "A"], &["B", "A", "B"]).unwrap(),
+            [(vec![0, 1], vec![1, 2])]
+        );
+        assert_eq!(
+            string_pairs(&["A"], &["A", "A"]).unwrap(),
+            [(vec![0], vec![0])]
+        );
     }
 
     #[test]
@@ -494,7 +589,9 @@ mod tests {
 
     #[test]
     fn pathological_repeated_keys_refuse_bounded_search() {
-        assert!(matches!(string_pairs(&vec!["A"; 1025], &vec!["A"; 1026]),
-                         Err(TextMatchingError::BudgetExceeded { .. })));
+        assert!(matches!(
+            string_pairs(&vec!["A"; 1025], &vec!["A"; 1026]),
+            Err(TextMatchingError::BudgetExceeded { .. })
+        ));
     }
 }
