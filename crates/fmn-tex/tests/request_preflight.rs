@@ -39,7 +39,12 @@ fn preflight_warms_full_preamble_and_alignment_keys_for_fresh_consumers() {
         .iter()
         .map(|request| {
             first
-                .typeset_aligned(request.mode, request.source, request.preamble, request.align)
+                .typeset_aligned(
+                    request.mode,
+                    request.source,
+                    request.preamble,
+                    request.align,
+                )
                 .unwrap()
                 .to_bytes()
                 .unwrap()
@@ -49,11 +54,21 @@ fn preflight_warms_full_preamble_and_alignment_keys_for_fresh_consumers() {
     let second = engine().with_cache(&store).unwrap();
     for (request, expected) in requests.iter().zip(expected) {
         let actual = second
-            .typeset_aligned(request.mode, request.source, request.preamble, request.align)
+            .typeset_aligned(
+                request.mode,
+                request.source,
+                request.preamble,
+                request.align,
+            )
             .unwrap();
         assert_eq!(actual.to_bytes().unwrap(), expected);
         assert_eq!(actual.source, request.source);
-        assert!(actual.subs.iter().all(|sub| sub.span.end <= request.source.len()));
+        assert!(
+            actual
+                .subs
+                .iter()
+                .all(|sub| sub.span.end <= request.source.len())
+        );
     }
     assert_eq!(second.layout_computations(), 0);
     assert!(second.persistent_cache_hits() >= 3);
@@ -91,20 +106,37 @@ fn worker_limit_and_empty_batches_do_not_change_layout_results() {
     let mut results = Vec::new();
     for workers in [1, 4] {
         let engine = engine();
-        assert!(engine
-            .preflight_requests(&[], NonZeroUsize::new(workers).unwrap())
-            .unwrap()
-            .is_empty());
+        assert!(
+            engine
+                .preflight_requests(&[], NonZeroUsize::new(workers).unwrap())
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(engine.layout_computations(), 0);
-        assert!(engine
-            .preflight_requests(&requests, NonZeroUsize::new(workers).unwrap())
-            .unwrap()
-            .iter()
-            .all(Result::is_ok));
-        results.push(requests.iter().map(|request| {
-            engine.typeset_aligned(request.mode, request.source, request.preamble, request.align)
-                .unwrap().to_bytes().unwrap()
-        }).collect::<Vec<_>>());
+        assert!(
+            engine
+                .preflight_requests(&requests, NonZeroUsize::new(workers).unwrap())
+                .unwrap()
+                .iter()
+                .all(Result::is_ok)
+        );
+        results.push(
+            requests
+                .iter()
+                .map(|request| {
+                    engine
+                        .typeset_aligned(
+                            request.mode,
+                            request.source,
+                            request.preamble,
+                            request.align,
+                        )
+                        .unwrap()
+                        .to_bytes()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
+        );
     }
     assert_eq!(results[0], results[1]);
     assert_ne!(results[0][0], results[0][1]);
