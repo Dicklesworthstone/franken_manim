@@ -205,12 +205,25 @@ def _install_curved_tip_fitting(g):
         if np.all(current == 0):
             raise Exception("Cannot position endpoints of closed loop")
         target = end - start
+        horizontal = math.hypot(target[0], target[1])
+        # At either pole the azimuth is undefined. Choose zero consistently,
+        # including signed-zero coordinates, and keep a real pitch axis. The
+        # old cross-with-OUT axis was zero for every vertical destination.
+        azimuth = math.atan2(target[1], target[0]) if horizontal else 0.0
+        pitch_axis = np.array(
+            [-target[1] / horizontal, target[0] / horizontal, 0.0]
+            if horizontal else [0.0, 1.0, 0.0]
+        )
+        # Normalize in f64 before crossing the native seam: an almost vertical
+        # chord must not underflow its axis when native geometry stores f32.
+        # Retain the azimuth-then-pitch convention, rather than a shortest-arc
+        # rotation which would change the authored curve's plane and tip roll.
         self.scale(np.linalg.norm(target) / np.linalg.norm(current), about_point=current_start)
-        self.rotate(math.atan2(target[1], target[0]) - math.atan2(current[1], current[0]))
+        self.rotate(azimuth - math.atan2(current[1], current[0]))
         self.rotate(
-            math.atan2(current[2], np.linalg.norm(current[:2]))
-            - math.atan2(target[2], np.linalg.norm(target[:2])),
-            axis=np.array([-target[1], target[0], 0.0]),
+            math.atan2(current[2], math.hypot(current[0], current[1]))
+            - math.atan2(target[2], horizontal),
+            axis=pitch_axis,
         )
         self.shift(start - self.get_start())
         return self
