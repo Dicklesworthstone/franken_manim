@@ -76,7 +76,12 @@ def install_live_rates(native: Any) -> None:
         # ShowPartial includes creation, uncreation and passing flashes, and
         # DrawBorderThenFill includes Write. Treating these as unsupported
         # silently sampled even a mixed Transform/Write play at 30 Hz.
-        for name in ("Rotating", "MoveAlongPath", "ShowPartial", "DrawBorderThenFill", "VFadeIn"):
+        # Fades synthesize their endpoints in create_target / starting_mobject
+        # rather than storing a _target_attr. That native-lowering sentinel
+        # must not hide their complete Transform callback implementation.
+        # Admit the concrete families, not bare Fade (which has no target).
+        for name in ("Rotating", "MoveAlongPath", "ShowPartial", "DrawBorderThenFill", "VFadeIn",
+                     "FadeIn", "FadeOut"):
             cls = g.get(name)
             if cls is not None and isinstance(animation, cls):
                 return True
