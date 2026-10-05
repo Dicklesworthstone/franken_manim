@@ -787,7 +787,10 @@ fn empty_lagged_selections_keep_their_duration_and_authored_root() {
     let empty = lagged_start(&mut stage, Vec::new()).expect("empty lagged start builds");
     assert!(empty.timings().is_empty());
     assert_eq!(empty.get_run_time(), 0.0);
-    assert_eq!(empty.state().config.lag_ratio, DEFAULT_LAGGED_START_LAG_RATIO);
+    assert_eq!(
+        empty.state().config.lag_ratio,
+        DEFAULT_LAGGED_START_LAG_RATIO
+    );
 
     let root = stage.add(Mobject::new());
     let mut calls = 0;
