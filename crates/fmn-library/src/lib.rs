@@ -50,7 +50,7 @@
 //!
 //! * **Clouds, images, and models** (fm-2u6, §12.4). [`pointcloud`] owns the
 //!   `PMobject`/`PGroup` collections and the DotCloud lineage — `DotCloud`,
-//!   `TrueDot`, `GlowDots`, `GlowDot` — with G0-2's kept glow falloff
+//!   `TrueDot`, `GlowDot` — with G0-2's kept glow falloff
 //!   `(1-r/R)²`; [`image`] owns `ImageMobject` over fmn-codec's owned
 //!   PNG/JPEG decode; [`obj_model`] owns `ThreeDModel` and the owned,
 //!   budget-checked OBJ-subset reader that displaces trimesh/pywavefront.
@@ -117,6 +117,7 @@ pub mod svg;
 pub mod svg_export;
 pub mod tex;
 pub mod text;
+pub mod text_matching;
 pub mod tip;
 pub mod vmobject;
 
@@ -199,6 +200,10 @@ pub use style::{Style, VStyle};
 pub use svg::{svg_document_mobject, svg_mobject};
 pub use tex::{LineAlign, Tex, TexMobject, TexMobjectError, TexText};
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
+pub use text_matching::{
+    MAX_MATCHING_COMPARISONS, MAX_MATCHING_PARTS, TextMatchingConfig, TextMatchingError,
+    TransformMatchingStrings, TransformMatchingTex,
+};
 pub use tip::TipEnd;
 pub use vmobject::{
     DashError, MAX_DASHES, VMobject, curves_as_submobjects, dashed_vmobject, group, v_group,
