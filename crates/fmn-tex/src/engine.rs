@@ -36,8 +36,8 @@ use crate::typeset::{KEYWORD_INK_COMMANDS, Prim, TYPESET_FORMAT_VERSION, Typeset
 use fmd_math::{Layout, MacroSet, PathContour, Style};
 use fmn_cache::{CacheKey, KeyBuilder, Namespace};
 use fmn_config::{Config, PackRegistry};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 trait ScopedSpawner {
     fn spawn<'scope, 'env: 'scope, F>(
@@ -86,8 +86,10 @@ pub struct TexEngine {
     /// The engine fingerprint: sha-256 over the probe set's canonical
     /// bytes plus the macro table — the cache key's engine component.
     fingerprint: CacheKey,
-    cache: Option<Namespace>,
+    cache: Mutex<Option<Arc<Namespace>>>,
     memory_cache: Mutex<MemoryCache>,
+    persistent_hits: AtomicU64,
+    layout_computations: AtomicU64,
 }
 
 impl core::fmt::Debug for TexEngine {
@@ -96,7 +98,7 @@ impl core::fmt::Debug for TexEngine {
             .field("pack_content_id", &self.pack_content_id)
             .field("macros", &self.macros.len())
             .field("fingerprint", &self.fingerprint)
-            .field("cached", &self.cache.is_some())
+            .field("cached", &self.persistent_cache_enabled())
             .finish_non_exhaustive()
     }
 }
@@ -128,8 +130,10 @@ impl TexEngine {
             macros,
             pack_content_id,
             fingerprint,
-            cache: None,
+            cache: Mutex::new(None),
             memory_cache: Mutex::new(MemoryCache::default()),
+            persistent_hits: AtomicU64::new(0),
+            layout_computations: AtomicU64::new(0),
         })
     }
 
@@ -156,19 +160,102 @@ impl TexEngine {
     /// # Errors
     ///
     /// [`TexError::Cache`] if the namespace cannot be opened.
-    pub fn with_cache(mut self, store: &fmn_cache::Store) -> Result<Self, TexError> {
-        let ns = store
-            .namespace(
-                "typeset",
-                TYPESET_FORMAT_VERSION,
-                fmn_cache::NamespacePolicy::default(),
-            )
-            .map_err(|e| TexError::Cache {
-                what: e.to_string(),
-            })?;
-        self.cache = Some(ns);
-        self.memory_cache = Mutex::new(MemoryCache::default());
+    pub fn with_cache(self, store: &fmn_cache::Store) -> Result<Self, TexError> {
+        self.set_cache(Some(store))?;
         Ok(self)
+    }
+
+    /// Attach, replace, or detach a store on an already-live engine.
+    ///
+    /// This is the production portal's configuration seam: its engines live
+    /// in thread-local slots and may have typeset module-level objects before
+    /// a Scene chooses its cache. No font, macro, fingerprint, or layout state
+    /// changes. Each request retains its namespace across concurrent changes;
+    /// neither layout nor filesystem I/O holds the configuration mutex.
+    /// Detaching never removes cache files. The memory front is cleared so a
+    /// subsequently requested formula populates a newly attached store.
+    ///
+    /// # Errors
+    /// [`TexError::Cache`] if the new namespace cannot be opened. On that
+    /// failure the prior binding is unchanged.
+    pub fn set_cache(&self, store: Option<&fmn_cache::Store>) -> Result<(), TexError> {
+        let next = store
+            .map(|store| {
+                store.namespace(
+                    "typeset",
+                    TYPESET_FORMAT_VERSION,
+                    fmn_cache::NamespacePolicy::default(),
+                )
+            })
+            .transpose()
+            .map_err(|error| TexError::Cache {
+                what: error.to_string(),
+            })?
+            .map(Arc::new);
+        let previous = {
+            let mut binding = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *binding, next)
+        };
+        // Namespace Drop may flush its advisory index. Never hold a cache
+        // mutex across that filesystem work.
+        drop(previous);
+        *self
+            .memory_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = MemoryCache::default();
+        Ok(())
+    }
+
+    /// Configure the optional native-host disk cache without replacing this
+    /// engine. An empty path uses FrankenManim's owned per-user cache leaf;
+    /// `None` disables disk caching without deleting anything.
+    ///
+    /// Explicitly host-only: ordinary `new`/`from_config` stay filesystem-free,
+    /// and capability-injected hosts use `set_cache` with their own Store.
+    /// Callers may report storage failure and continue typesetting normally.
+    ///
+    /// # Errors
+    /// [`TexError::Cache`] for an unavailable/refused host store. Unlike
+    /// `set_cache`, this convenience method detaches an earlier binding on
+    /// failure, so it cannot keep writing to a previously selected directory.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn configure_host_cache(&self, configured: Option<&str>) -> Result<(), TexError> {
+        let Some(configured) = configured else {
+            return self.set_cache(None);
+        };
+        let attached = fmn_cache::Store::open_native(configured, fmn_cache::StoreConfig::default())
+            .map_err(|error| TexError::Cache {
+                what: error.to_string(),
+            })
+            .and_then(|store| self.set_cache(Some(&store)));
+        if attached.is_err() {
+            self.set_cache(None)?;
+        }
+        attached
+    }
+
+    /// Whether a persistent namespace is attached. Storage may still become
+    /// unavailable; individual failures remain cache misses, never blank ink.
+    #[must_use]
+    pub fn persistent_cache_enabled(&self) -> bool {
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Verified disk hits since this engine was created. Diagnostic only;
+    /// neither this counter nor scheduling-dependent cache state is certified.
+    #[must_use]
+    pub fn persistent_cache_hits(&self) -> u64 {
+        self.persistent_hits.load(Ordering::Relaxed)
+    }
+
+    /// Actual layout attempts since creation, excluding fingerprint probes.
+    /// A memory/disk hit does not increment this counter. Failed layouts do.
+    #[must_use]
+    pub fn layout_computations(&self) -> u64 {
+        self.layout_computations.load(Ordering::Relaxed)
     }
 
     /// The resolved pack's content id (provenance, `fmn doctor`).
@@ -244,17 +331,23 @@ impl TexEngine {
         {
             return Ok(hit);
         }
-        if let Some(ns) = &self.cache
+        let cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(ns) = &cache
             && let Ok(Some(bytes)) = ns.get(&key)
             && let Ok(hit) = Typeset::from_bytes(&bytes)
             && hit.source == source
         {
+            self.persistent_hits.fetch_add(1, Ordering::Relaxed);
             self.remember(key, bytes);
             return Ok(hit);
         }
         let fresh = self.layout(mode, source)?;
         if let Ok(bytes) = fresh.to_bytes() {
-            if let Some(ns) = &self.cache {
+            if let Some(ns) = &cache {
                 let _ = ns.put(&key, &bytes);
             }
             self.remember(key, bytes);
@@ -270,6 +363,7 @@ impl TexEngine {
     }
 
     fn layout(&self, mode: Mode, source: &str) -> Result<Typeset, TexError> {
+        self.layout_computations.fetch_add(1, Ordering::Relaxed);
         let layout = match mode {
             Mode::Math(style) => self
                 .math

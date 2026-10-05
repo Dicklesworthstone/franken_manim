@@ -285,3 +285,26 @@ impl From<CacheRootError> for CacheError {
         Self::RootResolution(err)
     }
 }
+
+impl Store {
+    /// Open the native host store using the ordinary owned-root protocol.
+    ///
+    /// This explicit convenience boundary supplies `StdFs` and `StdClock`;
+    /// it does not weaken root validation or introduce another cache format.
+    /// An empty setting uses the platform's dedicated FrankenManim leaf.
+    /// Sandboxed hosts and deterministic tests continue to inject their own
+    /// capabilities through `open` or `open_host` instead.
+    ///
+    /// # Errors
+    /// The same root-resolution, ownership, format, and storage errors as
+    /// [`Self::open_host`]. No fallback directory is selected on failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_native(configured: &str, config: StoreConfig) -> Result<Self, CacheError> {
+        Self::open_host(
+            std::sync::Arc::new(fmn_platform::fs::StdFs),
+            std::sync::Arc::new(fmn_platform::clock::StdClock::new()),
+            configured,
+            config,
+        )
+    }
+}
