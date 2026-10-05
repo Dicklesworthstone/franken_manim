@@ -139,3 +139,73 @@ def tex_cache_info() -> dict[str, Any]:
     unsendable portal objects and their native engine slots.
     """
     return import_module("manimlib")._fmn_tex_cache_info()
+
+
+def _preflight_arguments(sources, *, template="", preamble="", text_mode=False,
+                         alignment=None, max_workers=32):
+    """Own a bounded batch before cache configuration or native work begins."""
+    if isinstance(sources, (str, bytes)):
+        raise TypeError("Tex preflight sources must be an iterable of strings, not one string")
+    if not isinstance(template, str) or not isinstance(preamble, str):
+        raise TypeError("Tex preflight template and preamble must be strings")
+    if not isinstance(text_mode, bool):
+        raise TypeError("Tex preflight text_mode must be bool")
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int):
+        raise TypeError("Tex preflight max_workers must be an integer")
+    if not 1 <= max_workers <= 64:
+        raise ValueError("Tex preflight max_workers must be in 1..=64")
+    if alignment is not None and (not isinstance(alignment, str)
+            or alignment not in (("left", "center", "right") if text_mode else ("left",))):
+        raise ValueError("Tex preflight alignment must be left for mathematics, or left/center/right for text")
+
+    def size(value, limit, name):
+        # Check code points before encoding so a rejected giant input cannot
+        # allocate another giant temporary UTF-8 buffer merely to be refused.
+        if str.__len__(value) > limit:
+            raise ValueError(f"Tex preflight {name} exceeds {limit} UTF-8 bytes")
+        count = len(str.encode(value, "utf-8"))
+        if count > limit:
+            raise ValueError(f"Tex preflight {name} exceeds {limit} UTF-8 bytes")
+        return count
+
+    size(template, 1024, "template")
+    preamble_bytes = size(preamble, 262_144, "preamble")
+    batch, total = [], 0
+    for index, source in enumerate(sources):
+        if index >= 4096:
+            raise ValueError("Tex preflight exceeds 4096 sources")
+        if not isinstance(source, str):
+            raise TypeError(f"Tex preflight source {index} must be str")
+        total += size(source, 262_144, f"source {index}") + preamble_bytes
+        if total > 4 * 1024 * 1024:
+            raise ValueError("Tex preflight exceeds 4 MiB of source and preamble bytes")
+        batch.append(source)
+    return batch, dict(template=template, preamble=preamble, text_mode=text_mode,
+                       alignment=alignment, max_workers=max_workers)
+
+
+def preflight_tex(sources, *, template="", preamble="", text_mode=False,
+                  alignment=None, max_workers=32) -> dict[str, Any]:
+    r"""Typeset a batch before constructing Tex/TexText objects or playing frames.
+
+    This warms the SAME native engine and content-addressed cache that ordinary
+    constructors use. Mathematics defaults to display style, TexText to centered
+    text with math islands. Use the same template, preamble and alignment as the
+    subsequent constructors. Scale, color and isolate selections are not layout
+    inputs. No Python layout worker or temporary engine is created.
+
+    For example: preflight_tex([r"x^2", r"\frac{1}{2}"], max_workers=4).
+    Invalid batch types and size/worker/alignment limits fail before cache
+    configuration. Native template/preamble validation is retained. Formula errors
+    are returned per source in input order; later valid sources still warm. The
+    receipt includes actual before/after native cache counters and a worker
+    ceiling, NOT a guarantee about the number of threads the host can start.
+    This explicit batch does not discover dynamic strings in arbitrary Python.
+    """
+    batch, options = _preflight_arguments(
+        sources, template=template, preamble=preamble, text_mode=text_mode,
+        alignment=alignment, max_workers=max_workers,
+    )
+    module = import_module("manimlib")
+    module._fmn_ensure_tex_cache()
+    return module._preflight_tex(batch, **options)
