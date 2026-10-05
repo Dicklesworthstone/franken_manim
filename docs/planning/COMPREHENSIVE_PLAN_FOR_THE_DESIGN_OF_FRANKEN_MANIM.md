@@ -652,19 +652,19 @@ OQ-1 (G0-6) Floating + fmn-dmath vs fixed-point raster boundary for certificatio
 
 ## Appendix C. The Reference-defect register (Rev-3 rulings: fixed, with Behavior Notes)
 
-With output parity dropped, every known Reference defect is simply **fixed**; each carries a Behavior Note so migrating users are never surprised.
+With output parity dropped, every known Reference defect is simply **fixed**; each one a migrating user could notice carries a Behavior Note, so they are never surprised. The rulings below cite where each is documented.
 
 | # | Defect at the pin | Ruling |
 |---|---|---|
-| C-1 | `TurnInsideOut` calls a nonexistent `refresh_triangulation` (AttributeError on any VMobject) | fixed — the evident intent implemented |
-| C-2 | `get_scale_stroke_with_zoom()` reads the `flat_stroke` uniform | fixed |
+| C-1 | `TurnInsideOut` calls a nonexistent `refresh_triangulation` (AttributeError on any VMobject) | fixed — the evident intent implemented (native `turn_inside_out`, `fmn-anim/src/indication.rs`); code that crashed now runs, so no migration note |
+| C-2 | `get_scale_stroke_with_zoom()` reads the `flat_stroke` uniform | fixed (BN-07, stroke-uniform fixes) |
 | C-3 | `Line.get_arc_length` handles only positive `path_arc` | fixed — true arc length for all arcs (BN-03) |
-| C-4 | `TexturedGeometry.init_points` triple-reads one slice (dead code) | not replicated |
-| C-5 | `add_updater(call=True)` runs the update twice | fixed — runs once (BN, §8.6) |
-| C-6 | `Group.__add__` mutates in place while `Mobject.__add__` returns new | fixed — consistent value semantics (BN, §8.6) |
-| C-7 | `use_winding_fill` is a documented no-op; the earclip path is dead in the shipped fill | API accepted as a no-op for compatibility; our fill never needed it |
+| C-4 | `TexturedGeometry.init_points` triple-reads one slice (dead code) | not replicated; no observable behaviour, so no migration note |
+| C-5 | `add_updater(call=True)` runs the update twice | fixed — runs once (BN-07, updater and group fixes; §8.6) |
+| C-6 | `Group.__add__` mutates in place while `Mobject.__add__` returns new | fixed — consistent value semantics (BN-07, updater and group fixes; §8.6) |
+| C-7 | `use_winding_fill` is a documented no-op; the earclip path is dead in the shipped fill | API accepted as a no-op for compatibility; our fill never needed it (BN-07, stroke-uniform fixes) |
 | C-8 | three inconsistent arc-density conventions; chord-heuristic length layer | unified density rule; true length (BN-03, BN-09) |
-| C-9 | public-surface typos (`tickness_multiplier`, `char_to_cahced_mob`, `event_listner`) | canonical names in the schema; exact-name aliases in fmn-python |
+| C-9 | public-surface typos (`tickness_multiplier`, `char_to_cahced_mob`, `event_listner`) | canonical names in the schema; exact-name aliases in fmn-python (the `C-9` alias rows of `API_OVERLAY.tsv`) |
 | C-10 | `AnimationGroup.interpolate` consumes raw alpha, so a group's accepted `rate_func`/`time_span` are silently inert (and cannot reach a nested group) | fixed — a composition's alpha runs the one normalized-alpha pipeline; the group rate curve defaults to `linear` so the ordinary group is unchanged (BN-11) |
 | C-11 | `Succession` derives `run_time` from its members' run times, then splits alpha into equal shares (`integer_interpolate`) — and drops any member a coarse alpha step passes over, never beginning or finishing it | fixed — one interval table for every operator; the active member walks forward, running each member it passes (BN-11) |
 | C-12 | the fill's alpha is scaled by `0.95` before the signed-alpha winding blend (`quadratic_bezier/fill/frag.glsl:32`, bounding the `−a/(1−a)` singularity at `a = 1`) and the resolved texture is un-scaled by `1.06` (`shader_wrapper.py:489`) — but `1/0.95 = 1.05263…`, so `1.06 × 0.95 = 1.007`: a **0.70 % overshoot** applied to rgb *and* alpha of every filled shape in every frame the Reference has rendered | not inherited — our analytic fill has no winding-blend scaling, so there is nothing to un-scale. Consequence for review: a side-by-side shows our fill uniformly ~0.7 % darker and less opaque, which is us being right; recorded so it is never read as a colour regression (BN-04, BN-06) |

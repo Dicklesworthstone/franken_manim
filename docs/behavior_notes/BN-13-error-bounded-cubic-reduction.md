@@ -1,6 +1,10 @@
 # BN-13 — Cubic curves keep a measured error bound
 
-**Status:** Draft. Landed in W2 (fm-6cf); becomes Final when G1 passes.
+**Status:** Final. Landed in W2 (fm-6cf). G1 (fm-o3j) passed on 2026-08-20; the
+migration guidance below was checked against the code on 2026-10-04: the
+0.1 px / `0.1 / 135` scene-unit default (`fmn-geom/src/cubic.rs`), the no-op
+`set_use_simple_quadratic_approx`, `add_cubic_bezier_curve_to_with_tolerance`,
+and the fallible `CubicBezier` conversions with no infallible `From`.
 
 ## What changed
 

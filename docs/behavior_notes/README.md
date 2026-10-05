@@ -46,7 +46,7 @@ migration guidance users read:
 | BN-10 | Skip mode delivers the same updater time as playback (§9.3) | [BN-10-skip-mode-updater-time.md](BN-10-skip-mode-updater-time.md) | W4 | Draft |
 | BN-11 | Composition honours its declared timing (C-10, C-11) | [BN-11-composition-timing.md](BN-11-composition-timing.md) | W4 | Draft |
 | BN-12 | The Animation contract's typed edges (§9.1) | [BN-12-animation-contract.md](BN-12-animation-contract.md) | W4 | Draft |
-| BN-13 | Cubic curves use one C1, error-bounded reduction; the simple shortcut cannot lower fidelity | [BN-13-error-bounded-cubic-reduction.md](BN-13-error-bounded-cubic-reduction.md) | W2 | Draft |
+| BN-13 | Cubic curves use one C1, error-bounded reduction; the simple shortcut cannot lower fidelity | [BN-13-error-bounded-cubic-reduction.md](BN-13-error-bounded-cubic-reduction.md) | W2 | Final |
 | BN-14 | Sound is sample-exact on the rational frame clock; pre-zero audio clips instead of raising | [BN-14-sample-exact-sound.md](BN-14-sample-exact-sound.md) | W8 | Draft |
 | BN-15 | The CLI is generated, validated, capability-aware, and machine-readable | [BN-15-cli-contract.md](BN-15-cli-contract.md) | W9/W10 | Draft |
 | BN-16 | Polygon default corner rounding measures the complete cyclic edge set | [BN-16-polygon-corner-radius.md](BN-16-polygon-corner-radius.md) | W10 | Draft |
