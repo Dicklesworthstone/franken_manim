@@ -419,6 +419,20 @@ fn window_and_progress_flags_are_refused_and_never_mistime_a_file_render() {
         argv.extend(args(&["--video_dir"]));
         argv.push(output.clone().into_os_string());
         argv.extend(args(&["@builtin", "circle_shift.v1"]));
+        // Log the argv and the runtime config the front door resolves for it.
+        let text: Vec<String> = argv
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        if let Ok(fmn_cli::Invocation::Render(command)) = fmn_cli::parse_args(text.clone()) {
+            let config = fmn_cli::resolve_render_config(&fmn_platform::fs::StdFs, &command)
+                .expect("the render config resolves");
+            let runtime = command.runtime_config(&config);
+            eprintln!(
+                "argv={text:?} fps={} windowed={} write_file={}",
+                config.camera.fps, runtime.windowed, command.write_file
+            );
+        }
         (run(&fixture, argv), output)
     };
 
@@ -429,7 +443,9 @@ fn window_and_progress_flags_are_refused_and_never_mistime_a_file_render() {
         .map(|entry| entry.expect("directory entry").path())
         .find(|path| path.extension().is_some_and(|ext| ext == "y4m"))
         .expect("a y4m artifact");
-    assert_eq!(y4m_rate_and_frames(&artifact), ("60:1".to_owned(), 23));
+    let observed = y4m_rate_and_frames(&artifact);
+    eprintln!("plain: header rate {} frames {}", observed.0, observed.1);
+    assert_eq!(observed, ("60:1".to_owned(), 23));
 
     for (name, flags) in [
         ("presenter", &["-p"][..]),
@@ -440,6 +456,7 @@ fn window_and_progress_flags_are_refused_and_never_mistime_a_file_render() {
         ("bars", &["--leave_progress_bars"][..]),
     ] {
         let (refused, dir) = render(name, flags);
+        eprintln!("{name}: exit {:?}", refused.status.code());
         assert_code(&refused, 4);
         assert!(
             !dir.exists() || fs::read_dir(&dir).expect("output dir").next().is_none(),

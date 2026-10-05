@@ -596,6 +596,30 @@ mod tests {
         );
     }
 
+    /// A display fraction sets its numerator in text style, at full size;
+    /// a text-style fraction drops it to script size (fm-tex-display-style-nclg).
+    #[test]
+    fn display_fraction_numerators_are_text_size() {
+        let engine = engine();
+        let height = |m: &VMobject| {
+            let (min, max) = m.extent().expect("has extent");
+            max[1] - min[1]
+        };
+        let digit = height(&Tex::new("1").build(&engine).expect("builds").vmob);
+        let numerator = |style: MathStyle| {
+            let tex = Tex::new(r"\frac{1}{2}")
+                .math_style(style)
+                .build(&engine)
+                .expect("builds");
+            let ordinal = tex.occurrences("1")[0][0];
+            height(&tex.vmob.children()[ordinal]) / digit
+        };
+        let display = numerator(MathStyle::Display);
+        assert!(display >= 0.9, "display numerator is {display} of a digit");
+        let text = numerator(MathStyle::Text);
+        assert!(text < 0.8, "text-style numerator is {text} of a digit");
+    }
+
     /// `TexText`'s `$…$` islands are inline (text-style) mathematics, as in
     /// LaTeX prose: the display default of `Tex` must not leak into them.
     #[test]
