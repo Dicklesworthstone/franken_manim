@@ -12349,6 +12349,8 @@ pub struct PortalDefaultsGauntletReport {
     pub scene_camera: ((u32, u32), u32, String, f64),
     /// `Tex(r"\frac{1}{2}").get_height()` at the default font size.
     pub display_fraction_height: f64,
+    /// The README quick example's formula: `(width, height)`.
+    pub readme_formula: (f64, f64),
 }
 
 /// Reference-default parity through the production portal route
@@ -12384,6 +12386,8 @@ _camera = Scene().camera_config
 _fmn_camera = (tuple(int(n) for n in _camera["resolution"]), int(_camera["fps"]),
                str(_camera["background_color"]), float(_camera["background_opacity"]))
 _fmn_display_fraction_height = float(Tex(r"\frac{1}{2}").get_height())
+_readme = Tex(r"\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}")
+_fmn_readme_formula = (float(_readme.get_width()), float(_readme.get_height()))
 "#,
         )
         .expect("reference defaults scene contains no NUL");
@@ -12408,6 +12412,12 @@ _fmn_display_fraction_height = float(Tex(r"\frac{1}{2}").get_height())
             .ok_or_else(|| "reference defaults scene emitted no Tex height".to_owned())?
             .extract()
             .map_err(|error: PyErr| error.to_string())?;
+        let readme_formula: (f64, f64) = globals
+            .get_item("_fmn_readme_formula")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reference defaults scene emitted no README formula box".to_owned())?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
         Ok(PortalDefaultsGauntletReport {
             fps,
             frame_count,
@@ -12415,6 +12425,7 @@ _fmn_display_fraction_height = float(Tex(r"\frac{1}{2}").get_height())
             target_width,
             scene_camera,
             display_fraction_height,
+            readme_formula,
         })
     })
 }

@@ -3,8 +3,8 @@
 //! authored tier-1 formulas with the pinned Reference's measured
 //! `Tex(source)` width and height at the default font size (see its header).
 //! Native boxes are compared with them; the counts of formulas inside a
-//! relative tolerance on both axes may only rise. The worst rows are printed
-//! so each run names what to fix next.
+//! relative tolerance on both axes may only rise. Every row is printed,
+//! worst first, so each run names what to fix next.
 #![forbid(unsafe_code)]
 #![allow(clippy::expect_used, clippy::panic, clippy::print_stderr)]
 
@@ -78,7 +78,8 @@ fn native_tex_boxes_track_the_reference_and_never_regress() {
         rows.len(),
         rows.len()
     );
-    for ((dw, dh), source) in measured.iter().take(20) {
+    // Every row, worst first: formula, relative width and height error.
+    for ((dw, dh), source) in &measured {
         eprintln!("  dw={dw:+.3} dh={dh:+.3}  {source}");
     }
     assert!(

@@ -2760,6 +2760,11 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
     // tall at 6199a00d (TeX Live 2025, measured 2026-10-04); text style is
     // about 0.58 (fm-tex-display-style-nclg).
     let display_style = (report.display_fraction_height / 0.9876 - 1.0).abs() < 0.02;
+    // The README quick example's Tex is 3.940671 x 1.149994 on the Reference
+    // (measured 2026-10-04); text style would be about half as tall.
+    let (readme_width, readme_height) = report.readme_formula;
+    let readme_envelope = (readme_width / 3.940_671 - 1.0).abs() < 0.10
+        && (readme_height / 1.149_994 - 1.0).abs() < 0.10;
     let front_doors_agree = *resolution == native.resolution
         && *fps == native.fps
         && background.eq_ignore_ascii_case(&native.background_color)
@@ -2778,20 +2783,26 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
             .field("rate_is_reference", truth(rate_is_reference))
             .field("brace_spans", truth(brace_spans))
             .field("front_doors_agree", truth(front_doors_agree))
-            .field("display_style", truth(display_style)),
+            .field("display_style", truth(display_style))
+            .field(
+                "readme_formula",
+                format!("{readme_width:.4}x{readme_height:.4}"),
+            )
+            .field("readme_envelope", truth(readme_envelope)),
     );
     if !(background_is_reference
         && rate_is_reference
         && frames_match
         && brace_spans
         && front_doors_agree
-        && display_style)
+        && display_style
+        && readme_envelope)
     {
         return Err(fail(format!(
             "portal Reference defaults drifted: header={header:?} frames={frames} \
              receipt_fps={} receipt_frames={} yuv=({y},{u},{v}) brace={} target={} \
              portal_camera={:?} native_camera=({:?}, {}, {}, {}) \
-             display_fraction_height={}",
+             display_fraction_height={} readme_formula={:?}",
             report.fps,
             report.frame_count,
             report.brace_width,
@@ -2801,7 +2812,8 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
             native.fps,
             native.background_color,
             native.background_opacity,
-            report.display_fraction_height
+            report.display_fraction_height,
+            report.readme_formula
         )));
     }
     Ok(RunOutcome::ok()
@@ -2810,7 +2822,8 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
         .with_counter("python_defaults_reference_rate", 1)
         .with_counter("python_defaults_brace_spans_composite", 1)
         .with_counter("python_defaults_front_doors_agree", 1)
-        .with_counter("python_defaults_display_style_tex", 1))
+        .with_counter("python_defaults_display_style_tex", 1)
+        .with_counter("python_defaults_readme_formula_envelope", 1))
 }
 
 fn python_portal_png_still_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -5330,6 +5343,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             counter_eq("python_defaults_brace_spans_composite", 1),
             counter_eq("python_defaults_front_doors_agree", 1),
             counter_eq("python_defaults_display_style_tex", 1),
+            counter_eq("python_defaults_readme_formula_envelope", 1),
         ],
         vec![LogExpect::span_present(
             "e2e.python.reference_defaults",
@@ -5340,6 +5354,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("brace_spans", "true"),
                 FieldPred::str_eq("front_doors_agree", "true"),
                 FieldPred::str_eq("display_style", "true"),
+                FieldPred::str_eq("readme_envelope", "true"),
             ],
         )],
     ));
