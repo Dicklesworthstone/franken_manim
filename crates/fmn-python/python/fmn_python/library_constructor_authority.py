@@ -178,7 +178,10 @@ LIBRARY_CONSTRUCTOR_AUTHORITIES: Final = (
         binding_kind="direct_native_builder",
         python_base="VMobject",
         python_authority_class="Polyline",
-        python_authority_token='"_build_polyline",',
+        python_authority_token=(
+            '_set_native_vmobject_points(self, "_build_polyline", '
+            "[_vec3(vertex) for vertex in self.vertices])"
+        ),
         native_builder="_build_polyline",
         rust_source="crates/fmn-library/src/poly.rs",
         rust_function="polyline",
@@ -197,7 +200,10 @@ LIBRARY_CONSTRUCTOR_AUTHORITIES: Final = (
         binding_kind="native_equivalent_builder",
         python_base="Rectangle",
         python_authority_class="RoundedRectangle",
-        python_authority_token='"_build_rounded_rectangle",',
+        python_authority_token=(
+            '_set_native_vmobject_points(self, "_build_rounded_rectangle", '
+            "self.width, self.height, self.corner_radius)"
+        ),
         native_builder="_build_rounded_rectangle",
         rust_source="crates/fmn-library/src/poly.rs",
         rust_function="rounded_rectangle",

@@ -180,11 +180,39 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
             helper="triangle",
         )
 
+    def test_lifecycle_authority_requires_the_native_lifecycle_route(self) -> None:
+        self.mutate(
+            audit.BOOTSTRAP_PATH,
+            "    \"\"\"Atlas's open shared-anchor path through caller-supplied vertices.\"\"\"\n\n"
+            "    def __init__(self, *vertices, **kwargs):\n"
+            "        self.vertices = _np.array([_vec3(vertex) for vertex in vertices], dtype=float)\n"
+            "        _init_native_vmobject(self, kwargs)",
+            "    \"\"\"Atlas's open shared-anchor path through caller-supplied vertices.\"\"\"\n\n"
+            "    def __init__(self, *vertices, **kwargs):\n"
+            "        self.vertices = _np.array([_vec3(vertex) for vertex in vertices], dtype=float)\n"
+            "        VMobject.__init__(self, **kwargs)",
+        )
+        self.assert_audit_error(
+            "python-authority-missing",
+            helper="polyline",
+        )
+
+    def test_lifecycle_authority_must_be_the_exact_builder_call(self) -> None:
+        self.mutate(
+            audit.BOOTSTRAP_PATH,
+            'self, "_build_rounded_rectangle", self.width, self.height, self.corner_radius',
+            'self, "_build_rectangle", self.width, self.height, self.corner_radius',
+        )
+        self.assert_audit_error(
+            "python-authority-missing",
+            helper="rounded_rectangle",
+        )
+
     def test_inherited_parent_must_still_call_native_builder(self) -> None:
         self.mutate(
             audit.BOOTSTRAP_PATH,
-            "self._build_dot(",
-            "self._build_circle(",
+            'self, "_build_dot", _vec3(self.arc_center), self.radius',
+            'self, "_build_circle", _vec3(self.arc_center), self.radius',
         )
         self.assert_audit_error(
             "python-native-builder-missing",
@@ -194,14 +222,16 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
     def test_nested_python_code_object_cannot_impersonate_parent_builder(self) -> None:
         self.mutate(
             audit.BOOTSTRAP_PATH,
-            "specs = self._build_dot(",
-            "def authority_decoy():\n"
-            "            return self._build_dot(\n"
-            "                _native_shell_factory,\n"
-            "                _vec3(point),\n"
-            "                float(radius),\n"
-            "            )\n"
-            "        specs = self._build_circle(",
+            "        return _set_native_vmobject_points(\n"
+            '            self, "_build_dot", _vec3(self.arc_center), self.radius\n'
+            "        )",
+            "        def authority_decoy():\n"
+            "            return _set_native_vmobject_points(\n"
+            '                self, "_build_dot", _vec3(self.arc_center), self.radius\n'
+            "            )\n\n"
+            "        return _set_native_vmobject_points(\n"
+            '            self, "_build_circle", _vec3(self.arc_center), self.radius\n'
+            "        )",
         )
         self.assert_audit_error(
             "python-native-builder-missing",

@@ -237,6 +237,43 @@ def _has_expected_call(
     )
 
 
+def _native_lifecycle_init_points(
+    class_node: ast.ClassDef,
+    constructor: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The class's own init_points when its __init__ takes the native lifecycle.
+
+    _init_native_vmobject runs the Reference's init_points hook, so a class
+    whose __init__ calls it builds its geometry there, not in __init__.
+    """
+    if not any(
+        _call_target(call) == "_init_native_vmobject"
+        for call in _executable_calls(constructor)
+    ):
+        return None
+    matches = [
+        node
+        for node in class_node.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "init_points"
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _routes_native_builder(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    builder: str,
+) -> bool:
+    """Whether function publishes builder through _set_native_vmobject_points."""
+    return any(
+        _call_target(call) == "_set_native_vmobject_points"
+        and len(call.args) >= 2
+        and isinstance(call.args[1], ast.Constant)
+        and call.args[1].value == builder
+        for call in _executable_calls(function)
+    )
+
+
 def _require_expected_call(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     token: str,
@@ -564,14 +601,21 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
             path=bootstrap_path,
             helper=helper,
         )
-        _require_expected_call(
-            constructor,
+        lifecycle = _native_lifecycle_init_points(class_node, constructor)
+        if lifecycle is None or not _has_expected_call(
+            lifecycle,
             record.python_authority_token,
             path=bootstrap_path,
             helper=helper,
-            owner=record.reference_class,
-            code="python-authority-missing",
-        )
+        ):
+            _require_expected_call(
+                constructor,
+                record.python_authority_token,
+                path=bootstrap_path,
+                helper=helper,
+                owner=record.reference_class,
+                code="python-authority-missing",
+            )
 
         if (
             record.native_builder is not None
@@ -589,14 +633,20 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
                 path=bootstrap_path,
                 helper=helper,
             )
-            _require_expected_call(
-                authority_constructor,
-                f"self.{record.native_builder}(",
-                path=bootstrap_path,
-                helper=helper,
-                owner=record.python_authority_class,
-                code="python-native-builder-missing",
+            authority_lifecycle = _native_lifecycle_init_points(
+                authority_node, authority_constructor
             )
+            if authority_lifecycle is None or not _routes_native_builder(
+                authority_lifecycle, record.native_builder
+            ):
+                _require_expected_call(
+                    authority_constructor,
+                    f"self.{record.native_builder}(",
+                    path=bootstrap_path,
+                    helper=helper,
+                    owner=record.python_authority_class,
+                    code="python-native-builder-missing",
+                )
 
         if record.bridge_function is not None:
             bridge_block = _rust_function_block(
