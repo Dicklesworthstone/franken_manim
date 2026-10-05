@@ -89,6 +89,7 @@ _STEPS = (
     ("embedded_shell", "install_embedded_shell"),
     ("source_autoreload", "install_source_autoreload"),
     ("project_editor", "install_scene_project_editor"),
+    ("typesetting", "install_typesetting"),
     ("runtime_provenance", "install_runtime_provenance"),
     ("paired_output", "install_paired_output"),
 )

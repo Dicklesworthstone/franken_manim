@@ -6,6 +6,8 @@ mod markdown;
 mod svg_ingress;
 #[path = "portal_table.rs"]
 mod table;
+#[path = "portal_typesetting.rs"]
+mod typesetting;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -313,6 +315,7 @@ fn _build_styled_text<'py>(
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_build_styled_text, module)?)?;
     module.add_function(wrap_pyfunction!(_validate_tex_options, module)?)?;
+    typesetting::install(module)?;
     table::install(module)?;
     svg_ingress::install(module)?;
     markdown::install(module)
