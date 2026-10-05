@@ -89,3 +89,48 @@ Environment note: the run needed `texlive-fonts-extra` (`dsfont.sty`) and
 `texlive-science` (`physics.sty`) installed for the Reference's default TeX
 template; this is the recorded capture machine's dependency closure, not a
 maintained environment (D-16).
+
+## Regenerated gallery (fm-5wq.50, 2026-10-05)
+
+The gallery is now regenerated from **installed release artefacts**. It no
+longer uses the G0-2 spike harness, which flipped y itself and so never ran
+the production 2D route.
+
+- **Scenes.** Every panel is a committed scene class under `gallery/scenes/`:
+  - `primitives.py`: the seven calibration scenes above, unchanged in content;
+  - `math_sheet.py`: fifty authored tier-1 formulas in two sheets. The
+    corpus formulas stay private under §15.3;
+  - `readme.py`: twenty README-class scenes.
+- **Command.**
+  `scripts/regenerate_look_gallery.py --fmn-python PATH [--reference-python PATH]`.
+  - The installed `fmn-python` renders each panel as a certified final still
+    into `gallery/renders/` (committed). The build id comes from that render's
+    provenance sidecar.
+  - The pinned Reference renders the same unedited source (`-s -w`, xvfb, a
+    private config directory) into `gallery/reference_captures/panels/`. That
+    directory is private and never touches the original capture set above.
+- **Manifest** (`crates/fmn-conformance/fixtures/look_gallery.tsv`, v2).
+  - It names the release under review once. Each row records its source,
+    both digests and its build id.
+  - `fmn_conformance::gallery::render_pairs` refuses a panel from another
+    build, or a render or capture whose bytes changed.
+  - Its verdict column is **advisory** (agent review) and resets to
+    `unreviewed` whenever a render's pixels change.
+- **Owner verdicts** (`crates/fmn-conformance/fixtures/look_gallery_owner_verdicts.tsv`).
+  - Each verdict is bound to the render digest it judged. The vocabulary is
+    enforced by `tests/look_gallery.rs`: at-least-as-good,
+    different-but-fine with a named BN, or regression.
+  - G2 and G4a cite only these.
+
+**Incident, recorded in `PROVENANCE.json` supplements.** The first version of
+the regeneration script wrote its captures to the paths of the 2026-07-25 set
+and overwrote them.
+- `lighting_3d` was restored byte-identically by re-running
+  `capture_reference_imagery.py`.
+- `joints_and_caps`, `math_formula`, `self_intersections` and `text_sample`
+  re-captured byte-identical.
+- `glow` and `gradient_fills` no longer reproduce on this host, so the July
+  bytes are lost. Their recorded digests remain in `captures`, and the files
+  now hold this host's capture of the same scenes.
+- The script now writes only to `panels/` and refuses to replace a capture it
+  did not record.

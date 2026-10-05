@@ -266,6 +266,9 @@ def main() -> None:
     ap.add_argument("--out", default=DEFAULT_OUT)
     args = ap.parse_args()
     out = args.out
+    # The Reference's manimlib parses sys.argv when imported (manimlib/config.py);
+    # it must not see this tool's flags.
+    sys.argv = sys.argv[:1]
 
     m = import_reference()
     scenes = build_scenes(m)

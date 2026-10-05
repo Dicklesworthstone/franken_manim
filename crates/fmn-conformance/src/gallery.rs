@@ -41,19 +41,23 @@
 //! 2. **The verdict workflow.** [`Verdict`] is §16.3's vocabulary —
 //!    `AtLeastAsGood`, `DifferentButFine` (Behavior-Noted), `Regression` — and
 //!    [`GalleryManifest`] is its ledger: a versioned TSV artifact
-//!    (`fixtures/look_gallery.tsv`, format `# fmn-look-gallery v1`) pairing
-//!    each captured Reference image (`gallery/reference_captures/`, private
-//!    per §15.3) with its committed FrankenManim render
-//!    (`docs/g0/g0-2-renders/`), the current verdict, and the change that
-//!    last moved it. A row may carry the explicit
-//!    `reference-capture-missing` refusal until its private capture exists;
-//!    this is not an aesthetic verdict. The review tooling is three functions:
-//!    [`render_pairs`] resolves a manifest against a checkout (a missing
-//!    committed render is an error; an absent private capture only mutes the
-//!    smoke alarm), [`GalleryManifest::record_verdict`] moves one panel's
-//!    verdict with its reason and bumps the manifest revision, and
-//!    [`GalleryManifest::regressions_since`] diffs two manifest revisions for
-//!    panels whose verdict worsened.
+//!    (`fixtures/look_gallery.tsv`, format `# fmn-look-gallery v2`) written by
+//!    `scripts/regenerate_look_gallery.py` (fm-5wq.50). It names the release
+//!    under review once, and pairs each panel's scene source
+//!    (`gallery/scenes/`) with its committed render (`gallery/renders/`), the
+//!    render's SHA-256, the build id that produced it, and the digest of the
+//!    private Reference capture of the same source (`gallery/reference_captures/`,
+//!    §15.3). The manifest's verdict column is **advisory** (agent review); a
+//!    row may carry `unreviewed` or the `reference-capture-missing` refusal,
+//!    neither an aesthetic verdict. Gates cite only the owner's verdicts
+//!    ([`OwnerVerdicts`], `fixtures/look_gallery_owner_verdicts.tsv`), each
+//!    bound to the render digest it judged. The review tooling:
+//!    [`render_pairs`] resolves a manifest against a checkout and refuses a
+//!    missing or altered render, or one built by anything but the release
+//!    under review; [`GalleryManifest::record_verdict`] moves one panel's
+//!    advisory verdict with its reason and bumps the revision; and
+//!    [`GalleryManifest::regressions_since`] diffs two revisions for panels
+//!    whose verdict worsened.
 //!
 //! [`canonical_png_panel`] is the deliberate bridge from certified Lumen
 //! frames to this review plane. It applies fmn-frame's bit-exact canonical
@@ -76,10 +80,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The manifest format tag; the first line of every look-gallery TSV.
-pub const MANIFEST_HEADER: &str = "# fmn-look-gallery v1";
+pub const MANIFEST_HEADER: &str = "# fmn-look-gallery v2";
 
 const MANIFEST_REVISION_PREFIX: &str = "# revision: ";
-const MANIFEST_COLUMNS: &str = "# columns: panel\treference\trender\tverdict\tchanged";
+const MANIFEST_RELEASE_PREFIX: &str = "# release: ";
+const MANIFEST_REFERENCE_PREFIX: &str = "# reference: ";
+const MANIFEST_COLUMNS: &str = "# columns: panel\tsource\treference\treference_sha256\trender\t\
+     render_sha256\tbuild_id\tadvisory_verdict\tchanged";
+const MANIFEST_FIELDS: usize = 9;
+/// The `reference_sha256` spelling of "no private capture recorded".
+const NO_CAPTURE: &str = "-";
+
+/// The owner-verdict ledger's format tag and column legend.
+pub const OWNER_HEADER: &str = "# fmn-look-gallery-owner-verdicts v1";
+const OWNER_COLUMNS: &str = "# columns: panel\trender_sha256\tverdict\tnote\tdate";
 
 /// Maximum byte length of one look-gallery manifest. The ledger is a small,
 /// reviewed TSV; one MiB leaves ample growth room while keeping malformed
@@ -215,6 +229,10 @@ pub struct ErrorPercentiles {
 /// manifest row names the BN note or ratification that carries the behavior.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Verdict {
+    /// The render has a Reference capture but nobody has judged this render
+    /// yet (a regenerated panel resets to it). Not a review result and not
+    /// part of the severity order.
+    Unreviewed,
     /// No captured Reference image exists, so assigning an aesthetic verdict
     /// would fabricate evidence. This is an evidence-gap refusal, not a
     /// human review result and not part of the severity order.
@@ -234,6 +252,7 @@ impl Verdict {
     #[must_use]
     pub fn token(self) -> &'static str {
         match self {
+            Self::Unreviewed => "unreviewed",
             Self::ReferenceCaptureMissing => "reference-capture-missing",
             Self::AtLeastAsGood => "at-least-as-good",
             Self::DifferentButFine => "different-but-fine",
@@ -241,10 +260,18 @@ impl Verdict {
         }
     }
 
+    /// Whether this is a review result (on the severity order), not a
+    /// no-verdict state.
+    #[must_use]
+    pub fn is_judgment(self) -> bool {
+        !matches!(self, Self::Unreviewed | Self::ReferenceCaptureMissing)
+    }
+
     /// Parse a TSV verdict token.
     #[must_use]
     pub fn from_token(token: &str) -> Option<Self> {
         match token {
+            "unreviewed" => Some(Self::Unreviewed),
             "reference-capture-missing" => Some(Self::ReferenceCaptureMissing),
             "at-least-as-good" => Some(Self::AtLeastAsGood),
             "different-but-fine" => Some(Self::DifferentButFine),
@@ -260,17 +287,27 @@ impl fmt::Display for Verdict {
     }
 }
 
-/// One manifest row: a named pair, its verdict, and the change that last
-/// moved the verdict.
+/// One manifest row: a named pair, where both sides came from, its advisory
+/// verdict, and the change that last moved the verdict.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GalleryRow {
     /// Panel id (`[a-z0-9._-]`, e.g. `gradient_fills`); a path-safe name.
     pub panel: String,
+    /// The scene both engines rendered: `repo/relative/path.py:SceneClass`.
+    pub source: String,
     /// Repo-relative path of the captured Reference image.
     pub reference: String,
+    /// SHA-256 (lowercase hex) of the private Reference capture, or `None`
+    /// when no capture was recorded.
+    pub reference_sha256: Option<String>,
     /// Repo-relative path of the committed FrankenManim render.
     pub render: String,
-    /// The current human verdict, or the explicit missing-capture refusal.
+    /// SHA-256 (lowercase hex) of the committed render's bytes.
+    pub render_sha256: String,
+    /// The build id of the release artefact that produced the render.
+    pub build_id: String,
+    /// The advisory (agent) verdict, `unreviewed`, or the explicit
+    /// missing-capture refusal. Gates cite [`OwnerVerdicts`] instead.
     pub verdict: Verdict,
     /// Free-text record of the change that last moved the verdict (no tabs
     /// or newlines; by convention `bead date: reason`).
@@ -289,12 +326,17 @@ pub struct VerdictChange {
     pub to: Verdict,
 }
 
-/// A parsed look-gallery manifest: format version 1, a monotone `revision`
-/// bumped by every verdict change, and rows sorted by panel on write.
+/// A parsed look-gallery manifest: format version 2, a monotone `revision`
+/// bumped by every verdict change or regeneration, the release under review,
+/// the Reference identity, and rows sorted by panel on write.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GalleryManifest {
     /// Manifest revision; `record_verdict` bumps it.
     pub revision: u64,
+    /// The build id of the release under review; every row must match it.
+    pub release: String,
+    /// The Reference identity the captures came from (`3b1b/manim@<commit>`).
+    pub reference: String,
     /// The gallery rows.
     pub rows: Vec<GalleryRow>,
 }
@@ -354,6 +396,9 @@ pub enum GalleryError {
     InvalidChangeNote,
     /// `record_verdict` cannot advance an already maximal manifest revision.
     RevisionOverflow,
+    /// `record_verdict` was asked for a judgment on a panel with no Reference
+    /// capture: there is nothing it could have been judged against.
+    NoCapture(String),
     /// A committed FrankenManim render named by the manifest is missing from
     /// the checkout. This is the "missing pair" the tests fail on.
     MissingRender {
@@ -361,6 +406,28 @@ pub enum GalleryError {
         panel: String,
         /// The path that was expected to exist.
         path: PathBuf,
+    },
+    /// A panel was rendered by a build other than the release under review:
+    /// a stale panel, never evidence about this release.
+    StalePanel {
+        /// The stale panel.
+        panel: String,
+        /// The build id that produced its render.
+        build_id: String,
+        /// The release the manifest is under review for.
+        release: String,
+    },
+    /// A file's bytes do not have the digest the manifest records: the
+    /// render (or a present private capture) changed after regeneration.
+    DigestMismatch {
+        /// The panel whose file changed.
+        panel: String,
+        /// The file that was hashed.
+        path: PathBuf,
+        /// The digest the manifest records.
+        expected: String,
+        /// The digest of the bytes on disk.
+        actual: String,
     },
 }
 
@@ -398,10 +465,34 @@ impl fmt::Display for GalleryError {
                     "look-gallery manifest revision cannot advance past u64::MAX"
                 )
             }
+            Self::NoCapture(panel) => write!(
+                f,
+                "gallery panel {panel:?} has no Reference capture to judge it against"
+            ),
             Self::MissingRender { panel, path } => write!(
                 f,
                 "gallery panel {panel:?} names a render that is missing from the \
                  checkout: {}",
+                path.display()
+            ),
+            Self::StalePanel {
+                panel,
+                build_id,
+                release,
+            } => write!(
+                f,
+                "gallery panel {panel:?} was rendered by {build_id}, not by the release \
+                 under review {release}; regenerate it"
+            ),
+            Self::DigestMismatch {
+                panel,
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "gallery panel {panel:?}: {} has SHA-256 {actual}, the manifest records \
+                 {expected}",
                 path.display()
             ),
         }
@@ -708,18 +799,48 @@ fn valid_repo_path(path: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-/// Split one manifest row without allocating a field vector for malformed
-/// input carrying an arbitrary number of tab separators.
-fn split_gallery_row(line: &str) -> Option<[&str; 5]> {
+/// Split one row into exactly `N` fields without allocating a field vector
+/// for malformed input carrying an arbitrary number of tab separators.
+fn split_row<const N: usize>(line: &str) -> Option<[&str; N]> {
     let mut fields = line.split('\t');
-    let exact = [
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-    ];
+    let mut exact = [""; N];
+    for slot in &mut exact {
+        *slot = fields.next()?;
+    }
     fields.next().is_none().then_some(exact)
+}
+
+/// A lowercase hexadecimal SHA-256 digest.
+fn valid_sha256(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A build or Reference identity: short printable ASCII without separators,
+/// e.g. `git:<commit>`, `git:<commit>+dirty:<digest>` or `3b1b/manim@<commit>`.
+fn valid_identity(identity: &str) -> bool {
+    (1..=200).contains(&identity.len())
+        && identity.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b':' | b'+' | b'.' | b'_' | b'-' | b'/' | b'@')
+        })
+}
+
+/// A scene source: a repo path and a Python class name, `path.py:SceneClass`.
+fn valid_source(source: &str) -> bool {
+    source.split_once(':').is_some_and(|(path, scene)| {
+        valid_repo_path(path)
+            && path.ends_with(".py")
+            && scene.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scene
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    fmn_hash::sha256(bytes).to_hex()
 }
 
 fn oversized_manifest() -> GalleryError {
@@ -729,7 +850,7 @@ fn oversized_manifest() -> GalleryError {
 }
 
 impl GalleryManifest {
-    /// Parse manifest text in format v1.
+    /// Parse manifest text in format v2.
     ///
     /// # Errors
     /// [`GalleryError::Corrupt`] on any format violation: wrong header, bad
@@ -803,16 +924,36 @@ impl GalleryManifest {
             });
         }
 
+        let mut identity = |line: usize, prefix: &str, what: &str| {
+            let text = lines
+                .next()
+                .and_then(|(_, text)| text.strip_prefix(prefix))
+                .ok_or_else(|| GalleryError::Corrupt {
+                    line,
+                    detail: format!("line {line} must start with {prefix:?}"),
+                })?;
+            if valid_identity(text) {
+                Ok(text.to_string())
+            } else {
+                Err(GalleryError::Corrupt {
+                    line,
+                    detail: format!("invalid {what} identity {text:?}"),
+                })
+            }
+        };
+        let release = identity(3, MANIFEST_RELEASE_PREFIX, "release")?;
+        let reference_identity = identity(4, MANIFEST_REFERENCE_PREFIX, "reference")?;
+
         let Some((_, columns)) = lines.next() else {
             return Err(GalleryError::Corrupt {
-                line: 3,
+                line: 5,
                 detail: format!("missing columns line {MANIFEST_COLUMNS:?}"),
             });
         };
         if columns != MANIFEST_COLUMNS {
             return Err(GalleryError::Corrupt {
-                line: 3,
-                detail: format!("third line must be {MANIFEST_COLUMNS:?}"),
+                line: 5,
+                detail: format!("fifth line must be {MANIFEST_COLUMNS:?}"),
             });
         }
 
@@ -827,19 +968,31 @@ impl GalleryManifest {
             }
             if line.starts_with(MANIFEST_REVISION_PREFIX) {
                 return Err(corrupt(
-                    "duplicate revision line: format v1 requires exactly one".to_string(),
+                    "duplicate revision line: format v2 requires exactly one".to_string(),
                 ));
             }
             if line.starts_with('#') {
                 return Err(corrupt(format!(
-                    "unexpected comment line {line:?}: format v1 has exactly three prelude lines"
+                    "unexpected comment line {line:?}: format v2 has exactly five prelude lines"
                 )));
             }
-            let Some([panel, reference, render, verdict, changed]) = split_gallery_row(line) else {
+            let Some(
+                [
+                    panel,
+                    source,
+                    reference,
+                    reference_sha256,
+                    render,
+                    render_sha256,
+                    build_id,
+                    verdict,
+                    changed,
+                ],
+            ) = split_row::<MANIFEST_FIELDS>(line)
+            else {
                 let field_count = line.split('\t').count();
                 return Err(corrupt(format!(
-                    "expected 5 tab-separated fields, found {}",
-                    field_count
+                    "expected {MANIFEST_FIELDS} tab-separated fields, found {field_count}"
                 )));
             };
             if !valid_panel(panel) {
@@ -870,12 +1023,41 @@ impl GalleryManifest {
                      the repository"
                 )));
             }
+            if !valid_source(source) {
+                return Err(corrupt(format!(
+                    "invalid source {source:?}: expected repo/relative/path.py:SceneClass"
+                )));
+            }
+            let reference_sha256 = match reference_sha256 {
+                NO_CAPTURE => None,
+                digest if valid_sha256(digest) => Some(digest.to_string()),
+                digest => {
+                    return Err(corrupt(format!(
+                        "invalid reference_sha256 {digest:?}: lowercase SHA-256 hex or '-'"
+                    )));
+                }
+            };
+            if !valid_sha256(render_sha256) {
+                return Err(corrupt(format!(
+                    "invalid render_sha256 {render_sha256:?}: lowercase SHA-256 hex"
+                )));
+            }
+            if !valid_identity(build_id) {
+                return Err(corrupt(format!("invalid build_id {build_id:?}")));
+            }
             let verdict = Verdict::from_token(verdict).ok_or_else(|| {
                 corrupt(format!(
-                    "unknown verdict {verdict:?}: expected at-least-as-good, \
-                     different-but-fine, or regression"
+                    "unknown verdict {verdict:?}: expected unreviewed, \
+                     reference-capture-missing, at-least-as-good, different-but-fine, \
+                     or regression"
                 ))
             })?;
+            if verdict.is_judgment() && reference_sha256.is_none() {
+                return Err(corrupt(format!(
+                    "panel {panel:?} carries the verdict {verdict} but records no Reference \
+                     capture to have judged it against"
+                )));
+            }
             if changed.is_empty() {
                 return Err(corrupt(format!(
                     "panel {panel:?} has an empty change note: record what moved the verdict"
@@ -883,13 +1065,22 @@ impl GalleryManifest {
             }
             rows.push(GalleryRow {
                 panel: panel.to_string(),
+                source: source.to_string(),
                 reference: reference.to_string(),
+                reference_sha256,
                 render: render.to_string(),
+                render_sha256: render_sha256.to_string(),
+                build_id: build_id.to_string(),
                 verdict,
                 changed: changed.to_string(),
             });
         }
-        Ok(Self { revision, rows })
+        Ok(Self {
+            revision,
+            release,
+            reference: reference_identity,
+            rows,
+        })
     }
 
     /// Load a manifest from disk.
@@ -925,16 +1116,24 @@ impl GalleryManifest {
             .len()
             .saturating_add(MANIFEST_REVISION_PREFIX.len())
             .saturating_add(revision.len())
+            .saturating_add(MANIFEST_RELEASE_PREFIX.len())
+            .saturating_add(self.release.len())
+            .saturating_add(MANIFEST_REFERENCE_PREFIX.len())
+            .saturating_add(self.reference.len())
             .saturating_add(MANIFEST_COLUMNS.len())
-            .saturating_add(3);
+            .saturating_add(5);
         for row in &self.rows {
             len = len
                 .saturating_add(row.panel.len())
+                .saturating_add(row.source.len())
                 .saturating_add(row.reference.len())
+                .saturating_add(row.reference_sha256.as_deref().unwrap_or(NO_CAPTURE).len())
                 .saturating_add(row.render.len())
+                .saturating_add(row.render_sha256.len())
+                .saturating_add(row.build_id.len())
                 .saturating_add(row.verdict.token().len())
                 .saturating_add(row.changed.len())
-                .saturating_add(5);
+                .saturating_add(MANIFEST_FIELDS);
         }
         if len > MAX_MANIFEST_BYTES {
             Err(oversized_manifest())
@@ -958,18 +1157,27 @@ impl GalleryManifest {
         out.push_str(MANIFEST_REVISION_PREFIX);
         out.push_str(&self.revision.to_string());
         out.push('\n');
+        out.push_str(MANIFEST_RELEASE_PREFIX);
+        out.push_str(&self.release);
+        out.push('\n');
+        out.push_str(MANIFEST_REFERENCE_PREFIX);
+        out.push_str(&self.reference);
+        out.push('\n');
         out.push_str(MANIFEST_COLUMNS);
         out.push('\n');
         for row in rows {
-            out.push_str(&row.panel);
-            out.push('\t');
-            out.push_str(&row.reference);
-            out.push('\t');
-            out.push_str(&row.render);
-            out.push('\t');
-            out.push_str(row.verdict.token());
-            out.push('\t');
-            out.push_str(&row.changed);
+            let fields = [
+                row.panel.as_str(),
+                row.source.as_str(),
+                row.reference.as_str(),
+                row.reference_sha256.as_deref().unwrap_or(NO_CAPTURE),
+                row.render.as_str(),
+                row.render_sha256.as_str(),
+                row.build_id.as_str(),
+                row.verdict.token(),
+                row.changed.as_str(),
+            ];
+            out.push_str(&fields.join("\t"));
             out.push('\n');
         }
         Ok(out)
@@ -1021,6 +1229,9 @@ impl GalleryManifest {
             .iter()
             .position(|row| row.panel == panel)
             .ok_or_else(|| GalleryError::UnknownPanel(panel.to_string()))?;
+        if verdict.is_judgment() && self.rows[row_index].reference_sha256.is_none() {
+            return Err(GalleryError::NoCapture(panel.to_string()));
+        }
         let next_revision = self
             .revision
             .checked_add(1)
@@ -1052,8 +1263,8 @@ impl GalleryManifest {
     /// The panels whose verdict *worsened* relative to an earlier manifest
     /// revision, sorted by panel. Worsened means strictly higher on the
     /// severity order `AtLeastAsGood < DifferentButFine < Regression`; the
-    /// `ReferenceCaptureMissing` refusal is incomparable and therefore never
-    /// a regression. A
+    /// `Unreviewed` and `ReferenceCaptureMissing` states are incomparable and
+    /// therefore never a regression. A
     /// panel that did not exist in `earlier` counts only when it enters at
     /// `Regression` (a new `DifferentButFine` panel is a review item, not a
     /// regression).
@@ -1068,9 +1279,7 @@ impl GalleryManifest {
         for row in &self.rows {
             match old.get(row.panel.as_str()) {
                 Some(&from)
-                    if from != Verdict::ReferenceCaptureMissing
-                        && row.verdict != Verdict::ReferenceCaptureMissing
-                        && row.verdict > from =>
+                    if from.is_judgment() && row.verdict.is_judgment() && row.verdict > from =>
                 {
                     changes.push(VerdictChange {
                         panel: row.panel.clone(),
@@ -1099,23 +1308,37 @@ impl GalleryManifest {
 }
 
 /// Resolve a manifest against a checkout rooted at `repo_root`, sorted by
-/// panel.
+/// panel, refusing anything that is not evidence about the release under
+/// review.
 ///
-/// A missing **render** is [`GalleryError::MissingRender`]: the FrankenManim
-/// panels are committed artifacts and their absence is a broken checkout (the
-/// "missing pair" the tests fail on). A missing **reference** is not an
-/// error — the Reference captures are private §15.3 fixtures and a checkout
-/// without them simply cannot run the smoke alarm; the returned
-/// [`ResolvedPair::reference_present`] flag says which pairs are measurable.
+/// - A panel whose `build_id` is not the manifest's `release` is a
+///   [`GalleryError::StalePanel`]: it shows another build's pixels.
+/// - A missing **render** is [`GalleryError::MissingRender`]: the panels are
+///   committed artifacts and their absence is a broken checkout.
+/// - A render whose bytes do not hash to `render_sha256`, or a present
+///   private capture that does not hash to `reference_sha256`, is a
+///   [`GalleryError::DigestMismatch`]: the file changed after regeneration.
+/// - A missing **reference** is not an error. The captures are private §15.3
+///   fixtures; [`ResolvedPair::reference_present`] says which pairs are
+///   measurable.
 ///
 /// # Errors
-/// [`GalleryError::MissingRender`] for the first panel whose render is absent.
+/// The first refusal above, in panel order.
 pub fn render_pairs(
     manifest: &GalleryManifest,
     repo_root: &Path,
 ) -> Result<Vec<ResolvedPair>, GalleryError> {
-    let mut pairs = Vec::with_capacity(manifest.rows.len());
-    for row in &manifest.rows {
+    let mut rows: Vec<&GalleryRow> = manifest.rows.iter().collect();
+    rows.sort_by(|a, b| a.panel.cmp(&b.panel));
+    let mut pairs = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.build_id != manifest.release {
+            return Err(GalleryError::StalePanel {
+                panel: row.panel.clone(),
+                build_id: row.build_id.clone(),
+                release: manifest.release.clone(),
+            });
+        }
         let render = repo_root.join(&row.render);
         if !render.is_file() {
             return Err(GalleryError::MissingRender {
@@ -1123,16 +1346,181 @@ pub fn render_pairs(
                 path: render,
             });
         }
+        verify_digest(&row.panel, &render, &row.render_sha256)?;
         let reference = repo_root.join(&row.reference);
+        let reference_present = reference.is_file();
+        if let (true, Some(expected)) = (reference_present, &row.reference_sha256) {
+            verify_digest(&row.panel, &reference, expected)?;
+        }
         pairs.push(ResolvedPair {
             panel: row.panel.clone(),
-            reference_present: reference.is_file(),
+            reference_present,
             reference,
             render,
         });
     }
-    pairs.sort_by(|a, b| a.panel.cmp(&b.panel));
     Ok(pairs)
+}
+
+fn verify_digest(panel: &str, path: &Path, expected: &str) -> Result<(), GalleryError> {
+    let bytes = std::fs::read(path).map_err(|err| GalleryError::Io {
+        path: path.to_path_buf(),
+        err,
+    })?;
+    let actual = digest_hex(&bytes);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(GalleryError::DigestMismatch {
+            panel: panel.to_string(),
+            path: path.to_path_buf(),
+            expected: expected.to_string(),
+            actual,
+        })
+    }
+}
+
+// --------------------------------------------------- the owner verdict lane
+
+/// One owner verdict: a judgment of one panel's render, identified by digest.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OwnerVerdict {
+    /// The panel judged.
+    pub panel: String,
+    /// SHA-256 of the exact render judged; a regenerated render is unjudged.
+    pub render_sha256: String,
+    /// `AtLeastAsGood`, `DifferentButFine` or `Regression` only.
+    pub verdict: Verdict,
+    /// Why; a `DifferentButFine` note names its Behavior Note (`BN-nn`).
+    pub note: String,
+    /// When, `YYYY-MM-DD`.
+    pub date: String,
+}
+
+/// The owner's verdict ledger (`fixtures/look_gallery_owner_verdicts.tsv`,
+/// format `# fmn-look-gallery-owner-verdicts v1`). G2 and G4a cite only these;
+/// the manifest's verdict column is advisory. Rows are append-only history:
+/// the current verdict on a panel is the last row whose digest matches the
+/// manifest's render.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OwnerVerdicts {
+    /// Every recorded owner verdict, in file order.
+    pub rows: Vec<OwnerVerdict>,
+}
+
+impl OwnerVerdicts {
+    /// Parse the owner ledger. Only judgments are accepted: `unreviewed` and
+    /// `reference-capture-missing` are not verdicts an owner records.
+    ///
+    /// # Errors
+    /// [`GalleryError::Corrupt`] on a wrong header or column line, a
+    /// non-canonical line, a wrong field count, an invalid panel, digest or
+    /// date, a non-judgment verdict, or a `different-but-fine` note that
+    /// names no Behavior Note.
+    pub fn parse(text: &str) -> Result<Self, GalleryError> {
+        if text.len() > MAX_MANIFEST_BYTES {
+            return Err(oversized_manifest());
+        }
+        let Some(body) = text.strip_suffix('\n') else {
+            return Err(GalleryError::Corrupt {
+                line: text.bytes().filter(|byte| *byte == b'\n').count() + 1,
+                detail: "owner verdicts must end with a final LF".to_string(),
+            });
+        };
+        let mut lines = body.split('\n').enumerate();
+        for (line, expected) in [(1, OWNER_HEADER), (2, OWNER_COLUMNS)] {
+            if lines.next().map(|(_, text)| text) != Some(expected) {
+                return Err(GalleryError::Corrupt {
+                    line,
+                    detail: format!("line {line} must be {expected:?}"),
+                });
+            }
+        }
+        let mut rows = Vec::new();
+        for (index, line) in lines {
+            let corrupt = |detail: String| GalleryError::Corrupt {
+                line: index + 1,
+                detail,
+            };
+            let Some([panel, render_sha256, verdict, note, date]) = split_row::<5>(line) else {
+                return Err(corrupt(format!(
+                    "expected 5 tab-separated fields, found {}",
+                    line.split('\t').count()
+                )));
+            };
+            if !valid_panel(panel) {
+                return Err(corrupt(format!("invalid panel id {panel:?}")));
+            }
+            if !valid_sha256(render_sha256) {
+                return Err(corrupt(format!("invalid render_sha256 {render_sha256:?}")));
+            }
+            let verdict = Verdict::from_token(verdict)
+                .filter(|v| v.is_judgment())
+                .ok_or_else(|| {
+                    corrupt(format!(
+                        "owner verdict {verdict:?} is not at-least-as-good, \
+                         different-but-fine or regression"
+                    ))
+                })?;
+            if note.is_empty() || note.contains('\r') {
+                return Err(corrupt("an owner verdict needs a note".to_string()));
+            }
+            if verdict == Verdict::DifferentButFine && !names_behavior_note(note) {
+                return Err(corrupt(format!(
+                    "a different-but-fine verdict must name its Behavior Note (BN-nn): {note:?}"
+                )));
+            }
+            if !valid_date(date) {
+                return Err(corrupt(format!(
+                    "invalid date {date:?}: expected YYYY-MM-DD"
+                )));
+            }
+            rows.push(OwnerVerdict {
+                panel: panel.to_string(),
+                render_sha256: render_sha256.to_string(),
+                verdict,
+                note: note.to_string(),
+                date: date.to_string(),
+            });
+        }
+        Ok(Self { rows })
+    }
+
+    /// The owner's current verdict per panel: the last row whose digest is
+    /// the manifest's render. A verdict on an earlier render is history, not
+    /// a verdict on this release.
+    #[must_use]
+    pub fn current(&self, manifest: &GalleryManifest) -> BTreeMap<String, Verdict> {
+        let digests: BTreeMap<&str, &str> = manifest
+            .rows
+            .iter()
+            .map(|row| (row.panel.as_str(), row.render_sha256.as_str()))
+            .collect();
+        let mut current = BTreeMap::new();
+        for row in &self.rows {
+            if digests.get(row.panel.as_str()) == Some(&row.render_sha256.as_str()) {
+                current.insert(row.panel.clone(), row.verdict);
+            }
+        }
+        current
+    }
+}
+
+fn names_behavior_note(note: &str) -> bool {
+    note.as_bytes()
+        .windows(5)
+        .any(|w| w.starts_with(b"BN-") && w[3].is_ascii_digit() && w[4].is_ascii_digit())
+}
+
+fn valid_date(date: &str) -> bool {
+    let bytes = date.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
 }
 
 #[cfg(test)]

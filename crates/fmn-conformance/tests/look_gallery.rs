@@ -8,8 +8,8 @@
 //! without them simply skips the measurement and says so.
 
 use fmn_conformance::gallery::{
-    GalleryError, GalleryManifest, PairMetrics, RgbaView, Verdict, canonical_png_panel,
-    compare_pair, edge_distance_luma, render_pairs,
+    GalleryError, GalleryManifest, OwnerVerdicts, PairMetrics, RgbaView, Verdict,
+    canonical_png_panel, compare_pair, edge_distance_luma, render_pairs,
 };
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use std::fs::File;
@@ -303,121 +303,203 @@ fn image_views_refuse_dimension_products_that_overflow_rgba8_length() {
 
 // ---------------------------------------------------------- manifest rules
 
+const RELEASE: &str = "git:0123456789abcdef0123456789abcdef01234567";
+const DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const COLUMNS: &str = "# columns: panel\tsource\treference\treference_sha256\trender\t\
+     render_sha256\tbuild_id\tadvisory_verdict\tchanged";
+
+/// A v2 prelude at `revision`.
+fn prelude(revision: &str) -> String {
+    format!(
+        "# fmn-look-gallery v2\n# revision: {revision}\n# release: {RELEASE}\n\
+         # reference: 3b1b/manim@6199a00d4c1b1127ebe45cb629c3f22538b10e13\n{COLUMNS}\n"
+    )
+}
+
+/// A well-formed v2 row for `panel` with the given advisory verdict and note.
+fn row(panel: &str, verdict: &str, note: &str) -> String {
+    format!(
+        "{panel}\tgallery/scenes/s.py:Scene\ta/{panel}.png\t{DIGEST}\tc/{panel}.png\t{DIGEST}\t\
+         {RELEASE}\t{verdict}\t{note}\n"
+    )
+}
+
 #[test]
 fn committed_manifest_parses_and_round_trips_byte_for_byte() {
     let path = committed_manifest_path();
     let text = std::fs::read_to_string(&path).expect("committed manifest");
     let manifest = GalleryManifest::parse(&text).expect("the committed manifest parses");
-    assert_eq!(manifest.revision, 3, "the committed manifest revision");
-    assert_eq!(
-        manifest.rows.len(),
-        7,
-        "seven panels have committed renders"
+    assert!(
+        manifest.revision >= 4,
+        "regeneration advanced the v1 revision 3"
     );
     assert_eq!(
         manifest.to_text().expect("canonical manifest serializes"),
         text,
         "the committed manifest must be in canonical form"
     );
-    // The seeded verdicts are the G1 verdict sheet plus the fm-gjl7 drafted
-    // math verdict, not fresh judgments.
-    let verdict = |panel: &str| {
+    // fm-5wq.50 coverage: the seven primitives, a 50-formula math sheet in two
+    // parts, and twenty README-class scenes, each from a committed scene file.
+    let count = |prefix: &str| {
         manifest
-            .row(panel)
-            .expect("the seeded manifest covers every G1 panel")
-            .verdict
+            .rows
+            .iter()
+            .filter(|row| row.panel.starts_with(prefix))
+            .count()
     };
-    assert_eq!(verdict("self_intersections"), Verdict::AtLeastAsGood);
-    assert_eq!(verdict("joints_and_caps"), Verdict::DifferentButFine);
-    assert_eq!(verdict("glow"), Verdict::AtLeastAsGood);
-    assert_eq!(verdict("gradient_fills"), Verdict::DifferentButFine);
-    assert_eq!(verdict("lighting_3d"), Verdict::AtLeastAsGood);
-    assert_eq!(verdict("math_formula"), Verdict::DifferentButFine);
+    assert_eq!(count("math."), 2, "{:?}", manifest.rows);
+    assert_eq!(count("readme."), 20, "{:?}", manifest.rows);
+    assert_eq!(manifest.rows.len(), 29);
+    for name in [
+        "glow",
+        "gradient_fills",
+        "joints_and_caps",
+        "lighting_3d",
+        "math_formula",
+        "self_intersections",
+        "text_sample",
+    ] {
+        let row = manifest.row(name).expect("every primitive panel is kept");
+        assert!(row.source.starts_with("gallery/scenes/primitives.py:"));
+    }
+    for row in &manifest.rows {
+        let (file, _) = row.source.split_once(':').expect("source names a scene");
+        assert!(
+            repo_root().join(file).is_file(),
+            "{} names a missing scene file",
+            row.panel
+        );
+    }
+}
+
+#[test]
+fn every_committed_panel_is_this_release_and_unaltered() {
+    let manifest = GalleryManifest::load(&committed_manifest_path()).expect("manifest parses");
+    let pairs =
+        render_pairs(&manifest, &repo_root()).expect("panels match the release under review");
+    assert_eq!(pairs.len(), manifest.rows.len());
+}
+
+#[test]
+fn a_planted_stale_or_altered_panel_is_refused() {
+    let manifest = GalleryManifest::load(&committed_manifest_path()).expect("manifest parses");
+    let mut stale = manifest.clone();
+    stale.rows[0].build_id = "git:ffffffffffffffffffffffffffffffffffffffff".to_string();
+    let error = render_pairs(&stale, &repo_root()).expect_err("a stale panel must refuse");
+    assert!(
+        matches!(&error, GalleryError::StalePanel { panel, .. } if *panel == stale.rows[0].panel),
+        "{error}"
+    );
+
+    let mut altered = manifest.clone();
+    altered.rows[1].render_sha256 = DIGEST.to_string();
+    let error = render_pairs(&altered, &repo_root()).expect_err("an altered render must refuse");
+    assert!(
+        matches!(&error, GalleryError::DigestMismatch { panel, .. } if *panel == altered.rows[1].panel),
+        "{error}"
+    );
 }
 
 #[test]
 fn corrupt_manifests_are_named_errors() {
-    let cases: [(&str, &str); 8] = [
-        ("", "empty manifest"),
-        ("# fmn-look-gallery v1\n", "revision"),
+    let with_row = |line: String| format!("{}{line}", prelude("1"));
+    let mut swapped = row("panel", "regression", "note");
+    swapped = swapped.replacen(DIGEST, "not-a-digest", 2);
+    let cases: Vec<(String, &str)> = vec![
+        (String::new(), "empty manifest"),
+        ("# fmn-look-gallery v2\n".to_string(), "revision"),
         (
-            "# fmn-look-gallery v9\n# revision: 1\n",
+            "# fmn-look-gallery v1\n# revision: 1\n".to_string(),
             "first line must be",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: soon\n",
+            "# fmn-look-gallery v2\n# revision: soon\n".to_string(),
             "not a non-negative integer",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n\
-             panel\tonly-two\n",
-            "expected 5 tab-separated fields",
+            "# fmn-look-gallery v2\n# revision: 1\n# columns: x\n".to_string(),
+            "must start with",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n\
-             Panel\ta/b.png\tc/d.png\tregression\tnote\n",
+            "# fmn-look-gallery v2\n# revision: 1\n# release: has space\n".to_string(),
+            "invalid release identity",
+        ),
+        (
+            with_row("panel\tonly-two\n".to_string()),
+            "expected 9 tab-separated fields",
+        ),
+        (
+            with_row(row("Panel", "regression", "note")),
             "invalid panel id",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n\
-             panel\t../escape.png\tc/d.png\tregression\tnote\n",
+            with_row(row("panel", "regression", "note").replace("a/panel.png", "../escape.png")),
             "invalid reference path",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n\
-             panel\ta/b.png\tc/d.png\tlooks-good\tnote\n",
+            with_row(row("panel", "looks-good", "note")),
             "unknown verdict",
+        ),
+        (
+            with_row(
+                row("panel", "regression", "note").replace("gallery/scenes/s.py:Scene", "s.py"),
+            ),
+            "invalid source",
+        ),
+        (with_row(swapped), "invalid reference_sha256"),
+        (
+            with_row(row("panel", "regression", "note").replace(RELEASE, "git dirty")),
+            "invalid build_id",
+        ),
+        (
+            with_row(row("panel", "at-least-as-good", "note").replacen(
+                &format!("\t{DIGEST}\tc/"),
+                "\t-\tc/",
+                1,
+            )),
+            "records no Reference capture",
         ),
     ];
     for (text, needle) in cases {
-        let err = GalleryManifest::parse(text).expect_err("corrupt input must refuse");
+        let err = GalleryManifest::parse(&text).expect_err("corrupt input must refuse");
         assert!(
             err.to_string().contains(needle),
             "expected {needle:?} in: {err}"
         );
     }
-    let duplicate = "# fmn-look-gallery v1\n# revision: 1\n\
-        # columns: panel\treference\trender\tverdict\tchanged\n\
-        panel\ta/b.png\tc/d.png\tregression\tnote\n\
-        panel\ta/b.png\tc/d.png\tregression\tnote\n";
-    let err = GalleryManifest::parse(duplicate).expect_err("duplicate panel must refuse");
+    let duplicate = format!(
+        "{}{}{}",
+        prelude("1"),
+        row("panel", "regression", "note"),
+        row("panel", "regression", "note")
+    );
+    let err = GalleryManifest::parse(&duplicate).expect_err("duplicate panel must refuse");
     assert!(err.to_string().contains("duplicate panel"), "{err}");
-    let empty_note = "# fmn-look-gallery v1\n# revision: 1\n\
-        # columns: panel\treference\trender\tverdict\tchanged\n\
-        panel\ta/b.png\tc/d.png\tregression\t\n";
-    let err = GalleryManifest::parse(empty_note).expect_err("empty change note must refuse");
+    let empty_note = format!("{}{}", prelude("1"), row("panel", "regression", ""));
+    let err = GalleryManifest::parse(&empty_note).expect_err("empty change note must refuse");
     assert!(err.to_string().contains("empty change note"), "{err}");
 
-    let duplicate_revision = "# fmn-look-gallery v1\n# revision: 1\n\
-        # columns: panel\treference\trender\tverdict\tchanged\n\
-        # revision: 2\n";
-    let err = GalleryManifest::parse(duplicate_revision)
+    let duplicate_revision = format!("{}# revision: 2\n", prelude("1"));
+    let err = GalleryManifest::parse(&duplicate_revision)
         .expect_err("a manifest must have one authoritative revision line");
     assert!(
         matches!(
             err,
-            GalleryError::Corrupt { line: 4, ref detail }
+            GalleryError::Corrupt { line: 6, ref detail }
                 if detail.contains("duplicate revision line")
         ),
         "unexpected duplicate-revision refusal: {err}"
     );
 
-    let mut over_fielded = String::from(
-        "# fmn-look-gallery v1\n# revision: 1\n\
-         # columns: panel\treference\trender\tverdict\tchanged\n\
-         panel\ta/b.png\tc/d.png\tregression\tnote",
-    );
+    let mut over_fielded = format!("{}{}", prelude("1"), row("panel", "regression", "note"));
+    over_fielded.pop();
     over_fielded.extend(std::iter::repeat_n('\t', 1_000_000));
     over_fielded.push('\n');
     let err = GalleryManifest::parse(&over_fielded)
         .expect_err("a delimiter-heavy malformed row must be refused");
     assert!(
         err.to_string()
-            .contains("expected 5 tab-separated fields, found 1000005"),
+            .contains("expected 9 tab-separated fields, found 1000009"),
         "unexpected over-fielded refusal: {err}"
     );
     assert!(
@@ -428,62 +510,39 @@ fn corrupt_manifests_are_named_errors() {
 
 #[test]
 fn noncanonical_manifest_spellings_are_refused() {
-    let canonical = "# fmn-look-gallery v1\n# revision: 1\n\
-        # columns: panel\treference\trender\tverdict\tchanged\n\
-        alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n";
-    GalleryManifest::parse(canonical).expect("canonical spelling parses");
+    let canonical = format!("{}{}", prelude("1"), row("alpha", "unreviewed", "note"));
+    GalleryManifest::parse(&canonical).expect("canonical spelling parses");
 
     let cases = [
         (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n",
-            "third line must be",
+            format!(
+                "{}{}",
+                prelude("1").replace(&format!("{COLUMNS}\n"), ""),
+                row("alpha", "unreviewed", "note")
+            ),
+            "fifth line must be",
         ),
+        (prelude("01"), "canonical unsigned-decimal"),
+        (prelude("1 "), "not a non-negative integer"),
+        (prelude("1").replace('\n', "\r\n"), "carriage returns"),
+        (prelude("1").trim_end_matches('\n').to_string(), "final LF"),
+        (format!("{}\n", prelude("1")), "blank lines"),
         (
-            "# fmn-look-gallery v1\n# revision: 1\n# columns: panel\treference\trender\n",
-            "third line must be",
-        ),
-        (
-            "# fmn-look-gallery v1\n# revision: 01\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n",
-            "canonical unsigned-decimal",
-        ),
-        (
-            "# fmn-look-gallery v1\n# revision: 1 \n\
-             # columns: panel\treference\trender\tverdict\tchanged\n",
-            "not a non-negative integer",
-        ),
-        (
-            "# fmn-look-gallery v1\r\n# revision: 1\r\n\
-             # columns: panel\treference\trender\tverdict\tchanged\r\n",
-            "carriage returns",
-        ),
-        (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged",
-            "final LF",
-        ),
-        (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n\n",
-            "blank lines",
-        ),
-        (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n\
-             # extra metadata\n",
+            format!("{}# extra metadata\n", prelude("1")),
             "unexpected comment line",
         ),
         (
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n\
-             beta\ta/b.png\tc/d.png\tat-least-as-good\tnote\n\
-             alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n",
+            format!(
+                "{}{}{}",
+                prelude("1"),
+                row("beta", "unreviewed", "note"),
+                row("alpha", "unreviewed", "note")
+            ),
             "out of canonical order",
         ),
     ];
     for (text, needle) in cases {
-        let error = GalleryManifest::parse(text).expect_err("noncanonical spelling must refuse");
+        let error = GalleryManifest::parse(&text).expect_err("noncanonical spelling must refuse");
         assert!(
             error.to_string().contains(needle),
             "expected {needle:?} in: {error}"
@@ -516,10 +575,12 @@ fn oversized_manifest_documents_are_refused_by_parse_and_load() {
         "unexpected load refusal: {load_error}"
     );
 
-    let valid = "# fmn-look-gallery v1\n# revision: 1\n\
-        # columns: panel\treference\trender\tverdict\tchanged\n\
-        panel\ta/b.png\tc/d.png\tat-least-as-good\tnote\n";
-    let mut updated = GalleryManifest::parse(valid).expect("valid manifest");
+    let valid = format!(
+        "{}{}",
+        prelude("1"),
+        row("panel", "at-least-as-good", "note")
+    );
+    let mut updated = GalleryManifest::parse(&valid).expect("valid manifest");
     let before = updated.clone();
     let update_error = updated
         .record_verdict("panel", Verdict::Regression, &oversized)
@@ -549,46 +610,46 @@ fn oversized_manifest_documents_are_refused_by_parse_and_load() {
 
 #[test]
 fn verdict_transitions_are_recorded_and_regressions_found() {
-    let text = std::fs::read_to_string(committed_manifest_path()).expect("committed manifest");
-    let baseline = GalleryManifest::parse(&text).expect("parses");
+    let baseline = GalleryManifest::parse(&format!(
+        "{}{}{}",
+        prelude("4"),
+        row("glow", "at-least-as-good", "seed"),
+        row("gradient_fills", "different-but-fine", "BN-06 seed")
+    ))
+    .expect("parses");
     let mut current = baseline.clone();
 
-    // A deliberate worsening, with its reason — the human review act.
+    // A deliberate worsening, with its reason — the review act.
     let change = current
         .record_verdict(
             "glow",
             Verdict::Regression,
-            "fm-t1v demo: glow falloff visibly clipped after radius rework",
+            "fm-t1v demo: glow falloff visibly clipped",
         )
         .expect("known panel");
     assert_eq!(change.from, Some(Verdict::AtLeastAsGood));
     assert_eq!(change.to, Verdict::Regression);
     assert_eq!(current.revision, baseline.revision + 1);
 
-    // An improvement in the same revision span must not read as a
-    // regression: a manifest carrying only the improvement reports none.
+    // An improvement alone is never a regression.
     let mut improved = baseline.clone();
     improved
         .record_verdict(
             "gradient_fills",
             Verdict::AtLeastAsGood,
-            "fm-t1v demo: owner signed off; field is at-least-as-good",
+            "fm-t1v demo: at-least-as-good",
         )
         .expect("known panel");
-    assert!(
-        improved.regressions_since(&baseline).is_empty(),
-        "moving from worse to better is never a regression"
-    );
+    assert!(improved.regressions_since(&baseline).is_empty());
 
     // Both movements in one span: only the worsening is reported.
     current
         .record_verdict(
             "gradient_fills",
             Verdict::AtLeastAsGood,
-            "fm-t1v demo: owner signed off; field is at-least-as-good",
+            "fm-t1v demo: at-least-as-good",
         )
         .expect("known panel");
-
     let regressions = current.regressions_since(&baseline);
     assert_eq!(
         regressions.len(),
@@ -598,16 +659,20 @@ fn verdict_transitions_are_recorded_and_regressions_found() {
     assert_eq!(regressions[0].panel, "glow");
     assert_eq!(regressions[0].from, Some(Verdict::AtLeastAsGood));
     assert_eq!(regressions[0].to, Verdict::Regression);
-
-    // Diffed backwards, the improvement reads as the (correct) worsening of
-    // gradient_fills relative to the improved manifest.
     let backwards = baseline.regressions_since(&current);
     assert_eq!(backwards.len(), 1);
     assert_eq!(backwards[0].panel, "gradient_fills");
 
+    // A reset to unreviewed (a regenerated render) is not a regression either way.
+    let mut reset = baseline.clone();
+    reset
+        .record_verdict("glow", Verdict::Unreviewed, "fm-5wq.50 demo: re-rendered")
+        .expect("known panel");
+    assert!(reset.regressions_since(&baseline).is_empty());
+    assert!(baseline.regressions_since(&reset).is_empty());
+
     // Persistence: save → load is lossless and the TSV round-trips.
-    let dir = scratch("verdicts");
-    let path = dir.join("look_gallery.tsv");
+    let path = scratch("verdicts").join("look_gallery.tsv");
     current.save(&path).expect("save");
     let reloaded = GalleryManifest::load(&path).expect("reload");
     assert_eq!(reloaded, current);
@@ -617,7 +682,6 @@ fn verdict_transitions_are_recorded_and_regressions_found() {
         "the file holds exactly the canonical text"
     );
 
-    // Refusals stay named errors.
     let err = current
         .record_verdict("no_such_panel", Verdict::Regression, "note")
         .expect_err("unknown panel must refuse");
@@ -630,12 +694,13 @@ fn verdict_transitions_are_recorded_and_regressions_found() {
 
 #[test]
 fn verdict_updates_refuse_revision_rollover_without_partial_mutation() {
-    let text = "# fmn-look-gallery v1\n# revision: 18446744073709551615\n\
-        # columns: panel\treference\trender\tverdict\tchanged\n\
-        panel\ta/b.png\tc/d.png\tat-least-as-good\toriginal note\n";
-    let mut manifest = GalleryManifest::parse(text).expect("maximum u64 revision is valid v1");
+    let text = format!(
+        "{}{}",
+        prelude("18446744073709551615"),
+        row("panel", "at-least-as-good", "original note")
+    );
+    let mut manifest = GalleryManifest::parse(&text).expect("maximum u64 revision is valid");
     let before = manifest.clone();
-
     let error = manifest
         .record_verdict("panel", Verdict::Regression, "replacement note")
         .expect_err("the monotone revision must not roll over");
@@ -644,7 +709,6 @@ fn verdict_updates_refuse_revision_rollover_without_partial_mutation() {
         manifest, before,
         "a refused revision advance must not mutate the verdict or note"
     );
-
     let error = manifest
         .record_verdict("missing", Verdict::Regression, "replacement note")
         .expect_err("unknown-panel refusal retains precedence");
@@ -654,29 +718,101 @@ fn verdict_updates_refuse_revision_rollover_without_partial_mutation() {
 
 #[test]
 fn regressions_since_flags_new_regression_panels_only() {
-    let parse = |rows: &str| {
-        GalleryManifest::parse(&format!(
-            "# fmn-look-gallery v1\n# revision: 1\n\
-             # columns: panel\treference\trender\tverdict\tchanged\n{rows}"
-        ))
-        .expect("well-formed")
+    let parse = |rows: String| {
+        GalleryManifest::parse(&format!("{}{rows}", prelude("1"))).expect("well-formed")
     };
-    let earlier = parse("alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n");
-    // A panel entering at different-but-fine is a review item, not a regression.
+    let earlier = parse(row("alpha", "at-least-as-good", "note"));
     let with_review_item = parse(
-        "alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n\
-         beta\ta/b.png\tc/d.png\tdifferent-but-fine\tnote\n",
+        row("alpha", "at-least-as-good", "note") + &row("beta", "different-but-fine", "note"),
     );
     assert!(with_review_item.regressions_since(&earlier).is_empty());
-    // A panel entering at regression is one.
-    let with_regression = parse(
-        "alpha\ta/b.png\tc/d.png\tat-least-as-good\tnote\n\
-         beta\ta/b.png\tc/d.png\tregression\tnote\n",
-    );
+    let with_regression =
+        parse(row("alpha", "at-least-as-good", "note") + &row("beta", "regression", "note"));
     let found = with_regression.regressions_since(&earlier);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].panel, "beta");
     assert_eq!(found[0].from, None);
+}
+
+// --------------------------------------------------- the owner verdict lane
+
+#[test]
+fn the_owner_ledger_is_committed_and_binds_verdicts_to_render_digests() {
+    let ledger = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/look_gallery_owner_verdicts.tsv"),
+    )
+    .expect("the owner ledger is committed");
+    let owner = OwnerVerdicts::parse(&ledger).expect("the committed owner ledger parses");
+    let manifest = GalleryManifest::load(&committed_manifest_path()).expect("manifest parses");
+    // Every committed owner verdict names a panel of the gallery.
+    for verdict in &owner.rows {
+        assert!(
+            manifest.row(&verdict.panel).is_some(),
+            "{} is not a panel",
+            verdict.panel
+        );
+    }
+
+    let header = "# fmn-look-gallery-owner-verdicts v1\n# columns: panel\trender_sha256\tverdict\tnote\tdate\n";
+    let glow = manifest.row("glow").expect("glow panel");
+    let current = format!(
+        "glow\t{}\tat-least-as-good\tsigned off\t2026-10-05\n",
+        glow.render_sha256
+    );
+    let earlier = format!("glow\t{DIGEST}\tregression\tolder render\t2026-08-01\n");
+    let owner = OwnerVerdicts::parse(&format!("{header}{earlier}{current}")).expect("well-formed");
+    let verdicts = owner.current(&manifest);
+    assert_eq!(verdicts.get("glow"), Some(&Verdict::AtLeastAsGood));
+    // A verdict on another render is history, not a verdict on this release.
+    let only_old = OwnerVerdicts::parse(&format!("{header}{earlier}")).expect("well-formed");
+    assert!(only_old.current(&manifest).is_empty());
+}
+
+#[test]
+fn the_owner_lane_accepts_only_its_vocabulary() {
+    let header = "# fmn-look-gallery-owner-verdicts v1\n# columns: panel\trender_sha256\tverdict\tnote\tdate\n";
+    let line = |verdict: &str, note: &str, date: &str| {
+        format!("{header}glow\t{DIGEST}\t{verdict}\t{note}\t{date}\n")
+    };
+    for verdict in ["at-least-as-good", "regression"] {
+        OwnerVerdicts::parse(&line(verdict, "seen", "2026-10-05")).expect("a judgment");
+    }
+    OwnerVerdicts::parse(&line("different-but-fine", "BN-05 face", "2026-10-05"))
+        .expect("BN-noted");
+    for (text, needle) in [
+        (
+            line("unreviewed", "seen", "2026-10-05"),
+            "is not at-least-as-good",
+        ),
+        (
+            line("reference-capture-missing", "seen", "2026-10-05"),
+            "is not at-least-as-good",
+        ),
+        (
+            line("looks-good", "seen", "2026-10-05"),
+            "is not at-least-as-good",
+        ),
+        (
+            line("different-but-fine", "fine by me", "2026-10-05"),
+            "must name its Behavior Note",
+        ),
+        (line("regression", "", "2026-10-05"), "needs a note"),
+        (line("regression", "seen", "10/05/2026"), "invalid date"),
+        (
+            format!("{header}glow\tabc\tregression\tseen\t2026-10-05\n"),
+            "invalid render_sha256",
+        ),
+        (
+            format!("# fmn-look-gallery-owner-verdicts v9\n{}", &header[37..]),
+            "line 1 must be",
+        ),
+    ] {
+        let error = OwnerVerdicts::parse(&text).expect_err("outside the owner vocabulary");
+        assert!(
+            error.to_string().contains(needle),
+            "expected {needle:?} in: {error}"
+        );
+    }
 }
 
 // ------------------------------------------------------------ the demo run
@@ -758,8 +894,8 @@ fn smoke_alarm_over_the_real_pairs() {
     let pairs = render_pairs(&manifest, &repo_root()).expect("no missing committed renders");
     assert_eq!(
         pairs.len(),
-        7,
-        "the manifest covers exactly the seven committed panels"
+        manifest.rows.len(),
+        "every manifest panel resolves to its committed render"
     );
 
     let measurable: Vec<_> = pairs.iter().filter(|p| p.reference_present).collect();
