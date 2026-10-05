@@ -248,3 +248,35 @@ thread.
    observations (`fm-inr`). The rig and target baselines are complete; the
    `Baseline` schema enforces bare-metal + isolation qualification, so a
    shared-host number cannot satisfy the rows by construction.
+
+## Post-marshal updates (2026-10-04)
+
+Recorded after a side-by-side against the pinned Reference
+(`docs/IMPLEMENTATION_STATUS.md`, 2026-10-04 reality check); fold into the next
+re-marshal. The suite pin under test is now `franken_markdown @ e911be2a`
+(`SUITE.lock:33`), not the `82588865` named in the header.
+
+1. **Criterion 1 was weaker than its row says, and is still Partial.**
+   - The ratchet's "layout" percentage counts strings for which `typeset()`
+     returned Ok; it checks no geometry (`docs/ratchet/dashboard.md`: layout
+     checked by an oracle, 0 %).
+   - Every `Tex` was laid out in TeX *text* style, while the Reference's `Tex`
+     is `align*` display math: `Tex(\sum…\frac)` was 0.588 tall against the
+     Reference's 1.331. Fixed in `f3ef1f30` (display default) with
+     `fmn-library` regression `the_default_is_the_references_display_style`.
+   - A first real layout oracle now exists:
+     `crates/fmn-library/tests/tex_reference_boxes.rs` compares native boxes
+     with the Reference's measured `Tex` boxes for 111 authored tier-1
+     formulas. **24/111 are within 5 % on both axes and 57/111 within 10 %**
+     (ratchet floors). The largest misses: display integrals about 30 % short,
+     `cases` and matrices 21–37 % short, `\emptyset`/`\vec` 60–80 % wide,
+     `\sqrt` and `\ldots`/`\cdots` 24–34 % narrow, and relation glyphs from
+     the Noto fallback because the bundled CM Unicode faces lack the math
+     codepoints (`fm-tex-metrics-glyphs-ru72`).
+2. **Criterion 5 is NOT GREEN.** The typeset cache and the pre-play preflight
+   exist and are tested, but no shipped entry point (`fmn`, `fmn::render`,
+   `fmn-python`) attaches the persistent cache or installs a preflight hook
+   (`fm-typeset-cache-preflight-wiring-1sn0`). The row above cites closed beads,
+   not production wiring.
+3. **Criterion 7** stays NOT GREEN (PDF inline math, `fm-djcw`), and
+   **criterion 8** stays NOT GREEN (no pinned-host observation, `fm-inr`).
