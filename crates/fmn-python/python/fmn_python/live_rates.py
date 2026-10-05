@@ -115,14 +115,12 @@ def install_live_rates(native: Any) -> None:
             if isinstance(proto, Builder) and not isinstance(animation, Animation):
                 raise TypeError("AnimationBuilder.build must return an Animation")
             animations.append(animation)
-        if custom(rate) and animations and all(supported(animation) for animation in animations):
-            # The Reference applies play-level options to the top-level
-            # animations. A group's curve acts on its timeline, not on each
-            # child a second time. Once all top-level animations can execute
-            # callbacks, no native global lookup table is needed at all.
-            for animation in animations:
-                animation.rate_func = rate
-            kwargs = dict(kwargs, rate_func=None)
+        live_override = custom(rate) and bool(animations) and all(
+            supported(animation) for animation in animations)
+        overridden = {id(animation) for animation in animations} if live_override else set()
+        # Determine callback roots without changing authored animations. A
+        # malformed/cyclic composition must refuse before an easing override
+        # leaks into a later, otherwise valid play of the same animation.
         # A mixed play with an unsupported native kind keeps its old global
         # lowering. Do not remove the native sibling's easing override or
         # reinterpret a specialized animation as a generic Transform.
@@ -139,7 +137,8 @@ def install_live_rates(native: Any) -> None:
             if leaving:
                 visiting.remove(marker)
                 seen.add(marker)
-                if supported(animation) and custom(animation.rate_func):
+                effective_rate = rate if marker in overridden else animation.rate_func
+                if supported(animation) and custom(effective_rate):
                     groups.append(animation)
                 continue
             if marker in visiting:
@@ -149,19 +148,40 @@ def install_live_rates(native: Any) -> None:
             visiting.add(marker)
             stack.append((animation, True))
             stack.extend((child, False) for child in reversed(animation.animations))
-        absent, bound = object(), []
+        absent, bound, changed_rates = object(), [], []
         try:
+            if live_override:
+                # Play-level easing belongs to each top-level timeline, not
+                # to its children a second time. Save shared roots once and
+                # keep successful play's updated options, as before.
+                changed = set()
+                for animation in animations:
+                    if id(animation) not in changed:
+                        changed.add(id(animation))
+                        changed_rates.append((animation, animation.rate_func))
+                        animation.rate_func = rate
+                kwargs = dict(kwargs, rate_func=None)
             for group in groups:
                 g["_fmn_ensure_composition_root"](group)
                 bound.append((group, group.__dict__.get("_composition_scene", absent)))
                 group._composition_scene = self
             return previous_play(self, *animations, **kwargs)
-        except BaseException:
+        except BaseException as error:
             for group, _ in reversed(bound):
                 try:
                     group.abort()
                 except BaseException:
                     pass
+            for animation, prior_rate in reversed(changed_rates):
+                try:
+                    animation.rate_func = prior_rate
+                except BaseException:
+                    # An authored descriptor can itself fail during unwind;
+                    # preserve the original play/cancellation exception.
+                    try:
+                        error.add_note("animation easing restoration failed")
+                    except BaseException:
+                        pass
             raise
         finally:
             for group, prior in reversed(bound):

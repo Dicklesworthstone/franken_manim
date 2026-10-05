@@ -191,5 +191,153 @@ class FadeRateRouting(unittest.TestCase):
         self.assertIs(self.native.Scene.play, play)
 
 
+class PlayRateRecovery(unittest.TestCase):
+    def setUp(self):
+        self.native = protocol()
+
+    def test_cycle_refuses_before_any_root_rate_is_overwritten(self):
+        scene, original, replacement = self.native.Scene(), Curve(), Curve()
+        leaf = self.native.FadeIn(original)
+        group = self.native.AnimationGroup(rate_func=original)
+        group.animations.append(group)
+        with self.assertRaisesRegex(ValueError, "cycle"):
+            scene.play(leaf, group, rate_func=replacement)
+        self.assertIs(leaf.rate_func, original)
+        self.assertIs(group.rate_func, original)
+        self.assertFalse(hasattr(scene, "received"))
+
+    def test_play_failure_and_cancellation_restore_original_rates(self):
+        for failure in (ValueError("begin failed"), KeyboardInterrupt(), SystemExit(3)):
+            with self.subTest(kind=type(failure).__name__):
+                scene = self.native.Scene()
+                scene.failure = failure
+                original, replacement = Curve(), Curve()
+                fade = self.native.FadeOut(original)
+                moving = self.native.Transform("linear")
+                with self.assertRaises(type(failure)) as caught:
+                    scene.play(fade, moving, rate_func=replacement)
+                self.assertIs(caught.exception, failure)
+                self.assertIs(fade.rate_func, original)
+                self.assertEqual(moving.rate_func, "linear")
+
+    def test_failed_animation_can_be_retried_with_its_original_rate(self):
+        scene, original = self.native.Scene(), Curve()
+        animation = self.native.FadeIn(original)
+        scene.failure = ValueError("transient failure")
+        with self.assertRaises(ValueError):
+            scene.play(animation, rate_func=Curve())
+        scene.failure = None
+        scene.play(animation)
+        self.assertIs(animation.rate_func, original)
+        self.assertEqual(scene.callbacks, (True,))
+
+    def test_success_retains_the_applied_override(self):
+        scene, replacement = self.native.Scene(), Curve()
+        animation = self.native.FadeIn()
+        scene.play(animation, rate_func=replacement)
+        self.assertIs(animation.rate_func, replacement)
+
+    def test_root_preparation_failure_restores_rates(self):
+        failure = RuntimeError("cannot bind root")
+        def refuse(group):
+            raise failure
+        self.native._fmn_ensure_composition_root = refuse
+        original = Curve()
+        group = self.native.AnimationGroup(self.native.FadeIn(), rate_func=original)
+        with self.assertRaises(RuntimeError) as caught:
+            self.native.Scene().play(group, rate_func=Curve())
+        self.assertIs(caught.exception, failure)
+        self.assertIs(group.rate_func, original)
+        self.assertNotIn("_composition_scene", vars(group))
+
+    def test_nested_contexts_and_child_rates_survive_failure(self):
+        original, child_rate, replacement, old_scene = Curve(), Curve(), Curve(), object()
+        leaf = self.native.FadeIn(child_rate)
+        inner = self.native.AnimationGroup(leaf, rate_func=child_rate)
+        outer = self.native.AnimationGroup(inner, rate_func=original)
+        inner._composition_scene = old_scene
+        scene = self.native.Scene()
+        scene.failure = RuntimeError("play failed")
+        with self.assertRaises(RuntimeError):
+            scene.play(outer, rate_func=replacement)
+        self.assertIs(outer.rate_func, original)
+        self.assertIs(inner.rate_func, child_rate)
+        self.assertIs(leaf.rate_func, child_rate)
+        self.assertIs(inner._composition_scene, old_scene)
+        self.assertNotIn("_composition_scene", vars(outer))
+        self.assertEqual((inner.aborts, outer.aborts), (1, 1))
+
+    def test_shared_group_is_bound_and_aborted_once(self):
+        original = Curve()
+        shared = self.native.AnimationGroup(self.native.FadeIn(), rate_func=original)
+        outer = self.native.AnimationGroup(shared, shared)
+        scene = self.native.Scene()
+        scene.failure = RuntimeError("failed")
+        with self.assertRaises(RuntimeError):
+            scene.play(outer, shared, rate_func=Curve())
+        self.assertEqual(shared.aborts, 1)
+        self.assertIs(shared.rate_func, original)
+
+    def test_duplicate_top_level_animation_keeps_one_original_snapshot(self):
+        original = Curve()
+        animation = self.native.FadeIn(original)
+        scene = self.native.Scene()
+        scene.failure = RuntimeError("duplicate rejected downstream")
+        with self.assertRaises(RuntimeError):
+            scene.play(animation, animation, rate_func=Curve())
+        self.assertIs(animation.rate_func, original)
+
+    def test_rate_assignment_failure_unwinds_earlier_assignments(self):
+        original, replacement = Curve(), Curve()
+        failure = ValueError("rate descriptor refused")
+        class RefusingFade(self.native.FadeIn):
+            @property
+            def rate_func(self):
+                return self._rate
+            @rate_func.setter
+            def rate_func(self, value):
+                if value is replacement:
+                    raise failure
+                self._rate = value
+        first, second = self.native.FadeIn(original), RefusingFade(original)
+        with self.assertRaises(ValueError) as caught:
+            self.native.Scene().play(first, second, rate_func=replacement)
+        self.assertIs(caught.exception, failure)
+        self.assertIs(first.rate_func, original)
+        self.assertIs(second.rate_func, original)
+
+    def test_cleanup_failure_does_not_replace_primary_error(self):
+        original, replacement = Curve(), Curve()
+        failure = ValueError("primary play failure")
+        class RefusingRestore(self.native.FadeIn):
+            @property
+            def rate_func(self):
+                return self._rate
+            @rate_func.setter
+            def rate_func(self, value):
+                if value is original and getattr(self, "_rate", None) is replacement:
+                    raise RuntimeError("restore failed")
+                self._rate = value
+        animation = RefusingRestore(original)
+        scene = self.native.Scene()
+        scene.failure = failure
+        with self.assertRaises(ValueError) as caught:
+            scene.play(animation, rate_func=replacement)
+        self.assertIs(caught.exception, failure)
+        self.assertIn("animation easing restoration failed", failure.__notes__)
+
+    def test_catalog_play_override_still_uses_native_catalog(self):
+        animation, scene = self.native.FadeIn(), self.native.Scene()
+        scene.play(animation, rate_func="linear")
+        self.assertIs(scene.received[1]["rate_func"], self.native.linear)
+        self.assertEqual(scene.callbacks, (False,))
+
+    def test_invalid_catalog_refuses_before_builder_execution(self):
+        builder = self.native._AnimationBuilder(self.native.FadeIn())
+        with self.assertRaisesRegex(ValueError, "unknown rate function"):
+            self.native.Scene().play(builder, rate_func="not_a_curve")
+        self.assertEqual(builder.builds, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
