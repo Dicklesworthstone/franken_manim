@@ -1,7 +1,9 @@
 # BN-01 — One RNG: reproducible within FrankenManim, not across engines
 
-**Status:** Draft (W1, fm-m1u). Finalized when the segment-purity
-classifier consumes the fork API (fm-3xk).
+**Status:** Draft (W1, fm-m1u). The stated condition is met (fm-3xk's
+classifier consumes `RngRoot`), but the 2026-10-04 review against real
+behaviour found the migration guidance wrong for the Python portal, and the
+portal half stays Draft until its gate (G4a, fm-boe) passes.
 
 ## What changed
 
@@ -32,14 +34,23 @@ On top of it:
 ## Migration guidance
 
 - A seeded scene reproduces **within FrankenManim** — same seed, same
-  build, same bits, any thread count. It does **not** reproduce the
-  Python engine's draws: the legacy streams are gone by design.
-- Scenes that relied on `np.random.seed(...)` global state should pass
-  the seed through scene config; the engine's substreams take care of
-  isolation.
-- Python scenes may still import real NumPy and draw their own numbers;
-  those draws are the scene's business and are captured by the input
-  closure only insofar as §16.7 documents.
+  build, same bits, any thread count.
+- **Native fmn and the Rust API** draw only from PCG64DXSM substreams.
+  They do not reproduce the Reference's draws, because the legacy
+  streams are gone there by design. Seed through the config
+  (`determinism.seed`).
+- **The fmn-python portal** keeps the Reference's scene-level seeding for
+  source-unedited scenes:
+  - `Scene.__init__` seeds CPython's `random` and NumPy's legacy global
+    state with `Scene.random_seed` (default 0, `None` disables it).
+  - The Reference helpers draw from those generators: `random_color`
+    from NumPy, `random_bright_color` from `random`.
+  - So a scene's own `random`/`np.random` draws and those helpers give
+    the Reference's numbers for the same seed.
+  - Randomness inside native engine code still uses the named
+    substreams.
+- Draws a Python scene makes itself are the scene's business. The input
+  closure captures them only insofar as §16.7 documents.
 
 ## Evidence
 

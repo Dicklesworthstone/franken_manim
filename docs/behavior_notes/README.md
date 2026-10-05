@@ -35,7 +35,7 @@ migration guidance users read:
 | # | Note | File | Workstream | Status |
 |---|---|---|---|---|
 | BN-01 | One RNG: PCG64DXSM with named substreams; seeded scenes reproduce within FrankenManim, not across engines | [BN-01-single-rng.md](BN-01-single-rng.md) | W1 | Draft |
-| BN-02 | The rational clock on manim's nominal sample points — no drift | [BN-02-rational-clock.md](BN-02-rational-clock.md) | W4 | Draft |
+| BN-02 | The rational clock on manim's nominal sample points — no drift | [BN-02-rational-clock.md](BN-02-rational-clock.md) | W4 | Final |
 | BN-03 | True arc length under the original names: constant-speed paths, length-true dashes and tips | [BN-03-true-arc-length.md](BN-03-true-arc-length.md) | W2 | Draft |
 | BN-04 | **Colour** — a family, see rule 2: linear-light compositing with manim's gradient formulas kept; callable color fields on every native record schema | [compositing and gradients](BN-04-color.md) · [callable color fields](BN-04-functional-color-fields.md) | W1/W10 | Draft |
 | BN-05 | Native typesetting: metrics differ from LaTeX; the quality bar is documented | [BN-05-native-text-typesetting.md](BN-05-native-text-typesetting.md) | W6 | Draft |

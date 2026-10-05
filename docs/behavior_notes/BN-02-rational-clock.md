@@ -1,7 +1,12 @@
 # BN-02 — The rational clock: drift-free time, exact frame counts
 
-**Status:** Draft (W4, fm-wuq). Finalized when the six-step frame order
-lands (fm-x79).
+**Status:** Final (W4, fm-wuq). The six-step frame order landed (fm-x79),
+and G1 (fm-o3j) passed on 2026-08-20. The migration table was checked
+against real behaviour on 2026-10-04:
+- the Reference's `np.arange(0, d, 1/fps)` gives 3, 6, 30, 10, 90 and 15
+  frames for the rows below;
+- a portal `wait(0.1)` publishes 4 frames at 30 fps and 7 at 60;
+- `wait(2.9999)` publishes 90 and 180, equal to the Reference.
 
 ## What changed
 

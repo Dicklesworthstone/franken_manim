@@ -66,9 +66,11 @@ differences.
   midtones the way gamma-space blending does.
 - Gradients, `set_color_by_gradient`, colormaps, and `average_color` match
   classic manim to floating-point tolerance; no visual change.
-- An **Oklab interpolation option** (`interpolate_color_oklab`) exists for
-  users who want perceptually uniform ramps. It is opt-in, never a silent
-  replacement; the default remains the Reference formula.
+- An **Oklab interpolation option** exists for users who want
+  perceptually uniform ramps. It is opt-in, never a silent replacement;
+  the default remains the Reference formula. Today it is Rust-only
+  (`fmn_core::color::interpolate_color_oklab`); `fmn-python` does not
+  expose it.
 
 ## Native pointwise callback colors
 
