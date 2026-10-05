@@ -1028,7 +1028,7 @@ mod tests {
         );
         assert_eq!(
             cold.digest().to_string(),
-            "98d53b3ba950b5288be9fb5b131d435c8854e3aac4de4881dd2c0f460be0d7a5"
+            "47f24615b676cb92dd3e223823ca3d5885005cd9a93fa80d5f1bd4e76e852335"
         );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
@@ -1045,7 +1045,7 @@ mod tests {
         );
         assert_eq!(
             cached.digest().to_string(),
-            "8d546db311d00ecf492dd612a379ee305334f52a497b3f49f5485ed6211bc9cf"
+            "ec1b38ced49d303f56bcc33d2e51946043a208b2dfee3cefe4a960323a93a46b"
         );
 
         let text = Pg7Definition::new(Pg7Scenario::Text10kGlyph).expect("text definition");

@@ -10,12 +10,12 @@
 
 use fmn_library::{Tex, TexEngine};
 
-/// Formulas within ±5% of the Reference on both axes, measured 2026-10-04
-/// at the commit that introduced this oracle. Raise it when layout improves;
-/// never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 24;
-/// The same at ±10%.
-const WITHIN_10_PERCENT_FLOOR: usize = 57;
+/// Formulas within ±5% of the Reference on both axes: 24 when this oracle
+/// landed (2026-10-04), 26 after the display-integral fix (franken_markdown
+/// 68fe29b). Raise it when layout improves; never lower it to land a change.
+const WITHIN_5_PERCENT_FLOOR: usize = 26;
+/// The same at ±10%: 57, then 60.
+const WITHIN_10_PERCENT_FLOOR: usize = 60;
 
 struct Row {
     width: f64,

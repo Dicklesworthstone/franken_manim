@@ -620,6 +620,29 @@ mod tests {
         assert!(text < 0.8, "text-style numerator is {text} of a digit");
     }
 
+    /// A display `\int` takes cmex10's display-size glyph, twice the text
+    /// one, as the Reference measures (1.082 vs 0.541 tall); `\sum` keeps
+    /// its 1.4 (fm-tex-display-style-nclg, franken_markdown 68fe29b).
+    #[test]
+    fn display_integrals_use_the_display_size_glyph() {
+        let engine = engine();
+        let height = |source: &str, style: MathStyle| {
+            let tex = Tex::new(source)
+                .math_style(style)
+                .build(&engine)
+                .expect("builds");
+            let (min, max) = tex.vmob.extent().expect("has extent");
+            max[1] - min[1]
+        };
+        let integral = height(r"\int", MathStyle::Display) / height(r"\int", MathStyle::Text);
+        assert!(
+            (integral - 2.0).abs() < 1e-6,
+            "display/text integral {integral}"
+        );
+        let sum = height(r"\sum", MathStyle::Display) / height(r"\sum", MathStyle::Text);
+        assert!((sum - 1.4).abs() < 1e-6, "display/text sum {sum}");
+    }
+
     /// `TexText`'s `$…$` islands are inline (text-style) mathematics, as in
     /// LaTeX prose: the display default of `Tex` must not leak into them.
     #[test]
