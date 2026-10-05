@@ -32,6 +32,7 @@
 
 use crate::error::{PreflightError, TexError};
 use crate::memory_cache::{MemoryCache, TypesetCacheStats};
+use crate::request::TypesetRequest;
 use crate::typeset::{KEYWORD_INK_COMMANDS, Prim, TYPESET_FORMAT_VERSION, Typeset};
 use fmd_math::{Layout, MacroSet, PathContour, Style};
 use fmn_cache::{CacheKey, KeyBuilder, Namespace};
@@ -450,6 +451,32 @@ impl TexEngine {
         self.preflight_with_spawner(items, workers, &NativeScopedSpawner)
     }
 
+    /// Preflight complete constructor requests on the same bounded worker path.
+    ///
+    /// Preambles and text alignment use `typeset_aligned`, exactly as Tex and
+    /// TexText construction do. Results stay in input order; a bad formula
+    /// cannot prevent a later valid request from warming its cache. The worker
+    /// limit is explicit and never changes layout, spans, or frame sampling.
+    ///
+    /// # Errors
+    /// [`PreflightError::ResultStorageAllocationFailed`] if ordered results
+    /// cannot be reserved before work starts.
+    pub fn preflight_requests(
+        &self,
+        items: &[TypesetRequest<'_>],
+        max_workers: std::num::NonZeroUsize,
+    ) -> Result<Vec<Result<(), TexError>>, PreflightError> {
+        let workers = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(1)
+            .min(max_workers.get());
+        preflight_jobs(items.len(), workers, &NativeScopedSpawner, &|index| {
+            let item = items[index];
+            self.typeset_aligned(item.mode, item.source, item.preamble, item.align)
+                .map(|_| ())
+        })
+    }
+
     fn preflight_with_spawner<Spawner>(
         &self,
         items: &[(Mode, &str)],
@@ -459,38 +486,10 @@ impl TexEngine {
     where
         Spawner: ScopedSpawner,
     {
-        if items.is_empty() {
-            return Ok(Vec::new());
-        }
-        let workers = workers.clamp(1, items.len());
-        let next = AtomicUsize::new(0);
-        let (results, mut outcomes) = preflight_storage(items.len())?;
-        std::thread::scope(|scope| {
-            let mut spawned = 0;
-            for _ in 0..workers {
-                let next = &next;
-                let results = &results;
-                if spawner
-                    .spawn(scope, move || preflight_worker(self, items, next, results))
-                    .is_err()
-                {
-                    break;
-                }
-                spawned += 1;
-            }
-            if spawned == 0 {
-                preflight_worker(self, items, &next, &results);
-            }
-        });
-
-        for ((mode, source), slot) in items.iter().copied().zip(results) {
-            let outcome = slot
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner)
-                .unwrap_or_else(|| self.typeset(mode, source).map(|_| ()));
-            outcomes.push(outcome);
-        }
-        Ok(outcomes)
+        preflight_jobs(items.len(), workers, spawner, &|index| {
+            let (mode, source) = items[index];
+            self.typeset(mode, source).map(|_| ())
+        })
     }
 }
 
@@ -512,18 +511,56 @@ fn preflight_storage(
     Ok((slots, outcomes))
 }
 
-fn preflight_worker(
-    engine: &TexEngine,
-    items: &[(Mode, &str)],
+fn preflight_jobs<Spawner: ScopedSpawner, Job: Fn(usize) -> PreflightOutcome + Sync>(
+    count: usize,
+    workers: usize,
+    spawner: &Spawner,
+    job: &Job,
+) -> Result<Vec<PreflightOutcome>, PreflightError> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let workers = workers.clamp(1, count);
+    let next = AtomicUsize::new(0);
+    let (results, mut outcomes) = preflight_storage(count)?;
+    std::thread::scope(|scope| {
+        let mut spawned = 0;
+        for _ in 0..workers {
+            let next = &next;
+            let results = &results;
+            if spawner
+                .spawn(scope, move || preflight_worker(job, next, results))
+                .is_err()
+            {
+                break;
+            }
+            spawned += 1;
+        }
+        if spawned == 0 {
+            preflight_worker(job, &next, &results);
+        }
+    });
+    for (index, slot) in results.into_iter().enumerate() {
+        outcomes.push(
+            slot.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or_else(|| job(index)),
+        );
+    }
+    Ok(outcomes)
+}
+
+fn preflight_worker<Job: Fn(usize) -> PreflightOutcome + Sync>(
+    job: &Job,
     next: &AtomicUsize,
     results: &[PreflightSlot],
 ) {
     loop {
         let index = next.fetch_add(1, Ordering::Relaxed);
-        let Some((slot, (mode, source))) = results.get(index).zip(items.get(index)) else {
+        let Some(slot) = results.get(index) else {
             break;
         };
-        let outcome = engine.typeset(*mode, source).map(|_| ());
+        let outcome = job(index);
         let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
         *slot = Some(outcome);
     }

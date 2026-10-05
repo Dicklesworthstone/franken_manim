@@ -224,7 +224,7 @@ pub use fmn_geom::{
         rotation_matrix_transpose_from_quaternion, thick_diagonal, tri_area, z_to_vector,
     },
 };
-pub use fmn_tex::TexEngine;
+pub use fmn_tex::{TexEngine, TypesetRequest};
 pub use fmn_text::{FontBook, bundled_faces};
 
 // The Scribe span-map seam: the composition root's translation data
