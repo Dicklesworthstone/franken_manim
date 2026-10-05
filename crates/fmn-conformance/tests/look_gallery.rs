@@ -763,13 +763,18 @@ fn smoke_alarm_over_the_real_pairs() {
     );
 
     let measurable: Vec<_> = pairs.iter().filter(|p| p.reference_present).collect();
-    if measurable.is_empty() {
-        eprintln!(
-            "look gallery: private Reference captures not present in this checkout \
-             (gallery/reference_captures/ is gitignored per §15.3); smoke alarm skipped, \
-             {} committed renders verified present",
-            pairs.len()
+    // The Reference captures are private §15.3 fixtures
+    // (gallery/reference_captures/ is gitignored): name every absent one.
+    for pair in pairs.iter().filter(|p| !p.reference_present) {
+        fmn_core::test_inputs::skip_or_fail(
+            &format!(
+                "fmn-conformance::smoke_alarm_over_the_real_pairs[{}]",
+                pair.panel
+            ),
+            &format!("Reference capture {}", pair.reference.display()),
         );
+    }
+    if measurable.is_empty() {
         return;
     }
 
@@ -801,13 +806,5 @@ fn smoke_alarm_over_the_real_pairs() {
             p99 = m.error.p99,
             max = m.error.max
         );
-    }
-    let skipped: Vec<_> = pairs
-        .iter()
-        .filter(|p| !p.reference_present)
-        .map(|p| p.panel.as_str())
-        .collect();
-    if !skipped.is_empty() {
-        eprintln!("look gallery: skipped pairs without a capture in this checkout: {skipped:?}");
     }
 }

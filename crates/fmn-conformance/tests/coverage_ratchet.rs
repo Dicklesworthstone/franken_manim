@@ -231,10 +231,10 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
     let corpus_file = match File::open(&corpus_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "corpus not present at {} — recompute skipped (the pin-coupling \
-                 test still enforces re-runs at pin bumps)",
-                corpus_path.display()
+            // The pin-coupling test still enforces re-runs at pin bumps.
+            fmn_core::test_inputs::skip_or_fail(
+                "fmn-conformance::recompute_and_enforce_the_ratchet",
+                &format!("TeX corpus at {}", corpus_path.display()),
             );
             return Ok(());
         }

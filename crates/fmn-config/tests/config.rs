@@ -443,7 +443,10 @@ fn unknown_keys_survive_in_the_raw_tree() {
 fn the_actual_reference_files_parse_when_checked_out() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/manim_ref");
     let Ok(default_yml) = std::fs::read_to_string(root.join("manimlib/default_config.yml")) else {
-        eprintln!("skipping: pinned Reference checkout not present");
+        fmn_core::test_inputs::skip_or_fail(
+            "fmn-config::the_actual_reference_files_parse_when_checked_out",
+            "scripts/manim_ref (pinned Reference checkout)",
+        );
         return;
     };
 

@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import sys
 import tempfile
 import types
@@ -12,6 +13,20 @@ from pathlib import Path
 
 import audit_portal_runtime as audit
 from fmn_python.schema_provenance import SCHEMA_PROVENANCE_VERSION
+
+
+def skip_or_fail(test: unittest.TestCase, name: str, missing: str) -> None:
+    """A required input is absent (fm-5wq.48): fail under
+    FMN_REQUIRE_FULL_INPUTS=1, otherwise record a SKIPPED ledger line and skip."""
+    if os.environ.get("FMN_REQUIRE_FULL_INPUTS") == "1":
+        test.fail(f"{name}: required input missing: {missing} (FMN_REQUIRE_FULL_INPUTS=1)")
+    line = f"SKIPPED {name} {missing}\n"
+    sys.stderr.write(line)
+    ledger = os.environ.get("FMN_SKIP_LEDGER")
+    if ledger:
+        with open(ledger, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    test.skipTest(f"{missing} is absent")
 
 
 def status_text(*rows: str) -> str:
@@ -501,6 +516,13 @@ class RuntimeAuditTests(unittest.TestCase):
         import ast
 
         root = Path(__file__).resolve().parents[1]
+        if not (root / "scripts/manim_ref/manimlib").is_dir():
+            skip_or_fail(
+                self,
+                "scripts/test_audit_portal_runtime.py::"
+                "test_trivial_body_justifications_are_verified_against_the_sources",
+                "scripts/manim_ref (pinned Reference checkout)",
+            )
         dispatch = (root / "crates/fmn-python/src/lib.rs").read_text(encoding="utf-8")
         table = audit_contract().TRIVIAL_BODY_JUSTIFICATIONS
         self.assertTrue(table)

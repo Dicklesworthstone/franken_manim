@@ -6,6 +6,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Tests whose inputs are absent (the pinned Reference checkout, the private TeX
+# corpus, a built wasm artifact) record a SKIPPED line here instead of passing
+# silently; set FMN_REQUIRE_FULL_INPUTS=1 to make any such skip fail (fm-5wq.48).
+FMN_SKIP_LEDGER="${FMN_SKIP_LEDGER:-$(mktemp)}"
+export FMN_SKIP_LEDGER
+
 echo "==> agent control-plane parser/planner/generator/tests"
 python3 -m py_compile \
     scripts/agent_brief.py \
@@ -233,4 +239,8 @@ else
     echo "==> npm/WASM package release gate SKIPPED: set FMN_WASM_PACKAGE_GATE=1"
 fi
 
+if [[ -s "$FMN_SKIP_LEDGER" ]]; then
+    echo "==> skipped for missing inputs (set FMN_REQUIRE_FULL_INPUTS=1 to fail instead):"
+    sort -u "$FMN_SKIP_LEDGER"
+fi
 echo "OK: all gates green"

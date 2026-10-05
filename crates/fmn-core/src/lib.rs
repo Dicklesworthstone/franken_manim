@@ -13,6 +13,7 @@ pub mod color;
 pub mod constants;
 pub mod rate;
 pub mod rng;
+pub mod test_inputs;
 pub mod types;
 
 /// `render.aa`: the standard-mode coverage quality policy (§10.4, D-21).

@@ -754,8 +754,8 @@ mod tests {
     /// The R19 artifact-size budget: if the release wasm artifact has been
     /// built on this host, it must fit the recorded budget (measured + 10%
     /// headroom, `SIZE_BUDGET.tsv`). When no artifact exists the test
-    /// passes vacuously — building the artifact is a deliberate step, never
-    /// a test side effect.
+    /// reports the skip (and fails under `FMN_REQUIRE_FULL_INPUTS=1`) —
+    /// building the artifact is a deliberate step, never a test side effect.
     #[test]
     fn size_budget_within_headroom() {
         let budget_text = std::fs::read_to_string(
@@ -806,9 +806,9 @@ mod tests {
             checked += 1;
         }
         if checked == 0 {
-            eprintln!(
-                "size_budget_within_headroom: no wasm artifact built yet; \
-                 build one (demo/wasm/README.md) to make this test bite"
+            fmn_core::test_inputs::skip_or_fail(
+                "fmn-wasm::size_budget_within_headroom",
+                "a built wasm artifact (demo/wasm/README.md)",
             );
         }
     }

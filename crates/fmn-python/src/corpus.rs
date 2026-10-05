@@ -332,9 +332,9 @@ mod tests {
     fn seed_modules_reach_precise_verdicts_under_the_import_shim() {
         let videos_ref = repo_root().join("scripts/videos_ref");
         if !videos_ref.join(".git").exists() {
-            eprintln!(
-                "SKIP: scripts/videos_ref checkout absent (G0-4 convention); \
-                 run scripts/video_corpus.py verify for the clone commands"
+            fmn_core::test_inputs::skip_or_fail(
+                "fmn-python::corpus::seed_modules_reach_precise_verdicts_under_the_import_shim",
+                "scripts/videos_ref (G0-4; scripts/video_corpus.py verify prints the clone commands)",
             );
             return;
         }
@@ -477,9 +477,9 @@ mod tests {
     fn seed_scenes_publish_deterministic_final_state_pngs() {
         let videos_ref = repo_root().join("scripts/videos_ref");
         if !videos_ref.join(".git").exists() {
-            eprintln!(
-                "SKIP: scripts/videos_ref checkout absent (G0-4 convention); \
-                 run scripts/video_corpus.py verify for the clone commands"
+            fmn_core::test_inputs::skip_or_fail(
+                "fmn-python::corpus::seed_scenes_publish_deterministic_final_state_pngs",
+                "scripts/videos_ref (G0-4; scripts/video_corpus.py verify prints the clone commands)",
             );
             return;
         }
