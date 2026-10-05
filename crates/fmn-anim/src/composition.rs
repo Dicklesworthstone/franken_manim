@@ -122,9 +122,6 @@ fn assemble(
     lag_ratio: f64,
     group: Option<Mob>,
 ) -> Result<(Vec<Interval>, f64, Mob), AnimError> {
-    if animations.is_empty() {
-        return Err(AnimError::EmptyComposition);
-    }
     let run_times: Vec<f64> = animations.iter().map(|a| a.get_run_time()).collect();
     let timings = build_timings(&run_times, lag_ratio);
     let end = max_end_time(&timings);
@@ -194,10 +191,11 @@ pub struct AnimationGroup {
 
 impl AnimationGroup {
     /// `AnimationGroup(*animations)` — simultaneous (`lag_ratio = 0`), run
-    /// time derived from the members.
+    /// time derived from the members. An empty member list is valid: its
+    /// timeline has length zero, and an explicit run-time override still
+    /// participates in the ordinary scene clock and container lifecycle.
     ///
     /// # Errors
-    /// [`AnimError::EmptyComposition`] for an empty member list;
     /// [`AnimError::Stage`] if a member's mobject cannot join the container.
     pub fn new(stage: &mut Stage, animations: Vec<Box<dyn Animation>>) -> Result<Self, AnimError> {
         Self::with_lag_ratio(stage, animations, 0.0)
@@ -484,7 +482,8 @@ impl Succession {
     /// `Succession(*animations)` — `lag_ratio = 1`.
     ///
     /// # Errors
-    /// As [`AnimationGroup::new`].
+    /// [`AnimError::EmptyComposition`] for an empty member list;
+    /// otherwise as [`AnimationGroup::new`].
     pub fn new(stage: &mut Stage, animations: Vec<Box<dyn Animation>>) -> Result<Self, AnimError> {
         Self::with_lag_ratio(stage, animations, 1.0)
     }
@@ -494,12 +493,17 @@ impl Succession {
     /// begin then applies to whichever member the timeline is inside.
     ///
     /// # Errors
-    /// As [`AnimationGroup::new`].
+    /// As [`Succession::new`].
     pub fn with_lag_ratio(
         stage: &mut Stage,
         animations: Vec<Box<dyn Animation>>,
         lag_ratio: f64,
     ) -> Result<Self, AnimError> {
+        // Unlike a simultaneous group, a succession must have an active
+        // member. Refuse before allocating a container or indexing member 0.
+        if animations.is_empty() {
+            return Err(AnimError::EmptyComposition);
+        }
         let (timings, max_end_time, group) = assemble(stage, &animations, lag_ratio, None)?;
         Ok(Self {
             state: AnimState::new(group, group_config("Succession", max_end_time, lag_ratio)),
@@ -670,12 +674,13 @@ pub fn lagged_start(
 ///
 /// `anim_func` is the Reference's `anim_func(submob, **kwargs)`; it receives
 /// the stage because most constructors need it (a target copy, a path
-/// query), and it may fail by name.
+/// query), and it may fail by name. A childless group is valid: the factory
+/// is never called, the caller's group is retained, and the default two-second
+/// duration still uses the ordinary animation lifecycle.
 ///
 /// # Errors
-/// [`AnimError::StaleHandle`] for a dead `group`,
-/// [`AnimError::EmptyComposition`] for a childless one, and whatever
-/// `anim_func` reports.
+/// [`AnimError::StaleHandle`] for a dead `group`, and whatever `anim_func`
+/// reports.
 pub fn lagged_start_map<F>(
     stage: &mut Stage,
     group: Mob,
