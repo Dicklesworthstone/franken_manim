@@ -745,17 +745,172 @@ fn a_pure_composition_lets_its_segment_classify_pure() {
     assert!(report.begin_state.is_some());
 }
 
+// ------------------------------------------------------- empty selections
+
+#[test]
+fn an_empty_group_has_zero_timing_and_a_real_container_lifecycle() {
+    let mut stage = Stage::new();
+    let mut group = AnimationGroup::new(&mut stage, Vec::new()).expect("empty group builds");
+    let root = group.group();
+    assert!(group.animations().is_empty());
+    assert!(group.timings().is_empty());
+    assert_eq!(group.max_end_time(), 0.0);
+    assert_eq!(group.get_run_time(), 0.0);
+    assert_eq!(group.effect_signature(), AnimationSignature::Pure);
+    assert!(
+        stage
+            .get(root)
+            .expect("live container")
+            .submobjects()
+            .is_empty()
+    );
+    assert_eq!(group.all_mobjects(), vec![root]);
+    group.validate_begin(&stage).expect("empty group preflight");
+    group.begin(&mut stage).expect("empty group begins");
+    assert!(stage.is_animating(root));
+    for alpha in [0.0, 0.5, 1.0] {
+        group.update_mobjects(&mut stage, 1.0 / 30.0);
+        group.interpolate(&mut stage, alpha);
+    }
+    group.finish(&mut stage);
+    group.clean_up_from_scene(&mut stage);
+    assert!(!stage.is_animating(root));
+    assert!(group.deferred_error().is_none());
+    group.begin(&mut stage).expect("empty group begins again");
+    group.abort(&mut stage);
+    assert!(!stage.is_animating(root));
+}
+
+#[test]
+fn empty_lagged_selections_keep_their_duration_and_authored_root() {
+    let mut stage = Stage::new();
+    let empty = lagged_start(&mut stage, Vec::new()).expect("empty lagged start builds");
+    assert!(empty.timings().is_empty());
+    assert_eq!(empty.get_run_time(), 0.0);
+    assert_eq!(empty.state().config.lag_ratio, DEFAULT_LAGGED_START_LAG_RATIO);
+
+    let root = stage.add(Mobject::new());
+    let mut calls = 0;
+    let mapped = lagged_start_map(&mut stage, root, |_stage, _mob| {
+        calls += 1;
+        Err(AnimError::EmptyMobject)
+    })
+    .expect("mapping an empty selection does not call the factory");
+    assert_eq!(calls, 0);
+    assert_eq!(mapped.group(), root);
+    assert!(mapped.animations().is_empty());
+    assert!(mapped.timings().is_empty());
+    assert_eq!(mapped.max_end_time(), 0.0);
+    assert_eq!(mapped.get_run_time(), 2.0);
+}
+
+#[test]
+fn empty_groups_use_the_regular_segment_clock_in_both_modes() {
+    for skip in [false, true] {
+        for (duration, expected_frames) in [(0.0, 0), (2.0, 60)] {
+            let mut stage = Stage::new();
+            let group = AnimationGroup::new(&mut stage, Vec::new())
+                .expect("empty group builds")
+                .with_run_time(duration);
+            let root = group.group();
+            let mut clock = RationalFrameClock::new(30).expect("clock");
+            let rng = RngRoot::from_seed(29);
+            let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(group)];
+            let report = play_segment(
+                &mut stage,
+                &mut clock,
+                &rng,
+                &mut animations,
+                skip,
+                &mut |_packet| {},
+            )
+            .expect("empty group plays through the ordinary driver");
+            assert_eq!(clock.now().frames(), expected_frames);
+            assert!(!stage.is_animating(root));
+            assert!(report.purity.is_pure());
+        }
+    }
+}
+
+#[test]
+fn empty_groups_nested_in_a_succession_do_not_skip_real_members() {
+    for skip in [false, true] {
+        let mut stage = Stage::new();
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let before = AnimationGroup::new(&mut stage, Vec::new()).expect("before builds");
+        let after = AnimationGroup::new(&mut stage, Vec::new()).expect("after builds");
+        let before_root = before.group();
+        let after_root = after.group();
+        let mob = square(&mut stage);
+        let succession = Succession::new(
+            &mut stage,
+            vec![
+                Box::new(before),
+                Probe::boxed(mob, "real", 1.0, &log),
+                Box::new(after),
+            ],
+        )
+        .expect("nested composition builds");
+        let root = succession.group();
+        let mut clock = RationalFrameClock::new(30).expect("clock");
+        let rng = RngRoot::from_seed(31);
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(succession)];
+        play_segment(
+            &mut stage,
+            &mut clock,
+            &rng,
+            &mut animations,
+            skip,
+            &mut |_packet| {},
+        )
+        .expect("nested empty selections play");
+        assert_eq!(clock.now().frames(), 30);
+        assert_eq!(
+            ids_of(&log, |event| match event {
+                Event::Begin(id) => Some(*id),
+                _ => None,
+            }),
+            ["real"]
+        );
+        assert_eq!(
+            ids_of(&log, |event| match event {
+                Event::Finish(id) => Some(*id),
+                _ => None,
+            }),
+            ["real"]
+        );
+        for object in [root, before_root, after_root, mob] {
+            assert!(!stage.is_animating(object));
+        }
+    }
+}
+
+#[test]
+fn an_empty_group_still_validates_its_time_span_before_begin() {
+    let mut stage = Stage::new();
+    let mut group = AnimationGroup::new(&mut stage, Vec::new()).expect("empty group builds");
+    group.state_mut().config.time_span = Some((1.0, 1.0));
+    assert_eq!(
+        group.begin(&mut stage).err(),
+        Some(AnimError::InvalidTimeSpan {
+            start: 1.0,
+            end: 1.0
+        })
+    );
+    assert!(!stage.is_animating(group.group()));
+}
+
 // ---------------------------------------------------------- named refusals
 
 #[test]
-fn an_empty_composition_is_refused_by_name() {
+fn an_empty_succession_is_still_refused_by_name() {
     let mut stage = Stage::new();
     assert_eq!(
-        AnimationGroup::new(&mut stage, Vec::new()).err(),
+        Succession::new(&mut stage, Vec::new()).err(),
         Some(AnimError::EmptyComposition)
     );
     assert_eq!(
-        Succession::new(&mut stage, Vec::new()).err(),
+        Succession::with_lag_ratio(&mut stage, Vec::new(), 0.5).err(),
         Some(AnimError::EmptyComposition)
     );
 }
