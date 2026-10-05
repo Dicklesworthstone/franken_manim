@@ -280,3 +280,11 @@ re-marshal. The suite pin under test is now `franken_markdown @ e911be2a`
    not production wiring.
 3. **Criterion 7** stays NOT GREEN (PDF inline math, `fm-djcw`), and
    **criterion 8** stays NOT GREEN (no pinned-host observation, `fm-inr`).
+4. **Later the same day, the franken_markdown repin to `68fe29b8`**
+   (`8e6d7372`): display integrals now take cmex10's 2.0x display size, not
+   the `\sum` class's 1.4x. The box oracle reads **26/111 within 5 % and
+   60/111 within 10 %**, and its floors rose with the repin. The README's
+   formula is 3.606 x 1.128 against the Reference's 3.941 x 1.150. Display
+   integral heights now match; their widths are 22–35 % wide because the
+   fallback integral glyph is wider than CM's (`fm-tex-metrics-glyphs-ru72`).
+   Criterion 1 remains Partial.
