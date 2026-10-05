@@ -335,6 +335,86 @@ def failed_render_does_not_publish_a_successful_artifact():
         assert "_fmn_owned_render_session" not in vars(scene)
 
 
+def planar_content_takes_the_retained_route_and_matches_the_camera_route():
+    # fm-sq8.11: planar vector content under the default camera frame renders
+    # on Lumen's retained 2D route; anything the camera must project keeps the
+    # camera route. Both draw the same picture within an AA budget.
+    from manimlib import ParametricSurface, VMobject
+
+    class Planar(Scene):
+        def construct(self):
+            box = Square(side_length=1.5, fill_opacity=1, stroke_width=4).move_to([-1, .5, 0])
+            self.add(box)
+            self.play(box.animate.shift(RIGHT), run_time=.25, rate_func=linear)
+
+    class Lifted(Planar):
+        # The same picture plus an invisible point off the plane, which makes
+        # the stage non-planar and so forces the camera route.
+        def construct(self):
+            marker = VMobject().set_points_as_corners([[5., 3., 1.], [5.01, 3., 1.]])
+            self.add(marker.set_stroke(opacity=0).set_fill(opacity=0))
+            super().construct()
+
+    class Fixed(Scene):
+        # Fixed-in-frame content is drawn through the camera route.
+        def construct(self):
+            self.add(Square(side_length=1.5, fill_opacity=1).fix_in_frame())
+            self.wait(.25)
+
+    class Moving(Planar):
+        def construct(self):
+            super().construct()
+            self.play(self.frame.animate.shift(.5 * RIGHT), run_time=.25, rate_func=linear)
+
+    class Curved(Scene):
+        def construct(self):
+            self.add(ParametricSurface(lambda u, v: np.array([u, v, u * v]),
+                                       u_range=(-1, 1), v_range=(-1, 1)))
+            self.wait(.25)
+
+    def render(scene_class, name, threads=1):
+        scene = scene_class()
+        path = Path(directory) / name
+        result = scene.render(path, format="y4m", resolution=(128, 72), fps=8, threads=threads)
+        return scene._render_routes, y4m_luma(path), result.frame_count, path.read_bytes()
+
+    with tempfile.TemporaryDirectory() as directory:
+        routes, planar, frames, one = render(Planar, "planar-1.y4m")
+        assert routes == (frames, 0, None), routes
+        for threads in (4, 16):
+            _, _, _, other = render(Planar, f"planar-{threads}.y4m", threads=threads)
+            assert one == other, f"the planar route differs at {threads} threads"
+        routes, lifted, lifted_frames, _ = render(Lifted, "lifted.y4m")
+        assert routes[:2] == (0, lifted_frames) and lifted_frames == frames, routes
+        assert "nonplanar" in routes[2], routes
+        difference = np.abs(np.stack(planar).astype(np.int16) - np.stack(lifted).astype(np.int16))
+        print("planar vs camera route luma: mean", float(difference.mean()),
+              "p99", float(np.percentile(difference, 99)), "max", int(difference.max()))
+        # Measured 2026-10-04: mean 0.0017, p99 0, max 8 luma codes.
+        assert (difference.mean() < 0.05 and np.percentile(difference, 99) < 1
+                and difference.max() <= 16), difference.max()
+        routes, _, moving_frames, _ = render(Moving, "moving.y4m")
+        assert routes[0] > 0 and routes[1] > 0 and sum(routes[:2]) == moving_frames, routes
+        assert routes[2] == "camera frame differs from the default frame", routes
+        routes, _, fixed_frames, _ = render(Fixed, "fixed.y4m")
+        assert routes[:2] == (0, fixed_frames) and "fixed-in-frame" in routes[2], routes
+        routes, _, curved_frames, _ = render(Curved, "curved.y4m")
+        assert routes[:2] == (0, curved_frames) and routes[2], routes
+
+        # Certified provenance journals the route (closure item 7).
+        def certified_manifest(scene_class, name):
+            scene = scene_class()
+            result = scene.render(Path(directory) / name, format="png_sequence",
+                                  resolution=(128, 72), fps=8, threads=1, reproducible=True,
+                                  sources={"scene_execution.py": b"planar route provenance"})
+            return scene._render_routes, (Path(result.manifest).parent / "manifest.txt").read_text()
+
+        routes, text = certified_manifest(Planar, "planar-certified")
+        assert "cpu-certified-lumen:retained-2d, %d retained-2d and 0 camera frames" % routes[0] in text, text
+        routes, text = certified_manifest(Lifted, "lifted-certified")
+        assert "cpu-certified-lumen:camera, 0 retained-2d" in text and "first camera frame: nonplanar" in text, text
+
+
 CASES = (
     partial_begin_recovers_and_subsequent_wait_runs_live_updaters,
     later_begin_failure_recovers_prior_callback_and_leaves_future_unbegun,
@@ -349,6 +429,7 @@ CASES = (
     end_at_animation_terminates_before_the_excluded_segment_and_publishes,
     hooks_drive_real_frames_and_preserve_one_four_thread_output,
     failed_render_does_not_publish_a_successful_artifact,
+    planar_content_takes_the_retained_route_and_matches_the_camera_route,
 )
 for case in CASES:
     case()

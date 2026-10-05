@@ -113,39 +113,12 @@ impl BundleCapture {
 
     fn validate_stage(stage: &Stage) -> PyResult<()> {
         // A flat bundle is portable to both existing consumers. In particular,
-        // a z-bearing Vector does not currently set requires_camera(), so test
-        // its actual point lanes rather than only its program tag.
-        for item in stage.draw_plan().items() {
-            let entry = stage
-                .get(item.mob)
-                .ok_or_else(|| capability("stale drawable"))?;
-            let uniforms = entry.uniforms();
-            if item.key.program != fmn_mobject::ProgramKind::Vector
-                || uniforms.depth_test
-                || uniforms.shading != [0.0; 3]
-                || uniforms.clip_planes != [[0.0; 4]; 4]
-            {
-                return Err(capability(
-                    "depth, raster primitives, lighting or clip planes require a camera-bearing bundle",
-                ));
-            }
-            // Test world z: positional operations compose into the entry's
-            // object-to-world placement, so a shift(OUT) leaves the stored
-            // record points planar while the drawn geometry is not.
-            let placement = entry.placement();
-            if let Some(points) = entry.buffer.read_column("point")
-                && points
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .any(|point| placement.apply_point(point.map(f64::from))[2] != 0.0)
-            {
-                return Err(capability(
-                    "nonplanar geometry requires a camera-bearing bundle",
-                ));
-            }
+        // a z-bearing Vector does not currently set requires_camera(), so the
+        // shared rule tests actual point lanes rather than only program tags.
+        match crate::planar_stage_refusal(stage) {
+            Some(reason) => Err(capability(reason)),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 

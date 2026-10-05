@@ -293,6 +293,12 @@ pub(crate) fn _portal_publish_manifest(
         .extract()?;
     let artifact_digest =
         Digest::from_hex(&digest_hex).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Which Lumen route rasterized the frames (fm-sq8.11): (retained planar,
+    // camera) counts and why the first camera-route frame left the planar one.
+    let routes: Option<(u64, u64, Option<String>)> = artifact_report
+        .get_item("routes")?
+        .map(|value| value.extract())
+        .transpose()?;
 
     let artifact_kind = match format {
         "png" => "canonical_png",
@@ -508,12 +514,30 @@ pub(crate) fn _portal_publish_manifest(
             fine_tile: plan.fine_tile,
         };
         let doc = fmn_render::engine::journal(identity, &frame_config, tiling);
-        (identity, "cpu-certified-lumen", doc)
+        let route = match routes {
+            Some((planar, 0, _)) if planar > 0 => "cpu-certified-lumen:retained-2d",
+            Some((0, camera, _)) if camera > 0 => "cpu-certified-lumen:camera",
+            Some((planar, camera, _)) if planar > 0 && camera > 0 => {
+                "cpu-certified-lumen:retained-2d+camera"
+            }
+            _ => "cpu-certified-lumen",
+        };
+        (identity, route, doc)
+    };
+    let c7_detail = match &routes {
+        Some((planar, camera, reason)) if format != "wav" => format!(
+            "semantic renderer and execution backend: {route}, {planar} retained-2d and \
+             {camera} camera frames{}",
+            reason.as_deref().map_or_else(String::new, |reason| format!(
+                " (first camera frame: {reason})"
+            ))
+        ),
+        _ => "semantic renderer and execution backend".to_owned(),
     };
 
     let c7 = ClosureItem::structural(
         7,
-        "semantic renderer and execution backend",
+        c7_detail,
         &[
             StructuralField::Text(&engine_identity.closure_string()),
             StructuralField::Text(route),

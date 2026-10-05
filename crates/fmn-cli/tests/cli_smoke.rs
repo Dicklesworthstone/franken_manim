@@ -447,3 +447,101 @@ fn window_and_progress_flags_are_refused_and_never_mistime_a_file_render() {
         );
     }
 }
+
+/// The config keys `fmn_cli::resolve_render_config` writes from flags: every
+/// `pairs.push((` site's first string literal.
+fn flag_written_keys(cli: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = cli;
+    while let Some(at) = rest.find("pairs.push((") {
+        rest = &rest[at + "pairs.push((".len()..];
+        let literal = rest.trim_start();
+        if let Some(body) = literal.strip_prefix('"')
+            && let Some(end) = body.find('"')
+        {
+            keys.push(body[..end].to_owned());
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// Keys no source reads, other than those whose flag is refused for a file
+/// render and exercised by `refusals` (the refusal test's flag table).
+fn orphan_keys(
+    keys: &[String],
+    sources: &[String],
+    refused: &[(&str, &str)],
+    refusals: &str,
+) -> Vec<String> {
+    keys.iter()
+        .filter(|key| {
+            let read = sources
+                .iter()
+                .any(|source| source.contains(&format!(".{key}")));
+            let refused_and_tested = refused.iter().any(|(refused_key, flag)| {
+                refused_key == key && refusals.contains(&format!("&[\"{flag}\""))
+            });
+            !read && !refused_and_tested
+        })
+        .cloned()
+        .collect()
+}
+
+/// fm-cli-flag-timing-ht01: a flag whose config key nothing reads is a silent
+/// no-op. Every key a render flag writes has a reader outside fmn-config, or
+/// its flag is refused for file renders and covered by the refusal test.
+#[test]
+fn every_flag_written_config_key_has_a_reader_or_a_refused_flag() {
+    const REFUSED: [(&str, &str); 4] = [
+        ("window.full_screen", "-f"),
+        ("embed.autoreload", "--autoreload"),
+        ("scene.show_animation_progress", "--show_animation_progress"),
+        ("scene.leave_progress_bars", "--leave_progress_bars"),
+    ];
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let cli = std::fs::read_to_string(crates.join("fmn-cli/src/lib.rs")).expect("fmn-cli source");
+    let keys = flag_written_keys(&cli);
+    assert!(keys.len() >= 10, "found only {keys:?}");
+    let mut sources = Vec::new();
+    let mut pending = vec![crates.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read source directory") {
+            let path = entry.expect("directory entry").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if !matches!(name, "target" | "tests" | "fmn-config") && !name.starts_with('.') {
+                    pending.push(path);
+                }
+            } else if name.ends_with(".rs") && name != "generated.rs" {
+                sources.push(std::fs::read_to_string(&path).expect("read source"));
+            }
+        }
+    }
+    let smoke = include_str!("cli_smoke.rs");
+    let refusals = smoke
+        .split("fn window_and_progress_flags_are_refused_and_never_mistime_a_file_render")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("the refusal test exists");
+    let orphans = orphan_keys(&keys, &sources, &REFUSED, refusals);
+    assert!(
+        orphans.is_empty(),
+        "flag-written config keys nothing reads: {orphans:?}"
+    );
+
+    // Planted negatives: an unread key, and a refused flag the refusal test
+    // does not exercise.
+    let planted = vec!["camera.fps".to_owned(), "window.made_up".to_owned()];
+    let reader = vec!["config.camera.fps".to_owned()];
+    assert_eq!(
+        orphan_keys(&planted, &reader, &REFUSED, refusals),
+        ["window.made_up"]
+    );
+    let untested = vec!["window.full_screen".to_owned()];
+    assert_eq!(
+        orphan_keys(&untested, &reader, &REFUSED, "&[\"-p\"]"),
+        untested
+    );
+}

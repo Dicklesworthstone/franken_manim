@@ -392,7 +392,8 @@ class RenderSession:
                 manifest_file_str, closure_digest = self._publish_manifest(
                     Path(self.destination), self.format, self.resolution,
                     self.fps, self.threads, self.seed,
-                    {"path": str(path), "digest": digest},
+                    {"path": str(path), "digest": digest,
+                     "routes": tuple(getattr(self.scene, "_render_routes", (0, 0, None)))},
                     sources, self.runtime_identities, _cue_assets(cues),
                 )
                 manifest_path = Path(manifest_file_str)

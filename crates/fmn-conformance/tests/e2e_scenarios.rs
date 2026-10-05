@@ -1046,6 +1046,85 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("cli_rule_named", 1))
 }
 
+/// fm-cli-flag-timing-ht01: a window flag on a file render is refused by name
+/// with the capability exit before anything is published, and the same
+/// render without it keeps the requested timing (60 fps header, 23 frames).
+fn failure_cli_window_flag_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("failure_cli_window_flag")?;
+    let render = |name: &str, extra: &[&str]| -> Result<_, ScenarioError> {
+        let output_dir = dir.join(name);
+        let output_text = output_dir
+            .to_str()
+            .ok_or_else(|| fail("window-flag output path is not UTF-8"))?
+            .to_owned();
+        let mut argv = vec![
+            "--robot",
+            "--format",
+            "y4m",
+            "--resolution",
+            "64x36",
+            "--fps",
+            "60",
+            "--threads",
+            "1",
+        ];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--video_dir", &output_text]);
+        argv.extend_from_slice(&[fmn_cli::BUILTIN_SCENE_SOURCE, "circle_shift.v1"]);
+        Ok((fmn_cli::run(argv), output_dir))
+    };
+    let (refused, refused_dir) = render("presenter", &["-p"])?;
+    let published_nothing = !refused_dir.exists()
+        || std::fs::read_dir(&refused_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+    let names_studio = refused.stdout.contains("fmn studio");
+    let (plain, plain_dir) = render("plain", &[])?;
+    let artifact = std::fs::read_dir(&plain_dir)
+        .map_err(|error| fail(format!("list plain output: {error}")))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "y4m"))
+        .ok_or_else(|| fail("the plain render published no y4m"))?;
+    let bytes =
+        std::fs::read(&artifact).map_err(|error| fail(format!("read plain y4m: {error}")))?;
+    let header_end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| fail("y4m header line missing"))?;
+    let header = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
+    let frames = bytes
+        .windows(6)
+        .filter(|window| window == b"FRAME\n")
+        .count();
+    let rate_ok = header.split_whitespace().any(|token| token == "F60:1");
+    ctx.event(
+        LogEvent::new("e2e.failure")
+            .field("rule", "window-flag-on-file-render")
+            .field("refused_code", u64::from(refused.code))
+            .field("published_nothing", truth(published_nothing))
+            .field("names_studio", truth(names_studio))
+            .field("plain_header", header.clone())
+            .field("plain_frames", frames),
+    );
+    if refused.code != 4
+        || !published_nothing
+        || !names_studio
+        || plain.code != 0
+        || !rate_ok
+        || frames != 23
+    {
+        return Err(fail(format!(
+            "window flag: refused code={} published_nothing={published_nothing} \
+             names_studio={names_studio} stdout={:?}; plain code={} header={header:?} frames={frames}",
+            refused.code, refused.stdout, plain.code
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_window_flag_refused", 1)
+        .with_counter("cli_plain_render_frames", frames as u64))
+}
+
 /// Collect real host capabilities through the same in-process CLI dispatch
 /// used by the shipping executable. The optional encoder is deliberately
 /// absent, so this scenario does not depend on an installed ffmpeg or probe
@@ -2543,6 +2622,95 @@ fn python_portal_sequence_run(
         .with_counter("python_engine_journaled", 1))
 }
 
+/// fm-sq8.11: a pure-2D Python scene renders on Lumen's retained planar
+/// route, and its frames are byte-identical to native `fmn` replaying the
+/// same scene's FMTL/1 export (same engine, one thread); a surface scene keeps
+/// the camera route and says why. The installed-wheel suite
+/// (scene_execution.py) checks that certified provenance names the route.
+fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_planar_route")?;
+    let report = manimlib::run_portal_gauntlet_planar_route(&root)
+        .map_err(|error| fail(format!("run Python portal planar route: {error}")))?;
+    let native_dir = root.join("native");
+    std::fs::create_dir(&native_dir)
+        .map_err(|error| fail(format!("create native output directory: {error}")))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "64x36",
+        "--threads",
+        "1",
+        "--video_dir",
+        native_dir
+            .to_str()
+            .ok_or_else(|| fail("native output path is not UTF-8"))?,
+        report
+            .bundle
+            .to_str()
+            .ok_or_else(|| fail("bundle path is not UTF-8"))?,
+        "Flat",
+    ]);
+    let pngs = |directory: &std::path::Path| -> Result<Vec<Vec<u8>>, ScenarioError> {
+        let mut paths: Vec<_> = std::fs::read_dir(directory)
+            .map_err(|error| fail(format!("list {}: {error}", directory.display())))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .collect();
+        paths.sort();
+        paths
+            .iter()
+            .map(|path| {
+                std::fs::read(path)
+                    .map_err(|error| fail(format!("read {}: {error}", path.display())))
+            })
+            .collect()
+    };
+    let portal = pngs(&report.portal_sequence)?;
+    let native = pngs(&native_dir.join("Flat"))?;
+    let identical_frames = portal.iter().zip(&native).filter(|(a, b)| a == b).count();
+    let native_identical = output.code == 0
+        && portal.len() as u64 == report.frame_count
+        && native.len() == portal.len()
+        && identical_frames == portal.len();
+    let (planar, camera, reason) = &report.planar_routes;
+    let planar_route = *planar == report.frame_count && *camera == 0 && reason.is_none();
+    let (surface_planar, surface_camera, surface_reason) = &report.surface_routes;
+    let surface_route = *surface_planar == 0 && *surface_camera > 0 && surface_reason.is_some();
+    ctx.event(
+        LogEvent::new("e2e.python.planar_route")
+            .field("frames", report.frame_count)
+            .field("planar_frames", *planar)
+            .field("camera_frames", *camera)
+            .field("identical_frames", identical_frames)
+            .field("native_identical", truth(native_identical))
+            .field("surface_camera_frames", *surface_camera)
+            .field(
+                "surface_reason",
+                surface_reason.clone().unwrap_or_else(|| "none".to_owned()),
+            ),
+    );
+    if !(native_identical && planar_route && surface_route) {
+        return Err(fail(format!(
+            "portal planar route: routes={:?} surface={:?} frames={} portal={} native={} \
+             identical={identical_frames} cli_code={} stderr={:?}",
+            report.planar_routes,
+            report.surface_routes,
+            report.frame_count,
+            portal.len(),
+            native.len(),
+            output.code,
+            output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("python_planar_route_frames", *planar)
+        .with_counter("python_planar_native_identical", 1)
+        .with_counter("python_planar_surface_camera", 1))
+}
+
 /// The portal's final-state still route: semantic construction completes with
 /// intermediate raster work skipped, then the same Lumen/Reel composition root
 /// atomically publishes exactly one canonical PNG.
@@ -2588,6 +2756,10 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
         .config
         .camera;
     let (resolution, fps, background, opacity) = &report.scene_camera;
+    // The Reference's Tex is align* display math: Tex(r"\frac{1}{2}") is 0.9876
+    // tall at 6199a00d (TeX Live 2025, measured 2026-10-04); text style is
+    // about 0.58 (fm-tex-display-style-nclg).
+    let display_style = (report.display_fraction_height / 0.9876 - 1.0).abs() < 0.02;
     let front_doors_agree = *resolution == native.resolution
         && *fps == native.fps
         && background.eq_ignore_ascii_case(&native.background_color)
@@ -2605,18 +2777,21 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
             .field("background_is_reference", truth(background_is_reference))
             .field("rate_is_reference", truth(rate_is_reference))
             .field("brace_spans", truth(brace_spans))
-            .field("front_doors_agree", truth(front_doors_agree)),
+            .field("front_doors_agree", truth(front_doors_agree))
+            .field("display_style", truth(display_style)),
     );
     if !(background_is_reference
         && rate_is_reference
         && frames_match
         && brace_spans
-        && front_doors_agree)
+        && front_doors_agree
+        && display_style)
     {
         return Err(fail(format!(
             "portal Reference defaults drifted: header={header:?} frames={frames} \
              receipt_fps={} receipt_frames={} yuv=({y},{u},{v}) brace={} target={} \
-             portal_camera={:?} native_camera=({:?}, {}, {}, {})",
+             portal_camera={:?} native_camera=({:?}, {}, {}, {}) \
+             display_fraction_height={}",
             report.fps,
             report.frame_count,
             report.brace_width,
@@ -2625,7 +2800,8 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
             native.resolution,
             native.fps,
             native.background_color,
-            native.background_opacity
+            native.background_opacity,
+            report.display_fraction_height
         )));
     }
     Ok(RunOutcome::ok()
@@ -2633,7 +2809,8 @@ fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
         .with_counter("python_defaults_reference_background", 1)
         .with_counter("python_defaults_reference_rate", 1)
         .with_counter("python_defaults_brace_spans_composite", 1)
-        .with_counter("python_defaults_front_doors_agree", 1))
+        .with_counter("python_defaults_front_doors_agree", 1)
+        .with_counter("python_defaults_display_style_tex", 1))
 }
 
 fn python_portal_png_still_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -5152,6 +5329,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             counter_eq("python_defaults_reference_rate", 1),
             counter_eq("python_defaults_brace_spans_composite", 1),
             counter_eq("python_defaults_front_doors_agree", 1),
+            counter_eq("python_defaults_display_style_tex", 1),
         ],
         vec![LogExpect::span_present(
             "e2e.python.reference_defaults",
@@ -5161,6 +5339,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("rate_is_reference", "true"),
                 FieldPred::str_eq("brace_spans", "true"),
                 FieldPred::str_eq("front_doors_agree", "true"),
+                FieldPred::str_eq("display_style", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_portal_planar_route.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_planar_route_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_planar_native_identical", 1),
+            counter_eq("python_planar_surface_camera", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.planar_route",
+            vec![
+                FieldPred::str_eq("native_identical", "true"),
+                FieldPred::u64_eq("camera_frames", 0),
             ],
         )],
     ));
@@ -5363,6 +5560,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("rule", "quality-exclusive"),
                 FieldPred::str_eq("rule_named", "true"),
                 FieldPred::str_eq("stderr_empty", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.cli_window_flag_refused_timing_kept.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_window_flag_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_window_flag_refused", 1),
+            counter_eq("cli_plain_render_frames", 23),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure",
+            vec![
+                FieldPred::str_eq("rule", "window-flag-on-file-render"),
+                FieldPred::u64_eq("refused_code", 4),
+                FieldPred::str_eq("published_nothing", "true"),
+                FieldPred::u64_eq("plain_frames", 23),
             ],
         )],
     ));
@@ -5897,6 +6114,28 @@ fn python_studio_capture_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_studio_capture.v1")
         .expect("Python Studio capture is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// fm-cli-flag-timing-ht01: window flags refuse file renders; timing holds.
+#[test]
+fn cli_window_flag_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.cli_window_flag_refused_timing_kept.v1")
+        .expect("CLI window-flag scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// fm-sq8.11: the portal's planar route, certified parity with native fmn.
+#[test]
+fn python_planar_route_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_portal_planar_route.v1")
+        .expect("Python planar route scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

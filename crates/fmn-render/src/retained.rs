@@ -197,6 +197,16 @@ impl RetainedFrameRenderer {
         })
     }
 
+    /// Replace the planar route's background. Cached tiles hold composited
+    /// background pixels, so a change discards them; an unchanged background
+    /// keeps every cache hit.
+    pub fn set_background(&mut self, background: LinearRgba) {
+        if self.config.frame.background != background {
+            self.config.frame.background = background;
+            self.cache = PixelTileCache::new();
+        }
+    }
+
     /// Synchronize one immutable stage and rasterize its retained raw frame.
     ///
     /// `camera_revision` is independent of frame sequence. A fixed 2D camera

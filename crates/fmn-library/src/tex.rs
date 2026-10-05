@@ -596,6 +596,32 @@ mod tests {
         );
     }
 
+    /// `TexText`'s `$…$` islands are inline (text-style) mathematics, as in
+    /// LaTeX prose: the display default of `Tex` must not leak into them.
+    #[test]
+    fn textext_math_islands_stay_text_style() {
+        let engine = engine();
+        let height = |m: &TexMobject| {
+            let (min, max) = m.vmob.extent().expect("has extent");
+            max[1] - min[1]
+        };
+        let island = TexText::new(r"$\frac{1}{2}$")
+            .build(&engine)
+            .expect("builds");
+        let inline = Tex::new(r"\frac{1}{2}")
+            .math_style(MathStyle::Text)
+            .build(&engine)
+            .expect("builds");
+        let display = Tex::new(r"\frac{1}{2}").build(&engine).expect("builds");
+        assert!(
+            (height(&island) - height(&inline)).abs() < 1e-9,
+            "island {} vs inline {}",
+            height(&island),
+            height(&inline)
+        );
+        assert!(height(&display) > 1.3 * height(&island));
+    }
+
     /// The Reference typesets every `Tex` inside `align*`, i.e. display
     /// math (fm-tex-display-style-nclg): the default must be display style,
     /// so big-operator limits stack and fractions take display size.

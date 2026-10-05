@@ -163,6 +163,19 @@ struct PortalArtifactReport {
     digest: fmn_output::ArtifactDigest,
     invocations: Vec<fmn_output::InvocationReport>,
     audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    /// Frames rasterized on Lumen's retained planar route and on the camera
+    /// route (fm-sq8.11).
+    routes: PortalRoutes,
+}
+
+/// Which Lumen route rasterized a render's frames (fm-sq8.11): counts for
+/// the retained planar route and the camera route, plus why the first
+/// camera-route frame could not take the planar one.
+#[derive(Clone, Copy, Default, Debug)]
+struct PortalRoutes {
+    planar: u64,
+    camera: u64,
+    first_camera_reason: Option<&'static str>,
 }
 
 impl From<NativeArtifactReport> for PortalArtifactReport {
@@ -174,6 +187,7 @@ impl From<NativeArtifactReport> for PortalArtifactReport {
             digest: report.digest,
             invocations: Vec::new(),
             audio_inputs: Vec::new(),
+            routes: PortalRoutes::default(),
         }
     }
 }
@@ -354,6 +368,7 @@ impl PortalRenderSession {
                         digest: report.digest,
                         invocations: audio.invocations(),
                         audio_inputs: std::mem::take(&mut audio.inputs),
+                        routes: PortalRoutes::default(),
                     },
                     "native-sound-mixer".to_owned(),
                     threads,
@@ -379,6 +394,12 @@ struct PortalFrameSession {
     opaque_video: bool,
     next_sequence: u64,
     timeline: OutputTimeline,
+    /// The default camera frame. While the scene's frame equals it and the
+    /// output aspect is the frame's, planar vector content takes the retained
+    /// 2D route (tile cache, adaptive AA) instead of the camera route.
+    planar_baseline: fmn_scene::studio_bridge::CameraFrame,
+    planar_map_matches: bool,
+    routes: PortalRoutes,
 }
 
 impl PortalFrameSession {
@@ -498,6 +519,14 @@ impl PortalFrameSession {
             ..CameraConfig::default()
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        // The retained 2D route maps scene units by output height over the
+        // configured frame height with the origin at the centre. It draws what
+        // the camera route draws only while the scene frame is the default one
+        // and that frame has the output's aspect.
+        let planar_baseline = CameraConfig::default().frame;
+        let [frame_width, frame_height] = planar_baseline.shape();
+        let planar_map_matches = (frame_height - config.sizes.frame_height).abs() < 1e-12
+            && (frame_width - frame_height * f64::from(width) / f64::from(height)).abs() < 1e-9;
         // ubs:ignore — compares a public output-format enum, not a secret.
         let pixel_format = wire.frame_format();
         let output_layout = FrameLayout::tight(pixel_format, width, height)
@@ -557,7 +586,13 @@ impl PortalFrameSession {
                         width,
                         height,
                         first_sequence: 0,
-                        compression: fmn_codec::CompressionLevel::Default,
+                        // Certified PNGs are the canonical (Best) encoding,
+                        // byte-identical to native fmn's under --reproducible.
+                        compression: if reproducible {
+                            fmn_codec::CompressionLevel::Best
+                        } else {
+                            fmn_codec::CompressionLevel::Default
+                        },
                         threads: plan.output_team.threads().max(1),
                         limits,
                         profile: None,
@@ -698,6 +733,9 @@ impl PortalFrameSession {
                 opaque_video,
                 next_sequence: 0,
                 timeline: OutputTimeline::new(single_frame),
+                planar_baseline,
+                planar_map_matches,
+                routes: PortalRoutes::default(),
             },
             runtime_config,
         ))
@@ -721,15 +759,38 @@ impl PortalFrameSession {
                     fmn_scene::IntegrationError::new("portal-render", error.to_string())
                 })?;
         }
-        // Portal coordinates follow manim's +Y-up camera plane, while every
-        // FrameBuffer is already in top-row-first output orientation.  The
-        // camera route owns that projection (including the Y inversion) for
-        // vector content as well as 3D primitives.  Bypassing it for a
-        // default affine frame reflects the delivered image vertically and
-        // violates D-23's no-post-render-vflip contract.
-        self.renderer
-            .render_with_camera(&stage, &self.camera)
-            .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
+        // fm-sq8.11: planar vector content under the default camera frame
+        // takes Lumen's retained 2D route, the one standalone fmn uses (tile
+        // cache, adaptive AA, revisioned plan reuse); its +Y-up screen map
+        // renders upright since fm-sq8.9. Anything else (a moved or rotated
+        // frame, another output aspect, depth, lighting, clip planes, raster
+        // primitives, non-planar points) keeps the camera route.
+        let frame = self.camera.frame();
+        let baseline = &self.planar_baseline;
+        let refusal = if !self.planar_map_matches {
+            Some("output aspect differs from the default frame")
+        } else if frame.center() != baseline.center()
+            || frame.shape() != baseline.shape()
+            || frame.orientation() != baseline.orientation()
+            || frame.field_of_view() != baseline.field_of_view()
+        {
+            Some("camera frame differs from the default frame")
+        } else {
+            planar_stage_refusal(&stage)
+        };
+        if let Some(reason) = refusal {
+            self.renderer
+                .render_with_camera(&stage, &self.camera)
+                .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
+            self.routes.camera += 1;
+            self.routes.first_camera_reason.get_or_insert(reason);
+        } else {
+            self.renderer.set_background(self.camera.background());
+            self.renderer
+                .render(&stage, 0)
+                .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
+            self.routes.planar += 1;
+        }
         let mut reservation = self
             .emitter
             .as_ref()
@@ -810,6 +871,7 @@ impl PortalFrameSession {
                     digest: report.boundary.artifact_digest,
                     invocations: report.boundary.invocations,
                     audio_inputs: Vec::new(),
+                    routes: PortalRoutes::default(),
                 }
             }
         };
@@ -820,6 +882,7 @@ impl PortalFrameSession {
             .invocations
             .splice(index..index, self.audio.invocations());
         report.audio_inputs = std::mem::take(&mut self.audio.inputs);
+        report.routes = self.routes;
         Ok((report, renderer.engine.closure_string(), renderer.threads))
     }
 
@@ -951,6 +1014,49 @@ struct PyScene {
     render: Arc<Mutex<Option<PortalRenderSession>>>,
     render_invocations: Vec<fmn_output::InvocationReport>,
     render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    /// The last render's frame routes (fm-sq8.11).
+    render_routes: PortalRoutes,
+}
+
+/// Why a stage cannot take Lumen's retained planar route, or `None` when it
+/// can. This mirrors the planar engine's own refusal
+/// (`FrameJobError::CameraProjectionRequired`): only vector programs without
+/// fixed-in-frame placement, zoom-scaled strokes, depth testing, lighting or
+/// clip planes, with every drawn point at world z = 0. Planar FMTL export and
+/// the portal's planar render route share this one rule (fm-sq8.11).
+pub(crate) fn planar_stage_refusal(stage: &Stage) -> Option<&'static str> {
+    for item in stage.draw_plan().items() {
+        let Some(entry) = stage.get(item.mob) else {
+            return Some("stale drawable");
+        };
+        let uniforms = entry.uniforms();
+        if item.key.program != fmn_mobject::ProgramKind::Vector
+            || uniforms.depth_test
+            || uniforms.shading != [0.0; 3]
+            || uniforms.clip_planes != [[0.0; 4]; 4]
+        {
+            return Some(
+                "depth, raster primitives, lighting or clip planes require a camera-bearing bundle",
+            );
+        }
+        if uniforms.is_fixed_in_frame != 0.0 || uniforms.scale_stroke_with_zoom {
+            return Some("fixed-in-frame or zoom-scaled strokes require a camera-bearing bundle");
+        }
+        // Test world z: positional operations compose into the entry's
+        // object-to-world placement, so a shift(OUT) leaves the stored record
+        // points planar while the drawn geometry is not.
+        let placement = entry.placement();
+        if let Some(points) = entry.buffer.read_column("point")
+            && points
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .any(|point| placement.apply_point(point.map(f64::from))[2] != 0.0)
+        {
+            return Some("nonplanar geometry requires a camera-bearing bundle");
+        }
+    }
+    None
 }
 
 /// Owns one pinned RecordBuffer generation while a NumPy array exports it.
@@ -8092,6 +8198,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         scene.engine = replacement;
         scene.render_invocations.clear();
         scene.render_audio_inputs.clear();
+        scene.render_routes = PortalRoutes::default();
     }
     *render = Some(session);
     Ok(())
@@ -8112,6 +8219,7 @@ impl PyScene {
             render: Arc::new(Mutex::new(None)),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
+            render_routes: PortalRoutes::default(),
         })
     }
 
@@ -8324,6 +8432,7 @@ impl PyScene {
             let mut scene = slf.borrow_mut();
             scene.render_invocations = report.invocations;
             scene.render_audio_inputs = report.audio_inputs;
+            scene.render_routes = report.routes;
         }
         Ok((
             report.path.to_string_lossy().into_owned(),
@@ -8333,6 +8442,15 @@ impl PyScene {
             engine,
             threads,
         ))
+    }
+
+    /// The last render's `(planar, camera, reason)`: frames rasterized on
+    /// Lumen's retained 2D route and on the camera route, and why the first
+    /// camera-route frame could not take the planar one (fm-sq8.11).
+    #[getter]
+    fn _render_routes(slf: &Bound<'_, Self>) -> (u64, u64, Option<&'static str>) {
+        let routes = slf.borrow().render_routes;
+        (routes.planar, routes.camera, routes.first_camera_reason)
     }
 
     #[getter]
@@ -12124,6 +12242,97 @@ pub fn run_portal_gauntlet_video_options() -> Result<(), String> {
     })
 }
 
+/// What [`run_portal_gauntlet_planar_route`] observed (fm-sq8.11).
+#[cfg(feature = "gauntlet")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalPlanarRouteGauntletReport {
+    /// The planar scene's PNG-sequence directory (standard mode, one thread:
+    /// certified output needs a file-backed extension this process lacks).
+    pub portal_sequence: PathBuf,
+    /// The same scene exported as a planar FMTL/1 bundle for native replay.
+    pub bundle: PathBuf,
+    /// Frames the planar scene published.
+    pub frame_count: u64,
+    /// `(planar, camera, first camera reason)` for the planar scene.
+    pub planar_routes: (u64, u64, Option<String>),
+    /// The same for a scene holding a surface.
+    pub surface_routes: (u64, u64, Option<String>),
+}
+
+/// Render one pure-2D Python scene through the portal, export the same scene
+/// as FMTL/1, and render a surface scene; report the routes taken.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_planar_route(
+    directory: &std::path::Path,
+) -> Result<PortalPlanarRouteGauntletReport, String> {
+    with_python_test_module("planar route Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_dir", directory.to_string_lossy().as_ref())
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(
+            r#"import os
+
+import numpy as np
+from manimlib import BLUE, YELLOW, Circle, ParametricSurface, Scene, Square, Transform, linear
+from fmn_python import export_bundle
+
+
+class _Flat(Scene):
+    def construct(self):
+        square = Square(side_length=2, fill_opacity=0.6, stroke_width=6).set_color(BLUE)
+        self.add(square)
+        self.play(Transform(square, Circle(radius=1).set_stroke(YELLOW, 4)),
+                  run_time=0.5, rate_func=linear)
+
+
+class _Curved(Scene):
+    def construct(self):
+        self.add(ParametricSurface(lambda u, v: np.array([u, v, u * v]),
+                                   u_range=(-1, 1), v_range=(-1, 1)))
+        self.wait(0.25)
+
+
+flat = _Flat()
+flat_result = flat.render(os.path.join(_fmn_dir, "portal"), format="png_sequence",
+                          resolution=(64, 36), fps=8, threads=1)
+_fmn_flat_routes = tuple(flat._render_routes)
+export_bundle(_Flat, os.path.join(_fmn_dir, "flat.fmtl"), resolution=(64, 36), fps=8)
+curved = _Curved()
+curved.render(os.path.join(_fmn_dir, "curved.y4m"), format="y4m",
+              resolution=(64, 36), fps=8, threads=1)
+_fmn_curved_routes = tuple(curved._render_routes)
+_fmn_flat_frames = int(flat_result.frame_count)
+"#,
+        )
+        .expect("planar route scene contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let get = |name: &str| {
+            globals
+                .get_item(name)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("planar route scene emitted no {name}"))
+        };
+        let planar_routes = get("_fmn_flat_routes")?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
+        let surface_routes = get("_fmn_curved_routes")?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
+        let frame_count = get("_fmn_flat_frames")?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
+        Ok(PortalPlanarRouteGauntletReport {
+            portal_sequence: directory.join("portal"),
+            bundle: directory.join("flat.fmtl"),
+            frame_count,
+            planar_routes,
+            surface_routes,
+        })
+    })
+}
+
 /// What [`run_portal_gauntlet_reference_defaults`] observed.
 #[cfg(feature = "gauntlet")]
 #[derive(Debug)]
@@ -12138,6 +12347,8 @@ pub struct PortalDefaultsGauntletReport {
     pub target_width: f64,
     /// A bare `Scene().camera_config`: resolution, fps, background, opacity.
     pub scene_camera: ((u32, u32), u32, String, f64),
+    /// `Tex(r"\frac{1}{2}").get_height()` at the default font size.
+    pub display_fraction_height: f64,
 }
 
 /// Reference-default parity through the production portal route
@@ -12154,7 +12365,7 @@ pub fn run_portal_gauntlet_reference_defaults(
             .set_item("_fmn_destination", destination.to_string_lossy().as_ref())
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import Brace, Circle, DOWN, RIGHT, Scene, Square, VGroup
+            r#"from manimlib import Brace, Circle, DOWN, RIGHT, Scene, Square, Tex, VGroup
 from fmn_python import render_scene
 
 
@@ -12172,6 +12383,7 @@ _fmn_report = (int(receipt.fps), int(receipt.frame_count),
 _camera = Scene().camera_config
 _fmn_camera = (tuple(int(n) for n in _camera["resolution"]), int(_camera["fps"]),
                str(_camera["background_color"]), float(_camera["background_opacity"]))
+_fmn_display_fraction_height = float(Tex(r"\frac{1}{2}").get_height())
 "#,
         )
         .expect("reference defaults scene contains no NUL");
@@ -12190,12 +12402,19 @@ _fmn_camera = (tuple(int(n) for n in _camera["resolution"]), int(_camera["fps"])
             .ok_or_else(|| "reference defaults scene emitted no camera config".to_owned())?
             .extract()
             .map_err(|error: PyErr| error.to_string())?;
+        let display_fraction_height: f64 = globals
+            .get_item("_fmn_display_fraction_height")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reference defaults scene emitted no Tex height".to_owned())?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
         Ok(PortalDefaultsGauntletReport {
             fps,
             frame_count,
             brace_width,
             target_width,
             scene_camera,
+            display_fraction_height,
         })
     })
 }
