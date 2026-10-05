@@ -1268,7 +1268,7 @@ InteractiveScene.toggle_selection_mode	InteractiveScene	bootstrap	1	bootstrap
 InteractiveScene.ungroup_selection	InteractiveScene	bootstrap	1	bootstrap
 InteractiveScene.update_selection_highlight	InteractiveScene	bootstrap	1	bootstrap
 InteractiveScene.update_selection_rectangle	InteractiveScene	bootstrap	1	bootstrap
-Scene.__init__	Scene	fmn_python.camera_lifecycle	1	fmn_python.camera_lifecycle
+Scene.__init__	Scene	fmn_python.typesetting	2	fmn_python.typesetting > fmn_python.camera_lifecycle
 Scene.add	Scene	bootstrap	1	bootstrap
 Scene.add_mobjects_among	Scene	bootstrap	1	bootstrap
 Scene.add_sound	Scene	bootstrap	1	bootstrap
