@@ -72,6 +72,31 @@ a list of globs, and cites its `ref`. The first matching row wins.
 - `open-bead` rows cite a bead for a known bug. A row that matches nothing in
   a run is **stale** and fails the diff, so a fixed bug forces its row out.
 
+### Envelopes (fm-5wq.45)
+
+A Behavior Note justifies a different outline or point count. It never
+justifies an unbounded size or position: a formula twice as tall, or a brace
+of zero width at the origin, is a bug under any BN. So every `behavior-note`
+or `adr` row that covers `bbox` carries an `envelope`, and validation (the
+loader, and `check` before it extracts anything) refuses a row without one:
+
+- `{"size_rel": r, "center_abs": c}`: per axis, the portal's extent is within
+  `r` of the Reference's extent. Its centre is within `c` units, plus half
+  the extent change, because an object placed by one edge (`next_to`,
+  `to_edge`) moves its centre by half of any size change. Quantization slack
+  is two quanta on an extent and one on a centre.
+- `{"bounded_by": "ancestor"}`, on a row with `under`: glyph members align
+  by index only, so they defer to their text or native root. Every `under`
+  class must itself have a numeric envelope (or an open-bead row).
+
+A `bbox` outside a row's envelope falls through to later rows. An `open-bead`
+row may state its bug's measured magnitude as an envelope (`Title` offset
+1.31 units, `fm-5wq.54`), so the bug stays admitted, a worse one still fails,
+and a fix makes the row stale. A `bbox` that no row admits is a difference
+with an `envelope_violation` naming the first envelope it broke, the size
+change and the centre offset. The diff record lists every violation under
+`envelope_violations`.
+
 ## Running it
 
 ```bash
@@ -142,8 +167,11 @@ Scenes that ran in only one engine are labeled by rule-based triage:
 
 `--scene MODULE:SCENE` targets single scenes, and `--minimize MODULE:SCENE`
 delta-debugs `construct` to a minimal structure-differing variant, written
-under `--out` only. `--report DIR --dashboard PATH` renders the outcome-code
-dashboard. Records carry scene identifiers and outcome codes only, because
+under `--out` only; with `--minimize-envelope` the target is the scene's first
+envelope violation. `--rediff DIR` recomputes verdicts from saved facts under
+the current table and reports stale open-bead rows. `--report DIR --dashboard
+PATH` renders the outcome-code dashboard, including envelope violations
+grouped by (class, broken envelope). Records carry scene identifiers and outcome codes only, because
 the corpus is CC BY-NC-SA.
 
 ## First measurement (2026-09-27, portal wheel from `fac2e515`)

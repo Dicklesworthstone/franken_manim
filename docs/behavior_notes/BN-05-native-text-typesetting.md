@@ -65,6 +65,18 @@ ligature is one submobject), so scene code indexes identically.
   Pango render; positions shift at the sub-em scale. Layout-relative code
   (`next_to`, `align_to`) is unaffected; pixel-locked expectations are
   not honored anywhere in FrankenManim by design.
+- **The magnitude is bounded** and checked by the structural differential's
+  envelopes (fm-5wq.45). Text is a different outline, not a different size
+  or place:
+  - `Tex`-family boxes stay within 10% of the Reference's extent and
+    0.05 units of its centre, since both engines set Computer Modern.
+  - `Text`, `MarkupText` and `Code` boxes stay within 25% and 0.05 units.
+    The Reference's own extent depends on its host's fonts: `Text('Hello')`
+    measured 1.28 and 1.049 wide on two hosts.
+  - A glyph regrouped out of its text stays within 25% and 0.1 units.
+  - A larger difference is a bug with its own bead. For example,
+    `fm-tex-metrics-glyphs-ru72` covers fallback glyphs that widen formulas
+    by up to 35%.
 - Pango-only markup (arbitrary attributes, `<gravity>`, etc.) is out of
   the compatibility claim; the supported set is documented in
   `fmn_text::markup`.

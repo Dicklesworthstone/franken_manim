@@ -45,7 +45,9 @@ FACTS_TOOL = ROOT / "crates" / "fmn-conformance" / "python" / "structural_facts.
 EXCLUSIONS = ROOT / "crates" / "fmn-conformance" / "fixtures" / "structural_facts" / "exclusions.json"
 SCHEMA = "fmn.corpus-differential"
 VERSION = 1
-_displays = itertools.count(4100)
+# Concurrent invocations (parallel --minimize runs) each count from their own base, so their
+# Xvfb displays do not collide; a rare clash is still retried on the next display.
+_displays = itertools.count(4100 + 64 * (os.getpid() % 512))
 _display_lock = threading.Lock()
 
 
@@ -117,6 +119,18 @@ def _digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()[:16] if path.exists() else None
 
 
+def _tiers(ref, portal, exclusions):
+    """Both tier verdicts for one two-engine scene. The geometry tier also keeps every
+    bbox that broke an exclusion row's envelope (fm-5wq.45)."""
+    tiers = {}
+    for tier, ignore in (("structure", sf.GEOMETRY_FACTS), ("geometry", frozenset())):
+        result = sf.diff_subject(ref, portal, exclusions, ignore=ignore)
+        tiers[tier] = {"verdict": result["verdict"], "first_difference": result["first_difference"],
+                       "difference_count": result["difference_count"], "excluded": result["excluded"]}
+    tiers["geometry"]["envelope_violations"] = result["envelope_violations"]
+    return tiers
+
+
 def run_one(args, module, scene):
     work = args.out / "scenes" / _slug(module, scene)
     work.mkdir(parents=True, exist_ok=True)
@@ -139,10 +153,7 @@ def run_one(args, module, scene):
     }
     if ran["portal"] and ran["reference"]:
         record["outcome"] = "both"
-        for tier, ignore in (("structure", sf.GEOMETRY_FACTS), ("geometry", frozenset())):
-            result = sf.diff_subject(ref, portal, args.exclusions, ignore=ignore)
-            record[tier] = {"verdict": result["verdict"], "first_difference": result["first_difference"],
-                            "difference_count": result["difference_count"], "excluded": result["excluded"]}
+        record.update(_tiers(ref, portal, args.exclusions))
         record["smoke"] = _smoke(ref_png, portal_png)
     else:
         record["outcome"] = {(True, False): "portal-only", (False, True): "reference-only"}.get(
@@ -213,6 +224,8 @@ def write_dashboard(records, path, title):
     for tier in ("structure", "geometry"):
         for verdict in ("equal", "equal-with-exclusions", "differs"):
             lines.append(f"| {tier}: {verdict} | {count(both, tier, verdict)} |")
+    violating = [r for r in both if r["geometry"].get("envelope_violations")]
+    lines.append(f"| geometry: violates an envelope | {len(violating)} |")
     for outcome in ("reference-only", "portal-only", "neither"):
         lines.append(f"| {outcome} | {sum(1 for r in records if r['outcome'] == outcome)} |")
     triaged = {}
@@ -234,6 +247,38 @@ def write_dashboard(records, path, title):
               "| class | fact | scenes | example |", "|---|---|---|---|"]
     for (cls, fact), scenes in sorted(clusters.items(), key=lambda kv: -len(kv[1])):
         lines.append(f"| {cls} | {fact} | {len(scenes)} | `{scenes[0]}` |")
+    # A bbox outside every admitting row's envelope (fm-5wq.45): size or position, not outline.
+    envelopes = {}
+    for r in violating:
+        for v in r["geometry"]["envelope_violations"]:
+            cluster = envelopes.setdefault((v["class"] or "(scene)", v["row"]),
+                                           {"scenes": [], "members": 0, "same": 0, "sized": 0,
+                                            "size": 0.0, "centre": 0.0})
+            if not cluster["scenes"] or cluster["scenes"][-1] != f"{r['module']}:{r['scene']}":
+                cluster["scenes"].append(f"{r['module']}:{r['scene']}")
+            cluster["members"] += 1
+            family = v.get("family")
+            cluster["same"] += bool(family) and family[0] == family[1]
+            size = v.get("size_rel")
+            cluster["sized"] += size is None or size > v["envelope"]["size_rel"]
+            cluster["size"] = max(cluster["size"], float("inf") if size is None else size)
+            cluster["centre"] = max(cluster["centre"], v.get("center_offset") or 0.0)
+    lines += ["", "## Envelope violations by (class, broken envelope)", "",
+              "A member's bbox fell outside the envelope of every exclusion row that matched it. "
+              "Size is the largest relative extent change; centre is the largest centre offset in units. "
+              "\"Same family\" counts violations whose member has as many point-bearing descendants in both "
+              "engines: those compare like with like. A violation between families of different sizes may be "
+              "a reshaped tree, or for Tex the differential host's broken Reference TeX (fm-0v8k). "
+              "\"Size\" counts violations whose own extent breaks the envelope; the rest are position-only, "
+              "which in scenes mostly inherit another object's size difference through next_to/align_to "
+              "layout (the minimized repros in fm-5wq.45 are of that kind).", "",
+              "| class | envelope row | scenes | members | size | same family | max size change "
+              "| max centre offset | example |",
+              "|---|---|---|---|---|---|---|---|---|"]
+    for (cls, row), c in sorted(envelopes.items(), key=lambda kv: (-len(kv[1]["scenes"]), kv[0])):
+        size = "unbounded" if c["size"] == float("inf") else f"{c['size']:.3f}"
+        lines.append(f"| {cls} | {row} | {len(c['scenes'])} | {c['members']} | {c['sized']} | {c['same']} | "
+                     f"{size} | {c['centre']:.3f} | `{c['scenes'][0]}` |")
     engines = sorted({r["engines"] for r in records if r.get("engines")})
     lines += ["", f"Engine identities: {', '.join(engines) or 'recorded per run'}.", ""]
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -274,9 +319,11 @@ def _construct_of(tree, scene):
     return None
 
 
-def minimize(args, module, scene, target=None, budget=60):
+def minimize(args, module, scene, target=None, budget=60, envelope=False):
     """Delta-debug `construct` (ddmin over its top-level statements) while the structure
-    difference with the same (class, fact) as the full scene's first one persists.
+    difference with the same (class, fact) as the full scene's first one persists. With
+    `envelope`, the target is instead the full scene's first envelope violation
+    (class, broken row), checked in the geometry tier (fm-5wq.45).
 
     The reduced module is written under --out only (the corpus is CC BY-NC-SA). The record
     names the target difference, the statement counts, and the tests run.
@@ -308,19 +355,28 @@ def minimize(args, module, scene, target=None, budget=60):
         ref, portal = _facts(run / "reference.ndjson"), _facts(run / "portal.ndjson")
         if ref is None or portal is None or "error" in ref or "error" in portal:
             return None
-        return sf.diff_subject(ref, portal, args.exclusions, limit=200, ignore=sf.GEOMETRY_FACTS)
+        return sf.diff_subject(ref, portal, args.exclusions, limit=200,
+                               ignore=frozenset() if envelope else sf.GEOMETRY_FACTS)
+
+    def keys(result):
+        if envelope:
+            return {(v["class"], v["row"]) for v in result["envelope_violations"]}
+        return {(d["class"], d["fact"]) for d in result["differences"]}
 
     full = differences_for(list(range(len(statements))))
-    if full is None or full["verdict"] != "differs":
-        return {"module": module, "scene": scene, "error": "the full scene does not differ structurally"}
-    first = full["first_difference"]
-    target = target or (first["class"], first["fact"])
+    if full is None:
+        return {"module": module, "scene": scene, "error": "the full scene did not run in both engines"}
+    if not keys(full):
+        what = "breaks no envelope" if envelope else "does not differ structurally"
+        return {"module": module, "scene": scene, "error": f"the full scene {what}"}
+    first = full["envelope_violations"][0] if envelope else full["first_difference"]
+    target = target or (first["class"], first["row"] if envelope else first["fact"])
 
     def reproduces(kept):
         if tests["count"] >= budget:
             return False
         result = differences_for(kept)
-        return bool(result) and any((d["class"], d["fact"]) == tuple(target) for d in result["differences"])
+        return bool(result) and tuple(target) in keys(result)
 
     items, n = list(range(len(statements))), 2
     while len(items) >= 2 and tests["count"] < budget:
@@ -366,6 +422,8 @@ def main():
     parser.add_argument("--minimize", action="append", default=[],
                         help="MODULE:SCENE to delta-debug to a minimal structure-differing construct")
     parser.add_argument("--minimize-budget", type=int, default=60)
+    parser.add_argument("--minimize-envelope", action="store_true",
+                        help="minimize to the scene's first envelope violation instead (fm-5wq.45)")
     parser.add_argument("--report", type=pathlib.Path, help="re-derive dashboard/gallery from DIR")
     parser.add_argument("--rediff", type=pathlib.Path,
                         help="recompute DIR's verdicts from its saved facts under the current exclusions")
@@ -381,16 +439,20 @@ def main():
                 continue
             work = args.rediff / "scenes" / _slug(r["module"], r["scene"])
             ref, portal = _facts(work / "reference.ndjson"), _facts(work / "portal.ndjson")
-            for tier, ignore in (("structure", sf.GEOMETRY_FACTS), ("geometry", frozenset())):
-                result = sf.diff_subject(ref, portal, exclusions, ignore=ignore)
-                r[tier] = {"verdict": result["verdict"], "first_difference": result["first_difference"],
-                           "difference_count": result["difference_count"], "excluded": result["excluded"]}
+            r.update(_tiers(ref, portal, exclusions))
         (args.rediff / "records.ndjson").write_text("".join(sf.canonical(r) + "\n" for r in records))
-        counts = {}
+        counts, used = {}, set()
         for r in records:
             key = r["outcome"] if r["outcome"] != "both" else f"both:{r['structure']['verdict']}"
             counts[key] = counts.get(key, 0) + 1
-        print(sf.canonical({"rediff": str(args.rediff), "counts": dict(sorted(counts.items()))}))
+            if r["outcome"] == "both":
+                used.update(r["structure"]["excluded"], r["geometry"]["excluded"])
+        stale = sorted(row["id"] for row in exclusions if row["kind"] == "open-bead" and row["id"] not in used)
+        print(sf.canonical({"rediff": str(args.rediff), "counts": dict(sorted(counts.items())),
+                            "envelope_violation_scenes": sum(
+                                1 for r in records if r["outcome"] == "both"
+                                and r["geometry"].get("envelope_violations")),
+                            "stale_open_bead_exclusions": stale}))
         return 0
     if args.report:
         records = sf.read_ndjson(args.report / "records.ndjson")
@@ -414,7 +476,8 @@ def main():
     if args.minimize:
         for spec in args.minimize:
             module, _, scene = spec.rpartition(":")
-            print(sf.canonical(minimize(args, module, scene, budget=args.minimize_budget)))
+            print(sf.canonical(minimize(args, module, scene, budget=args.minimize_budget,
+                                        envelope=args.minimize_envelope)))
         return 0
     scenes = candidates(args)
     print(f"{len(scenes)} candidate scenes", file=sys.stderr)

@@ -1,7 +1,7 @@
 {
   "schema": "fmn.structural-exclusions",
   "version": 1,
-  "rules": "First matching row wins. `class` names the Reference-side member class; `under` requires an ancestor of that class; `mro_missing` admits an mro difference only when the Reference chain is the portal chain plus exactly those names; `scope` (constructions, scenes, or any by default) limits where a row applies and is checked for staleness. A behavior-note row is a deliberate, documented divergence. An open-bead row is a known bug: an open-bead row that matches nothing in its scope fails the diff, so a fixed bug forces its row out.",
+  "rules": "First matching row wins. `class` names the Reference-side member class; `under` requires an ancestor of that class; `mro_missing` admits an mro difference only when the Reference chain is the portal chain plus exactly those names; `scope` (constructions, scenes, or any by default) limits where a row applies and is checked for staleness. A behavior-note row is a deliberate, documented divergence. An open-bead row is a known bug: an open-bead row that matches nothing in its scope fails the diff, so a fixed bug forces its row out. A Behavior Note justifies a different outline, not an unbounded size or position, so every behavior-note or ADR row that covers bbox carries an `envelope`: {size_rel, center_abs} bounds each axis's extent to size_rel of the Reference's and its centre to center_abs scene units, or {bounded_by: ancestor} defers to the envelope of the `under` ancestor whose bbox contains it. A bbox outside a row's envelope falls through to later rows; an open-bead row may state its bug's measured magnitude as an envelope. A bbox no row admits is a difference that names the first envelope it broke (fm-5wq.45).",
   "exclusions": [
     {
       "id": "fm-15k9-glyph-classes",
@@ -39,7 +39,8 @@
       "scope": ["classes", "scenes"],
       "class": "VMobjectFromSVGPath",
       "fact": ["n_points", "points", "points_sha256", "bbox"],
-      "reason": "Glyph outlines come from the bundled faces (BN-05), and SVG and CFF cubics go through the one error-bounded converter (BN-13), so point counts and positions of SVG-derived paths differ wherever scenes regroup them."
+      "envelope": {"size_rel": 0.25, "center_abs": 0.1},
+      "reason": "Glyph outlines come from the bundled faces (BN-05), and SVG and CFF cubics go through the one error-bounded converter (BN-13), so point counts and positions of SVG-derived paths differ wherever scenes regroup them. Envelope: a regrouped glyph's box may differ by a quarter of its extent and move by a tenth of a unit (BN-05's sub-em shifts); a glyph inside a text ancestor falls through to that ancestor's bound."
     },
     {
       "id": "fm-0v8k-reference-tex-environment",
@@ -63,9 +64,19 @@
       "id": "bn05-text-geometry",
       "kind": "behavior-note",
       "ref": "BN-05",
-      "class": ["Text", "MarkupText", "Tex", "TexText", "SingleStringTex", "OldTex", "OldTexText", "Title", "BulletedList", "Code"],
+      "class": ["Tex", "TexText", "SingleStringTex", "OldTex", "OldTexText", "Title", "BulletedList"],
       "fact": ["bbox", "points", "points_sha256", "n_points"],
-      "reason": "Native typesetting over bundled faces and fmd-math: glyph metrics and outlines differ from Pango/LaTeX by design. BN-05 keeps glyph order and count, and class/structure stays compared."
+      "envelope": {"size_rel": 0.1, "center_abs": 0.05},
+      "reason": "Native typesetting over bundled Computer Modern and fmd-math: glyph metrics and outlines differ from LaTeX by design. BN-05 keeps glyph order and count, and class/structure stays compared. Both engines set these in Computer Modern, so the box keeps the Reference's extent within 10% and its centre within 0.05 units."
+    },
+    {
+      "id": "bn05-text-face-geometry",
+      "kind": "behavior-note",
+      "ref": "BN-05",
+      "class": ["Text", "MarkupText", "Code"],
+      "fact": ["bbox", "points", "points_sha256", "n_points"],
+      "envelope": {"size_rel": 0.25, "center_abs": 0.05},
+      "reason": "Text, MarkupText and Code set bundled faces; the Reference sets whatever family its host maps through Pango (BN-05), so the Reference's own extent is a function of the host: Text('Hello') is 1.28 wide in the checked-in class-sweep facts and 1.049 on the differential host, where the portal's is 1.059. Envelope: extent within a quarter of the Reference's, centre within 0.05 units."
     },
     {
       "id": "bn05-glyph-geometry",
@@ -73,7 +84,8 @@
       "ref": "BN-05",
       "under": ["Text", "MarkupText", "Tex", "TexText", "SingleStringTex", "OldTex", "OldTexText", "Title", "BulletedList", "Code"],
       "fact": ["bbox", "points", "points_sha256", "n_points", "getters.get_vertices"],
-      "reason": "Glyph outlines inside text are BN-05 native typesetting."
+      "envelope": {"bounded_by": "ancestor"},
+      "reason": "Glyph outlines inside text are BN-05 native typesetting. Glyph members align by index only, so their boxes are bounded through the text root's envelope."
     },
     {
       "id": "fm-78b6-text-root-style",
@@ -89,7 +101,8 @@
       "ref": "BN-08",
       "class": ["Brace", "BraceLabel", "BraceText", "LineBrace"],
       "fact": ["bbox", "points", "points_sha256", "n_points", "style.fill_opacity"],
-      "reason": "Brace is a parametric path family, not a stretched \\underbrace glyph render (BN-08 table). Its root is the drawn path, not a container of glyph children."
+      "envelope": {"size_rel": 0.1, "center_abs": 0.05},
+      "reason": "Brace is a parametric path family, not a stretched \\underbrace glyph render (BN-08 table). Its root is the drawn path, not a container of glyph children. A different outline, not a different size: the box stays within 10% of the Reference's extent and 0.05 units of its centre."
     },
     {
       "id": "bn08-brace-glyph-children",
@@ -97,6 +110,7 @@
       "ref": "BN-08",
       "under": ["Brace", "BraceLabel", "BraceText", "LineBrace"],
       "fact": ["member", "class", "mro", "bbox", "points", "points_sha256", "n_points", "style.*", "getters", "getters.*"],
+      "envelope": {"bounded_by": "ancestor"},
       "reason": "The Reference's brace glyph children do not exist in the parametric path family (BN-08)."
     },
     {
@@ -105,7 +119,8 @@
       "ref": "BN-08",
       "class": ["DecimalNumber", "Integer"],
       "fact": ["bbox", "points", "points_sha256", "n_points"],
-      "reason": "DecimalNumber is native text through Scribe with a per-character glyph cache (BN-08, 'Why DecimalNumber is a cache')."
+      "envelope": {"size_rel": 0.1, "center_abs": 0.05},
+      "reason": "DecimalNumber is native text through Scribe with a per-character glyph cache (BN-08, 'Why DecimalNumber is a cache'). Its digits are Computer Modern in both engines: extent within 10%, centre within 0.05 units."
     },
     {
       "id": "bn08-decimal-digit-children",
@@ -113,6 +128,7 @@
       "ref": "BN-08",
       "under": ["DecimalNumber", "Integer"],
       "fact": ["member", "class", "mro", "string", "bbox", "points", "points_sha256", "n_points", "style.*"],
+      "envelope": {"bounded_by": "ancestor"},
       "reason": "Each digit is one glyph submobject, not a Text wrapping a glyph path, so the family is one level shallower (BN-08)."
     },
     {
@@ -146,7 +162,8 @@
       "scope": ["classes", "scenes"],
       "class": ["Checkmark", "Exmark", "Matrix", "DecimalMatrix", "IntegerMatrix", "TexMatrix", "MobjectMatrix", "BulletedList", "Title"],
       "fact": ["bbox", "points", "points_sha256", "n_points", "style.*"],
-      "reason": "De-TeX'd natives (BN-08 table): Checkmark/Exmark are drawn paths, Matrix brackets are drawn, BulletedList/Title set native text. The root is the drawn or native object, not a Tex glyph container."
+      "envelope": {"size_rel": 0.1, "center_abs": 0.05},
+      "reason": "De-TeX'd natives (BN-08 table): Checkmark/Exmark are drawn paths, Matrix brackets are drawn, BulletedList/Title set native text. The root is the drawn or native object, not a Tex glyph container. Drawn in place of a glyph, at the glyph's size: extent within 10%, centre within 0.05 units."
     },
     {
       "id": "bn08-drawn-native-children",
@@ -155,6 +172,7 @@
       "scope": ["classes", "scenes"],
       "under": ["Checkmark", "Exmark", "Matrix", "DecimalMatrix", "IntegerMatrix", "TexMatrix", "MobjectMatrix", "BulletedList", "Title"],
       "fact": ["member", "class", "mro", "string", "bbox", "points", "points_sha256", "n_points", "style.*", "getters", "getters.*"],
+      "envelope": {"bounded_by": "ancestor"},
       "reason": "The Reference's Tex glyph children of these natives do not exist, or are native glyphs (BN-08)."
     },
     {
@@ -182,7 +200,56 @@
       "scope": ["classes", "scenes"],
       "class": "Arrow",
       "fact": ["n_points", "points", "points_sha256", "bbox"],
-      "reason": "A curved Arrow's stem edges use quadratic_bezier_points_for_arc(path_arc) at its default of 8 components in the Reference, and BN-09's one arc-density rule in FrankenManim. Fewer components move the quadratic handles, and so the bbox. Straight arrows are equal."
+      "envelope": {"size_rel": 0.1, "center_abs": 0.05},
+      "reason": "A curved Arrow's stem edges use quadratic_bezier_points_for_arc(path_arc) at its default of 8 components in the Reference, and BN-09's one arc-density rule in FrankenManim. Fewer components move the quadratic handles, and so the bbox (6% of the height of Arrow(LEFT, RIGHT, path_arc=PI / 2) in the class sweep). Straight arrows are equal. Envelope: extent within 10%, centre within 0.05 units."
+    },
+    {
+      "id": "fm-tex-metrics-glyphs-ru72-extent",
+      "kind": "open-bead",
+      "ref": "fm-tex-metrics-glyphs-ru72",
+      "class": ["Tex", "TexText", "SingleStringTex", "OldTex", "OldTexText"],
+      "fact": ["bbox"],
+      "envelope": {"size_rel": 0.4, "center_abs": 0.05},
+      "reason": "Known metric bug past bn05-text-geometry's 10%: formulas run 2-18% narrow and fallback glyphs run wide (display integrals up to +35%, Tex('a + b') +23% from the '+'). The envelope states that magnitude, so a 2x Tex still fails."
+    },
+    {
+      "id": "fm-5wq.52-drawn-mark-size",
+      "kind": "open-bead",
+      "ref": "fm-5wq.52",
+      "scope": ["classes", "scenes"],
+      "class": ["Checkmark", "Exmark"],
+      "fact": ["bbox"],
+      "envelope": {"size_rel": 2.7, "center_abs": 0.05},
+      "reason": "The drawn marks are 1.0 x 1.0 where the Reference's glyphs are 0.33 x 0.35 (up to 3.6x the width)."
+    },
+    {
+      "id": "fm-5wq.53-brace-depth",
+      "kind": "open-bead",
+      "ref": "fm-5wq.53",
+      "class": ["Brace", "BraceLabel", "BraceText", "LineBrace"],
+      "fact": ["bbox"],
+      "envelope": {"size_rel": 0.45, "center_abs": 0.05},
+      "reason": "The parametric brace is 39% deeper than the Reference's \\underbrace (0.370 against 0.267 at width 2); BraceLabel 14% taller."
+    },
+    {
+      "id": "fm-5wq.54-title-offset",
+      "kind": "open-bead",
+      "ref": "fm-5wq.54",
+      "scope": "classes",
+      "class": "Title",
+      "fact": ["bbox"],
+      "envelope": {"size_rel": 0.1, "center_abs": 1.35},
+      "reason": "Title is translated 1.31 units right of the Reference's centred Title."
+    },
+    {
+      "id": "fm-5wq.55-bulleted-list-offset",
+      "kind": "open-bead",
+      "ref": "fm-5wq.55",
+      "scope": "classes",
+      "class": "BulletedList",
+      "fact": ["bbox"],
+      "envelope": {"size_rel": 0.1, "center_abs": 0.65},
+      "reason": "BulletedList is centred at (0.61, -0.28) where the Reference centres it at the origin."
     },
     {
       "id": "adr0020-drawings-shelf",

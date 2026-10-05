@@ -2369,6 +2369,26 @@ fn python_class_sweep_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("class_sweep_equal", report.equal))
 }
 
+/// Envelopes, not blankets (fm-5wq.45): the embedded portal's `Tex` passes the
+/// exclusion table, and the same facts with the root's height doubled fail it
+/// with a named envelope violation. The blanket bbox rows admitted both.
+fn python_structural_envelope_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_envelope_drill()
+        .map_err(|error| fail(format!("structural envelope drill: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.structural_envelope")
+            .field("subject", report.subject.as_str())
+            .field("clean_verdict", report.clean_verdict.as_str())
+            .field("planted_verdict", report.planted_verdict.as_str())
+            .field("violated_row", report.violated_row.as_str())
+            .field(
+                "planted_size_rel_milli",
+                (report.size_rel * 1000.0).round() as u64,
+            ),
+    );
+    Ok(RunOutcome::ok().with_counter("envelope_violations_detected", 1))
+}
+
 fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_svg()
         .map_err(|error| fail(format!("Python native SVG: {error}")))?;
@@ -5254,6 +5274,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.structural_envelope.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_structural_envelope_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("envelope_violations_detected", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.structural_envelope",
+            vec![
+                FieldPred::str_eq("subject", "tex"),
+                FieldPred::str_eq("planted_verdict", "differs"),
+                FieldPred::str_eq("violated_row", "bn05-text-geometry"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_svg.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -6635,6 +6673,16 @@ fn python_class_sweep_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.class_sweep.v1")
         .expect("class sweep scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_structural_envelope_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.structural_envelope.v1")
+        .expect("structural envelope scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

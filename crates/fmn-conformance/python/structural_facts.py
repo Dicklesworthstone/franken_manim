@@ -439,7 +439,27 @@ def scene_hook(scene_class, sink):
 
 
 def load_exclusions(path) -> list[dict]:
-    rows = json.loads(Path(path).read_text())["exclusions"]
+    return validate_exclusions(json.loads(Path(path).read_text())["exclusions"])
+
+
+def _covers(row, fact) -> bool:
+    return _matches(fact, row["fact"])
+
+
+def _numeric_envelope(envelope) -> bool:
+    return isinstance(envelope, dict) and set(envelope) == {"size_rel", "center_abs"}
+
+
+def validate_exclusions(rows) -> list[dict]:
+    """Check the table's shape and its envelope rule; return the rows unchanged.
+
+    A behavior-note or ADR row that admits a `bbox` difference must bound it with an
+    `envelope`: numbers ({"size_rel", "center_abs"}) or {"bounded_by": "ancestor"}
+    on a row with `under`, where every `under` class is itself bounded by a numeric
+    envelope (or by an open-bead row: a known bug). A Behavior Note justifies a
+    different outline, never an unbounded size or position. An open-bead row may
+    state its bug's magnitude as an envelope; it need not.
+    """
     for row in rows:
         missing = {"id", "kind", "ref", "fact", "reason"} - set(row)
         if missing:
@@ -450,6 +470,31 @@ def load_exclusions(path) -> list[dict]:
         scopes = [scopes] if isinstance(scopes, str) else scopes
         if not set(scopes) <= {"any", "constructions", "classes", "scenes"}:
             raise ValueError(f"exclusion {row['id']!r}: scope must be any, constructions, classes or scenes")
+        envelope = row.get("envelope")
+        if envelope is None:
+            if _covers(row, "bbox") and row["kind"] != "open-bead":
+                raise ValueError(f"exclusion {row['id']!r} admits bbox differences without an envelope")
+            continue
+        if not _covers(row, "bbox"):
+            raise ValueError(f"exclusion {row['id']!r}: an envelope needs a row that covers bbox")
+        if envelope == {"bounded_by": "ancestor"}:
+            if "under" not in row:
+                raise ValueError(f"exclusion {row['id']!r}: an ancestor-bounded envelope needs `under`")
+            continue
+        if not _numeric_envelope(envelope) or not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0
+                for v in envelope.values()):
+            raise ValueError(f"exclusion {row['id']!r}: envelope must be positive finite "
+                             "{size_rel, center_abs} or {bounded_by: ancestor}")
+    for row in rows:
+        if row.get("envelope") != {"bounded_by": "ancestor"}:
+            continue
+        under = [row["under"]] if isinstance(row["under"], str) else row["under"]
+        for name in under:
+            if not any(_covers(other, "bbox") and _matches(name, other.get("class", "*"))
+                       and (_numeric_envelope(other.get("envelope")) or other["kind"] == "open-bead")
+                       for other in rows):
+                raise ValueError(f"exclusion {row['id']!r}: ancestor class {name!r} has no bounded bbox row")
     return rows
 
 
@@ -459,15 +504,72 @@ def _matches(value, pattern) -> bool:
     return any(fnmatch.fnmatchcase(value, p) for p in patterns)
 
 
+def envelope_violation(envelope, reference, portal):
+    """None when a portal bbox lies within `envelope` of the Reference's, else the excess.
+
+    Per axis, the extent may differ by `size_rel` of the Reference's extent, and the
+    centre may move by `center_abs` scene units plus half the extent difference: an
+    object placed by one edge (next_to, to_edge, align_to) keeps that edge, so its
+    centre moves by half of any size change. Each carries the quantization slack
+    (two quanta on an extent, one on a centre). A bbox that is not a pair of
+    [min, centre, max] triples violates any envelope.
+    """
+    def triples(b):
+        return isinstance(b, list) and len(b) == 3 and all(
+            isinstance(p, list) and len(p) == 3 and all(isinstance(v, int) for v in p) for p in b)
+
+    if not (triples(reference) and triples(portal)):
+        return {"size_rel": None, "center_offset": None}
+    size_excess, centre_excess = 0.0, 0.0
+    size_seen, centre_seen = 0.0, 0.0
+    for axis in range(3):
+        ref_extent = max(reference[2][axis] - reference[0][axis], 0)
+        portal_extent = max(portal[2][axis] - portal[0][axis], 0)
+        gap = abs(portal_extent - ref_extent)
+        allowed = envelope["size_rel"] * ref_extent + 2 * TOLERANCE_QUANTA
+        relative = gap / ref_extent if ref_extent else (0.0 if gap <= 2 * TOLERANCE_QUANTA else math.inf)
+        size_seen = max(size_seen, relative)
+        size_excess = max(size_excess, gap - allowed)
+        shift = abs(portal[1][axis] - reference[1][axis])
+        centre_seen = max(centre_seen, shift / QUANTA_PER_UNIT)
+        centre_excess = max(centre_excess, shift - envelope["center_abs"] * QUANTA_PER_UNIT
+                            - gap / 2 - TOLERANCE_QUANTA)
+    if size_excess <= 0 and centre_excess <= 0:
+        return None
+    return {"size_rel": None if math.isinf(size_seen) else round(size_seen, 4),
+            "center_offset": round(centre_seen, 4)}
+
+
 def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None, empty=False):
-    """The first row covering this difference. Rows name the Reference-side class.
+    """The first row covering this difference (see `_resolve`), or None."""
+    return _resolve(rows, subject, member_class, fact, ancestors, values, empty)[0]
+
+
+def _resolve(rows, subject, member_class, fact, ancestors=(), values=None, empty=False):
+    """(row, violation): the first row admitting this difference. Rows name the Reference-side class.
 
     Optional row fields: `under` requires an ancestor whose class matches,
     `reference_values` requires the Reference-side value to be one of those,
     `empty_only` requires the Reference member to have no points, and
     `mro_missing` admits an `mro` difference only when the Reference chain equals
-    the portal chain plus exactly those names.
+    the portal chain plus exactly those names. A numeric `envelope` admits a
+    `bbox` difference only inside it; outside, matching continues down the table,
+    and if no later row admits it the first envelope it broke is the violation.
     """
+    violation = None
+    for row in _candidate_rows(rows, subject, member_class, fact, ancestors, values, empty):
+        envelope = row.get("envelope")
+        if fact == "bbox" and _numeric_envelope(envelope):
+            excess = envelope_violation(envelope, *(values or (None, None)))
+            if excess is not None:
+                if violation is None:
+                    violation = {"row": row["id"], "envelope": dict(envelope), **excess}
+                continue
+        return row, None
+    return None, violation
+
+
+def _candidate_rows(rows, subject, member_class, fact, ancestors, values, empty):
     for row in rows:
         if not (_matches(subject, row.get("subject", "*"))
                 and _matches(member_class or "", row.get("class", "*"))
@@ -485,8 +587,7 @@ def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None, e
                     and [n for n in ref_mro if n not in row["mro_missing"]] == portal_mro
                     and set(ref_mro) - set(portal_mro) == set(row["mro_missing"])):
                 continue
-        return row
-    return None
+        yield row
 
 
 # Facts that carry positions or sizes. The structure tier ignores them: under
@@ -566,20 +667,45 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
     for m in portal.get("members", ()):
         classes.setdefault(m["path"], m["class"])
 
+    def drawn(record):
+        # Point-bearing members in each subtree: an envelope violation between families of
+        # different sizes may be a reshaped tree (or, for Tex on the differential host, the
+        # Reference's broken TeX spans, fm-0v8k), not a moved object.
+        counts = {}
+        for m in record.get("members", ()):
+            if m.get("n_points"):
+                parts = m["path"].split(".")
+                for depth in range(1, len(parts) + 1):
+                    prefix = ".".join(parts[:depth])
+                    counts[prefix] = counts.get(prefix, 0) + 1
+        return counts
+
+    ref_drawn, portal_drawn = drawn(ref), drawn(portal)
+
     def ancestors(path):
         parts = path.split(".")
         return [classes[".".join(parts[:i])] for i in range(1, len(parts)) if ".".join(parts[:i]) in classes]
 
+    violations = []
+
     def note(path, member_class, fact, a, b):
         if fact.split(".")[0] in ignore:
             return
-        row = _excluded_by(exclusions, subject, member_class, fact, ancestors(path), (a, b),
-                           empty=ref_points.get(path) == 0)
+        row, violation = _resolve(exclusions, subject, member_class, fact, ancestors(path), (a, b),
+                                  empty=ref_points.get(path) == 0)
         if row is not None:
             excluded[row["id"]] = excluded.get(row["id"], 0) + 1
-        elif len(differences) < limit:
-            differences.append({"path": path, "class": member_class, "fact": fact,
-                                "reference": _short(a), "portal": _short(b)})
+            return
+        if violation is not None:
+            violation["family"] = [ref_drawn.get(path, 0), portal_drawn.get(path, 0)]
+            if len(violations) < limit:
+                violations.append({"path": path, "class": member_class, **violation})
+        if len(differences) < limit:
+            entry = {"path": path, "class": member_class, "fact": fact,
+                     "reference": _short(a), "portal": _short(b)}
+            if violation is not None:
+                entry["envelope_violation"] = violation
+            differences.append(entry)
         else:
             differences.append(None)
 
@@ -624,6 +750,7 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
         "first_difference": shown[0] if shown else None,
         "differences": shown,
         "excluded": dict(sorted(excluded.items())),
+        "envelope_violations": violations,
     }
 
 
@@ -666,6 +793,7 @@ def diff_files(reference_lines, portal_lines, exclusions=(), scope: str = "const
         return sorted({canonical(r["engine"]) for r in records.values() if "engine" in r})
 
     summary = {"schema": DIFF_SCHEMA, "version": VERSION, "summary": dict(sorted(counts.items())),
+               "envelope_violations": sum(len(r.get("envelope_violations", ())) for r in results),
                "stale_open_bead_exclusions": stale,
                "engines": {"reference": identities(ref), "portal": identities(portal)}}
     return results, summary
@@ -705,7 +833,12 @@ def check_constructions(reference_text: str, exclusions_text: str, engine_id: st
     `compared` (subjects on both sides) and `failing` (subjects that differ
     or are one-sided). A zero-subject comparison is a failure, never a pass.
     """
-    exclusions = json.loads(exclusions_text)["exclusions"]
+    try:
+        exclusions = validate_exclusions(json.loads(exclusions_text)["exclusions"])
+    except ValueError as error:
+        return {"schema": DIFF_SCHEMA, "version": VERSION, "compared": 0,
+                "stale_open_bead_exclusions": [],
+                "failing": [{"subject": "*", "verdict": "invalid-exclusions", "error": str(error)}]}
     reference = parse_ndjson(reference_text)
     if sweep_text is None:
         portal = list(extract_constructions(engine_id, points_mode="full"))
@@ -722,6 +855,26 @@ def check_constructions(reference_text: str, exclusions_text: str, engine_id: st
     if compared == 0:
         summary["failing"].append({"subject": "*", "verdict": "no-subjects-compared"})
     return summary
+
+
+def envelope_drill(reference_text: str, exclusions_text: str, engine_id: str, subject: str = "tex") -> dict:
+    """One envelope violation, end to end (fm-5wq.45).
+
+    Extract `subject` from the construction set in the running engine and diff it
+    against the Reference facts under the table; then double its root's bbox height
+    about its centre (the 2x-tall Tex the blanket rows once hid) and diff again.
+    Returns both verdicts and the envelope the planted defect broke.
+    """
+    rows = in_scope(validate_exclusions(json.loads(exclusions_text)["exclusions"]), "constructions")
+    reference = {r["subject"]: r for r in parse_ndjson(reference_text)}[subject]
+    portal = next(extract_constructions(engine_id, points_mode="full", only={subject}))
+    clean = diff_subject(reference, portal, rows)
+    planted = json.loads(canonical(portal))
+    (x0, y0, z0), (cx, cy, cz), (x1, y1, z1) = planted["members"][0]["bbox"]
+    planted["members"][0]["bbox"] = [[x0, cy - (y1 - y0), z0], [cx, cy, cz], [x1, cy + (y1 - y0), z1]]
+    result = diff_subject(reference, planted, rows)
+    return {"subject": subject, "clean_verdict": clean["verdict"], "planted_verdict": result["verdict"],
+            "violation": (result["first_difference"] or {}).get("envelope_violation")}
 
 
 def main(argv=None) -> int:

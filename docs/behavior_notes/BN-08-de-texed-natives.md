@@ -168,6 +168,14 @@ mouse/keyboard wiring is Proscenium's (W9), not the library's.
   `\ding{51}`'s width, need re-measuring. Scenes that position with
   `next_to`, `get_tip`, `put_at_tip`, or the positional API — which is nearly
   all of them — need no change.
+- **Dimensions are bounded, not free.** A native keeps the box of the glyph
+  it replaces. Brace, Checkmark/Exmark, Matrix, DecimalNumber and Integer
+  roots stay within 10% of the Reference's extent and 0.05 units of its
+  centre; the structural differential's envelopes check this (fm-5wq.45).
+  Two natives are outside that bound today, each tracked as a bug, not
+  covered by this note:
+  - the drawn marks are about 3x the glyph's size (`fm-5wq.52`);
+  - the parametric brace is 39% deeper than `\underbrace` (`fm-5wq.53`).
 - **Scaling behaviour is better defined, and therefore different.** A brace
   much narrower or much wider than its natural size now keeps its curl's
   proportions, and a tall matrix's brackets keep their weight. If a scene

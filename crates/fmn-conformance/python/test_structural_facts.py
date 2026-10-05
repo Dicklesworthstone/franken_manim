@@ -5,6 +5,7 @@ comparison is `structural_facts.py check` (gate) and the parity e2e scenario.
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 from pathlib import Path
@@ -246,7 +247,7 @@ class Exclusions(unittest.TestCase):
         self.assertTrue(rows)
         self.assertEqual(len({row["id"] for row in rows}), len(rows))
         for row in rows:
-            self.assertRegex(row["ref"], r"^(BN-\d\d|ADR-\d{4}|fm-[a-z0-9.]+)$")
+            self.assertRegex(row["ref"], r"^(BN-\d\d|ADR-\d{4}|fm-[a-z0-9.-]+)$")
 
 
 class RowScoping(unittest.TestCase):
@@ -425,6 +426,93 @@ class SceneHook(unittest.TestCase):
         self.assertEqual(calls, ["original"])
         self.assertEqual(sink[0]["subject"], "User")
         self.assertEqual(sink[0]["members"][0]["class"], "Square")
+
+
+class Envelopes(unittest.TestCase):
+    """fm-5wq.45: a Behavior Note bounds a bbox difference; it never blankets it."""
+    FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/structural_facts"
+
+    @staticmethod
+    def note(envelope=None, **row):
+        return {"id": "bn-e", "kind": "behavior-note", "ref": "BN-00", "class": "Square",
+                "fact": ["bbox", "points", "points_sha256", "getters.*"],
+                "envelope": envelope or {"size_rel": 0.1, "center_abs": 0.05}, "reason": "t", **row}
+
+    @staticmethod
+    def square(transform):
+        return facts([Square([transform(x, y, z) for x, y, z in SQUARE])])
+
+    def test_inside_the_envelope_is_excluded_and_outside_names_the_broken_envelope(self):
+        ref, rows = self.square(lambda x, y, z: (x, y, z)), [self.note()]
+        inside = sf.diff_subject(ref, self.square(lambda x, y, z: (1.05 * x, y, z)), rows)
+        self.assertEqual(inside["verdict"], "equal-with-exclusions")
+        self.assertEqual(inside["envelope_violations"], [])
+        outside = sf.diff_subject(ref, self.square(lambda x, y, z: (1.5 * x, y, z)), rows)
+        self.assertEqual(outside["verdict"], "differs")
+        self.assertEqual(outside["first_difference"]["fact"], "bbox")
+        violation = outside["first_difference"]["envelope_violation"]
+        self.assertEqual((violation["row"], violation["size_rel"]), ("bn-e", 0.5))
+        self.assertEqual(outside["envelope_violations"][0]["path"], "0")
+
+    def test_a_broken_envelope_falls_through_to_a_bounded_bug_row(self):
+        bug = {"id": "bug", "kind": "open-bead", "ref": "fm-test", "class": "Square", "fact": ["bbox"],
+               "envelope": {"size_rel": 0.6, "center_abs": 0.05}, "reason": "measured bug"}
+        ref, wide = self.square(lambda x, y, z: (x, y, z)), self.square(lambda x, y, z: (1.5 * x, y, z))
+        result = sf.diff_subject(ref, wide, [self.note(), bug])
+        self.assertEqual(result["verdict"], "equal-with-exclusions")
+        self.assertEqual(result["excluded"]["bug"], 1)
+        twice = sf.diff_subject(ref, self.square(lambda x, y, z: (2.0 * x, y, z)), [self.note(), bug])
+        self.assertEqual(twice["first_difference"]["envelope_violation"]["row"], "bn-e")
+
+    def test_an_edge_placed_object_may_move_its_centre_by_half_its_size_change(self):
+        ref, rows = self.square(lambda x, y, z: (x, y, z)), [self.note()]
+        # Left edge pinned, 8% wider: the centre moves 0.08, half the extent change.
+        grown = self.square(lambda x, y, z: (x + 0.08 * (x + 1), y, z))
+        self.assertEqual(sf.diff_subject(ref, grown, rows)["verdict"], "equal-with-exclusions")
+        # The same 0.08 as a pure translation is a position difference.
+        moved = sf.diff_subject(ref, self.square(lambda x, y, z: (x + 0.08, y, z)), rows)
+        self.assertEqual(moved["first_difference"]["envelope_violation"]["center_offset"], 0.08)
+
+    def test_a_behavior_note_without_an_envelope_fails_validation_and_check(self):
+        row = self.note()
+        del row["envelope"]
+        with self.assertRaisesRegex(ValueError, "without an envelope"):
+            sf.validate_exclusions([row])
+        summary = sf.check_constructions("", json.dumps({"exclusions": [row]}), "unit")
+        self.assertEqual(summary["failing"][0]["verdict"], "invalid-exclusions")
+        # A known bug may still be acknowledged without a magnitude.
+        sf.validate_exclusions([dict(row, kind="open-bead", ref="fm-test")])
+
+    def test_envelope_shapes_are_validated(self):
+        child = {"id": "c", "kind": "behavior-note", "ref": "BN-00", "fact": ["bbox"],
+                 "envelope": {"bounded_by": "ancestor"}, "reason": "t"}
+        for rows, message in (
+                ([child], "needs `under`"),
+                ([dict(child, under=["Square"])], "no bounded bbox row"),
+                ([self.note({"size_rel": 0, "center_abs": 0.05})], "positive finite"),
+                ([self.note({"size_rel": 0.1})], "positive finite"),
+                ([dict(self.note(), fact=["points"])], "covers bbox")):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                sf.validate_exclusions(rows)
+        sf.validate_exclusions([self.note(), dict(child, under=["Square"])])
+
+    def test_planted_tall_tex_and_flat_brace_fail_the_checked_in_table(self):
+        text = (self.FIXTURES / "reference_constructions.v1.ndjson").read_text(encoding="utf-8")
+        ref = {r["subject"]: r for r in sf.parse_ndjson(text)}
+        rows = sf.in_scope(sf.load_exclusions(self.FIXTURES / "exclusions.json"), "constructions")
+        tall = copy.deepcopy(ref["tex"])
+        (x0, y0, z0), (cx, cy, cz), (x1, y1, z1) = tall["members"][0]["bbox"]
+        tall["members"][0]["bbox"] = [[x0, cy - (y1 - y0), z0], [cx, cy, cz], [x1, cy + (y1 - y0), z1]]
+        flat = copy.deepcopy(ref["brace"])
+        flat["members"][0]["bbox"] = [[0, 0, 0]] * 3
+        for planted, row in ((tall, "bn05-text-geometry"), (flat, "bn08-brace-path-family")):
+            subject = planted["subject"]
+            with self.subTest(subject=subject):
+                self.assertEqual(sf.diff_subject(ref[subject], ref[subject], rows)["verdict"], "equal")
+                result = sf.diff_subject(ref[subject], planted, rows)
+                self.assertEqual(result["verdict"], "differs")
+                self.assertEqual(result["first_difference"]["path"], "0")
+                self.assertEqual(result["first_difference"]["envelope_violation"]["row"], row)
 
 
 class Fixture(unittest.TestCase):

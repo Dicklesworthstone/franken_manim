@@ -56,19 +56,105 @@ pub fn run_portal_gauntlet_class_sweep() -> Result<StructuralParityReport, Strin
     )
 }
 
+/// What the envelope drill observed.
+#[derive(Debug)]
+pub struct EnvelopeDrillReport {
+    /// The construction the drill extracted and then planted a defect into.
+    pub subject: String,
+    /// Its verdict as extracted: within the table's envelopes.
+    pub clean_verdict: String,
+    /// Its verdict with the root's height doubled: a difference.
+    pub planted_verdict: String,
+    /// The exclusion row whose envelope the planted defect broke.
+    pub violated_row: String,
+    /// The planted extent change, relative to the Reference's extent.
+    pub size_rel: f64,
+}
+
+/// One envelope violation detected end to end (fm-5wq.45): the embedded
+/// portal's `Tex` construction passes the exclusion table, and the same facts
+/// with the root's height doubled fail it, naming the Behavior-Note envelope
+/// that bounds `Tex` size. The blanket bbox rows this replaced admitted both.
+///
+/// # Errors
+/// A clean subject that already differs, a planted one that does not, or a
+/// difference reported without an envelope violation.
+pub fn run_portal_gauntlet_envelope_drill() -> Result<EnvelopeDrillReport, String> {
+    crate::with_python_test_module("structural envelope drill", |py, _module, globals| {
+        load_structural_facts(py, globals)?;
+        let report = globals
+            .get_item("envelope_drill")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "envelope drill entry point is absent".to_owned())?
+            .call1((
+                include_str!(
+                    "../../fmn-conformance/fixtures/structural_facts/reference_constructions.v1.ndjson"
+                ),
+                EXCLUSIONS,
+                "embedded-portal",
+            ))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let text = |key: &str| -> Result<String, String> {
+            report
+                .get_item(key)
+                .and_then(|value| value.extract())
+                .map_err(|error| format!("{key}: {error}"))
+        };
+        let (subject, clean_verdict, planted_verdict) = (
+            text("subject")?,
+            text("clean_verdict")?,
+            text("planted_verdict")?,
+        );
+        if clean_verdict == "differs" || planted_verdict != "differs" {
+            return Err(format!(
+                "{subject}: clean {clean_verdict}, planted {planted_verdict}"
+            ));
+        }
+        let violation = report
+            .get_item("violation")
+            .map_err(|error| error.to_string())?;
+        if violation.is_none() {
+            return Err(format!(
+                "{subject}: the planted difference names no envelope"
+            ));
+        }
+        Ok(EnvelopeDrillReport {
+            subject,
+            clean_verdict,
+            planted_verdict,
+            violated_row: violation
+                .get_item("row")
+                .and_then(|value| value.extract())
+                .map_err(|error| error.to_string())?,
+            size_rel: violation
+                .get_item("size_rel")
+                .and_then(|value| value.extract())
+                .map_err(|error| error.to_string())?,
+        })
+    })
+}
+
+fn load_structural_facts(
+    py: Python<'_>,
+    globals: &Bound<'_, pyo3::types::PyDict>,
+) -> Result<(), String> {
+    let source = std::ffi::CString::new(include_str!(
+        "../../fmn-conformance/python/structural_facts.py"
+    ))
+    .map_err(|error| error.to_string())?;
+    py.run(source.as_c_str(), Some(globals), Some(globals))
+        .inspect_err(|error| error.print(py))
+        .map_err(|error| error.to_string())
+}
+
 fn check(
     suite: &'static str,
     reference: &'static str,
     sweep: Option<&'static str>,
 ) -> Result<StructuralParityReport, String> {
     crate::with_python_test_module(suite, |py, _module, globals| {
-        let source = std::ffi::CString::new(include_str!(
-            "../../fmn-conformance/python/structural_facts.py"
-        ))
-        .map_err(|error| error.to_string())?;
-        py.run(source.as_c_str(), Some(globals), Some(globals))
-            .inspect_err(|error| error.print(py))
-            .map_err(|error| error.to_string())?;
+        load_structural_facts(py, globals)?;
         let summary = globals
             .get_item("check_constructions")
             .map_err(|error| error.to_string())?
@@ -130,6 +216,16 @@ mod tests {
             "{}",
             report.summary
         );
+    }
+
+    #[test]
+    fn a_planted_tall_tex_breaks_its_envelope_in_the_embedded_portal() {
+        let report = super::run_portal_gauntlet_envelope_drill().unwrap();
+        assert_eq!(report.subject, "tex", "{report:?}");
+        assert_ne!(report.clean_verdict, "differs", "{report:?}");
+        assert_eq!(report.planted_verdict, "differs", "{report:?}");
+        assert_eq!(report.violated_row, "bn05-text-geometry", "{report:?}");
+        assert!(report.size_rel > 0.9, "{report:?}");
     }
 
     #[test]
