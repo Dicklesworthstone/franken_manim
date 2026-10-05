@@ -2,27 +2,26 @@
 
 - **Gate bead:** `fm-i1q` (flagship gate; **still OPEN** — this packet marshals
   evidence, it does not pass the gate)
-- **Packet status:** **Marshaled, gate not passed** (2026-08-21)
-- **Marshal:** `VioletPike` (fm-i1q.1)
+- **Packet status:** **Re-marshaled, gate not passed** (2026-10-05; first
+  marshaled 2026-08-21 at `0883b5e` by `VioletPike`, fm-i1q.1)
+- **Marshal:** `FuchsiaHorizon` (fm-fmd-repin-g2-truth-y3gr)
 - **Program owner of record:** Jeffrey Emanuel
-- **Evidence source commit:** `0883b5e` (`main`, 2026-08-21)
-- **Suite pin under test:** `franken_markdown @ 82588865c453b175cb1263b36e30f5b9b1941a2e`
-  (`SUITE.lock:33` — fmd-font + fmd-math with span maps, extensions, tier-2)
-- **Host:** Linux x86-64, kernel 6.17.0-41-generic
+- **Evidence source commit:** `6c5dd1c9` (`main`, 2026-10-05), plus the
+  Markdown inline-math change that lands with this packet. The packet lands
+  on `5bb1d37b`; the commits between touch curved arrows, animation groups
+  and portal Tex preflight, and are cited where they bear on a row
+- **Suite pin under test:** `franken_markdown @ 68fe29b8af0ddb763a7bf25af3b9c8307122d9d6`
+  (`SUITE.lock:33`)
+- **Host:** Linux x86-64, kernel 7.0.0-30-generic
 
 This is the recorded packet required by `docs/GOVERNANCE.md` §2, in the
-G1 (`docs/gates/G1-core-2d-evidence.md`) shape. Unlike the G1 packet it is
-**not** a pass record: two criteria are open (SVGMobject user files, and the
-blocking performance gates), and the human ratification steps for the Look
-Gallery text panel and the math-vs-LaTeX side-by-side review are pending.
-Several recent seams are committed **code-first with batch-test pending**;
-per the swarm's code-first doctrine no fresh `cargo test` run backs this
-packet, and no pass below claims one.
+G1 (`docs/gates/G1-core-2d-evidence.md`) shape. It is **not** a pass record:
+four of the eight criteria are open. Each row names the command or file
+that reproduces it; rows that rest on a closed bead say so.
 
 ## Gate disposition
 
-- [ ] **PASS** — not claimable yet; see the two open rows and the pending
-  ratifications in the matrix.
+- [ ] **PASS** — not claimable: criteria 1, 5, 7 and 8 are open.
 - [x] **OPEN** — `fm-i1q` stays open. The concrete remaining work is
   enumerated in "What still blocks G2" below.
 
@@ -32,74 +31,107 @@ The eight criteria are quoted from `fm-i1q` (plan §20.3).
 
 | G2 criterion | Evidence | Result |
 |---|---|---|
-| (1) Tier-1 construct set lays out correctly and beautifully | Ratchet layout coverage 99.797 % occurrence-weighted at the pinned rev; G0-3 fmd-math ratification against TeX's published rules; `text_sample` panel rendered and verdict drafted, human ratification pending; math-formula Look Gallery side-by-side vs LaTeX references **not yet recorded** | **Partial** |
-| (2) Span map drives isolate / t2c / slicing / TransformMatchingTex end-to-end | `crates/fmn-library/src/tex.rs` (isolate/t2c by source identity), `crates/fmn-anim/src/transform_matching.rs` (native span keys), portal binds `8ec3b03`/`d7fab57`/`511f7f1` — code-first, batch-test pending | **Green (code-first)** |
+| (1) Tier-1 construct set lays out correctly and beautifully | Typesetting returns Ok for 99.994 % of corpus occurrences, but no oracle checks corpus geometry (dashboard row "Layout checked by an oracle": 0 %, `fm-tex-layout-oracle-bkbc`). The one real layout oracle, `crates/fmn-library/tests/tex_reference_boxes.rs`, puts 26/111 tier-1 formulas within 5 % of the Reference's measured `Tex` box and 60/111 within 10 %. Beauty: the `text_sample` and math panels are ratified (`fm-6ppv`, ADR-0018 delegated review), but the gallery is static spike renders (`fm-5wq.50`) | **Partial** |
+| (2) Span map drives isolate / t2c / slicing / TransformMatchingTex end-to-end | `crates/fmn-library/src/tex.rs` (isolate/t2c by source identity), `crates/fmn-anim/src/transform_matching.rs` (native span keys), portal binds `8ec3b03`/`d7fab57`/`511f7f1`; the portal gate suites `matching_transform_semantics`, `matching_authoring`, `live_tex` and `bridge` exercise them (`scripts/check_portal_runtime.sh`) | **Green** |
 | (3) De-TeX'd classes native (W7DETEX) | `fm-y69` and `fm-ebl` closed; `crates/fmn-library/src/brace.rs`, `numbers.rs` (DecimalNumber), `matchers.rs`/`controls.rs` (Checkmark/Exmark, controls), matrix delimiters from the extensible-delimiter engine | **Green** |
-| (4) SVGMobject works for user files (W2SVG) | Chisel processor exists and `fm-6nm` is closed (`crates/fmn-geom/src/svg.rs`), but portal `SVGMobject` is **still a structural base**: users cannot load a real `.svg` through it until `fm-5wq.4.50` lands (in progress) | **NOT YET** |
-| (5) Typeset caching live (W6TEX + W8CACHE) | `fm-fw6` (fmn-cache content-addressed store) and `fm-7dw` (fmn-tex typeset caching + pre-play preflight) closed; `crates/fmn-tex/src/typeset.rs` | **Green** |
-| (6) Coverage-ratchet dashboard public and live (W6RATCHET) | `docs/ratchet/dashboard.md` — frozen G0-4 denominator (9269 strings / 17711 occurrences), CI-enforced pin/ratchet lockstep, eight-rev rising trend; `fm-mol` closed | **Green** |
-| (7) fmd renders `$…$` in HTML/PDF via the same crates | Measured 2026-09-25 against the `e911be2a` pin's math path (see "Cross-repo payoff"). PDF display equations are laid out by fmd-math and drawn from its outlines. Inline `$…$` in PDF prints its TeX source as text, and HTML emits browser-laid-out MathML from the fmd-math parse tree. This was previously marked green from a design-document citation; that was not evidence, and the corpus goldens it pointed to are parse-only | **NOT GREEN (PDF display math only)** |
-| (8) PG-1(G2) and PG-7 enforced and blocking | Policy rows exist and are `blocking` in `docs/performance/PERF_GATES.tsv`; rig code shipped (`crates/fmn-conformance/src/perf_pg7.rs`, `perf_frontdoor.rs`, `bin/fmn-perf.rs`); Reference capture (`docs/performance/reference-baseline-2026-07-28.json`) is calibration-only, not the PG-1 denominator (`docs/performance/PERFORMANCE_GATES.md:57`); **no pinned-host observed baseline is committed — PG-1 is NOT green** | **NOT GREEN** |
+| (4) SVGMobject works for user files (W2SVG) | `fm-6nm` and `fm-5wq.4.50` closed: portal `SVGMobject` builds a VMobject family through Chisel's hardened processor (`crates/fmn-geom/src/svg.rs`), covered by `crates/fmn-python/tests/bridge.py` | **Green** |
+| (5) Typeset caching live (W6TEX + W8CACHE) | The portal attaches the persistent typeset cache and preflights constructor requests and explicit batches on the worker pool (`65622548`, `59807496`, `23ec2654`, `5bb1d37b`). Standalone `fmn` and `fmn::render` attach no cache (`crates/fmn`, `crates/fmn-cli`), and the cache-warm and preflight-before-first-play acceptance tests have not landed (`fm-typeset-cache-preflight-wiring-1sn0`) | **NOT GREEN** |
+| (6) Coverage-ratchet dashboard public and live (W6RATCHET) | `docs/ratchet/dashboard.md`, regenerated at the `68fe29b8` pin (`8e6d7372`): frozen G0-4 denominator, CI-enforced pin/ratchet lockstep, and honest columns ("typeset returned Ok" apart from "checked by an oracle"). Recomputing it needs the private corpus, which exists only on the project host | **Green** |
+| (7) fmd renders `$…$` in HTML/PDF via the same crates | Re-measured at the `68fe29b8` pin (see "Cross-repo payoff"): PDF display equations go through fmd-math `Layout`; inline PDF math prints its TeX source; HTML emits browser-laid-out MathML (`fm-djcw`) | **NOT GREEN (PDF display math only)** |
+| (8) PG-1(G2) and PG-7 enforced and blocking | Policy rows are `blocking` in `docs/performance/PERF_GATES.tsv` and the rig is in-tree (`crates/fmn-conformance/src/perf_pg7.rs`, `perf_frontdoor.rs`, `bin/fmn-perf.rs`). ADR-0024 makes host qualification satisfiable (`fm-5wq.8` closed), but no pinned-host observation is committed (`fm-inr.1`), and the Reference side of PG-1 is still a calibration capture (`fm-5wq.17`) | **NOT GREEN** |
 
 ## Dependency closure
 
-Of the 15 gate blockers, 13 are closed and 2 remain open:
+Of `fm-i1q`'s 24 blockers, 16 are closed and 8 are open.
 
 - **Closed:** `fm-hk9`, `fm-wgl`, `fm-ydw`, `fm-fjq`, `fm-7dw`, `fm-u1u`,
   `fm-70s`, `fm-kg9`, `fm-ebl`, `fm-fw6`, `fm-y69`, `fm-mol`, `fm-6nm`,
-  plus the prerequisite gate `fm-o3j` (G1 passed 2026-08-20, `f1248b6`).
-- **Open:** `fm-inr` (W10 performance rig, in progress) and — outside the
-  original blocker list but binding on criterion 4 — `fm-5wq.4.50`
-  (SVGMobject user files through Chisel, in progress).
+  `fm-6ppv`, `fm-5wq.8`, and the prerequisite gate `fm-o3j` (G1 passed
+  2026-08-20, `f1248b6`).
+- **Open, by criterion:**
+  - (1) `fm-tex-display-style-nclg` (in progress), `fm-tex-metrics-glyphs-ru72`, `fm-5wq.50`;
+  - (5) `fm-typeset-cache-preflight-wiring-1sn0`;
+  - (7) `fm-djcw`;
+  - (8) `fm-inr` (in progress), `fm-5wq.17`;
+  - this packet's own bead, `fm-fmd-repin-g2-truth-y3gr`.
 
 ## The coverage ratchet (criterion 1 numerator, criterion 6)
 
-`docs/ratchet/dashboard.md`, computed against `franken_markdown 82588865c453`:
+`docs/ratchet/dashboard.md`, computed against `franken_markdown 68fe29b8af0d`:
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
 | Parse | 99.994 % | 99.989 % |
-| Parse + layout | 99.797 % | 99.644 % |
+| Parse + typeset returned Ok | 99.994 % | 99.989 % |
+| Layout checked by an oracle | 0 % | 0 % |
 
 - Denominator frozen at G0-4: 9269 distinct strings, 17711 occurrences,
   corpus hash `a8325e49…4bf883fc`, rules_version 1.
-- Remaining blocked constructs are enumerated and tracked by name: `\dx`
-  (1 occurrence, `fm-j5t`) at parse; five math-alphanumeric codepoints
-  (35 occurrences total, franken_markdown Noto subset bead) at layout.
+- One construct still fails, at parse: `\dx` (1 occurrence). The five
+  math-alphanumeric codepoints that failed layout at `82588865` typeset since
+  the `e911be2a` repin.
+- "Typeset returned Ok" means fmd-math produced a layout without an error,
+  not that the layout is right. That is why criterion 1 rests on the box
+  oracle and the open metric beads, not on this percentage.
 - Enforcement is structural: a `SUITE.lock` pin bump without a ratchet
   re-run fails CI, coverage decreases fail CI, and every out-of-tier
   construct must fail with its precise named tier-tagged error.
-- Trend across eight pin revisions is monotone rising
-  (`5310d87a` 98.916 % → `82588865` 99.797 % layout-occurrence).
+- The trend across ten pin revisions is monotone rising
+  (`5310d87a` 98.916 % → `68fe29b8` 99.994 % typeset-occurrence).
 
 Against R1's escalation path: coverage has **not** missed the checkpoint;
 no public construct-sprint amendment is required at these numbers.
 
-## Look Gallery: the `text_sample` panel (criterion 1, beauty half)
+## Layout correctness (criterion 1, correctness half)
 
-Committed at `da6ca7f` (fm-gfn):
+- **Box oracle.** `crates/fmn-library/tests/tex_reference_boxes.rs`
+  compares native `Tex` boxes with the Reference's measured boxes for 111
+  authored tier-1 formulas. At `68fe29b8`, 26/111 are within 5 % on both
+  axes and 60/111 within 10 %; those are the test's ratchet floors. Run it
+  with `cargo test -p fmn-library --test tex_reference_boxes -- --nocapture`.
+  The output logs every row.
+- **Style.** Every `Tex` used to be laid out in TeX text style, while the
+  Reference's `Tex` is `align*` display math: `Tex(\sum…\frac)` was 0.588
+  tall against the Reference's 1.331. `f3ef1f30` makes display the default.
+  Since `68fe29b8`, display integrals take cmex10's 2.0x display size, and
+  their heights match. The all-rows tolerance is still open
+  (`fm-tex-display-style-nclg`).
+- **Largest remaining misses** (the test's logged rows at `68fe29b8`):
+  - `cases` and matrices are 21–37 % short;
+  - `\emptyset`/`\vec` are 62–81 % wide;
+  - `\sqrt` and `\ldots`/`\cdots` are 24–34 % narrow;
+  - display integrals are up to 35 % wide (`\iint` +35 %, `\oint` +22 %,
+    `\int_0^1` +11 %), because the fallback integral glyph is wider than
+    CM's;
+  - relation glyphs (≥ ≤ ≠) come from the Noto fallback, because the
+    bundled CM Unicode faces lack those codepoints
+    (`fm-tex-metrics-glyphs-ru72`).
 
-- Panel: `docs/g0/g0-2-renders/fmn-text-sample.png`, SHA-256
-  `8f175ae968fcc0aeaa30e1595b492b9d24d5d59d287362efb2346fc7c0fec143`
-- Drafted verdict in `docs/g0/G0-2-look-study-ratification.md:392`:
-  **different-but-fine (Behavior-Noted, ratification pending)** — the face
-  divergence is the deliberate D-08/BN-05 sovereign-bundled-font call; what
-  must correspond does (centring, `next_to` spacing, 60/32 size ratio, true
-  italic contrast, em dash, AA edge character). Whole-frame normalized RMSE
-  `0.08914188` is registered as a smoke alarm over the intentional font
-  change.
-- Regeneration: `g0_2_look --text-only` in `spikes/g0-8-accelerator`
-  (Stage → Scribe (fmn-text over bundled Computer Modern) → production
-  Lumen), fixture row added to
-  `crates/fmn-conformance/fixtures/look_gallery.tsv`.
+  The README formula is 3.606 x 1.128 against the Reference's 3.941 x 1.150.
+- **Corpus scale.** No layout-correctness oracle runs over the 9269-string
+  corpus yet (`fm-tex-layout-oracle-bkbc`). The G0-3 ratification and
+  `crates/fmn-tex/tests/fmd_math_surface.rs` check fmd-math against TeX's
+  published rules construct by construct, not corpus-wide.
 
-**Honest gap:** the panel's verdict awaits ratification, and the criterion's
-*mathematics* half — side-by-side Look Gallery review of typeset formulas
-against LaTeX-rendered references, "indistinguishable at a glance" — has no
-recorded verdict sheet yet. Layout **correctness** is verified against TeX's
-published rules (G0-3 ratification and the fmd-math test surface,
-`crates/fmn-tex/tests/fmd_math_surface.rs`); layout **beauty** for math is
-the open review.
+## Look Gallery (criterion 1, beauty half)
+
+- **`text_sample`** (`da6ca7f`, fm-gfn): `docs/g0/g0-2-renders/fmn-text-sample.png`,
+  SHA-256 `8f175ae968fcc0aeaa30e1595b492b9d24d5d59d287362efb2346fc7c0fec143`.
+  - Verdict **different-but-fine**, ratified 2026-08-24 (`fm-6ppv`,
+    `docs/g0/G0-2-look-study-ratification.md`).
+  - The face divergence is the deliberate D-08/BN-05 bundled-font call.
+    What must correspond does: centring, `next_to` spacing, the 60/32 size
+    ratio, true italic contrast, the em dash, and the AA edge character.
+- **Math panel.** Captured against the Reference in the 2026-08-23
+  supplement session (`PROVENANCE.json` supplements). Settled
+  different-but-fine (BN-05) and ratified 2026-08-24 by delegated blind
+  review under ADR-0018 (`docs/g0/G0-2-look-study-ratification.md` §9).
+- **Honest gap.** Both panels are static spike renders
+  (`g0_2_look` in `spikes/g0-8-accelerator`), judged by agents, and there is
+  a single math panel. The gallery still has to be regenerated from the
+  production entry points with build provenance, a math sheet and an owner
+  verdict lane (`fm-5wq.50`). A corpus-scale math gallery rides
+  `fm-tex-layout-oracle-bkbc`.
 
 ## Span maps end-to-end (criterion 2)
 
@@ -112,9 +144,9 @@ the open review.
   native span keys (`511f7f1`).
 - Portal: `TransformMatchingTex` bound through `fmn-python` on the native
   span maps (`8ec3b03`, `d7fab57`, fm-5wq.4.49), alongside the indication
-  family (fm-5wq.4.48). These binds are committed **code-first; the
-  orchestrator's batch verification has not yet run over them**, so this row
-  is green-by-code-and-review, not green-by-fresh-test-run.
+  family (fm-5wq.4.48). The portal gate suites `matching_transform_semantics`,
+  `matching_authoring`, `live_tex` and `bridge` run them against an installed
+  wheel (`scripts/check_portal_runtime.sh`).
 
 ## De-TeX'd natives (criterion 3)
 
@@ -125,35 +157,45 @@ extensible-delimiter engine, and Checkmark/Exmark/controls are native
 (`crates/fmn-library/src/matchers.rs`, `controls.rs`; portal exposure at
 `9b0db8c`). None of these classes routes through a typesetter.
 
-## SVGMobject (criterion 4) — honest NOT YET
+## SVGMobject (criterion 4)
 
-The Chisel SVG document processor is real, hardened, and closed
-(`fm-6nm`, `crates/fmn-geom/src/svg.rs`, with explicit accept/reject).
-But the user-facing criterion is "SVGMobject works for user files," and
-today portal `SVGMobject` is a **structural base**: the schema SVG parser
-methods are unavailable callables and `SVGMobject("file.svg")` does not
-construct a VMobject family from Chisel. `fm-5wq.4.50` (in progress) is the
-seam that closes this. This row cannot be counted green until it lands and
-is batch-verified.
+The Chisel SVG document processor is hardened, with explicit accept/reject
+(`fm-6nm`, `crates/fmn-geom/src/svg.rs`). Since `fm-5wq.4.50` closed, portal
+`SVGMobject("file.svg")` constructs a real VMobject family through it. This
+is covered by `crates/fmn-python/tests/bridge.py`, which the `fmn-python`
+cargo suite embeds and executes.
 
-## Typeset caching (criterion 5)
+## Typeset caching (criterion 5) — NOT GREEN
 
-`fmn-cache` is the content-addressed store (`fm-fw6` closed);
-`fmn-tex` owns Tex/TexText typeset caching and the pre-play preflight
-(`fm-7dw` closed; `crates/fmn-tex/src/typeset.rs`, `engine.rs`). PG-7's
+The pieces are built and tested: `fmn-cache` is the content-addressed store
+(`fm-fw6`), and `fmn-tex` owns Tex/TexText typeset caching and the pre-play
+preflight (`fm-7dw`; `crates/fmn-tex/src/typeset.rs`, `engine.rs`).
+
+Production wiring is partial:
+- **Portal.** Scene constructors use the persistent cache (`65622548`,
+  `59807496`; `crates/fmn-python/src/portal_typesetting.rs`) and preflight
+  complete constructor requests on the native worker pool (`23ec2654`).
+  `fmn_python.typesetting.preflight_tex` preflights explicit batches
+  (`5bb1d37b`); nothing discovers a scene's static strings automatically.
+- **Native.** Standalone `fmn` and `fmn::render` attach no cache.
+- **Acceptance.** The cache-warm second run, the reproducible hit/miss bit
+  identity and the preflight-before-first-play scenarios have not landed.
+
+Until they do, `fm-typeset-cache-preflight-wiring-1sn0` keeps this row red.
+The row was previously marked green on the closed beads alone. PG-7's
 `formula-cached` workload is defined against a fresh cache root
 (`docs/performance/PERFORMANCE_GATES.md` §canonical PG-7 workloads), so the
-cache's latency claim will be measured, not asserted, when the rig runs.
+cache's latency claim will be measured, not asserted.
 
 ## Cross-repo payoff (criterion 7)
 
 fmd-math and fmd-font are franken_markdown workspace crates consumed here as
 git dependencies at the pinned rev (`SUITE.lock:33`). Whether fmd itself
-renders `$…$` through the same crates was measured on 2026-09-25 at
-franken_markdown `09562c1f`. The pin that fm-fmd-repin-g2-truth-y3gr
-consumes, `e911be2a`, differs from it only in PDF line layout and a
-text-mode fmd-math line-break fix, neither of which changes how math is
-rendered to HTML or PDF. The input was this document:
+renders `$…$` through the same crates was first measured on 2026-09-25 at
+franken_markdown `09562c1f`. It was re-measured on 2026-10-05 with an `fmd`
+built from the `68fe29b8` pin itself:
+`cargo build --release --features cli --bin fmd` in a worktree at that rev.
+The input was this document:
 
 ```markdown
 # Criterion 7 probe
@@ -163,15 +205,18 @@ Inline math: $\frac{a}{b} + x^2$ in a sentence.
 $$\int_0^1 \sqrt{1 - x^2}\,dx = \frac{\pi}{4}$$
 ```
 
-`fmd render probe.md --to both --out probe.html`, built from that rev,
-produces:
+`fmd render probe.md --to both --out probe.html` produces `probe.html`
+(41,526 bytes, SHA-256 `3b3df92d…a74f50`) and `probe.pdf` (17,342 bytes,
+SHA-256 `91b2b6c6…2d9fa`):
 
 - **HTML:** both formulas become MathML `<math display="inline">` and
   `<math display="block">` elements, generated from the fmd-math parse tree
   and laid out by the browser. fmd-math's `Layout` is not involved.
-- **PDF:** the display equation is one `/Formula` structure element, drawn
-  from fmd-math's `Layout` and glyph outlines (`src/pdf/math.rs`). The inline
-  formula is written into the content stream as its literal source text.
+- **PDF:** the display equation is the document's one `/Formula` structure
+  element, drawn from fmd-math's `Layout` and glyph outlines
+  (`src/pdf/math.rs`). The inline formula is set as its literal source in
+  the monospace code face. Both `pdftotext -layout probe.pdf -` and the page
+  rasterized with `pdftoppm -r 110 -png` show `\frac{a}{b} + x^2` as text.
 
 So criterion 7 holds only for display equations in PDF. Inline `$…$` in
 PDF, and all math in HTML, does not go through the shared layout. It was
@@ -194,97 +239,58 @@ What exists at the evidence commit:
   `docs/performance/reference-baseline-2026-07-28.json` is calibration-only
   shared-host evidence, not the PG-1 denominator
   (`docs/performance/PERFORMANCE_GATES.md:57`).
-- `fm-inr` (the rig on pinned profiles) is **in progress**.
+- ADR-0024 (`fm-5wq.8`, closed 2026-09-27) makes qualification satisfiable.
+  G2's PG-1(G2) and PG-7 close on one qualified Linux observation: an
+  isolated 8-physical-core slice of a bare-metal host. The Apple profile
+  gates only Apple-named rows.
+- Pinning the host and landing the replayable baseline corpus is an owner
+  host action (`fm-inr.1`, in progress). Deriving PG-1's Reference side from
+  raw samples on real-GL hardware is `fm-5wq.17`.
 
-What does not exist: any committed pinned-host observed baseline for
-PG-1(G2) (≤ 0.5× Reference wall-clock) or PG-7 (formula < 3 ms cold /
-< 100 µs cached; 10k-glyph < 20 ms). **PG-1 has no attributable pass and is
-not marked green here.** Under ADR-0018, inconclusive perf evidence is not a
-HOLD — but it is also not a pass, and G2 makes these gates blocking. This
-row stays red until `fm-inr` commits observations on a pinned host.
+What does not exist: any committed qualified observation for PG-1(G2)
+(≤ 0.5× Reference wall-clock) or PG-7 (formula < 3 ms cold / < 100 µs
+cached; 10k-glyph < 20 ms). **PG-1 has no attributable pass and is not
+marked green here.** Under ADR-0018, inconclusive perf evidence is not a
+HOLD, but it is also not a pass, and G2 makes these gates blocking.
 
 ## What still blocks G2
 
-1. **PG-1(G2) and PG-7 observed on a pinned host** (`fm-inr`) — the gates
-   turn blocking at G2 and currently have policy + rig but no observation.
-2. **SVGMobject for user files** (`fm-5wq.4.50`) — Chisel-backed
-   construction through the portal, replacing the structural base.
-3. **Look Gallery ratifications** — the `text_sample` verdict
-   (drafted, pending), and a recorded side-by-side math-formula review
-   against LaTeX-rendered references.
-4. **Batch verification** of the code-first span-map/TMT/indication portal
-   binds cited above.
+1. **Criterion 1, layout correctness and beauty.**
+   - The display-style all-rows tolerance (`fm-tex-display-style-nclg`).
+   - The metric and glyph misses the box oracle names (`fm-tex-metrics-glyphs-ru72`).
+   - A corpus-wide layout oracle (`fm-tex-layout-oracle-bkbc`).
+   - A Look Gallery regenerated from production entry points with an owner verdict lane (`fm-5wq.50`).
+2. **Criterion 5:** persistent cache and preflight in `fmn` and
+   `fmn::render`, with the cache-warm and preflight acceptance scenarios
+   (`fm-typeset-cache-preflight-wiring-1sn0`).
+3. **Criterion 7:** inline `$…$` in fmd's PDF through fmd-math `Layout`
+   (`fm-djcw`). HTML math is browser-laid-out MathML; whether criterion 7
+   requires fmd-math `Layout` for HTML too is the gate review's call.
+4. **Criterion 8:** a qualified Linux observation for PG-1(G2) and PG-7
+   (`fm-inr.1`), and an honest PG-1 Reference side (`fm-5wq.17`).
 
 ## Validation provenance note
 
-This packet was assembled code-first under the swarm doctrine: no
-`cargo test`, clippy, or workspace build was run for it. Every green row
-above traces to a closed bead, a committed artifact with a stated hash or
-path, or a named commit — and every claim that would require a fresh test
-run or a human verdict is labeled as pending rather than counted. The gate
-bead `fm-i1q` remains open; only the program owner's process closes it.
+Every row cites a closed bead, a committed file or commit, or a command a
+reader can re-run. Rows that need a fresh run name it (the box oracle, the
+criterion-7 probe, the portal gate suites). Green is never inferred from a
+closed bead alone; criterion 5 was, and is corrected here. The gate bead
+`fm-i1q` remains open; only the program owner's process closes it.
 
-## Post-marshal updates (2026-08-24)
+## Marshal history
 
-Recorded after the snapshot above so the marshal's rows stay as-written;
-fold these into the next re-marshal. Full detail in the `fm-i1q` comment
-thread.
-
-1. **Criterion 4 (SVGMobject) is now green.** `fm-5wq.4.50` closed: portal
-   `SVGMobject` constructs a real VMobject family through Chisel's hardened
-   document processor, covered by `tests/bridge.py` (embedded and executed
-   by the `fmn-python` cargo suite).
-2. **Criterion 2's binds are no longer only code-first.** Fresh run at HEAD
-   (`cargo test -p fmn-python -p fmn-conformance`, 2026-08-24): all suites
-   ok, 0 failed, including the span-map/TMT/indication portal binds.
-3. **Criterion 1's math half now has capture + verdict + ratification.** The
-   missing Reference capture exists (supplement session 2026-08-23,
-   `PROVENANCE.json` supplements); the fixture row is settled
-   `different-but-fine` (BN-05), ratified 2026-08-24 by delegated blind
-   review per ADR-0018 (`docs/g0/G0-2-look-study-ratification.md` §9;
-   `text_sample` ratified the same day, beads `fm-6ppv`/`fm-jrmc` closed).
-   Blocker 3 of "What still blocks G2" is resolved.
-4. **The one remaining blocker is item 1**: pinned-host PG-1(G2)/PG-7
-   observations (`fm-inr`). The rig and target baselines are complete; the
-   `Baseline` schema enforces bare-metal + isolation qualification, so a
-   shared-host number cannot satisfy the rows by construction.
-
-## Post-marshal updates (2026-10-04)
-
-Recorded after a side-by-side against the pinned Reference
-(`docs/IMPLEMENTATION_STATUS.md`, 2026-10-04 reality check); fold into the next
-re-marshal. The suite pin under test is now `franken_markdown @ e911be2a`
-(`SUITE.lock:33`), not the `82588865` named in the header.
-
-1. **Criterion 1 was weaker than its row says, and is still Partial.**
-   - The ratchet's "layout" percentage counts strings for which `typeset()`
-     returned Ok; it checks no geometry (`docs/ratchet/dashboard.md`: layout
-     checked by an oracle, 0 %).
-   - Every `Tex` was laid out in TeX *text* style, while the Reference's `Tex`
-     is `align*` display math: `Tex(\sum…\frac)` was 0.588 tall against the
-     Reference's 1.331. Fixed in `f3ef1f30` (display default) with
-     `fmn-library` regression `the_default_is_the_references_display_style`.
-   - A first real layout oracle now exists:
-     `crates/fmn-library/tests/tex_reference_boxes.rs` compares native boxes
-     with the Reference's measured `Tex` boxes for 111 authored tier-1
-     formulas. **24/111 are within 5 % on both axes and 57/111 within 10 %**
-     (ratchet floors). The largest misses: display integrals about 30 % short,
-     `cases` and matrices 21–37 % short, `\emptyset`/`\vec` 60–80 % wide,
-     `\sqrt` and `\ldots`/`\cdots` 24–34 % narrow, and relation glyphs from
-     the Noto fallback because the bundled CM Unicode faces lack the math
-     codepoints (`fm-tex-metrics-glyphs-ru72`).
-2. **Criterion 5 is NOT GREEN.** The typeset cache and the pre-play preflight
-   exist and are tested, but no shipped entry point (`fmn`, `fmn::render`,
-   `fmn-python`) attaches the persistent cache or installs a preflight hook
-   (`fm-typeset-cache-preflight-wiring-1sn0`). The row above cites closed beads,
-   not production wiring.
-3. **Criterion 7** stays NOT GREEN (PDF inline math, `fm-djcw`), and
-   **criterion 8** stays NOT GREEN (no pinned-host observation, `fm-inr`).
-4. **Later the same day, the franken_markdown repin to `68fe29b8`**
-   (`8e6d7372`): display integrals now take cmex10's 2.0x display size, not
-   the `\sum` class's 1.4x. The box oracle reads **26/111 within 5 % and
-   60/111 within 10 %**, and its floors rose with the repin. The README's
-   formula is 3.606 x 1.128 against the Reference's 3.941 x 1.150. Display
-   integral heights now match; their widths are 22–35 % wide because the
-   fallback integral glyph is wider than CM's (`fm-tex-metrics-glyphs-ru72`).
-   Criterion 1 remains Partial.
+- **2026-08-21:** first marshal at `0883b5e`, against the `82588865` pin.
+  Criteria 4 and 8 were open there; criteria 5 and 7 were marked green
+  without production evidence.
+- **2026-08-24:** criterion 4 turned green (`fm-5wq.4.50`), and the
+  `text_sample` and math panels were ratified.
+- **2026-09-25:** criterion 7 was measured and is not green. The repin to
+  `e911be2a` cleared the layout-plane failures.
+- **2026-10-04:** a side-by-side against the pinned Reference
+  (`docs/IMPLEMENTATION_STATUS.md`) found the following, followed by the
+  repin to `68fe29b8`:
+  - the text-style `Tex` default;
+  - the box-oracle misses;
+  - the criterion-5 overclaim.
+- **2026-10-05:** re-marshaled at the `68fe29b8` pin. Earlier post-marshal
+  notes are folded into the rows above, and their text stays in git history.

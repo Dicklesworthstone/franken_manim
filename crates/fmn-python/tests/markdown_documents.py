@@ -36,9 +36,9 @@ def content(document, block):
 
 class MathematicalDocumentTests(unittest.TestCase):
     def doc(self, source='# Result\n\nBefore $x_i+y_j$ after.\n', **options):
-        return MarkdownMobject(source, math_mode=True, font_size=32, **options)
+        return MarkdownMobject(source, font_size=32, **options)
 
-    def test_opt_in_formula_is_native_and_source_selection_uses_original_text(self):
+    def test_default_formula_is_native_and_source_selection_uses_original_text(self):
         source = '# Ω\n\nBefore $x_i+y_j$ after.\n'
         doc = self.doc(source)
         self.assertTrue(doc.math_mode)
@@ -47,11 +47,17 @@ class MathematicalDocumentTests(unittest.TestCase):
         self.assertIn('$x_i+y_j$', doc.get_block_source(1))
         np.testing.assert_allclose(shape(content(doc, 1)[1]),
                                    shape(m.Tex('x_i+y_j', font_size=32)), atol=3e-6)
-        # The opt-in must not silently change the newly landed literal API.
-        literal = MarkdownMobject('$x_i+y_j$', font_size=32)
+        # math_mode=False is the explicit opt-out that keeps dollars literal.
+        literal = MarkdownMobject('$x_i+y_j$', math_mode=False, font_size=32)
         self.assertFalse(literal.math_mode)
         self.assertNotEqual(shape(content(literal, 0)).shape,
                             shape(content(self.doc('$x_i+y_j$'), 0)).shape)
+
+    def test_prose_dollars_stay_literal_under_fmds_delimiter_rule(self):
+        for source in ('It costs $5 and $10 today.', 'a $ x$ b', 'a $x $ b'):
+            with self.subTest(source=source):
+                np.testing.assert_allclose(shape(self.doc(source)),
+                                           shape(self.doc(source.replace('$', r'\$'))), atol=0)
 
     def test_math_options_survive_live_edits_and_preserve_unchanged_block_identity(self):
         doc = self.doc(line_width=2.5, body_color=m.GREEN)
@@ -187,42 +193,45 @@ class MathematicalDocumentTests(unittest.TestCase):
 
     def test_math_mode_admission_is_explicit_and_owned(self):
         for options, error in [({'math_mode': 1}, TypeError),
-                               ({'line_width': 2}, ValueError),
-                               ({'body_color': m.GREEN}, ValueError),
-                               ({'math_mode': True, 'line_width': 0}, ValueError),
-                               ({'math_mode': True, 'line_width': float('nan')}, ValueError),
-                               ({'math_mode': True, 'body_color': (1, 0, float('nan'))}, ValueError)]:
+                               ({'math_mode': False, 'line_width': 2}, ValueError),
+                               ({'math_mode': False, 'body_color': m.GREEN}, ValueError),
+                               ({'line_width': 0}, ValueError),
+                               ({'line_width': float('nan')}, ValueError),
+                               ({'body_color': (1, 0, float('nan'))}, ValueError)]:
             with self.subTest(options=options), self.assertRaises(error):
                 MarkdownMobject('text', **options)
         doc = self.doc()
         with self.assertRaises(m._CapabilityError):
             doc.animate.set_source('$x$')
 
-    def test_fenced_math_pixels_match_independent_tex_at_one_and_four_threads(self):
+    def test_default_math_pixels_match_independent_tex_at_one_and_four_threads(self):
         # The expected scene uses only Tex and explicit placement. It does not
         # call either document builder or inspect the actual document geometry.
-        class Actual(m.Scene):
-            def construct(self):
-                self.add(MarkdownMobject('```math\n\\frac{1}{x^2}\n```', math_mode=True,
-                                         font_size=48))
-                self.wait(.25)
-        class Expected(m.Scene):
-            def construct(self):
-                self.add(m.Tex(r'\displaystyle\frac{1}{x^2}', font_size=48).center())
-                self.wait(.25)
-        with tempfile.TemporaryDirectory() as tmp:
-            previous = None
-            for threads in (1, 4):
-                frames = []
-                for cls in (Actual, Expected):
-                    path = Path(tmp) / f'{cls.__name__}-{threads}.y4m'
-                    receipt = cls().render(path, format='y4m', resolution=(128, 72), fps=8, threads=threads)
-                    self.assertEqual(receipt.frame_count, 2)
-                    frames.append(path.read_bytes())
-                self.assertEqual(frames[0], frames[1])
-                if previous is not None:
-                    self.assertEqual(frames[0], previous)
-                previous = frames[0]
+        # Fenced math is display style; inline `$…$` is text style.
+        for source, tex in [('```math\n\\frac{1}{x^2}\n```', r'\displaystyle\frac{1}{x^2}'),
+                            (r'$\frac{1}{x^2}$', r'\textstyle\frac{1}{x^2}')]:
+            class Actual(m.Scene):
+                def construct(self):
+                    self.add(MarkdownMobject(source, font_size=48))
+                    self.wait(.25)
+            class Expected(m.Scene):
+                def construct(self):
+                    self.add(m.Tex(tex, font_size=48).center())
+                    self.wait(.25)
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
+                previous = None
+                for threads in (1, 4):
+                    frames = []
+                    for cls in (Actual, Expected):
+                        path = Path(tmp) / f'{cls.__name__}-{threads}.y4m'
+                        receipt = cls().render(path, format='y4m', resolution=(128, 72), fps=8,
+                                               threads=threads)
+                        self.assertEqual(receipt.frame_count, 2)
+                        frames.append(path.read_bytes())
+                    self.assertEqual(frames[0], frames[1])
+                    if previous is not None:
+                        self.assertEqual(frames[0], previous)
+                    previous = frames[0]
 
 
 if __name__ == '__main__':

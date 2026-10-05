@@ -202,6 +202,49 @@ fn source_and_layout_limits_refuse_before_unbounded_expansion() {
     );
 }
 
+/// Whether fmd's own parser reads a one-paragraph source as mathematics.
+fn fmd_reads_math(source: &str) -> bool {
+    use franken_markdown::ast::{Block, Inline};
+    franken_markdown::parse::parse_document_spanned(source)
+        .blocks
+        .iter()
+        .any(|block| match &block.node {
+            Block::Paragraph(inlines) => inlines
+                .iter()
+                .any(|i| matches!(i, Inline::Math(_) | Inline::DisplayMath(_))),
+            Block::MathBlock(_) => true,
+            _ => false,
+        })
+}
+
+#[test]
+fn dollar_admission_is_fmds_so_prose_dollars_stay_prose() {
+    let (book, engine) = (book(), engine());
+    for (source, math) in [
+        ("It costs $5 and $10 today.", false),
+        ("price: $5", false),
+        ("a $ x$ b", false),
+        ("a $x $ b", false),
+        ("a $$$ b", false),
+        ("a $x$ b", true),
+        ("a $5 and 10$ b", true),
+        ("$$x$$", true),
+    ] {
+        assert_eq!(fmd_reads_math(source), math, "fmd's reading of {source:?}");
+        let doc = Markdown::new(source)
+            .build_with_math(&book, &engine)
+            .unwrap();
+        let literal = Markdown::new(&source.replace('$', r"\$"))
+            .build_with_math(&book, &engine)
+            .unwrap();
+        assert_eq!(
+            canonical(&doc.vmob) != canonical(&literal.vmob),
+            math,
+            "the document's reading of {source:?}"
+        );
+    }
+}
+
 #[test]
 fn invalid_math_is_a_named_error_not_literal_garbage() {
     let error = Markdown::new(r"$\thiscommanddoesnotexist{x}$")

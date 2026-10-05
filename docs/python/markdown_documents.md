@@ -33,11 +33,14 @@ the native markup/glyph pipeline. Literal `<`, `>` and `&` remain literal;
 inline code cannot become styling markup. Fenced code uses native syntax
 highlighting. Top-level tables with body rows use the native ruled-table
 layouter; cell text is retained but inline cell styling and column alignment
-hints are not applied. Lists and block quotes flatten with explicit prefixes,
-retaining nested non-paragraph content. Nested tables and header-only tables
-use a textual presentation. Thematic breaks are a textual rule. Default-mode
- table rules use `GREY_B` so they remain visible on the scene's default #333333 background (and on black);
-cell fills, native stroke widths and syntax colors are otherwise retained.
+hints are not applied. Without a `body_color`, table rules use `GREY_B` so they
+remain visible on the scene's default #333333 background (and on black); cell
+fills, native stroke widths and syntax colors are otherwise retained. The
+mathematical layout of lists, quotations and rules is in
+`mathematical_markdown.md`. In the `math_mode=False` text-only mode, lists and
+block quotes flatten with explicit prefixes, retaining nested non-paragraph
+content; nested tables and header-only tables use a textual presentation; and
+thematic breaks are a textual rule.
 
 The source is bounded to 32,768 UTF-8 bytes, 256 top-level blocks and 24 levels
 of block/inline nesting; native completed geometry is bounded to 1,048,576
@@ -114,11 +117,13 @@ source metadata. Normal native block animations, copies and scene checkpoints
 remain available. Changed block content uses the new source's native styles;
 unchanged content retains authored styling.
 
-The default text-only mode has no automatic wrapping/pagination, inline math
-layout, embedded-image loading or network access. Links show their text, images
-show alt text, and HTML/math syntax is literal. The separately added opt-in
-`math_mode=True` extension and its wrapping controls are described in
-`mathematical_markdown.md`; edits and restore retain those settings too.
+Documents typeset `$...$`, `$$...$$` and `math` fences natively by default;
+that layout and its wrapping controls are described in
+`mathematical_markdown.md`, and edits and restore retain those settings too.
+There is no embedded-image loading or network access: an image is a named
+error that asks for an explicit scene asset. Links show their text. The
+`math_mode=False` text-only mode keeps HTML and math syntax literal, shows
+image alt text, and has no automatic wrapping.
 Code themes are the names accepted
 by the native `CodeTheme` catalog. `font_size` must be finite in `(0, 10000]`;
 `block_gap` must be finite in `[0, 1000]` and scales with body font size.

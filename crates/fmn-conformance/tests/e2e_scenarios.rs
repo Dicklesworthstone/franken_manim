@@ -4868,6 +4868,77 @@ fn parity_tex_span_map_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     Ok(RunOutcome::ok().with_counter("parity_t2c_source_identity", 1))
 }
 
+/// §11.7 — Markdown composes `$…$` through fmd-math under fmd's own
+/// delimiter rule. An inline island is exactly the text-style `Tex` of its
+/// source, and prose dollars (`$5 and $10`) lay out as their escaped spelling
+/// rather than as italic mathematics.
+fn parity_markdown_inline_math_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    fn relative(v: &VMobject, points: &mut Vec<[f64; 3]>) {
+        points.extend_from_slice(v.points());
+        for child in v.children() {
+            relative(child, points);
+        }
+    }
+    // Shapes compare up to translation; placing a formula inside a line
+    // shifts it, and re-relativizing rounds below 1e-10 scene units.
+    let same_shape = |a: &VMobject, b: &VMobject| {
+        let (mut a_points, mut b_points) = (Vec::new(), Vec::new());
+        relative(a, &mut a_points);
+        relative(b, &mut b_points);
+        let (Some(a0), Some(b0)) = (a_points.first().copied(), b_points.first().copied()) else {
+            return a_points.is_empty() && b_points.is_empty();
+        };
+        a_points.len() == b_points.len()
+            && a_points
+                .iter()
+                .zip(&b_points)
+                .all(|(p, q)| (0..3).all(|i| ((p[i] - a0[i]) - (q[i] - b0[i])).abs() < 1e-10))
+    };
+    let corpus = scene_goldens::corpus();
+    let build = |source: &str| {
+        fmn_library::markdown::Markdown::new(source)
+            .build_with_math(&corpus.book, &corpus.tex)
+            .map_err(|error| fail(format!("Markdown {source:?} builds: {error}")))
+    };
+
+    let doc = build("area $x_i+y_j$ here")?;
+    let words = doc.blocks[0].vmob.children();
+    let formula = fmn_library::Tex::new("x_i+y_j")
+        .math_style(fmn_tex::Style::Text)
+        .build(&corpus.tex)
+        .map_err(|error| fail(format!("tex builds: {error}")))?;
+    let island = words.len() == 3 && same_shape(&words[1], &formula.vmob);
+    let prose = ["It costs $5 and $10 today.", "a $ x$ b", "a $x $ b"];
+    let mut literal = 0u64;
+    for source in prose {
+        if same_shape(
+            &build(source)?.vmob,
+            &build(&source.replace('$', r"\$"))?.vmob,
+        ) {
+            literal += 1;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.markdown_inline_math")
+            .field("island_is_text_style_tex", island)
+            .field("prose_sources", prose.len() as u64)
+            .field("prose_sources_literal", literal),
+    );
+    if !island {
+        return Err(fail(
+            "the inline island is not the text-style Tex of its source between two words",
+        ));
+    }
+    if literal != prose.len() as u64 {
+        return Err(fail(format!(
+            "{literal} of {} prose-dollar sources laid out as their escaped spelling",
+            prose.len()
+        )));
+    }
+    ctx.counter("parity_markdown_prose_dollars", literal);
+    Ok(RunOutcome::ok().with_counter("parity_markdown_prose_dollars", literal))
+}
+
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
@@ -5963,6 +6034,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(spec(
+        "parity.markdown_inline_math.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_markdown_inline_math_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("parity_markdown_prose_dollars", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.markdown_inline_math",
+            vec![
+                FieldPred::bool_eq("island_is_text_style_tex", true),
+                FieldPred::u64_eq("prose_sources", 3),
+                FieldPred::u64_eq("prose_sources_literal", 3),
+            ],
+        )],
+    ));
     // ------------------------------------------------------------------
     // fm-3kr / fm-n64 enhanced-surface drills: refusal policy by name,
     // spring-kernel determinism, CSV→Table round-trip.
@@ -6174,6 +6263,16 @@ fn python_native_outputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_native_outputs.v1")
         .expect("Python native output scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn markdown_inline_math_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.markdown_inline_math.v1")
+        .expect("Markdown inline-math scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

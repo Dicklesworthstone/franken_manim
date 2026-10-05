@@ -1,10 +1,10 @@
 # Mathematical Markdown scenes
 
-`MarkdownMobject(source, math_mode=True)` composes native Scribe prose with the
-existing TeX engine. It extends the source-addressable document API; it does not
-replace its native parser, scene objects, source edit machinery, or frame clock.
-The default `math_mode=False` remains literal at dollar delimiters, preserving
-existing text-only documents.
+`MarkdownMobject(source)` composes native Scribe prose with the existing TeX
+engine (plan §11.7: fmd's parser, Scribe layout, fmd-math mathematics). It
+extends the source-addressable document API; it does not replace its native
+parser, scene objects, source edit machinery, or frame clock. Pass
+`math_mode=False` to keep every dollar literal.
 
 ```python
 from manimlib import *
@@ -13,7 +13,7 @@ from fmn_python.markdown import MarkdownMobject
 class Derivation(Scene):
     def construct(self):
         source = "# A useful identity\n\nFor $x>0$, let $f(x)=x^2$.\n\n```math\nf'(x)=2x\n```"
-        document = MarkdownMobject(source, math_mode=True, line_width=7, font_size=28)
+        document = MarkdownMobject(source, line_width=7, font_size=28)
         self.add(document)
         self.play(document.select_text("f'(x)")[0].animate.set_color(YELLOW))
         self.play(document.animate_source(source.replace("x^2", "x^3").replace("2x", "3x^2")))
@@ -21,7 +21,10 @@ class Derivation(Scene):
 
 ## Native layout and controls
 
-Dollar islands `$...$` use native inline mathematics. Double-dollar islands occupy their own lines; they and `math`/`tex` fences
+Dollar islands `$...$` use native inline mathematics. Delimiters follow fmd's
+own rule: an opening dollar must precede non-whitespace and a closing dollar
+must follow it, so `$5 and $10` stays prose, as it does in fmd's HTML and PDF.
+Double-dollar islands occupy their own lines; they and `math`/`tex` fences
 use native display style. A `textext` fence uses the native
 text-mainland TeX API. Underscores and backslashes inside formulas are protected
 from Markdown interpretation. Reference links retain document-wide definitions even in mathematical paragraphs.
@@ -37,7 +40,8 @@ lists, task markers, quotations and native ruled tables retain their structure.
 Tables and code blocks are not automatically scaled or wrapped to the measure.
 
 `body_color` sets native text, mathematical and rule colors without replacing
-fenced-code syntax colors. `line_width` and `body_color` require `math_mode=True`.
+fenced-code syntax colors; without it, table rules take `TableMobject`'s
+`GREY_B`. `line_width` and `body_color` are refused with `math_mode=False`.
 The existing `theme`, `font_size` and `block_gap` options remain available;
 block gaps scale with font size as in text-only documents. Ordinary inherited
 whole-family color changes still affect every selected native member.

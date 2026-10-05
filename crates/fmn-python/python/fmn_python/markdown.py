@@ -48,12 +48,13 @@ class MarkdownMobject(m.VGroup):
     ``block_ranges`` are UTF-8 byte intervals from fmd. ``select_source`` uses
     Python character offsets and returns intersecting whole blocks, not glyphs.
     The document is centered initially; edits retain its authored upper-left
-    affine frame. ``math_mode=True`` composes native dollar/fenced mathematics
-    and enables ``line_width`` wrapping. The default remains literal text at
-    dollar delimiters. Neither mode launches a browser or fetches link targets.
+    affine frame. Dollar and fenced mathematics are typeset by fmd-math under
+    fmd's own delimiter rule (plan §11.7), and ``line_width`` wraps prose.
+    ``math_mode=False`` keeps every dollar literal. Neither mode launches a
+    browser or fetches link targets.
     """
     def __init__(self, source, *, font_size=24, theme='monokai', block_gap=.45,
-                 math_mode=False, line_width=None, body_color=None, **kwargs):
+                 math_mode=True, line_width=None, body_color=None, **kwargs):
         if '_markdown_blocks' in vars(self) or self._is_bound():
             raise RuntimeError("an existing Markdown document must be edited with set_source")
         source = _source(source)
@@ -98,10 +99,11 @@ class MarkdownMobject(m.VGroup):
         raw.remove(*children)
         blocks = m.VGroup()
         for content, kind in zip(children, kinds):
-            if kind == 'table' and not math_mode:
-                # Atlas's standalone table uses black rules. The source scene
-                # defaults to light glyphs on black; recolor only the stroke
-                # channel, retaining native rule widths and all cell fills.
+            if kind == 'table' and body_color is None:
+                # Atlas's standalone table uses black rules, and the math
+                # composer paints them in the body color. Without an explicit
+                # body_color, rules take TableMobject's GREY_B: recolor only
+                # the stroke channel, retaining rule widths and cell fills.
                 content.set_stroke(color=m.GREY_B)
             anchor = m.VectorizedPoint(content.get_corner(m.UL))
             block = m.VGroup(content, anchor)

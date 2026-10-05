@@ -147,7 +147,7 @@ class LiveMarkdownTests(unittest.TestCase):
             with self.assertRaises((TypeError,ValueError)): doc.set_source(source)
             self.assertEqual(records(doc),before)
         error=KeyboardInterrupt('cancel native shaping')
-        with patch.object(m,'_build_markdown',side_effect=error):
+        with patch.object(m,'_build_math_markdown',side_effect=error):
             with self.assertRaises(KeyboardInterrupt) as caught: doc.set_source('new')
         self.assertIs(caught.exception,error)
         self.assertEqual(records(doc),before)
@@ -156,19 +156,19 @@ class LiveMarkdownTests(unittest.TestCase):
 
     def test_reentry_and_callback_edits_do_not_poison_copies(self):
         doc=MarkdownMobject('first')
-        builder=m._build_markdown
+        builder=m._build_math_markdown
         clones=[]
         def hooked(*args,**kwargs):
             clones.extend((doc.copy(),copy.deepcopy(doc)))
             with self.assertRaises(RuntimeError): doc.set_source('recursive')
             return builder(*args,**kwargs)
-        with patch.object(m,'_build_markdown',side_effect=hooked): doc.set_source('second')
+        with patch.object(m,'_build_math_markdown',side_effect=hooked): doc.set_source('second')
         for clone in clones: clone.set_source('independent')
         def mutation(*args,**kwargs):
             doc.shift(m.RIGHT)
             return builder(*args,**kwargs)
         old=doc._markdown_anchors[0].get_center().copy()
-        with patch.object(m,'_build_markdown',side_effect=mutation):
+        with patch.object(m,'_build_math_markdown',side_effect=mutation):
             with self.assertRaisesRegex(RuntimeError,'changed during'): doc.set_source('third')
         self.assertEqual(doc.source,'second')
         np.testing.assert_allclose(doc._markdown_anchors[0].get_center(),old+m.RIGHT,atol=1e-6)
