@@ -60,6 +60,10 @@
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
+#[allow(dead_code)]
+#[path = "support/semantic_routes.rs"]
+mod semantic_routes;
+
 use fmn_anim::animation::Animation as _;
 use fmn_anim::{FramePacket, MoveAlongPath, RateFunc, Timeline};
 use fmn_conformance::e2e::{
@@ -5223,6 +5227,63 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    // fm-5wq.46: the semantic witness on every golden-producing route. Each
+    // route's frame must pass the sanity oracles and its planted vertical
+    // mirror must fail them, inside the one invocation: the RenderMatrix
+    // class already has its single drill.
+    specs.push(spec(
+        "render_matrix.semantic_oracles.native.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(semantic_oracles_native_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("semantic_routes_pass", 5),
+            counter_eq("semantic_mirrors_rejected", 5),
+        ],
+        [
+            "library_2d",
+            "cli_2d",
+            "cli_camera",
+            "fmtl_native",
+            "fmtl_wasm_player",
+        ]
+        .map(|route| {
+            LogExpect::span_present(
+                "e2e.oracle.semantic",
+                vec![
+                    FieldPred::str_eq("route", route),
+                    FieldPred::str_eq("frame", "rendered"),
+                    FieldPred::str_eq("oracle", "orientation.triangle"),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            )
+        })
+        .to_vec(),
+    ));
+    specs.push(spec(
+        "render_matrix.semantic_oracles.portal.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(semantic_oracles_portal_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("semantic_routes_pass", 2),
+        ],
+        ["portal_scene", "portal_camera_readback"]
+            .map(|route| {
+                LogExpect::span_present(
+                    "e2e.oracle.semantic",
+                    vec![
+                        FieldPred::str_eq("route", route),
+                        FieldPred::str_eq("frame", "planted_vertical_flip"),
+                        FieldPred::str_eq("oracle", "orientation.triangle"),
+                        FieldPred::str_eq("verdict", "fail"),
+                    ],
+                )
+            })
+            .to_vec(),
+    ));
     specs.push(spec(
         "lifecycle.python_scene_console.v1",
         ScenarioClass::LifecycleDrill,
@@ -6233,9 +6294,112 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     specs
 }
 
+/// One semantic-oracle log line: route, which frame, the oracle, its
+/// fixture, what it required, what it measured, and the verdict.
+fn semantic_reading_event(
+    route: &str,
+    frame: &str,
+    oracle: &str,
+    fixture: &str,
+    expected: &str,
+    measured: &str,
+    pass: bool,
+) -> LogEvent {
+    LogEvent::new("e2e.oracle.semantic")
+        .field("route", route)
+        .field("frame", frame)
+        .field("oracle", oracle)
+        .field("fixture", fixture)
+        .field("expected", expected)
+        .field("measured", measured)
+        .field("verdict", if pass { "pass" } else { "fail" })
+}
+
+/// fm-5wq.46: the semantic witness through every native golden-producing
+/// route (library, CLI affine and camera, native and wasm FMTL players).
+fn semantic_oracles_native_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (mut passed, mut rejected) = (0_u64, 0_u64);
+    for route in semantic_routes::ROUTES {
+        let frame = route().map_err(fail)?;
+        let (rendered, flipped) = frame.read();
+        for (label, readings) in [("rendered", &rendered), ("planted_vertical_flip", &flipped)] {
+            for r in readings {
+                ctx.event(semantic_reading_event(
+                    frame.route,
+                    label,
+                    r.oracle,
+                    r.fixture,
+                    &r.expected,
+                    &r.measured,
+                    r.pass,
+                ));
+            }
+        }
+        match frame.verdict() {
+            Ok(()) => {
+                passed += 1;
+                rejected += 1;
+            }
+            Err(error) => ctx.event(
+                LogEvent::new("e2e.oracle.semantic_failure")
+                    .field("route", frame.route)
+                    .field("error", error),
+            ),
+        }
+    }
+    ctx.counter("semantic_routes_pass", passed);
+    ctx.counter("semantic_mirrors_rejected", rejected);
+    Ok(RunOutcome::ok()
+        .with_counter("semantic_routes_pass", passed)
+        .with_counter("semantic_mirrors_rejected", rejected))
+}
+
+/// fm-5wq.46: the portal's scene render and camera readback; the Python
+/// suite asserts both frames and rejects both planted mirrors.
+fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let readings = manimlib::run_portal_gauntlet_semantic_witness().map_err(fail)?;
+    let mut routes = std::collections::BTreeSet::new();
+    for r in &readings {
+        routes.insert(r.route.clone());
+        ctx.event(semantic_reading_event(
+            &r.route,
+            &r.frame,
+            &r.oracle,
+            "",
+            "",
+            &r.measured,
+            r.pass,
+        ));
+    }
+    ctx.counter("semantic_routes_pass", routes.len() as u64);
+    Ok(RunOutcome::ok().with_counter("semantic_routes_pass", routes.len() as u64))
+}
+
 // ---------------------------------------------------------------------------
 // Test entry points
 // ---------------------------------------------------------------------------
+
+/// fm-5wq.46's native semantic-oracle scenario, focused.
+#[test]
+fn semantic_oracles_native_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.semantic_oracles.native.v1")
+        .expect("the native semantic-oracle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// fm-5wq.46's portal semantic-oracle scenario, focused.
+#[test]
+fn semantic_oracles_portal_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.semantic_oracles.portal.v1")
+        .expect("the portal semantic-oracle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
 
 /// Focused acceptance for the Python production-composition seam. The same
 /// spec also remains in the per-commit fast-tier catalog.

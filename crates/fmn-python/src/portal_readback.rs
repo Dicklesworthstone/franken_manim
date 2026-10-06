@@ -383,4 +383,28 @@ mod tests {
                 .expect("native camera readback preserves scene state and pixels");
         });
     }
+
+    /// fm-5wq.46: the semantic witness through the portal's scene render and
+    /// camera readback reads right side up, and a planted vertical mirror of
+    /// each frame fails the orientation oracles.
+    #[test]
+    fn portal_routes_pass_the_semantic_sanity_oracles() {
+        use pyo3::types::{PyAnyMethods, PyDictMethods};
+        crate::with_python_test_module("semantic witness", |py, _module, globals| {
+            let source =
+                std::ffi::CString::new(include_str!("../tests/semantic_witness.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("portal frames satisfy the semantic sanity oracles");
+            let routes: u64 = globals
+                .get_item("semantic_witness_report")
+                .unwrap()
+                .expect("the suite reports its routes")
+                .get_item("routes")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(routes, 2);
+        });
+    }
 }

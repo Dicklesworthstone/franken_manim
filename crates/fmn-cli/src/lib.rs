@@ -5455,9 +5455,10 @@ fn resolve_native_render_input(
             return Err(CliError::new(
                 "scene",
                 format!(
-                    "select a built-in scene or pass --write_all; available scenes: {}, plus {} and {} for --format wav; camera scenes: {}",
+                    "select a built-in scene or pass --write_all; available scenes: {}, plus {}, {} and {} for --format wav; camera scenes: {}",
                     fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
                     fmn::builtins::TEX_SPAN_SCENE_NAME,
+                    fmn::builtins::SEMANTIC_WITNESS_SCENE_NAME,
                     fmn::builtins::SOUND_CUE_SCENE_NAME,
                     camera_route::CAMERA_SCENE_NAMES.join(", "),
                 ),
@@ -5475,14 +5476,16 @@ fn resolve_native_render_input(
             if fmn::builtins::primitive_scene(name).is_none()
                 && fmn::builtins::sound_scene(name).is_none()
                 && fmn::builtins::tex_span_scene(name).is_none()
+                && fmn::builtins::semantic_witness_scene(name).is_none()
                 && camera_route::builtin(name).is_none()
             {
                 return Err(CliError::new(
                     "scene",
                     format!(
-                        "unknown built-in scene {name:?}; available scenes: {} plus {} and {}; camera scenes: {}",
+                        "unknown built-in scene {name:?}; available scenes: {} plus {}, {} and {}; camera scenes: {}",
                         fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
                         fmn::builtins::TEX_SPAN_SCENE_NAME,
+                        fmn::builtins::SEMANTIC_WITNESS_SCENE_NAME,
                         fmn::builtins::SOUND_CUE_SCENE_NAME,
                         camera_route::CAMERA_SCENE_NAMES.join(", "),
                     ),
@@ -5582,6 +5585,9 @@ fn resolve_builtin_program(name: &str) -> Result<Box<dyn fmn::SceneConstruct>, C
         return Ok(Box::new(scene));
     }
     if let Some(scene) = fmn::builtins::tex_span_scene(name) {
+        return Ok(Box::new(scene));
+    }
+    if let Some(scene) = fmn::builtins::semantic_witness_scene(name) {
         return Ok(Box::new(scene));
     }
     if let Some(scene) = fmn::builtins::sound_scene(name) {

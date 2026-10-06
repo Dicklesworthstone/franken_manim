@@ -165,8 +165,7 @@ pub fn render_probe_is_not_background() -> bool {
         let mut plan = RenderPlan::new();
         plan.sync(&stage, 0)
             .expect("valid empty wasm smoke fixture");
-        let mono =
-            MonoTable::build(&plan, config.map).expect("bounded empty monotone table");
+        let mono = MonoTable::build(&plan, config.map).expect("bounded empty monotone table");
         let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
             .expect("bounded wasm smoke binning");
         binning.prune_occluded(&plan).expect("binning prune");
@@ -175,6 +174,257 @@ pub fn render_probe_is_not_background() -> bool {
         encode_frame(&frame).expect("encode")
     };
     probe != background
+}
+
+// Semantic sanity oracles in the VM (fm-5wq.46). The probe above uses the
+// raw y-down map on purpose; these render the semantic witness through the
+// front doors' +Y-up map and check what a mirrored frame cannot fake. The
+// witness is the geometric half of `fmn::builtins::witness` (this target has
+// no typesetting crates), drawn from raw quad-path records like the probe.
+
+const ORACLE_WIDTH: u32 = 160;
+const ORACLE_HEIGHT: u32 = 90;
+/// Bits of [`semantic_oracle_mask`], in order: orientation.triangle,
+/// orientation.f_shape, placement.up_dot, placement.left_dot, colour.fill,
+/// colour.background.
+const ALL_ORACLES: u32 = 0b11_1111;
+
+fn oracle_config(y_up: bool) -> FrameConfig {
+    FrameConfig::new(
+        Viewport {
+            width: ORACLE_WIDTH,
+            height: ORACLE_HEIGHT,
+        },
+        ScreenMap {
+            scale: f64::from(ORACLE_HEIGHT) / 8.0,
+            origin: [
+                f64::from(ORACLE_WIDTH) / 2.0,
+                f64::from(ORACLE_HEIGHT) / 2.0,
+            ],
+            y_up,
+        },
+        Srgb::from_rgb8(0, 0, 0).to_linear(1.0),
+    )
+}
+
+/// A filled straight-edged polygon: the closed corner ring as the quad-path
+/// anchor/handle interleave, opaque fill, no stroke.
+fn add_polygon(stage: &mut Stage, corners: &[[f32; 2]], rgba: [f32; 4]) {
+    let mut points = Vec::with_capacity(2 * corners.len() + 1);
+    for (i, a) in corners.iter().enumerate() {
+        let b = corners[(i + 1) % corners.len()];
+        points.push([a[0], a[1], 0.0]);
+        points.push([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, 0.0]);
+    }
+    points.push([corners[0][0], corners[0][1], 0.0]);
+    let mut buffer =
+        fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), points.len())
+            .expect("a witness polygon cannot overflow the buffer size");
+    for (i, point) in points.iter().enumerate() {
+        buffer.write(i, "point", point);
+        buffer.write(i, "fill_rgba", &rgba);
+        buffer.write(i, "stroke_rgba", &rgba);
+        buffer.write(i, "stroke_width", &[0.0]);
+    }
+    let mob = stage.add(Mobject::from_buffer(buffer));
+    stage.add_to_scene(mob).expect("live root");
+}
+
+fn square(center: [f32; 2], half: f32) -> [[f32; 2]; 4] {
+    let [x, y] = center;
+    [
+        [x - half, y - half],
+        [x + half, y - half],
+        [x + half, y + half],
+        [x - half, y + half],
+    ]
+}
+
+const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+fn witness_stage() -> Stage {
+    let mut stage = Stage::new();
+    add_polygon(&mut stage, &[[-6.6, 3.6], [-4.2, 3.6], [-6.6, 1.4]], RED);
+    add_polygon(
+        &mut stage,
+        &[
+            [3.2, 0.8],
+            [3.7, 0.8],
+            [3.7, 2.0],
+            [5.0, 2.0],
+            [5.0, 2.5],
+            [3.7, 2.5],
+            [3.7, 3.1],
+            [5.6, 3.1],
+            [5.6, 3.6],
+            [3.2, 3.6],
+        ],
+        WHITE,
+    );
+    add_polygon(&mut stage, &square([0.0, 3.0], 0.25), GREEN);
+    add_polygon(&mut stage, &square([-5.0, 0.0], 0.25), BLUE);
+    stage
+}
+
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 == 0 { 1.0 } else { -1.0 };
+    let exponent = i32::from((bits >> 10) & 0x1f);
+    let mantissa = f32::from(bits & 0x3ff);
+    match exponent {
+        0 => sign * mantissa * 2f32.powi(-24),
+        31 => sign * f32::INFINITY,
+        _ => sign * (1.0 + mantissa / 1024.0) * 2f32.powi(exponent - 15),
+    }
+}
+
+/// The witness's linear RGB pixels, top row first.
+fn witness_pixels(y_up: bool) -> Vec<[f32; 3]> {
+    let stage = witness_stage();
+    let config = oracle_config(y_up);
+    let mut plan = RenderPlan::new();
+    plan.sync(&stage, 0).expect("valid witness fixture");
+    let mono = MonoTable::build(&plan, config.map).expect("bounded witness monotone table");
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded witness binning");
+    binning.prune_occluded(&plan).expect("binning prune");
+    let job = FrameJob::new(&plan, &mono, &binning, config).expect("frame job");
+    let frame = job.render(1).expect("render");
+    let stride = frame.layout().stride(0);
+    let plane = frame.plane(0);
+    let (w, h) = (ORACLE_WIDTH as usize, ORACLE_HEIGHT as usize);
+    let mut pixels = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let at = y * stride + x * 8;
+            pixels.push(std::array::from_fn(|c| {
+                f16_to_f32(u16::from_le_bytes([
+                    plane[at + 2 * c],
+                    plane[at + 2 * c + 1],
+                ]))
+            }));
+        }
+    }
+    pixels
+}
+
+fn is(pixel: [f32; 3], rgba: [f32; 4]) -> bool {
+    (0..3).all(|c| (pixel[c] - rgba[c]).abs() <= 0.1)
+}
+
+/// `(column, row)` of every interior pixel of one witness colour.
+fn coords(pixels: &[[f32; 3]], rgba: [f32; 4]) -> Vec<(usize, usize)> {
+    let w = ORACLE_WIDTH as usize;
+    pixels
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| is(**p, rgba))
+        .map(|(i, _)| (i % w, i / w))
+        .collect()
+}
+
+/// Mass in the first and last third of the pixels' extent along an axis.
+fn thirds(pixels: &[(usize, usize)], vertical: bool) -> (usize, usize) {
+    let axis = |&(x, y): &(usize, usize)| if vertical { y } else { x };
+    let (Some(lo), Some(hi)) = (pixels.iter().map(axis).min(), pixels.iter().map(axis).max())
+    else {
+        return (0, 0);
+    };
+    let span = hi - lo + 1;
+    let first = pixels.iter().filter(|p| (axis(p) - lo) * 3 < span).count();
+    let last = pixels
+        .iter()
+        .filter(|p| (axis(p) - lo) * 3 >= 2 * span)
+        .count();
+    (first, last)
+}
+
+fn heavier(a: usize, b: usize) -> bool {
+    a > 0 && a >= 2 * b
+}
+
+fn centroid(pixels: &[(usize, usize)]) -> Option<(f64, f64)> {
+    if pixels.is_empty() {
+        return None;
+    }
+    let n = pixels.len() as f64;
+    let (sx, sy) = pixels.iter().fold((0.0, 0.0), |(sx, sy), &(x, y)| {
+        (sx + x as f64, sy + y as f64)
+    });
+    Some((sx / n, sy / n))
+}
+
+/// Scene point to pixel, +Y up: the map the front doors use.
+fn expected_pixel(x: f64, y: f64) -> (f64, f64) {
+    let scale = f64::from(ORACLE_HEIGHT) / 8.0;
+    (
+        f64::from(ORACLE_WIDTH) / 2.0 + x * scale,
+        f64::from(ORACLE_HEIGHT) / 2.0 - y * scale,
+    )
+}
+
+fn near(centroid: Option<(f64, f64)>, expected: (f64, f64)) -> bool {
+    centroid.is_some_and(|(cx, cy)| {
+        (cx - expected.0).abs() <= 0.02 * f64::from(ORACLE_WIDTH)
+            && (cy - expected.1).abs() <= 0.02 * f64::from(ORACLE_HEIGHT)
+    })
+}
+
+fn oracle_mask(pixels: &[[f32; 3]]) -> u32 {
+    let (w, h) = (ORACLE_WIDTH as usize, ORACLE_HEIGHT as usize);
+    let red = coords(pixels, RED);
+    let upper_left = red.iter().filter(|&&(x, y)| 2 * x < w && 2 * y < h).count();
+    let (red_top, red_bottom) = thirds(&red, true);
+    let (red_left, red_right) = thirds(&red, false);
+    let white = coords(pixels, WHITE);
+    let (f_top, f_bottom) = thirds(&white, true);
+    let (f_left, f_right) = thirds(&white, false);
+    let up = centroid(&coords(pixels, GREEN));
+    let left = centroid(&coords(pixels, BLUE));
+    let (fill_x, fill_y) = expected_pixel((-6.6 - 4.2 - 6.6) / 3.0, (3.6 + 3.6 + 1.4) / 3.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let fill = pixels
+        .get(fill_y as usize * w + fill_x as usize)
+        .is_some_and(|p| is(*p, RED));
+    let background = [0, w - 1, (h - 1) * w, h * w - 1]
+        .iter()
+        .all(|&i| is(pixels[i], [0.0, 0.0, 0.0, 1.0]));
+    [
+        !red.is_empty()
+            && upper_left * 20 >= red.len() * 19
+            && heavier(red_top, red_bottom)
+            && heavier(red_left, red_right),
+        heavier(f_top, f_bottom) && heavier(f_left, f_right),
+        near(up, expected_pixel(0.0, 3.0)) && up.is_some_and(|(_, y)| y < h as f64 / 4.0),
+        near(left, expected_pixel(-5.0, 0.0)) && left.is_some_and(|(x, _)| x < w as f64 / 4.0),
+        fill,
+        background,
+    ]
+    .iter()
+    .enumerate()
+    .fold(0, |mask, (bit, &pass)| mask | (u32::from(pass) << bit))
+}
+
+/// The oracles that hold on the witness rendered through the +Y-up map,
+/// one bit each (see [`ALL_ORACLES`]); a right-side-up frame sets all six.
+#[wasm_bindgen]
+pub fn semantic_oracle_mask() -> u32 {
+    oracle_mask(&witness_pixels(true))
+}
+
+/// The same oracles on a planted vertical mirror (the y-down map): the
+/// orientation, up-dot and fill bits must all clear.
+#[wasm_bindgen]
+pub fn semantic_oracle_mask_mirrored() -> u32 {
+    oracle_mask(&witness_pixels(false))
+}
+
+/// The pass mask's expected value, exported so the harness never hardcodes it.
+#[wasm_bindgen]
+pub fn semantic_oracle_all() -> u32 {
+    ALL_ORACLES
 }
 
 /// Monotonic milliseconds from the browser clock capability.

@@ -187,7 +187,17 @@ A workstream may not hand off with failing gates or unwritten fixtures.
 1. `scripts/check.sh` is green on one named, unchanged committed source HEAD. A partial run, uncommitted tree, different commit, or hosted-only result is not this evidence.
 2. For W10/G4 portal parity claims, `scripts/check_portal_runtime.sh` is additionally green against a freshly installed wheel from that same source checkpoint, and its robot report/overlay hash are retained.
 3. UBS is run over changed files; criticals are fixed or explicitly adjudicated in the handoff.
-4. New or changed behavior carries tests or fixtures in the same tranche. Self-golden drift is adjudicated, never reflexively re-blessed.
+4. New or changed behavior carries tests or fixtures in the same tranche. Self-golden drift is adjudicated, never reflexively re-blessed. A re-bless follows the protocol below.
+
+### Re-bless protocol (fm-5wq.46)
+
+A bit-locked golden proves a frame is unchanged, never that it is right: G1 closed on goldens that had locked vertically mirrored frames for a month (fm-sq8.9). So every change to a golden lock under `crates/fmn-conformance/goldens/` carries its evidence:
+
+1. **The semantic sanity oracles stay green.** `cargo test -p fmn-conformance --test semantic_oracles`, the portal's `semantic_witness.py`, wasm-smoke and the e2e `render_matrix.semantic_oracles.*` scenarios read the built-in semantic witness on every golden-producing route. Orientation, placement, colour and reading order must hold, and a planted vertical mirror must fail. A re-bless that turns them red is a regression, not a bless.
+2. **The before/after side-by-side is committed with the lock.** For a lock whose new SHA-256 is `D`, the tree holds `crates/fmn-conformance/goldens/rebless/<lock stem>-<D[..12]>.png`. It is the panel the adjudicator reviewed, composed with `fmn_conformance::golden::side_by_side_png` (before left, after right, magenta divider). A lock that only gains new entries carries the same file, with the new frames on both sides.
+3. **The commit message names the adjudication**: what moved, why it is correct, and the bead.
+
+`tests/golden_rig.rs::every_golden_lock_carries_its_rebless_artefact` enforces item 2 for every lock. Digests from before the protocol are its launch baseline (`golden::REBLESS_LAUNCH_BASELINE`); that list is never extended. `a_rebless_without_its_side_by_side_fails_the_protocol` is the planted negative.
 5. New semantic divergences from the Reference have Behavior Notes.
 6. Beads is trued up: finished work closed with reasons, unfinished claims released with status comments, and follow-ups filed. Ready human/external obligations carry the exact ADR-0023 claim-kind label instead of an invented dependency or prose-only convention.
 7. Run `br sync --flush-only`, then stage and commit `.beads/`.

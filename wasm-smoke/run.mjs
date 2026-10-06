@@ -97,6 +97,18 @@ async function main() {
         fail(`frame digest unstable across renders: ${digestA} vs ${digestB}`);
     }
 
+    // 1b. Semantic sanity oracles (fm-5wq.46): the witness through the +Y-up
+    //     map passes all of them, and its planted vertical mirror fails the
+    //     orientation, up-dot and fill oracles (bits 0, 1, 2 and 4).
+    const oracles = ex.semantic_oracle_mask();
+    const mirrored = ex.semantic_oracle_mask_mirrored();
+    if (oracles !== ex.semantic_oracle_all()) {
+        fail(`semantic oracles failed in the VM: mask ${oracles.toString(2)}`);
+    }
+    if ((mirrored & 0b10111) !== 0) {
+        fail(`a vertically mirrored witness passed orientation oracles: mask ${mirrored.toString(2)}`);
+    }
+
     // 2. The clock capability reads the real host clocks.
     const monotonicMs = ex.clock_probe_monotonic_ms();
     if (!(monotonicMs >= 0 && monotonicMs < 1e9)) {
@@ -120,7 +132,8 @@ async function main() {
     console.log(
         `wasm-smoke OK: digest=${digestA.toString(16)} ` +
             `monotonic_ms=${monotonicMs.toFixed(3)} wall_ms=${wallMs.toFixed(0)} ` +
-            `process=capability-absent topology=1-cpu`,
+            `process=capability-absent topology=1-cpu ` +
+            `semantic_oracles=${oracles.toString(2)} mirrored=${mirrored.toString(2)}`,
     );
 }
 

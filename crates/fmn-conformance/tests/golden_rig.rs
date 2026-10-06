@@ -7,7 +7,8 @@
 //! parallel-safe.
 
 use fmn_conformance::golden::{
-    GoldenError, GoldenStore, LockEntry, Mode, Scope, Verdict, platform_key,
+    GoldenError, GoldenStore, LockEntry, Mode, REBLESS_ARTEFACT_DIR, Scope, Verdict, platform_key,
+    rebless_artefact_name, rebless_violations, side_by_side_png,
 };
 use std::path::PathBuf;
 
@@ -383,4 +384,92 @@ fn lock_document_envelope_bounds_reads_and_refuses_oversized_bless_atomically() 
         canonical.as_bytes(),
         "a refused oversized bless must not rewrite the lock"
     );
+}
+
+/// Every committed golden lock, as `(file name, SHA-256 hex)`.
+fn committed_locks() -> Vec<(String, String)> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("goldens");
+    let mut locks: Vec<_> = std::fs::read_dir(&dir)
+        .expect("list goldens")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "lock"))
+        .map(|path| {
+            let bytes = std::fs::read(&path).expect("read lock");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("UTF-8 lock name")
+                .to_owned();
+            (name, fmn_hash::sha256(&bytes).to_hex())
+        })
+        .collect();
+    locks.sort();
+    assert!(locks.len() >= 6, "the golden locks went missing: {locks:?}");
+    locks
+}
+
+fn committed_artefact(name: &str) -> Option<Vec<u8>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    std::fs::read(root.join(REBLESS_ARTEFACT_DIR).join(name)).ok()
+}
+
+/// fm-5wq.46: every golden lock at its committed digest is either the
+/// protocol's launch baseline or carries its before/after artefact.
+#[test]
+fn every_golden_lock_carries_its_rebless_artefact() {
+    let violations = rebless_violations(&committed_locks(), &committed_artefact);
+    assert!(
+        violations.is_empty(),
+        "re-bless protocol (docs/GOVERNANCE.md §4): {violations:#?}"
+    );
+}
+
+/// The planted negatives: a lock changed without an artefact, and an
+/// artefact that is not a PNG, both fail the protocol.
+#[test]
+fn a_rebless_without_its_side_by_side_fails_the_protocol() {
+    let mut locks = committed_locks();
+    let (lock, digest) = locks[0].clone();
+    let reblessed = fmn_hash::sha256(format!("{digest} re-blessed").as_bytes()).to_hex();
+    locks[0].1.clone_from(&reblessed);
+    let violations = rebless_violations(&locks, &committed_artefact);
+    assert_eq!(violations.len(), 1, "{violations:#?}");
+    assert!(
+        violations[0].contains(&lock)
+            && violations[0].contains(&rebless_artefact_name(&lock, &reblessed)),
+        "{violations:#?}"
+    );
+
+    let expected = rebless_artefact_name(&lock, &reblessed);
+    let not_png = |name: &str| (name == expected).then(|| b"not a png".to_vec());
+    let violations = rebless_violations(&locks, &|name| {
+        not_png(name).or_else(|| committed_artefact(name))
+    });
+    assert_eq!(violations.len(), 1, "{violations:#?}");
+    assert!(violations[0].contains("is not a PNG"), "{violations:#?}");
+
+    let panel = side_by_side_png(2, 1, &[1; 8], &[2; 8]).expect("panel");
+    let accepted = |name: &str| (name == expected).then(|| panel.clone());
+    assert!(
+        rebless_violations(&locks, &|name| accepted(name)
+            .or_else(|| committed_artefact(name)))
+        .is_empty(),
+        "an artefact under the digest's name satisfies the protocol"
+    );
+}
+
+#[test]
+fn side_by_side_panels_put_before_left_and_after_right() {
+    let before = [10_u8, 20, 30, 255].repeat(3 * 2);
+    let after = [40_u8, 50, 60, 255].repeat(3 * 2);
+    let png = side_by_side_png(3, 2, &before, &after).expect("panel");
+    let decoded =
+        fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default()).expect("panel decodes");
+    assert_eq!((decoded.width, decoded.height), (3 + 4 + 3, 2));
+    let pixel = |x: usize, y: usize| &decoded.rgba[(y * 10 + x) * 4..(y * 10 + x) * 4 + 4];
+    assert_eq!(pixel(0, 1), [10, 20, 30, 255]);
+    assert_eq!(pixel(4, 0), [255, 0, 255, 255]);
+    assert_eq!(pixel(9, 1), [40, 50, 60, 255]);
+    assert!(side_by_side_png(3, 2, &before, &after[4..]).is_err());
 }

@@ -18,6 +18,10 @@
 //!   written next to the lock (under `<suite>.<key>.actual/`), so a failure on
 //!   CI or another machine can be diffed byte-for-byte. Sidecars are
 //!   gitignored (`*.actual`).
+//! - **The re-bless protocol** (fm-5wq.46, `docs/GOVERNANCE.md` §4): a lock
+//!   at a new digest carries its before/after side-by-side under
+//!   [`REBLESS_ARTEFACT_DIR`], checked by [`rebless_violations`], and the
+//!   semantic sanity oracles (`crate::semantic`) stay green.
 //!
 //! Artifact names are constrained to a conservative character set — they are
 //! path components, and a fixture name must never be a traversal vector.
@@ -638,4 +642,128 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), GoldenError> {
         path: path.to_path_buf(),
         err,
     })
+}
+
+// ---------------------------------------------------------------------------
+// The re-bless protocol (fm-5wq.46)
+// ---------------------------------------------------------------------------
+//
+// A bit-lock proves "unchanged", never "correct": G1 passed on goldens that
+// had locked mirrored frames for a month (fm-sq8.9). So a re-bless carries
+// its evidence. Every golden lock at its current digest has, in the tree, the
+// before/after side-by-side its adjudicator looked at, named for that digest
+// ([`rebless_artefact_name`]), and the semantic sanity oracles
+// (`crate::semantic`) stay green in the same `cargo test`. A lock edited
+// without its artefact fails [`rebless_violations`] by construction.
+
+/// Repository-relative directory of re-bless artefacts.
+pub const REBLESS_ARTEFACT_DIR: &str = "crates/fmn-conformance/goldens/rebless";
+
+/// The lock digests the protocol launched with (2026-10-06). They were
+/// blessed before it existed, so they carry no artefact; never extend this
+/// list.
+pub const REBLESS_LAUNCH_BASELINE: &[(&str, &str)] = &[
+    (
+        "certified_engine.certified.lock",
+        "0acafed2ad2974ff8e8d9862857c4bc3d8ea002a53f27f1b52fe37daa4001b6f",
+    ),
+    (
+        "e2e.certified.lock",
+        "fde00e29ec1c470009d54b42023832bcd93a2542ea853812e2acdbb7d81c9307",
+    ),
+    (
+        "gallery_3d.certified.lock",
+        "43778109c8520888c53415780fd69ecdaa9e5f4f1b2e8dca657f76fbd852b1ca",
+    ),
+    (
+        "scene_goldens.certified.lock",
+        "5fae39c1f9e7a84560fdc0b11280d28792286691ead698987cc5aa754dd87182",
+    ),
+    (
+        "scene_runtime.certified.lock",
+        "4d501cee9e747ce57f2525836ca6a1420ba3602dc08ea0ea2068402e735a7af4",
+    ),
+    (
+        "self_goldens.certified.lock",
+        "c6cc392fe473bf77fc0c8bc1bd0043636fe85ef9cd84006976ad820d61b05b5d",
+    ),
+];
+
+/// The artefact a lock file at `digest` (SHA-256 hex of its bytes) must
+/// carry: `<lock stem>-<first 12 hex digits>.png` in
+/// [`REBLESS_ARTEFACT_DIR`].
+#[must_use]
+pub fn rebless_artefact_name(lock: &str, digest: &str) -> String {
+    let stem = lock.strip_suffix(".lock").unwrap_or(lock);
+    let prefix = digest.get(..12).unwrap_or(digest);
+    format!("{stem}-{prefix}.png")
+}
+
+/// The protocol's violations for `locks` (`(file name, SHA-256 hex)` of
+/// every lock file). `artefact` returns an artefact's bytes by file name in
+/// [`REBLESS_ARTEFACT_DIR`], or `None` when it is absent.
+#[must_use]
+pub fn rebless_violations(
+    locks: &[(String, String)],
+    artefact: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (lock, digest) in locks {
+        if REBLESS_LAUNCH_BASELINE
+            .iter()
+            .any(|(name, launched)| name == lock && launched == digest)
+        {
+            continue;
+        }
+        let name = rebless_artefact_name(lock, digest);
+        match artefact(&name) {
+            None => violations.push(format!(
+                "{lock} changed to {digest} without its before/after artefact \
+                 {REBLESS_ARTEFACT_DIR}/{name}"
+            )),
+            Some(bytes) if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") => violations.push(format!(
+                "{REBLESS_ARTEFACT_DIR}/{name} is not a PNG side-by-side"
+            )),
+            Some(_) => {}
+        }
+    }
+    violations
+}
+
+/// A before | after panel for a re-bless artefact: two same-size RGBA8
+/// frames side by side with a 4-pixel magenta divider, PNG-encoded.
+///
+/// # Errors
+/// When either frame is not `width * height * 4` bytes.
+pub fn side_by_side_png(
+    width: u32,
+    height: u32,
+    before: &[u8],
+    after: &[u8],
+) -> Result<Vec<u8>, String> {
+    const DIVIDER: u32 = 4;
+    let (w, h) = (width as usize, height as usize);
+    if before.len() != w * h * 4 || after.len() != w * h * 4 {
+        return Err(format!(
+            "side-by-side frames must be {width}x{height} RGBA8 ({} bytes); got {} and {}",
+            w * h * 4,
+            before.len(),
+            after.len()
+        ));
+    }
+    let row_bytes = w * 4;
+    let mut panel = Vec::with_capacity((2 * w + DIVIDER as usize) * h * 4);
+    for row in 0..h {
+        panel.extend_from_slice(&before[row * row_bytes..(row + 1) * row_bytes]);
+        for _ in 0..DIVIDER {
+            panel.extend_from_slice(&[255, 0, 255, 255]);
+        }
+        panel.extend_from_slice(&after[row * row_bytes..(row + 1) * row_bytes]);
+    }
+    Ok(fmn_codec::encode_rgba8(
+        2 * width + DIVIDER,
+        height,
+        &panel,
+        fmn_codec::CompressionLevel::Best,
+    ))
 }

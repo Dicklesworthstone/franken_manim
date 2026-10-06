@@ -321,6 +321,177 @@ pub mod builtins {
         })
     }
 
+    /// Stable name of the semantic-witness scene outside the pinned G1
+    /// corpus (fm-5wq.46).
+    ///
+    /// A bit-locked golden proves a frame unchanged, not right: G1 closed
+    /// while every native 2D frame was vertically mirrored (fm-sq8.9). This
+    /// static frame is the fixture the semantic sanity oracles
+    /// (`fmn-conformance`'s `semantic` module) read on every
+    /// golden-producing route. Every element is asymmetric under a mirror
+    /// and painted in its own exact colour, so an oracle classifies pixels
+    /// without knowing which renderer drew them.
+    pub const SEMANTIC_WITNESS_SCENE_NAME: &str = "semantic_witness.v1";
+
+    /// The witness's elements: exact sRGB8 colours, pairwise far apart so an
+    /// anti-aliased edge never classifies as another element, and their
+    /// scene-space placement in the default 8-unit-high frame.
+    pub mod witness {
+        use crate::prelude::Vec3;
+
+        /// A filled right triangle in the upper-left quadrant, its right
+        /// angle at the top-left corner.
+        pub const TRIANGLE: [u8; 3] = [255, 0, 0];
+        /// The triangle's vertices.
+        pub const TRIANGLE_VERTICES: [Vec3; 3] =
+            [[-6.6, 3.6, 0.0], [-4.2, 3.6, 0.0], [-6.6, 1.4, 0.0]];
+        /// An F-shaped polygon in the upper-right quadrant: the stem on the
+        /// left, the full-width bar on top.
+        pub const F_SHAPE: [u8; 3] = [255, 255, 255];
+        /// The F's outline.
+        pub const F_VERTICES: [Vec3; 10] = [
+            [3.2, 0.8, 0.0],
+            [3.7, 0.8, 0.0],
+            [3.7, 2.0, 0.0],
+            [5.0, 2.0, 0.0],
+            [5.0, 2.5, 0.0],
+            [3.7, 2.5, 0.0],
+            [3.7, 3.1, 0.0],
+            [5.6, 3.1, 0.0],
+            [5.6, 3.6, 0.0],
+            [3.2, 3.6, 0.0],
+        ];
+        /// A dot at `UP * 3`.
+        pub const UP_DOT: [u8; 3] = [0, 255, 0];
+        /// Its centre.
+        pub const UP_DOT_CENTER: Vec3 = [0.0, 3.0, 0.0];
+        /// A dot at `LEFT * 5`.
+        pub const LEFT_DOT: [u8; 3] = [0, 0, 255];
+        /// Its centre.
+        pub const LEFT_DOT_CENTER: Vec3 = [-5.0, 0.0, 0.0];
+        /// Both dots' radius.
+        pub const DOT_RADIUS: f64 = 0.25;
+        /// `Text("AB")`, its two glyphs in their own colours.
+        pub const TEXT: &str = "AB";
+        /// The A.
+        pub const TEXT_A: [u8; 3] = [255, 255, 0];
+        /// The B.
+        pub const TEXT_B: [u8; 3] = [0, 255, 255];
+        /// The text's centre.
+        pub const TEXT_CENTER: Vec3 = [3.6, -2.2, 0.0];
+        /// `Tex("x^2")`, base and superscript in their own colours.
+        pub const TEX: &str = "x^2";
+        /// The base x.
+        pub const TEX_BASE: [u8; 3] = [255, 0, 255];
+        /// The superscript 2.
+        pub const TEX_SUPERSCRIPT: [u8; 3] = [255, 128, 0];
+        /// The formula's centre.
+        pub const TEX_CENTER: Vec3 = [-2.6, -2.4, 0.0];
+        /// Text and formula size.
+        pub const FONT_SIZE: f64 = 96.0;
+    }
+
+    /// The native semantic-witness scene: one static frame.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SemanticWitnessScene {
+        name: &'static str,
+    }
+
+    impl SemanticWitnessScene {
+        /// The witness under its stable name.
+        #[must_use]
+        pub const fn new() -> Self {
+            Self {
+                name: SEMANTIC_WITNESS_SCENE_NAME,
+            }
+        }
+    }
+
+    impl Default for SemanticWitnessScene {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    fn witness_color(color: [u8; 3]) -> Srgb {
+        Srgb::from_rgb8(color[0], color[1], color[2])
+    }
+
+    /// Fill `mob` (and its family when `family`) with one opaque colour and
+    /// no stroke, so its pixels carry exactly that colour.
+    fn paint_solid(stage: &mut Stage<'_>, mob: Mob, color: [u8; 3], family: bool) {
+        stage.set_fill(mob, Some(witness_color(color)), Some(1.0), None, family);
+        stage.set_stroke(mob, None, Some(0.0), None, None, family);
+    }
+
+    /// Paint the point-bearing members of `root`, in family order, one
+    /// colour each; the member count must match.
+    fn paint_glyphs(stage: &mut Stage<'_>, root: Mob, colors: &[[u8; 3]]) -> crate::Result<()> {
+        let arena = stage.arena();
+        let glyphs: Vec<Mob> = arena
+            .family(root)
+            .into_iter()
+            .filter(|&member| arena.get_points(member).is_some_and(|p| !p.is_empty()))
+            .collect();
+        if glyphs.len() != colors.len() {
+            return Err(SceneError::Integration(IntegrationError::new(
+                "semantic witness",
+                format!("expected {} glyphs, found {}", colors.len(), glyphs.len()),
+            ))
+            .into());
+        }
+        for (glyph, color) in glyphs.into_iter().zip(colors) {
+            paint_solid(stage, glyph, *color, false);
+        }
+        Ok(())
+    }
+
+    impl SceneConstruct for SemanticWitnessScene {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
+            vec![TypesetRequest::math(witness::TEX)]
+        }
+
+        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+            let triangle = stage.add(Polygon::new(witness::TRIANGLE_VERTICES))?;
+            paint_solid(stage, triangle, witness::TRIANGLE, true);
+            let f_shape = stage.add(Polygon::new(witness::F_VERTICES))?;
+            paint_solid(stage, f_shape, witness::F_SHAPE, true);
+            for (center, color) in [
+                (witness::UP_DOT_CENTER, witness::UP_DOT),
+                (witness::LEFT_DOT_CENTER, witness::LEFT_DOT),
+            ] {
+                let dot = stage.add(Dot::new().point(center).radius(witness::DOT_RADIUS))?;
+                paint_solid(stage, dot, color, true);
+            }
+            let text = Text::new(witness::TEXT)
+                .font_size(witness::FONT_SIZE)
+                .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
+            let text = stage.add(text.vmob)?;
+            stage.move_to(text, witness::TEXT_CENTER, ORIGIN);
+            paint_glyphs(stage, text, &[witness::TEXT_A, witness::TEXT_B])?;
+            let tex = Tex::new(witness::TEX)
+                .font_size(witness::FONT_SIZE)
+                .build(stage.tex_engine()?)?;
+            let tex = stage.add(tex.vmob)?;
+            stage.move_to(tex, witness::TEX_CENTER, ORIGIN);
+            paint_glyphs(stage, tex, &[witness::TEX_BASE, witness::TEX_SUPERSCRIPT])?;
+            // A short hold so every route emits real frames: the CLI refuses
+            // a generation with none.
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+
+    /// Resolve the built-in semantic-witness scene by its stable name.
+    #[must_use]
+    pub fn semantic_witness_scene(name: &str) -> Option<SemanticWitnessScene> {
+        (name == SEMANTIC_WITNESS_SCENE_NAME).then_some(SemanticWitnessScene::new())
+    }
+
     pub const INTERACTIVE_SCENE_NAME: &str = "interactive.v1";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -841,6 +841,7 @@ dependencies = [
  "fmn-studio",
  "fmn-tex",
  "fmn-text",
+ "fmn-wasm",
  "fnp-io",
 ]
 

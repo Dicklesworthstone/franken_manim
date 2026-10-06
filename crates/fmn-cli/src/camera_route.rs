@@ -85,7 +85,13 @@ pub(super) const CAMERA_SCENE_NAMES: &[&str] = &[
     "dot_cloud_depth.v1",
     "image_quad.v1",
     "mixed_camera.v1",
+    SEMANTIC_WITNESS_CAMERA_SCENE_NAME,
 ];
+
+/// The semantic-witness scene (fm-5wq.46) drawn through the fixed camera
+/// instead of the affine route, so the oracles read the perspective kernel's
+/// own Y mapping.
+pub(super) const SEMANTIC_WITNESS_CAMERA_SCENE_NAME: &str = "semantic_witness_camera.v1";
 
 pub(super) fn builtin(name: &str) -> Option<CameraScene> {
     CAMERA_SCENE_NAMES
@@ -99,14 +105,31 @@ pub(super) struct CameraScene {
     name: &'static str,
 }
 
+const fn witness_scene() -> fmn::builtins::SemanticWitnessScene {
+    fmn::builtins::SemanticWitnessScene::new()
+}
+
 impl fmn::SceneConstruct for CameraScene {
     fn name(&self) -> &str {
         self.name
     }
 
+    fn tex_preflight(&self) -> Vec<fmn::prelude::TypesetRequest<'_>> {
+        if self.name == SEMANTIC_WITNESS_CAMERA_SCENE_NAME {
+            vec![fmn::prelude::TypesetRequest::math(
+                fmn::builtins::witness::TEX,
+            )]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
         use fmn::prelude::*;
         use fmn_library::{DotCloud, ImageMobject};
+        if self.name == SEMANTIC_WITNESS_CAMERA_SCENE_NAME {
+            return witness_scene().construct(stage);
+        }
         let mixed = self.name == "mixed_camera.v1";
         let mut moving = None;
         if mixed || self.name == "surface_cube.v1" {

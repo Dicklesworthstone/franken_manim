@@ -56,6 +56,9 @@ fmn-config.workspace = true
 # PG-8 (fm-zoi): the binding-tax producer drives the real bridge. pyo3 stays
 # out of the shipped closure (D3) — this is a Gauntlet-only test edge.
 fmn-python = { workspace = true, features = ["gauntlet"] }
+# The browser player's frame path for the semantic sanity oracles
+# (tests/semantic_oracles.rs, fm-5wq.46), run natively.
+fmn-wasm = { path = "../fmn-wasm" }
 
 [lints]
 workspace = true

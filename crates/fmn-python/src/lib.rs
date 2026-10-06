@@ -12260,6 +12260,60 @@ pub struct PortalPlanarRouteGauntletReport {
     pub surface_routes: (u64, u64, Option<String>),
 }
 
+/// One semantic-oracle reading from the portal suite (fm-5wq.46).
+#[cfg(feature = "gauntlet")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalSemanticReading {
+    /// `portal_scene` or `portal_camera_readback`.
+    pub route: String,
+    /// `rendered` or `planted_vertical_flip`.
+    pub frame: String,
+    /// The oracle, e.g. `orientation.triangle`.
+    pub oracle: String,
+    /// What it measured.
+    pub measured: String,
+    /// Whether the frame satisfied it.
+    pub pass: bool,
+}
+
+/// Run `tests/semantic_witness.py`: the semantic witness through the
+/// portal's scene render and camera readback, each frame and its planted
+/// vertical mirror read by the semantic sanity oracles. The suite itself
+/// asserts the verdicts; the readings come back for the e2e log.
+///
+/// # Errors
+/// The suite's own failure, as text.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_semantic_witness() -> Result<Vec<PortalSemanticReading>, String> {
+    with_python_test_module("semantic witness Gauntlet", |py, _module, globals| {
+        let source = CString::new(include_str!("../tests/semantic_witness.py"))
+            .expect("semantic witness suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let report = globals
+            .get_item("semantic_witness_report")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "semantic witness suite emitted no report".to_owned())?;
+        let readings: Vec<(String, String, String, String, bool)> = report
+            .get_item("readings")
+            .and_then(|readings| readings.extract())
+            .map_err(|error| error.to_string())?;
+        Ok(readings
+            .into_iter()
+            .map(
+                |(route, frame, oracle, measured, pass)| PortalSemanticReading {
+                    route,
+                    frame,
+                    oracle,
+                    measured,
+                    pass,
+                },
+            )
+            .collect())
+    })
+}
+
 /// Render one pure-2D Python scene through the portal, export the same scene
 /// as FMTL/1, and render a surface scene; report the routes taken.
 #[cfg(feature = "gauntlet")]

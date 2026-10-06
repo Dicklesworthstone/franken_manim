@@ -120,4 +120,5 @@ pub mod perf_pg8;
 pub mod ratchet;
 pub mod scene_goldens;
 pub mod schema;
+pub mod semantic;
 pub mod tolerance;
