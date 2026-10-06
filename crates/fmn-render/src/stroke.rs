@@ -206,6 +206,10 @@ pub(crate) struct PreparedSegment {
     /// whose width and colour are exactly the same at every station, so the
     /// per-pixel arc-length solve can be skipped without changing a bit.
     station: bool,
+    /// For a uniform curved stroke, the squared object-space distance from the
+    /// segment's control triangle at and beyond which the segment provably
+    /// leaves the pixel's coverage unchanged ([`uniform_cull_distance`]).
+    cull_distance_squared: Option<f64>,
 }
 
 /// Per-draw stroke data whose inputs are fixed before a tile is touched.
@@ -250,6 +254,11 @@ impl<'a> PreparedStroke<'a> {
             f64::NEG_INFINITY,
         ];
         let station = style.stroke_station_is_observable();
+        let cull = if station || straight_segments {
+            None
+        } else {
+            uniform_cull_distance(style, map)
+        };
         for segment in segments {
             let segment_slab = segment_slab(segment, style, map, translate);
             slab[0] = slab[0].min(segment_slab[0]);
@@ -265,6 +274,8 @@ impl<'a> PreparedStroke<'a> {
                 },
                 line: straight_segments,
                 station,
+                cull_distance_squared: cull
+                    .and_then(|distance| segment_cull_distance_squared(segment, distance)),
             });
         }
         slab
@@ -305,6 +316,11 @@ impl<'a> PreparedStroke<'a> {
                 line_segment_excess_and_s(segment, style, map, obj)
             } else if prepared.station {
                 segment_excess_and_s(segment, prepared.total_arc_length, style, map, obj)
+            } else if prepared
+                .cull_distance_squared
+                .is_some_and(|threshold| hull_distance_squared(segment, [ox, oy]) >= threshold)
+            {
+                (zero_coverage_excess(style), segment.s0)
             } else {
                 uniform_segment_excess(segment, style, map, obj)
             };
@@ -484,6 +500,92 @@ pub fn stroke_nearest(
         }
     }
     Some((best, best_s))
+}
+
+/// The smallest excess [`aa_coverage`] maps to exactly zero coverage: half the
+/// AA band, through the same band substitution `aa_coverage` makes.
+/// `excess / aa >= 0.5` holds for every `excess` at or above it, because the
+/// halving is exact and correctly rounded division is monotone.
+fn zero_coverage_excess(style: &Style) -> f64 {
+    let aa_width_px = f64::from(style.anti_alias_width);
+    let aa = if aa_width_px > 0.0 { aa_width_px } else { 1e-8 };
+    0.5 * aa
+}
+
+/// The object-space distance at and beyond which a segment of a **uniform**
+/// stroke cannot change a pixel's shade.
+///
+/// Such a segment's excess is at least [`zero_coverage_excess`], so it either
+/// loses the minimum to a nearer segment or leaves a minimum that `aa_coverage`
+/// sends to zero. [`apply_joins`] is a chain of `min`/`max` steps whose result
+/// for any input at or above that excess is either at or above it too (zero
+/// coverage) or an input-independent wedge value — so the excess can be replaced
+/// by any value at or above the threshold without moving a bit. The station is
+/// unobservable (one exact width and colour), so the replaced station cannot
+/// move a bit either.
+///
+/// `None` (never cull) for a degenerate map or a non-finite bound.
+fn uniform_cull_distance(style: &Style, map: ScreenMap) -> Option<f64> {
+    let scale = map.scale.abs();
+    if !(scale > 0.0 && scale.is_finite()) {
+        return None;
+    }
+    let distance =
+        ((zero_coverage_excess(style) + half_width_px(style, map, 0.0)) / scale).max(0.0);
+    distance.is_finite().then_some(distance)
+}
+
+/// [`uniform_cull_distance`] widened for one segment's rounding, and squared.
+///
+/// The computed nearest distance can undercut the exact distance to the hull by
+/// a few units in the last place of the coordinates involved. The widening —
+/// one part in 10⁹ of the distance plus 10⁻⁹ of the coordinate magnitude, many
+/// orders above that rounding — keeps the lower bound strictly conservative.
+fn segment_cull_distance_squared(segment: &Segment, distance: f64) -> Option<f64> {
+    let magnitude = [segment.p0, segment.p1, segment.p2]
+        .iter()
+        .flat_map(|p| [p[0].abs(), p[1].abs()])
+        .fold(0.0f64, f64::max);
+    let widened = distance * (1.0 + 1e-9) + 1e-9 * (1.0 + magnitude);
+    let squared = widened * widened;
+    squared.is_finite().then_some(squared)
+}
+
+/// Squared planar distance from `q` to a segment's control triangle: zero on or
+/// inside it, and a degenerate (collinear) triangle measures as its edges.
+///
+/// A quadratic Bézier lies in its control triangle, and dropping `z` can only
+/// shorten a distance, so this is a lower bound on the distance
+/// [`fmn_geom::distance::nearest_on_quadratic`] measures. Any `NaN` reads as
+/// inside (zero), which never culls.
+fn hull_distance_squared(segment: &Segment, q: [f64; 2]) -> f64 {
+    let a = [segment.p0[0], segment.p0[1]];
+    let b = [segment.p1[0], segment.p1[1]];
+    let c = [segment.p2[0], segment.p2[1]];
+    let cross =
+        |o: [f64; 2], u: [f64; 2]| (u[0] - o[0]) * (q[1] - o[1]) - (u[1] - o[1]) * (q[0] - o[0]);
+    let sides = [cross(a, b), cross(b, c), cross(c, a)];
+    let negative = sides.iter().any(|side| *side < 0.0);
+    let positive = sides.iter().any(|side| *side > 0.0);
+    if !(negative && positive) {
+        return 0.0;
+    }
+    edge_distance_squared(a, b, q)
+        .min(edge_distance_squared(b, c, q))
+        .min(edge_distance_squared(c, a, q))
+}
+
+fn edge_distance_squared(a: [f64; 2], b: [f64; 2], q: [f64; 2]) -> f64 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let aq = [q[0] - a[0], q[1] - a[1]];
+    let length_squared = dot2(ab, ab);
+    let t = if length_squared > 0.0 {
+        (dot2(aq, ab) / length_squared).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let d = [aq[0] - t * ab[0], aq[1] - t * ab[1]];
+    dot2(d, d)
 }
 
 /// [`segment_excess_and_s`] for a stroke whose station is unobservable: the
@@ -1444,39 +1546,117 @@ mod tests {
         ] {
             assert!(ramped.stroke_station_is_observable(), "{ramped:?}");
         }
-        for joint_type in [JointType::Auto, JointType::Bevel, JointType::Miter] {
-            let style = Style {
-                joint_type,
-                ..uniform.clone()
-            };
-            let joins = join_wedges(&segments, &shape.subpath_starts, &style, map, translate);
-            let (backing, slab) = prepared(&segments, &style, map, translate, false);
-            assert!(backing.iter().all(|segment| !segment.station));
-            let prepared = PreparedStroke::from_parts(&backing, slab);
-            let mut covered = 0;
-            for y in -80..80 {
-                for x in -80..120 {
-                    let point = [f64::from(x) + 0.25, f64::from(y) + 0.75];
-                    let scalar = stroke_shade(&segments, &joins, &style, map, translate, point);
-                    let fast = prepared.shade(&segments, &joins, &style, map, translate, point);
-                    assert_eq!(
-                        fast.0.to_bits(),
-                        scalar.0.to_bits(),
-                        "coverage at {point:?}"
-                    );
-                    if scalar.0 > 0.0 {
-                        covered += 1;
-                        let colour = |s| stroke_rgba_at(&style, s).map(f32::to_bits);
-                        assert_eq!(colour(fast.1), colour(scalar.1), "colour at {point:?}");
+        // Thick, hairline and negative (zero-coverage) widths; the default and
+        // a degenerate AA band; every joint. The control-triangle cull must
+        // fire on the lattice, and nothing it skips may move a bit.
+        let mut culled = 0;
+        for (width, anti_alias_width, min_covered) in [
+            (500.0, 1.5, 500),
+            (20.0, 1.5, 100),
+            (500.0, 0.0, 500),
+            (-50.0, 1.5, 0),
+        ] {
+            for joint_type in [JointType::Auto, JointType::Bevel, JointType::Miter] {
+                let style = Style {
+                    joint_type,
+                    stroke_width: width,
+                    stroke_width_end: width,
+                    anti_alias_width,
+                    ..uniform.clone()
+                };
+                let joins = join_wedges(&segments, &shape.subpath_starts, &style, map, translate);
+                let (backing, slab) = prepared(&segments, &style, map, translate, false);
+                assert!(backing.iter().all(|segment| !segment.station));
+                let prepared = PreparedStroke::from_parts(&backing, slab);
+                let mut covered = 0;
+                for y in -80..80 {
+                    for x in -80..120 {
+                        let point = [f64::from(x) + 0.25, f64::from(y) + 0.75];
+                        let scalar = stroke_shade(&segments, &joins, &style, map, translate, point);
+                        let fast = prepared.shade(&segments, &joins, &style, map, translate, point);
                         assert_eq!(
-                            half_width_px(&style, map, fast.1).to_bits(),
-                            half_width_px(&style, map, scalar.1).to_bits()
+                            fast.0.to_bits(),
+                            scalar.0.to_bits(),
+                            "coverage at {point:?}, {style:?}"
                         );
+                        if scalar.0 > 0.0 {
+                            covered += 1;
+                            let colour = |s| stroke_rgba_at(&style, s).map(f32::to_bits);
+                            assert_eq!(colour(fast.1), colour(scalar.1), "colour at {point:?}");
+                            assert_eq!(
+                                half_width_px(&style, map, fast.1).to_bits(),
+                                half_width_px(&style, map, scalar.1).to_bits()
+                            );
+                        }
+                        let [ox, oy] = map.to_object(point, translate);
+                        culled += segments
+                            .iter()
+                            .zip(&backing)
+                            .filter(|(segment, prepared)| {
+                                point[0] >= prepared.slab[0]
+                                    && point[0] <= prepared.slab[2]
+                                    && point[1] >= prepared.slab[1]
+                                    && point[1] <= prepared.slab[3]
+                                    && prepared.cull_distance_squared.is_some_and(|threshold| {
+                                        hull_distance_squared(segment, [ox, oy]) >= threshold
+                                    })
+                            })
+                            .count();
                     }
                 }
+                assert!(
+                    covered >= min_covered,
+                    "the grid exercises the stroke: {covered} at width {width}"
+                );
             }
-            assert!(covered > 500, "the grid exercises the stroke: {covered}");
         }
+        assert!(
+            culled > 1000,
+            "the lattice exercises the hull cull: {culled}"
+        );
+    }
+
+    #[test]
+    fn the_control_triangle_bounds_the_curve_distance_from_below() {
+        let segment = Segment {
+            p0: [-3.0, -1.0, 0.0],
+            p1: [0.5, 4.0, 2.0],
+            p2: [4.0, -0.5, -1.0],
+            s0: 0.0,
+            s1: 1.0,
+        };
+        let degenerate = Segment {
+            p0: [0.0, 0.0, 0.0],
+            p1: [1.0, 1.0, 0.0],
+            p2: [2.0, 2.0, 0.0],
+            s0: 0.0,
+            s1: 1.0,
+        };
+        let mut outside = 0;
+        for subject in [segment, degenerate] {
+            for y in -40..40 {
+                for x in -40..40 {
+                    let q = [f64::from(x) * 0.23, f64::from(y) * 0.19];
+                    let bound = hull_distance_squared(&subject, q);
+                    let near = fmn_geom::distance::nearest_on_quadratic(
+                        subject.p0,
+                        subject.p1,
+                        subject.p2,
+                        [q[0], q[1], 0.0],
+                    );
+                    assert!(
+                        bound.sqrt() <= near.distance + 1e-12,
+                        "{q:?}: hull {} > curve {}",
+                        bound.sqrt(),
+                        near.distance
+                    );
+                    outside += usize::from(bound > 0.0);
+                }
+            }
+        }
+        assert!(outside > 1000);
+        let nan = [f64::NAN, 0.0];
+        assert_eq!(hull_distance_squared(&segment, nan), 0.0);
     }
 
     #[test]

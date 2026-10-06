@@ -76,6 +76,91 @@ fn nv12_fusion_preserves_legacy_bytes_for_every_binary16_pattern() {
 }
 
 #[test]
+fn repeated_quads_convert_exactly_like_isolated_quads() {
+    // Runs of byte-identical quads (the converters' reuse path) interleaved with
+    // quads that differ from their predecessor in exactly one pixel, one byte —
+    // including an alpha-only byte the transfer ignores. Every quad must encode
+    // exactly as the same four pixels converted alone in a 2x2 frame, where no
+    // predecessor exists to reuse.
+    let (width, height) = (24usize, 6usize);
+    let base = [
+        f16_from_f32(0.25),
+        f16_from_f32(0.5),
+        f16_from_f32(0.75),
+        f16_from_f32(1.0),
+    ];
+    let mut source = frame(PixelFormat::Rgba16F, width as u32, height as u32, 64);
+    for y in 0..height {
+        for x in 0..width {
+            let mut bits = base;
+            let quad = (x / 2, y / 2);
+            if quad.0 % 3 == 2 && (x + y) % 4 == 1 {
+                // One pixel of every third quad differs in one channel.
+                let channel = (quad.0 + quad.1) % 4;
+                bits[channel] ^= 1;
+            }
+            set_pixel(&mut source, x, y, bits);
+        }
+    }
+    let read = |frame: &FrameBuffer, x: usize, y: usize| -> [u16; 4] {
+        let at = y * frame.layout().stride(0) + x * 8;
+        std::array::from_fn(|k| {
+            let bytes = &frame.plane(0)[at + 2 * k..at + 2 * k + 2];
+            u16::from_le_bytes([bytes[0], bytes[1]])
+        })
+    };
+    for siting in [ChromaSiting::Left, ChromaSiting::Center] {
+        let mut nv12 = frame(PixelFormat::Nv12, width as u32, height as u32, 64);
+        let mut p010 = frame(PixelFormat::P010, width as u32, height as u32, 64);
+        rgba16f_to_nv12(&source, &mut nv12, ColorRange::Limited, siting).unwrap();
+        rgba16f_to_p010(&source, &mut p010, ColorRange::Limited, siting).unwrap();
+        for qy in 0..height / 2 {
+            for qx in 0..width / 2 {
+                let mut alone = frame(PixelFormat::Rgba16F, 2, 2, 64);
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        set_pixel(&mut alone, dx, dy, read(&source, 2 * qx + dx, 2 * qy + dy));
+                    }
+                }
+                let mut nv12_alone = frame(PixelFormat::Nv12, 2, 2, 64);
+                let mut p010_alone = frame(PixelFormat::P010, 2, 2, 64);
+                rgba16f_to_nv12(&alone, &mut nv12_alone, ColorRange::Limited, siting).unwrap();
+                rgba16f_to_p010(&alone, &mut p010_alone, ColorRange::Limited, siting).unwrap();
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let (x, y) = (2 * qx + dx, 2 * qy + dy);
+                        assert_eq!(
+                            nv12.plane(0)[y * nv12.layout().stride(0) + x],
+                            nv12_alone.plane(0)[dy * nv12_alone.layout().stride(0) + dx],
+                            "NV12 luma at ({x}, {y}), {siting:?}"
+                        );
+                        assert_eq!(
+                            code(&p010, 0, x, y),
+                            code(&p010_alone, 0, dx, dy),
+                            "P010 luma at ({x}, {y}), {siting:?}"
+                        );
+                    }
+                }
+                for channel in 0..2 {
+                    assert_eq!(
+                        nv12.plane(1)[qy * nv12.layout().stride(1) + 2 * qx + channel],
+                        nv12_alone.plane(1)[channel],
+                        "NV12 chroma {channel} of quad ({qx}, {qy}), {siting:?}"
+                    );
+                    assert_eq!(
+                        code(&p010, 1, 2 * qx + channel, qy),
+                        code(&p010_alone, 1, channel, 0),
+                        "P010 chroma {channel} of quad ({qx}, {qy}), {siting:?}"
+                    );
+                }
+            }
+        }
+        padding_is_untouched(&nv12);
+        padding_is_untouched(&p010);
+    }
+}
+
+#[test]
 fn direct_converters_preserve_unequal_strides_orientation_and_padding() {
     for width in [2, 6, 18] {
         let mut source = frame(PixelFormat::Rgba16F, width, 6, 128);

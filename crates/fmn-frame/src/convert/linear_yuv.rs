@@ -169,6 +169,11 @@ fn put<const TEN: bool>(bytes: &mut [u8], at: usize, code: u16) {
 // Monomorphized output depth and pixel reader keep the NV12 and P010 arithmetic
 // explicit. All working storage is a single 2x2 quad on the stack. The layout
 // checks above and FrameLayout's even-dimension rule precede all writes.
+//
+// Every output code of a quad is a pure function of its four source pixels, so
+// a quad whose pixels are byte-identical to the previous quad's — background,
+// flat fills — reuses that quad's four luma and two chroma codes instead of
+// repeating the transfer, matrix and rounding. Same bytes, less work.
 fn convert<const TEN: bool>(
     src: &FrameBuffer,
     dst: &mut FrameBuffer,
@@ -186,32 +191,52 @@ fn convert<const TEN: bool>(
     let sample_bytes = if TEN { 2 } else { 1 };
     let source = src.plane(0);
     let target = dst.as_bytes_mut();
+    let pixel_key = |at: usize| {
+        u64::from_le_bytes(source[at..at + 8].try_into().expect("an 8-byte pixel"))
+    };
+    let mut memo: Option<([u64; 4], [u16; 4], [u16; 2])> = None;
     for y in (0..height).step_by(2) {
         for x in (0..width).step_by(2) {
-            let mut chroma = [[0i64; 2]; 4];
+            let ats = [
+                y * src_stride + x * 8,
+                y * src_stride + (x + 1) * 8,
+                (y + 1) * src_stride + x * 8,
+                (y + 1) * src_stride + (x + 1) * 8,
+            ];
+            let key = ats.map(pixel_key);
+            let (luma, chroma_codes) = match memo {
+                Some((previous, luma, chroma)) if previous == key => (luma, chroma),
+                _ => {
+                    let mut luma = [0u16; 4];
+                    let mut chroma = [[0i64; 2]; 4];
+                    for (k, &at) in ats.iter().enumerate() {
+                        let pixel = rgb(&source[at..at + 8]);
+                        luma[k] = quant::<TEN>(dot(&coef.y, pixel), coef.y_off);
+                        chroma[k] = [dot(&coef.cb, pixel), dot(&coef.cr, pixel)];
+                    }
+                    let chroma_codes = [0, 1].map(|channel| {
+                        let sum = site_average(
+                            siting,
+                            chroma[0][channel],
+                            chroma[1][channel],
+                            chroma[2][channel],
+                            chroma[3][channel],
+                        );
+                        quant::<TEN>(sum, 128)
+                    });
+                    memo = Some((key, luma, chroma_codes));
+                    (luma, chroma_codes)
+                }
+            };
             for dy in 0..2 {
                 for dx in 0..2 {
-                    let at = (y + dy) * src_stride + (x + dx) * 8;
-                    let pixel = rgb(&source[at..at + 8]);
                     let y_at = y_offset + (y + dy) * y_stride + (x + dx) * sample_bytes;
-                    put::<TEN>(target, y_at, quant::<TEN>(dot(&coef.y, pixel), coef.y_off));
-                    chroma[dy * 2 + dx] = [dot(&coef.cb, pixel), dot(&coef.cr, pixel)];
+                    put::<TEN>(target, y_at, luma[dy * 2 + dx]);
                 }
             }
             let c_at = c_offset + (y / 2) * c_stride + x * sample_bytes;
-            for channel in 0..2 {
-                let sum = site_average(
-                    siting,
-                    chroma[0][channel],
-                    chroma[1][channel],
-                    chroma[2][channel],
-                    chroma[3][channel],
-                );
-                put::<TEN>(
-                    target,
-                    c_at + channel * sample_bytes,
-                    quant::<TEN>(sum, 128),
-                );
+            for (channel, code) in chroma_codes.into_iter().enumerate() {
+                put::<TEN>(target, c_at + channel * sample_bytes, code);
             }
         }
     }

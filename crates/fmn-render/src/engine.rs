@@ -2415,6 +2415,12 @@ impl<'a> FrameJob<'a> {
         }
         let segments = self.segments_of(rec);
         let joins = self.joins_of(rec);
+        // A constant-width stroke narrower than the complexity threshold is
+        // rejected by `stroke_contributes_complexity` at every station, so
+        // neither the centre test nor any subcell probe can count an edge.
+        // Skipping the classification then changes no bit and saves the four
+        // probe shades per AA-band pixel.
+        let classify = classify && stroke_may_contribute_complexity(&rec.style, self.config.map);
         let w = (x_hi - x_lo) as usize;
         for i in 0..w {
             let p = [f64::from(x_lo + i as u32) + 0.5, f64::from(py) + 0.5];
@@ -2674,6 +2680,17 @@ fn stroke_contributes_complexity(style: &Style, map: ScreenMap, s: f64) -> bool 
     let aa_band = effective_aa_band(style);
     let full_width = 2.0 * half_width_px(style, map, s);
     full_width >= AA_STROKE_COMPLEX_MIN_WIDTH_BANDS * aa_band
+}
+
+/// Whether [`stroke_contributes_complexity`] can hold at *some* station.
+///
+/// False only for a constant-width stroke whose one (finite) width fails the
+/// threshold: [`Style::has_constant_stroke_width`] means every station's width
+/// is numerically the same as station 0's, so the predicate's verdict at
+/// station 0 is its verdict everywhere. Any other stroke answers true and keeps
+/// the per-station test.
+fn stroke_may_contribute_complexity(style: &Style, map: ScreenMap) -> bool {
+    !style.has_constant_stroke_width() || stroke_contributes_complexity(style, map, 0.0)
 }
 
 /// The same nonzero AA width [`crate::stroke::aa_coverage`] evaluates.
@@ -3191,10 +3208,7 @@ impl PixelKernel for FastBuildTier {
 
     #[inline]
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
-        for (&pixel, out) in acc.iter().zip(out.as_chunks_mut::<8>().0) {
-            let [r, g, b, a] = pixel.to_array();
-            write_row_f32(&[PremulRgba32 { r, g, b, a }], out);
-        }
+        write_premul_f32_pixels(acc.iter().map(|pixel| pixel.to_array()), out);
     }
 
     #[inline]
@@ -3232,28 +3246,64 @@ fn source_over(rgba: [f32; 4], coverage: f64, dst: PremulRgba) -> PremulRgba {
 }
 
 /// Write one row of the accumulator as linear-light straight-alpha `Rgba16F`.
+///
+/// Like [`write_premul_f32_pixels`], a pixel bit-identical to its predecessor
+/// reuses the predecessor's encoded bytes.
 fn write_row(acc: &[PremulRgba], out: &mut [u8]) {
+    let mut memo: Option<([u64; 4], [u8; 8])> = None;
     for (px, dst) in acc.iter().zip(out.as_chunks_mut::<8>().0) {
+        let key = [px.r, px.g, px.b, px.a].map(f64::to_bits);
+        if let Some((previous, bytes)) = memo
+            && previous == key
+        {
+            *dst = bytes;
+            continue;
+        }
         let lin = px.unpremultiply();
+        let mut bytes = [0u8; 8];
         for (k, v) in [lin.r, lin.g, lin.b, lin.a].into_iter().enumerate() {
             let bits = fmn_frame::half::f16_from_f32(v as f32);
-            dst[k * 2..k * 2 + 2].copy_from_slice(&bits.to_le_bytes());
+            bytes[k * 2..k * 2 + 2].copy_from_slice(&bits.to_le_bytes());
         }
+        *dst = bytes;
+        memo = Some((key, bytes));
     }
 }
 
 /// Standard-mode writeback from the f32 premultiplied accumulator.
 fn write_row_f32(acc: &[PremulRgba32], out: &mut [u8]) {
-    for (px, dst) in acc.iter().zip(out.as_chunks_mut::<8>().0) {
-        let rgba = if px.a == 0.0 {
+    write_premul_f32_pixels(acc.iter().map(|px| [px.r, px.g, px.b, px.a]), out);
+}
+
+/// Unpremultiply and encode premultiplied `f32` pixels as `Rgba16F`.
+///
+/// The encoding is a pure function of the four input bit patterns, so a run of
+/// bit-identical pixels — background, flat fills, saturated stroke cores —
+/// reuses the previous pixel's eight bytes instead of repeating four divisions
+/// and four half-float roundings. Same bytes, less work.
+fn write_premul_f32_pixels(pixels: impl Iterator<Item = [f32; 4]>, out: &mut [u8]) {
+    let mut memo: Option<([u32; 4], [u8; 8])> = None;
+    for (px, dst) in pixels.zip(out.as_chunks_mut::<8>().0) {
+        let key = px.map(f32::to_bits);
+        if let Some((previous, bytes)) = memo
+            && previous == key
+        {
+            *dst = bytes;
+            continue;
+        }
+        let [r, g, b, a] = px;
+        let rgba = if a == 0.0 {
             [0.0, 0.0, 0.0, 0.0]
         } else {
-            [px.r / px.a, px.g / px.a, px.b / px.a, px.a]
+            [r / a, g / a, b / a, a]
         };
+        let mut bytes = [0u8; 8];
         for (k, value) in rgba.into_iter().enumerate() {
             let bits = fmn_frame::half::f16_from_f32(value);
-            dst[k * 2..k * 2 + 2].copy_from_slice(&bits.to_le_bytes());
+            bytes[k * 2..k * 2 + 2].copy_from_slice(&bits.to_le_bytes());
         }
+        *dst = bytes;
+        memo = Some((key, bytes));
     }
 }
 
