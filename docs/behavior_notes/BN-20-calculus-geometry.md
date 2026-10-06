@@ -78,3 +78,12 @@ projection styles and tracker-driven region playback. Independently constructed
 native polygons verify that disconnected fills have no invented bridge.
 Y4M comparisons run at one and four threads. These witnesses do not close the
 wider compatibility or certified-rendering gates.
+
+The native Rust `Axes::get_riemann_rectangles` follows the same rules — the same
+bin formula as the portal's `_riemann_grid`, chart corners, `show_signed_area` —
+witnessed by `riemann_bins_follow_bn20` in `crates/fmn-library/src/coords.rs`.
+Both front doors default to the pinned Reference's `colors=(BLUE, GREEN)`, and
+the portal's `get_area_under_graph` to its `fill_color=BLUE`
+(`test_default_colors_are_the_references` in `live_graphing.py`). The native
+`get_area_under_graph` still cuts by curve index; it has not taken this note's
+data-coordinate clipping yet.

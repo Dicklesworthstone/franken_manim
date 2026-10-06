@@ -6964,7 +6964,7 @@ class CoordinateSystem(_abc.ABC):
         stroke_width=1,
         stroke_color=None,
         fill_opacity=1,
-        colors=(_BLUE_D, _BLUE_B),
+        colors=(_BLUE, _GREEN),
         negative_color=None,
         stroke_background=True,
         show_signed_area=True,
@@ -6974,8 +6974,6 @@ class CoordinateSystem(_abc.ABC):
             stroke_color = _BLACK
         if negative_color is None:
             negative_color = _RED
-        if colors == (_BLUE_D, _BLUE_B):
-            colors = (_BLUE_D, _BLUE_B)
         if x_range is None:
             x_range = self.x_range[:2]
         if dx is None:
@@ -7024,7 +7022,7 @@ class CoordinateSystem(_abc.ABC):
 
     def get_area_under_graph(self, graph, x_range=None, fill_color=None, fill_opacity=0.5):
         if fill_color is None:
-            fill_color = _BLUE_D
+            fill_color = _BLUE
         if x_range is None:
             x_range = [
                 self.x_axis.p2n(graph.get_start()),

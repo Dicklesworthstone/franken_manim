@@ -51,7 +51,7 @@ use fmn_core::color::{Srgb, color_gradient};
 use fmn_core::constants::{
     BLACK, BLUE, DEFAULT_LIGHT_COLOR, DEFAULT_MOBJECT_COLOR, DEFAULT_MOBJECT_TO_EDGE_BUFF, DL,
     DOWN, DR, FRAME_X_RADIUS, FRAME_Y_RADIUS, GREEN, GREY_A, LEFT, MED_SMALL_BUFF, ORIGIN, OUT, PI,
-    RED, RIGHT, SMALL_BUFF, UL, UP, YELLOW,
+    RED, RIGHT, SMALL_BUFF, UP, YELLOW,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::{QuadPath, space_ops};
@@ -62,7 +62,7 @@ use crate::graphs::{SamplingBudget, SamplingError, sampled_values};
 use crate::line::{DashedLine, Line};
 use crate::numbers::DecimalNumber;
 use crate::pointcloud::DotCloud;
-use crate::poly::{ArrowTip, Rectangle};
+use crate::poly::{ArrowTip, Polygon};
 use crate::style::Style;
 use crate::tex::{Tex, TexMobjectError};
 use crate::text::{Text, TextMobjectError, text_style};
@@ -125,6 +125,9 @@ pub enum CoordsError {
     Dash(DashError),
     /// An axis or graph label failed to typeset.
     Tex(TexMobjectError),
+    /// A Riemann range that decreases, has a non-positive step, or whose
+    /// step cannot advance the bound (BN-20).
+    InvalidRiemannRange(&'static str),
 }
 
 impl std::fmt::Display for CoordsError {
@@ -140,6 +143,7 @@ impl std::fmt::Display for CoordsError {
             Self::Text(e) => write!(f, "coordinate label failed: {e}"),
             Self::Dash(e) => write!(f, "coordinate dash construction failed: {e}"),
             Self::Tex(e) => write!(f, "coordinate label failed to typeset: {e}"),
+            Self::InvalidRiemannRange(reason) => write!(f, "invalid Riemann range: {reason}"),
         }
     }
 }
@@ -151,7 +155,7 @@ impl std::error::Error for CoordsError {
             Self::Text(e) => Some(e),
             Self::Dash(e) => Some(e),
             Self::Tex(e) => Some(e),
-            Self::InvalidSampleType(_) => None,
+            Self::InvalidSampleType(_) | Self::InvalidRiemannRange(_) => None,
         }
     }
 }
@@ -235,6 +239,65 @@ fn sorted_contains_close(values: &[f64], target: f64) -> bool {
 /// The Reference's `inverse_interpolate`.
 fn inverse_interpolate(x0: f64, x1: f64, x: f64) -> f64 {
     (x - x0) / (x1 - x0)
+}
+
+/// BN-20's Riemann bins over `[start, stop]`: `start + k·step` for
+/// `k < count`, then `stop`, where `count = max(1, ⌈(stop − start)/step⌉)`
+/// with the ratio stepped down one ulp first, so a range that is an exact
+/// multiple of `step` up to rounding never grows a sliver bin. The portal's
+/// `fmn_python.calculus._riemann_grid` computes the same bins.
+fn riemann_bins(
+    start: f64,
+    stop: f64,
+    step: f64,
+    budget: SamplingBudget,
+) -> Result<Vec<(f64, f64)>, CoordsError> {
+    const CONTEXT: &str = "Riemann rectangles";
+    for (parameter, value) in [("start", start), ("stop", stop), ("dx", step)] {
+        if !value.is_finite() {
+            return Err(SamplingError::NonFinite {
+                context: CONTEXT,
+                parameter,
+                value,
+            }
+            .into());
+        }
+    }
+    if stop < start {
+        return Err(CoordsError::InvalidRiemannRange("the range decreases"));
+    }
+    if step <= 0.0 {
+        return Err(CoordsError::InvalidRiemannRange("dx must be positive"));
+    }
+    if start == stop {
+        return Ok(Vec::new());
+    }
+    let ratio = (stop - start) / step;
+    let limit = budget.max_samples();
+    let exceeded = || {
+        CoordsError::from(SamplingError::LimitExceeded {
+            context: CONTEXT,
+            max_samples: limit,
+        })
+    };
+    if !ratio.is_finite() || ratio > limit as f64 {
+        return Err(exceeded());
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let count = (ratio.next_down().ceil() as usize).max(1);
+    // `count` bins have `count + 1` bounds; the budget bounds those values.
+    if count >= limit {
+        return Err(exceeded());
+    }
+    let mut boundaries: Vec<f64> = (0..count).map(|k| start + k as f64 * step).collect();
+    boundaries.push(stop);
+    let bins: Vec<(f64, f64)> = boundaries.windows(2).map(|w| (w[0], w[1])).collect();
+    if bins.iter().any(|&(left, right)| right <= left) {
+        return Err(CoordsError::InvalidRiemannRange(
+            "dx is too small to advance the range",
+        ));
+    }
+    Ok(bins)
 }
 
 // -----------------------------------------------------------------------
@@ -1672,17 +1735,31 @@ impl Axes {
         )
     }
 
-    /// The styled form of [`get_riemann_rectangles`](Self::get_riemann_rectangles).
+    /// The styled form of [`get_riemann_rectangles`](Self::get_riemann_rectangles),
+    /// under BN-20 (`docs/behavior_notes/BN-20-calculus-geometry.md`):
     ///
-    /// Rectangles span `[x0, x1]` over `arange(x_min, x_max + dx, dx)`;
-    /// the sample is `x0`/`x1`/their midpoint by `input_sample_type`;
-    /// height is `‖i2gp(sample) − c2p(sample, 0)‖`; each is moved to
-    /// `c2p(x0, 0)` aligned `DL` (positive) or `UL` (negative).
+    /// * **The integration interval is authoritative.** Bins start every
+    ///   `dx` from the lower bound; a final partial bin ends exactly at the
+    ///   upper bound (the Reference extends the range by `dx` and can
+    ///   overshoot it). A step count within one unit in the last place of an
+    ///   integer is that integer, so no sliver bin appears; a zero-length
+    ///   interval is an empty group.
+    /// * **Rectangles are built in the axes' chart**: the corners are
+    ///   `c2p(x0, 0)`, `c2p(x1, 0)`, `c2p(x1, h)`, `c2p(x0, h)` with
+    ///   `h = function(sample)`, so rotated or sheared axes keep their bins
+    ///   (the Reference measures width and sign in world space).
+    /// * `show_signed_area` decides whether a negative bin (`h < 0`) takes
+    ///   `negative_color`; zero-height bins are nonnegative.
+    ///
+    /// The sample is the bin's left end, right end or midpoint by
+    /// `input_sample_type`; colours run the `colors` gradient across bins.
     ///
     /// # Errors
     /// [`CoordsError::InvalidSampleType`] for a sample type outside
-    /// `left | right | center`, or [`CoordsError::Sampling`] when the
-    /// requested rectangle range exceeds the configured budget.
+    /// `left | right | center`; [`CoordsError::Sampling`] for a non-finite
+    /// bound or step, or more bins than the configured budget;
+    /// [`CoordsError::InvalidRiemannRange`] for a decreasing range, a
+    /// non-positive step, or a step too small to advance the bound.
     pub fn riemann_rectangles_styled(
         &self,
         function: &dyn Fn(f64) -> f64,
@@ -1694,46 +1771,41 @@ impl Axes {
         if !matches!(input_sample_type, "left" | "right" | "center") {
             return Err(CoordsError::InvalidSampleType(input_sample_type.to_owned()));
         }
-        let xr = x_range.unwrap_or([self.x_range[0], self.x_range[1]]);
-        let dx = dx.unwrap_or(self.x_range[2]);
-        let xs = arange(
-            "Riemann rectangles",
-            xr[0],
-            xr[1] + dx,
-            dx,
-            self.sampling_budget,
-        )?;
+        let [start, stop] = x_range.unwrap_or([self.x_range[0], self.x_range[1]]);
+        let step = dx.unwrap_or(self.x_range[2]);
+        let bins = riemann_bins(start, stop, step, self.sampling_budget)?;
         let gradient = if config.colors.len() >= 2 {
-            color_gradient(&config.colors, xs.len().saturating_sub(1))
+            color_gradient(&config.colors, bins.len())
         } else {
-            vec![config.colors.first().copied().unwrap_or(BLUE); xs.len().saturating_sub(1)]
+            vec![config.colors.first().copied().unwrap_or(BLUE); bins.len()]
         };
-        let mut rects = Vec::new();
-        for (i, pair) in xs.windows(2).enumerate() {
-            let (x0, x1) = (pair[0], pair[1]);
+        let mut rects = Vec::with_capacity(bins.len());
+        for (i, &(x0, x1)) in bins.iter().enumerate() {
             let sample = match input_sample_type {
                 "right" => x1,
-                "center" => 0.5 * x0 + 0.5 * x1,
+                "center" => x0 + (x1 - x0) / 2.0,
                 _ => x0,
             };
-            let height_vect = sub(self.i2gp(sample, function), self.c2p(&[sample, 0.0]));
-            let positive = height_vect[1] > 0.0;
-            let fill = if positive {
-                gradient.get(i).copied().unwrap_or(GREEN)
-            } else {
+            let height = function(sample);
+            let negative = height < 0.0;
+            let fill = if negative && config.show_signed_area {
                 config.negative_color
+            } else {
+                gradient.get(i).copied().unwrap_or(GREEN)
             };
             let style = Style::default()
                 .stroke(config.stroke_color, config.stroke_width, 1.0)
                 .fill(fill, config.fill_opacity);
-            let rect = Rectangle::new()
-                .width(self.x_axis.n2p(x1)[0] - self.x_axis.n2p(x0)[0])
-                .height(space_ops::get_norm(height_vect))
+            let corners = [
+                self.c2p(&[x0, 0.0]),
+                self.c2p(&[x1, 0.0]),
+                self.c2p(&[x1, height]),
+                self.c2p(&[x0, height]),
+            ];
+            let rect = Polygon::new(corners)
                 .style(style)
                 .build()
-                .expect("an unrounded Riemann rectangle cannot request arc components")
-                .with_stroke_behind(config.stroke_behind)
-                .moved_to_aligned(self.c2p(&[x0, 0.0]), if positive { DL } else { UL });
+                .with_stroke_behind(config.stroke_behind);
             rects.push(rect);
         }
         Ok(v_group(rects))
@@ -1852,8 +1924,9 @@ pub struct RiemannConfig {
     pub negative_color: Srgb,
     /// `stroke_background=True`.
     pub stroke_behind: bool,
-    /// `show_signed_area=True`. Stored for ctor parity; the Reference
-    /// accepts it and never reads it (`coordinate_systems.py:375`).
+    /// `show_signed_area=True`: negative bins take `negative_color`; with
+    /// `false` they keep their gradient colour (BN-20 — the Reference
+    /// accepts the parameter and never reads it).
     pub show_signed_area: bool,
 }
 
@@ -2148,7 +2221,7 @@ mod tests {
         }
     }
 
-    use fmn_core::constants::UR;
+    use fmn_core::constants::{UL, UR};
 
     fn tex_engine() -> TexEngine {
         TexEngine::new("fmd-math/pack/default", None).expect("bundled math pack")
@@ -2746,6 +2819,7 @@ mod tests {
             .expect("valid sample type");
         assert_eq!(rects.children().len(), 4);
         let expected_heights = [2.0, 1.0, 0.0, 1.0];
+        let gradient = color_gradient(&[BLUE, GREEN], 4);
         for (i, rect) in rects.children().iter().enumerate() {
             let x0 = i as f64 - 2.0;
             assert!(
@@ -2761,14 +2835,16 @@ mod tests {
             );
             // Positive rects sit on the axis; negative ones hang below.
             let anchor = axes.c2p(&[x0, 0.0]);
-            if i == 3 {
+            if i >= 2 {
                 assert_vec3_near(
                     rect.bbox_point(DL).expect("bbox"),
                     anchor,
                     1e-9,
                     "DL anchor",
                 );
-                assert_eq!(rect.style().fill_color, GREEN, "gradient tail is GREEN");
+                // BN-20: a zero-height bin is nonnegative and keeps its
+                // gradient colour; the tail is GREEN.
+                assert_eq!(rect.style().fill_color, gradient[i], "gradient colour");
             } else {
                 assert_vec3_near(
                     rect.bbox_point(UL).expect("bbox"),
@@ -2776,7 +2852,7 @@ mod tests {
                     1e-9,
                     "UL anchor",
                 );
-                assert_eq!(rect.style().fill_color, RED, "non-positive rects are RED");
+                assert_eq!(rect.style().fill_color, RED, "negative rects are RED");
             }
             assert_eq!(rect.style().stroke_color, BLACK);
             assert!((rect.style().stroke_width - 1.0).abs() < 1e-15);
@@ -2857,6 +2933,60 @@ mod tests {
         }
         let default = Axes::new().build(&book()).expect("build axes");
         assert!((default.x_axis().vmob().style().stroke_opacity - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn riemann_bins_follow_bn20() {
+        let axes = Axes::new().build(&book()).expect("build axes");
+        let f = |x: f64| x.sin() + 1.0;
+        // The interval is authoritative: 12 full bins, then [3, π].
+        let rects = axes
+            .get_riemann_rectangles(&f, Some([0.0, PI]), Some(0.25), "left")
+            .expect("bins");
+        assert_eq!(rects.children().len(), 13);
+        let last = &rects.children()[12];
+        assert_vec3_near(
+            last.bbox_point(DR).expect("last bin"),
+            axes.c2p(&[PI, 0.0]),
+            1e-9,
+            "the final partial bin ends at the bound",
+        );
+        assert!((last.length_over_dim(0) - (PI - 3.0)).abs() < 1e-9);
+        // A range that is a multiple of dx only up to rounding grows no
+        // sliver bin: 0.3 / 0.1 is 2.9999999999999996.
+        let exact = axes
+            .get_riemann_rectangles(&f, Some([0.0, 0.3]), Some(0.1), "right")
+            .expect("bins");
+        assert_eq!(exact.children().len(), 3);
+        // A zero-length interval is empty; refusals are typed.
+        let empty = axes
+            .get_riemann_rectangles(&f, Some([1.0, 1.0]), Some(0.5), "left")
+            .expect("empty");
+        assert!(empty.children().is_empty());
+        assert!(matches!(
+            axes.get_riemann_rectangles(&f, Some([1.0, 0.0]), Some(0.5), "left"),
+            Err(CoordsError::InvalidRiemannRange(_))
+        ));
+        assert!(matches!(
+            axes.get_riemann_rectangles(&f, Some([0.0, 1.0]), Some(0.0), "left"),
+            Err(CoordsError::InvalidRiemannRange(_))
+        ));
+        assert!(matches!(
+            axes.get_riemann_rectangles(&f, Some([0.0, f64::NAN]), Some(0.5), "left"),
+            Err(CoordsError::Sampling(SamplingError::NonFinite { .. }))
+        ));
+        // show_signed_area=false keeps the gradient on negative bins.
+        let config = RiemannConfig {
+            show_signed_area: false,
+            ..RiemannConfig::default()
+        };
+        let unsigned = axes
+            .riemann_rectangles_styled(&|x| x, Some([-2.0, 2.0]), Some(1.0), "left", &config)
+            .expect("bins");
+        let gradient = color_gradient(&[BLUE, GREEN], 4);
+        for (rect, colour) in unsigned.children().iter().zip(&gradient) {
+            assert_eq!(rect.style().fill_color, *colour);
+        }
     }
 
     #[test]

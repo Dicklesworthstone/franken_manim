@@ -62,8 +62,9 @@ def install_graph_calculus(native):
         opacity = _finite(fill_opacity, "Riemann fill_opacity")
         if not 0 <= width <= np.finfo(np.float32).max or not 0 <= opacity <= 1:
             raise ValueError("Riemann stroke_width must be nonnegative and fill_opacity in [0,1]")
+        # The pinned Reference's default gradient is (BLUE, GREEN).
         palette = tuple(itertools.islice(
-            iter((g["BLUE_D"], g["BLUE_B"]) if colors is None else colors),
+            iter((g["BLUE"], g["GREEN"]) if colors is None else colors),
             _MAX_SAMPLES + 1))
         if not palette or len(palette) > _MAX_SAMPLES:
             raise ValueError("Riemann colors must be a nonempty bounded iterable")
@@ -166,7 +167,7 @@ def _install_graph_areas(g, point):
         opacity = _finite(fill_opacity, "graph area fill_opacity")
         if not 0 <= opacity <= 1:
             raise ValueError("graph area fill_opacity must be in [0,1]")
-        color = g["BLUE_D"] if fill_color is None else fill_color
+        color = g["BLUE"] if fill_color is None else fill_color  # Reference fill_color=BLUE
         if not np.isfinite(np.asarray(g["color_to_rgb"](color))).all():
             raise ValueError("graph area fill_color must be finite")
         size = graph.get_num_points()

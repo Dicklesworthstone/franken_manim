@@ -306,6 +306,20 @@ class RiemannAcceptance(unittest.TestCase):
         np.testing.assert_allclose(m.color_to_rgb(rect.get_stroke_color()), m.color_to_rgb(m.YELLOW))
         self.assertFalse(rect.stroke_behind)
 
+    def test_default_colors_are_the_references(self):
+        # Pinned Reference: colors=(BLUE, GREEN) for the bins and
+        # fill_color=BLUE for get_area_under_graph.
+        axes = self.axes()
+        graph = axes.get_graph(lambda x: 1)
+        rects = axes.get_riemann_rectangles(graph, (0, 1), dx=.25)
+        np.testing.assert_allclose(
+            m.color_to_rgb(rects[0].get_fill_color()), m.color_to_rgb(m.BLUE), atol=1e-6)
+        np.testing.assert_allclose(
+            m.color_to_rgb(rects[-1].get_fill_color()), m.color_to_rgb(m.GREEN), atol=1e-6)
+        area = axes.get_area_under_graph(graph, (0, 1))
+        np.testing.assert_allclose(
+            m.color_to_rgb(area.get_fill_color()), m.color_to_rgb(m.BLUE), atol=1e-6)
+
     def test_invalid_requests_are_rejected_before_authored_callbacks(self):
         axes = self.axes()
         graph = axes.get_graph(lambda x: 1)
@@ -368,7 +382,7 @@ class RiemannAcceptance(unittest.TestCase):
 
 suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
                            for cls in (RecordComparison, LiveGraphingAcceptance, RiemannAcceptance))
-if suite.countTestCases() != 18:
+if suite.countTestCases() != 19:
     raise AssertionError('live graph native acceptance inventory drift')
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
