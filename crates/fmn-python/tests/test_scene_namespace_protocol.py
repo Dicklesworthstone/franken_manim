@@ -14,8 +14,16 @@ import unittest
 
 
 _SOURCE = Path(__file__).resolve().parents[1] / "python" / "fmn_python" / "scene_loading.py"
-_SPEC = importlib.util.spec_from_file_location("_fmn_namespace_loader_tests", _SOURCE)
+# scene_loading imports its sibling `.runtime_paths`. Load it inside a synthetic
+# package rooted at the same source directory, so the relative import resolves to
+# the repository's own module without importing fmn_python's native extension.
+_PACKAGE = "_fmn_namespace_loader_tests"
+_PACKAGE_MODULE = ModuleType(_PACKAGE)
+_PACKAGE_MODULE.__path__ = [str(_SOURCE.parent)]
+sys.modules[_PACKAGE] = _PACKAGE_MODULE
+_SPEC = importlib.util.spec_from_file_location(f"{_PACKAGE}.scene_loading", _SOURCE)
 _LOADING = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _LOADING
 _SPEC.loader.exec_module(_LOADING)
 SceneSource = _LOADING.SceneSource
 

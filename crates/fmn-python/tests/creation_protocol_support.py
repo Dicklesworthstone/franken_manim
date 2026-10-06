@@ -18,6 +18,16 @@ spec = importlib.util.spec_from_file_location("creation_semantics_under_test", S
 semantics = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(semantics)
 
+# Values install() captures before any authored code runs, which the functions
+# it defines close over (fm-5wq.31's shipped_straight_path). A harness that lifts
+# those functions out of install() must lift these captures with them.
+INSTALL_CAPTURES = frozenset({"shipped_straight_path"})
+
+
+def is_install_capture(node):
+    return isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id in INSTALL_CAPTURES for target in node.targets)
+
 
 def environment():
     class Mobject:
@@ -236,7 +246,8 @@ def environment():
         exec(compile(ast.Module([nodes[name]], []), str(BOOTSTRAP), "exec"), g)
     install = next(node for node in ast.parse(SOURCE.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "install")
     for node in install.body:
-        if isinstance(node, ast.FunctionDef):
+        # install()'s captures run first: the lifted functions close over them.
+        if isinstance(node, ast.FunctionDef) or is_install_capture(node):
             exec(compile(ast.Module([node], []), str(SOURCE), "exec"), g)
     mappings = {
         "__init__":"animation_init", "_validate_input_type":"validate_input_type",

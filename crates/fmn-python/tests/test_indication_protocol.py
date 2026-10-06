@@ -259,7 +259,10 @@ def native_table():
         Animation=Animation, AnimationGroup=AnimationGroup, Mobject=Mobject,
         VMobject=VMobject, Scene=Scene, WiggleOutThenIn=WiggleOutThenIn,
         VShowPassingFlash=VShowPassingFlash, FlashAround=FlashAround,
-        _np=np, _linear_rate=linear, _RATE_FUNC_NAMES={linear: "linear"},
+        # The stock rates fmn-core implements cross as names, as in the
+        # bootstrap's native catalog; wiggle is not one of them.
+        _np=np, _linear_rate=linear,
+        _RATE_FUNC_NAMES={linear: "linear", there_and_back: "there_and_back"},
         _requires_python_animation=lambda a: not a._native_kind,
         _AnimationBuilder=Builder, prepare_animation=lambda b: b.build(),
         there_and_back=there_and_back, wiggle=wiggle, linear=linear,

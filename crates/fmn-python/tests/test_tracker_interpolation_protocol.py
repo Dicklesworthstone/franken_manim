@@ -68,7 +68,11 @@ def environment(install=True):
     names = {"interpolate_uniform", "mobject_interpolate"}
     nodes = [node for node in installer.body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert {node.name for node in nodes} == names
-    exec(compile(ast.Module(nodes, []), str(source), "exec"), g)
+    # mobject_interpolate closes over install()'s shipped_straight_path capture.
+    captures = [node for node in installer.body if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "shipped_straight_path" for target in node.targets)]
+    assert len(captures) == 1
+    exec(compile(ast.Module(captures + nodes, []), str(source), "exec"), g)
     Mobject.interpolate = g["mobject_interpolate"]
     if install:
         trackers.install_tracker_interpolation(native)
