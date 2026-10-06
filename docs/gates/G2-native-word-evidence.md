@@ -37,27 +37,27 @@ The eight criteria are quoted from `fm-i1q` (plan §20.3).
 | (4) SVGMobject works for user files (W2SVG) | `fm-6nm` and `fm-5wq.4.50` closed: portal `SVGMobject` builds a VMobject family through Chisel's hardened processor (`crates/fmn-geom/src/svg.rs`), covered by `crates/fmn-python/tests/bridge.py` | **Green** |
 | (5) Typeset caching live (W6TEX + W8CACHE) | The portal attaches the persistent typeset cache and preflights constructor requests and explicit batches on the worker pool (`65622548`, `59807496`, `23ec2654`, `5bb1d37b`). Standalone `fmn` and `fmn::render` attach no cache (`crates/fmn`, `crates/fmn-cli`), and the cache-warm and preflight-before-first-play acceptance tests have not landed (`fm-typeset-cache-preflight-wiring-1sn0`) | **NOT GREEN** |
 | (6) Coverage-ratchet dashboard public and live (W6RATCHET) | `docs/ratchet/dashboard.md`, regenerated at the `68fe29b8` pin (`8e6d7372`): frozen G0-4 denominator, CI-enforced pin/ratchet lockstep, and honest columns ("typeset returned Ok" apart from "checked by an oracle"). Recomputing it needs the private corpus, which exists only on the project host | **Green** |
-| (7) fmd renders `$…$` in HTML/PDF via the same crates | Re-measured at the `68fe29b8` pin (see "Cross-repo payoff"): PDF display equations go through fmd-math `Layout`; inline PDF math prints its TeX source; HTML emits browser-laid-out MathML (`fm-djcw`) | **NOT GREEN (PDF display math only)** |
+| (7) fmd renders `$…$` in HTML/PDF via the same crates | Re-measured at the `f059cac6` pin (see "Cross-repo payoff"): PDF inline and display math both go through fmd-math `Layout` (`fm-djcw`, UPSTREAM_LEDGER row 21). HTML emits MathML from the fmd-math parse tree and the browser lays it out; this packet records that as **not** using the shared layout | **PDF GREEN; HTML NOT GREEN (MathML; owner decision on whether it satisfies "via the same crates")** |
 | (8) PG-1(G2) and PG-7 enforced and blocking | Policy rows are `blocking` in `docs/performance/PERF_GATES.tsv` and the rig is in-tree (`crates/fmn-conformance/src/perf_pg7.rs`, `perf_frontdoor.rs`, `bin/fmn-perf.rs`). ADR-0024 makes host qualification satisfiable (`fm-5wq.8` closed), but no pinned-host observation is committed (`fm-inr.1`), and the Reference side of PG-1 is still a calibration capture (`fm-5wq.17`) | **NOT GREEN** |
 
 ## Dependency closure
 
-Of `fm-i1q`'s 24 blockers, 16 are closed and 8 are open.
+Of `fm-i1q`'s 25 blockers, 18 are closed and 7 are open.
 
 - **Closed:** `fm-hk9`, `fm-wgl`, `fm-ydw`, `fm-fjq`, `fm-7dw`, `fm-u1u`,
   `fm-70s`, `fm-kg9`, `fm-ebl`, `fm-fw6`, `fm-y69`, `fm-mol`, `fm-6nm`,
-  `fm-6ppv`, `fm-5wq.8`, and the prerequisite gate `fm-o3j` (G1 passed
-  2026-08-20, `f1248b6`).
+  `fm-6ppv`, `fm-5wq.8`, `fm-djcw`, this packet's own bead
+  `fm-fmd-repin-g2-truth-y3gr`, and the prerequisite gate `fm-o3j` (G1
+  passed 2026-08-20, `f1248b6`).
 - **Open, by criterion:**
   - (1) `fm-tex-display-style-nclg` (in progress), `fm-tex-metrics-glyphs-ru72`, `fm-5wq.50`;
   - (5) `fm-typeset-cache-preflight-wiring-1sn0`;
-  - (7) `fm-djcw`;
-  - (8) `fm-inr` (in progress), `fm-5wq.17`;
-  - this packet's own bead, `fm-fmd-repin-g2-truth-y3gr`.
+  - (7) `fm-mmzl` (the HTML ruling, `agent:claim:manual`);
+  - (8) `fm-inr` (in progress), `fm-5wq.17`.
 
 ## The coverage ratchet (criterion 1 numerator, criterion 6)
 
-`docs/ratchet/dashboard.md`, computed against `franken_markdown 68fe29b8af0d`:
+`docs/ratchet/dashboard.md`, computed against `franken_markdown f059cac6b861`:
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
@@ -192,10 +192,12 @@ cache's latency claim will be measured, not asserted.
 fmd-math and fmd-font are franken_markdown workspace crates consumed here as
 git dependencies at the pinned rev (`SUITE.lock:33`). Whether fmd itself
 renders `$…$` through the same crates was first measured on 2026-09-25 at
-franken_markdown `09562c1f`. It was re-measured on 2026-10-05 with an `fmd`
-built from the `68fe29b8` pin itself:
-`cargo build --release --features cli --bin fmd` in a worktree at that rev.
-The input was this document:
+franken_markdown `09562c1f` and re-measured at `68fe29b8` on 2026-10-05.
+
+**Re-measured on 2026-10-06 at the `f059cac6` pin**, which carries fm-djcw's PDF
+inline math. The `fmd` binary was built from that rev through rch
+(`cargo build --release --features cli --bin fmd`). The input is the same
+probe document:
 
 ```markdown
 # Criterion 7 probe
@@ -206,23 +208,26 @@ $$\int_0^1 \sqrt{1 - x^2}\,dx = \frac{\pi}{4}$$
 ```
 
 `fmd render probe.md --to both --out probe.html` produces `probe.html`
-(41,526 bytes, SHA-256 `3b3df92d…a74f50`) and `probe.pdf` (17,342 bytes,
-SHA-256 `91b2b6c6…2d9fa`):
+(41,526 bytes, SHA-256 `3b3df92d…a74f50`, byte-identical to the 2026-10-05
+measurement) and `probe.pdf` (17,594 bytes, SHA-256 `530154af…bd48400`):
 
-- **HTML:** both formulas become MathML `<math display="inline">` and
-  `<math display="block">` elements, generated from the fmd-math parse tree
-  and laid out by the browser. fmd-math's `Layout` is not involved.
-- **PDF:** the display equation is the document's one `/Formula` structure
-  element, drawn from fmd-math's `Layout` and glyph outlines
-  (`src/pdf/math.rs`). The inline formula is set as its literal source in
-  the monospace code face. Both `pdftotext -layout probe.pdf -` and the page
-  rasterized with `pdftoppm -r 110 -png` show `\frac{a}{b} + x^2` as text.
+- **PDF:** both formulas go through fmd-math's `Layout`. The structure tree
+  has two `/Formula` elements, with `/Alt` set to each source. The content
+  stream fills both from fmd-math glyph outlines, and its text never selects
+  the monospace face. The inline formula is one unbreakable box on the text
+  baseline, typeset in text style at body size.
+  `pdftotext -layout probe.pdf -` recovers both sources through their
+  `/ActualText` anchors. The page rasterized with `pdftoppm -r 110 -png`
+  shows a typeset fraction, plus sign and superscript inside the sentence.
+- **HTML:** unchanged. Both formulas become MathML `<math display="inline">`
+  and `<math display="block">` elements, generated from the fmd-math parse
+  tree and laid out by the browser. fmd-math's `Layout` is not involved.
 
-So criterion 7 holds only for display equations in PDF. Inline `$…$` in
-PDF, and all math in HTML, does not go through the shared layout. It was
-previously marked green on the strength of a design sentence
-(`docs/g0/G0-3-fmd-math-ratification.md:103`) and parse-only corpus
-goldens; neither demonstrates rendering.
+So criterion 7 now holds for PDF: inline and display math both go through
+the shared layout. HTML uses the shared parser but not the shared layout.
+This packet does not reinterpret the criterion. Whether parser-only MathML
+satisfies "via the same crates" for HTML is recorded here as an open owner
+decision (`fm-mmzl`), not as green.
 
 ## Performance gates (criterion 8) — PG-1 is NOT green
 
@@ -263,9 +268,9 @@ HOLD, but it is also not a pass, and G2 makes these gates blocking.
 2. **Criterion 5:** persistent cache and preflight in `fmn` and
    `fmn::render`, with the cache-warm and preflight acceptance scenarios
    (`fm-typeset-cache-preflight-wiring-1sn0`).
-3. **Criterion 7:** inline `$…$` in fmd's PDF through fmd-math `Layout`
-   (`fm-djcw`). HTML math is browser-laid-out MathML; whether criterion 7
-   requires fmd-math `Layout` for HTML too is the gate review's call.
+3. **Criterion 7:** PDF is done (`fm-djcw`). HTML math is browser-laid-out
+   MathML from the fmd-math parser; whether criterion 7 requires fmd-math
+   `Layout` for HTML too is an owner ruling (`fm-mmzl`).
 4. **Criterion 8:** a qualified Linux observation for PG-1(G2) and PG-7
    (`fm-inr.1`), and an honest PG-1 Reference side (`fm-5wq.17`).
 
