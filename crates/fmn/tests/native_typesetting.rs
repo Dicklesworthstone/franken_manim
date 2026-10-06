@@ -57,7 +57,9 @@ impl SceneConstruct for FormulaScene {
         self.before_build = engine.layout_computations();
         let formula = Tex::new(FORMULA).build(engine)?;
         let expanded = Tex::new(r"\answer^2").preamble(PREAMBLE).build(engine)?;
-        let text = TexText::new(TEXT).line_align(LineAlign::Right).build(engine)?;
+        let text = TexText::new(TEXT)
+            .line_align(LineAlign::Right)
+            .build(engine)?;
         self.after_build = engine.layout_computations();
         assert_eq!(expanded.typeset.source, r"\answer^2");
         let formula = stage.add(formula)?;
@@ -71,7 +73,8 @@ impl SceneConstruct for FormulaScene {
 }
 
 fn png(fs: &VirtualFs, directory: &str) -> Vec<u8> {
-    fs.read(&Path::new(directory).join("frame_000000.png")).unwrap()
+    fs.read(&Path::new(directory).join("frame_000000.png"))
+        .unwrap()
 }
 
 #[test]
@@ -137,8 +140,8 @@ fn an_unowned_cache_root_is_reported_but_does_not_prevent_real_ink() {
     assert_eq!(scene.before_build, scene.after_build);
     assert_eq!(fs.read(&foreign).unwrap(), b"not a cache");
     assert_eq!(fs.list_dir(Path::new(cache_root())).unwrap(), before);
-    let image = fmn_codec::decode_png(&png(&fs, "/fallback"), &fmn_codec::PngLimits::default())
-        .unwrap();
+    let image =
+        fmn_codec::decode_png(&png(&fs, "/fallback"), &fmn_codec::PngLimits::default()).unwrap();
     assert!(image.rgba.chunks_exact(4).any(|pixel| pixel[0] > 128));
 }
 
@@ -176,7 +179,9 @@ fn native_formula_errors_stop_construction_but_later_valid_requests_still_warm()
     assert!(!program.constructed);
     let engine = session.engine().unwrap();
     let before = engine.layout_computations();
-    engine.typeset(Mode::Math(MathStyle::Display), "x+1").unwrap();
+    engine
+        .typeset(Mode::Math(MathStyle::Display), "x+1")
+        .unwrap();
     assert_eq!(engine.layout_computations(), before);
 }
 
@@ -233,7 +238,12 @@ fn batch_count_source_size_and_total_bytes_are_admitted_before_engine_initializa
 #[test]
 fn camera_rendering_uses_the_same_persistent_session_as_affine_rendering() {
     let fs = Arc::new(VirtualFs::new());
-    render_with_fs(&mut FormulaScene::default(), options("/affine", 1), fs.clone()).unwrap();
+    render_with_fs(
+        &mut FormulaScene::default(),
+        options("/affine", 1),
+        fs.clone(),
+    )
+    .unwrap();
     let report = render_camera_with_fs(
         |scene, camera| {
             let rig = CameraRig::new(scene, camera)?;
@@ -251,8 +261,7 @@ fn camera_rendering_uses_the_same_persistent_session_as_affine_rendering() {
 #[test]
 fn memory_scene_runs_expose_observed_work_and_bundle_export_honors_the_template() {
     let mut scene = FormulaScene::default();
-    let completed = run_scene(&mut scene, RuntimeConfig::default(), 0, &mut NullSceneSink)
-        .unwrap();
+    let completed = run_scene(&mut scene, RuntimeConfig::default(), 0, &mut NullSceneSink).unwrap();
     assert!(completed.typesetting_report().initialized);
     assert!(!completed.typesetting_report().persistent);
     assert_eq!(scene.before_build, scene.after_build);
@@ -262,7 +271,9 @@ fn memory_scene_runs_expose_observed_work_and_bundle_export_honors_the_template(
     let mut scene = FormulaScene::default();
     assert!(matches!(
         export_bundle_bytes(&mut scene, options),
-        Err(BundleExportError::Scene(Error::TexEngine(TexError::Pack(_))))
+        Err(BundleExportError::Scene(Error::TexEngine(TexError::Pack(
+            _
+        ))))
     ));
     assert!(!scene.constructed);
 }

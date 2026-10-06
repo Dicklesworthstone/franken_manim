@@ -5,6 +5,7 @@ use std::num::NonZeroUsize;
 
 use fmn_tex::{
     Mode, PreflightError, Style, TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES, TexSession,
+    TypesetRequest,
 };
 
 use crate::SceneConstruct;
@@ -81,17 +82,50 @@ pub(crate) fn preflight<P: SceneConstruct + ?Sized>(
     session: &TexSession,
     max_workers: NonZeroUsize,
 ) -> crate::Result<()> {
-    let requests = program.tex_preflight();
+    warm_requests(&program.tex_preflight(), session, max_workers)
+}
+
+impl crate::Stage<'_> {
+    /// Warm formulas discovered during construction on this scene's engine.
+    ///
+    /// Call this before building their `Tex`/`TexText` mobjects or starting the
+    /// play that consumes them. Unlike the static `SceneConstruct` manifest,
+    /// the sources may be generated from data already loaded by `construct`.
+    /// The batch does not advance scene time, invoke updaters or emit frames.
+    ///
+    /// Requests must match the constructors' source, mode, preamble and line
+    /// alignment. Layouts share the bounded memory front and verified persistent
+    /// cache used by `tex_engine`; no temporary engine or Python worker is used.
+    /// More than the resident cache budget may evict earlier results, so this
+    /// is a warm-up operation, not a promise that arbitrary batches stay pinned.
+    /// `max_workers` is a ceiling (capped at 64), not a guaranteed thread count.
+    /// An empty batch leaves even the fonts and persistent cache uninitialized.
+    ///
+    /// # Errors
+    /// The same limits as the static manifest apply: 4096 requests, 4 MiB total,
+    /// and the native per-source/preamble limits. Budget refusals occur before
+    /// cache I/O. A formula failure retains its native error; the entire admitted
+    /// batch has completed before the first ordered error is returned, leaving
+    /// later valid requests warm. No scene state is rolled back on error.
+    pub fn preflight_tex(
+        &self,
+        requests: &[TypesetRequest<'_>],
+        max_workers: NonZeroUsize,
+    ) -> crate::Result<()> {
+        warm_requests(requests, self.typesetting, max_workers)
+    }
+}
+
+fn warm_requests(
+    requests: &[TypesetRequest<'_>],
+    session: &TexSession,
+    max_workers: NonZeroUsize,
+) -> crate::Result<()> {
     if requests.is_empty() {
         return Ok(());
     }
     if requests.len() > MAX_REQUESTS {
-        return Err(admission_error(
-            "requests",
-            None,
-            requests.len(),
-            MAX_REQUESTS,
-        ));
+        return Err(admission_error("requests", None, requests.len(), MAX_REQUESTS));
     }
     let mut bytes = 0usize;
     for (index, request) in requests.iter().enumerate() {
@@ -124,7 +158,7 @@ pub(crate) fn preflight<P: SceneConstruct + ?Sized>(
     let engine = session.engine()?;
     let workers = NonZeroUsize::new(max_workers.get().min(64)).unwrap();
     let outcomes = engine
-        .preflight_requests(&requests, workers)
+        .preflight_requests(requests, workers)
         .map_err(TexPreflightError::Infrastructure)?;
     for outcome in outcomes {
         // The complete batch has finished, so later valid requests are warmed

@@ -106,7 +106,13 @@ fn injected_filesystems_never_resolve_ambient_cache_paths() {
         let session = session(&config, &fs);
         assert!(!bytes(&session, "x").is_empty());
         assert!(!session.report().persistent);
-        assert!(session.report().cache_error.unwrap().contains("explicit absolute"));
+        assert!(
+            session
+                .report()
+                .cache_error
+                .unwrap()
+                .contains("explicit absolute")
+        );
         assert!(!fs.exists(Path::new(root())));
     }
 }
@@ -124,7 +130,10 @@ fn template_refusals_precede_cache_io_instead_of_falling_back_to_default() {
 
 #[test]
 fn the_selected_template_reaches_the_engine_and_empty_means_default() {
-    for (template, pack) in [("basic", "fmd-math/pack/basic"), ("", "fmd-math/pack/default")] {
+    for (template, pack) in [
+        ("basic", "fmd-math/pack/basic"),
+        ("", "fmd-math/pack/default"),
+    ] {
         let session = TexSession::memory(template);
         let reference = fmn_tex::TexEngine::new(pack, None).unwrap();
         let expected = reference

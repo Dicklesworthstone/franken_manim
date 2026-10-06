@@ -72,11 +72,7 @@ impl TexSession {
     /// before scene code can change the working directory. The platform
     /// default is resolved on first use. An unavailable cache is nonfatal.
     #[must_use]
-    pub fn with_cache(
-        config: &Config,
-        fs: Arc<dyn FileSystem>,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
+    pub fn with_cache(config: &Config, fs: Arc<dyn FileSystem>, clock: Arc<dyn Clock>) -> Self {
         Self {
             cache: Some(CacheBinding {
                 root: cache_root(&config.directories.cache, fs.as_ref()),
@@ -156,7 +152,8 @@ fn cache_root(directory: &str, fs: &dyn FileSystem) -> Result<Option<PathBuf>, S
     let root = Path::new(directory);
     if !root.is_absolute() || root.components().any(|part| part == Component::ParentDir) {
         return Err(
-            "injected typeset cache requires an explicit absolute directory without '..'".to_owned(),
+            "injected typeset cache requires an explicit absolute directory without '..'"
+                .to_owned(),
         );
     }
     Ok(Some(root.to_path_buf()))
