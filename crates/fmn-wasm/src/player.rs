@@ -41,6 +41,9 @@ use fmn_scene::{TIMELINE_BUNDLE_SCHEMA, bundle_engine_version};
 
 use crate::{render_stage_rgba8, render_stage_rgba8_into, rgba8_output_len};
 
+#[path = "camera_player.rs"]
+mod camera_player;
+
 /// Every refusal the player can produce, named per the contract.
 #[derive(Debug)]
 pub enum PlayerError {
@@ -155,7 +158,7 @@ impl From<BundleReadError> for PlayerError {
         match error {
             BundleReadError::Camera(error) => Self::Render(error.to_string()),
             BundleReadError::CameraTrackRequired => Self::Render(
-                "camera-bearing FMTL requires the native camera-aware player".to_owned(),
+                "camera-bearing FMTL requires paired camera/geometry reconstruction".to_owned(),
             ),
             BundleReadError::Malformed(error) => Self::Malformed(error),
             BundleReadError::EngineMismatch { wanted, found } => {
@@ -193,9 +196,6 @@ impl PlayerCore {
     /// is the deliberate second step.
     fn load(bytes: &[u8]) -> Result<Self, PlayerError> {
         let bundle = TimelineBundle::from_bytes(bytes)?;
-        if bundle.has_camera_track() {
-            return Err(BundleReadError::CameraTrackRequired.into());
-        }
         Ok(Self {
             bundle,
             width: 0,
@@ -243,6 +243,27 @@ impl PlayerCore {
         if self.width == 0 || self.height == 0 {
             return Err(PlayerError::Viewport("set_viewport before rendering"));
         }
+        if self.bundle.has_camera_track() {
+            if index >= self.frame_count() {
+                return Err(PlayerError::FrameOutOfRange {
+                    index,
+                    total: self.frame_count(),
+                });
+            }
+            let len = rgba8_output_len(self.width, self.height)
+                .map_err(|e| PlayerError::Render(e.to_string()))?;
+            let mut rgba8 = Vec::new();
+            rgba8
+                .try_reserve_exact(len)
+                .map_err(|_| PlayerError::AllocationFailed {
+                    context: "camera RGBA8 output",
+                    requested: len,
+                })?;
+            rgba8.resize(len, 0);
+            crate::note_owned_rgba8_output_allocation();
+            self.render_index_into(index, &mut rgba8)?;
+            return Ok(rgba8);
+        }
         let stage = self.stage_at(index)?;
         let revision = u64::from(index) + 1;
         render_stage_rgba8(&stage, self.width, self.height, revision)
@@ -269,6 +290,9 @@ impl PlayerCore {
                 height: self.height,
             });
         }
+        if self.bundle.has_camera_track() {
+            return camera_player::render_into(self, index, dst);
+        }
         let stage = self.stage_at(index)?;
         let revision = u64::from(index) + 1;
         render_stage_rgba8_into(&stage, self.width, self.height, revision, dst)
@@ -277,7 +301,9 @@ impl PlayerCore {
 }
 
 /// A loaded FMTL/1 timeline bundle, ready to scrub and render frames to
-/// RGBA8 pixels through the tier-1 Lumen path.
+/// RGBA8 pixels through Lumen. Minor-0 bundles keep the planar path; minor-1
+/// bundles reconstruct their recorded camera alongside geometry and use the
+/// same camera-aware CPU renderer as native playback.
 ///
 /// ```text
 /// const player = FmnPlayer.from_bundle(await (await fetch("bundle.fmtl")).arrayBuffer());
@@ -306,8 +332,9 @@ impl FmnPlayer {
     }
 
     /// Set the render viewport in canvas pixels (required before the first
-    /// render; the bundle deliberately carries no dimensions — the canvas
-    /// owns them).
+    /// render). The canvas owns output dimensions. For camera-bearing bundles,
+    /// the shared decoder adapts the recorded view to this aspect ratio while
+    /// preserving authored frame width; it never substitutes a default camera.
     ///
     /// # Errors
     /// `JsError` for a dimension outside `1..=4096`.
@@ -331,6 +358,13 @@ impl FmnPlayer {
     #[wasm_bindgen(getter)]
     pub fn frame_count(&self) -> u32 {
         self.core.frame_count()
+    }
+
+    /// Whether playback uses a captured camera, light, background and sample
+    /// policy instead of the legacy planar viewport.
+    #[wasm_bindgen(getter)]
+    pub fn has_camera_track(&self) -> bool {
+        self.core.bundle.has_camera_track()
     }
 
     /// The schedule's frame rate.
@@ -859,8 +893,11 @@ mod tests {
     }
 
     #[test]
-    fn camera_tracks_refuse_at_load_instead_of_losing_the_view() {
-        let camera = fmn_render::Camera::new(fmn_render::CameraConfig::default()).unwrap();
+    fn camera_tracks_play_the_authored_background_instead_of_losing_the_view() {
+        let mut camera = fmn_render::Camera::new(fmn_render::CameraConfig::default()).unwrap();
+        camera
+            .set_background(fmn_core::color::Srgb::from_rgb8(255, 0, 0).to_linear(1.0))
+            .unwrap();
         let mut recorder = fmn_scene::recording::SceneBundleRecorder::new_render_only_with_camera(
             camera.fps(),
             fmn_scene::BundleExportLimits::default(),
@@ -870,9 +907,14 @@ mod tests {
             .capture_terminal_still_with_camera(&Stage::new(), &camera)
             .unwrap();
         let bytes = recorder.finish().unwrap().bytes;
-        assert!(matches!(
-            PlayerCore::load(&bytes),
-            Err(PlayerError::Render(message)) if message.contains("camera-aware")
-        ));
+        let mut player = FmnPlayer::from_bundle(&bytes).unwrap();
+        assert!(player.has_camera_track());
+        player.set_viewport(32, 18).unwrap();
+        let pixels = player.render_frame(0).unwrap();
+        assert_eq!(pixels.len(), 32 * 18 * 4);
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel == [255, 0, 0, 255]));
+        let mut scratch = vec![0; pixels.len()];
+        player.render_into(0, &mut scratch).unwrap();
+        assert_eq!(scratch, pixels);
     }
 }
