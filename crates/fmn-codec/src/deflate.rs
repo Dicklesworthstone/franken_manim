@@ -316,10 +316,7 @@ impl<'a> Matcher<'a> {
             if pos - cand > WINDOW {
                 break;
             }
-            let mut len = 0;
-            while len < max_len && self.data[cand + len] == self.data[pos + len] {
-                len += 1;
-            }
+            let len = common_prefix(self.data, cand, pos, max_len);
             if len > best_len {
                 best_len = len;
                 best_dist = pos - cand;
@@ -332,6 +329,29 @@ impl<'a> Matcher<'a> {
         }
         (best_len >= MIN_MATCH).then_some((best_len, best_dist))
     }
+}
+
+/// The length of the common prefix of `data[a..]` and `data[b..]`, capped at
+/// `max_len` (`a < b`, and `b + max_len <= data.len()`).
+///
+/// Eight bytes per step: the first differing byte of a word is its lowest
+/// set byte of the XOR, so the result is exactly the bytewise count — the
+/// matcher's choices, and the encoded stream, do not change.
+fn common_prefix(data: &[u8], a: usize, b: usize, max_len: usize) -> usize {
+    let mut len = 0;
+    while len + 8 <= max_len {
+        let x = u64::from_le_bytes(data[a + len..a + len + 8].try_into().expect("8 bytes"));
+        let y = u64::from_le_bytes(data[b + len..b + len + 8].try_into().expect("8 bytes"));
+        let diff = x ^ y;
+        if diff != 0 {
+            return len + (diff.trailing_zeros() / 8) as usize;
+        }
+        len += 8;
+    }
+    while len < max_len && data[a + len] == data[b + len] {
+        len += 1;
+    }
+    len
 }
 
 /// Emit one block, choosing stored / fixed / dynamic by exact bit cost
@@ -671,4 +691,45 @@ pub fn zlib_compress(data: &[u8], level: CompressionLevel) -> Vec<u8> {
     out.extend_from_slice(&deflate(data, level));
     out.extend_from_slice(&adler32(data).to_be_bytes());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::common_prefix;
+
+    #[test]
+    fn word_prefix_matches_the_bytewise_count() {
+        // Runs, near-runs and noise: every (a, b, cap) agrees with the
+        // byte-at-a-time definition the matcher used before.
+        let mut data = Vec::new();
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for i in 0..2048u32 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            data.push(match i % 512 {
+                0..=255 => 7,
+                256..=383 => (i % 3) as u8,
+                _ => x as u8,
+            });
+        }
+        for a in (0..600).step_by(7) {
+            for b in (a + 1..a + 700).step_by(13) {
+                for cap in [0, 1, 7, 8, 9, 15, 16, 63, 258] {
+                    if b + cap > data.len() {
+                        continue;
+                    }
+                    let mut want = 0;
+                    while want < cap && data[a + want] == data[b + want] {
+                        want += 1;
+                    }
+                    assert_eq!(
+                        common_prefix(&data, a, b, cap),
+                        want,
+                        "a={a} b={b} cap={cap}"
+                    );
+                }
+            }
+        }
+    }
 }
