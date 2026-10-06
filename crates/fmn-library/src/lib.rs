@@ -198,7 +198,7 @@ pub use solids::{
 pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};
 pub use style::{Style, VStyle};
 pub use svg::{svg_document_mobject, svg_mobject, vmobject_from_svg_path};
-pub use tex::{LineAlign, Tex, TexMobject, TexMobjectError, TexText};
+pub use tex::{LineAlign, OldTex, OldTexMobject, Tex, TexMobject, TexMobjectError, TexText};
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use text_matching::{
     MAX_MATCHING_COMPARISONS, MAX_MATCHING_PARTS, TextMatchingConfig, TextMatchingError,

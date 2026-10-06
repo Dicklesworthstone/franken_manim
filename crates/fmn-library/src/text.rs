@@ -214,9 +214,14 @@ impl TextMobject {
     }
 }
 
+/// Completing construction as the Reference's `SVGMobject` does
+/// (`move_into_position` with `should_center`): a `Text`/`MarkupText` added
+/// to a stage stands centred on the origin. [`TextMobject::vmob`] itself
+/// stays in layout coordinates (the first baseline at `y = 0`) for builders
+/// that compose laid-out pieces.
 impl From<TextMobject> for Mobject {
     fn from(t: TextMobject) -> Self {
-        t.vmob.into()
+        t.vmob.moved_to([0.0; 3]).into()
     }
 }
 

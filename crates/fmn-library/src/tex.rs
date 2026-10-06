@@ -142,9 +142,13 @@ impl TexMobject {
     }
 }
 
+/// Completing construction as the Reference's `SVGMobject` does
+/// (`move_into_position` with `should_center`): a `Tex`/`TexText` added to a
+/// stage stands centred on the origin. [`TexMobject::vmob`] itself stays in
+/// layout coordinates for builders that compose typeset pieces.
 impl From<TexMobject> for Mobject {
     fn from(t: TexMobject) -> Self {
-        t.vmob.into()
+        t.vmob.moved_to([0.0; 3]).into()
     }
 }
 
@@ -344,6 +348,256 @@ impl<'a> TexText<'a> {
     }
 }
 
+/// `OldTex` / `OldTexText` (old_tex_mobject.py): the legacy multi-argument
+/// Tex whose submobjects are **one group per argument** — `old_tex[1]` is
+/// the whole second argument, not its first glyph (contrast `Tex`'s flat
+/// glyph family).
+///
+/// The Reference typesets the joined string, then re-typesets every argument
+/// on its own (`SingleStringTex`) and slices the full glyph run by those
+/// counts — which silently misassigns glyphs whenever the parts lay out
+/// differently in context. Here the joined string is typeset once and every
+/// primitive joins the argument whose byte range holds its source span
+/// start, the native provenance (§11.3). Arguments are first split around
+/// every `isolate` / `tex_to_color_map` substring, as the Reference's
+/// `break_up_tex_strings` does; arguments that are blank or draw nothing
+/// form no group. A single argument is one group of every glyph.
+///
+/// `math_mode` true is `OldTex` (display mathematics, the Reference's
+/// `align*`); false is `OldTexText` (text mainland with `$…$` islands).
+#[derive(Debug, Clone)]
+pub struct OldTex<'a> {
+    strings: Vec<&'a str>,
+    arg_separator: &'a str,
+    isolate: Vec<&'a str>,
+    t2c: &'a [(&'a str, Srgb)],
+    math_mode: bool,
+    font_size: f64,
+    preamble: &'a str,
+    style: Style,
+}
+
+/// A built [`OldTex`]: the grouped family plus each group's argument.
+#[derive(Debug, Clone)]
+pub struct OldTexMobject {
+    /// One child per drawn argument, each a group of that argument's
+    /// primitives in emission order. Layout coordinates; converting into a
+    /// [`Mobject`] centres it, as the Reference's constructor does.
+    pub vmob: VMobject,
+    /// Group `i`'s argument, stripped (`old_tex[i].get_tex()`).
+    pub tex_strings: Vec<String>,
+    /// The typeset of the joined string.
+    pub typeset: Typeset,
+}
+
+impl OldTexMobject {
+    /// `get_parts_by_tex(tex, substring=True)`: the group indices whose
+    /// argument contains `tex` (or equals it when `substring` is false).
+    #[must_use]
+    pub fn parts_by_tex(&self, tex: &str, substring: bool) -> Vec<usize> {
+        self.tex_strings
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| {
+                if substring {
+                    part.contains(tex)
+                } else {
+                    part.as_str() == tex
+                }
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// `get_part_by_tex`: the first match of [`Self::parts_by_tex`].
+    #[must_use]
+    pub fn part_by_tex(&self, tex: &str) -> Option<usize> {
+        self.parts_by_tex(tex, true).first().copied()
+    }
+}
+
+impl From<OldTexMobject> for Mobject {
+    fn from(t: OldTexMobject) -> Self {
+        t.vmob.moved_to([0.0; 3]).into()
+    }
+}
+
+impl<'a> OldTex<'a> {
+    /// `OldTex(*tex_strings)` with the Reference's defaults: no separator,
+    /// display mathematics, font size 48.
+    #[must_use]
+    pub fn new(strings: &[&'a str]) -> Self {
+        Self {
+            strings: strings.to_vec(),
+            arg_separator: "",
+            isolate: Vec::new(),
+            t2c: &[],
+            math_mode: true,
+            font_size: DEFAULT_FONT_SIZE,
+            preamble: "",
+            style: text_style(),
+        }
+    }
+
+    /// `OldTexText(*tex_strings)`: the same grouping over text mainland.
+    #[must_use]
+    pub fn text(strings: &[&'a str]) -> Self {
+        Self {
+            math_mode: false,
+            ..Self::new(strings)
+        }
+    }
+
+    /// The `arg_separator=` surface, joined between arguments.
+    #[must_use]
+    pub fn arg_separator(mut self, separator: &'a str) -> Self {
+        self.arg_separator = separator;
+        self
+    }
+
+    /// The `isolate=` surface: substrings split out as their own groups.
+    #[must_use]
+    pub fn isolate(mut self, isolate: &[&'a str]) -> Self {
+        self.isolate = isolate.to_vec();
+        self
+    }
+
+    /// `tex_to_color_map`: its keys are isolated, and every group whose
+    /// argument contains a key takes that colour (later entries win).
+    #[must_use]
+    pub fn t2c(mut self, t2c: &'a [(&'a str, Srgb)]) -> Self {
+        self.t2c = t2c;
+        self
+    }
+
+    /// The `font_size=` surface.
+    #[must_use]
+    pub fn font_size(mut self, font_size: f64) -> Self {
+        self.font_size = font_size;
+        self
+    }
+
+    /// Native macro declarations for the joined request.
+    #[must_use]
+    pub fn preamble(mut self, preamble: &'a str) -> Self {
+        self.preamble = preamble;
+        self
+    }
+
+    /// Replace the base style.
+    #[must_use]
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// `break_up_tex_strings`: split each argument around every isolated
+    /// substring (kept as its own piece), dropping empty pieces. The
+    /// Reference's regex alternation takes the leftmost match, and the
+    /// earliest-listed substring among those starting there.
+    fn pieces(&self) -> Vec<&'a str> {
+        let needles: Vec<&str> = self
+            .isolate
+            .iter()
+            .copied()
+            .chain(self.t2c.iter().map(|(needle, _)| *needle))
+            .filter(|needle| !needle.is_empty())
+            .collect();
+        let mut pieces = Vec::new();
+        for &string in &self.strings {
+            let mut rest = string;
+            loop {
+                let next = needles
+                    .iter()
+                    .filter_map(|needle| rest.find(needle).map(|at| (at, *needle)))
+                    .min_by_key(|(at, _)| *at);
+                let Some((at, needle)) = next else {
+                    pieces.push(rest);
+                    break;
+                };
+                pieces.push(&rest[..at]);
+                pieces.push(&rest[at..at + needle.len()]);
+                rest = &rest[at + needle.len()..];
+            }
+        }
+        pieces.retain(|piece| !piece.is_empty());
+        pieces
+    }
+
+    /// Typeset the joined string and group its primitives by argument.
+    ///
+    /// # Errors
+    ///
+    /// As [`Tex::build`]: the joined string must typeset as a whole.
+    pub fn build(&self, engine: &TexEngine) -> Result<OldTexMobject, TexMobjectError> {
+        let pieces = self.pieces();
+        let joined = pieces.join(self.arg_separator);
+        let tex = Tex {
+            source: &joined,
+            preamble: self.preamble,
+            mode: if self.math_mode {
+                Mode::Math(MathStyle::Display)
+            } else {
+                Mode::Text
+            },
+            font_size: self.font_size,
+            font_size_for_unit_height: DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
+            style: self.style,
+            t2c: &[],
+            align: if self.math_mode {
+                LineAlign::Left
+            } else {
+                LineAlign::Center
+            },
+        };
+        let built = tex.build(engine)?;
+        // Each piece's byte range in the joined source.
+        let mut ranges = Vec::with_capacity(pieces.len());
+        let mut offset = 0;
+        for piece in &pieces {
+            ranges.push(offset..offset + piece.len());
+            offset += piece.len() + self.arg_separator.len();
+        }
+        let mut members: Vec<Vec<VMobject>> = vec![Vec::new(); pieces.len()];
+        for (sub, child) in built.typeset.subs.iter().zip(built.vmob.children()) {
+            // The piece holding the span start; a span starting inside a
+            // separator belongs to the piece before it.
+            let start = sub.span.start;
+            let index = ranges
+                .iter()
+                .rposition(|range| range.start <= start)
+                .unwrap_or(0);
+            if let Some(group) = members.get_mut(index) {
+                group.push(child.clone());
+            }
+        }
+        let mut groups = Vec::new();
+        let mut tex_strings = Vec::new();
+        for (piece, children) in pieces.iter().zip(members) {
+            let stripped = piece.trim();
+            if stripped.is_empty() || children.is_empty() {
+                continue;
+            }
+            let mut group = VMobject::new()
+                .with_style(self.style)
+                .with_children(children);
+            for (needle, color) in self.t2c {
+                if stripped.contains(needle) {
+                    let color = *color;
+                    group = group.map_style_deep(move |style| style.color(color));
+                }
+            }
+            groups.push(group);
+            tex_strings.push(stripped.to_owned());
+        }
+        Ok(OldTexMobject {
+            vmob: VMobject::new().with_style(self.style).with_children(groups),
+            tex_strings,
+            typeset: built.typeset,
+        })
+    }
+}
+
 /// The ems→scene-units scale, calibrated the Reference's way: typeset a
 /// reference "0" (text-style math, the Reference's calibration surface)
 /// and scale so its height is `font_size / font_size_for_unit_height`.
@@ -418,6 +672,106 @@ mod tests {
 
     fn engine() -> TexEngine {
         TexEngine::new("fmd-math/pack/default", None).expect("engine")
+    }
+
+    #[test]
+    fn old_tex_groups_primitives_by_argument() {
+        let engine = engine();
+        let old = OldTex::new(&["a^2", "+", "b^2"])
+            .build(&engine)
+            .expect("typesets");
+        assert_eq!(old.tex_strings, ["a^2", "+", "b^2"]);
+        let sizes: Vec<usize> = old
+            .vmob
+            .children()
+            .iter()
+            .map(|g| g.children().len())
+            .collect();
+        assert_eq!(sizes, [2, 1, 2]);
+        // Every primitive of the joined typeset lands in exactly one group,
+        // and the groups read left to right.
+        assert_eq!(sizes.iter().sum::<usize>(), old.typeset.subs.len());
+        let xs: Vec<f64> = old
+            .vmob
+            .children()
+            .iter()
+            .map(|g| g.center_point()[0])
+            .collect();
+        assert!(xs[0] < xs[1] && xs[1] < xs[2], "{xs:?}");
+        assert_eq!(old.parts_by_tex("2", true), [0, 2]);
+        assert_eq!(old.part_by_tex("+"), Some(1));
+        assert!(old.parts_by_tex("a", false).is_empty());
+
+        // One argument is one group of everything.
+        let single = OldTex::new(&[r"\frac{1}{2}"])
+            .build(&engine)
+            .expect("typesets");
+        assert_eq!(single.vmob.children().len(), 1);
+        assert_eq!(
+            single.vmob.children()[0].children().len(),
+            single.typeset.subs.len()
+        );
+    }
+
+    #[test]
+    fn old_tex_isolates_and_colours_substrings() {
+        let engine = engine();
+        let t2c = [("y", RED)];
+        let old = OldTex::new(&["x + y = z"])
+            .isolate(&["="])
+            .t2c(&t2c)
+            .build(&engine)
+            .expect("typesets");
+        assert_eq!(old.tex_strings, ["x +", "y", "=", "z"]);
+        let y = &old.vmob.children()[1];
+        assert_eq!(y.style().fill_color, RED);
+        assert!(
+            y.children()
+                .iter()
+                .all(|glyph| glyph.style().fill_color == RED)
+        );
+        assert_ne!(old.vmob.children()[0].style().fill_color, RED);
+        // Text mainland, with a separator between arguments.
+        let text = OldTex::text(&["Hello", "world"])
+            .arg_separator(" ")
+            .build(&engine)
+            .expect("typesets");
+        assert_eq!(text.tex_strings, ["Hello", "world"]);
+        assert_eq!(text.vmob.children()[0].children().len(), 5);
+        assert_eq!(text.vmob.children()[1].children().len(), 5);
+        // Added to a stage it stands centred, as the Reference's does.
+        let mut stage = Stage::new();
+        let mob = stage.add(text);
+        let [x, y, _] = stage.get_center(mob);
+        assert!(x.abs() < 1e-6 && y.abs() < 1e-6);
+    }
+
+    /// The Reference centres every Tex/TexText/Text at construction; a built
+    /// mobject added to a stage stands there too, while the layout-space
+    /// `vmob` keeps the baseline origin for composite builders.
+    #[test]
+    fn added_typeset_mobjects_are_centred_like_the_reference() {
+        let engine = engine();
+        let book = crate::FontBook::bundled().expect("bundled faces");
+        let mut stage = Stage::new();
+        let tex = Tex::new(r"\sum_{n=1}^{\infty} \frac{1}{n^2}")
+            .build(&engine)
+            .expect("typesets");
+        let layout_center = tex.vmob.center_point();
+        assert!(
+            layout_center[0].abs() > 0.1,
+            "layout space is baseline-anchored"
+        );
+        let text = crate::text::Text::new("Hello world")
+            .build(&book)
+            .expect("lays out");
+        let textext = TexText::new(r"area $\pi r^2$")
+            .build(&engine)
+            .expect("typesets");
+        for mob in [stage.add(tex), stage.add(text), stage.add(textext)] {
+            let [x, y, _] = stage.get_center(mob);
+            assert!(x.abs() < 1e-6 && y.abs() < 1e-6, "centre ({x}, {y})");
+        }
     }
 
     /// The deterministic golden format: one line per point of the
