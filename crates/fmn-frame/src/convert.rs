@@ -1,7 +1,7 @@
 //! Format conversion kernels (§14.1, §14.3, §17.3 hot list: "color
 //! transfer functions").
 //!
-//! Three kernels and a swizzle:
+//! Transfer, matrix-conversion and swizzle kernels:
 //!
 //! - [`rgba16f_to_rgba8`] / [`rgba16f_to_rgba8_slice`] — linear-light
 //!   RGBA16F → sRGB RGBA8, the certified canonical-output conversion:
@@ -12,7 +12,11 @@
 //!   in Q16.16 integer fixed point with defined rounding; standard-mode
 //!   kernels (they feed ffmpeg, whose products are uncertified by
 //!   construction) but deterministic everywhere regardless.
-//! - [`swap_rb8`] — RGBA8 ⇄ BGRA8 for compatibility sinks.
+//! - [`rgba16f_to_nv12`] / [`rgba16f_to_p010`] — direct binary16 conversion
+//!   without a frame-sized scratch buffer. NV12 preserves the legacy bytes;
+//!   P010 transfers RGB at 16-bit precision before the final 10-bit rounding.
+//! - [`swap_rb8`] / [`rgba16f_to_bgra8`] — compatibility-channel order,
+//!   including direct linear-light output without an RGBA8 intermediate.
 //!
 //! Every kernel honors per-plane strides (padding bytes are never
 //! touched), allocates nothing, and reads/writes in output orientation
@@ -39,12 +43,17 @@
 //! `(sum + 2¹⁵) >> 16` (arithmetic shift: floor), i.e. round half up on
 //! the whole number line, then offset and clamp. The 10-bit path reuses
 //! the same Q16.16 sums with a 14-bit shift, so 8- and 10-bit outputs
-//! quantize one common intermediate.
+//! quantize one common intermediate. The direct binary16 P010 kernel instead
+//! divides a 16-bit-input sum by 257 times that scale; it does not round each
+//! RGB channel down to eight bits first.
 
 use crate::FrameError;
 use crate::buffer::FrameBuffer;
 use crate::format::{ChromaSiting, ColorRange, PixelFormat};
 use crate::transfer::{TransferTables, tables};
+
+mod linear_yuv;
+pub use linear_yuv::{rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010};
 
 #[inline]
 fn convert_rgba16f_pixels(src: &[[u8; 8]], dst: &mut [[u8; 4]], tables: &TransferTables) {
