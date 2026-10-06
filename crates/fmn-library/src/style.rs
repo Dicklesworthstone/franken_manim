@@ -18,11 +18,12 @@
 //!   opacity=0.5)` changes only the alpha lane, leaving the rgb alone —
 //!   which is what every fade animation depends on.
 //!
-//! One deliberate gap, filed as fm-sjl: the Reference also keeps a
-//! one-record `_data_defaults` array so that styling a **point-less**
-//! mobject is remembered until it gains points. We have no such record
-//! yet, so a style write to an empty entry writes nothing. Group styling
-//! still works — it recurses into children, which is where the points are.
+//! Styling a **point-less** mobject is remembered until it gains points,
+//! as the Reference's one-record `_data_defaults` does (fm-sjl): the write
+//! lands in the buffer's phantom default record, which growth from zero
+//! adopts. The column writes themselves are Marionette's
+//! (`RecordBuffer::write_color_lanes` / `write_scalar_lanes`), shared with
+//! the `.animate` builder's style commands.
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
@@ -128,59 +129,14 @@ impl Style {
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
+/// One colour column's rgb and/or alpha lanes, through Marionette's record
+/// primitive (which also carries the fm-sjl point-less default-record path).
 fn write_rgba(buffer: &mut RecordBuffer, field: &str, color: Option<Srgb>, opacity: Option<f64>) {
-    if buffer.schema().offset(field).is_none() {
-        return;
-    }
-    // The fm-sjl path: a point-less entry has no rows to traverse, so the
-    // Reference writes the resolved values into `_data_defaults`, where
-    // growth from zero picks them up.
-    if buffer.is_empty() {
-        if let Some(base) = buffer.default_record(field)
-            && base.len() == 4
-        {
-            let mut rgba = [base[0], base[1], base[2], base[3]];
-            if let Some(c) = color {
-                rgba[0] = c.r as f32;
-                rgba[1] = c.g as f32;
-                rgba[2] = c.b as f32;
-            }
-            if let Some(a) = opacity {
-                rgba[3] = a as f32;
-            }
-            buffer.write_default_record(field, &rgba);
-        }
-        return;
-    }
-    for i in 0..buffer.len() {
-        let Some(current) = buffer.read(i, field) else {
-            continue;
-        };
-        let mut rgba = [current[0], current[1], current[2], current[3]];
-        if let Some(c) = color {
-            rgba[0] = c.r as f32;
-            rgba[1] = c.g as f32;
-            rgba[2] = c.b as f32;
-        }
-        if let Some(a) = opacity {
-            rgba[3] = a as f32;
-        }
-        buffer.write(i, field, &rgba);
-    }
+    buffer.write_color_lanes(field, color.map(|c| [c.r, c.g, c.b]), opacity);
 }
 
-#[allow(clippy::cast_possible_truncation)]
 fn write_scalar(buffer: &mut RecordBuffer, field: &str, value: f64) {
-    if buffer.schema().offset(field).is_none() {
-        return;
-    }
-    if buffer.is_empty() {
-        buffer.write_default_record(field, &[value as f32]);
-        return;
-    }
-    let column = vec![value as f32; buffer.len()];
-    buffer.write_range(field, 0, &column);
+    buffer.write_scalar_lanes(field, value);
 }
 
 /// The runtime style surface, as an extension trait because [`Stage`]

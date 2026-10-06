@@ -624,6 +624,58 @@ impl RecordBuffer {
         row[off..off + width].copy_from_slice(value);
     }
 
+    /// The Reference's style write over one 4-lane colour column (`set_fill`,
+    /// `set_stroke`, `set_color`): replace the rgb lanes and/or the alpha lane
+    /// of every record, leaving the other untouched — colour and opacity are
+    /// independent writes, which every fade depends on. A point-less buffer
+    /// writes its phantom record instead, so growth from zero adopts the
+    /// style (`_data_defaults`). A schema without `field` is a no-op.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn write_color_lanes(&mut self, field: &str, rgb: Option<[f64; 3]>, alpha: Option<f64>) {
+        if self.schema.field_width(field) != Some(4) {
+            return;
+        }
+        let update = |rgba: &mut [f32]| {
+            if let Some([r, g, b]) = rgb {
+                rgba[0] = r as f32;
+                rgba[1] = g as f32;
+                rgba[2] = b as f32;
+            }
+            if let Some(a) = alpha {
+                rgba[3] = a as f32;
+            }
+        };
+        if self.is_empty() {
+            if let Some(mut base) = self.default_record(field) {
+                update(&mut base);
+                self.write_default_record(field, &base);
+            }
+            return;
+        }
+        if let Some(mut column) = self.read_column(field) {
+            for rgba in column.as_chunks_mut::<4>().0 {
+                update(rgba);
+            }
+            self.write_range(field, 0, &column);
+        }
+    }
+
+    /// Write one scalar across a 1-lane column (`stroke_width`,
+    /// `fill_border_width`), or into the phantom record of a point-less
+    /// buffer. A schema without `field` is a no-op.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn write_scalar_lanes(&mut self, field: &str, value: f64) {
+        if self.schema.field_width(field) != Some(1) {
+            return;
+        }
+        if self.is_empty() {
+            self.write_default_record(field, &[value as f32]);
+            return;
+        }
+        let column = vec![value as f32; self.len];
+        self.write_range(field, 0, &column);
+    }
+
     /// Tile the phantom record across `cells` when growth starts from zero
     /// (the `_data_defaults` adoption rule). A no-op without defaults or on
     /// non-empty growth.

@@ -253,3 +253,79 @@ fn broadcast_wires_the_lagged_restores_with_reference_defaults() {
     assert!(group.state().config.remover);
     assert_eq!(group.animations().len(), 3);
 }
+
+#[test]
+fn flashy_fade_in_fades_the_mobject_while_an_outline_copy_flashes() {
+    let mut stage = Stage::new();
+    let mob = line5(&mut stage);
+    let mut anim = fmn_anim::flashy_fade_in(&mut stage, mob, 2.0, 0.0, 1.0).unwrap();
+    assert_eq!(anim.state().config.name, "FlashyFadeIn");
+    // The container holds the mobject and its outline copy, in that order.
+    let members = stage
+        .get(anim.state().mobject())
+        .unwrap()
+        .submobjects()
+        .to_vec();
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0], mob);
+    let outline = members[1];
+    assert_ne!(outline, mob);
+    // The outline is stroke-only: fill alpha 0, stroke width 2 at alpha 1.
+    let fill = column(&stage, outline, "fill_rgba");
+    assert!(fill.iter().skip(3).step_by(4).all(|a| *a == 0.0));
+    let stroke = column(&stage, outline, "stroke_rgba");
+    assert!(stroke.iter().skip(3).step_by(4).all(|a| *a == 1.0));
+    assert!(
+        column(&stage, outline, "stroke_width")
+            .iter()
+            .all(|w| *w == 2.0)
+    );
+    // The original paint is untouched by building the outline.
+    let original = column(&stage, mob, "fill_rgba");
+    assert!(original.iter().skip(3).step_by(4).all(|a| *a == 1.0));
+
+    anim.begin(&mut stage).unwrap();
+    anim.interpolate(&mut stage, 0.0);
+    let start = column(&stage, mob, "fill_rgba");
+    assert!(
+        start.iter().skip(3).step_by(4).all(|a| *a == 0.0),
+        "{start:?}"
+    );
+    anim.interpolate(&mut stage, 0.5);
+    let middle = column(&stage, mob, "fill_rgba");
+    assert!(
+        middle
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .all(|a| *a > 0.0 && *a < 1.0),
+        "{middle:?}"
+    );
+    anim.finish(&mut stage);
+    let end = column(&stage, mob, "fill_rgba");
+    assert_close(&end, &[0.2, 0.4, 0.6, 1.0].repeat(5), 1e-6);
+}
+
+#[test]
+fn flashy_fade_in_squishes_the_fade_into_its_lag_window() {
+    let mut stage = Stage::new();
+    let mob = line5(&mut stage);
+    let mut anim = fmn_anim::flashy_fade_in(&mut stage, mob, 2.0, 0.5, 1.0).unwrap();
+    anim.begin(&mut stage).unwrap();
+    // Before fade_lag the fade has not started.
+    anim.interpolate(&mut stage, 0.4);
+    let early = column(&stage, mob, "fill_rgba");
+    assert!(
+        early.iter().skip(3).step_by(4).all(|a| *a == 0.0),
+        "{early:?}"
+    );
+    anim.interpolate(&mut stage, 0.75);
+    let later = column(&stage, mob, "fill_rgba");
+    assert!(
+        later.iter().skip(3).step_by(4).all(|a| *a > 0.0),
+        "{later:?}"
+    );
+    let gone = line5(&mut stage);
+    stage.delete(gone).unwrap();
+    assert!(fmn_anim::flashy_fade_in(&mut stage, gone, 2.0, 0.0, 1.0).is_err());
+}

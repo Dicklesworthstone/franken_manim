@@ -98,8 +98,8 @@ pub use frame::{
 pub use growing::{grow_arrow, grow_from_center, grow_from_edge, grow_from_point};
 pub use indication::{
     INDICATION_YELLOW, VShowPassingFlash, WiggleOutThenIn, animation_on_surrounding_rectangle,
-    apply_wave, broadcast, circle_indicate, flash, flash_around, focus_on, indicate,
-    show_creation_then_destruction, show_creation_then_destruction_around,
+    apply_wave, broadcast, circle_indicate, flash, flash_around, flashy_fade_in, focus_on,
+    indicate, show_creation_then_destruction, show_creation_then_destruction_around,
     show_creation_then_fade_around, show_creation_then_fade_out, show_passing_flash_around,
     turn_inside_out,
 };

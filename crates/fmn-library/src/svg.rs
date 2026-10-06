@@ -64,6 +64,39 @@ pub fn svg_mobject(bytes: &[u8]) -> Result<VMobject, SvgError> {
     Ok(svg_document_mobject(&document))
 }
 
+/// `VMobjectFromSVGPath`: one SVG path-data string (`d`) as a VMobject in
+/// the path's own user-space coordinates — no viewport fit, flip or
+/// recentring (those belong to `SVGMobject`) and no paint, so the
+/// VMobject defaults apply, as in the Reference. Cubic and arc segments
+/// reduce through Chisel's one error-bounded converter (§7.2), and the
+/// string passes through the same budgeted document processor as any user
+/// SVG (§7.6), so a hostile `d` refuses by name.
+///
+/// An empty `d` is an empty mobject.
+///
+/// # Errors
+/// The processor's typed refusal for malformed or over-budget path data.
+pub fn vmobject_from_svg_path(d: &str) -> Result<VMobject, SvgError> {
+    let mut escaped = String::with_capacity(d.len());
+    for c in d.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(c),
+        }
+    }
+    let source = format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="{escaped}"/></svg>"#);
+    let document = SvgDocument::parse(source.as_bytes())?;
+    let points = document
+        .shapes
+        .iter()
+        .find(|shape| shape.path.has_points())
+        .map(|shape| shape.path.points().to_vec())
+        .unwrap_or_default();
+    Ok(VMobject::from_points(points))
+}
+
 /// One shape's child: its shared-anchor point run under its resolved style.
 fn shape_child(shape: &SvgShape) -> VMobject {
     VMobject::from_points(shape.path.points().to_vec()).with_style(shape_style(&shape.style))

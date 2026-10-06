@@ -1051,3 +1051,234 @@ pub fn laptop() -> VMobject {
 
     v_group([body, screen_plate, axis])
 }
+
+// ------------------------------------------------- geometry-native bubbles
+
+/// The `SpeechBubble` / `ThoughtBubble` filler: an invisible
+/// `Rectangle(*filler_shape)` the body surrounds when no content is given.
+fn bubble_filler(filler_shape: (f64, f64)) -> Result<VMobject, BooleanMobjectError> {
+    Ok(Rectangle::new()
+        .width(filler_shape.0)
+        .height(filler_shape.1)
+        .build()?
+        .map_style_deep(|style| style.fill(BLACK, 0.0).stroke(BLACK, 0.0, 1.0)))
+}
+
+/// The Reference's `Bubble.__init__` tail: the body takes `fill BLACK 0.8`
+/// and `stroke WHITE 3.0` across its family, then the group is
+/// `VGroup(body, content)`.
+fn bubble_group(body: VMobject, content: VMobject) -> VMobject {
+    let body = body.map_style_deep(|style| style.fill(BLACK, 0.8).stroke(WHITE, 3.0, 1.0));
+    v_group([body, content])
+}
+
+/// Content extent, the surrounding rectangle's corners in the Reference
+/// `Rectangle` vertex order (UR, UL, DL, DR), `buff` clear on every side.
+fn surrounding_corners(content: &VMobject, buff: f64) -> [Vec3; 4] {
+    let (min, max) = content.extent().unwrap_or(([0.0; 3], [0.0; 3]));
+    let (x0, x1) = (min[0] - buff, max[0] + buff);
+    let (y0, y1) = (min[1] - buff, max[1] + buff);
+    let z = 0.5 * (min[2] + max[2]);
+    [[x1, y1, z], [x0, y1, z], [x0, y0, z], [x1, y0, z]]
+}
+
+fn lerp3(a: Vec3, b: Vec3, alpha: f64) -> Vec3 {
+    [
+        a[0] + alpha * (b[0] - a[0]),
+        a[1] + alpha * (b[1] - a[1]),
+        a[2] + alpha * (b[2] - a[2]),
+    ]
+}
+
+/// `SpeechBubble` (drawings.py:463), geometry-only — no asset involved.
+///
+/// The body is the content's `SurroundingRectangle(buff)` with
+/// `round_corners()` (a quarter of the shortest edge), unioned with a stem
+/// triangle whose top spans `stem_top_x_props` of the bottom edge and whose
+/// tip hangs `stem_height_to_bubble_height` of the bubble's height below the
+/// lower-left corner; a rightward `direction` mirrors it. `content` of
+/// [`None`] surrounds the invisible `filler_shape` rectangle. Reference
+/// defaults: `buff = MED_SMALL_BUFF`, `filler_shape = (2, 1)`,
+/// `stem_height_to_bubble_height = 0.5`, `stem_top_x_props = (0.2, 0.3)`,
+/// `direction = LEFT`.
+///
+/// Behavior Note: the Reference's `insert_n_curves(20)` only densifies the
+/// union for later morphing; curve density here is the boolean kernel's.
+///
+/// # Errors
+/// [`BooleanMobjectError`] from the rounded rectangle or the union.
+pub fn speech_bubble(
+    content: Option<&VMobject>,
+    direction: Vec3,
+    buff: f64,
+    filler_shape: (f64, f64),
+    stem_height_to_bubble_height: f64,
+    stem_top_x_props: (f64, f64),
+) -> Result<VMobject, BooleanMobjectError> {
+    let content = match content {
+        Some(given) => given.clone(),
+        None => bubble_filler(filler_shape)?,
+    };
+    let corners = surrounding_corners(&content, buff);
+    let rect = crate::poly::Polygon::new(corners).round_corners(None)?;
+    let (lp, rp) = (corners[2], corners[3]);
+    let stem_height = stem_height_to_bubble_height * (corners[0][1] - corners[3][1]);
+    let triangle = crate::poly::Polygon::new([
+        lerp3(lp, rp, stem_top_x_props.0),
+        lerp3(lp, rp, stem_top_x_props.1),
+        [lp[0], lp[1] - stem_height, lp[2]],
+    ])
+    .build();
+    let mut body = crate::boolean_ops::union(&[rect, triangle])?.into_mobject();
+    if direction[0] > 0.0 {
+        body = mirrored_horizontally(body);
+    }
+    Ok(bubble_group(body, content))
+}
+
+/// [`speech_bubble`] with every Reference default, around `content`.
+///
+/// # Errors
+/// As [`speech_bubble`].
+pub fn speech_bubble_default(content: Option<&VMobject>) -> Result<VMobject, BooleanMobjectError> {
+    speech_bubble(content, LEFT, MED_SMALL_BUFF, (2.0, 1.0), 0.5, (0.2, 0.3))
+}
+
+/// The `ThoughtBubble` knobs beyond the shared bubble surface, with the
+/// Reference's defaults.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThoughtBubbleShape {
+    /// `bulge_radius` — the cloud's circle radius (`0.35`).
+    pub bulge_radius: f64,
+    /// `bulge_overlap` — the fraction of a diameter neighbours overlap (`0.25`).
+    pub bulge_overlap: f64,
+    /// `noise_factor` — jitter of bulge spacing and radius (`0.1`).
+    pub noise_factor: f64,
+    /// `circle_radii` — the trailing thought circles (`[0.1, 0.15, 0.2]`).
+    pub circle_radii: Vec<f64>,
+}
+
+impl Default for ThoughtBubbleShape {
+    fn default() -> Self {
+        Self {
+            bulge_radius: 0.35,
+            bulge_overlap: 0.25,
+            noise_factor: 0.1,
+            circle_radii: vec![0.1, 0.15, 0.2],
+        }
+    }
+}
+
+/// `ThoughtBubble` (drawings.py:497), geometry-only — no asset involved.
+///
+/// Bulge centres walk the content's `SurroundingRectangle(buff)` corner to
+/// corner (DL → UL → UR → DR → DL) at `(1 − bulge_overlap)·2·bulge_radius`
+/// spacing, each jittered along its edge; every bulge is a circle of
+/// jittered radius, and the cloud is their union with the rectangle. The
+/// trailing circles are arranged up-right, the middle one nudged down-right,
+/// and placed under the cloud's lower-left. A rightward `direction` mirrors
+/// the whole body. `content` of [`None`] surrounds the invisible
+/// `filler_shape` rectangle. Reference defaults: `buff = SMALL_BUFF`,
+/// `filler_shape = (2, 1)`, `direction = LEFT`, and
+/// [`ThoughtBubbleShape::default`].
+///
+/// Randomness is the one RNG (BN-01): pass a stream from the scene's
+/// [`fmn_core::rng::RngRoot`] substreams, not an ambient generator. The
+/// draws keep the Reference's order — every spacing jitter, then every
+/// radius jitter.
+///
+/// # Errors
+/// [`BooleanMobjectError`] from the cloud union.
+pub fn thought_bubble(
+    content: Option<&VMobject>,
+    direction: Vec3,
+    buff: f64,
+    filler_shape: (f64, f64),
+    shape: &ThoughtBubbleShape,
+    rng: &mut fmn_core::rng::Pcg64Dxsm,
+) -> Result<VMobject, BooleanMobjectError> {
+    let content = match content {
+        Some(given) => given.clone(),
+        None => bubble_filler(filler_shape)?,
+    };
+    let corners = surrounding_corners(&content, buff);
+    let rect = crate::poly::Polygon::new(corners).build();
+    let radius = shape.bulge_radius;
+    let step = (1.0 - shape.bulge_overlap) * (2.0 * radius);
+    let nf = shape.noise_factor;
+    // drawings.py walks [DL, UL, UR, DR] as adjacent pairs, closing back.
+    let walk = [corners[2], corners[1], corners[0], corners[3]];
+    let mut points = Vec::new();
+    for index in 0..walk.len() {
+        let (c1, c2) = (walk[index], walk[(index + 1) % walk.len()]);
+        let distance = fmn_geom::space_ops::get_norm([c1[0] - c2[0], c1[1] - c2[1], c1[2] - c2[2]]);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n_alphas = (distance / step) as usize + 1;
+        for k in 0..n_alphas {
+            // np.linspace(0, 1, n): a single sample is 0.
+            let alpha = if n_alphas == 1 {
+                0.0
+            } else {
+                k as f64 / (n_alphas - 1) as f64
+            };
+            let jitter = nf * (step / n_alphas as f64) * (rng.next_f64() - 0.5);
+            points.push(lerp3(c1, c2, alpha + jitter));
+        }
+    }
+    let mut operands = Vec::with_capacity(points.len() + 1);
+    operands.push(rect);
+    for point in points {
+        let bulge = radius * (1.0 + nf * rng.next_f64());
+        operands.push(Circle::new().radius(bulge).build().moved_to(point));
+    }
+    let cloud = crate::boolean_ops::union(&operands)?.into_mobject();
+
+    let circ_buff = 0.25 * shape.circle_radii.first().copied().unwrap_or(0.0);
+    let circles = VMobject::arranged(
+        shape
+            .circle_radii
+            .iter()
+            .map(|r| Circle::new().radius(*r).build()),
+        UR,
+        circ_buff,
+        ORIGIN,
+    );
+    // `arrange` re-centres the group; then nudge the middle circle.
+    let circles = circles.moved_to(ORIGIN);
+    let mut position = 0usize;
+    let circles = circles.map_children(move |circle| {
+        let nudged = if position == 1 {
+            circle.shifted([circ_buff * DR[0], circ_buff * DR[1], 0.0])
+        } else {
+            circle
+        };
+        position += 1;
+        nudged
+    });
+    let circles = circles.next_to(&cloud, DOWN, 4.0 * circ_buff, LEFT);
+    let mut members: Vec<VMobject> = circles.children().to_vec();
+    members.push(cloud);
+    let mut body = v_group(members);
+    if direction[0] > 0.0 {
+        body = mirrored_horizontally(body);
+    }
+    Ok(bubble_group(body, content))
+}
+
+/// [`thought_bubble`] with every Reference default, around `content`.
+///
+/// # Errors
+/// As [`thought_bubble`].
+pub fn thought_bubble_default(
+    content: Option<&VMobject>,
+    rng: &mut fmn_core::rng::Pcg64Dxsm,
+) -> Result<VMobject, BooleanMobjectError> {
+    thought_bubble(
+        content,
+        LEFT,
+        fmn_core::constants::SMALL_BUFF,
+        (2.0, 1.0),
+        &ThoughtBubbleShape::default(),
+        rng,
+    )
+}

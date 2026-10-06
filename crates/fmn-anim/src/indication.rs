@@ -33,9 +33,8 @@
 //! The remaining geometry-bound classes land with their dependencies (the
 //! seams the fm-cye bead records): `FlashAround`/`FlashUnder` and the
 //! `AnimationOnSurroundingRectangle` family need `SurroundingRectangle`/
-//! `Underline` (fmn-library, §12); `FlashyFadeIn` and specialized.py's
-//! `Broadcast` need their additional composition policies. Their mechanisms
-//! — Transform, passing flash, fade, restore — are all already here.
+//! `Underline` (fmn-library, §12). [`flashy_fade_in`] composes the fade and
+//! passing-flash mechanisms; [`broadcast`] wires caller-built restores.
 
 use fmn_core::rate;
 use fmn_core::types::Vec3;
@@ -603,5 +602,39 @@ pub fn broadcast(
     group.state_mut().config.run_time = run_time;
     group.state_mut().config.lag_ratio = lag_ratio;
     group.state_mut().config.remover = remover;
+    Ok(group)
+}
+
+/// `FlashyFadeIn` (indication.py:408): the mobject fades in, its rate
+/// squished to `[fade_lag, 1]`, while a stroke-only outline copy — fill
+/// alpha 0, stroke `stroke_width` at full opacity — runs a
+/// [`VShowPassingFlash`] of `time_width`. The two members run together in
+/// one [`AnimationGroup`] (linear group clock, as the Reference's group
+/// default). Reference defaults: `stroke_width = 2.0`, `fade_lag = 0.0`,
+/// `time_width = 1.0`. The outline copy is made now, as the Reference copies
+/// at construction; the passing flash removes it when done.
+///
+/// # Errors
+/// [`AnimError::StaleHandle`] for a dead `vmobject`, or the Stage errors
+/// reported while copying it or assembling the group.
+pub fn flashy_fade_in(
+    stage: &mut Stage,
+    vmobject: Mob,
+    stroke_width: f64,
+    fade_lag: f64,
+    time_width: f64,
+) -> Result<AnimationGroup, AnimError> {
+    if !stage.contains(vmobject) {
+        return Err(AnimError::StaleHandle(vmobject));
+    }
+    let outline = stage.copy_family(vmobject)?;
+    stage.set_color_lanes(outline, "fill_rgba", None, Some(0.0), true);
+    stage.set_scalar_lanes(outline, "stroke_width", stroke_width, true);
+    stage.set_color_lanes(outline, "stroke_rgba", None, Some(1.0), true);
+    let mut fade = crate::fading::fade_in(stage, vmobject, Vec3::default(), 1.0)?;
+    fade.state_mut().config.rate_func = RateFunc::smooth().squish(fade_lag, 1.0);
+    let flash = VShowPassingFlash::new(outline).with_time_width(time_width);
+    let mut group = AnimationGroup::new(stage, vec![Box::new(fade), Box::new(flash)])?;
+    group.state_mut().config.name = "FlashyFadeIn".to_owned();
     Ok(group)
 }

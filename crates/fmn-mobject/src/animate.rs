@@ -1,6 +1,16 @@
 //! The `.animate` builder: deferred-command recording with the Reference's
-//! REAL rules (§8.6, fm-yra; G0-1's ratified fluent-recording shape — one
-//! implementation serving both front doors).
+//! REAL rules (§8.6, fm-yra; G0-1's ratified fluent-recording shape). This is
+//! the native front door's builder; the Python portal records its own chains
+//! and hands Choreo the resulting target.
+//!
+//! The recordable surface is the Reference's chainable mutation vocabulary
+//! that a target copy can realize: placement (`shift`, `move_to`, `next_to`,
+//! `align_to`, `to_edge`, `to_corner`, `center`, `set_x/y/z`, `match_*`,
+//! `arrange`), transforms (`scale`, `stretch`, `rotate` about a point or axis,
+//! `flip`, `apply_matrix`), size (`set_width`, `set_height`), style
+//! (`set_color`, `set_fill`, `set_stroke`, `set_opacity`, `fade`), and value
+//! trackers. Arbitrary callables (`apply_function`, `become`) are not
+//! recordable as `Copy` commands; they are ordinary animations instead.
 //!
 //! `mob.animate()` returns a recorder; chained mutation calls append
 //! commands; [`AnimBuilder::build`] realizes the recording against a target
@@ -31,10 +41,13 @@
 //!   unrepresentable at the type level. fmn-anim's `Animation` joins the
 //!   same contract at fm-67a (§9.1 shares it).
 
+use crate::placement::Placement;
 use crate::positional::PosTarget;
 use crate::stage::{Mob, Stage};
-use fmn_core::constants::OUT;
+use fmn_core::color::Srgb;
+use fmn_core::constants::{OUT, TAU};
 use fmn_core::types::Vec3;
+use fmn_geom::Mat3;
 
 /// Transform-level arguments passed once per chain (the Reference's
 /// `set_anim_args` surface: `run_time`, `rate_func`, `lag_ratio`,
@@ -111,6 +124,31 @@ pub enum AnimateCommand {
     SetComplexValue(f64, f64),
     /// Increment a complex tracker's real and imaginary components.
     IncrementComplexValue(f64, f64),
+    /// `rotate(angle, axis, about_point)`; `None` pivots on the box center.
+    RotateAbout(f64, Vec3, Option<Vec3>),
+    /// `scale(factor, about_point, about_edge)`; both `None` is the center.
+    ScaleAbout(f64, Option<Vec3>, Option<Vec3>),
+    /// `flip(axis)`: a half turn about `axis` through the box center.
+    Flip(Vec3),
+    /// `apply_matrix(matrix)` about the origin, the Reference's default.
+    ApplyMatrix(Mat3),
+    /// `set_x` / `set_y` / `set_z` of the box center: `(dim, value)`.
+    SetCoord(usize, f64),
+    /// `match_x` / `match_y` / `match_z`: `(other, dim)`, read at build.
+    MatchCoord(Mob, usize),
+    /// `match_width` / `match_height` / `match_depth`: `(other, dim)`.
+    MatchDimSize(Mob, usize),
+    /// `arrange(direction, buff, center)` over the target's submobjects.
+    Arrange(Vec3, f64, bool),
+    /// `set_color(color, opacity)` across the family: fill and stroke (and
+    /// a base mobject's `rgba`) take the colour; opacity only when given.
+    SetColor(Srgb, Option<f64>),
+    /// `set_fill(color, opacity)` across the family.
+    SetFill(Option<Srgb>, Option<f64>),
+    /// `set_stroke(color, width, opacity)` across the family.
+    SetStroke(Option<Srgb>, Option<f64>, Option<f64>),
+    /// `fade(darkness)`: the Reference's `set_opacity(1 - darkness)`.
+    Fade(f64),
 }
 
 /// Marker for a W7 `override_animate` animation: the builder enforces the
@@ -407,6 +445,176 @@ impl AnimBuilder {
         self.push(AnimateCommand::IncrementComplexValue(real, imaginary))
     }
 
+    /// Record `rotate(angle, axis, about_point)`. `about_point = None`
+    /// rotates about the target's bounding-box center, as the Reference does.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn rotate_about(
+        self,
+        angle: f64,
+        axis: Vec3,
+        about_point: Option<Vec3>,
+    ) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::RotateAbout(angle, axis, about_point))
+    }
+
+    /// Record `scale(factor, about_point=…, about_edge=…)`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn scale_about(
+        self,
+        factor: f64,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::ScaleAbout(factor, about_point, about_edge))
+    }
+
+    /// Record `flip(axis)` — the Reference's `rotate(TAU / 2, axis)`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn flip(self, axis: Vec3) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::Flip(axis))
+    }
+
+    /// Record `apply_matrix(matrix)` about the origin.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn apply_matrix(self, matrix: Mat3) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::ApplyMatrix(matrix))
+    }
+
+    /// Record `set_x`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_x(self, x: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetCoord(0, x))
+    }
+
+    /// Record `set_y`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_y(self, y: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetCoord(1, y))
+    }
+
+    /// Record `set_z`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_z(self, z: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetCoord(2, z))
+    }
+
+    /// Record `match_x(other)`; `other`'s position is read at build time.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn match_x(self, other: Mob) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::MatchCoord(other, 0))
+    }
+
+    /// Record `match_y(other)`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn match_y(self, other: Mob) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::MatchCoord(other, 1))
+    }
+
+    /// Record `match_z(other)`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn match_z(self, other: Mob) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::MatchCoord(other, 2))
+    }
+
+    /// Record `match_width(other)`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn match_width(self, other: Mob) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::MatchDimSize(other, 0))
+    }
+
+    /// Record `match_height(other)`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn match_height(self, other: Mob) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::MatchDimSize(other, 1))
+    }
+
+    /// Record `match_depth(other)`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn match_depth(self, other: Mob) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::MatchDimSize(other, 2))
+    }
+
+    /// Record `arrange(direction, buff)`, re-centering the arranged group as
+    /// the Reference's default `center=True` does.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn arrange(self, direction: Vec3, buff: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::Arrange(direction, buff, true))
+    }
+
+    /// Record `set_color(color)` across the family; opacity is unchanged.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_color(self, color: Srgb) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetColor(color, None))
+    }
+
+    /// Record `set_color(color, opacity)` across the family.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_color_with_opacity(self, color: Srgb, opacity: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetColor(color, Some(opacity)))
+    }
+
+    /// Record `set_fill(color, opacity)`; `None` leaves that lane untouched.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_fill(self, color: Option<Srgb>, opacity: Option<f64>) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetFill(color, opacity))
+    }
+
+    /// Record `set_stroke(color, width, opacity)`; `None` leaves that aspect
+    /// untouched.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_stroke(
+        self,
+        color: Option<Srgb>,
+        width: Option<f64>,
+        opacity: Option<f64>,
+    ) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetStroke(color, width, opacity))
+    }
+
+    /// Record `fade(darkness)`: opacity becomes `1 - darkness`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn fade(self, darkness: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::Fade(darkness))
+    }
+
     /// Realize the recording: generate the target copy NOW (dynamic target
     /// lookup at build time), apply every command to it, and hand back the
     /// [`BuiltAnimate`] Choreo interpolates. The target is arena-allocated
@@ -444,7 +652,9 @@ impl AnimBuilder {
             }
             if let AnimateCommand::MoveTo(PosTarget::Mob(m), _)
             | AnimateCommand::NextTo(PosTarget::Mob(m), _, _, _)
-            | AnimateCommand::AlignTo(PosTarget::Mob(m), _) = command
+            | AnimateCommand::AlignTo(PosTarget::Mob(m), _)
+            | AnimateCommand::MatchCoord(m, _)
+            | AnimateCommand::MatchDimSize(m, _) = command
                 && !stage.contains(*m)
             {
                 return Err(AnimateError::StaleHandle(*m));
@@ -525,6 +735,50 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), 
             stage
                 .increment_tracker_complex_value(target, real, imaginary)
                 .map_err(|_| AnimateError::StaleHandle(target))?;
+        }
+        AnimateCommand::RotateAbout(angle, axis, about_point) => {
+            stage.rotate(target, angle, axis, about_point, None);
+        }
+        AnimateCommand::ScaleAbout(factor, about_point, about_edge) => {
+            stage.scale_about(target, factor, about_point, about_edge);
+        }
+        AnimateCommand::Flip(axis) => {
+            stage.rotate(target, TAU / 2.0, axis, None, None);
+        }
+        AnimateCommand::ApplyMatrix(matrix) => {
+            stage.apply_affine(target, Placement::new(matrix, [0.0; 3]));
+        }
+        AnimateCommand::SetCoord(dim, value) => {
+            stage.set_coord(target, value, dim, fmn_core::constants::ORIGIN);
+        }
+        AnimateCommand::MatchCoord(other, dim) => {
+            stage.match_coord(target, other, dim, fmn_core::constants::ORIGIN);
+        }
+        AnimateCommand::MatchDimSize(other, dim) => {
+            stage.match_dim_size(target, other, dim);
+        }
+        AnimateCommand::Arrange(direction, buff, center) => {
+            stage.arrange(target, direction, buff, center);
+        }
+        AnimateCommand::SetColor(color, opacity) => {
+            let rgb = Some([color.r, color.g, color.b]);
+            for field in ["fill_rgba", "stroke_rgba", "rgba"] {
+                stage.set_color_lanes(target, field, rgb, opacity, true);
+            }
+        }
+        AnimateCommand::SetFill(color, opacity) => {
+            let rgb = color.map(|c| [c.r, c.g, c.b]);
+            stage.set_color_lanes(target, "fill_rgba", rgb, opacity, true);
+        }
+        AnimateCommand::SetStroke(color, width, opacity) => {
+            let rgb = color.map(|c| [c.r, c.g, c.b]);
+            stage.set_color_lanes(target, "stroke_rgba", rgb, opacity, true);
+            if let Some(width) = width {
+                stage.set_scalar_lanes(target, "stroke_width", width, true);
+            }
+        }
+        AnimateCommand::Fade(darkness) => {
+            stage.set_family_opacity(target, 1.0 - darkness);
         }
     }
     Ok(())

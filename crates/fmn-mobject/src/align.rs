@@ -214,6 +214,37 @@ impl Stage {
         }
     }
 
+    /// The Reference's colour write on one 4-lane column (`fill_rgba`,
+    /// `stroke_rgba`, or a base mobject's `rgba`) across `mob`, or its whole
+    /// family when `recurse`: replace the rgb and/or alpha lanes, leaving
+    /// the other untouched. Members whose schema lacks `field` are skipped.
+    pub fn set_color_lanes(
+        &mut self,
+        mob: Mob,
+        field: &str,
+        rgb: Option<[f64; 3]>,
+        alpha: Option<f64>,
+        recurse: bool,
+    ) {
+        let members = if recurse { self.family(mob) } else { vec![mob] };
+        for member in members {
+            if let Some(entry) = self.get_mut(member) {
+                entry.buffer.write_color_lanes(field, rgb, alpha);
+            }
+        }
+    }
+
+    /// One scalar written across a 1-lane column (`stroke_width`,
+    /// `fill_border_width`) of `mob`, or of its whole family when `recurse`.
+    pub fn set_scalar_lanes(&mut self, mob: Mob, field: &str, value: f64, recurse: bool) {
+        let members = if recurse { self.family(mob) } else { vec![mob] };
+        for member in members {
+            if let Some(entry) = self.get_mut(member) {
+                entry.buffer.write_scalar_lanes(field, value);
+            }
+        }
+    }
+
     /// Reference `invisible_copy`'s `set_opacity(0)`. Public because the
     /// fade mechanism family uses the exact same record mutation.
     pub fn set_family_opacity_zero(&mut self, mob: Mob) {
