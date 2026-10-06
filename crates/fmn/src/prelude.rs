@@ -10,8 +10,8 @@ pub use crate::exporting::{
 pub use crate::{
     BundleExportError, BundleExportOptions, BundleExportReport, CompletedScene, Error, ErrorKind,
     RenderError, RenderFormat, RenderOptions, RenderReport, SceneBundleExport, SceneConstruct,
-    Stage, export_bundle, export_bundle_bytes, export_bundle_with_fs, render, render_with_fs,
-    run_scene,
+    Stage, TexPreflightError, export_bundle, export_bundle_bytes, export_bundle_with_fs, render,
+    render_with_fs, run_scene, run_scene_with_typesetting,
 };
 pub use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationGroup, FramePacket, IntoAnimation, IntoAnimations,
@@ -41,5 +41,5 @@ pub use fmn_scene::{
     CaptureReason, IntegrationError, NullSceneSink, PlayOverrides, RuntimeConfig, Scene,
     SceneError, SceneProgram, SceneRunReport, SceneSink,
 };
-pub use fmn_tex::TexEngine;
+pub use fmn_tex::{TexEngine, TexSession, TypesetRequest, TypesetSessionReport};
 pub use fmn_text::FontBook;

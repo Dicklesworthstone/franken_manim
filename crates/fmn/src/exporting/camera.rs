@@ -84,9 +84,12 @@ where
         failure: None,
     };
     sink.sample(scene.stage())?;
+    let typesetting = fmn_tex::TexSession::memory(options.config.tex.template.clone());
     let mut adapter = ProgramAdapter {
         program: &mut program,
         front_door_error: None,
+        typesetting: &typesetting,
+        preflight_workers: crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
     };
     let run = scene.run(&mut adapter, &mut sink);
     if let Some(error) = sink.failure.take() {

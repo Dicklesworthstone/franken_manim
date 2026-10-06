@@ -29,8 +29,8 @@ pub use camera::{export_camera_bundle, export_camera_bundle_bytes, export_camera
 /// Explicit semantic settings and bounded storage for one native scene export.
 #[derive(Clone, Debug)]
 pub struct BundleExportOptions {
-    /// Only scene timing and deterministic seed affect capture. Renderer/output
-    /// policy must be supplied independently when playing the bundle.
+    /// Scene timing, deterministic seed and the native typesetting template
+    /// affect construction. Renderer/output policy is supplied on playback.
     pub config: Config,
     /// Cumulative snapshot/table budget and maximum admitted output frames.
     pub limits: BundleExportLimits,
@@ -162,11 +162,14 @@ pub fn export_bundle_bytes<P: SceneConstruct + ?Sized>(
     let runtime = RuntimeConfig::from_config(&options.config);
     let mut recorder = SceneBundleRecorder::new(runtime.effective_fps(), options.limits)
         .map_err(BundleExportError::Recording)?;
-    let run = crate::run_scene(
+    let typesetting = fmn_tex::TexSession::memory(options.config.tex.template.clone());
+    let run = crate::run_scene_with_typesetting(
         program,
         runtime,
         options.config.determinism.seed,
         &mut recorder,
+        &typesetting,
+        crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
     );
     let completed = match run {
         Ok(completed) => completed,

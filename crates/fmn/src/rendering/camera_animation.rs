@@ -63,6 +63,8 @@ where
     let runtime = RuntimeConfig::from_config(&options.config);
     let mut scene = Scene::new(runtime, options.config.determinism.seed)
         .map_err(|error| RenderError::Scene(error.into()))?;
+    let typesetting = options.typesetting_session(Arc::clone(&fs));
+    let preflight_workers = options.typeset_preflight_workers;
     let inner = RenderSink::new(options, fs)?;
     let (mut program, rig) = factory(&mut scene, &base).map_err(RenderError::Scene)?;
     if scene.time().frames() != 0 || scene.play_count() != 0 {
@@ -75,6 +77,8 @@ where
     let mut adapter = ProgramAdapter {
         program: &mut program,
         front_door_error: None,
+        typesetting: &typesetting,
+        preflight_workers,
     };
     let run = scene.run(&mut adapter, &mut sink);
     if let Some(error) = sink.inner.failure.take() {
@@ -119,6 +123,7 @@ where
         emission,
         execution_plan: sink.inner.plan.clone(),
         frame_pipeline,
+        typesetting: typesetting.report(),
     })
 }
 

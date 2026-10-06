@@ -123,5 +123,6 @@ pub fn render_bundle_with_fs(
         emission,
         execution_plan: sink.plan.clone(),
         frame_pipeline,
+        typesetting: fmn_tex::TypesetSessionReport::default(),
     })
 }

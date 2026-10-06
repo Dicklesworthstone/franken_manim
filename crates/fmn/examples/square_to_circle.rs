@@ -3,12 +3,17 @@ use fmn::prelude::*;
 #[derive(Default)]
 struct SquareToCircle;
 
+const FORMULA: &str = r"\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}";
+
 impl SceneConstruct for SquareToCircle {
+    fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
+        vec![TypesetRequest::math(FORMULA)]
+    }
+
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
-        let tex = TexEngine::new("fmd-math/pack/default", None)?;
         let square = stage.add(Square::new().side_length(2.0).color(BLUE))?;
-        let label = stage
-            .add(Tex::new(r"\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}").build(&tex)?)?;
+        let label = Tex::new(FORMULA).build(stage.tex_engine()?)?;
+        let label = stage.add(label)?;
         stage.next_to(label, square, UP, DEFAULT_MOBJECT_TO_MOBJECT_BUFF, ORIGIN);
 
         let write_label = write(stage.arena(), label);

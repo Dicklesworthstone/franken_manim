@@ -44,6 +44,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use std::num::NonZeroUsize;
 
 use fmn_anim::{
     AnimError, Animation, IntoAnimation, IntoAnimations, SegmentReport, prepare_animation,
@@ -61,11 +62,13 @@ use fmn_scene::{
     IntegrationError, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram,
     SceneRunReport, SceneSink,
 };
-use fmn_tex::TexError;
+use fmn_tex::{TexEngine, TexError, TexSession, TypesetRequest, TypesetSessionReport};
 
 pub mod exporting;
 pub mod prelude;
 pub mod rendering;
+mod typesetting;
+pub use typesetting::TexPreflightError;
 
 pub use exporting::{
     BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport, export_bundle,
@@ -286,9 +289,12 @@ pub mod builtins {
             self.name
         }
 
+        fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
+            vec![TypesetRequest::math(r"\frac{x}{y}")]
+        }
+
         fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
-            let engine = TexEngine::new("fmd-math/pack/default", None)?;
-            let tex = Tex::new(r"\frac{x}{y}").build(&engine)?;
+            let tex = Tex::new(r"\frac{x}{y}").build(stage.tex_engine()?)?;
             let text = Text::new("hello")
                 .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
             let (tex_data, text_data) = (tex.span_map(), text.span_map());
@@ -538,6 +544,8 @@ pub enum Error {
     Typesetting(TexMobjectError),
     /// Math-engine initialization or layout.
     TexEngine(TexError),
+    /// Declared typesetting preflight admission or outcome-storage budget.
+    TexPreflight(TexPreflightError),
     /// Span-record bookkeeping for the Studio span-map seam.
     Span(SpanCollectorError),
     /// Filesystem capability I/O.
@@ -567,6 +575,7 @@ impl Error {
                 | GeomError::ArcComponentsAboveBudget { .. },
             )
             | Self::SpaceOps(_)
+            | Self::TexPreflight(_)
             | Self::Dash(DashError::DashCountOverflow | DashError::TooManyDashes { .. })
             | Self::Stage(StageError::SubmobjectBudgetExceeded { .. })
             | Self::Text(
@@ -627,6 +636,7 @@ impl fmt::Display for Error {
             Self::Text(error) => write!(f, "text construction failed: {error}"),
             Self::Typesetting(error) => write!(f, "math construction failed: {error}"),
             Self::TexEngine(error) => write!(f, "math engine failed: {error}"),
+            Self::TexPreflight(error) => write!(f, "{error}"),
             Self::Span(error) => write!(f, "span records failed: {error}"),
             Self::FileSystem(error) => write!(f, "{error}"),
             Self::AssetFetch(error) => write!(f, "{error}"),
@@ -650,6 +660,7 @@ impl std::error::Error for Error {
             Self::Text(error) => error,
             Self::Typesetting(error) => error,
             Self::TexEngine(error) => error,
+            Self::TexPreflight(error) => error,
             Self::Span(error) => error,
             Self::FileSystem(error) => error,
             Self::AssetFetch(error) => error,
@@ -679,6 +690,7 @@ error_from!(AnimError, Animation);
 error_from!(TextMobjectError, Text);
 error_from!(TexMobjectError, Typesetting);
 error_from!(TexError, TexEngine);
+error_from!(TexPreflightError, TexPreflight);
 error_from!(SpanCollectorError, Span);
 error_from!(FsError, FileSystem);
 error_from!(FetchError, AssetFetch);
@@ -712,9 +724,22 @@ impl From<SceneError> for Error {
 pub struct Stage<'a> {
     scene: &'a mut Scene,
     sink: &'a mut dyn SceneSink,
+    typesetting: &'a TexSession,
 }
 
 impl Stage<'_> {
+    /// The run's shared native engine, including declared preflight results.
+    ///
+    /// Use `Tex::new(source).build(stage.tex_engine()?)` rather than creating
+    /// another engine inside `construct`. The render host supplies the resolved
+    /// template and cache; filesystem-free scene runs use a memory-only session.
+    ///
+    /// # Errors
+    /// Preserves template and bundled-font failures as [`Error::TexEngine`].
+    pub fn tex_engine(&self) -> Result<&TexEngine> {
+        self.typesetting.engine().map_err(Error::from)
+    }
+
     /// Add a detached mobject to the arena and root it in the scene.
     pub fn add(&mut self, mobject: impl Into<Mobject>) -> Result<Mob> {
         self.scene.add_mobject(mobject).map_err(Error::from)
@@ -819,6 +844,17 @@ pub trait SceneConstruct {
         "Scene"
     }
 
+    /// Declare static Tex/TexText requests to warm before `construct` runs.
+    ///
+    /// Use the same mode, source, preamble and alignment as the constructors.
+    /// This is an explicit manifest, not discovery of arbitrary dynamic strings.
+    /// Empty manifests do no typesetting or cache I/O. Admission is bounded to
+    /// 4096 requests and 4 MiB of combined source/preamble bytes; malformed
+    /// formulas preserve their native error and prevent construction/playback.
+    fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
+        Vec::new()
+    }
+
     /// Construct and play the scene against the real Proscenium runtime.
     fn construct(&mut self, stage: &mut Stage<'_>) -> Result<()>;
 }
@@ -826,6 +862,8 @@ pub trait SceneConstruct {
 struct ProgramAdapter<'a, P: ?Sized> {
     program: &'a mut P,
     front_door_error: Option<Error>,
+    typesetting: &'a TexSession,
+    preflight_workers: NonZeroUsize,
 }
 
 impl<P> SceneProgram for ProgramAdapter<'_, P>
@@ -841,8 +879,16 @@ where
         scene: &mut Scene,
         sink: &mut dyn SceneSink,
     ) -> std::result::Result<(), SceneError> {
-        let mut stage = Stage { scene, sink };
-        if let Err(error) = self.program.construct(&mut stage) {
+        let construction = (|| -> Result<()> {
+            typesetting::preflight(self.program, self.typesetting, self.preflight_workers)?;
+            let mut stage = Stage {
+                scene,
+                sink,
+                typesetting: self.typesetting,
+            };
+            self.program.construct(&mut stage)
+        })();
+        if let Err(error) = construction {
             match error {
                 Error::Scene(SceneError::EndScene(signal)) => {
                     return Err(SceneError::EndScene(signal));
@@ -862,6 +908,7 @@ where
 pub struct CompletedScene {
     scene: Scene,
     report: SceneRunReport,
+    typesetting: TypesetSessionReport,
 }
 
 impl CompletedScene {
@@ -869,6 +916,12 @@ impl CompletedScene {
     #[must_use]
     pub const fn report(&self) -> &SceneRunReport {
         &self.report
+    }
+
+    /// Observed typesetting work at completion; not certified scene identity.
+    #[must_use]
+    pub const fn typesetting_report(&self) -> &TypesetSessionReport {
+        &self.typesetting
     }
 
     /// Final scene state for inspection, persistence, or another host action.
@@ -898,15 +951,51 @@ pub fn run_scene<P>(
 where
     P: SceneConstruct + ?Sized,
 {
+    run_scene_with_typesetting(
+        program,
+        config,
+        seed,
+        sink,
+        &TexSession::default(),
+        typesetting::DEFAULT_PREFLIGHT_WORKERS,
+    )
+}
+
+/// Run with an explicitly owned typesetting session shared by preflight and
+/// constructors. Unlike [`run_scene`]'s memory-only default, the caller may
+/// bind a persistent cache using [`TexSession::with_cache`].
+///
+/// The worker argument is a ceiling, further bounded to 64 and the native
+/// engine's available parallelism. It does not change layout or frame timing.
+///
+/// # Errors
+/// As [`run_scene`], plus bounded preflight admission and native formula errors.
+pub fn run_scene_with_typesetting<P>(
+    program: &mut P,
+    config: RuntimeConfig,
+    seed: u64,
+    sink: &mut dyn SceneSink,
+    typesetting: &TexSession,
+    preflight_workers: NonZeroUsize,
+) -> Result<CompletedScene>
+where
+    P: SceneConstruct + ?Sized,
+{
     let mut scene = Scene::new(config, seed)?;
     let mut adapter = ProgramAdapter {
         program,
         front_door_error: None,
+        typesetting,
+        preflight_workers,
     };
     let run = scene.run(&mut adapter, sink);
     if let Some(error) = adapter.front_door_error {
         return Err(error);
     }
     let report = run?;
-    Ok(CompletedScene { scene, report })
+    Ok(CompletedScene {
+        scene,
+        report,
+        typesetting: typesetting.report(),
+    })
 }

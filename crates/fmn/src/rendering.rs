@@ -14,6 +14,7 @@
 //! caller-owned external assets and callbacks still need closure attestation.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ use fmn_output::{
     PngSinkConfig, PngTarget, ReceiptError, SinkAdapterError, SinkLimits, SinkReceipt, Y4mSink,
     Y4mSinkConfig,
 };
+use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::{
@@ -39,6 +41,7 @@ use fmn_runtime::{
     RenderIntent, SurfaceSpec,
 };
 use fmn_scene::{CaptureReason, IntegrationError, RuntimeConfig, SceneRunReport, SceneSink};
+use fmn_tex::{TexSession, TypesetSessionReport};
 
 use crate::SceneConstruct;
 
@@ -107,6 +110,13 @@ pub struct RenderOptions {
     /// Upper bound on the output ring and frozen frame-job count; the scheduler
     /// may lower it. Does not change frame sampling or pixels.
     pub frames_in_flight: usize,
+    /// Attach the resolved persistent typeset cache when a scene first needs
+    /// TeX. Storage refusals fall back to native layout and appear in the report.
+    /// False keeps the bounded memory front without any persistent-cache I/O.
+    pub typeset_cache: bool,
+    /// Ceiling for declared preflight workers, additionally bounded to 64 and
+    /// available parallelism. This is independent of frame-render thread policy.
+    pub typeset_preflight_workers: NonZeroUsize,
 }
 
 impl RenderOptions {
@@ -124,6 +134,8 @@ impl RenderOptions {
             max_output_bytes: 64 * 1024 * 1024 * 1024,
             max_resident_bytes: 512 * 1024 * 1024,
             frames_in_flight: 2,
+            typeset_cache: true,
+            typeset_preflight_workers: crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
         })
     }
 
@@ -162,6 +174,14 @@ impl RenderOptions {
             ..CameraConfig::default()
         })
     }
+
+    fn typesetting_session(&self, fs: Arc<dyn FileSystem>) -> TexSession {
+        if self.typeset_cache {
+            TexSession::with_cache(&self.config, fs, Arc::new(StdClock::new()))
+        } else {
+            TexSession::memory(self.config.tex.template.clone())
+        }
+    }
 }
 
 /// Successful execution and publication, including the actual CPU plan.
@@ -177,6 +197,9 @@ pub struct RenderReport {
     pub execution_plan: ExecutionPlan,
     /// Final joined frame-pipeline counters for affine and camera captures.
     pub frame_pipeline: Option<PipelineStats>,
+    /// Actual typesetting/cache work, separate from certified artifact identity.
+    /// Code-free bundle replay has no typesetting session and reports zero work.
+    pub typesetting: TypesetSessionReport,
 }
 
 /// Typed failure of native scene rendering; underlying sources are retained.
@@ -289,8 +312,17 @@ pub fn render_with_fs<P: SceneConstruct + ?Sized>(
         ));
     }
     let seed = options.config.determinism.seed;
+    let typesetting = options.typesetting_session(Arc::clone(&fs));
+    let preflight_workers = options.typeset_preflight_workers;
     let mut sink = RenderSink::new(options, fs)?;
-    let completed = crate::run_scene(program, runtime, seed, &mut sink);
+    let completed = crate::run_scene_with_typesetting(
+        program,
+        runtime,
+        seed,
+        &mut sink,
+        &typesetting,
+        preflight_workers,
+    );
     if let Some(error) = sink.failure.take() {
         // A closed admission stream can hide the original worker failure.
         // Wake output waiters before joining raster/conversion workers.
@@ -329,6 +361,7 @@ pub fn render_with_fs<P: SceneConstruct + ?Sized>(
         emission,
         execution_plan: sink.plan.clone(),
         frame_pipeline,
+        typesetting: completed.typesetting_report().clone(),
     })
 }
 
