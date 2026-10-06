@@ -142,7 +142,14 @@ fn an_unowned_cache_root_is_reported_but_does_not_prevent_real_ink() {
     assert_eq!(fs.list_dir(Path::new(cache_root())).unwrap(), before);
     let image =
         fmn_codec::decode_png(&png(&fs, "/fallback"), &fmn_codec::PngLimits::default()).unwrap();
-    assert!(image.rgba.chunks_exact(4).any(|pixel| pixel[0] > 128));
+    assert!(
+        image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[0] > 128)
+    );
 }
 
 struct BadFormula {
