@@ -56,14 +56,14 @@ def run_typeset_preflight(m):
         declarations = r"\newcommand{\preflightword}{x^2}"
         source = r"\preflightword + 1"
         configure(enabled=False)
-        expected_macro = m.Tex(source, preamble=declarations).get_all_points().copy()
+        expected_macro = m.Tex(source, additional_preamble=declarations).get_all_points().copy()
         configure(enabled=False)
         report = preflight([source], preamble=declarations)
         assert report["succeeded"] == 1, report
         # Constructor preamble admission may typeset an empty validation probe;
         # compare geometry here rather than hiding that work in a cache claim.
         np.testing.assert_array_equal(
-            m.Tex(source, preamble=declarations).get_all_points(), expected_macro,
+            m.Tex(source, additional_preamble=declarations).get_all_points(), expected_macro,
         )
         assert preflight([source])["failed"] == 1, "preamble leaked into the engine"
 
