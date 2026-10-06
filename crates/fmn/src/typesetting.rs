@@ -125,7 +125,12 @@ fn warm_requests(
         return Ok(());
     }
     if requests.len() > MAX_REQUESTS {
-        return Err(admission_error("requests", None, requests.len(), MAX_REQUESTS));
+        return Err(admission_error(
+            "requests",
+            None,
+            requests.len(),
+            MAX_REQUESTS,
+        ));
     }
     let mut bytes = 0usize;
     for (index, request) in requests.iter().enumerate() {

@@ -130,7 +130,10 @@ fn twenty_four_dynamic_formulas_warm_across_sessions_without_layout_inside_play(
     )
     .unwrap();
     assert!(!memory.typesetting.persistent);
-    assert_eq!(memory_scene.layouts_at_build, memory_scene.layouts_after_play);
+    assert_eq!(
+        memory_scene.layouts_at_build,
+        memory_scene.layouts_after_play
+    );
     assert!(!memory_fs.exists(Path::new(cache_root())));
     let reference = frames(&fs, "/cold");
     assert_eq!(reference, frames(&memory_fs, "/memory"));
