@@ -191,9 +191,8 @@ fn convert<const TEN: bool>(
     let sample_bytes = if TEN { 2 } else { 1 };
     let source = src.plane(0);
     let target = dst.as_bytes_mut();
-    let pixel_key = |at: usize| {
-        u64::from_le_bytes(source[at..at + 8].try_into().expect("an 8-byte pixel"))
-    };
+    let pixel_key =
+        |at: usize| u64::from_le_bytes(source[at..at + 8].try_into().expect("an 8-byte pixel"));
     let mut memo: Option<([u64; 4], [u16; 4], [u16; 2])> = None;
     for y in (0..height).step_by(2) {
         for x in (0..width).step_by(2) {
