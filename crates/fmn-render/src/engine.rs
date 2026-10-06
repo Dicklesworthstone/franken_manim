@@ -2421,8 +2421,19 @@ impl<'a> FrameJob<'a> {
         // Skipping the classification then changes no bit and saves the four
         // probe shades per AA-band pixel.
         let classify = classify && stroke_may_contribute_complexity(&rec.style, self.config.map);
+        // Only cells meeting the stroke's row span can receive coverage or an
+        // edge count; every other pixel of the row is an exact no-op.
+        let Some((span_lo, span_hi)) = stroke.row_span(f64::from(py)) else {
+            return;
+        };
         let w = (x_hi - x_lo) as usize;
-        for i in 0..w {
+        let cell = |x: f64| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let index = (x - f64::from(x_lo)).clamp(0.0, w as f64) as usize;
+            index
+        };
+        let (first, last) = (cell(span_lo.floor()), cell(span_hi.floor() + 1.0));
+        for i in first..last {
             let p = [f64::from(x_lo + i as u32) + 0.5, f64::from(py) + 0.5];
             if p[0] < slab[0] || p[0] > slab[2] {
                 continue;

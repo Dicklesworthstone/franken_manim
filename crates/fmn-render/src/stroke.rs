@@ -210,6 +210,75 @@ pub(crate) struct PreparedSegment {
     /// segment's control triangle at and beyond which the segment provably
     /// leaves the pixel's coverage unchanged ([`uniform_cull_distance`]).
     cull_distance_squared: Option<f64>,
+    /// The screen-space strip around the segment's chord outside which no
+    /// point can receive coverage from it ([`ChordStrip`]); `None` for a
+    /// degenerate chord, which keeps the slab bound alone.
+    strip: Option<ChordStrip>,
+}
+
+/// A conservative screen-space strip around a segment's chord line.
+///
+/// Every point of a quadratic lies within half its control point's distance
+/// from the chord line, and a stroke's coverage — round, bevelled or mitred,
+/// plus the AA band — reaches at most [`max_stroke_reach_px`] beyond the
+/// curve; a mitre tip sits within that reach of the joint, which lies on the
+/// chord line. So a point farther than `reach + deviation` from the chord
+/// line (widened for rounding) gets zero coverage from this segment and
+/// cannot be the corner of any join it takes part in.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChordStrip {
+    /// A point on the chord line (the start anchor), in pixels.
+    origin: [f64; 2],
+    /// The chord's unit normal.
+    normal: [f64; 2],
+    /// The strip's half-width, in pixels.
+    half_width: f64,
+}
+
+impl ChordStrip {
+    fn of(segment: &Segment, map: ScreenMap, translate: [f64; 2], reach: f64) -> Option<Self> {
+        let to_px = |p: fmn_core::types::Vec3| {
+            let q = map.to_pixel(p[0], p[1]);
+            [q[0] + translate[0], q[1] + translate[1]]
+        };
+        let [a, c, b] = [to_px(segment.p0), to_px(segment.p1), to_px(segment.p2)];
+        let chord = [b[0] - a[0], b[1] - a[1]];
+        let length = norm2(chord);
+        if !(length > 1e-9 && length.is_finite() && reach.is_finite()) {
+            return None;
+        }
+        let normal = [-chord[1] / length, chord[0] / length];
+        let deviation = dot2(normal, [c[0] - a[0], c[1] - a[1]]).abs();
+        let magnitude = [a, b, c]
+            .iter()
+            .flat_map(|q| [q[0].abs(), q[1].abs()])
+            .fold(0.0f64, f64::max);
+        let half_width = reach.max(0.0) + deviation + 1e-6 + 1e-9 * magnitude;
+        half_width.is_finite().then_some(Self {
+            origin: a,
+            normal,
+            half_width,
+        })
+    }
+
+    /// The x-interval of the strip over the pixel row `[y0, y0 + 1]`, or
+    /// `None` when the chord is too close to horizontal to bound `x`.
+    fn row_interval(&self, y0: f64) -> Option<(f64, f64)> {
+        let [nx, ny] = self.normal;
+        if nx.abs() < 1e-6 {
+            return None;
+        }
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for y in [y0, y0 + 1.0] {
+            for offset in [-self.half_width, self.half_width] {
+                let x = self.origin[0] + (offset - ny * (y - self.origin[1])) / nx;
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+        }
+        (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+    }
 }
 
 /// Per-draw stroke data whose inputs are fixed before a tile is touched.
@@ -259,6 +328,7 @@ impl<'a> PreparedStroke<'a> {
         } else {
             uniform_cull_distance(style, map)
         };
+        let reach = max_stroke_reach_px(style, map);
         for segment in segments {
             let segment_slab = segment_slab(segment, style, map, translate);
             slab[0] = slab[0].min(segment_slab[0]);
@@ -276,6 +346,7 @@ impl<'a> PreparedStroke<'a> {
                 station,
                 cull_distance_squared: cull
                     .and_then(|distance| segment_cull_distance_squared(segment, distance)),
+                strip: ChordStrip::of(segment, map, translate, reach),
             });
         }
         slab
@@ -284,6 +355,38 @@ impl<'a> PreparedStroke<'a> {
     #[must_use]
     pub(crate) fn slab(&self) -> [f64; 4] {
         self.slab
+    }
+
+    /// The x-interval of the pixel row `[y0, y0 + 1]` outside which no point
+    /// receives coverage from this stroke: the hull, over segments whose slab
+    /// meets the row, of each segment's slab x-range cut down to its
+    /// [`ChordStrip`]. `None` when no segment meets the row.
+    ///
+    /// Shading only the pixels whose cell meets this interval changes no
+    /// bit: every skipped point is beyond every segment's reach, so its
+    /// coverage — and any subcell probe of its cell — is exactly zero.
+    #[must_use]
+    pub(crate) fn row_span(&self, y0: f64) -> Option<(f64, f64)> {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for prepared in self.segments {
+            let slab = prepared.slab;
+            if slab[3] < y0 || slab[1] > y0 + 1.0 {
+                continue;
+            }
+            let (mut a, mut b) = (slab[0], slab[2]);
+            if let Some((strip_lo, strip_hi)) =
+                prepared.strip.and_then(|strip| strip.row_interval(y0))
+            {
+                a = a.max(strip_lo);
+                b = b.min(strip_hi);
+            }
+            if a <= b {
+                lo = lo.min(a);
+                hi = hi.max(b);
+            }
+        }
+        (lo <= hi).then_some((lo, hi))
     }
 
     fn nearest(
@@ -1613,6 +1716,87 @@ mod tests {
         assert!(
             culled > 1000,
             "the lattice exercises the hull cull: {culled}"
+        );
+    }
+
+    #[test]
+    fn every_covered_point_lies_in_its_rows_span() {
+        let mut chain = QuadPath::default();
+        chain.start_new_path([-28.0, -3.0, 0.0]);
+        chain
+            .add_quadratic_bezier_curve_to([-20.0, 24.0, 0.0], [-10.0, 1.0, 0.0], false)
+            .unwrap();
+        chain
+            .add_quadratic_bezier_curve_to([0.0, -22.0, 0.0], [11.0, 4.0, 0.0], false)
+            .unwrap();
+        chain
+            .add_quadratic_bezier_curve_to([26.0, 4.0, 0.0], [18.0, -2.0, 0.0], false)
+            .unwrap();
+        let mut diagonal = QuadPath::default();
+        diagonal.start_new_path([-30.0, -20.0, 0.0]);
+        diagonal
+            .add_quadratic_bezier_curve_to([0.0, 0.5, 0.0], [30.0, 21.0, 0.0], false)
+            .unwrap();
+        diagonal
+            .add_quadratic_bezier_curve_to([31.0, 0.0, 0.0], [32.0, -20.0, 0.0], false)
+            .unwrap();
+        let translate = [13.0, -9.0];
+        let map = ScreenMap {
+            scale: 1.75,
+            origin: [7.0, -4.0],
+            y_up: true,
+        };
+        let mut covered_points = 0;
+        for path in [&chain, &diagonal] {
+            let (shape, segments) =
+                compile_shape(shape_digest(path.points()), path, Hint::General, 0)
+                    .expect("fixture fits retained table widths");
+            for (width, width_end) in [(500.0, 500.0), (40.0, 40.0), (200.0, 900.0)] {
+                for joint_type in [JointType::Auto, JointType::Bevel, JointType::Miter] {
+                    let style = Style {
+                        joint_type,
+                        stroke_width: width,
+                        stroke_width_end: width_end,
+                        ..flat_stroke_style(width)
+                    };
+                    let joins =
+                        join_wedges(&segments, &shape.subpath_starts, &style, map, translate);
+                    let (backing, slab) = prepared(&segments, &style, map, translate, false);
+                    let prepared = PreparedStroke::from_parts(&backing, slab);
+                    for y in -90..90 {
+                        let span = prepared.row_span(f64::from(y));
+                        for x in -90..140 {
+                            for (dx, dy) in [
+                                (0.5, 0.5),
+                                (0.25, 0.25),
+                                (0.75, 0.25),
+                                (0.25, 0.75),
+                                (0.75, 0.75),
+                            ] {
+                                let point = [f64::from(x) + dx, f64::from(y) + dy];
+                                let coverage = prepared
+                                    .shade(&segments, &joins, &style, map, translate, point)
+                                    .0;
+                                if coverage <= 0.0 {
+                                    continue;
+                                }
+                                covered_points += 1;
+                                let (lo, hi) = span.unwrap_or_else(|| {
+                                    panic!("covered {point:?} in a row with no span ({style:?})")
+                                });
+                                assert!(
+                                    f64::from(x) + 1.0 >= lo && f64::from(x) <= hi,
+                                    "covered {point:?} outside the row span [{lo}, {hi}] ({joint_type:?}, {width})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            covered_points > 10_000,
+            "the lattice exercises strokes: {covered_points}"
         );
     }
 
