@@ -430,6 +430,12 @@ impl fmt::Display for RenderError {
             Self::Scene(error) => error.fmt(f),
             Self::Plan(error) => error.fmt(f),
             Self::Frame(error) => error.fmt(f),
+            Self::Renderer(RetainedFrameRendererError::CameraRequired { program }) => write!(
+                f,
+                "{program:?} content needs the camera route: set RenderOptions::camera \
+                 (for example `options.camera = Some(options.camera_config()?)`) or render \
+                 with fmn::render_camera"
+            ),
             Self::Renderer(error) => error.fmt(f),
             Self::Pipeline(error) => error.fmt(f),
             Self::Sink(error) => error.fmt(f),

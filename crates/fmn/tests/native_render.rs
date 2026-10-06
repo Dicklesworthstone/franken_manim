@@ -433,3 +433,39 @@ fn library_refusals_cross_the_front_door_typed_and_classified() {
     assert_eq!(budget.kind(), fmn::ErrorKind::Budget);
     assert!(std::error::Error::source(&budget).is_some());
 }
+
+struct LitSphere;
+
+impl SceneConstruct for LitSphere {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        stage.add(Sphere::new(1.0))?;
+        Ok(())
+    }
+}
+
+#[test]
+fn surface_content_names_the_camera_route_and_renders_on_it() {
+    let fs = Arc::new(VirtualFs::new());
+    let error = render_with_fs(
+        &mut LitSphere,
+        options("/sphere", RenderFormat::PngSequence, 1),
+        fs.clone(),
+    )
+    .expect_err("a surface cannot take the planar vector route");
+    let message = error.to_string();
+    assert!(
+        message.contains("camera route") && message.contains("RenderOptions::camera"),
+        "{message}"
+    );
+    assert!(!fs.exists(Path::new("/sphere")));
+
+    let mut options = options("/sphere", RenderFormat::PngSequence, 1);
+    options.camera = Some(options.camera_config().expect("camera config"));
+    let report = render_with_fs(&mut LitSphere, options, fs.clone()).expect("camera route");
+    assert_eq!(report.artifact.frame_count, 1);
+    let image = png(&fs, "/sphere/frame_000000.png");
+    let shaded = (0..image.height as usize)
+        .map(|row| lit_pixels_on_row(&image, row))
+        .sum::<usize>();
+    assert!(shaded > 0, "the sphere is drawn");
+}

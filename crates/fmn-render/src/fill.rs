@@ -1520,17 +1520,47 @@ pub fn boundary_crossings_at_cell(
     row_y: u32,
     cell: u32,
 ) -> u8 {
-    const PROBES: [f64; 3] = [0.25, 0.5, 0.75];
+    /// Candidates held on the stack; a cell met by more pieces than this
+    /// probes the whole list (the count is the same either way).
+    const MAX_CANDIDATES: usize = 32;
     let x0 = f64::from(cell);
-    let x1 = x0 + 1.0;
     let y0 = f64::from(row_y);
+    let mut candidates = [0usize; MAX_CANDIDATES];
+    let mut held = 0;
+    for (index, piece) in pieces.iter().enumerate() {
+        if !piece_extent_may_meet_cell(piece, translate, x0, y0) {
+            continue;
+        }
+        if held == MAX_CANDIDATES {
+            return probe_crossings(pieces.iter(), translate, x0, y0);
+        }
+        candidates[held] = index;
+        held += 1;
+    }
+    probe_crossings(
+        candidates[..held].iter().map(|&index| &pieces[index]),
+        translate,
+        x0,
+        y0,
+    )
+}
+
+/// The six interior probes of [`boundary_crossings_at_cell`] over `pieces`.
+fn probe_crossings<'a>(
+    pieces: impl Iterator<Item = &'a MonoPiece> + Clone,
+    translate: [f64; 2],
+    x0: f64,
+    y0: f64,
+) -> u8 {
+    const PROBES: [f64; 3] = [0.25, 0.5, 0.75];
+    let x1 = x0 + 1.0;
     let y1 = y0 + 1.0;
     let mut most = 0u8;
 
     for offset in PROBES {
         let y = y0 + offset;
         let mut count = 0u8;
-        for piece in pieces {
+        for piece in pieces.clone() {
             let c = Coeffs::<f64>::of(piece, translate);
             let a = c.y(0.0);
             let b = c.y(1.0);
@@ -1551,7 +1581,7 @@ pub fn boundary_crossings_at_cell(
     for offset in PROBES {
         let x = x0 + offset;
         let mut count = 0u8;
-        for piece in pieces {
+        for piece in pieces.clone() {
             let c = Coeffs::<f64>::of(piece, translate);
             let a = c.x(0.0);
             let b = c.x(1.0);
@@ -1570,6 +1600,26 @@ pub fn boundary_crossings_at_cell(
     }
 
     most
+}
+
+/// Whether a piece's endpoint box, widened for rounding, meets the unit cell
+/// at `(x0, y0)`.
+///
+/// A [`MonoPiece`] is monotone in both axes, so every point the probes in
+/// [`boundary_crossings_at_cell`] can evaluate on it lies between its
+/// translated endpoints; evaluation rounding moves a value by a few units in
+/// the last place of the coordinates. The widening — 10⁻⁶ px plus 10⁻⁹ of the
+/// coordinate magnitude, orders of magnitude above that — makes a `false`
+/// here a proof that no probe of the cell can count the piece, so skipping it
+/// changes no crossing count. `NaN` coordinates answer `true` (never skipped).
+fn piece_extent_may_meet_cell(piece: &MonoPiece, translate: [f64; 2], x0: f64, y0: f64) -> bool {
+    let reaches = |a: f64, b: f64, lo: f64| {
+        let (min, max) = (a.min(b), a.max(b));
+        let margin = 1e-6 + 1e-9 * (min.abs() + max.abs());
+        !(max + margin < lo || min - margin > lo + 1.0)
+    };
+    reaches(piece.p0[0] + translate[0], piece.p2[0] + translate[0], x0)
+        && reaches(piece.p0[1] + translate[1], piece.p2[1] + translate[1], y0)
 }
 
 /// The winding number of a filled path at a screen point.
@@ -3457,6 +3507,84 @@ mod tests {
                 "{samples}x: {resolved} vs native {native}"
             );
         }
+    }
+
+    /// [`boundary_crossings_at_cell`] without the extent prefilter: every
+    /// piece through every probe, as the counts are defined.
+    fn unfiltered_crossings(
+        pieces: &[MonoPiece],
+        translate: [f64; 2],
+        row_y: u32,
+        cell: u32,
+    ) -> u8 {
+        let (x0, y0) = (f64::from(cell), f64::from(row_y));
+        let mut most = 0u8;
+        for offset in [0.25, 0.5, 0.75] {
+            let (y, x) = (y0 + offset, x0 + offset);
+            let mut across = 0u8;
+            let mut down = 0u8;
+            for piece in pieces {
+                let c = Coeffs::<f64>::of(piece, translate);
+                let (a, b) = (c.y(0.0), c.y(1.0));
+                if !(a.max(b) <= a.min(b) || y < a.min(b) || y >= a.max(b)) {
+                    let hit = c.x(c.t_at_y(y, 0.0, 1.0));
+                    across += u8::from(hit >= x0 && hit < x0 + 1.0);
+                }
+                let (a, b) = (c.x(0.0), c.x(1.0));
+                if !(a.max(b) <= a.min(b) || x < a.min(b) || x >= a.max(b)) {
+                    let hit = c.y(c.t_at_x(x, 0.0, 1.0));
+                    down += u8::from(hit >= y0 && hit < y0 + 1.0);
+                }
+            }
+            most = most.max(across).max(down);
+        }
+        most
+    }
+
+    #[test]
+    fn the_extent_prefilter_never_changes_a_crossing_count() {
+        let mut shapes = vec![
+            pieces_of_path(&circle_path(8.3, 8.1, 5.7, 8), unit()),
+            pieces_of_path(&circle_path(9.0, 9.0, 0.4, 8), unit()),
+        ];
+        let mut dense = pieces_of_path(
+            &polygon(&[[5.1, 4.0], [5.2, 4.0], [5.2, 8.0], [5.1, 8.0]]),
+            unit(),
+        );
+        dense.extend(pieces_of_path(
+            &polygon(&[[5.0, 5.0], [9.0, 5.0], [9.0, 5.0 + 1e-7], [5.0, 5.0 + 1e-7]]),
+            unit(),
+        ));
+        shapes.push(dense);
+        // More pieces meet cell (5, 5) than the candidate buffer holds: the
+        // whole-list fallback must count the same.
+        let mut crowded = Vec::new();
+        for k in 0..12 {
+            let x = 5.05 + 0.075 * f64::from(k);
+            crowded.extend(pieces_of_path(
+                &polygon(&[[x, 4.5], [x + 0.03, 4.5], [x + 0.03, 6.5], [x, 6.5]]),
+                unit(),
+            ));
+        }
+        assert!(crowded.len() > 32);
+        shapes.push(crowded);
+        let mut counted = 0;
+        for pieces in &shapes {
+            for translate in [[0.0, 0.0], [0.37, -0.81]] {
+                for row in 0..18 {
+                    for cell in 0..18 {
+                        let want = unfiltered_crossings(pieces, translate, row, cell);
+                        assert_eq!(
+                            boundary_crossings_at_cell(pieces, translate, row, cell),
+                            want,
+                            "cell ({cell}, {row}) at {translate:?}"
+                        );
+                        counted += usize::from(want > 0);
+                    }
+                }
+            }
+        }
+        assert!(counted >= 50, "the lattice crosses boundaries: {counted}");
     }
 
     #[test]
