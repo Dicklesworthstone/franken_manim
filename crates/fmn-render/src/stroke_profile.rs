@@ -52,6 +52,15 @@ pub struct StrokeProfile {
     maximum_width: f32,
     visible_alpha: bool,
     constant_width: bool,
+    uniform_paint: bool,
+}
+
+/// `a` and `b` are one finite value that is not negative zero — the condition
+/// under which `a + (b - a) * t` is exactly `a` for every `t >= 0`
+/// (`b - a` is `+0`, and adding a zero of either sign leaves a nonzero or
+/// positive-zero `a` unchanged).
+fn interpolation_is_exactly_constant(a: f32, b: f32) -> bool {
+    a.to_bits() == b.to_bits() && a.is_finite() && !(a == 0.0 && a.is_sign_negative())
 }
 
 impl StrokeProfile {
@@ -67,7 +76,9 @@ impl StrokeProfile {
         let mut maximum_width = 0.0f32;
         let mut visible_alpha = false;
         let first_width = knots[0].width;
+        let first_rgba = knots[0].rgba;
         let mut constant_width = true;
+        let mut uniform_paint = true;
         for knot in &knots {
             if !knot.s.is_finite() || !(previous..=1.0).contains(&knot.s) {
                 return Err(StrokeProfileError::Stations);
@@ -79,12 +90,15 @@ impl StrokeProfile {
             maximum_width = maximum_width.max(knot.width);
             visible_alpha |= knot.rgba[3] > 0.0;
             constant_width &= knot.width == first_width;
+            uniform_paint &= interpolation_is_exactly_constant(first_width, knot.width)
+                && (0..4).all(|i| interpolation_is_exactly_constant(first_rgba[i], knot.rgba[i]));
         }
         Ok(Self {
             knots,
             maximum_width,
             visible_alpha,
             constant_width,
+            uniform_paint,
         })
     }
 
@@ -110,6 +124,13 @@ impl StrokeProfile {
     #[must_use]
     pub fn has_constant_width(&self) -> bool {
         self.constant_width
+    }
+
+    /// Whether every station evaluates to exactly the same width and colour
+    /// bits, so a shader may skip computing the station at all.
+    #[must_use]
+    pub fn has_uniform_paint(&self) -> bool {
+        self.uniform_paint
     }
 
     fn interval(&self, s: f64) -> (StrokeKnot, StrokeKnot, f32) {
@@ -210,6 +231,28 @@ impl crate::Style {
             || self.stroke_width == self.stroke_width_end,
             |profile| profile.has_constant_width(),
         )
+    }
+
+    /// Whether the arc-length station of a stroke sample can change its width
+    /// or colour. False only when [`Self::stroke_width_at`] and
+    /// [`Self::stroke_color_at`] are exactly — bit for bit — the same at every
+    /// station: one finite, non-negative-zero value at both ends (or at every
+    /// profile knot). Shaders use it to skip the per-pixel arc-length solve;
+    /// any doubt keeps the station.
+    #[must_use]
+    pub fn stroke_station_is_observable(&self) -> bool {
+        match &self.stroke_profile {
+            Some(profile) => !profile.has_uniform_paint(),
+            None => {
+                !(interpolation_is_exactly_constant(self.stroke_width, self.stroke_width_end)
+                    && (0..4).all(|i| {
+                        interpolation_is_exactly_constant(
+                            self.stroke_rgba[i],
+                            self.stroke_rgba_end[i],
+                        )
+                    }))
+            }
+        }
     }
 
     /// One-sided color/width parameter for an outgoing subpath endpoint.

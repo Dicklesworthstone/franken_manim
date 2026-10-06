@@ -201,6 +201,11 @@ pub(crate) struct PreparedSegment {
     slab: [f64; 4],
     total_arc_length: f64,
     line: bool,
+    /// Whether the arc-length station of the nearest point is observable:
+    /// false for a uniform stroke ([`Style::stroke_station_is_observable`]),
+    /// whose width and colour are exactly the same at every station, so the
+    /// per-pixel arc-length solve can be skipped without changing a bit.
+    station: bool,
 }
 
 /// Per-draw stroke data whose inputs are fixed before a tile is touched.
@@ -244,6 +249,7 @@ impl<'a> PreparedStroke<'a> {
             f64::NEG_INFINITY,
             f64::NEG_INFINITY,
         ];
+        let station = style.stroke_station_is_observable();
         for segment in segments {
             let segment_slab = segment_slab(segment, style, map, translate);
             slab[0] = slab[0].min(segment_slab[0]);
@@ -252,10 +258,13 @@ impl<'a> PreparedStroke<'a> {
             slab[3] = slab[3].max(segment_slab[3]);
             out.put(PreparedSegment {
                 slab: segment_slab,
-                total_arc_length: fmn_geom::arclength::quadratic_arc_length(
-                    segment.p0, segment.p1, segment.p2,
-                ),
+                total_arc_length: if station {
+                    fmn_geom::arclength::quadratic_arc_length(segment.p0, segment.p1, segment.p2)
+                } else {
+                    0.0
+                },
                 line: straight_segments,
+                station,
             });
         }
         slab
@@ -294,8 +303,10 @@ impl<'a> PreparedStroke<'a> {
             admitted = true;
             let (excess, s) = if prepared.line {
                 line_segment_excess_and_s(segment, style, map, obj)
-            } else {
+            } else if prepared.station {
                 segment_excess_and_s(segment, prepared.total_arc_length, style, map, obj)
+            } else {
+                uniform_segment_excess(segment, style, map, obj)
             };
             if excess < best {
                 best = excess;
@@ -473,6 +484,23 @@ pub fn stroke_nearest(
         }
     }
     Some((best, best_s))
+}
+
+/// [`segment_excess_and_s`] for a stroke whose station is unobservable: the
+/// same nearest-point solve and the same excess, without the arc-length
+/// station. The width and colour are exactly equal at every station of such a
+/// stroke, so the returned station (the segment's start) shades identically.
+fn uniform_segment_excess(
+    segment: &Segment,
+    style: &Style,
+    map: ScreenMap,
+    object_point: fmn_core::types::Vec3,
+) -> (f64, f64) {
+    let near =
+        fmn_geom::distance::nearest_on_quadratic(segment.p0, segment.p1, segment.p2, object_point);
+    let s = segment.s0;
+    let excess = near.distance * map.scale.abs() - half_width_px(style, map, s);
+    (excess, s)
 }
 
 fn segment_excess_and_s(
@@ -1370,6 +1398,85 @@ mod tests {
                 && probe[1] <= slab[3],
             "covered miter point {probe:?} outside slab {slab:?}"
         );
+    }
+
+    /// A uniform stroke skips the per-pixel arc-length station; its coverage
+    /// and shaded colour must still equal the full scalar evaluation bit for
+    /// bit. A ramped stroke keeps the station.
+    #[test]
+    fn uniform_strokes_skip_the_station_without_changing_a_bit() {
+        let mut path = QuadPath::default();
+        path.start_new_path([-28.0, -3.0, 0.0]);
+        path.add_quadratic_bezier_curve_to([-20.0, 24.0, 0.0], [-10.0, 1.0, 0.0], false)
+            .unwrap();
+        path.add_quadratic_bezier_curve_to([0.0, -22.0, 0.0], [11.0, 4.0, 0.0], false)
+            .unwrap();
+        path.add_quadratic_bezier_curve_to([26.0, 4.0, 0.0], [18.0, -2.0, 0.0], false)
+            .unwrap();
+        let (shape, segments) = compile_shape(shape_digest(path.points()), &path, Hint::General, 0)
+            .expect("fixture fits retained table widths");
+        let translate = [13.0, -9.0];
+        let map = ScreenMap {
+            scale: 1.75,
+            origin: [7.0, -4.0],
+            y_up: false,
+        };
+        let uniform = Style {
+            stroke_rgba: [0.25, 0.5, 1.0, 0.75],
+            stroke_rgba_end: [0.25, 0.5, 1.0, 0.75],
+            ..flat_stroke_style(500.0)
+        };
+        assert!(!uniform.stroke_station_is_observable());
+        for ramped in [
+            Style {
+                stroke_width_end: 900.0,
+                ..uniform.clone()
+            },
+            Style {
+                stroke_rgba_end: [0.25, 0.5, 0.0, 0.75],
+                ..uniform.clone()
+            },
+            Style {
+                stroke_rgba: [-0.0, 0.5, 1.0, 0.75],
+                stroke_rgba_end: [-0.0, 0.5, 1.0, 0.75],
+                ..uniform.clone()
+            },
+        ] {
+            assert!(ramped.stroke_station_is_observable(), "{ramped:?}");
+        }
+        for joint_type in [JointType::Auto, JointType::Bevel, JointType::Miter] {
+            let style = Style {
+                joint_type,
+                ..uniform.clone()
+            };
+            let joins = join_wedges(&segments, &shape.subpath_starts, &style, map, translate);
+            let (backing, slab) = prepared(&segments, &style, map, translate, false);
+            assert!(backing.iter().all(|segment| !segment.station));
+            let prepared = PreparedStroke::from_parts(&backing, slab);
+            let mut covered = 0;
+            for y in -80..80 {
+                for x in -80..120 {
+                    let point = [f64::from(x) + 0.25, f64::from(y) + 0.75];
+                    let scalar = stroke_shade(&segments, &joins, &style, map, translate, point);
+                    let fast = prepared.shade(&segments, &joins, &style, map, translate, point);
+                    assert_eq!(
+                        fast.0.to_bits(),
+                        scalar.0.to_bits(),
+                        "coverage at {point:?}"
+                    );
+                    if scalar.0 > 0.0 {
+                        covered += 1;
+                        let colour = |s| stroke_rgba_at(&style, s).map(f32::to_bits);
+                        assert_eq!(colour(fast.1), colour(scalar.1), "colour at {point:?}");
+                        assert_eq!(
+                            half_width_px(&style, map, fast.1).to_bits(),
+                            half_width_px(&style, map, scalar.1).to_bits()
+                        );
+                    }
+                }
+            }
+            assert!(covered > 500, "the grid exercises the stroke: {covered}");
+        }
     }
 
     #[test]
