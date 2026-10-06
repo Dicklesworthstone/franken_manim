@@ -345,3 +345,33 @@ fn copies_and_in_memory_snapshots_carry_placement_state() {
     assert!(stage.placement(mob).unwrap().same_bits(placement));
     assert_eq!(stage.get_points(mob).unwrap(), world_points);
 }
+
+#[test]
+fn shift_onto_screen_pulls_back_only_the_edges_beyond_the_inset_frame() {
+    use fmn_core::constants::{FRAME_X_RADIUS, FRAME_Y_RADIUS};
+    let square = |center: Vec3| {
+        let [x, y, z] = center;
+        Mobject::from_points(&[
+            [x - 0.5, y - 0.5, z],
+            [x + 0.5, y - 0.5, z],
+            [x + 0.5, y + 0.5, z],
+            [x - 0.5, y + 0.5, z],
+        ])
+    };
+    let mut stage = Stage::new();
+    // Beyond the right and top edges: both pulled to `radius - buff`.
+    let off = stage.add(square([9.0, 5.0, 0.0]));
+    stage.shift_onto_screen(off, 0.5);
+    assert!((stage.get_right(off)[0] - (FRAME_X_RADIUS - 0.5)).abs() < TOL);
+    assert!((stage.get_top(off)[1] - (FRAME_Y_RADIUS - 0.5)).abs() < TOL);
+    // Inside the inset frame: untouched.
+    let inside = stage.add(square([1.0, -1.0, 0.0]));
+    stage.shift_onto_screen(inside, 0.5);
+    assert!((stage.get_center(inside)[0] - 1.0).abs() < TOL);
+    assert!((stage.get_center(inside)[1] + 1.0).abs() < TOL);
+    // Beyond the bottom-left: pulled to the inset bottom-left.
+    let low = stage.add(square([-9.0, -6.0, 0.0]));
+    stage.shift_onto_screen(low, 0.25);
+    assert!((stage.get_left(low)[0] + (FRAME_X_RADIUS - 0.25)).abs() < TOL);
+    assert!((stage.get_bottom(low)[1] + (FRAME_Y_RADIUS - 0.25)).abs() < TOL);
+}

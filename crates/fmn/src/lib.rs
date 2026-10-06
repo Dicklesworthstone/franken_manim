@@ -52,7 +52,11 @@ use fmn_anim::{
 };
 use fmn_config::ConfigError;
 use fmn_geom::{GeomError, SpaceOpsError};
-use fmn_library::{DashError, SpanCollectorError, TexMobjectError, TextMobjectError};
+use fmn_library::{
+    CoordsError, DashError, DataMobjectError, FieldError, GraphError, ImageError, MatrixError,
+    MeshError, NetworkGraphError, NeuralNetworkError, ObjError, ProbabilityError, SamplingError,
+    SliderError, SpanCollectorError, TexMobjectError, TextMatchingError, TextMobjectError,
+};
 use fmn_mobject::{AnimateError, Mob, Mobject, Stage as MobjectStage, StageError};
 use fmn_platform::fetch::FetchError;
 use fmn_platform::fs::FsError;
@@ -730,6 +734,149 @@ pub enum Error {
     Process(ProcessError),
     /// Host topology discovery.
     Topology(TopologyError),
+    /// A native library class (Atlas/Menagerie) refused construction.
+    Library(LibraryError),
+}
+
+/// The native library's constructor refusals, one variant per class family,
+/// so a scene's `construct` can `?` any of them into [`Error`].
+#[derive(Debug)]
+pub enum LibraryError {
+    /// `Axes`, `NumberLine`, labels and calculus helpers.
+    Coordinates(CoordsError),
+    /// `FunctionGraph`, `ParametricCurve`, `ImplicitFunction`.
+    Graph(GraphError),
+    /// Range sampling shared by coordinate systems and fields.
+    Sampling(SamplingError),
+    /// `Matrix` and its integer/decimal/tex variants.
+    Matrix(MatrixError),
+    /// `BarChart`, `Table`-style data mobjects.
+    DataMobject(DataMobjectError),
+    /// `SampleSpace` and the probability plane.
+    Probability(ProbabilityError),
+    /// `VectorField`, `StreamLines`.
+    Field(FieldError),
+    /// `ImageMobject`.
+    Image(ImageError),
+    /// `Markdown` documents.
+    Markdown(fmn_library::markdown::MarkdownError),
+    /// `Union`, `Difference`, `Intersection`, `Exclusion`.
+    Boolean(fmn_library::boolean_ops::BooleanMobjectError),
+    /// `TransformMatchingTex`/`TransformMatchingStrings` planning.
+    TextMatching(TextMatchingError),
+    /// `NetworkGraph`.
+    NetworkGraph(NetworkGraphError),
+    /// `NeuralNetworkMobject`.
+    NeuralNetwork(NeuralNetworkError),
+    /// `Slider` and the control widgets.
+    Slider(SliderError),
+    /// Drawing classes that take user-supplied art.
+    Drawings(fmn_library::drawings::DrawingsAssetError),
+    /// `ThreeDModel` OBJ ingestion.
+    Obj(ObjError),
+    /// Surface and textured-mesh construction.
+    Mesh(MeshError),
+    /// Sampled surface meshes.
+    SurfaceMesh(fmn_library::solids::SurfaceMeshError),
+}
+
+impl LibraryError {
+    /// Whether the refusal is a declared resource budget (exit 8), not a
+    /// scene defect.
+    #[must_use]
+    pub const fn is_budget(&self) -> bool {
+        const fn sampling(error: &SamplingError) -> bool {
+            matches!(
+                error,
+                SamplingError::LimitExceeded { .. }
+                    | SamplingError::CapacityOverflow { .. }
+                    | SamplingError::AllocationFailed { .. }
+            )
+        }
+        match self {
+            Self::Sampling(error)
+            | Self::Coordinates(CoordsError::Sampling(error))
+            | Self::Graph(GraphError::Sampling(error)) => sampling(error),
+            Self::TextMatching(TextMatchingError::BudgetExceeded { .. }) => true,
+            _ => false,
+        }
+    }
+
+    fn source_error(&self) -> &(dyn std::error::Error + 'static) {
+        match self {
+            Self::Coordinates(error) => error,
+            Self::Graph(error) => error,
+            Self::Sampling(error) => error,
+            Self::Matrix(error) => error,
+            Self::DataMobject(error) => error,
+            Self::Probability(error) => error,
+            Self::Field(error) => error,
+            Self::Image(error) => error,
+            Self::Markdown(error) => error,
+            Self::Boolean(error) => error,
+            Self::TextMatching(error) => error,
+            Self::NetworkGraph(error) => error,
+            Self::NeuralNetwork(error) => error,
+            Self::Slider(error) => error,
+            Self::Drawings(error) => error,
+            Self::Obj(error) => error,
+            Self::Mesh(error) => error,
+            Self::SurfaceMesh(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for LibraryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.source_error())
+    }
+}
+
+impl std::error::Error for LibraryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source_error())
+    }
+}
+
+macro_rules! library_error_from {
+    ($source:ty, $variant:ident) => {
+        impl From<$source> for LibraryError {
+            fn from(error: $source) -> Self {
+                Self::$variant(error)
+            }
+        }
+
+        impl From<$source> for Error {
+            fn from(error: $source) -> Self {
+                Self::Library(LibraryError::$variant(error))
+            }
+        }
+    };
+}
+
+library_error_from!(CoordsError, Coordinates);
+library_error_from!(GraphError, Graph);
+library_error_from!(SamplingError, Sampling);
+library_error_from!(MatrixError, Matrix);
+library_error_from!(DataMobjectError, DataMobject);
+library_error_from!(ProbabilityError, Probability);
+library_error_from!(FieldError, Field);
+library_error_from!(ImageError, Image);
+library_error_from!(fmn_library::markdown::MarkdownError, Markdown);
+library_error_from!(fmn_library::boolean_ops::BooleanMobjectError, Boolean);
+library_error_from!(TextMatchingError, TextMatching);
+library_error_from!(NetworkGraphError, NetworkGraph);
+library_error_from!(NeuralNetworkError, NeuralNetwork);
+library_error_from!(SliderError, Slider);
+library_error_from!(fmn_library::drawings::DrawingsAssetError, Drawings);
+library_error_from!(ObjError, Obj);
+library_error_from!(MeshError, Mesh);
+library_error_from!(fmn_library::solids::SurfaceMeshError, SurfaceMesh);
+
+impl From<LibraryError> for Error {
+    fn from(error: LibraryError) -> Self {
+        Self::Library(error)
+    }
 }
 
 impl Error {
@@ -764,6 +911,7 @@ impl Error {
             | Self::Process(
                 ProcessError::StdinChunkLimit { .. } | ProcessError::StdinTotalLimit { .. },
             ) => ErrorKind::Budget,
+            Self::Library(error) if error.is_budget() => ErrorKind::Budget,
             Self::AssetFetch(_)
             | Self::FfmpegLocator(_)
             | Self::Process(ProcessError::CapabilityAbsent { .. })
@@ -787,7 +935,8 @@ impl Error {
             | Self::Text(_)
             | Self::Typesetting(_)
             | Self::TexEngine(_)
-            | Self::Span(_) => ErrorKind::Scene,
+            | Self::Span(_)
+            | Self::Library(_) => ErrorKind::Scene,
             Self::Scene(SceneError::Camera(_) | SceneError::Integration(_))
             | Self::FileSystem(_)
             | Self::Process(_) => ErrorKind::Render,
@@ -815,6 +964,7 @@ impl fmt::Display for Error {
             Self::FfmpegLocator(error) => write!(f, "{error}"),
             Self::Process(error) => write!(f, "{error}"),
             Self::Topology(error) => write!(f, "{error}"),
+            Self::Library(error) => write!(f, "library construction failed: {error}"),
         }
     }
 }
@@ -839,6 +989,7 @@ impl std::error::Error for Error {
             Self::FfmpegLocator(error) => error,
             Self::Process(error) => error,
             Self::Topology(error) => error,
+            Self::Library(error) => error,
         })
     }
 }

@@ -13,7 +13,7 @@
 //! half-constructed object.
 
 use fmn_core::color::{Srgb, color_gradient};
-use fmn_core::constants::OUT;
+use fmn_core::constants::{FRAME_X_RADIUS, FRAME_Y_RADIUS, OUT};
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, QuadPath, space_ops};
 use fmn_mobject::stage::{Mob, Stage};
@@ -21,6 +21,17 @@ use fmn_mobject::uniforms::{JointType, Uniforms};
 use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive, ShapeTag};
 
 use crate::style::Style;
+
+/// numpy `sign`: `-1`, `0` or `1` (`NaN` stays `NaN`).
+fn numpy_sign(value: f64) -> f64 {
+    if value > 0.0 {
+        1.0
+    } else if value < 0.0 {
+        -1.0
+    } else {
+        value * 0.0
+    }
+}
 
 /// Maximum number of dash children one construction may publish.
 ///
@@ -551,6 +562,50 @@ impl VMobject {
             Some(p) => self.shifted([point[0] - p[0], point[1] - p[1], point[2] - p[2]]),
             None => self,
         }
+    }
+
+    /// Align a side or corner against the default frame's border, inset by
+    /// `buff` (Reference `align_on_border`, the engine of `to_edge` and
+    /// `to_corner`): only the axes `direction` points along move.
+    #[must_use]
+    pub fn aligned_on_border(self, direction: Vec3, buff: f64) -> Self {
+        let Some(point) = self.bbox_point(direction) else {
+            return self;
+        };
+        let radius = [FRAME_X_RADIUS, FRAME_Y_RADIUS, 0.0];
+        let shift: Vec3 = std::array::from_fn(|k| {
+            let sign = numpy_sign(direction[k]);
+            (sign * radius[k] - point[k] - buff * direction[k]) * sign.abs()
+        });
+        self.shifted(shift)
+    }
+
+    /// Reference `to_edge(edge, buff)`.
+    #[must_use]
+    pub fn to_edge(self, edge: Vec3, buff: f64) -> Self {
+        self.aligned_on_border(edge, buff)
+    }
+
+    /// Reference `shift_onto_screen(buff=…)`: for each of `UP`, `DOWN`,
+    /// `LEFT`, `RIGHT` in that order, an edge centre beyond the default
+    /// frame's half-extent less `buff` is pulled back with `to_edge`.
+    #[must_use]
+    pub fn shifted_onto_screen(mut self, buff: f64) -> Self {
+        for (vect, radius) in [
+            ([0.0, 1.0, 0.0], FRAME_Y_RADIUS),
+            ([0.0, -1.0, 0.0], FRAME_Y_RADIUS),
+            ([-1.0, 0.0, 0.0], FRAME_X_RADIUS),
+            ([1.0, 0.0, 0.0], FRAME_X_RADIUS),
+        ] {
+            let Some(edge) = self.bbox_point(vect) else {
+                return self;
+            };
+            let reach = edge[0] * vect[0] + edge[1] * vect[1] + edge[2] * vect[2];
+            if reach > radius - buff {
+                self = self.to_edge(vect, buff);
+            }
+        }
+        self
     }
 
     /// Place next to a point, on the `direction` side, `buff` away, aligned

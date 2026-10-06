@@ -921,6 +921,24 @@ impl Stage {
         self.align_on_border(mob, corner, buff)
     }
 
+    /// Reference `shift_onto_screen(buff=…)`: for each of `UP`, `DOWN`,
+    /// `LEFT`, `RIGHT` in that order, an edge centre beyond the frame's
+    /// half-extent less `buff` is pulled back with [`Stage::to_edge`].
+    pub fn shift_onto_screen(&mut self, mob: Mob, buff: f64) -> &mut Self {
+        for (vect, radius) in [
+            (UP, FRAME_Y_RADIUS),
+            (DOWN, FRAME_Y_RADIUS),
+            (LEFT, FRAME_X_RADIUS),
+            (RIGHT, FRAME_X_RADIUS),
+        ] {
+            let edge = self.get_bounding_box_point(mob, vect);
+            if space_ops::dot(edge, vect) > radius - buff {
+                self.to_edge(mob, vect, buff);
+            }
+        }
+        self
+    }
+
     /// Position `mob` next to a target, on the `direction` side, `buff` away,
     /// aligning along `aligned_edge` (Reference `next_to`, `coor_mask = 1`).
     pub fn next_to(

@@ -49,18 +49,22 @@
 
 use fmn_core::color::{Srgb, color_gradient};
 use fmn_core::constants::{
-    BLACK, BLUE, DEFAULT_LIGHT_COLOR, DEFAULT_MOBJECT_COLOR, DL, DOWN, GREEN, GREY_A, LEFT,
-    MED_SMALL_BUFF, ORIGIN, OUT, PI, RED, RIGHT, SMALL_BUFF, UL, UP, YELLOW,
+    BLACK, BLUE, DEFAULT_LIGHT_COLOR, DEFAULT_MOBJECT_COLOR, DEFAULT_MOBJECT_TO_EDGE_BUFF, DL,
+    DOWN, DR, FRAME_X_RADIUS, FRAME_Y_RADIUS, GREEN, GREY_A, LEFT, MED_SMALL_BUFF, ORIGIN, OUT, PI,
+    RED, RIGHT, SMALL_BUFF, UL, UP, YELLOW,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::{QuadPath, space_ops};
+use fmn_tex::TexEngine;
 use fmn_text::FontBook;
 
 use crate::graphs::{SamplingBudget, SamplingError, sampled_values};
 use crate::line::{DashedLine, Line};
 use crate::numbers::DecimalNumber;
+use crate::pointcloud::DotCloud;
 use crate::poly::{ArrowTip, Rectangle};
 use crate::style::Style;
+use crate::tex::{Tex, TexMobjectError};
 use crate::text::{Text, TextMobjectError, text_style};
 use crate::tip::{TipEnd, attach_tip};
 use crate::vmobject::{DashError, VMobject, v_group};
@@ -119,6 +123,8 @@ pub enum CoordsError {
     Text(TextMobjectError),
     /// A dashed projection line exceeded or violated the dash contract.
     Dash(DashError),
+    /// An axis or graph label failed to typeset.
+    Tex(TexMobjectError),
 }
 
 impl std::fmt::Display for CoordsError {
@@ -133,6 +139,7 @@ impl std::fmt::Display for CoordsError {
             Self::Sampling(e) => write!(f, "coordinate sampling failed: {e}"),
             Self::Text(e) => write!(f, "coordinate label failed: {e}"),
             Self::Dash(e) => write!(f, "coordinate dash construction failed: {e}"),
+            Self::Tex(e) => write!(f, "coordinate label failed to typeset: {e}"),
         }
     }
 }
@@ -143,6 +150,7 @@ impl std::error::Error for CoordsError {
             Self::Sampling(e) => Some(e),
             Self::Text(e) => Some(e),
             Self::Dash(e) => Some(e),
+            Self::Tex(e) => Some(e),
             Self::InvalidSampleType(_) => None,
         }
     }
@@ -163,6 +171,12 @@ impl From<TextMobjectError> for CoordsError {
 impl From<DashError> for CoordsError {
     fn from(e: DashError) -> Self {
         Self::Dash(e)
+    }
+}
+
+impl From<TexMobjectError> for CoordsError {
+    fn from(e: TexMobjectError) -> Self {
+        Self::Tex(e)
     }
 }
 
@@ -1365,6 +1379,237 @@ impl Axes {
         self.get_line_from_axis_to_point(1, point)
     }
 
+    /// `get_v_line_to_graph(x, graph)`: [`get_v_line`](Self::get_v_line)
+    /// to the graph point over `x`.
+    ///
+    /// # Errors
+    /// As [`get_v_line`](Self::get_v_line).
+    pub fn get_v_line_to_graph(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+    ) -> Result<VMobject, CoordsError> {
+        self.get_v_line(self.input_to_graph_point(x, function))
+    }
+
+    /// `get_h_line_to_graph(x, graph)`: [`get_h_line`](Self::get_h_line)
+    /// to the graph point over `x`.
+    ///
+    /// # Errors
+    /// As [`get_h_line`](Self::get_h_line).
+    pub fn get_h_line_to_graph(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+    ) -> Result<VMobject, CoordsError> {
+        self.get_h_line(self.input_to_graph_point(x, function))
+    }
+
+    /// `get_parametric_curve(function, **kwargs)`: a [`ParametricCurve`]
+    /// through `c2p` of `function(t)`'s first two coordinates, at the
+    /// curve's own defaults (`t_range = (0, 1, 0.1)`), to be configured
+    /// further before `build`.
+    ///
+    /// [`ParametricCurve`]: crate::graphs::ParametricCurve
+    #[must_use]
+    pub fn get_parametric_curve(
+        &self,
+        function: impl Fn(f64) -> Vec3 + 'static,
+    ) -> crate::graphs::ParametricCurve {
+        let x_axis = self.x_axis.clone();
+        let y_axis = self.y_axis.clone();
+        crate::graphs::ParametricCurve::new(move |t| {
+            let coords = function(t);
+            c2p_with_axes(&x_axis, &y_axis, &coords[..2])
+        })
+        .sampling_budget(self.sampling_budget)
+    }
+
+    /// `get_scatterplot(x_values, y_values, **dot_config)`: a [`DotCloud`]
+    /// at `c2p(x, y)` for each pair (extra values on the longer side are
+    /// ignored, as numpy's pairwise `c2p` would refuse them).
+    #[must_use]
+    pub fn get_scatterplot(&self, x_values: &[f64], y_values: &[f64]) -> DotCloud {
+        DotCloud::new(
+            x_values
+                .iter()
+                .zip(y_values)
+                .map(|(&x, &y)| self.c2p(&[x, y])),
+        )
+    }
+
+    // --- labels ---------------------------------------------------------------
+
+    /// `get_axis_label(label_tex, axis, edge, direction, buff, ensure_on_screen)`:
+    /// a `Tex` placed `buff` away from the axis's `edge` centre, on the
+    /// `direction` side, then (when asked) shifted onto the default frame.
+    ///
+    /// # Errors
+    /// [`CoordsError::Tex`] when the label fails to typeset.
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_axis_label(
+        &self,
+        engine: &TexEngine,
+        label_tex: &str,
+        axis: usize,
+        edge: Vec3,
+        direction: Vec3,
+        buff: f64,
+        ensure_on_screen: bool,
+    ) -> Result<VMobject, CoordsError> {
+        let label = Tex::new(label_tex).build(engine)?.vmob.moved_to(ORIGIN);
+        Ok(self.place_axis_label(label, axis, edge, direction, buff, ensure_on_screen))
+    }
+
+    /// The placement half of [`get_axis_label`](Self::get_axis_label), for
+    /// a label built some other way (a `Text`, a styled `Tex`, a group).
+    #[must_use]
+    pub fn place_axis_label(
+        &self,
+        label: VMobject,
+        axis: usize,
+        edge: Vec3,
+        direction: Vec3,
+        buff: f64,
+        ensure_on_screen: bool,
+    ) -> VMobject {
+        let axis = self.axis(axis).vmob();
+        let anchor = axis.bbox_point(edge).unwrap_or(ORIGIN);
+        let label = label.next_to_point(anchor, direction, buff, ORIGIN);
+        if ensure_on_screen {
+            label.shifted_onto_screen(MED_SMALL_BUFF)
+        } else {
+            label
+        }
+    }
+
+    /// `get_x_axis_label(label_tex, edge=RIGHT, direction=DL)`.
+    ///
+    /// # Errors
+    /// As [`get_axis_label`](Self::get_axis_label).
+    pub fn get_x_axis_label(
+        &self,
+        engine: &TexEngine,
+        label_tex: &str,
+    ) -> Result<VMobject, CoordsError> {
+        self.get_axis_label(engine, label_tex, 0, RIGHT, DL, MED_SMALL_BUFF, false)
+    }
+
+    /// `get_y_axis_label(label_tex, edge=UP, direction=DR)`.
+    ///
+    /// # Errors
+    /// As [`get_axis_label`](Self::get_axis_label).
+    pub fn get_y_axis_label(
+        &self,
+        engine: &TexEngine,
+        label_tex: &str,
+    ) -> Result<VMobject, CoordsError> {
+        self.get_axis_label(engine, label_tex, 1, UP, DR, MED_SMALL_BUFF, false)
+    }
+
+    /// `get_axis_labels(x_label_tex="x", y_label_tex="y")`: both labels as
+    /// one group, x first.
+    ///
+    /// # Errors
+    /// As [`get_axis_label`](Self::get_axis_label).
+    pub fn get_axis_labels(
+        &self,
+        engine: &TexEngine,
+        x_label_tex: &str,
+        y_label_tex: &str,
+    ) -> Result<VMobject, CoordsError> {
+        Ok(v_group([
+            self.get_x_axis_label(engine, x_label_tex)?,
+            self.get_y_axis_label(engine, y_label_tex)?,
+        ]))
+    }
+
+    /// `get_graph_label(graph, label, x=None, buff=MED_SMALL_BUFF, color=None)`
+    /// for the graph of `function` (drawn as `graph`).
+    ///
+    /// With no `x`, the Reference searches `arange(*x_range)` from the right
+    /// for the first graph point whose `|x|` and `|y|` leave room for the
+    /// label inside the default frame, falling back to the range's end. The
+    /// label sits `buff` off the graph along the upward tangent normal and is
+    /// then shifted onto the frame.
+    ///
+    /// Colour: with no `color`, the label takes the graph's colour (its fill
+    /// colour if it has a visible fill, else its stroke colour — the
+    /// Reference's `match_color`). A given `color` is applied; the Reference
+    /// accepts the parameter but never uses it.
+    ///
+    /// # Errors
+    /// [`CoordsError::Sampling`] when the default search range exceeds the
+    /// axes' sampling budget.
+    pub fn get_graph_label(
+        &self,
+        function: &dyn Fn(f64) -> f64,
+        graph: &VMobject,
+        label: VMobject,
+        x: Option<f64>,
+        buff: f64,
+        color: Option<Srgb>,
+    ) -> Result<VMobject, CoordsError> {
+        let color = color.unwrap_or_else(|| {
+            let style = graph.style();
+            if style.fill_opacity > 0.0 {
+                style.fill_color
+            } else {
+                style.stroke_color
+            }
+        });
+        let label = label.map_style_deep(|style| style.color(color));
+        let x = match x {
+            Some(x) => x,
+            None => {
+                let max_y = FRAME_Y_RADIUS - label.length_over_dim(1);
+                let max_x = FRAME_X_RADIUS - label.length_over_dim(0);
+                let candidates = arange(
+                    "get_graph_label",
+                    self.x_range[0],
+                    self.x_range[1],
+                    self.x_range[2],
+                    self.sampling_budget,
+                )?;
+                candidates
+                    .into_iter()
+                    .rev()
+                    .find(|&x0| {
+                        let point = self.input_to_graph_point(x0, function);
+                        point[0].abs() < max_x && point[1].abs() < max_y
+                    })
+                    .unwrap_or(self.x_range[1])
+            }
+        };
+        let point = self.input_to_graph_point(x, function);
+        let angle = self.angle_of_tangent(x, function);
+        let mut normal = space_ops::rotate_vector(RIGHT, angle + PI / 2.0, OUT);
+        if normal[1] < 0.0 {
+            normal = [-normal[0], -normal[1], -normal[2]];
+        }
+        Ok(label
+            .next_to_point(point, normal, buff, ORIGIN)
+            .shifted_onto_screen(DEFAULT_MOBJECT_TO_EDGE_BUFF))
+    }
+
+    /// [`get_graph_label`](Self::get_graph_label) with a `Tex` label.
+    ///
+    /// # Errors
+    /// [`CoordsError::Tex`] when the label fails to typeset, else as
+    /// [`get_graph_label`](Self::get_graph_label).
+    pub fn get_graph_label_tex(
+        &self,
+        engine: &TexEngine,
+        function: &dyn Fn(f64) -> f64,
+        graph: &VMobject,
+        label_tex: &str,
+        x: Option<f64>,
+        color: Option<Srgb>,
+    ) -> Result<VMobject, CoordsError> {
+        let label = Tex::new(label_tex).build(engine)?.vmob.moved_to(ORIGIN);
+        self.get_graph_label(function, graph, label, x, MED_SMALL_BUFF, color)
+    }
+
     // --- calculus -------------------------------------------------------------
 
     /// `angle_of_tangent(x, graph, dx=EPSILON)`: the angle of the secant
@@ -1901,6 +2146,139 @@ mod tests {
                 expected[k]
             );
         }
+    }
+
+    use fmn_core::constants::UR;
+
+    fn tex_engine() -> TexEngine {
+        TexEngine::new("fmd-math/pack/default", None).expect("bundled math pack")
+    }
+
+    fn unit_square(side: f64) -> VMobject {
+        crate::poly::Square::new().side_length(side).build()
+    }
+
+    #[test]
+    fn axis_labels_sit_at_the_reference_corners() {
+        let axes = Axes::new().build(&book()).expect("build axes");
+        let engine = tex_engine();
+        // x: the label's UR corner sits `buff` down-left of the x-axis's
+        // right edge centre (`next_to(edge_center, DL, buff)`).
+        let x_label = axes.get_x_axis_label(&engine, "x").expect("x label");
+        let right = axes.x_axis().vmob().bbox_point(RIGHT).expect("x axis");
+        assert_vec3_near(
+            x_label.bbox_point(UR).expect("label"),
+            [
+                right[0] - MED_SMALL_BUFF,
+                right[1] - MED_SMALL_BUFF,
+                right[2],
+            ],
+            1e-9,
+            "x label corner",
+        );
+        // y: the label's UL corner sits `buff` down-right of the top.
+        let y_label = axes.get_y_axis_label(&engine, "y").expect("y label");
+        let top = axes.y_axis().vmob().bbox_point(UP).expect("y axis");
+        assert_vec3_near(
+            y_label.bbox_point(UL).expect("label"),
+            [top[0] + MED_SMALL_BUFF, top[1] - MED_SMALL_BUFF, top[2]],
+            1e-9,
+            "y label corner",
+        );
+        let both = axes.get_axis_labels(&engine, "x", "y").expect("labels");
+        assert_eq!(both.children().len(), 2);
+        assert_eq!(both.children()[0].extent(), x_label.extent());
+        assert_eq!(both.children()[1].extent(), y_label.extent());
+        // ensure_on_screen pulls a label that would cross the frame back in.
+        let placed = axes.place_axis_label(unit_square(0.5), 0, RIGHT, RIGHT, 0.0, true);
+        let edge = placed.bbox_point(RIGHT).expect("placed")[0];
+        assert!(
+            (edge - (FRAME_X_RADIUS - MED_SMALL_BUFF)).abs() < 1e-9,
+            "{edge}"
+        );
+    }
+
+    #[test]
+    fn graph_label_follows_the_upward_normal_then_the_frame() {
+        let axes = Axes::new().build(&book()).expect("build axes");
+        let f = |x: f64| 0.5 * x;
+        let graph = axes.get_graph(f).color(BLUE).build().expect("graph");
+        let label = unit_square(0.5);
+        // Explicit x on the line y = x/2: the normal is the slope's upward
+        // perpendicular, and the label's lower-right corner (its side facing
+        // the graph) sits `buff` along it.
+        let placed = axes
+            .get_graph_label(&f, &graph, label.clone(), Some(1.0), MED_SMALL_BUFF, None)
+            .expect("label");
+        let angle = 0.5f64.atan();
+        let normal = [-angle.sin(), angle.cos(), 0.0];
+        let point = axes.c2p(&[1.0, 0.5]);
+        assert_vec3_near(
+            placed.bbox_point(DR).expect("placed"),
+            [
+                point[0] + normal[0] * MED_SMALL_BUFF,
+                point[1] + normal[1] * MED_SMALL_BUFF,
+                0.0,
+            ],
+            1e-6,
+            "explicit x",
+        );
+        assert_eq!(placed.style().fill_color, BLUE, "matches the graph stroke");
+        // No x: from the right, 7 leaves no room for a 0.5-wide label
+        // (|7| >= 7.11 - 0.5), 6 does; the label then crosses the top
+        // (3.72 > 4 - 0.5) and `shift_onto_screen` brings its top to 3.5.
+        let searched = axes
+            .get_graph_label(&f, &graph, label, None, MED_SMALL_BUFF, Some(RED))
+            .expect("label");
+        let point = axes.c2p(&[6.0, 3.0]);
+        let corner = searched.bbox_point(DR).expect("searched");
+        assert!((corner[0] - (point[0] + normal[0] * MED_SMALL_BUFF)).abs() < 1e-6);
+        let top = searched.bbox_point(UP).expect("searched")[1];
+        assert!((top - (FRAME_Y_RADIUS - DEFAULT_MOBJECT_TO_EDGE_BUFF)).abs() < 1e-9);
+        assert_eq!(
+            searched.style().fill_color,
+            RED,
+            "an explicit colour is applied"
+        );
+    }
+
+    #[test]
+    fn graph_lines_scatterplots_and_parametric_curves_go_through_c2p() {
+        let axes = Axes::new().build(&book()).expect("build axes");
+        let f = |x: f64| x * x / 4.0;
+        let v = axes.get_v_line_to_graph(2.0, &f).expect("v line");
+        let expected = axes.get_v_line(axes.c2p(&[2.0, 1.0])).expect("v line");
+        assert_eq!(v.extent(), expected.extent());
+        let h = axes.get_h_line_to_graph(-2.0, &f).expect("h line");
+        let expected = axes.get_h_line(axes.c2p(&[-2.0, 1.0])).expect("h line");
+        assert_eq!(h.extent(), expected.extent());
+
+        let cloud = axes.get_scatterplot(&[0.0, 1.0, 2.0], &[1.0, -1.0]);
+        let mobject: fmn_mobject::Mobject = cloud.into();
+        let points: Vec<Vec3> = mobject
+            .buffer
+            .read_column("point")
+            .expect("points")
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
+            .collect();
+        assert_eq!(points.len(), 2, "pairs, not the longer side");
+        assert_vec3_near(points[1], axes.c2p(&[1.0, -1.0]), 1e-6, "second dot");
+
+        let curve = axes
+            .get_parametric_curve(|t| [t.cos(), t.sin(), 0.0])
+            .build()
+            .expect("curve");
+        let points = curve.points();
+        assert_vec3_near(points[0], axes.c2p(&[1.0, 0.0]), 1e-9, "start");
+        assert_vec3_near(
+            *points.last().expect("end"),
+            axes.c2p(&[1.0f64.cos(), 1.0f64.sin()]),
+            1e-9,
+            "end",
+        );
     }
 
     /// A deterministic splitmix64 — property tests without a rand dep.

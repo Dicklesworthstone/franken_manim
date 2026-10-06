@@ -1165,6 +1165,25 @@ impl CoordinateSystem for ComplexPlane {
     }
 }
 
+/// Like [`Axes`], a built plane is added to a stage directly.
+impl From<NumberPlane> for fmn_mobject::Mobject {
+    fn from(plane: NumberPlane) -> Self {
+        plane.into_vmob().into()
+    }
+}
+
+impl From<ComplexPlane> for fmn_mobject::Mobject {
+    fn from(plane: ComplexPlane) -> Self {
+        plane.into_vmob().into()
+    }
+}
+
+impl From<ThreeDAxes> for fmn_mobject::Mobject {
+    fn from(axes: ThreeDAxes) -> Self {
+        axes.into_vmob().into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

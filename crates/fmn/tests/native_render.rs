@@ -331,3 +331,105 @@ fn adjacent_float_durations_straddle_the_exact_frame_boundary() {
         assert!(!fs.exists(&Path::new("/boundary").join(format!("frame_{count:06}.png"))));
     }
 }
+
+/// A native calculus scene written the way a user writes one: every library
+/// constructor (`Axes`, graphs, labels, Riemann rectangles) propagates with a
+/// plain `?` into `fmn::Result`.
+struct LabelledAxes;
+
+impl SceneConstruct for LabelledAxes {
+    fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
+        vec![
+            TypesetRequest::math("x"),
+            TypesetRequest::math("y"),
+            TypesetRequest::math("f(x)"),
+        ]
+    }
+
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let book = FontBook::bundled().map_err(fmn::library::TextMobjectError::Text)?;
+        let axes = Axes::new()
+            .x_range([-1.0, 4.0, 1.0])
+            .y_range([-1.0, 2.0, 1.0])
+            .build(&book)?;
+        let f = |x: f64| 0.5 * x;
+        let graph = axes.get_graph(f).color(YELLOW).build()?;
+        let labels = axes.get_axis_labels(stage.tex_engine()?, "x", "y")?;
+        let label =
+            axes.get_graph_label_tex(stage.tex_engine()?, &f, &graph, "f(x)", None, None)?;
+        let area = axes.get_riemann_rectangles(&f, Some([0.0, 2.0]), Some(0.5), "left")?;
+        let v_line = axes.get_v_line_to_graph(1.0, &f)?;
+        stage.add(axes.into_vmob())?;
+        for mobject in [graph, labels, label, area, v_line] {
+            stage.add(mobject)?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_labelled_axes_scene_renders_through_the_front_door() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut options = options("/axes", RenderFormat::PngSequence, 1);
+    options.config.camera.resolution = (160, 90);
+    options.config.sizes.frame_height = 8.0;
+    let report = render_with_fs(&mut LabelledAxes, options, fs.clone()).expect("axes render");
+    assert_eq!(report.artifact.frame_count, 1);
+    let image = png(&fs, "/axes/frame_000000.png");
+    let lit: usize = (0..image.height as usize)
+        .map(|row| lit_pixels_on_row(&image, row))
+        .sum();
+    assert!(lit > 100, "axes, graph and labels are drawn: {lit}");
+    // The Riemann rectangles' BLUE -> GREEN gradient: green well above red.
+    let area = image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[1] > 100 && pixel[1] > pixel[0].saturating_add(40))
+        .count();
+    assert!(area > 50, "the area under the graph is drawn: {area}");
+}
+
+struct BadSampleType;
+
+impl SceneConstruct for BadSampleType {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let book = FontBook::bundled().map_err(fmn::library::TextMobjectError::Text)?;
+        let axes = Axes::new().build(&book)?;
+        let area = axes.get_riemann_rectangles(&|x| x, None, None, "middle")?;
+        stage.add(area)?;
+        Ok(())
+    }
+}
+
+#[test]
+fn library_refusals_cross_the_front_door_typed_and_classified() {
+    let fs = Arc::new(VirtualFs::new());
+    let error = render_with_fs(
+        &mut BadSampleType,
+        options("/refused", RenderFormat::PngSequence, 1),
+        fs.clone(),
+    )
+    .expect_err("an invalid sample type refuses the scene");
+    let RenderError::Scene(error) = error else {
+        panic!("a scene-side refusal: {error:?}")
+    };
+    assert!(matches!(
+        &error,
+        fmn::Error::Library(LibraryError::Coordinates(
+            fmn::library::CoordsError::InvalidSampleType(kind)
+        )) if kind == "middle"
+    ));
+    assert_eq!(error.kind(), fmn::ErrorKind::Scene);
+    assert!(!fs.exists(Path::new("/refused")));
+
+    let budget = fmn::Error::from(fmn::library::CoordsError::Sampling(
+        fmn::library::SamplingError::LimitExceeded {
+            context: "axis ticks",
+            max_samples: 16,
+        },
+    ));
+    assert_eq!(budget.kind(), fmn::ErrorKind::Budget);
+    assert!(std::error::Error::source(&budget).is_some());
+}
