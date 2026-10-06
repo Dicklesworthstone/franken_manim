@@ -174,7 +174,11 @@ impl<'a> BulletedList<'a> {
                 .next_to(&bullet, RIGHT, BULLET_BUFF, ORIGIN);
             lines.push(v_group([bullet, text]));
         }
-        let mut group = VMobject::arranged(lines, DOWN, self.buff, self.aligned_edge);
+        // `arrange(DOWN, buff, aligned_edge)` with its default
+        // `center=True`: the arranged list is centred on the origin, as
+        // every freshly built Reference mobject is (fm-5wq.55).
+        let mut group =
+            VMobject::arranged(lines, DOWN, self.buff, self.aligned_edge).moved_to(ORIGIN);
         if let Some((index, opacity, scale_factor)) = self.fade {
             group = fade_group(group, index, opacity, scale_factor);
         }
@@ -356,7 +360,14 @@ impl<'a> Title<'a> {
                 *last = last.clone().with_child(decoration.clone());
             }
         }
-        let text_block = v_group(part_groups).with_style(text.vmob.style());
+        // The Reference's TexText is centred on the origin at construction
+        // (SVGMobject's `should_center`); Scribe lays text out from its
+        // baseline origin, so centre the block before positioning
+        // (fm-5wq.54: an uncentred block put the whole title right of
+        // centre and its underline off the frame).
+        let text_block = v_group(part_groups)
+            .with_style(text.vmob.style())
+            .moved_to(ORIGIN);
 
         // to_edge(UP, buff=MED_SMALL_BUFF), applied to the text alone
         // before the underline exists, as in the Reference.
@@ -653,6 +664,49 @@ mod tests {
         let gap = bottom_edge(text) - top_edge(underline);
         assert!(close(gap, SMALL_BUFF), "underline gap {gap}");
         assert!(close(underline.center_point()[0], text.center_point()[0]));
+    }
+
+    /// fm-5wq.54: the Reference's title text is centred on x = 0 (TexText
+    /// centres at construction; `to_edge(UP)` moves only y), so the whole
+    /// title, underline included, is symmetric about the frame's centre.
+    #[test]
+    fn title_is_centred_horizontally_like_the_reference() {
+        for underline in [true, false] {
+            for matched in [true, false] {
+                let title = Title::new(&["Hello", "World"])
+                    .include_underline(underline)
+                    .match_underline_width_to_text(matched)
+                    .build(&book())
+                    .expect("builds");
+                let center = title.vmob.center_point()[0];
+                assert!(center.abs() < 1e-9, "title centre x {center}");
+                assert!(
+                    close(left_edge(&title.vmob), -right_edge(&title.vmob)),
+                    "asymmetric title"
+                );
+            }
+        }
+        let title = built_title();
+        let underline = title.underline().expect("underline included");
+        assert!(close(left_edge(underline), -(FRAME_WIDTH - 2.0) / 2.0));
+        assert!(
+            right_edge(underline) < FRAME_WIDTH / 2.0,
+            "underline leaves the frame"
+        );
+    }
+
+    /// fm-5wq.55: `arrange` re-centres by default, so a fresh list sits on
+    /// the origin in both axes.
+    #[test]
+    fn bulleted_list_is_centred_on_the_origin() {
+        for numbered in [false, true] {
+            let list = BulletedList::new(&ITEMS)
+                .numbered(numbered)
+                .build(&book())
+                .expect("builds");
+            let [x, y, _] = list.vmob.center_point();
+            assert!(x.abs() < 1e-9 && y.abs() < 1e-9, "list centre ({x}, {y})");
+        }
     }
 
     #[test]

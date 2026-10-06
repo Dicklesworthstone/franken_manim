@@ -233,16 +233,40 @@ pub fn underline(target: &VMobject, color: Srgb, buff: f64, stretch_factor: f64)
         .with_stroke_profile(vec![0.0, 3.0, 3.0, 0.0])
 }
 
+/// The Reference's `Checkmark()` box at its default `font_size = 48`:
+/// `\ding{51}`'s ink is 0.3345 × 0.3504 units (fm-5wq.52, pinned Reference
+/// `6199a00d` probed side by side with the portal).
+pub const CHECKMARK_SIZE: (f64, f64) = (0.3345, 0.3504);
+
+/// The Reference's `Exmark()` box at `font_size = 48`: `\ding{55}`'s ink is
+/// 0.279 × 0.3549 units.
+pub const EXMARK_SIZE: (f64, f64) = (0.279, 0.3549);
+
+/// A closed polygon over unit-box `outline` points, mapped onto a
+/// `size`-box centred on the origin and filled.
+fn drawn_mark(outline: &[[f64; 3]], size: (f64, f64), color: Srgb) -> VMobject {
+    let place = |p: [f64; 3]| [p[0] * size.0, p[1] * size.1, 0.0];
+    let mut path = QuadPath::new();
+    path.start_new_path(place(outline[0]));
+    for point in &outline[1..] {
+        let _ = path.add_line_to(place(*point), true);
+    }
+    let _ = path.add_line_to(place(outline[0]), true);
+    VMobject::from_path(&path).with_style(Style::default().fill(color, 1.0).stroke(color, 0.0, 1.0))
+}
+
 /// `Checkmark` — the Reference's `\ding{51}`, drawn (see the module docs).
 ///
 /// Two strokes meeting at the low point: a short descent to the left and a
-/// long rise to the right, in a unit box centred on the origin.
+/// long rise to the right, filling exactly [`CHECKMARK_SIZE`] centred on the
+/// origin — the glyph's size at the default font size, so a portal
+/// `font_size` scales from the Reference's own box.
 #[must_use]
 pub fn checkmark(color: Srgb) -> VMobject {
     // Both tips are cut vertically, so the shape reaches x = ±0.5 on a flat
     // edge rather than at a needle point; the bottom vertex and the top-right
-    // tip carry y = ∓0.5. That is what makes the box exactly unit-square, and
-    // therefore what makes the pair match in size.
+    // tip carry y = ∓0.5. That is what makes the outline exactly fill its
+    // box, and therefore what makes the pair's sizes exact.
     let outline: [[f64; 3]; 6] = [
         [-0.5, 0.14, 0.0],   // left tip, upper corner
         [-0.10, -0.24, 0.0], // inner elbow
@@ -251,23 +275,17 @@ pub fn checkmark(color: Srgb) -> VMobject {
         [-0.14, -0.5, 0.0],  // bottom vertex, outer
         [-0.5, -0.02, 0.0],  // left tip, lower corner
     ];
-    let mut path = QuadPath::new();
-    path.start_new_path(outline[0]);
-    for point in &outline[1..] {
-        let _ = path.add_line_to(*point, true);
-    }
-    let _ = path.add_line_to(outline[0], true);
-    VMobject::from_path(&path).with_style(Style::default().fill(color, 1.0).stroke(color, 0.0, 1.0))
+    drawn_mark(&outline, CHECKMARK_SIZE, color)
 }
 
 /// `Exmark` — the Reference's `\ding{55}`, drawn (see the module docs).
 ///
-/// Two crossed bars of equal weight in the same unit box as [`checkmark`], so
-/// the pair reads as siblings the way the Reference's two dingbats do.
+/// Two crossed bars of equal weight, drawn like [`checkmark`] so the pair
+/// reads as siblings the way the Reference's two dingbats do, filling
+/// exactly [`EXMARK_SIZE`] centred on the origin.
 #[must_use]
 pub fn exmark(color: Srgb) -> VMobject {
     let t = 0.12;
-    let mut path = QuadPath::new();
     // One closed contour tracing the whole cross, corner to corner.
     let outline: [[f64; 3]; 12] = [
         [-0.5 + t, -0.5, 0.0],
@@ -283,12 +301,7 @@ pub fn exmark(color: Srgb) -> VMobject {
         [-t * 0.7, 0.0, 0.0],
         [-0.5, -0.5 + t, 0.0],
     ];
-    path.start_new_path(outline[0]);
-    for point in &outline[1..] {
-        let _ = path.add_line_to(*point, true);
-    }
-    let _ = path.add_line_to(outline[0], true);
-    VMobject::from_path(&path).with_style(Style::default().fill(color, 1.0).stroke(color, 0.0, 1.0))
+    drawn_mark(&outline, EXMARK_SIZE, color)
 }
 
 // -------------------------------------------------- flash conveniences
@@ -502,24 +515,29 @@ mod tests {
     }
 
     #[test]
-    fn both_marks_are_closed_shapes_in_the_same_unit_box() {
-        // The pair has to read as siblings — matched weight, matched size —
-        // which is the whole reason both are drawn rather than one being set
-        // from IBM Plex's U+2713.
-        for (name, mark) in [("check", checkmark(GREEN)), ("ex", exmark(RED))] {
+    fn both_marks_are_closed_shapes_at_the_reference_glyph_size() {
+        // The pair has to read as siblings — matched weight — which is the
+        // whole reason both are drawn rather than one being set from IBM
+        // Plex's U+2713. Their boxes are the Reference's glyph boxes at the
+        // default font size (fm-5wq.52: they were 3x too large).
+        for (name, mark, size) in [
+            ("check", checkmark(GREEN), CHECKMARK_SIZE),
+            ("ex", exmark(RED), EXMARK_SIZE),
+        ] {
             let path = mark.path().expect("a built mark is a valid path");
             assert!(path.is_closed(), "{name} must be a closed filled shape");
             let (min, max) = mark.extent().expect("a built mark has an extent");
             assert!(
-                (max[0] - min[0] - 1.0).abs() < 1e-9,
-                "{name} spans the unit box horizontally, got {}",
+                (max[0] - min[0] - size.0).abs() < 1e-9,
+                "{name} width {}",
                 max[0] - min[0]
             );
             assert!(
-                (max[1] - min[1] - 1.0).abs() < 1e-9,
-                "{name} spans the unit box vertically, got {}",
+                (max[1] - min[1] - size.1).abs() < 1e-9,
+                "{name} height {}",
                 max[1] - min[1]
             );
+            assert!(mark.center_point()[0].abs() < 1e-9 && mark.center_point()[1].abs() < 1e-9);
             let style = mark.style();
             assert!(
                 (style.fill_opacity - 1.0).abs() < 1e-12,

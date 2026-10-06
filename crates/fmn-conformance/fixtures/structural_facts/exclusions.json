@@ -213,45 +213,6 @@
       "reason": "Known metric bug past bn05-text-geometry's 10%: formulas run 2-18% narrow and fallback glyphs run wide (display integrals up to +35%, Tex('a + b') +23% from the '+'). The envelope states that magnitude, so a 2x Tex still fails."
     },
     {
-      "id": "fm-5wq.52-drawn-mark-size",
-      "kind": "open-bead",
-      "ref": "fm-5wq.52",
-      "scope": ["classes", "scenes"],
-      "class": ["Checkmark", "Exmark"],
-      "fact": ["bbox"],
-      "envelope": {"size_rel": 2.7, "center_abs": 0.05},
-      "reason": "The drawn marks are 1.0 x 1.0 where the Reference's glyphs are 0.33 x 0.35 (up to 3.6x the width)."
-    },
-    {
-      "id": "fm-5wq.53-brace-depth",
-      "kind": "open-bead",
-      "ref": "fm-5wq.53",
-      "class": ["Brace", "BraceLabel", "BraceText", "LineBrace"],
-      "fact": ["bbox"],
-      "envelope": {"size_rel": 0.45, "center_abs": 0.05},
-      "reason": "The parametric brace is 39% deeper than the Reference's \\underbrace (0.370 against 0.267 at width 2); BraceLabel 14% taller."
-    },
-    {
-      "id": "fm-5wq.54-title-offset",
-      "kind": "open-bead",
-      "ref": "fm-5wq.54",
-      "scope": "classes",
-      "class": "Title",
-      "fact": ["bbox"],
-      "envelope": {"size_rel": 0.1, "center_abs": 1.35},
-      "reason": "Title is translated 1.31 units right of the Reference's centred Title."
-    },
-    {
-      "id": "fm-5wq.55-bulleted-list-offset",
-      "kind": "open-bead",
-      "ref": "fm-5wq.55",
-      "scope": "classes",
-      "class": "BulletedList",
-      "fact": ["bbox"],
-      "envelope": {"size_rel": 0.1, "center_abs": 0.65},
-      "reason": "BulletedList is centred at (0.61, -0.28) where the Reference centres it at the origin."
-    },
-    {
       "id": "adr0020-drawings-shelf",
       "kind": "adr",
       "ref": "ADR-0020",

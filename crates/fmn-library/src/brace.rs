@@ -42,13 +42,22 @@ use fmn_geom::space_ops::get_norm;
 use crate::style::Style;
 use crate::vmobject::VMobject;
 
+/// The Reference's measured depth of a wide brace: `Brace(Square(), DOWN)`
+/// is `2.0 × 0.2668` at the default font size (fm-5wq.53, pinned Reference
+/// `6199a00d` probed side by side with the portal). The `\underbrace` glyph
+/// keeps that depth at every wider width — its `set_initial_width` stretches
+/// only the straight runs.
+pub const REFERENCE_BRACE_DEPTH: f64 = 0.2668;
+
 /// The size parameter of the curl, in manim units.
 ///
-/// Calibrated so a wide brace stands `0.05 + 2 × 0.16 = 0.37` units deep,
-/// which is where the Reference's `\underbrace{\qquad}` lands at the default
-/// font size — the kept look (Appendix B), reached by construction rather
-/// than by rendering a glyph.
-pub const DEFAULT_BRACE_EM: f64 = 1.0;
+/// At `em = 1` a wide brace stands `0.05 + 2 × 0.16 = 0.37` units deep; the
+/// default scales the whole curl (hooks, centre point and stroke together,
+/// so the shape keeps its proportions) to [`REFERENCE_BRACE_DEPTH`] — the
+/// kept look (Appendix B), reached by construction rather than by rendering
+/// a glyph. An earlier calibration claimed 0.37 matched the Reference; the
+/// probe measured 39 % too deep.
+pub const DEFAULT_BRACE_EM: f64 = REFERENCE_BRACE_DEPTH / 0.37;
 
 /// The Reference's `Brace(..., buff=0.2)`.
 pub const DEFAULT_BRACE_BUFF: f64 = 0.2;
@@ -522,6 +531,35 @@ mod tests {
                     "width {width}: point {p:?} escapes the curl's depth"
                 );
             }
+        }
+    }
+
+    /// fm-5wq.53: at the default size a brace under a 2-unit square is the
+    /// Reference's 2.0 × 0.2668, its top edge `buff = 0.2` below the target,
+    /// so it is centred at y = −1.3334 as the Reference's is.
+    #[test]
+    fn default_brace_matches_the_reference_extents() {
+        let square = crate::poly::Rectangle::new()
+            .width(2.0)
+            .height(2.0)
+            .build()
+            .expect("square");
+        let brace = Brace::around(&square, DOWN).build();
+        let (min, max) = brace.extent().expect("brace has extent");
+        assert!(((max[0] - min[0]) - 2.0).abs() < 1e-9, "width");
+        assert!(
+            ((max[1] - min[1]) - REFERENCE_BRACE_DEPTH).abs() < 1e-9,
+            "depth"
+        );
+        assert!((max[1] - (-1.0 - DEFAULT_BRACE_BUFF)).abs() < 1e-9, "buff");
+        assert!((brace.center_point()[1] + 1.3334).abs() < 1e-9);
+        // Wider braces keep the depth; the runs absorb the width.
+        for width in [3.0, 8.0, 14.0] {
+            let depth = Brace::new().width(width).depth();
+            assert!(
+                (depth - REFERENCE_BRACE_DEPTH).abs() < 1e-9,
+                "{width}: {depth}"
+            );
         }
     }
 

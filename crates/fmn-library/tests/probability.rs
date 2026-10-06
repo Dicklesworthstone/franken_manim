@@ -177,7 +177,8 @@ fn self_golden_locks_the_canonical_divided_space() {
 
     const BASE_GOLDEN: &str = "b3df7f2dd1a21dc91464a55d92d3a4e4d9f087a0d49705412728aab4836b997a";
     const PARTS_GOLDEN: &str = "d2cfdcb45dba0739b88ed304294509058405c5622b8e35fca55b447dd9ebe3fc";
-    const LABELS_GOLDEN: &str = "84035c9e5c4bb62b79c81cf818b6a93260bff7d40892233ff360dcfad0dcc225";
+    // Re-locked when Brace depth moved to the Reference's 0.2668 (fm-5wq.53).
+    const LABELS_GOLDEN: &str = "11c0ac834c33efdb477117a0aeca4834082678eb9a987c9c21bdef1ff96fa2e5";
     if BASE_GOLDEN.starts_with("PLACEHOLDER") {
         fail(format!(
             "SELF GOLDEN SEEDS sample_space: base={} parts={} labels={}",

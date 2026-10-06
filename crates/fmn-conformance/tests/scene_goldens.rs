@@ -189,3 +189,81 @@ fn lock_entries_exist_for_every_scene() {
         );
     }
 }
+
+/// Each scene's certified post-construct frame as tight RGBA8 — the form a
+/// re-bless panel shows a reviewer.
+fn review_frame(case: &fmn_conformance::scene_goldens::SceneCase) -> Vec<u8> {
+    let built = (case.build)(corpus());
+    let frame = render_frame(&built.stage, EngineIdentity::certified(), 1);
+    let config = frame_config();
+    let mut rgba = FrameBuffer::new(
+        fmn_frame::FrameLayout::tight(
+            fmn_frame::PixelFormat::Rgba8,
+            config.viewport.width,
+            config.viewport.height,
+        )
+        .expect("the review frame layout exists"),
+    );
+    fmn_frame::convert::rgba16f_to_rgba8(&frame, &mut rgba).expect("certified frames convert");
+    rgba.as_bytes().to_vec()
+}
+
+/// The re-bless protocol's tooling for this suite (docs/GOVERNANCE.md §4).
+///
+/// 1. At the old source, `FMN_GOLDEN_FRAMES_DIR=<before>` writes every
+///    scene's review frame as `<before>/<scene>.rgba`.
+/// 2. At the new source, bless the lock (`UPDATE_GOLDENS=1`), then run this
+///    test with `FMN_REBLESS_BEFORE_DIR=<before>`: every scene whose frame
+///    changed is stacked top to bottom, before | after, through
+///    [`side_by_side_png`], and written as the lock's artefact under
+///    `REBLESS_ARTEFACT_DIR`, named for the blessed lock's digest.
+///
+/// Neither switch set: nothing to do (an ordinary gate run).
+#[test]
+fn rebless_review_frames_and_panel() {
+    use fmn_conformance::golden::{REBLESS_ARTEFACT_DIR, rebless_artefact_name, side_by_side_png};
+    if let Ok(dir) = std::env::var("FMN_GOLDEN_FRAMES_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("frames directory");
+        for case in SCENES {
+            std::fs::write(dir.join(format!("{}.rgba", case.name)), review_frame(case))
+                .expect("review frame written");
+        }
+    }
+    let Ok(before_dir) = std::env::var("FMN_REBLESS_BEFORE_DIR") else {
+        return;
+    };
+    let before_dir = std::path::PathBuf::from(before_dir);
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    let mut rows = 0u32;
+    for case in SCENES {
+        let old = std::fs::read(before_dir.join(format!("{}.rgba", case.name)))
+            .unwrap_or_else(|error| panic!("{}: before frame: {error}", case.name));
+        let new = review_frame(case);
+        if old != new {
+            before.extend_from_slice(&old);
+            after.extend_from_slice(&new);
+            rows += 1;
+        }
+    }
+    assert!(
+        rows > 0,
+        "no scene frame changed; there is nothing to re-bless"
+    );
+    let config = frame_config();
+    let panel = side_by_side_png(
+        config.viewport.width,
+        config.viewport.height * rows,
+        &before,
+        &after,
+    )
+    .expect("same-size before/after stacks");
+    let lock = "scene_goldens.certified.lock";
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let digest =
+        fmn_hash::sha256(&std::fs::read(manifest.join("goldens").join(lock)).expect("lock"))
+            .to_hex();
+    let out = manifest.join("../..").join(REBLESS_ARTEFACT_DIR);
+    std::fs::create_dir_all(&out).expect("re-bless artefact directory");
+    std::fs::write(out.join(rebless_artefact_name(lock, &digest)), panel).expect("panel written");
+}

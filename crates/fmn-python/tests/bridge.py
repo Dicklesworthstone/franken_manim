@@ -6590,16 +6590,21 @@ assert len(checkmark.submobjects) == 1
 assert len(exmark.submobjects) == 1
 assert checkmark.get_part_by_tex(checkmark.tex)[0] is checkmark[0]
 assert exmark.get_part_by_tex(exmark.tex)[0] is exmark[0]
-assert np.allclose(checkmark.get_bounding_box()[[0, 2], :2], [[-0.5, -0.5], [0.5, 0.5]])
-assert np.allclose(exmark.get_bounding_box()[[0, 2], :2], [[-0.5, -0.5], [0.5, 0.5]])
+# The Reference's \ding{51}/\ding{55} boxes at font_size 48 (fm-5wq.52).
+assert np.allclose(
+    checkmark.get_bounding_box()[[0, 2], :2], [[-0.16725, -0.1752], [0.16725, 0.1752]]
+)
+assert np.allclose(
+    exmark.get_bounding_box()[[0, 2], :2], [[-0.1395, -0.17745], [0.1395, 0.17745]]
+)
 assert checkmark[0].get_fill_color() == manimlib.GREEN
 assert exmark[0].get_fill_color() == manimlib.RED
 assert np.isclose(checkmark[0].get_stroke_width(), 0.0)
 assert np.isclose(exmark[0].get_stroke_width(), 0.0)
 
 large_checkmark = drawings.Checkmark(font_size=96, color=manimlib.BLUE)
-assert np.isclose(large_checkmark.get_width(), 2.0)
-assert np.isclose(large_checkmark.get_height(), 2.0)
+assert np.isclose(large_checkmark.get_width(), 2 * 0.3345)
+assert np.isclose(large_checkmark.get_height(), 2 * 0.3504)
 assert large_checkmark[0].get_fill_color() == manimlib.BLUE
 
 bound_matcher_scene.add(checkmark, exmark)
@@ -15409,7 +15414,10 @@ def verify_portal_console_scene():
     # the adopted fixed-frame pixels in one production regression.
     brace_destination = output_root / "fixed-line-brace.png"
     brace_scene = InteractiveScene()
-    brace_scene._begin_png(str(brace_destination), 160, 90, 30, 1, 0)
+    # 320x180: the Reference-depth brace (fm-5wq.53) is 28% thinner than the
+    # old calibration, so the white-pixel witness needs the finer grid to keep
+    # its threshold; an off-screen brace still yields none.
+    brace_scene._begin_png(str(brace_destination), 320, 180, 30, 1, 0)
     brace_frame = brace_scene.frame
     brace_frame.reorient(-55, 68, 0, [1.0, -1.0, 0.0], 6)
     brace_start = np.array([-2.5, -0.5, 0.0])

@@ -85,7 +85,7 @@
 //! * **Marks are drawn, not stroked (BN-08).** The Reference's checkbox
 //!   draws two `Line`s for the checkmark and two for the cross; here the
 //!   content is the native drawn pair [`crate::matchers::checkmark`] /
-//!   [`crate::matchers::exmark`], the same unit-box siblings the rest of
+//!   [`crate::matchers::exmark`], the same drawn siblings the rest of
 //!   the library uses, stretched onto the box and scaled by the
 //!   Reference's hard `0.5` (its `box_content_buff` field is dead in the
 //!   Reference and is not reproduced).
@@ -688,7 +688,7 @@ impl Checkbox {
             .expect("an unrounded checkbox cannot request arc components")
     }
 
-    /// `get_checkmark` / `get_cross`: the unit-box mark stretched onto the
+    /// `get_checkmark` / `get_cross`: the drawn mark stretched onto the
     /// box, scaled by 0.5, centred on the box.
     fn build_content(&self) -> VMobject {
         let (color, width) = if self.value {

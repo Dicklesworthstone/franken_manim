@@ -6506,6 +6506,17 @@ fn python_studio_capture_scenario_passes() {
     assert!(report.is_pass(), "{}", report.summary());
 }
 
+/// The facade's video formats need an explicit ffmpeg capability (D2).
+#[test]
+fn facade_video_capability_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.facade_video_requires_ffmpeg_capability.v1")
+        .expect("facade video capability scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 /// fm-cli-flag-timing-ht01: window flags refuse file renders; timing holds.
 #[test]
 fn cli_window_flag_scenario_passes() {
