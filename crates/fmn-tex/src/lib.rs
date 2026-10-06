@@ -39,6 +39,7 @@ mod error;
 mod memory_cache;
 mod preamble;
 mod request;
+mod session;
 mod typeset;
 
 pub use engine::{Mode, TexEngine};
@@ -48,6 +49,7 @@ pub use memory_cache::{
 };
 pub use preamble::{LineAlign, TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES};
 pub use request::TypesetRequest;
+pub use session::{TexSession, TypesetSessionReport};
 pub use typeset::{
     KEYWORD_INK_COMMANDS, Prim, Sub, TYPESET_DOCUMENT_LIMIT_BYTES, TYPESET_FORMAT_VERSION, Typeset,
     TypesetError,

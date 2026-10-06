@@ -12,15 +12,13 @@ fmn-config.workspace = true
 fmn-mobject.workspace = true
 fmn-text.workspace = true
 fmn-cache.workspace = true
+# Capability-bound scene sessions attach the existing cache without ambient
+# filesystem access when the host supplies an injected filesystem.
+fmn-platform.workspace = true
 # The native TeX-mathematics layout engine (§11.4): tier-1 grammar, the
 # atom/spacing engine, and style machinery — pinned to the SUITE.lock
 # franken_markdown rev (fm-wgl; layout/placement arrives with fm-hk9).
 fmd-math.workspace = true
-
-[dev-dependencies]
-# The deterministic-lab doubles (VirtualFs/FakeClock) for cache-wired
-# tests — a dev-tier edge per ADR-0003, outside §19's shipped DAG.
-fmn-platform.workspace = true
 
 [lints]
 workspace = true

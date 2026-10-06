@@ -40,7 +40,7 @@ EXPECTED: dict[str, set[str]] = {
     # Lumen; exotic formats remain an upper-layer ffmpeg capability.
     "fmn-render": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-frame", "fmn-codec", "fmn-hash", "fmn-cache"},
     "fmn-text": {"fmn-core", "fmn-geom", "fmn-mobject"},
-    "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache"},
+    "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache", "fmn-platform"},  # platform: capability-bound native typesetting sessions
     "fmn-library": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex", "fmn-codec"},  # dmath: tip/arc trigonometry (ADR-0014); codec: ImageMobject decode (§10.6, fm-2u6)
     "fmn-scene": {"fmn-core", "fmn-config", "fmn-platform", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-hash"},  # hash: journal serialization + digests (§13.4, fm-y7u)
     # hash: canonical supervisor/worker IPC; cache: supervisor-owned
