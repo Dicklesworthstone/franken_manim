@@ -38,7 +38,10 @@ fn code(frame: &FrameBuffer, plane: usize, x: usize, y: usize) -> u16 {
 fn padding_is_untouched(frame: &FrameBuffer) {
     let layout = frame.layout();
     for plane in 0..layout.format().plane_count() {
-        let payload = layout.format().min_row_bytes(layout.width(), plane).unwrap();
+        let payload = layout
+            .format()
+            .min_row_bytes(layout.width(), plane)
+            .unwrap();
         let stride = layout.stride(plane);
         for row in frame.plane(plane).chunks_exact(stride) {
             assert!(row[payload..].iter().all(|byte| *byte == 0xA5));
@@ -131,13 +134,32 @@ fn p010_keeps_more_than_eight_bits_of_a_half_float_gray_ramp() {
     let mut legacy = frame(PixelFormat::P010, width as u32, 2, 64);
     let mut rgba = frame(PixelFormat::Rgba8, width as u32, 2, 64);
     rgba16f_to_rgba8(&source, &mut rgba).unwrap();
-    rgba_to_p010(&rgba, &mut legacy, ColorRange::Limited, ChromaSiting::Center).unwrap();
-    rgba16f_to_p010(&source, &mut direct, ColorRange::Limited, ChromaSiting::Center).unwrap();
+    rgba_to_p010(
+        &rgba,
+        &mut legacy,
+        ColorRange::Limited,
+        ChromaSiting::Center,
+    )
+    .unwrap();
+    rgba16f_to_p010(
+        &source,
+        &mut direct,
+        ColorRange::Limited,
+        ChromaSiting::Center,
+    )
+    .unwrap();
     let old_levels: BTreeSet<_> = (0..width).map(|x| code(&legacy, 0, x, 0)).collect();
     let new_levels: BTreeSet<_> = (0..width).map(|x| code(&direct, 0, x, 0)).collect();
     assert_eq!(old_levels.len(), 256);
-    assert!(new_levels.len() > 800, "only {} luma levels", new_levels.len());
-    assert_eq!((code(&direct, 0, 0, 0), code(&direct, 0, width - 1, 0)), (64, 940));
+    assert!(
+        new_levels.len() > 800,
+        "only {} luma levels",
+        new_levels.len()
+    );
+    assert_eq!(
+        (code(&direct, 0, 0, 0), code(&direct, 0, width - 1, 0)),
+        (64, 940)
+    );
     for x in 0..width {
         assert_eq!(code(&direct, 1, x, 0), 512);
         let at = x * 8;
@@ -178,8 +200,10 @@ fn p010_uniform_colors_obey_an_independent_inverse_matrix_error_bound() {
                 let green = (y - 0.2126 * red - 0.0722 * blue) / 0.7152;
                 for (actual, bits) in [red, green, blue].into_iter().zip(bits) {
                     let expected = srgb_encode(f16_to_f64(bits));
-                    assert!((actual - expected).abs() <= 2.0 / 1023.0,
-                        "rgb=({r},{g},{b}): reconstructed {actual}, expected {expected}");
+                    assert!(
+                        (actual - expected).abs() <= 2.0 / 1023.0,
+                        "rgb=({r},{g},{b}): reconstructed {actual}, expected {expected}"
+                    );
                 }
                 assert!((64..=940).contains(&code(&output, 0, 0, 0)));
                 assert!((64..=960).contains(&code(&output, 1, 0, 0)));
@@ -199,7 +223,13 @@ fn p010_siting_uses_unquantized_chroma_and_left_ignores_the_right_column() {
     let mut left = frame(PixelFormat::P010, 2, 2, 16);
     let mut center = frame(PixelFormat::P010, 2, 2, 16);
     rgba16f_to_p010(&source, &mut left, ColorRange::Limited, ChromaSiting::Left).unwrap();
-    rgba16f_to_p010(&source, &mut center, ColorRange::Limited, ChromaSiting::Center).unwrap();
+    rgba16f_to_p010(
+        &source,
+        &mut center,
+        ColorRange::Limited,
+        ChromaSiting::Center,
+    )
+    .unwrap();
     assert_eq!(left.plane(0), center.plane(0));
     assert_eq!((code(&left, 1, 0, 0), code(&left, 1, 1, 0)), (512, 512));
     // Average black and red in encoded space: cb = -Kr/(1-Kb)/4,
@@ -214,15 +244,27 @@ fn nonfinite_values_and_coverage_alpha_do_not_pollute_p010_channels() {
     let mut source = frame(PixelFormat::Rgba16F, 2, 2, 16);
     let mut output = frame(PixelFormat::P010, 2, 2, 16);
     for (value, expected) in [
-        (0x0000, 64), (0x8000, 64), (0xbc00, 64), (0xfc00, 64),
-        (0x7e00, 64), (0xfe00, 64), (0x7c00, 940), (0x4000, 940),
+        (0x0000, 64),
+        (0x8000, 64),
+        (0xbc00, 64),
+        (0xfc00, 64),
+        (0x7e00, 64),
+        (0xfe00, 64),
+        (0x7c00, 940),
+        (0x4000, 940),
     ] {
         for y in 0..2 {
             for x in 0..2 {
                 set_pixel(&mut source, x, y, [value, value, value, 0x7e00]);
             }
         }
-        rgba16f_to_p010(&source, &mut output, ColorRange::Limited, ChromaSiting::Center).unwrap();
+        rgba16f_to_p010(
+            &source,
+            &mut output,
+            ColorRange::Limited,
+            ChromaSiting::Center,
+        )
+        .unwrap();
         assert_eq!(code(&output, 0, 0, 0), expected);
         assert_eq!((code(&output, 1, 0, 0), code(&output, 1, 1, 0)), (512, 512));
     }
@@ -247,11 +289,17 @@ fn invalid_layouts_and_full_range_p010_refuse_before_any_write() {
         assert_eq!(target.as_bytes(), before);
         let mut target = frame(format, 4, 2, 16);
         let before = target.as_bytes().to_vec();
-        assert_eq!(convert(&source, &mut target), Err(FrameError::DimensionMismatch));
+        assert_eq!(
+            convert(&source, &mut target),
+            Err(FrameError::DimensionMismatch)
+        );
         assert_eq!(target.as_bytes(), before);
         let mut target = frame(PixelFormat::Rgba8, 2, 2, 16);
         let before = target.as_bytes().to_vec();
-        assert!(matches!(convert(&source, &mut target), Err(FrameError::FormatMismatch { .. })));
+        assert!(matches!(
+            convert(&source, &mut target),
+            Err(FrameError::FormatMismatch { .. })
+        ));
         assert_eq!(target.as_bytes(), before);
     }
     let mut target = frame(PixelFormat::P010, 2, 2, 16);

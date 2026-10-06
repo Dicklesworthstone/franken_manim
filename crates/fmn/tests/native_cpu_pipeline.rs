@@ -2,7 +2,7 @@
 
 use fmn::rendering::{NativeFramePipeline, RenderError};
 use fmn_core::color::LinearRgba;
-use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
+use fmn_frame::convert::{rgba_to_nv12, rgba16f_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_output::{EmitterConfig, OrderedEmitter, SinkBinding, SinkWrite};
@@ -69,7 +69,15 @@ fn shape() -> Mobject {
     Mobject::from_buffer(records)
 }
 
+/// The serial two-step route for 8-bit wires (the pipeline's fused kernels
+/// must reproduce it byte for byte), and the direct binary16 kernel for P010,
+/// whose precision beyond eight bits the two-step route would discard.
 fn convert_reference(frame: &FrameBuffer, format: PixelFormat) -> Vec<u8> {
+    if format == PixelFormat::P010 {
+        let mut output = FrameBuffer::new(FrameLayout::tight(format, 32, 24).unwrap());
+        rgba16f_to_p010(frame, &mut output, ColorRange::Limited, ChromaSiting::Left).unwrap();
+        return output.as_bytes().to_vec();
+    }
     let mut rgba = FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap());
     rgba16f_to_rgba8(frame, &mut rgba).unwrap();
     if format == PixelFormat::Rgba8 {
@@ -80,9 +88,6 @@ fn convert_reference(frame: &FrameBuffer, format: PixelFormat) -> Vec<u8> {
         PixelFormat::Bgra8 => swap_rb8(&rgba, &mut output),
         PixelFormat::Nv12 => {
             rgba_to_nv12(&rgba, &mut output, ColorRange::Limited, ChromaSiting::Left)
-        }
-        PixelFormat::P010 => {
-            rgba_to_p010(&rgba, &mut output, ColorRange::Limited, ChromaSiting::Left)
         }
         _ => panic!("not a converted CPU format"),
     }

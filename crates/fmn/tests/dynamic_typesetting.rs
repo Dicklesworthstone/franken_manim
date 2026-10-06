@@ -138,7 +138,14 @@ fn twenty_four_dynamic_formulas_warm_across_sessions_without_layout_inside_play(
     let reference = frames(&fs, "/cold");
     assert_eq!(reference, frames(&memory_fs, "/memory"));
     let image = fmn_codec::decode_png(&reference[0], &fmn_codec::PngLimits::default()).unwrap();
-    assert!(image.rgba.chunks_exact(4).any(|pixel| pixel[0] > 128));
+    assert!(
+        image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[0] > 128)
+    );
 }
 
 struct RejectedBatch {

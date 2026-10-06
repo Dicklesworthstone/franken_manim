@@ -6,7 +6,7 @@ use fmn_scene::SceneRunReport;
 use fmn_scene::timeline_bundle::TimelineBundle;
 use std::sync::Arc;
 
-use super::{NativeFramePipeline, RenderError, RenderOptions, RenderReport, RenderSink};
+use super::{RenderError, RenderOptions, RenderReport, RenderSink};
 
 /// Render a validated FMTL artifact through the native bounded CPU pipeline.
 ///
@@ -103,26 +103,13 @@ pub fn render_bundle_with_fs(
             return Err(error);
         }
     }
-    let frame_pipeline = sink
-        .pipeline
-        .take()
-        .map(NativeFramePipeline::finish)
-        .transpose()?;
-    let emission = sink
-        .emitter
-        .take()
-        .ok_or(RenderError::InvalidOptions(
-            "compiled emitter was already finalized",
-        ))?
-        .finish()
-        .map_err(RenderError::Drain)?;
-    let artifact = sink.receipt.take().map_err(RenderError::Receipt)?;
+    let finished = sink.finish(None)?;
     Ok(RenderReport {
         scene,
-        artifact,
-        emission,
+        artifact: finished.artifact,
+        emission: finished.emission,
         execution_plan: sink.plan.clone(),
-        frame_pipeline,
+        frame_pipeline: finished.frame_pipeline,
         typesetting: fmn_tex::TypesetSessionReport::default(),
     })
 }

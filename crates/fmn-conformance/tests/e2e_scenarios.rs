@@ -1050,6 +1050,68 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("cli_rule_named", 1))
 }
 
+/// The facade's MP4 request with no ffmpeg capability is a named capability
+/// refusal (D2) that runs no scene code and publishes nothing; a native
+/// format from the same options still renders.
+fn failure_facade_video_capability_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Shift {
+        ran: bool,
+    }
+    impl fmn::SceneConstruct for Shift {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            self.ran = true;
+            let dot = stage.add(fmn::library::Circle::new().radius(0.5))?;
+            let shift = dot.animate().shift([0.5, 0.0, 0.0])?;
+            stage.play(shift)?;
+            Ok(())
+        }
+    }
+    let options = |path: &str, format: fmn::RenderFormat| -> Result<_, ScenarioError> {
+        let mut options = fmn::RenderOptions::with_format(path, format)
+            .map_err(|error| fail(format!("bundled config: {error}")))?;
+        options.config.camera.resolution = (32, 18);
+        options.config.camera.fps = 8;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(1);
+        Ok(options)
+    };
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut refused_scene = Shift { ran: false };
+    let refusal = fmn::render_with_fs(
+        &mut refused_scene,
+        options("/facade.mp4", fmn::RenderFormat::Mp4)?,
+        fs.clone(),
+    );
+    let named = matches!(&refusal, Err(fmn::RenderError::Capability(message))
+        if message.contains("ffmpeg") && message.contains("PNG-sequence"));
+    let published = fs.read(std::path::Path::new("/facade.mp4")).is_ok();
+    let mut native_scene = Shift { ran: false };
+    let native = fmn::render_with_fs(
+        &mut native_scene,
+        options("/facade.y4m", fmn::RenderFormat::Y4m)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("native y4m render failed: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.failure")
+            .field("rule", "facade-video-capability")
+            .field("refusal_named", truth(named))
+            .field("scene_ran", truth(refused_scene.ran))
+            .field("published", truth(published))
+            .field("native_frames", native.artifact.frame_count.to_string()),
+    );
+    if !named || refused_scene.ran || published || !native_scene.ran {
+        return Err(fail(format!(
+            "facade video refusal lost its identity: {refusal:?}, ran={}, published={published}",
+            refused_scene.ran
+        )));
+    }
+    ctx.counter("facade_video_refusal_named", 1);
+    ctx.counter("facade_native_frames", native.artifact.frame_count);
+    Ok(RunOutcome::ok()
+        .with_counter("facade_video_refusal_named", 1)
+        .with_counter("facade_native_frames", native.artifact.frame_count))
+}
+
 /// fm-cli-flag-timing-ht01: a window flag on a file render is refused by name
 /// with the capability exit before anything is published, and the same
 /// render without it keeps the requested timing (60 fps header, 23 frames).
@@ -5745,6 +5807,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("rule", "quality-exclusive"),
                 FieldPred::str_eq("rule_named", "true"),
                 FieldPred::str_eq("stderr_empty", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.facade_video_requires_ffmpeg_capability.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_facade_video_capability_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("facade_video_refusal_named", 1),
+            counter_ge("facade_native_frames", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure",
+            vec![
+                FieldPred::str_eq("rule", "facade-video-capability"),
+                FieldPred::str_eq("refusal_named", "true"),
+                FieldPred::str_eq("scene_ran", "false"),
+                FieldPred::str_eq("published", "false"),
             ],
         )],
     ));

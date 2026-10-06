@@ -76,7 +76,8 @@ pub use exporting::{
 };
 
 pub use rendering::{
-    RenderError, RenderFormat, RenderOptions, RenderReport, render, render_with_fs,
+    FfmpegCapability, RenderArtifact, RenderError, RenderFormat, RenderOptions, RenderReport,
+    SoundtrackReport, render, render_with_fs,
 };
 
 /// Built-in native scenes shipped with the standalone binary.

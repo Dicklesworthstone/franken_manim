@@ -4,8 +4,8 @@ use std::cell::RefCell;
 use std::fmt;
 use std::sync::Mutex;
 
-use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
-use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
+use fmn_frame::convert::{rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010, rgba16f_to_rgba8};
+use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat};
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
 use fmn_render::{
     Camera, CameraConfig, EngineIdentity, FrameArena, OwnedVectorFrame, PixelTileCache,
@@ -238,37 +238,18 @@ impl PipelineStages for NativeFrameStages {
         (frame, mut output): Self::Rasterized,
         _: &TeamPlan,
     ) -> Result<FrameReservation, Self::Error> {
-        let format = output.frame().layout().format();
-        match format {
-            PixelFormat::Rgba8 => {
-                rgba16f_to_rgba8(&frame, output.frame_mut()).map_err(NativeFrameError::Frame)?;
+        // Direct binary16 kernels: no frame-sized RGBA8 intermediate per
+        // frame (PG-6). BGRA/NV12 are byte-identical to the legacy two-step
+        // route; P010 keeps its precision beyond eight bits.
+        let destination = output.frame_mut();
+        match destination.layout().format() {
+            PixelFormat::Rgba8 => rgba16f_to_rgba8(&frame, destination),
+            PixelFormat::Bgra8 => rgba16f_to_bgra8(&frame, destination),
+            PixelFormat::Nv12 => {
+                rgba16f_to_nv12(&frame, destination, ColorRange::Limited, ChromaSiting::Left)
             }
-            PixelFormat::Bgra8 | PixelFormat::Nv12 | PixelFormat::P010 => {
-                let layout = FrameLayout::tight(
-                    PixelFormat::Rgba8,
-                    frame.layout().width(),
-                    frame.layout().height(),
-                )
-                .map_err(NativeFrameError::Frame)?;
-                let mut scratch = FrameBuffer::new(layout);
-                rgba16f_to_rgba8(&frame, &mut scratch).map_err(NativeFrameError::Frame)?;
-                match format {
-                    PixelFormat::Bgra8 => swap_rb8(&scratch, output.frame_mut()),
-                    PixelFormat::Nv12 => rgba_to_nv12(
-                        &scratch,
-                        output.frame_mut(),
-                        ColorRange::Limited,
-                        ChromaSiting::Left,
-                    ),
-                    PixelFormat::P010 => rgba_to_p010(
-                        &scratch,
-                        output.frame_mut(),
-                        ColorRange::Limited,
-                        ChromaSiting::Left,
-                    ),
-                    _ => unreachable!("conversion format was checked above"),
-                }
-                .map_err(NativeFrameError::Frame)?;
+            PixelFormat::P010 => {
+                rgba16f_to_p010(&frame, destination, ColorRange::Limited, ChromaSiting::Left)
             }
             PixelFormat::Rgba16F => {
                 return Err(NativeFrameError::WorkerState(
@@ -276,6 +257,7 @@ impl PipelineStages for NativeFrameStages {
                 ));
             }
         }
+        .map_err(NativeFrameError::Frame)?;
         Ok(output)
     }
 }
@@ -291,7 +273,9 @@ impl PipelineStages for NativeFrameStages {
 ///
 /// Pixel admission must include one retained RGBA16F cache per affine render
 /// team (or a retained camera frame on the owner and each compiled-camera
-/// render team), in addition to the plan's in-flight surfaces. Plan NV12/BGRA/P010 conversions with an RGBA8 intermediate.
+/// render team), in addition to the plan's in-flight surfaces. Output
+/// conversion runs directly from the RGBA16F raster into the reserved output
+/// slot; no per-frame intermediate surface is allocated.
 pub struct NativeFramePipeline {
     compiler: NativeCompiler,
     stream: Option<FrameStream<NativeFrameJob, NativeFrameError>>,

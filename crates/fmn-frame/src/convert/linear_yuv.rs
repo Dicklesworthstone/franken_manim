@@ -46,13 +46,15 @@ pub fn rgba16f_to_bgra8(src: &FrameBuffer, dst: &mut FrameBuffer) -> Result<(), 
     for y in 0..height {
         let source = &src_plane[y * src_stride..y * src_stride + width * 8];
         let target = &mut dst_plane[y * dst_stride..y * dst_stride + width * 4];
-        for (s, d) in source.chunks_exact(8).zip(target.chunks_exact_mut(4)) {
-            d.copy_from_slice(&[
+        let (source, _) = source.as_chunks::<8>();
+        let (target, _) = target.as_chunks_mut::<4>();
+        for (s, d) in source.iter().zip(target.iter_mut()) {
+            *d = [
                 table.srgb8_from_f16(channel(s, 4)),
                 table.srgb8_from_f16(channel(s, 2)),
                 table.srgb8_from_f16(channel(s, 0)),
                 table.linear8_from_f16(channel(s, 6)),
-            ]);
+            ];
         }
     }
     Ok(())
@@ -205,7 +207,11 @@ fn convert<const TEN: bool>(
                     chroma[2][channel],
                     chroma[3][channel],
                 );
-                put::<TEN>(target, c_at + channel * sample_bytes, quant::<TEN>(sum, 128));
+                put::<TEN>(
+                    target,
+                    c_at + channel * sample_bytes,
+                    quant::<TEN>(sum, 128),
+                );
             }
         }
     }

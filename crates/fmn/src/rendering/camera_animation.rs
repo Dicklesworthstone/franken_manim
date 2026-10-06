@@ -6,9 +6,7 @@ use fmn_anim::FramePacket;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_scene::{CameraRig, CaptureReason, IntegrationError, RuntimeConfig, Scene};
 
-use super::{
-    CameraConfig, NativeFramePipeline, RenderError, RenderOptions, RenderReport, RenderSink,
-};
+use super::{CameraConfig, RenderError, RenderOptions, RenderReport, RenderSink};
 use crate::{ProgramAdapter, SceneConstruct};
 
 /// Render ordinary native animation with a snapshot-native camera rig.
@@ -81,19 +79,7 @@ where
         preflight_workers,
     };
     let run = scene.run(&mut adapter, &mut sink);
-    if let Some(error) = sink.inner.failure.take() {
-        // Admission can observe only a closed stream; join to recover its
-        // original worker-stage failure, never claim successful publication.
-        if matches!(&error, RenderError::Pipeline(_)) {
-            if let Some(emitter) = &sink.inner.emitter {
-                emitter.cancel();
-            }
-            if let Some(pipeline) = sink.inner.pipeline.take() {
-                pipeline.finish()?;
-            }
-        }
-        return Err(error);
-    }
+    sink.inner.surface_failure()?;
     if let Some(error) = adapter.front_door_error.take() {
         return Err(RenderError::Scene(error));
     }
@@ -101,28 +87,13 @@ where
     if sink.inner.next_sequence == 0 {
         sink.render_stage(scene.stage())?;
     }
-    let frame_pipeline = sink
-        .inner
-        .pipeline
-        .take()
-        .map(NativeFramePipeline::finish)
-        .transpose()?;
-    let emission = sink
-        .inner
-        .emitter
-        .take()
-        .ok_or(RenderError::InvalidOptions(
-            "render emitter was already finalized",
-        ))?
-        .finish()
-        .map_err(RenderError::Drain)?;
-    let artifact = sink.inner.receipt.take().map_err(RenderError::Receipt)?;
+    let finished = sink.inner.finish(Some(&scene))?;
     Ok(RenderReport {
         scene: scene_report,
-        artifact,
-        emission,
+        artifact: finished.artifact,
+        emission: finished.emission,
         execution_plan: sink.inner.plan.clone(),
-        frame_pipeline,
+        frame_pipeline: finished.frame_pipeline,
         typesetting: typesetting.report(),
     })
 }

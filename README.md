@@ -123,6 +123,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The `Tex` mobject above is laid out by fmd-math from bundled Computer Modern (same paths, every platform, every time), and `MoveAlongPath`, dashes, tips, and tracers all place by *true* arc length.
 
+`RenderOptions::with_format(path, RenderFormat::Gif | RenderFormat::Y4m)` selects the other native codecs. For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.
+
 ---
 
 ## The design commitments

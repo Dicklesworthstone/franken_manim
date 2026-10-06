@@ -23,5 +23,15 @@ fmn-frame.workspace = true
 fmn-codec.workspace = true
 fmn-runtime.workspace = true
 
+[dev-dependencies]
+# Tests inject the host process mechanism as an explicit FfmpegCapability.
+fmn-platform = { workspace = true, features = ["exact-process"] }
+
+[features]
+# The host ffmpeg capability for MP4/MOV output (D2: the one external tool).
+# Off by default so the native-codec facade keeps no process substrate;
+# callers may instead inject their own `FfmpegCapability`.
+ffmpeg = ["fmn-platform/exact-process", "fmn-output/exact-process"]
+
 [lints]
 workspace = true
