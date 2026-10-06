@@ -1154,11 +1154,12 @@ mod tests {
         if Tier::COMPILED.name() == "portable" {
             // Moved by adjudicated inputs only: the scene-golden lock (the
             // 67b1c438 stroke/fill-profile re-pin, fm-sq8.9's exact vertical
-            // mirror, then 685c4f68's near-straight quadratic strokes) and
-            // the journaled map orientation.
+            // mirror, 685c4f68's near-straight quadratic strokes, then the
+            // three Tex scenes' rule-17 italic corrections at franken_markdown
+            // 4c8caa2) and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "98a622a49ee3c253720919dd722b3e0de56632b0297b651e615872b7c07982bf"
+                "2e6ed3666caea2a26cbb072157eb2be7636c9bed4f5d20ed9d980739b4971b53"
             );
         }
     }
