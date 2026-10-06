@@ -67,6 +67,33 @@ python3 -m http.server 8080 --directory demo/wasm
 The bundle's size is recorded with headroom in `SIZE_BUDGET.tsv`
 (`demo-timeline-bundle` row), enforced by a host test.
 
+### Open your own recording
+
+Use **Open recording** to load a local `.fmtl` file without uploading it. Both
+minor-0 planar bundles and minor-1 camera-bearing recordings use the shared
+reader; the latter retain recorded camera motion, lighting, background and
+sample policy. The output canvas owns the viewport aspect ratio. Engine
+identity mismatches still refuse: rebuild the player and re-export the scene
+from the same source closure rather than bypassing the check.
+
+The browser admits at most 256 MiB of input and checks local file size before
+reading it. Loading a replacement renders its first frame before releasing the
+current player. A failed or superseded load keeps the prior movie, and replaced
+Wasm instances are freed. **Load demo** switches back to `bundle.fmtl`.
+
+Playback follows elapsed presentation time at the bundle FPS, independent of
+monitor refresh rate. Pause/resume and seeks reset the presentation anchor;
+a late browser callback catches up without retiming the recorded scene.
+
+The dependency-free transport and loading tests run without a Wasm build:
+
+```sh
+node --test demo/wasm/playback.test.mjs demo/wasm/player-session.test.mjs
+```
+
+These JavaScript tests exercise clocks and session ownership with a test player;
+they do not replace Rust camera regression tests or real-browser package checks.
+
 ## npm package and real-browser release gate
 
 The publishable artifact uses wasm-pack's `bundler` target, carries its README,

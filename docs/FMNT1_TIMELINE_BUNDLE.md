@@ -111,9 +111,14 @@ renormalization, Euler conversion or callback runs during reconstruction.
 Native compiled rendering and the standalone CLI consume the track through the
 existing bounded CPU render-team pipeline. Recorded pose, background, lighting
 and sample policy are authoritative; `render_bundle` refuses an explicit camera
-override. The camera-less WASM player refuses these artifacts at load rather
-than emitting a plausible but incorrect planar movie. Other geometry-only
-consumers must adopt the paired reconstruction API before claiming support.
+override. The WASM `FmnPlayer` also consumes the paired reconstruction API and
+renders with `RetainedFrameRenderer::render_with_camera`, preserving recorded
+pose, background, lighting and sample policy. Its `has_camera_track` getter
+identifies this route. Caller-buffer rendering keeps the same validation and
+storage-reuse contract; minor-0 bundles retain their existing planar path.
+WASM playback remains standard-only, not part of the certified platform matrix.
+Other geometry-only consumers must adopt the paired reconstruction API before
+claiming support.
 Audio and arbitrary external effects are still not represented by this format.
 
 Regression coverage lives in `crates/fmn-conformance/tests/camera_bundle.rs`:
@@ -122,3 +127,15 @@ random-order shared-worker reconstruction, changed backgrounds, old-reader
 refusal, malformed counts/cameras, sticky capture failures and output limits.
 These tests are execution evidence only when their recorded run passes; the
 format addition does not itself establish cross-platform certification.
+
+The WASM adapter adds original-capture comparisons, random-order seeking,
+viewport round trips and caller-buffer/refusal tests in
+`crates/fmn-wasm/src/camera_player.rs`. These need a successful Rust test run
+before being treated as execution evidence.
+
+The browser demo opens local recordings without uploading them, with a 256 MiB
+input admission limit. It renders frame zero before replacing the active movie;
+failed and superseded loads retain the prior movie. Playback selects recorded
+frames from elapsed presentation time and the bundle FPS, not monitor refresh
+rate. A late display may skip presentation frames; this does not resample the
+scene, change FMTL reconstruction or alter offline output sampling.
