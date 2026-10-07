@@ -32,7 +32,7 @@ use fmn_output::{
     ArtifactDigest, AudioDecodeError, AudioDecodeLimits, AudioDecoder, Boundary, BoundaryError,
     ColorDescription, Container, EmitterConfig, EmitterError, EmitterFailure, EncoderCapabilities,
     EncoderChoice, FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegSoundtrack,
-    FfmpegTool, GifSink, GifSinkConfig, InvocationReport, JobLimits, MixReport, MixerConfig,
+    FfmpegTool, GifSink, GifSinkConfig, InvocationReport, MixReport, MixerConfig,
     NativeArtifactKind, NegotiationError, OrderedEmitter, PngSink, PngSinkConfig, PngTarget,
     ReceiptError, SinkAdapterError, SinkLimits, SinkReceipt, SoundCue, SoundError, SoundMixer,
     VideoJob, WireFormat, Y4mSink, Y4mSinkConfig, frames_to_samples,
@@ -56,12 +56,14 @@ use crate::SceneConstruct;
 
 mod camera_animation;
 mod compiled;
+mod ffmpeg_limits;
 mod pipeline;
 pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use compiled::{render_bundle, render_bundle_with_fs};
+pub use ffmpeg_limits::{DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport};
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
 
-pub use fmn_output::{EmitterReport, NativeArtifactReport};
+pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
 pub use fmn_render::{CameraConfig, CameraFrame};
 pub use fmn_runtime::ExecutionPlan;
 
@@ -168,6 +170,10 @@ pub struct RenderArtifact {
     /// (encode, then the optional audio mux), each naming the hashed tool and
     /// exact argv. Empty for native codecs.
     pub ffmpeg: Vec<InvocationReport>,
+    /// Effective resource bounds used for this video's encode, mux, and media
+    /// decode. Native artifacts carry no ffmpeg policy. See
+    /// [`FfmpegLimitsReport::to_json`] for manifest embedding.
+    pub ffmpeg_limits: Option<FfmpegLimitsReport>,
     /// The soundtrack muxed into a video artifact; `None` when the scene
     /// authored no sound or the format carries no audio.
     pub soundtrack: Option<SoundtrackReport>,
@@ -197,6 +203,7 @@ impl RenderArtifact {
             bytes: report.bytes,
             digest: report.digest,
             ffmpeg: Vec::new(),
+            ffmpeg_limits: None,
             soundtrack: None,
         })
     }
@@ -213,6 +220,7 @@ impl RenderArtifact {
             bytes: report.boundary.artifact_bytes,
             digest: report.boundary.artifact_digest,
             ffmpeg: report.boundary.invocations,
+            ffmpeg_limits: None,
             soundtrack,
         }
     }
@@ -262,6 +270,14 @@ pub struct RenderOptions {
     /// [`render`] supplies [`FfmpegCapability::host`] if the `ffmpeg` feature
     /// is enabled; every other entry point refuses video by name.
     pub ffmpeg: Option<FfmpegCapability>,
+    /// Explicit bounds for each render-time ffmpeg invocation. The default
+    /// timeout is 24 hours because encoding spans scene construction and frame
+    /// production; log/artifact defaults remain 1 MiB per stream and 8 GiB.
+    /// Set a smaller timeout for service workloads or a larger one for long
+    /// offline jobs. Zero/unrepresentable bounds are refused, not unlimited.
+    /// The artifact cap is also bounded by [`Self::max_output_bytes`]. Native
+    /// formats ignore this policy; tool probes retain their own short bounds.
+    pub ffmpeg_limits: JobLimits,
 }
 
 impl RenderOptions {
@@ -282,6 +298,7 @@ impl RenderOptions {
             typeset_cache: true,
             typeset_preflight_workers: crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
             ffmpeg: None,
+            ffmpeg_limits: ffmpeg_limits::default_job_limits(),
         })
     }
 
@@ -586,6 +603,8 @@ struct VideoSession {
     runner: Arc<dyn ProcessRunner>,
     workdir_root: PathBuf,
     fs: Arc<dyn FileSystem>,
+    job_limits: JobLimits,
+    max_input_bytes: u64,
 }
 
 /// Bytes read from any one sound-cue asset (the CLI's cue budget).
@@ -657,6 +676,11 @@ impl RenderSink {
         } else {
             None
         };
+        let job_limits = options
+            .format
+            .is_video()
+            .then(|| options.effective_ffmpeg_limits())
+            .transpose()?;
         let pixel_format = match (&video_job, options.format) {
             (Some(job), _) => job.wire.frame_format(),
             (None, RenderFormat::Y4m) => PixelFormat::Nv12,
@@ -846,6 +870,9 @@ impl RenderSink {
                 let job = video_job.ok_or(RenderError::InvalidOptions(
                     "video format reached the sink without a negotiated job",
                 ))?;
+                let job_limits = job_limits.ok_or(RenderError::InvalidOptions(
+                    "video format reached the sink without admitted ffmpeg limits",
+                ))?;
                 let capability = options.ffmpeg.ok_or(RenderError::Capability(
                     "video output requires an ffmpeg capability",
                 ))?;
@@ -877,7 +904,7 @@ impl RenderSink {
                         audio: None,
                         destination: options.output,
                         workdir_root: capability.workdir_root.clone(),
-                        job_limits: JobLimits::default(),
+                        job_limits: job_limits.clone(),
                         first_sequence: 0,
                         limits,
                         profile: None,
@@ -893,6 +920,8 @@ impl RenderSink {
                     runner: capability.runner,
                     workdir_root: capability.workdir_root,
                     fs: Arc::clone(&fs),
+                    job_limits,
+                    max_input_bytes: options.max_output_bytes,
                 });
                 let (binding, receipt) = sink.into_binding("ffmpeg-video");
                 (binding, RenderReceipt::Video(receipt))
@@ -1006,7 +1035,7 @@ impl RenderSink {
             ))?
             .finish()
             .map_err(RenderError::Drain)?;
-        let artifact = match &self.receipt {
+        let mut artifact = match &self.receipt {
             RenderReceipt::Native(receipt) => {
                 RenderArtifact::native(self.format, receipt.take().map_err(RenderError::Receipt)?)?
             }
@@ -1016,6 +1045,9 @@ impl RenderSink {
                 soundtrack,
             ),
         };
+        artifact.ffmpeg_limits = self.video.as_ref().map(|video| {
+            FfmpegLimitsReport::new(&video.job_limits, video.max_input_bytes)
+        });
         Ok(FinishedRender {
             frame_pipeline,
             emission,
@@ -1055,7 +1087,7 @@ impl VideoSession {
         let boundary = Boundary::new(
             self.tool.clone(),
             Arc::clone(&self.runner),
-            JobLimits::default(),
+            self.job_limits.clone(),
             self.workdir_root.clone(),
         )
         .map_err(RenderError::Ffmpeg)?;
