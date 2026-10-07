@@ -4,6 +4,8 @@
 //! defaults are promoted to RGBA/qtrle. Explicit incompatible choices fail
 //! before opening the encoder or reserving an output generation.
 
+mod quality;
+
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat};
@@ -77,6 +79,7 @@ impl PortalVideoConfig {
                 "file_writer.ffmpeg_bin must be nonempty and contain no NUL",
             ));
         }
+        let quality = quality::from_writer(&writer)?;
         let job = video_job(
             format,
             width,
@@ -86,7 +89,9 @@ impl PortalVideoConfig {
             &pixel_format,
             rgba[3] < 1.0,
         )
-        .map_err(PyValueError::new_err)?;
+        .map_err(PyValueError::new_err)?
+        .with_quality(quality)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
         // Python getters may adopt mobjects, advance time, or recursively
         // acquire a generation. Never replace that state or probe an encoder
         // against the now-stale preflight in begin_portal_render.
