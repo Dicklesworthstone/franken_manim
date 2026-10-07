@@ -619,6 +619,19 @@ pub struct PngSinkConfig {
     pub profile: Option<OutputProfile>,
 }
 
+impl PngSinkConfig {
+    /// How many sequence frames this configuration encodes at once
+    /// (fm-hyqz): up to `threads`, while every in-flight frame's raw and
+    /// encoded bytes fit `max_resident_bytes`. One for a single PNG.
+    #[must_use]
+    pub fn sequence_frame_concurrency(&self) -> usize {
+        let frame_bytes = u64::from(self.width)
+            .saturating_mul(u64::from(self.height))
+            .saturating_mul(4);
+        png_frame_concurrency(self, frame_bytes)
+    }
+}
+
 /// Cancellation-safe canonical PNG / PNG-sequence adapter.
 pub struct PngSink {
     fs: Arc<dyn FileSystem>,

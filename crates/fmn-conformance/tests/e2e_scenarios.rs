@@ -427,6 +427,109 @@ fn sink_limits(frames: u64) -> Result<SinkLimits, ScenarioError> {
         .map_err(|error| fail(format!("sink limits: {error}")))
 }
 
+/// fm-hyqz: the PNG-sequence sink encodes frames concurrently. Twelve
+/// certified frames publish byte-identical at 1 and 4 encoder workers (the
+/// same members and tree digest), and the run logs the sink's frame
+/// concurrency, its in-flight byte bound, and the encoder lanes the profile
+/// saw. Lane counts depend on scheduling, so they are logged, not asserted.
+fn png_sequence_frame_concurrency_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    const PRESET: Preset = Preset {
+        flag: "png-concurrency",
+        width: 160,
+        height: 90,
+        tier: Tier::Fast,
+    };
+    const FRAMES: u32 = 12;
+    let frames = (0..FRAMES)
+        .map(|index| {
+            let layout = FrameLayout::tight(PixelFormat::Rgba8, PRESET.width, PRESET.height)
+                .map_err(|error| fail(format!("frame layout: {error}")))?;
+            let mut frame = FrameBuffer::new(layout);
+            for (pixel, rgba) in frame
+                .as_bytes_mut()
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                let pixel = u32::try_from(pixel).unwrap_or(u32::MAX);
+                let (x, y) = (pixel % PRESET.width, pixel / PRESET.width);
+                let block = x.abs_diff(10 * index + 20) < 12 && y.abs_diff(45) < 12;
+                *rgba = if block {
+                    [255, 200, 40, 255]
+                } else {
+                    let ramp =
+                        |value: u32, span: u32| u8::try_from(value * 255 / span).unwrap_or(255);
+                    [ramp(x, PRESET.width), ramp(y, PRESET.height), 51, 255]
+                };
+            }
+            Ok(frame)
+        })
+        .collect::<Result<Vec<_>, ScenarioError>>()?;
+    let serial_dir = scenario_dir("png_sequence_concurrency_serial")?;
+    let (serial, serial_report) =
+        publish_png_sequence(&serial_dir, &PRESET, &frames, true, 1, None)?;
+    let recorder = fmn_platform::profile::ProfileRecorder::enabled();
+    let profile = fmn_output::OutputProfile::new(
+        Arc::new(fmn_platform::clock::StdClock::new()),
+        recorder.clone(),
+        fmn_platform::profile::ProfilePath::scene(0),
+    );
+    let pooled_dir = scenario_dir("png_sequence_concurrency_pooled")?;
+    let (pooled, pooled_report) =
+        publish_png_sequence(&pooled_dir, &PRESET, &frames, true, 4, Some(profile))?;
+    let probe = PngSinkConfig {
+        target: PngTarget::Sequence {
+            directory: pooled_dir.join("probe"),
+            stem: "frame".to_string(),
+            digits: 4,
+        },
+        width: PRESET.width,
+        height: PRESET.height,
+        first_sequence: 0,
+        compression: fmn_codec::CompressionLevel::Best,
+        threads: 4,
+        limits: sink_limits(u64::from(FRAMES))?,
+        profile: None,
+    };
+    let concurrency = probe.sequence_frame_concurrency() as u64;
+    let frame_bytes = u64::from(PRESET.width) * u64::from(PRESET.height) * 4;
+    let ndjson = recorder.snapshot().to_ndjson();
+    let encode_spans = ndjson
+        .lines()
+        .filter(|line| line.contains("\"phase\":\"encode\""))
+        .count() as u64;
+    let lanes = ndjson
+        .lines()
+        .filter(|line| line.contains("\"lane_role\":\"encoder\""))
+        .filter_map(|line| line.split("\"lane_index\":").nth(1))
+        .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
+    let identical = serial == pooled && serial_report.digest == pooled_report.digest;
+    ctx.event(
+        LogEvent::new("e2e.png.frame_concurrency")
+            .field("frames", u64::from(FRAMES))
+            .field("threads", 4_u64)
+            .field("concurrency", concurrency)
+            .field("in_flight_bound_bytes", concurrency * 2 * frame_bytes)
+            .field("encode_spans", encode_spans)
+            .field("encoder_lanes_observed", lanes)
+            .field("identical", truth(identical)),
+    );
+    if !identical || concurrency < 2 || encode_spans != u64::from(FRAMES) {
+        return Err(fail(format!(
+            "frame-concurrent PNG sequence: identical={identical} concurrency={concurrency} \
+             encode_spans={encode_spans} lanes={lanes} serial={} pooled={}",
+            serial.len(),
+            pooled.len()
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("png_concurrency_identical", 1)
+        .with_counter("png_encode_spans", encode_spans))
+}
+
 /// Drive the real native y4m sink over the rendered frames and read the
 /// published artifact back from disk.
 fn publish_y4m(
@@ -473,13 +576,16 @@ fn publish_y4m(
 /// sequence order, plus the sink's completion report.
 type PublishedSequence = (Vec<(String, Vec<u8>)>, NativeArtifactReport);
 
-/// Drive the real canonical PNG-sequence sink and read every published
-/// frame back from disk (file order = sequence order).
+/// Drive the real canonical PNG-sequence sink with `threads` encoder workers
+/// and read every published frame back from disk (file order = sequence
+/// order).
 fn publish_png_sequence(
     dir: &std::path::Path,
     preset: &Preset,
     frames: &[FrameBuffer],
     certified: bool,
+    threads: usize,
+    profile: Option<fmn_output::OutputProfile>,
 ) -> Result<PublishedSequence, ScenarioError> {
     let directory = dir.join("frames");
     let mut sink = PngSink::new(
@@ -498,9 +604,9 @@ fn publish_png_sequence(
             } else {
                 fmn_codec::CompressionLevel::Default
             },
-            threads: 1,
+            threads,
             limits: sink_limits(frames.len() as u64)?,
-            profile: None,
+            profile,
         },
     )
     .map_err(|error| fail(format!("png sink constructs: {error}")))?;
@@ -644,7 +750,8 @@ fn render_matrix_run(
             outcome = outcome.with_artifact(stem, bytes);
         }
         SinkKind::PngSequence => {
-            let (published, report) = publish_png_sequence(&dir, preset, &converted, certified)?;
+            let (published, report) =
+                publish_png_sequence(&dir, preset, &converted, certified, 1, None)?;
             if report.kind != NativeArtifactKind::PngSequence {
                 return Err(fail("png receipt reports the wrong artifact kind"));
             }
@@ -5327,6 +5434,21 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.png_sequence_frame_concurrency.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(png_sequence_frame_concurrency_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("png_concurrency_identical", 1),
+            counter_eq("png_encode_spans", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.png.frame_concurrency",
+            vec![FieldPred::str_eq("identical", "true")],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.cli_primitive_builtins.v1",
         ScenarioClass::RenderMatrix,
         Surface::CliInProcess,
@@ -7234,6 +7356,7 @@ fn cli_builtin_scenarios_pass() {
         "render_matrix.cli_camera_builtins.v1",
         "render_matrix.cli_primitive_builtins.v1",
         "determinism.cli_builtins_threads_1_4.v1",
+        "render_matrix.png_sequence_frame_concurrency.v1",
     ] {
         let scenario = catalog()
             .into_iter()
