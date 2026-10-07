@@ -124,6 +124,33 @@ fn every_certified_frame_is_thread_count_invariant() {
     }
 }
 
+/// A locked frame that is all background proves nothing:
+/// `title_underlined.v1` locked one (its title sat outside the viewport), so
+/// the frame could not show fm-5wq.54's offset. Every scene's frame shows
+/// ink, a pixel the empty stage does not have, at both lifecycle points.
+#[test]
+fn every_locked_frame_shows_ink() {
+    let corpus = corpus();
+    let empty = render_frame(&Stage::new(), EngineIdentity::certified(), 1);
+    let mut blank = Vec::new();
+    for (index, case) in SCENES.iter().enumerate() {
+        let frames = std::cell::RefCell::new(Vec::new());
+        let _artifact = artifact(case, corpus, index, &|stage| {
+            let frame = render_frame(stage, EngineIdentity::certified(), 1);
+            frames
+                .borrow_mut()
+                .push(frame.as_bytes() == empty.as_bytes());
+            encode_frame(&frame).expect("the frame encodes into its canonical document")
+        });
+        for (point, is_blank) in frames.into_inner().into_iter().enumerate() {
+            if is_blank {
+                blank.push(format!("{} point {point}", case.name));
+            }
+        }
+    }
+    assert!(blank.is_empty(), "blank locked frames: {blank:?}");
+}
+
 #[test]
 fn every_artifact_is_reproducible_within_a_run() {
     let corpus = corpus();
@@ -214,7 +241,8 @@ fn review_frame(case: &fmn_conformance::scene_goldens::SceneCase) -> Vec<u8> {
 ///    scene's review frame as `<before>/<scene>.rgba`.
 /// 2. At the new source, bless the lock (`UPDATE_GOLDENS=1`), then run this
 ///    test with `FMN_REBLESS_BEFORE_DIR=<before>`: every scene whose frame
-///    changed is stacked top to bottom, before | after, through
+///    changed, or that is new (its frame on both sides), is stacked top to
+///    bottom, before | after, through
 ///    [`side_by_side_png`], and written as the lock's artefact under
 ///    `REBLESS_ARTEFACT_DIR`, named for the blessed lock's digest.
 ///
@@ -237,10 +265,15 @@ fn rebless_review_frames_and_panel() {
     let (mut before, mut after) = (Vec::new(), Vec::new());
     let mut rows = 0u32;
     for case in SCENES {
-        let old = std::fs::read(before_dir.join(format!("{}.rgba", case.name)))
-            .unwrap_or_else(|error| panic!("{}: before frame: {error}", case.name));
         let new = review_frame(case);
-        if old != new {
+        // A scene the old source did not have is new: the protocol shows
+        // its frame on both sides.
+        let (old, added) = match std::fs::read(before_dir.join(format!("{}.rgba", case.name))) {
+            Ok(old) => (old, false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (new.clone(), true),
+            Err(error) => panic!("{}: before frame: {error}", case.name),
+        };
+        if added || old != new {
             before.extend_from_slice(&old);
             after.extend_from_slice(&new);
             rows += 1;

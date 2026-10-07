@@ -90,12 +90,12 @@ loader, and `check` before it extracts anything) refuses a row without one:
   class must itself have a numeric envelope (or an open-bead row).
 
 A `bbox` outside a row's envelope falls through to later rows. An `open-bead`
-row may state its bug's measured magnitude as an envelope (`Title` offset
-1.31 units, `fm-5wq.54`), so the bug stays admitted, a worse one still fails,
-and a fix makes the row stale. A `bbox` that no row admits is a difference
-with an `envelope_violation` naming the first envelope it broke, the size
-change and the centre offset. The diff record lists every violation under
-`envelope_violations`.
+row may state its bug's measured magnitude as an envelope (Tex formulas up to
+40% off in size, `fm-tex-metrics-glyphs-ru72`), so the bug stays admitted, a
+worse one still fails, and a fix makes the row stale. A `bbox` that no row
+admits is a difference with an `envelope_violation` naming the first envelope it
+broke, the size change and the centre offset. The diff record lists every
+violation under `envelope_violations`.
 
 ## Running it
 

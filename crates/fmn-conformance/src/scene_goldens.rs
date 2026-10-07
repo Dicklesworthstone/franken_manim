@@ -668,12 +668,17 @@ fn bulleted_list(corpus: &Corpus) -> Built {
     stage_of(v_group([list]))
 }
 
+/// The title goes to the top edge of the full frame (y ~ 3.2 ... 3.75), far
+/// outside this corpus's +-1.5-unit viewport, so v1 locked a blank frame and
+/// could not show fm-5wq.54's 1.31-unit offset. v2 moves the built title 3.5
+/// units down into view; a pure translation keeps its centring visible.
 fn title_underlined(corpus: &Corpus) -> Built {
     let title = Title::new(&["The Gauntlet"])
         .font_size(40.0)
         .build(&corpus.book)
         .expect("title lays out")
-        .vmob;
+        .vmob
+        .shifted([0.0, -3.5, 0.0]);
     stage_of(v_group([title]))
 }
 
@@ -856,7 +861,7 @@ pub const SCENES: &[SceneCase] = &[
         build: bulleted_list,
     },
     SceneCase {
-        name: "title_underlined.v1",
+        name: "title_underlined.v2",
         build: title_underlined,
     },
     SceneCase {
