@@ -15003,7 +15003,8 @@ def verify_portal_console_scene():
     assert engine_parts[0] == "fast-cpu"
     assert engine_parts[2].isdigit()
     assert rendered["threads"] == 1
-    assert pathlib.Path(rendered["destination"]) == destination
+    # Receipts carry canonical paths (macOS /var -> /private/var).
+    assert pathlib.Path(rendered["destination"]) == destination.resolve()
     frames = sorted(destination.glob("frame_*.png"))
     assert len(frames) == rendered["frame_count"]
     assert sum(frame.stat().st_size for frame in frames) == rendered["bytes"]

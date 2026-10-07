@@ -79,7 +79,9 @@ class ObjMaterialTests(unittest.TestCase):
         self.assertAlmostEqual(model[1].get_center()[0], 1)
         np.testing.assert_allclose(model.get_center(), (0, 0, 0), atol=1e-6)
         self.assertEqual(model.get_num_points(), 0)
-        self.assertIn(str(self.root / 'materials/maps/tiles.png'), model.asset_paths)
+        # Input-closure identities carry canonical paths (macOS /var ->
+        # /private/var), one spelling per file.
+        self.assertIn(str((self.root / 'materials/maps/tiles.png').resolve()), model.asset_paths)
 
     def test_texture_pixels_uvs_and_normals_match_independent_manual_mesh(self):
         model = m.ThreeDModel(self.path, height=2)

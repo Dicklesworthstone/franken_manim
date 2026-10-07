@@ -640,6 +640,37 @@ fn clear_authorization_refuses_a_symlinked_root() {
     }
 }
 
+/// fm-macos-var-symlink-gate-aqr1: `$TMPDIR` on macOS is `/var/folders/...`,
+/// and `/var` is the operating system's root-owned link to `/private/var`.
+/// A cache root there opens persistently and clears under authorization;
+/// the canonical root is the `/private` spelling.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_cache_root_under_the_macos_tmpdir_opens_persistently() {
+    let root = std::env::temp_dir().join(format!("fmn-cache-tmpdir-{}", std::process::id()));
+    assert!(
+        root.starts_with("/var/"),
+        "macOS TMPDIR is expected under /var: {}",
+        root.display()
+    );
+    let store = open(&root);
+    store
+        .namespace("tmpdir", 1, NamespacePolicy::default())
+        .expect("namespace")
+        .put(&key(1), b"persistent")
+        .expect("store a value");
+    drop(store);
+    let reopened = open(&root);
+    let value = reopened
+        .namespace("tmpdir", 1, NamespacePolicy::default())
+        .expect("namespace")
+        .get(&key(1))
+        .expect("read back");
+    assert_eq!(value.as_deref(), Some(&b"persistent"[..]));
+    drop(reopened);
+    CacheClearAuthorization::authorize(&root).expect("clear authorization under /var");
+}
+
 #[cfg(unix)]
 #[test]
 fn store_reopen_refuses_a_linked_ownership_marker() {

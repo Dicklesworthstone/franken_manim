@@ -1434,6 +1434,11 @@ fn reject_symlink_components(path: &Path) -> Result<(), CacheError> {
     ancestors.reverse();
     for component in ancestors {
         match host_node_kind_no_follow(component)? {
+            // An operating-system link above the root (macOS's `/var` and
+            // `/tmp`, through which every `$TMPDIR` runs) cannot be
+            // redirected by anyone but root; the root itself never may be
+            // a link.
+            Some(FsNodeKind::Link) if component != path && trusted_system_link(component) => {}
             Some(FsNodeKind::Link) => {
                 return Err(root_refused(
                     path,
@@ -1446,6 +1451,30 @@ fn reject_symlink_components(path: &Path) -> Result<(), CacheError> {
         }
     }
     Ok(())
+}
+
+/// Whether a symlinked ancestor of a cache root is an operating-system link
+/// (fm-macos-var-symlink-gate-aqr1): a direct child of the filesystem root,
+/// owned by root. macOS ships `/var`, `/tmp` and `/etc` this way, and
+/// merged-`/usr` Linux ships `/bin` and `/lib`. Only root can place or
+/// retarget such a link, and root can redirect anything anyway, so it is no
+/// traversal risk the cache could defend against. Every other link stays a
+/// refusal, including any link a process creates elsewhere, even as root.
+/// Reparse points (non-Unix) are never trusted.
+pub(crate) fn trusted_system_link(link: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        link.is_absolute()
+            && link.parent() == Some(Path::new("/"))
+            && fs::symlink_metadata(link)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink() && metadata.uid() == 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = link;
+        false
+    }
 }
 
 fn reject_symlink_leaf(path: &Path, root: &Path, label: &str) -> Result<(), CacheError> {
@@ -2577,6 +2606,36 @@ mod tests {
             local_app_data: None,
             user_profile: None,
         }
+    }
+
+    /// fm-macos-var-symlink-gate-aqr1: every root-owned link directly under
+    /// `/` on this host is a trusted ancestor, and a link anywhere else is
+    /// not, whoever owns it (the torture suite holds the full refusal).
+    #[cfg(unix)]
+    #[test]
+    fn only_root_owned_top_level_links_are_trusted_ancestors() {
+        use std::os::unix::fs::MetadataExt;
+        for entry in fs::read_dir("/")
+            .expect("the filesystem root lists")
+            .flatten()
+        {
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let expected = metadata.file_type().is_symlink() && metadata.uid() == 0;
+            assert_eq!(trusted_system_link(&path), expected, "{}", path.display());
+        }
+        assert!(!trusted_system_link(Path::new("/")));
+        let dir = std::env::temp_dir().join(format!("fmn-cache-trust-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("scratch directory");
+        let link = dir.join("alias");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&dir, &link).expect("scratch link");
+        assert!(
+            !trusted_system_link(&link),
+            "a link below the filesystem root is never trusted"
+        );
     }
 
     #[test]
