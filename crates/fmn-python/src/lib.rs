@@ -600,7 +600,7 @@ impl PortalFrameSession {
                         } else {
                             fmn_codec::CompressionLevel::Default
                         },
-                        threads: plan.output_team.threads().max(1),
+                        threads: plan.encoder_threads().max(1),
                         limits,
                         profile: None,
                     },

@@ -438,6 +438,20 @@ pub struct ExecutionPlan {
 }
 
 impl ExecutionPlan {
+    /// Workers an encoder-bound output stage may fan across: every planned
+    /// CPU thread, render teams and output team together. While output is
+    /// the bottleneck the render teams wait on the bounded frame ring, so a
+    /// heavy codec (canonical PNG) can use their cores. Codec bytes never
+    /// depend on this count (fm-hyqz).
+    #[must_use]
+    pub fn encoder_threads(&self) -> usize {
+        self.render_teams
+            .iter()
+            .map(TeamPlan::threads)
+            .sum::<usize>()
+            .saturating_add(self.output_team.threads())
+    }
+
     /// Derive a plan. A cache is consulted only for standard mode.
     ///
     /// # Errors
@@ -1016,6 +1030,15 @@ mod tests {
                 .len(),
             96
         );
+    }
+
+    /// fm-hyqz: an encoder-bound output stage may use every planned CPU
+    /// thread, not only the two-thread output team.
+    #[test]
+    fn encoder_threads_count_every_planned_cpu_thread() {
+        let plan = ExecutionPlan::derive(offline(), &topology_96(), None).expect("plan");
+        assert_eq!(plan.encoder_threads(), 96 + plan.output_team.threads());
+        assert!(plan.encoder_threads() > plan.output_team.threads());
     }
 
     #[test]

@@ -396,7 +396,7 @@ fn canonical_png_sink_strips_padding_profiles_and_publishes_on_finish() {
     assert_eq!(ndjson.lines().count(), 2);
 }
 
-fn png_sequence_bytes(level: CompressionLevel, threads: usize) -> Vec<Vec<u8>> {
+fn png_sequence_bytes(level: CompressionLevel, threads: usize, frames: u8) -> Vec<Vec<u8>> {
     let fs = Arc::new(VirtualFs::new());
     let mut sink = PngSink::new(
         fs.clone(),
@@ -406,21 +406,21 @@ fn png_sequence_bytes(level: CompressionLevel, threads: usize) -> Vec<Vec<u8>> {
                 stem: "shot".to_string(),
                 digits: 4,
             },
-            exact_limits(3),
+            exact_limits(u64::from(frames)),
             level,
             threads,
         ),
     )
     .expect("sequence sink");
     let receipt = sink.receipt();
-    for offset in 0..3 {
+    for offset in 0..frames {
         let (frame, _) = padded_frame(PixelFormat::Rgba8, 20 + offset);
         write_direct(&mut sink, 7 + u64::from(offset), &frame);
     }
     sink.finish().expect("sequence finish");
     let report = receipt.take().expect("sequence report");
     assert_eq!(report.kind, NativeArtifactKind::PngSequence);
-    assert_eq!(report.frame_count, 3);
+    assert_eq!(report.frame_count, u64::from(frames));
     let members = (0..report.frame_count)
         .map(|offset| {
             let path = report.path.join(format!("shot_{:04}.png", 7 + offset));
@@ -448,12 +448,25 @@ fn png_sequence_is_bit_identical_at_one_four_and_sixteen_threads_for_every_quali
         CompressionLevel::Default,
         CompressionLevel::Best,
     ] {
-        let serial = png_sequence_bytes(level, 1);
-        assert_eq!(png_sequence_bytes(level, 4), serial);
-        assert_eq!(png_sequence_bytes(level, 16), serial);
+        let serial = png_sequence_bytes(level, 1, 3);
+        assert_eq!(png_sequence_bytes(level, 4, 3), serial);
+        assert_eq!(png_sequence_bytes(level, 16, 3), serial);
         for bytes in serial {
             decode_png(&bytes, &PngLimits::default()).expect("canonical member");
         }
+    }
+}
+
+/// fm-hyqz: more frames than encoder slots, so frames finish out of order
+/// and wait for their predecessors. Members, names and the tree digest
+/// (checked inside the helper) match the serial path exactly.
+#[test]
+fn frame_concurrent_png_sequence_commits_in_order_and_matches_serial_bytes() {
+    for level in [CompressionLevel::Default, CompressionLevel::Best] {
+        let serial = png_sequence_bytes(level, 1, 12);
+        assert_eq!(png_sequence_bytes(level, 2, 12), serial);
+        assert_eq!(png_sequence_bytes(level, 4, 12), serial);
+        assert_eq!(png_sequence_bytes(level, 16, 12), serial);
     }
 }
 
@@ -733,7 +746,7 @@ fn png_sequence_private_failure_never_exposes_a_partial_generation() -> Result<(
             },
             exact_limits(3),
             CompressionLevel::Default,
-            2,
+            1,
         ),
     )
     .expect("sequence");
@@ -754,6 +767,56 @@ fn png_sequence_private_failure_never_exposes_a_partial_generation() -> Result<(
         return Err("receipt must retain the root failure");
     };
     assert_eq!(failure.code(), "sink.publish");
+    Ok(())
+}
+
+/// fm-hyqz: with encoder slots, a failed private child write surfaces at a
+/// later write or at finish, never as a published partial generation, and
+/// the receipt keeps the root failure.
+#[test]
+fn frame_concurrent_png_sequence_failure_never_exposes_a_partial_generation()
+-> Result<(), &'static str> {
+    let fs = Arc::new(FailNthWriteFs::new(2));
+    let mut sink = PngSink::new(
+        fs.clone(),
+        png_config(
+            PngTarget::Sequence {
+                directory: PathBuf::from("/partial"),
+                stem: "frame".to_string(),
+                digits: 2,
+            },
+            exact_limits(3),
+            CompressionLevel::Default,
+            4,
+        ),
+    )
+    .expect("sequence");
+    let receipt = sink.receipt();
+    let mut failure = None;
+    for offset in 0..3 {
+        let (frame, _) = padded_frame(PixelFormat::Rgba8, offset);
+        if let Err(error) = sink.write_frame(7 + u64::from(offset), &frame) {
+            failure = Some(error);
+            break;
+        }
+    }
+    let failure = match failure {
+        Some(error) => error,
+        None => sink
+            .finish()
+            .expect_err("the failed child write surfaces by finish"),
+    };
+    assert_eq!(failure.code(), "sink.publish");
+    let (frame, _) = padded_frame(PixelFormat::Rgba8, 9);
+    let retry = sink
+        .write_frame(10, &frame)
+        .expect_err("failed lifecycle cannot be retried");
+    assert_eq!(retry.code(), "sink.already_finalized");
+    assert!(!fs.exists(Path::new("/partial")));
+    let ReceiptError::Failed(root) = receipt.take().expect_err("failed receipt") else {
+        return Err("receipt must retain the root failure");
+    };
+    assert_eq!(root.code(), "sink.publish");
     Ok(())
 }
 

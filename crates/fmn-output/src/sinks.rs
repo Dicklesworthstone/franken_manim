@@ -32,6 +32,7 @@ use fmn_platform::process::{ProcessCancellation, ProcessRunner, ProcessStdinLimi
 use fmn_platform::profile::{
     ProfileLane, ProfileLaneRole, ProfilePath, ProfilePhase, ProfileRecorder, ProfileSpan,
 };
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -169,6 +170,17 @@ impl OutputProfile {
             recorder,
             path,
         }
+    }
+
+    /// An encode span on encoder lane `lane`, for a frame-concurrent
+    /// sequence encoder (fm-hyqz).
+    fn encode_span(&self, frame: u64, lane: u16) -> Option<ProfileSpan<'_>> {
+        self.recorder.span(
+            self.clock.as_ref(),
+            self.path.with_frame(frame),
+            ProfilePhase::Encode,
+            ProfileLane::new(ProfileLaneRole::Encoder, lane),
+        )
     }
 
     fn span(&self, frame: Option<u64>, phase: ProfilePhase) -> Option<ProfileSpan<'_>> {
@@ -596,8 +608,10 @@ pub struct PngSinkConfig {
     pub first_sequence: u64,
     /// Deterministic codec effort.
     pub compression: CompressionLevel,
-    /// Parallel fixed-segment workers within each frame; canonical bytes are
-    /// invariant at {1,4,16}.
+    /// Encoder workers. A sequence encodes up to this many frames at once
+    /// (bounded by `max_resident_bytes`), giving each frame the remainder as
+    /// fixed-segment workers; a single PNG fans its own segments. Canonical
+    /// bytes are invariant at every count.
     pub threads: usize,
     /// Explicit bounds.
     pub limits: SinkLimits,
@@ -620,6 +634,9 @@ pub struct PngSink {
     artifact_hasher: Sha256,
     receipt: SinkReceipt<NativeArtifactReport>,
     no_clobber: bool,
+    /// Frame-concurrent sequence encoding, started at the first frame when
+    /// more than one frame may be in flight (fm-hyqz).
+    encoders: Option<PngEncodePool>,
 }
 
 impl PngSink {
@@ -664,6 +681,7 @@ impl PngSink {
             artifact_hasher,
             receipt: SinkReceipt::pending(),
             no_clobber: false,
+            encoders: None,
         })
     }
 
@@ -700,11 +718,22 @@ impl PngSink {
         }
         let frame_bytes = validate_frame(frame, &self.expected_layout)?;
         self.state.check(sequence, frame_bytes)?;
-        let _span = self
-            .config
-            .profile
+        // The span holds its own handle so the sink stays mutable under it.
+        let profile = self.config.profile.clone();
+        let _span = profile
             .as_ref()
             .and_then(|profile| profile.span(Some(sequence), ProfilePhase::Emit));
+        if self.encoders.is_none() {
+            let concurrency = png_frame_concurrency(&self.config, frame_bytes);
+            if concurrency > 1 {
+                let segment_threads = (self.config.threads / concurrency).max(1);
+                self.encoders =
+                    PngEncodePool::start(&self.config, concurrency, segment_threads, sequence);
+            }
+        }
+        if self.encoders.is_some() {
+            return self.submit_sequence_frame(sequence, frame, frame_bytes);
+        }
         self.scratch.clear();
         append_tight(frame, &self.expected_layout, &mut self.scratch);
         let encoded = {
@@ -721,7 +750,22 @@ impl PngSink {
                 self.config.threads,
             )
         };
-        let encoded_bytes = byte_len(&encoded)?;
+        let artifact_bytes = self.admit_encoded(frame_bytes, &encoded)?;
+        if matches!(self.config.target, PngTarget::Single(_)) {
+            self.artifact_hasher.update(&encoded);
+            self.single_encoded = Some(encoded);
+        } else {
+            self.publish_sequence_frame(sequence, &encoded)?;
+        }
+        self.artifact_bytes = artifact_bytes;
+        self.state.commit_frame(frame_bytes);
+        Ok(())
+    }
+
+    /// The resident and artifact budgets for one encoded frame; returns the
+    /// artifact total after it.
+    fn admit_encoded(&self, frame_bytes: u64, encoded: &[u8]) -> Result<u64, SinkAdapterError> {
+        let encoded_bytes = byte_len(encoded)?;
         let resident = frame_bytes.checked_add(encoded_bytes).ok_or(
             SinkAdapterError::ResidentBytesExceeded {
                 attempted: u64::MAX,
@@ -736,42 +780,125 @@ impl PngSink {
             },
         )?;
         enforce_artifact_limit(artifact_bytes, self.config.limits.max_artifact_bytes)?;
-        match &self.config.target {
-            PngTarget::Single(_) => {
-                self.artifact_hasher.update(&encoded);
-                self.single_encoded = Some(encoded);
-            }
-            PngTarget::Sequence {
-                directory,
-                stem,
-                digits,
-            } => {
-                if self.directory_writer.is_none() {
-                    self.directory_writer = Some(
-                        Arc::clone(&self.fs)
-                            .begin_atomic_directory(directory)
-                            .map_err(|error| publish_error(directory, error))?,
-                    );
-                }
-                let leaf = png_leaf(stem, *digits, sequence);
-                self.artifact_hasher
-                    .update(&u64::try_from(leaf.len()).unwrap_or(u64::MAX).to_le_bytes());
-                self.artifact_hasher.update(leaf.as_bytes());
-                self.artifact_hasher.update(&encoded_bytes.to_le_bytes());
-                self.artifact_hasher.update(&encoded);
-                self.directory_writer
-                    .as_mut()
-                    .ok_or(SinkAdapterError::AlreadyFinalized)?
-                    .write_file(Path::new(&leaf), &encoded)
-                    .map_err(|error| publish_error(directory, error))?;
-            }
+        Ok(artifact_bytes)
+    }
+
+    /// Hash and stage one sequence file, in sequence order.
+    fn publish_sequence_frame(
+        &mut self,
+        sequence: u64,
+        encoded: &[u8],
+    ) -> Result<(), SinkAdapterError> {
+        let PngTarget::Sequence {
+            directory,
+            stem,
+            digits,
+        } = &self.config.target
+        else {
+            return Err(SinkAdapterError::InvalidConfig(
+                "only a PNG sequence publishes frame files",
+            ));
+        };
+        if self.directory_writer.is_none() {
+            self.directory_writer = Some(
+                Arc::clone(&self.fs)
+                    .begin_atomic_directory(directory)
+                    .map_err(|error| publish_error(directory, error))?,
+            );
         }
-        self.artifact_bytes = artifact_bytes;
+        let encoded_bytes = byte_len(encoded)?;
+        let leaf = png_leaf(stem, *digits, sequence);
+        self.artifact_hasher
+            .update(&u64::try_from(leaf.len()).unwrap_or(u64::MAX).to_le_bytes());
+        self.artifact_hasher.update(leaf.as_bytes());
+        self.artifact_hasher.update(&encoded_bytes.to_le_bytes());
+        self.artifact_hasher.update(encoded);
+        self.directory_writer
+            .as_mut()
+            .ok_or(SinkAdapterError::AlreadyFinalized)?
+            .write_file(Path::new(&leaf), encoded)
+            .map_err(|error| publish_error(directory, error))
+    }
+
+    /// Hand one accepted sequence frame to the encoder pool, waiting for a
+    /// slot when every slot is busy, then commit whatever has completed in
+    /// order.
+    fn submit_sequence_frame(
+        &mut self,
+        sequence: u64,
+        frame: &FrameBuffer,
+        frame_bytes: u64,
+    ) -> Result<(), SinkAdapterError> {
+        let pool = self
+            .encoders
+            .as_mut()
+            .ok_or(SinkAdapterError::AlreadyFinalized)?;
+        let mut rgba = pool.spare.pop().unwrap_or_default();
+        rgba.clear();
+        append_tight(frame, &self.expected_layout, &mut rgba);
+        while self
+            .encoders
+            .as_ref()
+            .is_some_and(|pool| pool.in_flight >= pool.capacity)
+        {
+            self.receive_encoded(true)?;
+            self.commit_ready()?;
+        }
+        let pool = self
+            .encoders
+            .as_mut()
+            .ok_or(SinkAdapterError::AlreadyFinalized)?;
+        pool.submit(sequence, rgba)?;
         self.state.commit_frame(frame_bytes);
+        while self.receive_encoded(false)? {}
+        self.commit_ready()
+    }
+
+    /// Move one finished frame from the pool into its ready set. Returns
+    /// false when nothing was waiting and `block` is false.
+    fn receive_encoded(&mut self, block: bool) -> Result<bool, SinkAdapterError> {
+        let pool = self
+            .encoders
+            .as_mut()
+            .ok_or(SinkAdapterError::AlreadyFinalized)?;
+        pool.receive(block)
+    }
+
+    /// Commit every frame whose predecessors are committed.
+    fn commit_ready(&mut self) -> Result<(), SinkAdapterError> {
+        let frame_bytes = byte_len_from_usize(self.expected_layout.total_bytes())?;
+        loop {
+            let Some(pool) = self.encoders.as_mut() else {
+                return Ok(());
+            };
+            let sequence = pool.next_commit;
+            let Some(encoded) = pool.ready.remove(&sequence) else {
+                return Ok(());
+            };
+            pool.next_commit += 1;
+            pool.in_flight -= 1;
+            let artifact_bytes = self.admit_encoded(frame_bytes, &encoded)?;
+            self.publish_sequence_frame(sequence, &encoded)?;
+            self.artifact_bytes = artifact_bytes;
+        }
+    }
+
+    /// Drain the pool in order and stop its workers.
+    fn drain_encoders(&mut self) -> Result<(), SinkAdapterError> {
+        while self
+            .encoders
+            .as_ref()
+            .is_some_and(|pool| pool.in_flight > 0)
+        {
+            self.receive_encoded(true)?;
+            self.commit_ready()?;
+        }
+        self.encoders = None;
         Ok(())
     }
 
     fn prepare(&mut self) -> Result<(), SinkAdapterError> {
+        self.drain_encoders()?;
         self.state.prepare("PNG")?;
         match &self.config.target {
             PngTarget::Single(path) => {
@@ -844,6 +971,7 @@ impl PngSink {
 
     fn abort_inner(&mut self) {
         self.state.abort();
+        self.encoders = None;
         self.single_encoded = None;
         self.directory_writer = None;
         self.prepared_file = None;
@@ -894,6 +1022,175 @@ impl FrameSink for PngSink {
 impl Drop for PngSink {
     fn drop(&mut self) {
         self.abort();
+    }
+}
+
+/// How many sequence frames a PNG sink may encode at once (fm-hyqz): up to
+/// `threads`, while every in-flight frame's raw and encoded bytes fit
+/// `max_resident_bytes` together. One for a single PNG and on wasm32.
+fn png_frame_concurrency(config: &PngSinkConfig, frame_bytes: u64) -> usize {
+    if cfg!(target_arch = "wasm32") || !matches!(config.target, PngTarget::Sequence { .. }) {
+        return 1;
+    }
+    let by_memory = config.limits.max_resident_bytes / frame_bytes.saturating_mul(2).max(1);
+    config
+        .threads
+        .min(usize::try_from(by_memory).unwrap_or(usize::MAX))
+        .max(1)
+}
+
+/// Frame-concurrent PNG-sequence encoding (fm-hyqz).
+///
+/// Each job is one whole frame encoded by the same canonical function as
+/// the serial path, so the bytes cannot depend on the pool. Finished frames
+/// are committed strictly in sequence order, which keeps the serial path's
+/// artifact digest, file set and first-error order. Dropping the pool closes
+/// its queue and joins the workers; a worker finishes at most its current
+/// frame.
+struct PngEncodePool {
+    jobs: Option<SyncSender<PngEncodeJob>>,
+    done: Receiver<PngEncoded>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    /// Most frames in flight at once.
+    capacity: usize,
+    /// Sequence of the oldest frame not yet committed.
+    next_commit: u64,
+    /// Frames submitted and not yet committed.
+    in_flight: usize,
+    /// Encoded frames waiting for their predecessors.
+    ready: BTreeMap<u64, Vec<u8>>,
+    /// Raw-frame buffers the workers handed back, for reuse.
+    spare: Vec<Vec<u8>>,
+}
+
+struct PngEncodeJob {
+    sequence: u64,
+    rgba: Vec<u8>,
+}
+
+struct PngEncoded {
+    sequence: u64,
+    rgba: Vec<u8>,
+    encoded: Result<Vec<u8>, &'static str>,
+}
+
+impl PngEncodePool {
+    /// Start `capacity` workers, each fanning its frame over
+    /// `segment_threads` fixed DEFLATE segments. `None` when a worker cannot
+    /// start; the sink then keeps its serial path.
+    fn start(
+        config: &PngSinkConfig,
+        capacity: usize,
+        segment_threads: usize,
+        first_sequence: u64,
+    ) -> Option<Self> {
+        let (jobs, job_rx) = mpsc::sync_channel::<PngEncodeJob>(capacity);
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        let (done_tx, done) = mpsc::channel::<PngEncoded>();
+        let mut pool = Self {
+            jobs: Some(jobs),
+            done,
+            workers: Vec::with_capacity(capacity),
+            capacity,
+            next_commit: first_sequence,
+            in_flight: 0,
+            ready: BTreeMap::new(),
+            spare: Vec::new(),
+        };
+        for worker in 0..capacity {
+            let job_rx = Arc::clone(&job_rx);
+            let done_tx = done_tx.clone();
+            let (width, height, level) = (config.width, config.height, config.compression);
+            let profile = config.profile.clone();
+            let lane = u16::try_from(worker).unwrap_or(u16::MAX);
+            let spawned = std::thread::Builder::new()
+                .name(format!("fmn-png-encode-{worker}"))
+                .spawn(move || {
+                    loop {
+                        let job = job_rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                        let Ok(PngEncodeJob { sequence, rgba }) = job else {
+                            break;
+                        };
+                        let encoded = {
+                            let _span = profile
+                                .as_ref()
+                                .and_then(|profile| profile.encode_span(sequence, lane));
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                encode_rgba8_segmented_parallel(
+                                    width,
+                                    height,
+                                    &rgba,
+                                    level,
+                                    segment_threads,
+                                )
+                            }))
+                            .map_err(|_| "a PNG encoder worker panicked")
+                        };
+                        let finished = PngEncoded {
+                            sequence,
+                            rgba,
+                            encoded,
+                        };
+                        if done_tx.send(finished).is_err() {
+                            break;
+                        }
+                    }
+                });
+            match spawned {
+                Ok(handle) => pool.workers.push(handle),
+                // Drop joins the workers already started.
+                Err(_) => return None,
+            }
+        }
+        Some(pool)
+    }
+
+    fn submit(&mut self, sequence: u64, rgba: Vec<u8>) -> Result<(), SinkAdapterError> {
+        self.jobs
+            .as_ref()
+            .ok_or(SinkAdapterError::AlreadyFinalized)?
+            .send(PngEncodeJob { sequence, rgba })
+            .map_err(|_| SinkAdapterError::Codec {
+                codec: "PNG",
+                detail: "the encoder pool stopped".to_owned(),
+            })?;
+        self.in_flight += 1;
+        Ok(())
+    }
+
+    fn receive(&mut self, block: bool) -> Result<bool, SinkAdapterError> {
+        let finished = if block {
+            match self.done.recv() {
+                Ok(finished) => finished,
+                Err(_) => {
+                    return Err(SinkAdapterError::Codec {
+                        codec: "PNG",
+                        detail: "the encoder pool stopped".to_owned(),
+                    });
+                }
+            }
+        } else {
+            match self.done.try_recv() {
+                Ok(finished) => finished,
+                Err(_) => return Ok(false),
+            }
+        };
+        self.spare.push(finished.rgba);
+        let encoded = finished.encoded.map_err(|detail| SinkAdapterError::Codec {
+            codec: "PNG",
+            detail: detail.to_owned(),
+        })?;
+        self.ready.insert(finished.sequence, encoded);
+        Ok(true)
+    }
+}
+
+impl Drop for PngEncodePool {
+    fn drop(&mut self) {
+        self.jobs = None;
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
     }
 }
 
