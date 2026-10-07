@@ -171,12 +171,18 @@ struct PortalArtifactReport {
 
 /// Which Lumen route rasterized a render's frames (fm-sq8.11): counts for
 /// the retained planar route and the camera route, plus why the first
-/// camera-route frame could not take the planar one.
+/// camera-route frame could not take the planar one. It also records what
+/// the render used of its execution plan: teams used against teams planned,
+/// threads per team, and the emitter's frames in flight.
 #[derive(Clone, Copy, Default, Debug)]
 struct PortalRoutes {
     planar: u64,
     camera: u64,
     first_camera_reason: Option<&'static str>,
+    teams_used: u64,
+    teams_planned: u64,
+    team_threads: u64,
+    frames_in_flight: u64,
 }
 
 impl From<NativeArtifactReport> for PortalArtifactReport {
@@ -736,7 +742,19 @@ impl PortalFrameSession {
                 timeline: OutputTimeline::new(single_frame),
                 planar_baseline,
                 planar_map_matches,
-                routes: PortalRoutes::default(),
+                // One renderer on the first team: fm-sq8.5 item 6 routes the
+                // portal through every team.
+                routes: PortalRoutes {
+                    teams_used: 1,
+                    teams_planned: plan.render_teams.len() as u64,
+                    team_threads: plan
+                        .render_teams
+                        .first()
+                        .map_or(1, fmn_runtime::TeamPlan::threads)
+                        as u64,
+                    frames_in_flight: plan.frames_in_flight as u64,
+                    ..PortalRoutes::default()
+                },
             },
             runtime_config,
         ))
@@ -8454,6 +8472,19 @@ impl PyScene {
         (routes.planar, routes.camera, routes.first_camera_reason)
     }
 
+    /// The last render's `(teams used, teams planned, threads per team,
+    /// frames in flight)`: what it used of its execution plan (fm-sq8.11).
+    #[getter]
+    fn _render_plan(slf: &Bound<'_, Self>) -> (u64, u64, u64, u64) {
+        let routes = slf.borrow().render_routes;
+        (
+            routes.teams_used,
+            routes.teams_planned,
+            routes.team_threads,
+            routes.frames_in_flight,
+        )
+    }
+
     #[getter]
     fn _render_audio_inputs(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
         portal_audio::input_facts(slf)
@@ -12258,6 +12289,9 @@ pub struct PortalPlanarRouteGauntletReport {
     pub planar_routes: (u64, u64, Option<String>),
     /// The same for a scene holding a surface.
     pub surface_routes: (u64, u64, Option<String>),
+    /// The planar render's `(teams used, teams planned, threads per team,
+    /// frames in flight)`.
+    pub planar_plan: (u64, u64, u64, u64),
 }
 
 /// One semantic-oracle reading from the portal suite (fm-5wq.46).
@@ -12351,6 +12385,7 @@ flat = _Flat()
 flat_result = flat.render(os.path.join(_fmn_dir, "portal"), format="png_sequence",
                           resolution=(64, 36), fps=8, threads=1)
 _fmn_flat_routes = tuple(flat._render_routes)
+_fmn_flat_plan = tuple(flat._render_plan)
 export_bundle(_Flat, os.path.join(_fmn_dir, "flat.fmtl"), resolution=(64, 36), fps=8)
 curved = _Curved()
 curved.render(os.path.join(_fmn_dir, "curved.y4m"), format="y4m",
@@ -12378,12 +12413,16 @@ _fmn_flat_frames = int(flat_result.frame_count)
         let frame_count = get("_fmn_flat_frames")?
             .extract()
             .map_err(|error: PyErr| error.to_string())?;
+        let planar_plan = get("_fmn_flat_plan")?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
         Ok(PortalPlanarRouteGauntletReport {
             portal_sequence: directory.join("portal"),
             bundle: directory.join("flat.fmtl"),
             frame_count,
             planar_routes,
             surface_routes,
+            planar_plan,
         })
     })
 }

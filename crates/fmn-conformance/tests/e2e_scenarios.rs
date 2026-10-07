@@ -2776,14 +2776,24 @@ fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
             .field(
                 "surface_reason",
                 surface_reason.clone().unwrap_or_else(|| "none".to_owned()),
-            ),
+            )
+            .field("teams_used", report.planar_plan.0)
+            .field("teams_planned", report.planar_plan.1)
+            .field("team_threads", report.planar_plan.2)
+            .field("frames_in_flight", report.planar_plan.3),
     );
-    if !(native_identical && planar_route && surface_route) {
+    let (teams_used, teams_planned, team_threads, frames_in_flight) = report.planar_plan;
+    let plan_reported = teams_used >= 1
+        && teams_used <= teams_planned
+        && team_threads >= 1
+        && frames_in_flight >= 1;
+    if !(native_identical && planar_route && surface_route && plan_reported) {
         return Err(fail(format!(
-            "portal planar route: routes={:?} surface={:?} frames={} portal={} native={} \
-             identical={identical_frames} cli_code={} stderr={:?}",
+            "portal planar route: routes={:?} surface={:?} plan={:?} frames={} portal={} \
+             native={} identical={identical_frames} cli_code={} stderr={:?}",
             report.planar_routes,
             report.surface_routes,
+            report.planar_plan,
             report.frame_count,
             portal.len(),
             native.len(),
