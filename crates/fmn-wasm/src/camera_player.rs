@@ -32,8 +32,7 @@ pub(super) fn render_into(
     renderer
         .render_with_camera(&stage, &camera)
         .map_err(|e| PlayerError::Render(e.to_string()))?;
-    rgba16f_to_rgba8_slice(renderer.frame(), dst)
-        .map_err(|e| PlayerError::Render(e.to_string()))
+    rgba16f_to_rgba8_slice(renderer.frame(), dst).map_err(|e| PlayerError::Render(e.to_string()))
 }
 
 #[cfg(test)]
@@ -45,8 +44,8 @@ mod tests {
     use fmn_render::{Camera, CameraConfig, FrameConfig, ScreenMap, Viewport};
     use fmn_scene::recording::SceneBundleRecorder;
     use fmn_scene::{
-        BundleExportLimits, CaptureReason, IntegrationError, LifecycleEvent, RuntimeConfig,
-        Scene, SceneSink,
+        BundleExportLimits, CaptureReason, IntegrationError, LifecycleEvent, RuntimeConfig, Scene,
+        SceneSink,
     };
 
     const WIDTH: u32 = 48;
@@ -75,9 +74,8 @@ mod tests {
         })
         .unwrap();
         renderer.render_with_camera(stage, camera).unwrap();
-        let mut frame = FrameBuffer::new(
-            FrameLayout::tight(PixelFormat::Rgba8, WIDTH, HEIGHT).unwrap(),
-        );
+        let mut frame =
+            FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba8, WIDTH, HEIGHT).unwrap());
         rgba16f_to_rgba8(renderer.frame(), &mut frame).unwrap();
         frame.as_bytes().to_vec()
     }
@@ -201,7 +199,10 @@ mod tests {
     fn camera_refusals_preserve_destination_and_cursor_before_rendering() {
         let (bytes, _) = recording();
         let mut core = PlayerCore::load(&bytes).unwrap();
-        assert!(matches!(core.render_index(0), Err(PlayerError::Viewport(_))));
+        assert!(matches!(
+            core.render_index(0),
+            Err(PlayerError::Viewport(_))
+        ));
         core.set_viewport(WIDTH, HEIGHT).unwrap();
         core.seek_frame(1).unwrap();
         let renders = crate::rasterized_surface_count();

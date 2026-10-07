@@ -912,7 +912,13 @@ mod tests {
         player.set_viewport(32, 18).unwrap();
         let pixels = player.render_frame(0).unwrap();
         assert_eq!(pixels.len(), 32 * 18 * 4);
-        assert!(pixels.chunks_exact(4).all(|pixel| pixel == [255, 0, 0, 255]));
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [255, 0, 0, 255])
+        );
         let mut scratch = vec![0; pixels.len()];
         player.render_into(0, &mut scratch).unwrap();
         assert_eq!(scratch, pixels);
