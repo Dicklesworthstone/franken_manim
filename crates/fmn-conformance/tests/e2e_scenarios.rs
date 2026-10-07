@@ -3084,6 +3084,195 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_manifest", 1))
 }
 
+/// The CLI's camera builtins (fm-cli-camera-route-i1zc): a lit surface,
+/// depth-sorted dots, a sampled image, and 2D drawn over 3D, each through the
+/// fixed camera.
+const CLI_CAMERA_BUILTINS: [&str; 4] = [
+    "surface_cube.v1",
+    "dot_cloud_depth.v1",
+    "image_quad.v1",
+    "mixed_camera.v1",
+];
+
+/// One builtin through the in-process CLI: `--reproducible`, a 64x36 PNG
+/// sequence at 8 fps on `threads` threads. Returns the CLI's output and the
+/// frames in order.
+fn cli_builtin_frames(
+    name: &str,
+    threads: &str,
+) -> Result<(fmn_cli::RunOutput, Vec<Vec<u8>>), ScenarioError> {
+    let dir = scenario_dir(&format!("cli_builtin_{threads}"))?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("CLI scenario output path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--reproducible",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "64x36",
+        "--fps",
+        "8",
+        "--threads",
+        threads,
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        name,
+    ]);
+    let sequence = dir.join(name);
+    let mut paths: Vec<_> = std::fs::read_dir(&sequence)
+        .map_err(|error| fail(format!("list {}: {error}", sequence.display())))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+        .collect();
+    paths.sort();
+    let frames = paths
+        .iter()
+        .map(|path| {
+            std::fs::read(path).map_err(|error| fail(format!("read {}: {error}", path.display())))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((output, frames))
+}
+
+/// fm-cli-camera-route-i1zc: the CLI's 3D builtins render through the camera
+/// route under `--reproducible`, animate visibly, and lock their certified
+/// frames in the e2e lock. Before this scenario no lock held the CLI's 3D
+/// output, so a camera-route regression could pass every gate.
+fn cli_camera_builtins_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut outcome = RunOutcome::ok();
+    let mut frames_total = 0_u64;
+    for name in CLI_CAMERA_BUILTINS {
+        let (output, frames) = cli_builtin_frames(name, "1")?;
+        let camera_route = output.stdout.contains("\"route\":\"camera-cpu\"");
+        let animated = frames.windows(2).any(|pair| pair[0] != pair[1]);
+        ctx.event(
+            LogEvent::new("e2e.cli.camera")
+                .field("builtin", name)
+                .field("frames", frames.len() as u64)
+                .field("camera_route", truth(camera_route))
+                .field("animated", truth(animated))
+                .field(
+                    "first_frame_sha256",
+                    frames
+                        .first()
+                        .map_or_else(String::new, |frame| fmn_hash::sha256(frame).to_hex()),
+                ),
+        );
+        if output.code != 0 || !camera_route || !animated {
+            return Err(fail(format!(
+                "CLI camera builtin {name}: code={} frames={} camera_route={camera_route} \
+                 animated={animated} stdout={:?} stderr={:?}",
+                output.code,
+                frames.len(),
+                output.stdout,
+                output.stderr
+            )));
+        }
+        frames_total += frames.len() as u64;
+        let stem = name.trim_end_matches(".v1");
+        for (index, frame) in frames.into_iter().enumerate() {
+            outcome = outcome.with_artifact(
+                &format!("render_matrix.cli_camera.{stem}.v1.{index:04}"),
+                frame,
+            );
+        }
+    }
+    Ok(outcome
+        .with_counter("cli_camera_builtins", CLI_CAMERA_BUILTINS.len() as u64)
+        .with_counter("cli_camera_frames", frames_total))
+}
+
+/// fm-facade-render-api-9ewt: the CLI's 25 primitive builtins render on the
+/// retained 2D route under `--reproducible` and lock their certified frames
+/// in the e2e lock. This is the before/after proof the sink extraction needs:
+/// no other lock holds the shipping CLI's 2D output (the scene corpus and the
+/// render matrix bypass the CLI).
+fn cli_primitive_builtins_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut outcome = RunOutcome::ok();
+    let mut frames_total = 0_u64;
+    for name in fmn::builtins::PRIMITIVE_SCENE_NAMES {
+        let (output, frames) = cli_builtin_frames(name, "1")?;
+        let retained_route = output.stdout.contains("\"route\":\"retained-cpu\"");
+        ctx.event(
+            LogEvent::new("e2e.cli.primitive")
+                .field("builtin", name)
+                .field("frames", frames.len() as u64)
+                .field("retained_route", truth(retained_route))
+                .field(
+                    "first_frame_sha256",
+                    frames
+                        .first()
+                        .map_or_else(String::new, |frame| fmn_hash::sha256(frame).to_hex()),
+                ),
+        );
+        if output.code != 0 || !retained_route || frames.is_empty() {
+            return Err(fail(format!(
+                "CLI primitive builtin {name}: code={} frames={} retained_route={retained_route} \
+                 stdout={:?} stderr={:?}",
+                output.code,
+                frames.len(),
+                output.stdout,
+                output.stderr
+            )));
+        }
+        frames_total += frames.len() as u64;
+        let stem = name.trim_end_matches(".v1");
+        for (index, frame) in frames.into_iter().enumerate() {
+            outcome = outcome.with_artifact(
+                &format!("render_matrix.cli_primitive.{stem}.v1.{index:04}"),
+                frame,
+            );
+        }
+    }
+    Ok(outcome
+        .with_counter(
+            "cli_primitive_builtins",
+            fmn::builtins::PRIMITIVE_SCENE_NAMES.len() as u64,
+        )
+        .with_counter("cli_primitive_frames", frames_total))
+}
+
+/// Every builtin the CLI ships: the 25 primitive programs and the camera
+/// programs.
+fn cli_all_builtins() -> impl Iterator<Item = &'static str> {
+    fmn::builtins::PRIMITIVE_SCENE_NAMES
+        .into_iter()
+        .chain(CLI_CAMERA_BUILTINS)
+}
+
+/// The CLI builtins' determinism drill (fm-cli-camera-route-i1zc,
+/// fm-facade-render-api-9ewt): every builtin's certified PNG sequence is
+/// byte-identical at 1 and 4 render threads.
+fn cli_builtins_threads_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut identical = 0_u64;
+    for name in cli_all_builtins() {
+        let (one, serial) = cli_builtin_frames(name, "1")?;
+        let (four, parallel) = cli_builtin_frames(name, "4")?;
+        let same = one.code == 0 && four.code == 0 && !serial.is_empty() && serial == parallel;
+        ctx.event(
+            LogEvent::new("e2e.cli.builtin_threads")
+                .field("builtin", name)
+                .field("frames", serial.len() as u64)
+                .field("threads_1_4_identical", truth(same)),
+        );
+        if !same {
+            return Err(fail(format!(
+                "CLI builtin {name} differs between 1 and 4 threads: codes {}/{} frames {}/{}",
+                one.code,
+                four.code,
+                serial.len(),
+                parallel.len()
+            )));
+        }
+        identical += 1;
+    }
+    Ok(RunOutcome::ok().with_counter("cli_builtins_threads_identical", identical))
+}
+
 /// Count the ordinary scene schedule without touching Reel, then drive each
 /// authored segment through its own real native sink.
 fn cli_prerun_subdivide_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -5117,6 +5306,59 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.cli_camera_builtins.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_camera_builtins_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_camera_builtins", 4),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.camera",
+            vec![
+                FieldPred::str_eq("camera_route", "true"),
+                FieldPred::str_eq("animated", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_primitive_builtins.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_primitive_builtins_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_primitive_builtins", 25),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.primitive",
+            vec![FieldPred::str_eq("retained_route", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "determinism.cli_builtins_threads_1_4.v1",
+        ScenarioClass::DeterminismDrill,
+        Surface::CliInProcess,
+        Invocation::new(cli_builtins_threads_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_builtins_threads_identical", 29),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.builtin_threads",
+            vec![FieldPred::str_eq("threads_1_4_identical", "true")],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.studio_builtin_preview.v1",
         ScenarioClass::RenderMatrix,
         Surface::StudioInProcess,
@@ -6982,4 +7224,56 @@ fn python_scene_console_scenario_passes() {
         .expect("Python scene console scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// The CLI builtin scenarios (fm-cli-camera-route-i1zc,
+/// fm-facade-render-api-9ewt), focused.
+#[test]
+fn cli_builtin_scenarios_pass() {
+    for name in [
+        "render_matrix.cli_camera_builtins.v1",
+        "render_matrix.cli_primitive_builtins.v1",
+        "determinism.cli_builtins_threads_1_4.v1",
+    ] {
+        let scenario = catalog()
+            .into_iter()
+            .find(|scenario| scenario.name == name)
+            .expect("the CLI builtin scenario is registered");
+        let report = Runner::from_env().run(scenario);
+        assert!(report.is_pass(), "{}", report.summary());
+    }
+}
+
+/// Re-bless evidence for the e2e lock's `render_matrix.cli_primitive.*` and
+/// `render_matrix.cli_camera.*` entries (GOVERNANCE.md §4). Opt-in with
+/// `FMN_REBLESS_E2E_CLI_BUILTINS=1`, after the bless: every builtin frame is
+/// decoded and stacked, and the stack goes on both sides of the lock's
+/// artefact, because these entries are new. A later change to them needs a
+/// before dump instead.
+#[test]
+fn rebless_e2e_cli_builtins_panel() {
+    use fmn_conformance::golden::{REBLESS_ARTEFACT_DIR, rebless_artefact_name, side_by_side_png};
+    if std::env::var("FMN_REBLESS_E2E_CLI_BUILTINS").as_deref() != Ok("1") {
+        return;
+    }
+    let (mut stack, mut width, mut height, mut rows) = (Vec::new(), 0, 0, 0);
+    for name in cli_all_builtins() {
+        let (_, frames) = cli_builtin_frames(name, "1").expect("the builtin renders");
+        for frame in frames {
+            let image = fmn_codec::decode_png(&frame, &fmn_codec::PngLimits::default())
+                .expect("a locked frame decodes");
+            (width, height) = (image.width, image.height);
+            stack.extend(image.rgba);
+            rows += 1;
+        }
+    }
+    let panel = side_by_side_png(width, height * rows, &stack, &stack).expect("frames stack");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lock = "e2e.certified.lock";
+    let digest =
+        fmn_hash::sha256(&std::fs::read(manifest.join("goldens").join(lock)).expect("lock"))
+            .to_hex();
+    let out = manifest.join("../..").join(REBLESS_ARTEFACT_DIR);
+    std::fs::create_dir_all(&out).expect("re-bless artefact directory");
+    std::fs::write(out.join(rebless_artefact_name(lock, &digest)), panel).expect("panel written");
 }
