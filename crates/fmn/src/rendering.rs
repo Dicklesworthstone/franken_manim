@@ -63,6 +63,7 @@ pub use compiled::{render_bundle, render_bundle_with_fs};
 pub use ffmpeg_limits::{DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport};
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
 
+pub use fmn_output::negotiate::{EncoderPreset, EncoderTune, VideoQuality};
 pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
 pub use fmn_render::{CameraConfig, CameraFrame};
 pub use fmn_runtime::ExecutionPlan;
@@ -174,6 +175,10 @@ pub struct RenderArtifact {
     /// decode. Native artifacts carry no ffmpeg policy. See
     /// [`FfmpegLimitsReport::to_json`] for manifest embedding.
     pub ffmpeg_limits: Option<FfmpegLimitsReport>,
+    /// Admitted video-quality overrides; `None` for native codecs. An empty
+    /// policy means encoder defaults, not an inferred CRF or measured quality.
+    /// The exact emitted flags also remain in the ffmpeg invocation provenance.
+    pub video_quality: Option<VideoQuality>,
     /// The soundtrack muxed into a video artifact; `None` when the scene
     /// authored no sound or the format carries no audio.
     pub soundtrack: Option<SoundtrackReport>,
@@ -204,6 +209,7 @@ impl RenderArtifact {
             digest: report.digest,
             ffmpeg: Vec::new(),
             ffmpeg_limits: None,
+            video_quality: None,
             soundtrack: None,
         })
     }
@@ -221,6 +227,7 @@ impl RenderArtifact {
             digest: report.boundary.artifact_digest,
             ffmpeg: report.boundary.invocations,
             ffmpeg_limits: None,
+            video_quality: None,
             soundtrack,
         }
     }
@@ -278,6 +285,12 @@ pub struct RenderOptions {
     /// The artifact cap is also bounded by [`Self::max_output_bytes`]. Native
     /// formats ignore this policy; tool probes retain their own short bounds.
     pub ffmpeg_limits: JobLimits,
+    /// Opt-in CRF, preset, tune, or bitrate for opaque MP4/MOV. The default
+    /// requests no override and preserves existing encoder behavior. Settings
+    /// incompatible with the selected codec, alpha MOV, or native formats are
+    /// refused before tool discovery rather than dropped. Never changes raw
+    /// frame rendering, frame sampling, or certified artifact semantics.
+    pub video_quality: VideoQuality,
 }
 
 impl RenderOptions {
@@ -299,6 +312,7 @@ impl RenderOptions {
             typeset_preflight_workers: crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
             ffmpeg: None,
             ffmpeg_limits: ffmpeg_limits::default_job_limits(),
+            video_quality: VideoQuality::default(),
         })
     }
 
@@ -605,6 +619,7 @@ struct VideoSession {
     fs: Arc<dyn FileSystem>,
     job_limits: JobLimits,
     max_input_bytes: u64,
+    video_quality: VideoQuality,
 }
 
 /// Bytes read from any one sound-cue asset (the CLI's cue budget).
@@ -647,6 +662,11 @@ impl RenderSink {
                 "frames_in_flight must be nonzero",
             ));
         }
+        if !options.format.is_video() && !options.video_quality.is_default() {
+            return Err(RenderError::InvalidOptions(
+                "video_quality requires an opaque MP4/MOV output",
+            ));
+        }
         let limits = SinkLimits::new(
             options.max_frames,
             options.max_resident_bytes,
@@ -668,11 +688,11 @@ impl RenderSink {
                     "video output requires RenderOptions::ffmpeg (or render() with the `ffmpeg` feature); native PNG-sequence, GIF and Y4M outputs need no external tool",
                 ));
             }
-            Some(negotiate_video(
-                options.format,
-                config,
-                options.camera.as_ref(),
-            )?)
+            Some(
+                negotiate_video(options.format, config, options.camera.as_ref())?
+                    .with_quality(options.video_quality)
+                    .map_err(RenderError::Negotiation)?,
+            )
         } else {
             None
         };
@@ -870,6 +890,7 @@ impl RenderSink {
                 let job = video_job.ok_or(RenderError::InvalidOptions(
                     "video format reached the sink without a negotiated job",
                 ))?;
+                let video_quality = job.quality().map_err(RenderError::Negotiation)?;
                 let job_limits = job_limits.ok_or(RenderError::InvalidOptions(
                     "video format reached the sink without admitted ffmpeg limits",
                 ))?;
@@ -922,6 +943,7 @@ impl RenderSink {
                     fs: Arc::clone(&fs),
                     job_limits,
                     max_input_bytes: options.max_output_bytes,
+                    video_quality,
                 });
                 let (binding, receipt) = sink.into_binding("ffmpeg-video");
                 (binding, RenderReceipt::Video(receipt))
@@ -1048,6 +1070,7 @@ impl RenderSink {
         artifact.ffmpeg_limits = self.video.as_ref().map(|video| {
             FfmpegLimitsReport::new(&video.job_limits, video.max_input_bytes)
         });
+        artifact.video_quality = self.video.as_ref().map(|video| video.video_quality);
         Ok(FinishedRender {
             frame_pipeline,
             emission,

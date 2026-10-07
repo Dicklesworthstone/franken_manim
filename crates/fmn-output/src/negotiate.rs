@@ -18,6 +18,9 @@ use std::path::Path;
 
 use fmn_frame::{ColorRange, PixelFormat};
 
+mod quality;
+pub use quality::{EncoderPreset, EncoderTune, VideoQuality};
+
 /// The pixel formats that travel down the pipe to ffmpeg.
 ///
 /// This is deliberately narrower than [`PixelFormat`]: `Rgba16F` is a
@@ -139,6 +142,17 @@ pub enum EncoderChoice {
     /// A named encoder (software or hardware), validated against the
     /// installed ffmpeg's capabilities before any spawn.
     Named(String),
+    /// An explicit encoder and its typed quality policy. Construct through
+    /// [`VideoJob::with_quality`] to resolve `Auto` before binding the policy.
+    /// Every boundary use revalidates it; direct enum construction cannot
+    /// bypass encoder-specific refusals. This carries settings without adding
+    /// required fields to existing `VideoJob` struct literals.
+    Configured {
+        /// The actual ffmpeg encoder name, not an argv fragment.
+        name: String,
+        /// Opt-in compressed-video controls.
+        quality: VideoQuality,
+    },
 }
 
 /// The negotiated container/mode.
@@ -194,7 +208,8 @@ pub struct VideoJob {
     /// Encoder selection.
     pub encoder: EncoderChoice,
     /// Constant-rate-factor quality, only meaningful for the software
-    /// x264/x265 encoders.
+    /// x264/x265 encoders. [`Self::with_quality`] also accepts it; conflicting
+    /// legacy/configured values are refused instead of silently overwritten.
     pub crf: Option<u8>,
 }
 
@@ -216,8 +231,8 @@ impl VideoJob {
     ///
     /// # Errors
     /// [`NegotiationError`] when the job's dimensions contradict each
-    /// other (alpha container on an opaque wire, CRF on a non-CRF
-    /// encoder, zero dimensions, zero frame rate).
+    /// other (alpha container on an opaque wire, zero dimensions or frame
+    /// rate) or quality controls contradict the encoder/container/rate mode.
     pub fn resolved_encoder(&self) -> Result<Option<String>, NegotiationError> {
         if self.width == 0 || self.height == 0 {
             return Err(NegotiationError("zero frame dimensions"));
@@ -232,7 +247,7 @@ impl VideoJob {
         }
         let encoder = match &self.encoder {
             EncoderChoice::Auto => self.container.default_encoder().map(str::to_owned),
-            EncoderChoice::Named(name) => {
+            EncoderChoice::Named(name) | EncoderChoice::Configured { name, .. } => {
                 if self.container == Container::Gif {
                     return Err(NegotiationError(
                         "GIF mode is muxer-level; it takes no encoder",
@@ -241,17 +256,7 @@ impl VideoJob {
                 Some(name.clone())
             }
         };
-        if let Some(crf) = self.crf {
-            let is_crf_encoder = matches!(encoder.as_deref(), Some("libx264" | "libx265"));
-            if !is_crf_encoder {
-                return Err(NegotiationError(
-                    "crf is a software x264/x265 knob; hardware encoders take none",
-                ));
-            }
-            if crf > 51 {
-                return Err(NegotiationError("crf outside 0..=51"));
-            }
-        }
+        self.merged_quality()?.validate(encoder.as_deref(), self.container)?;
         Ok(encoder)
     }
 }
@@ -285,6 +290,7 @@ fn base_argv() -> Vec<String> {
 /// [`NegotiationError`] per [`VideoJob::resolved_encoder`].
 pub fn encode_argv(job: &VideoJob, out: &Path) -> Result<Vec<String>, NegotiationError> {
     let encoder = job.resolved_encoder()?;
+    let quality = job.merged_quality()?;
     let mut argv = base_argv();
     // Input: tightly-packed frames, output orientation, on stdin.
     push(&mut argv, &["-f", "rawvideo"]);
@@ -295,13 +301,23 @@ pub fn encode_argv(job: &VideoJob, out: &Path) -> Result<Vec<String>, Negotiatio
     argv.push(format!("{}/{}", job.fps.0, job.fps.1));
     push(&mut argv, &["-i", "-"]);
 
-    // Output.
+    // Output. Only this pure negotiation layer emits encoder controls.
     if let Some(encoder) = &encoder {
         push(&mut argv, &["-c:v", encoder]);
     }
-    if let Some(crf) = job.crf {
+    if let Some(crf) = quality.crf {
         argv.push("-crf".into());
         argv.push(crf.to_string());
+    }
+    if let Some(preset) = quality.preset {
+        push(&mut argv, &["-preset", preset.as_str()]);
+    }
+    if let Some(tune) = quality.tune {
+        push(&mut argv, &["-tune", tune.as_str()]);
+    }
+    if let Some(bitrate) = quality.bitrate {
+        argv.push("-b:v".into());
+        argv.push(bitrate.to_string());
     }
     match job.container {
         Container::Mp4 | Container::Mov => {
