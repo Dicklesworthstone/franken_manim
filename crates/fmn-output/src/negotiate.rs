@@ -256,7 +256,8 @@ impl VideoJob {
                 Some(name.clone())
             }
         };
-        self.merged_quality()?.validate(encoder.as_deref(), self.container)?;
+        self.merged_quality()?
+            .validate(encoder.as_deref(), self.container)?;
         Ok(encoder)
     }
 }

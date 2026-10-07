@@ -1067,9 +1067,10 @@ impl RenderSink {
                 soundtrack,
             ),
         };
-        artifact.ffmpeg_limits = self.video.as_ref().map(|video| {
-            FfmpegLimitsReport::new(&video.job_limits, video.max_input_bytes)
-        });
+        artifact.ffmpeg_limits = self
+            .video
+            .as_ref()
+            .map(|video| FfmpegLimitsReport::new(&video.job_limits, video.max_input_bytes));
         artifact.video_quality = self.video.as_ref().map(|video| video.video_quality);
         Ok(FinishedRender {
             frame_pipeline,

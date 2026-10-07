@@ -39,7 +39,9 @@ impl RenderOptions {
     pub fn effective_ffmpeg_limits(&self) -> Result<JobLimits, RenderError> {
         let mut limits = self.ffmpeg_limits.clone();
         if limits.timeout.is_zero() {
-            return Err(RenderError::InvalidOptions("ffmpeg timeout must be nonzero"));
+            return Err(RenderError::InvalidOptions(
+                "ffmpeg timeout must be nonzero",
+            ));
         }
         if Instant::now().checked_add(limits.timeout).is_none() {
             return Err(RenderError::InvalidOptions(
@@ -47,7 +49,9 @@ impl RenderOptions {
             ));
         }
         if limits.max_log_bytes == 0 {
-            return Err(RenderError::InvalidOptions("ffmpeg max_log_bytes must be nonzero"));
+            return Err(RenderError::InvalidOptions(
+                "ffmpeg max_log_bytes must be nonzero",
+            ));
         }
         if limits.max_artifact_bytes == 0 || self.max_output_bytes == 0 {
             return Err(RenderError::InvalidOptions(

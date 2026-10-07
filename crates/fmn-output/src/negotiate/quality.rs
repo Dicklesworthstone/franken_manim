@@ -152,10 +152,7 @@ impl VideoQuality {
     /// Whether no encoder override was requested.
     #[must_use]
     pub const fn is_default(self) -> bool {
-        self.crf.is_none()
-            && self.preset.is_none()
-            && self.tune.is_none()
-            && self.bitrate.is_none()
+        self.crf.is_none() && self.preset.is_none() && self.tune.is_none() && self.bitrate.is_none()
     }
 
     pub(super) fn validate(
@@ -176,7 +173,9 @@ impl VideoQuality {
             }
         }
         if self.crf.is_some() && self.bitrate.is_some() {
-            return Err(NegotiationError("crf and video bitrate are mutually exclusive"));
+            return Err(NegotiationError(
+                "crf and video bitrate are mutually exclusive",
+            ));
         }
         if !self.is_default() && matches!(container, Container::Gif | Container::MovTransparent) {
             return Err(NegotiationError(
@@ -184,12 +183,16 @@ impl VideoQuality {
             ));
         }
         if (self.preset.is_some() || self.tune.is_some()) && !software {
-            return Err(NegotiationError("preset and tune require libx264 or libx265"));
+            return Err(NegotiationError(
+                "preset and tune require libx264 or libx265",
+            ));
         }
         if encoder == Some("libx265")
             && matches!(self.tune, Some(EncoderTune::Film | EncoderTune::StillImage))
         {
-            return Err(NegotiationError("film and stillimage tunes require libx264"));
+            return Err(NegotiationError(
+                "film and stillimage tunes require libx264",
+            ));
         }
         if let Some(bitrate) = self.bitrate {
             if bitrate == 0 {
@@ -207,7 +210,9 @@ impl VideoQuality {
                         | "av1_nvenc"
                 )
             ) {
-                return Err(NegotiationError("video bitrate is not supported for this encoder"));
+                return Err(NegotiationError(
+                    "video bitrate is not supported for this encoder",
+                ));
             }
         }
         Ok(())
@@ -257,7 +262,9 @@ impl VideoJob {
         if let (Some(legacy), Some(configured)) = (self.crf, quality.crf)
             && legacy != configured
         {
-            return Err(NegotiationError("conflicting legacy and configured crf values"));
+            return Err(NegotiationError(
+                "conflicting legacy and configured crf values",
+            ));
         }
         quality.crf = quality.crf.or(self.crf);
         Ok(quality)
@@ -291,29 +298,48 @@ mod tests {
             job.encoder = choice;
             let configured = job.clone().with_quality(VideoQuality::default()).unwrap();
             assert_eq!(configured, job);
-            assert_eq!(encode_argv(&configured, Path::new("/out.mp4")).unwrap().join(" "), expected);
+            assert_eq!(
+                encode_argv(&configured, Path::new("/out.mp4"))
+                    .unwrap()
+                    .join(" "),
+                expected
+            );
         }
     }
 
     #[test]
     fn all_crf_values_presets_and_encoder_tunes_reach_only_output_options() {
         let presets = [
-            EncoderPreset::UltraFast, EncoderPreset::SuperFast, EncoderPreset::VeryFast,
-            EncoderPreset::Faster, EncoderPreset::Fast, EncoderPreset::Medium,
-            EncoderPreset::Slow, EncoderPreset::Slower, EncoderPreset::VerySlow,
+            EncoderPreset::UltraFast,
+            EncoderPreset::SuperFast,
+            EncoderPreset::VeryFast,
+            EncoderPreset::Faster,
+            EncoderPreset::Fast,
+            EncoderPreset::Medium,
+            EncoderPreset::Slow,
+            EncoderPreset::Slower,
+            EncoderPreset::VerySlow,
             EncoderPreset::Placebo,
         ];
         let tunes = [
-            EncoderTune::Film, EncoderTune::Animation, EncoderTune::Grain,
-            EncoderTune::StillImage, EncoderTune::Psnr, EncoderTune::Ssim,
-            EncoderTune::FastDecode, EncoderTune::ZeroLatency,
+            EncoderTune::Film,
+            EncoderTune::Animation,
+            EncoderTune::Grain,
+            EncoderTune::StillImage,
+            EncoderTune::Psnr,
+            EncoderTune::Ssim,
+            EncoderTune::FastDecode,
+            EncoderTune::ZeroLatency,
         ];
         for name in ["libx264", "libx265"] {
             for crf in 0..=51 {
                 for preset in presets {
                     for tune in tunes {
                         let quality = VideoQuality {
-                            crf: Some(crf), preset: Some(preset), tune: Some(tune), bitrate: None,
+                            crf: Some(crf),
+                            preset: Some(preset),
+                            tune: Some(tune),
+                            bitrate: None,
                         };
                         let result = job(name).with_quality(quality);
                         if name == "libx265"
@@ -338,7 +364,11 @@ mod tests {
                             assert!(at > codec && at + 1 < argv.len() - 1);
                             assert_eq!(argv[at + 1], value);
                         }
-                        assert!(!argv.iter().any(|arg| matches!(arg.as_str(), "-b:v" | "-vf" | "-af")));
+                        assert!(
+                            !argv
+                                .iter()
+                                .any(|arg| matches!(arg.as_str(), "-b:v" | "-vf" | "-af"))
+                        );
                     }
                 }
             }
@@ -348,72 +378,139 @@ mod tests {
     #[test]
     fn every_out_of_range_crf_and_conflicting_rate_mode_refuses() {
         for crf in 52..=u8::MAX {
-            assert!(job("libx264").with_quality(VideoQuality {
-                crf: Some(crf), ..VideoQuality::default()
-            }).is_err());
+            assert!(
+                job("libx264")
+                    .with_quality(VideoQuality {
+                        crf: Some(crf),
+                        ..VideoQuality::default()
+                    })
+                    .is_err()
+            );
         }
-        assert!(job("libx264").with_quality(VideoQuality {
-            crf: Some(18), bitrate: Some(8_000_000), ..VideoQuality::default()
-        }).is_err());
-        assert!(job("libx264").with_quality(VideoQuality {
-            bitrate: Some(0), ..VideoQuality::default()
-        }).is_err());
+        assert!(
+            job("libx264")
+                .with_quality(VideoQuality {
+                    crf: Some(18),
+                    bitrate: Some(8_000_000),
+                    ..VideoQuality::default()
+                })
+                .is_err()
+        );
+        assert!(
+            job("libx264")
+                .with_quality(VideoQuality {
+                    bitrate: Some(0),
+                    ..VideoQuality::default()
+                })
+                .is_err()
+        );
     }
 
     #[test]
     fn hardware_bitrate_is_explicit_and_software_knobs_never_get_ignored() {
-        for name in ["h264_nvenc", "hevc_nvenc", "av1_nvenc", "h264_videotoolbox", "hevc_videotoolbox"] {
-            let configured = job(name).with_quality(VideoQuality {
-                bitrate: Some(12_000_000), ..VideoQuality::default()
-            }).unwrap();
+        for name in [
+            "h264_nvenc",
+            "hevc_nvenc",
+            "av1_nvenc",
+            "h264_videotoolbox",
+            "hevc_videotoolbox",
+        ] {
+            let configured = job(name)
+                .with_quality(VideoQuality {
+                    bitrate: Some(12_000_000),
+                    ..VideoQuality::default()
+                })
+                .unwrap();
             let argv = encode_argv(&configured, Path::new("/out.mp4")).unwrap();
             assert!(argv.windows(2).any(|pair| pair == ["-c:v", name]));
             assert!(argv.windows(2).any(|pair| pair == ["-b:v", "12000000"]));
             for quality in [
-                VideoQuality { crf: Some(18), ..VideoQuality::default() },
-                VideoQuality { preset: Some(EncoderPreset::Slow), ..VideoQuality::default() },
-                VideoQuality { tune: Some(EncoderTune::Animation), ..VideoQuality::default() },
+                VideoQuality {
+                    crf: Some(18),
+                    ..VideoQuality::default()
+                },
+                VideoQuality {
+                    preset: Some(EncoderPreset::Slow),
+                    ..VideoQuality::default()
+                },
+                VideoQuality {
+                    tune: Some(EncoderTune::Animation),
+                    ..VideoQuality::default()
+                },
             ] {
                 assert!(job(name).with_quality(quality).is_err());
             }
         }
-        assert!(job("qtrle").with_quality(VideoQuality {
-            bitrate: Some(12_000_000), ..VideoQuality::default()
-        }).is_err());
+        assert!(
+            job("qtrle")
+                .with_quality(VideoQuality {
+                    bitrate: Some(12_000_000),
+                    ..VideoQuality::default()
+                })
+                .is_err()
+        );
     }
 
     #[test]
     fn legacy_crf_is_preserved_or_explicitly_conflicted_not_overwritten() {
         let mut legacy = job("libx264");
         legacy.crf = Some(16);
-        let agreed = legacy.clone().with_quality(VideoQuality {
-            crf: Some(16), preset: Some(EncoderPreset::Slow), ..VideoQuality::default()
-        }).unwrap();
+        let agreed = legacy
+            .clone()
+            .with_quality(VideoQuality {
+                crf: Some(16),
+                preset: Some(EncoderPreset::Slow),
+                ..VideoQuality::default()
+            })
+            .unwrap();
         let argv = encode_argv(&agreed, Path::new("/out.mp4")).unwrap();
         assert_eq!(argv.iter().filter(|arg| arg.as_str() == "-crf").count(), 1);
         assert!(argv.windows(2).any(|pair| pair == ["-crf", "16"]));
-        assert!(legacy.with_quality(VideoQuality {
-            crf: Some(18), ..VideoQuality::default()
-        }).is_err());
+        assert!(
+            legacy
+                .with_quality(VideoQuality {
+                    crf: Some(18),
+                    ..VideoQuality::default()
+                })
+                .is_err()
+        );
     }
 
     #[test]
     fn closed_catalog_parsers_refuse_whitespace_aliases_and_argument_fragments() {
-        for value in ["", "Slow", " slow", "slow ", "slow -vf scale=1:1", "slow\0", "p7"] {
+        for value in [
+            "",
+            "Slow",
+            " slow",
+            "slow ",
+            "slow -vf scale=1:1",
+            "slow\0",
+            "p7",
+        ] {
             assert!(value.parse::<EncoderPreset>().is_err());
         }
         for value in ["", "animation,grain", "animation\n", "film -y", "unknown"] {
             assert!(value.parse::<EncoderTune>().is_err());
         }
-        assert_eq!("slow".parse::<EncoderPreset>().unwrap(), EncoderPreset::Slow);
-        assert_eq!("animation".parse::<EncoderTune>().unwrap(), EncoderTune::Animation);
+        assert_eq!(
+            "slow".parse::<EncoderPreset>().unwrap(),
+            EncoderPreset::Slow
+        );
+        assert_eq!(
+            "animation".parse::<EncoderTune>().unwrap(),
+            EncoderTune::Animation
+        );
     }
 
     #[test]
     fn configured_jobs_revalidate_direct_mutations_before_encoding() {
-        let mut configured = job("libx264").with_quality(VideoQuality {
-            crf: Some(16), preset: Some(EncoderPreset::Slow), ..VideoQuality::default()
-        }).unwrap();
+        let mut configured = job("libx264")
+            .with_quality(VideoQuality {
+                crf: Some(16),
+                preset: Some(EncoderPreset::Slow),
+                ..VideoQuality::default()
+            })
+            .unwrap();
         configured.crf = Some(17);
         assert!(encode_argv(&configured, Path::new("/out.mp4")).is_err());
         configured.crf = None;
