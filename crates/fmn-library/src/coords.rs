@@ -47,6 +47,8 @@
 //! * **Invalid `input_sample_type` is a typed error** ([`CoordsError`]),
 //!   where the Reference raises a bare `Exception`.
 
+pub(crate) mod placement;
+
 use fmn_core::color::{Srgb, color_gradient};
 use fmn_core::constants::{
     BLACK, BLUE, DEFAULT_LIGHT_COLOR, DEFAULT_MOBJECT_COLOR, DEFAULT_MOBJECT_TO_EDGE_BUFF, DL,
