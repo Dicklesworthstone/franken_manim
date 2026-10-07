@@ -1,6 +1,19 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run 2026-10-06 against `Cargo.lock` `c3737f70` and `SUITE.lock`
+**Status:** re-run 2026-10-06 against `Cargo.lock` `90803e2a` and `SUITE.lock`
+`1b2c97d0`, for the franken_markdown repin from `f059cac6` to `bfb3221c` (fm-5wq.60):
+fmd-math rule 11 `\root` placement. No package version changes.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines with
+  no fmd or franken_markdown package. The lock change moves only the three
+  franken_markdown packages' rev, none of which is in that graph.
+- The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
+  wasm graph changed since the run below.
+
+Earlier re-run, 2026-10-06, against `Cargo.lock` `c3737f70` and `SUITE.lock`
 `f2118084`, for the franken_markdown repin from `4c8caa25` to `f059cac6` (fm-djcw):
 PDF inline `$…$` through fmd-math `Layout`. fmd-font and fmd-math are
 byte-identical between the two revisions, and no package version changes.
@@ -209,8 +222,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `f2118084099fd9a9196633c64a968d1246187b99b8f86894d491167eed8c81a7`
-- `Cargo.lock` SHA-256: `c3737f706d3aae4b973981b978ed1888327d6cef190f5ce814e894295d969acf`
+- `SUITE.lock` SHA-256: `1b2c97d0840f5b3873c1aeb07684469e8d9298830b1a2acb76d17f8adb769232`
+- `Cargo.lock` SHA-256: `90803e2a68ec2d25aa84dc52123be942d0859778fc37b9c857af43f186d2da3d`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `4c58a1bb52b3e6e833fcc0cc50cfbf086a3b8889e4790480c291b64b44382f1a`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed
