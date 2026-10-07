@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::expect_used, clippy::panic, clippy::print_stderr)]
 
-use fmn_library::{Tex, TexEngine};
+use fmn_library::{Tex, TexEngine, TexText};
 
 /// Formulas within ±5% of the Reference on both axes: 24 when this oracle
 /// landed (2026-10-04), 26 after the display-integral fix (franken_markdown
@@ -40,6 +40,28 @@ fn rows() -> Vec<Row> {
             }
         })
         .collect()
+}
+
+/// fm-5wq.56: TeX's text fonts set the apostrophe of "can't" as the curly
+/// right quote. The pinned Reference measures that glyph at 0.080 x 0.186
+/// (font_size 60, the corpus differential's UniversalProblemSolvingTip
+/// repro); the straight ASCII wedge it replaces measured 0.056 x 0.220.
+#[test]
+fn texttext_apostrophe_is_the_reference_right_quote() {
+    let engine = TexEngine::new("fmd-math/pack/default", None).expect("engine");
+    let text = TexText::new("can't")
+        .font_size(60.0)
+        .build(&engine)
+        .expect("TexText typesets");
+    // One child per glyph, in emission order.
+    let glyphs = text.vmob.children();
+    assert_eq!(glyphs.len(), 5, "c a n quote t");
+    let (min, max) = glyphs[3].extent().expect("the quote has extent");
+    let (width, height) = (max[0] - min[0], max[1] - min[1]);
+    assert!(
+        (width / 0.080 - 1.0).abs() <= 0.10 && (height / 0.186 - 1.0).abs() <= 0.10,
+        "apostrophe {width:.3} x {height:.3} against the Reference's 0.080 x 0.186"
+    );
 }
 
 #[test]
