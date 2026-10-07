@@ -94,4 +94,16 @@ mod tests {
                 .expect("writer quality reaches native negotiation and the video bitstream");
         });
     }
+
+    #[test]
+    fn portal_video_quality_console_acceptance_suite() {
+        crate::with_python_test_module("portal console video quality", |py, _module, globals| {
+            let source =
+                std::ffi::CString::new(include_str!("../../tests/video_quality_console.py"))
+                    .unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("console controls reach single, batch, subdivided, and paired exports");
+        });
+    }
 }

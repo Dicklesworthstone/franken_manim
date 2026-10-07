@@ -81,3 +81,26 @@ while the file kept its configured rate, so `-f --fps 60` wrote 12 frames into a
 - `crates/fmn-cli/src/lib.rs`: parser, precedence, stable exits, human/robot
   separation, doctor, cache lifecycle, and exhaustive interaction tests.
 - `docs/api/cli_flags.md`: generated user-facing flag and command tables.
+
+## Python portal video-quality extension
+
+`fmn-python` additionally accepts `--crf`, `--preset`, `--tune`, and
+`--video-bitrate`, in separate-value or `--flag=value` form. These controls
+select compressed-video policy, not the familiar scene-resolution quality
+presets. CRF zero is retained; CRF and bitrate cannot be combined. Omitting all
+four preserves prior encoder defaults. Bitrate is integer bits per second.
+
+The Python console owner consumes only these extension flags before delegating
+legacy flags to the existing native parser. Range, duplicate, malformed-value,
+and native/explicit-transparent-format errors are usage failures before source
+import. Reel's shared typed negotiation validates exact preset/tune catalogs
+and encoder compatibility before discovery/spawn; it never ignores a requested
+software-only control on a hardware encoder. These checks do not duplicate
+encoder policy in Python or change D2's subprocess and publication boundaries.
+
+The same overrides reach named batches, `--write_all`, subdivisions, and video
+primaries paired with a final PNG, without injecting scene constructor kwargs
+or rerunning the scene. Actual encoder argv remains in each native receipt.
+See [Python video quality](../PYTHON_VIDEO_QUALITY.md) for usage and permanent
+parser/extension tests. This extension does not claim standalone Rust `fmn`
+CLI/config-file or AAC-bitrate support; those remain separate adapters.

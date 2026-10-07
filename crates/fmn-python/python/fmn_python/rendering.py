@@ -22,6 +22,7 @@ from typing import Any
 
 from .effect_audit import paused as paused_effects
 from .render_selection import animation_range as _animation_range, apply_animation_range
+from .video_cli import apply_video_options, validate_writer_video_format
 
 _FORMATS = frozenset({"png", "png_sequence", "gif", "y4m", "wav", "svg", "mp4", "mov"})
 _VIDEO_FORMATS = frozenset({"mp4", "mov"})
@@ -499,6 +500,7 @@ def _apply_output_options(scene: Any, options: dict[str, Any]) -> None:
         value = options.get(option)
         if value is not None:
             setattr(scene.file_writer, attribute, value)
+    apply_video_options(scene, options)
     if options.get("transparent", False):
         scene.camera.background_rgba[3] = 0.0
 
@@ -508,6 +510,7 @@ def _validate_writer_options(scene: Any, format: str, native: Any, *,
     writer = getattr(scene, "file_writer", None)
     if writer is None:
         return
+    validate_writer_video_format(writer, format)
     unsupported = []
     for name in ("subdivide_output", "open_file_upon_completion", "show_file_location_upon_completion"):
         if getattr(writer, name, False) and not (allow_subdivide and name == "subdivide_output"):

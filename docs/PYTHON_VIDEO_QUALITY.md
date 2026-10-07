@@ -29,7 +29,8 @@ a strict file-size ceiling, and cannot be combined with CRF. The shared
 [quality policy](VIDEO_ENCODING_QUALITY.md) validates the selected encoder,
 container, preset and tune; software-only controls on hardware encoders fail
 by name. Strings are exact catalog names, never argv fragments. Booleans and
-lossy float-to-integer conversions are refused.
+lossy float-to-integer conversions are refused. Explicit quality settings on
+native PNG/GIF/Y4M/SVG/WAV requests are errors, not ignored preferences.
 
 The adapter covers ordinary portal generations and recorded/subdivided video
 exports, which both use `PortalVideoConfig`. It preserves the ownership checks
@@ -37,13 +38,47 @@ around Python getters and propagates authored getter/conversion failures.
 Every successful video receipt's `ffmpeg_invocations` contains the actual
 resolved encoder and complete arguments. Video remains outside certification.
 
-The permanent `portal_video_quality_acceptance_suite` runs the actual extension,
-exercises admission before executable discovery, checks descriptor errors and
-existing-output preservation, and renders MP4/MOV at two CRFs. Its independent
-bitstream check demuxes H.264 with stream copy and reads x264 user-data SEI;
-it does not infer settings from our requested-option receipt alone. Real encode
-cases need ffmpeg and become mandatory under `FMN_REQUIRE_FFMPEG=1` or
-`FMN_REQUIRE_FULL_INPUTS=1`. Syntax/isolated parser checks are not extension proof.
+## Console controls
+
+```sh
+fmn-python scene.py Picture --format mp4 --crf 16 --preset slow --tune animation --video_dir picture.mp4
+fmn-python scene.py Second First --format mp4 --crf=16 --preset=slow --tune=animation --video_dir movies
+fmn-python scene.py Picture --format mp4 --vcodec h264_nvenc --video-bitrate 12000000 --video_dir hardware.mp4
+```
+
+Both `--flag value` and `--flag=value` work for these four new controls. A flag
+may be specified only once; CRF and bitrate are mutually exclusive. Numeric
+ranges, duplicate options, malformed values and incompatible native/explicit
+transparent output modes fail before source import with the existing usage
+exit. Exact preset/tune names and codec compatibility remain the native
+negotiator's responsibility before encoder discovery, after constructing the
+selected scene. No catalog or compatibility matrix is duplicated in Python.
+
+The flags apply to single and named multiple scenes, `--write_all`,
+`--subdivide`, and video primaries paired with `--save-last-frame`. They do not
+become scene constructor keywords: zero-argument custom constructors continue
+to work, and the lifecycle still runs once. Existing output overrides carry
+the settings through every owner. Batch checkpoints already bind the complete
+output-option mapping, so changing a requested quality control changes that
+checkpoint plan. Final paired PNG capture uses its native still path and does
+not inherit video compression settings.
+
+## Validation entry points
+
+```sh
+python crates/fmn-python/tests/video_cli_unit.py
+FMN_REQUIRE_FFMPEG=1 cargo test --locked -p fmn-python --lib portal_video_quality -- --test-threads=1
+```
+
+The standalone lexer tests need no extension. The permanent extension suites
+exercise admission before executable discovery, descriptor errors and existing
+output preservation, then render MP4/MOV at two CRFs. The independent bitstream
+check demuxes H.264 with stream copy and reads x264 user-data SEI; it does not
+infer settings from our requested-option receipt alone. Console coverage checks
+pre-import errors and all the output-owner modes above, including constructor
+counts and final PNG publication. Real encode cases need ffmpeg and become
+mandatory under `FMN_REQUIRE_FFMPEG=1` or `FMN_REQUIRE_FULL_INPUTS=1`.
+Syntax/isolated parser checks are not extension or end-to-end rendering proof.
 
 This does not yet configure AAC bitrate or expose these controls in standalone
 Rust `fmn` CLI/config files. No encoder default or visual-quality claim changes.

@@ -35,7 +35,11 @@ from .subdivision_rendering import (
     SUBDIVISION_HELP, subdivided_render_session, take_subdivision_option, validate_subdivided_mode,
 )
 
-_VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES
+from .video_cli import (
+    VIDEO_HELP, VIDEO_VALUE_FLAGS, VIDEO_WRITER_OPTIONS, take_video_options, validate_video_format,
+)
+
+_VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
 _SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
@@ -71,7 +75,10 @@ def _output_overrides(options):
     """Validate output combinations after the existing parser/still selector."""
     result = {name: options[name] for name in ("vcodec", "pix_fmt", "ffmpeg_bin", "transparent")
               if options.get(name) is not None and options.get(name) is not False}
+    result.update({name: options[name] for name in VIDEO_WRITER_OPTIONS
+                   if options.get(name) is not None})
     format = options["format"]
+    validate_video_format(format, result, transparent=bool(result.get("transparent")))
     if any(name in result for name in ("vcodec", "pix_fmt")) and format not in {"mp4", "mov"}:
         raise ValueError("--vcodec/--pix_fmt require mp4 or mov output")
     if "ffmpeg_bin" in result and format not in {"mp4", "mov", "wav"}:
@@ -179,12 +186,14 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
         text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + PAIRED_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
+        text += "\n" + VIDEO_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
     batch = bool(write_all or len(raw_positionals) > 2)
     try:
+        native_options, video_options = take_video_options(native_options, _VALUE_FLAGS)
         native_options, paired = take_last_frame_option(native_options, _VALUE_FLAGS)
         native_options, subdivide = take_subdivision_option(native_options, _VALUE_FLAGS)
         native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
@@ -197,6 +206,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         parser_args = raw_positionals[:1] + native_options
         positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(parser_args)
         options = select_still_format(options, native_options, still)
+        options.update(video_options)
         output_options = _output_overrides(options)
         if paired:
             if still:
