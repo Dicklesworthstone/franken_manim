@@ -200,6 +200,55 @@ fn fast_cpu_stays_inside_the_versioned_v1_budget() {
     );
 }
 
+/// fm-sq8.11: content the Python portal authors. A pure-2D portal scene
+/// renders on Lumen's retained planar route, and its frames equal native
+/// replay of the scene's FMTL/1 export (e2e
+/// `render_matrix.python_portal_planar_route.v1`). Replaying that export's
+/// stages here holds every fast tier to budget v1 on what the portal
+/// produces (a Transform mid-flight, BLUE fill under a thick stroke), not
+/// only on the native corpus.
+#[test]
+fn portal_planar_content_stays_inside_the_versioned_v1_budget() {
+    let root = std::env::temp_dir().join(format!(
+        "fmn-engine-equivalence-portal-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("portal scratch directory");
+    let report =
+        manimlib::run_portal_gauntlet_planar_route(&root).expect("the portal planar route renders");
+    let bytes = std::fs::read(&report.bundle).expect("the portal's FMTL/1 export");
+    let bundle = fmn_scene::timeline_bundle::TimelineBundle::from_bytes(&bytes)
+        .expect("the portal's FMTL/1 export decodes");
+    assert!(!bundle.requires_camera(), "a planar scene needs no camera");
+    let frames = u32::try_from(report.frame_count).expect("a small frame count");
+    assert!(frames >= 3, "the scene animates over {frames} frames");
+    let mut failures = Vec::new();
+    for index in [0, frames / 2, frames - 1] {
+        let stage = bundle
+            .stage_at(index)
+            .expect("every exported frame reconstructs");
+        let certified = render_frame(&stage, EngineIdentity::certified(), 1);
+        for &tier in Tier::ALL {
+            let identity = EngineIdentity {
+                tier,
+                ..EngineIdentity::fast()
+            };
+            let fast = render_frame(&stage, identity, FAST_THREADS);
+            let measured = divergence(&certified, &fast);
+            failures.extend(budget_v1_failures(
+                &format!("portal.flat@{index}"),
+                tier,
+                &measured,
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "engine-equivalence budget v1 violated on portal content:\n{}",
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn the_equivalence_subset_is_not_empty_and_is_stable() {
     // The blocker only blocks while it covers the engine's stress families;
