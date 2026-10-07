@@ -236,8 +236,11 @@ def render_scenes(
     save_last_frame=True composes each primary with one prepared native PNG,
     including subdivided output. File primaries use stem.png; directories use
     adjacent directory-name.png. Both paths for every job are preflighted.
-    Outcomes retain complete/partial paired receipts. This mode does not reuse
-    single-artifact checkpoints or inherit certification from another output.
+    Outcomes retain complete/partial paired receipts. With checkpoint/resume,
+    non-subdivided jobs bind and hash-verify BOTH outputs before a completed
+    scene is skipped. Incomplete pairs remain no-clobber failures, not reusable
+    successes. Single-artifact plans cannot be reused as paired plans. Neither
+    mode inherits certification from another output.
 
     By default the first ordinary failure raises BatchRenderError with partial
     receipts and the original cause. continue_on_error returns a report with
@@ -338,17 +341,17 @@ def render_scenes(
     validate_batch_mode(native, format, reproducible, checkpoint)
     owner = nullcontext(None) if checkpoint is None else BatchCheckpoint(checkpoint, resume=resume, key=resume_key)
     jobs, destinations = _plan(scenes, directory, format, native, maximum, None, subdivide=subdivide)
+    still_destinations = ([companion_png_path(path, format, subdivide=subdivide) for path in destinations]
+                          if save_last_frame else [])
     if checkpoint is not None:
-        owner.validate_destinations(destinations)
+        owner.validate_destinations([*destinations, *still_destinations])
     with owner as journal:
         existing = frozenset() if journal is None else journal.existing_destinations
         for destination in destinations:
             if os.path.lexists(destination) and destination not in existing:
                 raise FileExistsError(f"render destination already exists: {destination}")
-        still_destinations = ([companion_png_path(path, format, subdivide=subdivide) for path in destinations]
-                              if save_last_frame else [])
         for still_destination in still_destinations:
-            if os.path.lexists(still_destination):
+            if os.path.lexists(still_destination) and still_destination not in existing:
                 raise FileExistsError(f"final PNG destination already exists: {still_destination}")
         provenance = (BatchProvenance(native, format, sources, runtime_identities, destinations)
                       if reproducible else None)
@@ -359,6 +362,7 @@ def render_scenes(
                 "format": format, "resolution": resolution, "fps": fps,
                 "threads": threads, "animation_range": selection,
                 "output_options": _output_options,
+                **({"save_last_frame": True} if save_last_frame else {}),
                 **({"bundle_camera": bundle_camera, "bundle_limits": limits}
                    if format == "fmtl" else {}),
             })
@@ -460,6 +464,10 @@ def _record_checkpoint(journal, outcomes):
 def _restored_outcome(row):
     """Restore data only, never a pickled Scene or executable Python object."""
     data = dict(row["result"])
+    if data.get("schema") == "fmn.paired-render":
+        from .paired_checkpoint import restore_pair_receipt
+        result = restore_pair_receipt(data, destination=Path(row["destination"]))
+        return SceneRenderOutcome(row["name"], result.destination, "succeeded", result=result)
     if data.get("format") == "fmtl":
         from .bundle_checkpoint import restore_bundle_receipt
         result = restore_bundle_receipt(data)

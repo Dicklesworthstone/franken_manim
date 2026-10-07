@@ -15,6 +15,10 @@ scenes; only failed, cancelled and unattempted scenes render again. Progress is
 saved before observers run. A changed/missing output or an unrecorded existing
 output is an error, never permission to overwrite. Use a new output directory
 and checkpoint for a new input version. Keep the journal outside frame folders.
+With --save-last-frame, non-subdivided batches checkpoint the primary and final
+PNG together. Both must still match before a completed scene is skipped. Keep
+the journal and its lock outside BOTH outputs. Paired and single-output plans
+are distinct; --subdivide and --reproducible still do not support recovery.
 """
 
 

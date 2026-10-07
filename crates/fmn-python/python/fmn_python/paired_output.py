@@ -39,8 +39,8 @@ def validate_paired_mode(native, format, *, reproducible=False, checkpoint=None)
         raise ValueError("paired output requires gif, y4m, png_sequence, mp4, mov, or wav")
     if reproducible:
         raise RuntimeError("CAPABILITY: paired final PNGs are standard-only, not certified output")
-    if checkpoint is not None:
-        raise ValueError("paired outputs cannot reuse single-artifact checkpoint receipts")
+    # BatchCheckpoint binds the paired mode and verifies both artifacts.
+    # Subdivision and certified-output exclusions remain with their owners.
     if not callable(getattr(getattr(native, "_CameraCapture", None), "prepare_png", None)):
         raise RuntimeError("CAPABILITY: paired output requires the matching native PNG preparation API")
 
@@ -70,7 +70,9 @@ PAIRED_HELP = """Animation plus final image:
       directory-name.png. Applies to one scene, named batches, and --write_all.
       --subdivide retains per-call clips and adds a single final image.
       Not combined with -s/--skip_animations, still-only formats, certified
-      output or checkpoint/resume. Each artifact is independently no-clobber.
+      output. Non-subdivided batches support checkpoint/resume: a completed
+      pair is reused only after both artifacts are hash-verified. Partial pairs
+      remain no-clobber failures. Each artifact is independently no-clobber.
       Late still-publication failure retains the primary output and reports
       an incomplete pair, never whole-scene success or destructive rollback.
 """

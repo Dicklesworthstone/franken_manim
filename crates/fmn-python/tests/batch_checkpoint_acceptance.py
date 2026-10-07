@@ -46,7 +46,7 @@ def inventory(path):
             for file in files if file.is_file()]
 
 
-def real_output_resume(root, format):
+def real_output_resume(root, format, *, save_last_frame=False):
     global FAIL, SOUND
     FAIL = True
     SOUND = None
@@ -63,7 +63,8 @@ def real_output_resume(root, format):
     CALLS.clear()
     jobs = {"first": Motion, "recover": Recoverable, "last": Motion}
     options = dict(format=format, resolution=(96, 54), fps=8, threads=1,
-                   checkpoint=root / "progress.json", resume_key="native-fixture-v1")
+                   checkpoint=root / "progress.json", resume_key="native-fixture-v1",
+                   **({"save_last_frame": True} if save_last_frame else {}))
     try:
         render_scenes(jobs, root / "output", **options)
     except BatchRenderError as error:
@@ -72,21 +73,28 @@ def real_output_resume(root, format):
         raise AssertionError("authored failure did not fail the batch")
     assert [row.status for row in partial.outcomes] == ["succeeded", "failed", "not_run"], (format, partial.as_dict())
     first = partial.outcomes[0]
+    receipt = first.result.primary if save_last_frame else first.result
+    before_still = inventory(first.result.still_destination) if save_last_frame else None
+    if save_last_frame:
+        assert first.result.completed and first.result.still.frame_count == 1
+        assert before_still and first.result.still.digest == before_still[0][2]
     before = inventory(first.destination)
     assert before, "expected a real native publication"
     if format != "png_sequence":
-        assert first.result.digest == before[0][2]
+        assert receipt.digest == before[0][2]
     if format == "wav":
-        assert first.result.sample_frames > 0
-        assert len(first.result.audio_inputs) == 1
-        assert first.result.audio_inputs[0]["decoder"] == "native-wav"
-        assert first.result.audio_inputs[0]["source_sha256"] == hashlib.sha256(SOUND.read_bytes()).hexdigest()
-        assert not first.result.ffmpeg_invocations
+        assert receipt.sample_frames > 0
+        assert len(receipt.audio_inputs) == 1
+        assert receipt.audio_inputs[0]["decoder"] == "native-wav"
+        assert receipt.audio_inputs[0]["source_sha256"] == hashlib.sha256(SOUND.read_bytes()).hexdigest()
+        assert not receipt.ffmpeg_invocations
     FAIL = False
     CALLS.clear()
     result = render_scenes(jobs, root / "output", resume=True, **options)
     assert result.ok and CALLS == ["recoverable", "motion", "motion"], CALLS
     assert inventory(first.destination) == before, "completed output was rewritten"
+    if save_last_frame:
+        assert inventory(first.result.still_destination) == before_still, "final PNG was rewritten"
     assert result.outcomes[0].result.as_dict() == first.result.as_dict()
     CALLS.clear()
     replay = render_scenes(jobs, root / "output", resume=True, **options)
@@ -108,7 +116,7 @@ def invoke(arguments):
     return code, report
 
 
-def real_cli_resume(root):
+def real_cli_resume(root, *, save_last_frame=False):
     root.mkdir(parents=True)
     source, marker, ready = root / "scenes.py", root / "calls.txt", root / "ready"
     source.write_text(f'''from manimlib import *
@@ -127,14 +135,21 @@ class B(Scene):
 ''')
     arguments = [source, "--write_all", "--format", "png", "--resolution", "96x54", "--fps", "8", "--threads", "1",
                  "--video_dir", root / "output", "--checkpoint", root / "progress.json", "--resume-key", "cli-native-v1"]
+    if save_last_frame:
+        arguments[arguments.index("--format") + 1] = "gif"
+        arguments.append("--save-last-frame")
     code, report = invoke(arguments)
     assert code == 5 and report["batch"]["counts"]["succeeded"] == 1, report
     original = inventory(root / "output/A.png")
+    movie = inventory(root / "output/A.gif") if save_last_frame else None
     ready.write_text("retry failed B only")
     code, report = invoke([*arguments, "--resume"])
     assert code == 0 and report["batch"]["counts"]["succeeded"] == 2, report
     assert marker.read_text().splitlines() == ["A", "B", "B"]
     assert inventory(root / "output/A.png") == original
+    if save_last_frame:
+        assert inventory(root / "output/A.gif") == movie
+        assert report["batch"]["outcomes"][0]["result"]["completed"] is True
     code, report = invoke([*arguments, "--resume"])
     assert code == 0 and marker.read_text().splitlines() == ["A", "B", "B"], report
     (root / "output/A.png").write_bytes(b"damaged-output")
@@ -161,5 +176,20 @@ with tempfile.TemporaryDirectory(prefix="fmn-native-recovery-") as directory:
         traceback.print_exc()
     else:
         print("native batch recovery passed: cli", flush=True)
+    for format in ("gif", "y4m", "png_sequence", "wav"):
+        try:
+            real_output_resume(root / ("paired-" + format), format, save_last_frame=True)
+        except Exception:
+            failures.append("paired-" + format)
+            traceback.print_exc()
+        else:
+            print(f"native paired recovery passed: {format}", flush=True)
+    try:
+        real_cli_resume(root / "paired-cli", save_last_frame=True)
+    except Exception:
+        failures.append("paired-cli")
+        traceback.print_exc()
+    else:
+        print("native paired recovery passed: cli", flush=True)
     assert not failures, "native batch recovery failed: " + ", ".join(failures)
-print("native batch recovery acceptance passed: six formats and CLI fail/resume/integrity")
+print("native batch recovery acceptance passed: six single formats, four paired formats, and both CLI modes")

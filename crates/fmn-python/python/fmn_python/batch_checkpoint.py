@@ -173,7 +173,7 @@ class BatchCheckpoint:
         self.document = None
         self.lock = None
         self.plan = None
-        self.artifacts: dict[str, list[dict[str, Any]]] = {}
+        self.artifacts: dict[str, Any] = {}
         self.completed: dict[str, dict[str, Any]] = {}
 
     def __enter__(self):
@@ -228,8 +228,16 @@ class BatchCheckpoint:
         if self.document is None:
             return set()
         try:
-            return {Path(row["destination"]) for row in self.document["outcomes"]
-                    if row["status"] == "succeeded"}
+            destinations = {Path(row["destination"]) for row in self.document["outcomes"]
+                            if row["status"] == "succeeded"}
+            options = self.document.get("plan", {}).get("options", {})
+            if options.get("save_last_frame") is True:
+                from .paired_checkpoint import paired_destinations
+                destinations.update(paired_destinations(path, options["format"])[1]
+                                    for path in tuple(destinations))
+            # This only permits preflight to proceed. prepare() must still
+            # match the whole plan and verify every member before execution.
+            return destinations
         except (KeyError, TypeError) as error:
             raise ValueError("invalid checkpoint outcomes") from error
 
@@ -271,6 +279,14 @@ class BatchCheckpoint:
                 raise ValueError("invalid checkpoint outcome status")
             if status == "succeeded":
                 receipt = row.get("result")
+                if options.get("save_last_frame") is True:
+                    from .paired_checkpoint import pair_inventory
+                    actual = pair_inventory(receipt, destination, options)
+                    if _json(artifacts.get(job.name)) != _json(actual):
+                        raise ValueError(f"checkpoint output pair is missing or modified: {destination}")
+                    self.artifacts[job.name] = actual
+                    self.completed[job.name] = row
+                    continue
                 if options["format"] == "fmtl":
                     from .bundle_checkpoint import restore_bundle_receipt
                     bundle = restore_bundle_receipt(receipt, destination=destination, options=options)
@@ -300,6 +316,11 @@ class BatchCheckpoint:
         for outcome in outcomes:
             if outcome.status == "succeeded" and outcome.name not in self.artifacts:
                 receipt = outcome.result
+                if self.plan["options"].get("save_last_frame") is True:
+                    from .paired_checkpoint import pair_inventory
+                    self.artifacts[outcome.name] = pair_inventory(
+                        receipt.as_dict(), outcome.destination, self.plan["options"])
+                    continue
                 bundle_mode = self.plan["options"]["format"] == "fmtl"
                 if bundle_mode:
                     from .bundle_checkpoint import restore_bundle_receipt
