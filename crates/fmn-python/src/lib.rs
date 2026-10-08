@@ -12348,6 +12348,67 @@ pub fn run_portal_gauntlet_semantic_witness() -> Result<Vec<PortalSemanticReadin
     })
 }
 
+/// Execute `tests/hoeffding_portal.py` unedited (two segments of the Hoeffding's
+/// D explainer, as ordinary `manimlib` scene code) and render `RingHook` and
+/// `ShuffleLiveD` to PNG sequences under `directory` through
+/// `fmn_python.render_scene`, one render thread. Returns each scene's name and
+/// published frame count (fm-longform-native-e2e-hoeffding-l59d).
+///
+/// # Errors
+/// The scene file's or a render's failure, as text.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_hoeffding(
+    directory: &std::path::Path,
+    resolution: (u32, u32),
+    fps: u32,
+) -> Result<Vec<(String, u64)>, String> {
+    let directory = directory
+        .to_str()
+        .ok_or_else(|| "Gauntlet Hoeffding directory is not UTF-8".to_owned())?
+        .to_owned();
+    with_python_test_module("Hoeffding portal Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_hoeffding_dir", &directory)
+            .map_err(|error| error.to_string())?;
+        for (name, value) in [
+            ("_fmn_width", resolution.0),
+            ("_fmn_height", resolution.1),
+            ("_fmn_fps", fps),
+        ] {
+            globals
+                .set_item(name, value)
+                .map_err(|error| error.to_string())?;
+        }
+        let scenes = CString::new(include_str!("../tests/hoeffding_portal.py"))
+            .expect("the Hoeffding portal scenes contain no NUL");
+        py.run(scenes.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        py.run(
+            cr#"import pathlib
+from fmn_python import render_scene
+
+hoeffding_portal_report = []
+for _scene in (RingHook, ShuffleLiveD):
+    _receipt = render_scene(
+        _scene, pathlib.Path(_fmn_hoeffding_dir) / _scene.__name__, format="png_sequence",
+        resolution=(_fmn_width, _fmn_height), fps=_fmn_fps, threads=1)
+    hoeffding_portal_report.append((_scene.__name__, int(_receipt.frame_count)))
+"#,
+            Some(globals),
+            Some(globals),
+        )
+        .inspect_err(|error| error.print(py))
+        .map_err(|error| error.to_string())?;
+        globals
+            .get_item("hoeffding_portal_report")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "the Hoeffding portal driver emitted no report".to_owned())?
+            .extract::<Vec<(String, u64)>>()
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Render one pure-2D Python scene through the portal, export the same scene
 /// as FMTL/1, and render a surface scene; report the routes taken.
 #[cfg(feature = "gauntlet")]

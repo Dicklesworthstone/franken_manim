@@ -5483,6 +5483,76 @@ fn hoeffding_d_chapters_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("hoeffding_frames", total_frames))
 }
 
+/// fm-longform-native-e2e-hoeffding-l59d, the second front door: two of the
+/// explainer's segments written as ordinary `manimlib` scene code
+/// (crates/fmn-python/tests/hoeffding_portal.py, executed unedited: NumPy
+/// data, `always_redraw` readouts recomputing D from live dot centres,
+/// `ValueTracker.animate`, `LaggedStartMap`, `ShowPassingFlash`, `Axes.c2p`)
+/// render through the portal's production route at 160x90, 4 fps. Each
+/// publishes one PNG per reported frame, nine in ten of them show more than
+/// the background, and the last does (both scenes end on a full picture).
+fn hoeffding_d_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("hoeffding_d_portal")?;
+    let scenes = manimlib::run_portal_gauntlet_hoeffding(&root, (160, 90), 4)
+        .map_err(|error| fail(format!("Hoeffding portal segments: {error}")))?;
+    let mut total_frames = 0;
+    let mut scenes_clean = 0;
+    for (scene, frames) in &scenes {
+        let directory = root.join(scene);
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&directory)
+            .map_err(|error| fail(format!("read {}: {error}", directory.display())))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| fail(format!("read {scene} directory entry: {error}")))
+            })
+            .collect::<Result<_, _>>()?;
+        paths.retain(|path| path.extension().is_some_and(|extension| extension == "png"));
+        paths.sort();
+        let mut drawn = 0_u64;
+        let mut last_drawn = false;
+        for path in &paths {
+            let bytes = std::fs::read(path)
+                .map_err(|error| fail(format!("read {}: {error}", path.display())))?;
+            let image = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(format!("decode {}: {error}", path.display())))?;
+            // Drawn: some pixel departs from the frame's corner (background).
+            let pixels = image.rgba.as_chunks::<4>().0;
+            let corner = pixels.first().copied().unwrap_or_default();
+            last_drawn = pixels.iter().any(|pixel| {
+                pixel[..3]
+                    .iter()
+                    .zip(&corner[..3])
+                    .any(|(a, b)| a.abs_diff(*b) > 8)
+            });
+            drawn += u64::from(last_drawn);
+        }
+        let published = paths.len() as u64;
+        let clean = *frames > 0 && published == *frames && last_drawn && drawn * 10 >= frames * 9;
+        ctx.event(
+            LogEvent::new("e2e.hoeffding.portal_scene")
+                .field("scene", scene.as_str())
+                .field("frames", *frames)
+                .field("published", published)
+                .field("drawn_frames", drawn)
+                .field("last_frame_drawn", truth(last_drawn))
+                .field("clean", truth(clean)),
+        );
+        if !clean {
+            return Err(fail(format!(
+                "{scene}: {frames} frames reported, {published} published, {drawn} drawn, last drawn: {last_drawn}"
+            )));
+        }
+        total_frames += frames;
+        scenes_clean += 1;
+    }
+    ctx.counter("hoeffding_portal_scenes", scenes_clean);
+    ctx.counter("hoeffding_portal_frames", total_frames);
+    Ok(RunOutcome::ok()
+        .with_counter("hoeffding_portal_scenes", scenes_clean)
+        .with_counter("hoeffding_portal_frames", total_frames))
+}
+
 /// fm-longform-native-e2e-hoeffding-l59d, full tier (`FMN_E2E_FULL=1`; run it
 /// under `--release`): the whole explainer at 1920x1080, 60 fps, through the
 /// host's ffmpeg to one MP4 per chapter with the procedural score mixed
@@ -5717,6 +5787,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![LogExpect::span_present(
             "e2e.hoeffding.self_check",
             vec![FieldPred::str_eq("d", "0.4107142857")],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.hoeffding_d_portal.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(hoeffding_d_portal_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("hoeffding_portal_scenes", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.hoeffding.portal_scene",
+            vec![FieldPred::str_eq("clean", "true")],
         )],
     ));
     specs.push(
@@ -7165,6 +7249,18 @@ fn python_studio_capture_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_studio_capture.v1")
         .expect("Python Studio capture is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// fm-longform-native-e2e-hoeffding-l59d: the explainer's portal segments,
+/// focused.
+#[test]
+fn hoeffding_d_portal_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.hoeffding_d_portal.v1")
+        .expect("the Hoeffding's D portal scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
