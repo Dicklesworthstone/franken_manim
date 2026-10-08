@@ -447,6 +447,9 @@ pub struct PixelTileCache {
     tiles: TileCache<Vec<u8>>,
     work: Vec<TileWork>,
     render_state: Option<Digest>,
+    // Bumped when a render starts and again when it succeeds, so only the
+    // surface of the last *completed* render can present the current value.
+    serial: u64,
 }
 
 impl PixelTileCache {
@@ -479,6 +482,28 @@ impl PixelTileCache {
         self.tiles.clear();
         self.work.clear();
         self.render_state = None;
+        self.serial = self.serial.wrapping_add(1);
+    }
+
+    /// Token naming this cache's last completed render.
+    ///
+    /// A caller that keeps that render's surface untouched may pass the token
+    /// to [`crate::engine::FrameJob::render_into_cached_resuming`]. Reused
+    /// tiles are then already in place, so they are not copied back in. Any
+    /// later render start, failure or [`Self::clear`] retires the token.
+    #[must_use]
+    pub fn serial(&self) -> u64 {
+        self.serial
+    }
+
+    pub(crate) fn begin_render(&mut self, resume: Option<u64>) -> bool {
+        let resumed = resume == Some(self.serial) && self.serial != 0;
+        self.serial = self.serial.wrapping_add(1);
+        resumed
+    }
+
+    pub(crate) fn complete_render(&mut self) {
+        self.serial = self.serial.wrapping_add(1);
     }
 
     pub(crate) fn prepare_frame(

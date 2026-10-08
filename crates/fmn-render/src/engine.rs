@@ -1895,6 +1895,28 @@ impl<'a> FrameJob<'a> {
         camera_revision: u64,
         cache: &mut PixelTileCache,
     ) -> Result<CachedRenderStats, CachedRenderError> {
+        self.render_into_cached_resuming(threads, dst, camera_revision, cache, None)
+    }
+
+    /// [`Self::render_into_cached`] into the surface of the cache's previous
+    /// completed render.
+    ///
+    /// `resume` must be the [`PixelTileCache::serial`] read right after that
+    /// render, and the surface must not have been written since. Then every
+    /// reused tile already holds its cached bytes, so the restore copies are
+    /// skipped and the output is unchanged. A stale or absent token restores
+    /// as usual.
+    ///
+    /// # Errors
+    /// As [`Self::render_into_cached`].
+    pub fn render_into_cached_resuming(
+        &self,
+        threads: usize,
+        dst: &mut FrameBuffer,
+        camera_revision: u64,
+        cache: &mut PixelTileCache,
+        resume: Option<u64>,
+    ) -> Result<CachedRenderStats, CachedRenderError> {
         if dst.layout().format() != PixelFormat::Rgba16F {
             return Err(FrameError::FormatMismatch {
                 expected: "Rgba16F raw frame",
@@ -1907,15 +1929,19 @@ impl<'a> FrameJob<'a> {
         {
             return Err(FrameError::DimensionMismatch.into());
         }
+        let resumed = cache.begin_render(resume);
         cache.prepare_frame(
             self.binning,
             self.plan,
             camera_revision,
             self.journal_digest(),
         )?;
-        cache.restore_reused_tiles(dst, self.binning)?;
+        if !resumed {
+            cache.restore_reused_tiles(dst, self.binning)?;
+        }
         let raster = self.render_into_profiled_cached(threads, dst, cache)?;
         cache.retain_rasterized_tiles(dst, self.binning)?;
+        cache.complete_render();
         Ok(CachedRenderStats {
             cache: cache.stats(),
             raster,
@@ -3739,6 +3765,78 @@ mod tests {
             moved.cache.misses > 0,
             "movement reused stale affected tiles"
         );
+    }
+
+    #[test]
+    fn resumed_surfaces_skip_restores_and_stale_tokens_restore() {
+        let (mut stage, mobs) = corpus();
+        let cfg = FrameConfig {
+            viewport: Viewport {
+                width: 109,
+                height: 107,
+            },
+            ..config()
+        };
+        let tiling = default_tiling();
+        let mut plan = RenderPlan::new();
+        let mut arena = FrameArena::new();
+        let mut cache = PixelTileCache::new();
+        let layout = cfg.layout().expect("layout");
+        let mut frame = FrameBuffer::new(layout.clone());
+        assert_eq!(cache.serial(), 0, "a fresh cache names no completed render");
+
+        plan.sync(&stage, 0).expect("valid first frame");
+        let (mono, binning) = (
+            MonoTable::build(&plan, cfg.map).expect("first monotone table"),
+            Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("first binning"),
+        );
+        FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+            .expect("first artifacts")
+            .render_into_cached_resuming(4, &mut frame, 0, &mut cache, Some(0))
+            .expect("first render");
+        let token = cache.serial();
+        assert_ne!(token, 0, "a completed render must name itself");
+
+        // Resume into the surface the cache just filled: reused tiles stay put.
+        stage.shift(mobs[0], [24.0, 0.0, 0.0]);
+        plan.sync(&stage, 0).expect("valid moved frame");
+        let (mono, binning) = (
+            MonoTable::build(&plan, cfg.map).expect("moved monotone table"),
+            Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("moved binning"),
+        );
+        let moved = FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+            .expect("moved artifacts")
+            .render_into_cached_resuming(4, &mut frame, 0, &mut cache, Some(token))
+            .expect("resumed render");
+        let mut cold = FrameBuffer::new(layout.clone());
+        FrameJob::new(&plan, &mono, &binning, cfg)
+            .expect("cold artifacts")
+            .render_into(1, &mut cold)
+            .expect("cold render");
+        assert_frames_equal(
+            &frame,
+            &cold,
+            "a resumed surface diverged from cold rendering",
+        );
+        assert!(moved.cache.hits > 0, "the resumed frame reused no tiles");
+        assert_ne!(
+            cache.serial(),
+            token,
+            "a new render must retire the old token"
+        );
+
+        // The old token is stale now: a foreign surface must be fully restored.
+        let mut foreign = FrameBuffer::new(layout);
+        foreign.as_bytes_mut().fill(0xEE);
+        let again = FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+            .expect("repeat artifacts")
+            .render_into_cached_resuming(4, &mut foreign, 0, &mut cache, Some(token))
+            .expect("stale-token render");
+        assert_eq!(
+            again.cache.misses, 0,
+            "an unchanged frame rasterized a tile"
+        );
+        assert_frames_equal(&foreign, &cold, "a stale token skipped a restore");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Direct binary16 output conversion, without a frame-sized RGBA8 intermediate.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::{Coef, check_dims, check_rgba16f_source, quant8, site_average};
 use crate::half::f16_to_f64;
@@ -74,9 +74,26 @@ pub fn rgba16f_to_nv12(
     range: ColorRange,
     siting: ChromaSiting,
 ) -> Result<(), FrameError> {
+    rgba16f_to_nv12_threaded(src, dst, range, siting, 1)
+}
+
+/// [`rgba16f_to_nv12`] fanned out over up to `threads` scoped workers.
+///
+/// Each worker converts a disjoint band of row pairs; every output code is a
+/// pure function of its own 2x2 source quad, so the bytes are identical to
+/// the serial conversion at every thread count. Frames too small to amortize
+/// a spawn, `threads <= 1`, and targets without threads (wasm32) run serially
+/// with no allocation; a refused spawn converts that band on the caller.
+pub fn rgba16f_to_nv12_threaded(
+    src: &FrameBuffer,
+    dst: &mut FrameBuffer,
+    range: ColorRange,
+    siting: ChromaSiting,
+    threads: usize,
+) -> Result<(), FrameError> {
     check_output(src, dst, PixelFormat::Nv12, "Nv12 destination")?;
     let table = tables();
-    convert::<false>(src, dst, Coef::for_range(range), siting, |pixel| {
+    convert::<false>(src, dst, Coef::for_range(range), siting, threads, |pixel| {
         [0, 2, 4].map(|at| i64::from(table.srgb8_from_f16(channel(pixel, at))))
     });
     Ok(())
@@ -132,6 +149,18 @@ pub fn rgba16f_to_p010(
     range: ColorRange,
     siting: ChromaSiting,
 ) -> Result<(), FrameError> {
+    rgba16f_to_p010_threaded(src, dst, range, siting, 1)
+}
+
+/// [`rgba16f_to_p010`] fanned out over up to `threads` scoped workers, with
+/// the same byte-identity and fallback contract as [`rgba16f_to_nv12_threaded`].
+pub fn rgba16f_to_p010_threaded(
+    src: &FrameBuffer,
+    dst: &mut FrameBuffer,
+    range: ColorRange,
+    siting: ChromaSiting,
+    threads: usize,
+) -> Result<(), FrameError> {
     if range != ColorRange::Limited {
         return Err(FrameError::UnsupportedConversion(
             "P010 output is limited-range only",
@@ -139,7 +168,7 @@ pub fn rgba16f_to_p010(
     }
     check_output(src, dst, PixelFormat::P010, "P010 destination")?;
     let table = srgb16_table();
-    convert::<true>(src, dst, Coef::for_range(range), siting, |pixel| {
+    convert::<true>(src, dst, Coef::for_range(range), siting, threads, |pixel| {
         [0, 2, 4].map(|at| i64::from(table[usize::from(channel(pixel, at))]))
     });
     Ok(())
@@ -166,6 +195,75 @@ fn put<const TEN: bool>(bytes: &mut [u8], at: usize, code: u16) {
     }
 }
 
+// Below this many row pairs per worker, a thread spawn costs more than the
+// conversion it would take over.
+const MIN_BAND_ROW_PAIRS: usize = 32;
+
+// A worker's share of the destination: its first row pair, its luma rows and
+// its interleaved chroma rows.
+type Band<'a> = (usize, &'a mut [u8], &'a mut [u8]);
+
+// FrameLayout stores the planes contiguously and in order — luma rows, then
+// interleaved chroma rows — each plane exactly `stride * rows` bytes. Splitting
+// the destination at the chroma offset and each plane at whole row pairs gives
+// every worker disjoint storage with no shared writes.
+fn convert<const TEN: bool>(
+    src: &FrameBuffer,
+    dst: &mut FrameBuffer,
+    coef: &Coef,
+    siting: ChromaSiting,
+    threads: usize,
+    rgb: impl Fn(&[u8]) -> [i64; 3] + Sync,
+) {
+    let height = src.layout().height() as usize;
+    let y_stride = dst.layout().stride(0);
+    let c_stride = dst.layout().stride(1);
+    let c_offset = dst.layout().plane_offset(1);
+    debug_assert_eq!(dst.layout().plane_offset(0), 0);
+    let (luma, chroma) = dst.as_bytes_mut().split_at_mut(c_offset);
+    let row_pairs = height / 2;
+    let bands = if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        threads.clamp(1, (row_pairs / MIN_BAND_ROW_PAIRS).max(1))
+    };
+    let run = |(first, luma, chroma): Band<'_>| {
+        convert_band::<TEN>(
+            src, first, luma, y_stride, chroma, c_stride, coef, siting, &rgb,
+        );
+    };
+    if bands == 1 {
+        run((0, luma, chroma));
+        return;
+    }
+    let per_band = row_pairs.div_ceil(bands);
+    let mut slots = Vec::with_capacity(bands);
+    let (mut luma, mut chroma, mut first) = (luma, chroma, 0);
+    while first < row_pairs {
+        let pairs = per_band.min(row_pairs - first);
+        let (band_luma, rest_luma) = luma.split_at_mut(pairs * 2 * y_stride);
+        let (band_chroma, rest_chroma) = chroma.split_at_mut(pairs * c_stride);
+        slots.push(Mutex::new(Some((first, band_luma, band_chroma))));
+        (luma, chroma, first) = (rest_luma, rest_chroma, first + pairs);
+    }
+    std::thread::scope(|scope| {
+        for slot in &slots[1..] {
+            // A refused spawn drops only its closure; the band stays in its
+            // slot and the caller converts it below.
+            let _ = std::thread::Builder::new().spawn_scoped(scope, || take_band(slot).map(run));
+        }
+        for slot in &slots {
+            if let Some(band) = take_band(slot) {
+                run(band);
+            }
+        }
+    });
+}
+
+fn take_band<'a>(slot: &Mutex<Option<Band<'a>>>) -> Option<Band<'a>> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner).take()
+}
+
 // Monomorphized output depth and pixel reader keep the NV12 and P010 arithmetic
 // explicit. All working storage is a single 2x2 quad on the stack. The layout
 // checks above and FrameLayout's even-dimension rule precede all writes.
@@ -173,28 +271,29 @@ fn put<const TEN: bool>(bytes: &mut [u8], at: usize, code: u16) {
 // Every output code of a quad is a pure function of its four source pixels, so
 // a quad whose pixels are byte-identical to the previous quad's — background,
 // flat fills — reuses that quad's four luma and two chroma codes instead of
-// repeating the transfer, matrix and rounding. Same bytes, less work.
-fn convert<const TEN: bool>(
+// repeating the transfer, matrix and rounding. Same bytes, less work. The memo
+// starts empty in each band, which changes only how often it hits.
+#[allow(clippy::too_many_arguments)]
+fn convert_band<const TEN: bool>(
     src: &FrameBuffer,
-    dst: &mut FrameBuffer,
+    first_pair: usize,
+    target_luma: &mut [u8],
+    y_stride: usize,
+    target_chroma: &mut [u8],
+    c_stride: usize,
     coef: &Coef,
     siting: ChromaSiting,
-    rgb: impl Fn(&[u8]) -> [i64; 3],
+    rgb: &impl Fn(&[u8]) -> [i64; 3],
 ) {
     let width = src.layout().width() as usize;
-    let height = src.layout().height() as usize;
     let src_stride = src.layout().stride(0);
-    let y_stride = dst.layout().stride(0);
-    let c_stride = dst.layout().stride(1);
-    let c_offset = dst.layout().plane_offset(1);
-    let y_offset = dst.layout().plane_offset(0);
     let sample_bytes = if TEN { 2 } else { 1 };
     let source = src.plane(0);
-    let target = dst.as_bytes_mut();
     let pixel_key =
         |at: usize| u64::from_le_bytes(source[at..at + 8].try_into().expect("an 8-byte pixel"));
     let mut memo: Option<([u64; 4], [u16; 4], [u16; 2])> = None;
-    for y in (0..height).step_by(2) {
+    for pair in 0..target_chroma.len() / c_stride {
+        let y = (first_pair + pair) * 2;
         for x in (0..width).step_by(2) {
             let ats = [
                 y * src_stride + x * 8,
@@ -229,13 +328,13 @@ fn convert<const TEN: bool>(
             };
             for dy in 0..2 {
                 for dx in 0..2 {
-                    let y_at = y_offset + (y + dy) * y_stride + (x + dx) * sample_bytes;
-                    put::<TEN>(target, y_at, luma[dy * 2 + dx]);
+                    let y_at = (pair * 2 + dy) * y_stride + (x + dx) * sample_bytes;
+                    put::<TEN>(target_luma, y_at, luma[dy * 2 + dx]);
                 }
             }
-            let c_at = c_offset + (y / 2) * c_stride + x * sample_bytes;
+            let c_at = pair * c_stride + x * sample_bytes;
             for (channel, code) in chroma_codes.into_iter().enumerate() {
-                put::<TEN>(target, c_at + channel * sample_bytes, code);
+                put::<TEN>(target_chroma, c_at + channel * sample_bytes, code);
             }
         }
     }

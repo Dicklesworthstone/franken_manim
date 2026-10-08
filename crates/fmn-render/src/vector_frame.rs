@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use fmn_frame::FrameBuffer;
+use fmn_frame::{FrameBuffer, FrameError, FrameLayout};
 use fmn_mobject::{ProgramKind, Stage};
 
 use crate::{
@@ -90,6 +90,14 @@ pub struct OwnedVectorFrame {
 }
 
 impl OwnedVectorFrame {
+    /// The RGBA16F surface layout [`Self::render_cached_into`] requires.
+    ///
+    /// # Errors
+    /// Refuses a viewport too large for one frame allocation.
+    pub fn raster_layout(&self) -> Result<FrameLayout, FrameError> {
+        self.config.frame.layout()
+    }
+
     /// Execute with caller-owned, worker-local scratch and retained pixels.
     ///
     /// Workers may receive nonconsecutive frames: cache keys name content, not
@@ -105,6 +113,35 @@ impl OwnedVectorFrame {
         arena: &mut FrameArena,
         cache: &mut PixelTileCache,
     ) -> Result<(FrameBuffer, CachedRenderStats), RetainedFrameRendererError> {
+        let mut frame = FrameBuffer::new(self.config.frame.layout()?);
+        let stats = self.render_cached_into(threads, arena, cache, &mut frame, None)?;
+        Ok((frame, stats))
+    }
+
+    /// [`Self::render_cached`] into a caller-recycled RGBA16F surface.
+    ///
+    /// Every pixel is overwritten: reused tiles are restored and every other
+    /// tile writes its background before any coverage, so a recycled surface
+    /// yields the same bytes as a fresh one. Recycling skips the frame-sized
+    /// zeroed allocation (66 MB at 4K) and its page faults on every frame.
+    /// Row padding is never written. The surface must have this frame's
+    /// RGBA16F layout.
+    ///
+    /// `resume` is the cache's [`PixelTileCache::serial`] from the render that
+    /// last filled `frame`, when nothing has written it since. Reused tiles
+    /// are then left in place instead of copied back from the cache. See
+    /// [`crate::engine::FrameJob::render_into_cached_resuming`].
+    ///
+    /// # Errors
+    /// As [`Self::render_cached`], plus a layout mismatch for `frame`.
+    pub fn render_cached_into(
+        &self,
+        threads: usize,
+        arena: &mut FrameArena,
+        cache: &mut PixelTileCache,
+        frame: &mut FrameBuffer,
+        resume: Option<u64>,
+    ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
         if threads == 0 {
             return Err(RetainedFrameRendererError::InvalidThreads);
         }
@@ -124,9 +161,7 @@ impl OwnedVectorFrame {
             self.config.frame,
             self.config.engine,
         )?;
-        let mut frame = FrameBuffer::new(self.config.frame.layout()?);
-        let stats = job.render_into_cached(threads, &mut frame, self.camera_revision, cache)?;
-        Ok((frame, stats))
+        Ok(job.render_into_cached_resuming(threads, frame, self.camera_revision, cache, resume)?)
     }
 }
 

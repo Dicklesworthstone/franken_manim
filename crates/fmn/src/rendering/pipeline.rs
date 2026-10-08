@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::fmt;
 use std::sync::Mutex;
 
-use fmn_frame::convert::{rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010, rgba16f_to_rgba8};
+use fmn_frame::convert::{
+    rgba16f_to_bgra8, rgba16f_to_nv12_threaded, rgba16f_to_p010_threaded, rgba16f_to_rgba8,
+};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat};
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
 use fmn_render::{
@@ -94,6 +96,40 @@ struct VectorWorker {
     cache: PixelTileCache,
     compiled_vector: Option<VectorFrameCompiler>,
     compiled_camera: Option<RetainedFrameRenderer>,
+    // The last vector raster, kept with the cache token proving it still
+    // holds that frame: no 66 MB zeroed allocation per 4K frame (its page
+    // faults were ~12% of a 4K render), and reused tiles stay in place.
+    spare: Option<(FrameBuffer, u64)>,
+}
+
+impl VectorWorker {
+    // Render into the recycled raster, convert into the output slot on the
+    // same team, then keep the raster for the next frame. A raster from a
+    // failed render is dropped, so a stale surface can never be resumed.
+    fn render_vector(
+        &mut self,
+        frame: &OwnedVectorFrame,
+        threads: usize,
+        output: &mut FrameBuffer,
+    ) -> Result<(), NativeFrameError> {
+        let layout = frame.raster_layout().map_err(NativeFrameError::Frame)?;
+        let (mut raster, resume) = match self.spare.take() {
+            Some((raster, serial)) if *raster.layout() == layout => (raster, Some(serial)),
+            _ => (FrameBuffer::new(layout), None),
+        };
+        frame
+            .render_cached_into(
+                threads,
+                &mut self.arena,
+                &mut self.cache,
+                &mut raster,
+                resume,
+            )
+            .map_err(NativeFrameError::Renderer)?;
+        convert_into(&raster, output, threads)?;
+        self.spare = Some((raster, self.cache.serial()));
+        Ok(())
+    }
 }
 
 pub(super) struct NativeFrameStages {
@@ -115,7 +151,8 @@ impl NativeFrameStages {
 impl PipelineStages for NativeFrameStages {
     type Frame = NativeFrameJob;
     type Prepared = NativeFrameJob;
-    type Rasterized = (FrameBuffer, FrameReservation);
+    // Converted on the render team that rasterized it (see `convert`).
+    type Rasterized = FrameReservation;
     type Output = FrameReservation;
     type Error = NativeFrameError;
 
@@ -129,10 +166,14 @@ impl PipelineStages for NativeFrameStages {
         job: NativeFrameJob,
         team: &TeamPlan,
     ) -> Result<Self::Rasterized, Self::Error> {
-        let frame = match job.frame {
-            NativeFrame::Camera(frame) => frame
-                .render(team.threads())
-                .map_err(NativeFrameError::Renderer)?,
+        let NativeFrameJob { frame, mut output } = job;
+        match frame {
+            NativeFrame::Camera(frame) => {
+                let raster = frame
+                    .render(team.threads())
+                    .map_err(NativeFrameError::Renderer)?;
+                convert_into(&raster, output.frame_mut(), team.threads())?;
+            }
             NativeFrame::Compiled {
                 job,
                 config,
@@ -172,7 +213,7 @@ impl PipelineStages for NativeFrameStages {
                                 .map_err(NativeFrameError::Renderer)?,
                         );
                     }
-                    worker
+                    let raster = worker
                         .compiled_camera
                         .as_mut()
                         .ok_or(NativeFrameError::WorkerState(
@@ -181,29 +222,23 @@ impl PipelineStages for NativeFrameStages {
                         .prepare_with_camera(&stage, &camera)
                         .map_err(NativeFrameError::Renderer)?
                         .render(team.threads())
-                        .map_err(NativeFrameError::Renderer)?
+                        .map_err(NativeFrameError::Renderer)?;
+                    convert_into(&raster, output.frame_mut(), team.threads())?;
                 } else {
                     if worker.compiled_vector.is_none() {
                         worker.compiled_vector = Some(
                             VectorFrameCompiler::new(config).map_err(NativeFrameError::Renderer)?,
                         );
                     }
-                    let VectorWorker {
-                        compiled_vector,
-                        arena,
-                        cache,
-                        ..
-                    } = &mut *worker;
-                    compiled_vector
+                    let frame = worker
+                        .compiled_vector
                         .as_mut()
                         .ok_or(NativeFrameError::WorkerState(
                             "missing compiled vector compiler",
                         ))?
                         .capture(&stage, 0)
-                        .map_err(NativeFrameError::Renderer)?
-                        .render_cached(team.threads(), arena, cache)
-                        .map_err(NativeFrameError::Renderer)?
-                        .0
+                        .map_err(NativeFrameError::Renderer)?;
+                    worker.render_vector(&frame, team.threads(), output.frame_mut())?;
                 }
             }
             NativeFrame::Vector(frame) => {
@@ -223,43 +258,59 @@ impl PipelineStages for NativeFrameStages {
                         "render worker scratch was poisoned by an earlier panic",
                     )
                 })?;
-                let VectorWorker { arena, cache, .. } = &mut *worker;
-                frame
-                    .render_cached(team.threads(), arena, cache)
-                    .map_err(NativeFrameError::Renderer)?
-                    .0
-            }
-        };
-        Ok((frame, job.output))
-    }
-
-    fn convert(
-        &self,
-        (frame, mut output): Self::Rasterized,
-        _: &TeamPlan,
-    ) -> Result<FrameReservation, Self::Error> {
-        // Direct binary16 kernels: no frame-sized RGBA8 intermediate per
-        // frame (PG-6). BGRA/NV12 are byte-identical to the legacy two-step
-        // route; P010 keeps its precision beyond eight bits.
-        let destination = output.frame_mut();
-        match destination.layout().format() {
-            PixelFormat::Rgba8 => rgba16f_to_rgba8(&frame, destination),
-            PixelFormat::Bgra8 => rgba16f_to_bgra8(&frame, destination),
-            PixelFormat::Nv12 => {
-                rgba16f_to_nv12(&frame, destination, ColorRange::Limited, ChromaSiting::Left)
-            }
-            PixelFormat::P010 => {
-                rgba16f_to_p010(&frame, destination, ColorRange::Limited, ChromaSiting::Left)
-            }
-            PixelFormat::Rgba16F => {
-                return Err(NativeFrameError::WorkerState(
-                    "RGBA16F is a renderer intermediate, not a native output format",
-                ));
+                worker.render_vector(&frame, team.threads(), output.frame_mut())?;
             }
         }
-        .map_err(NativeFrameError::Frame)?;
         Ok(output)
     }
+
+    // Output conversion runs at the end of `rasterize`, on the render team's
+    // threads, which are otherwise idle until the next frame arrives. The
+    // output team has at most two SMT siblings (one E-core on macOS); at 4K
+    // the conversion there was the pipeline's serial bottleneck. Same bytes:
+    // on trj, 600 4K frames took 13.3 s fused vs 13.5 s on the output team.
+    fn convert(
+        &self,
+        output: FrameReservation,
+        _: &TeamPlan,
+    ) -> Result<FrameReservation, Self::Error> {
+        Ok(output)
+    }
+}
+
+// Direct binary16 kernels: no frame-sized RGBA8 intermediate per frame (PG-6).
+// BGRA/NV12 are byte-identical to the legacy two-step route; P010 keeps its
+// precision beyond eight bits. The video formats fan out over `threads`: at
+// 4K the serial NV12 pass was the largest single cost.
+fn convert_into(
+    frame: &FrameBuffer,
+    destination: &mut FrameBuffer,
+    threads: usize,
+) -> Result<(), NativeFrameError> {
+    match destination.layout().format() {
+        PixelFormat::Rgba8 => rgba16f_to_rgba8(frame, destination),
+        PixelFormat::Bgra8 => rgba16f_to_bgra8(frame, destination),
+        PixelFormat::Nv12 => rgba16f_to_nv12_threaded(
+            frame,
+            destination,
+            ColorRange::Limited,
+            ChromaSiting::Left,
+            threads,
+        ),
+        PixelFormat::P010 => rgba16f_to_p010_threaded(
+            frame,
+            destination,
+            ColorRange::Limited,
+            ChromaSiting::Left,
+            threads,
+        ),
+        PixelFormat::Rgba16F => {
+            return Err(NativeFrameError::WorkerState(
+                "RGBA16F is a renderer intermediate, not a native output format",
+            ));
+        }
+    }
+    .map_err(NativeFrameError::Frame)
 }
 
 /// Shared CPU capture-to-output pipeline for native front doors.

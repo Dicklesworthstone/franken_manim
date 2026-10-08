@@ -53,7 +53,10 @@ use crate::format::{ChromaSiting, ColorRange, PixelFormat};
 use crate::transfer::{TransferTables, tables};
 
 mod linear_yuv;
-pub use linear_yuv::{rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010};
+pub use linear_yuv::{
+    rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_nv12_threaded, rgba16f_to_p010,
+    rgba16f_to_p010_threaded,
+};
 
 #[inline]
 fn convert_rgba16f_pixels(src: &[[u8; 8]], dst: &mut [[u8; 4]], tables: &TransferTables) {

@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use fmn_frame::convert::{
-    rgba_to_nv12, rgba_to_p010, rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010,
-    rgba16f_to_rgba8, swap_rb8,
+    rgba_to_nv12, rgba_to_p010, rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_nv12_threaded,
+    rgba16f_to_p010, rgba16f_to_p010_threaded, rgba16f_to_rgba8, swap_rb8,
 };
 use fmn_frame::half::{f16_from_f32, f16_to_f64};
 use fmn_frame::transfer::{srgb_decode, srgb_encode};
@@ -394,4 +394,61 @@ fn invalid_layouts_and_full_range_p010_refuse_before_any_write() {
         Err(FrameError::UnsupportedConversion(_))
     ));
     assert_eq!(target.as_bytes(), before);
+}
+
+#[test]
+fn threaded_yuv_conversion_is_byte_identical_at_every_thread_count() {
+    // 330 row pairs: bands split unevenly at most counts; padded strides and
+    // flat runs (memo hits across what become band seams) are both present.
+    let (width, height) = (322, 660);
+    let mut source = frame(PixelFormat::Rgba16F, width, height, 64);
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let bits = if (y / 7 + x / 13) % 3 == 0 {
+                [0x3C00, 0x3800, 0x3400, 0x3C00]
+            } else {
+                let seed = (x * 7919 + y * 104_729) as u16;
+                [seed, seed.rotate_left(5), !seed, 0x3C00]
+            };
+            set_pixel(&mut source, x, y, bits);
+        }
+    }
+    for siting in [ChromaSiting::Left, ChromaSiting::Center] {
+        let mut nv12 = frame(PixelFormat::Nv12, width, height, 64);
+        let mut p010 = frame(PixelFormat::P010, width, height, 64);
+        rgba16f_to_nv12(&source, &mut nv12, ColorRange::Limited, siting).unwrap();
+        rgba16f_to_p010(&source, &mut p010, ColorRange::Limited, siting).unwrap();
+        for threads in [0, 1, 2, 3, 4, 7, 10, 16, 64] {
+            let mut nv12_threaded = frame(PixelFormat::Nv12, width, height, 64);
+            let mut p010_threaded = frame(PixelFormat::P010, width, height, 64);
+            rgba16f_to_nv12_threaded(
+                &source,
+                &mut nv12_threaded,
+                ColorRange::Limited,
+                siting,
+                threads,
+            )
+            .unwrap();
+            rgba16f_to_p010_threaded(
+                &source,
+                &mut p010_threaded,
+                ColorRange::Limited,
+                siting,
+                threads,
+            )
+            .unwrap();
+            assert_eq!(
+                nv12_threaded.as_bytes(),
+                nv12.as_bytes(),
+                "NV12 at {threads} threads"
+            );
+            assert_eq!(
+                p010_threaded.as_bytes(),
+                p010.as_bytes(),
+                "P010 at {threads} threads"
+            );
+            padding_is_untouched(&nv12_threaded);
+            padding_is_untouched(&p010_threaded);
+        }
+    }
 }
