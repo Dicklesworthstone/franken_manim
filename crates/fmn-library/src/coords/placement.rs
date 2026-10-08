@@ -1,7 +1,7 @@
 //! Owning coordinate-system placement. Drawn geometry and numeric endpoints
 //! always follow the same operation; a detached VMobject clone is not the chart.
 
-use super::{Axes, NumberLine, Vec3, VMobject};
+use super::{Axes, NumberLine, VMobject, Vec3};
 
 /// The geometry operations that preserve the orthogonal chart used by p2c.
 /// General shears are deliberately not admitted through this interface.
@@ -38,9 +38,7 @@ impl NumberLine {
     #[must_use]
     pub fn scaled_about(mut self, factor: f64, about: Vec3) -> Self {
         self.vmob = core::mem::take(&mut self.vmob).scaled_about(factor, about);
-        let map = |point: Vec3| {
-            std::array::from_fn(|i| about[i] + (point[i] - about[i]) * factor)
-        };
+        let map = |point: Vec3| std::array::from_fn(|i| about[i] + (point[i] - about[i]) * factor);
         self.start = map(self.start);
         self.end = map(self.end);
         // These getters also feed NumberPlane's independent x/y unit sizes.
@@ -79,18 +77,18 @@ macro_rules! coordinate_placement {
             /// mutate this detached value.
             #[must_use]
             pub fn shifted(self, offset: fmn_core::types::Vec3) -> Self {
-                self.transformed_coordinates(
-                    $crate::coords::placement::CoordinateTransform::Shift(offset),
-                )
+                self.transformed_coordinates($crate::coords::placement::CoordinateTransform::Shift(
+                    offset,
+                ))
             }
 
             /// Scale a built chart and its whole drawn family about a scene point.
             /// Negative factors reflect it; a zero factor collapses its inverse.
             #[must_use]
             pub fn scaled_about(self, factor: f64, about: fmn_core::types::Vec3) -> Self {
-                self.transformed_coordinates(
-                    $crate::coords::placement::CoordinateTransform::Scale(factor, about),
-                )
+                self.transformed_coordinates($crate::coords::placement::CoordinateTransform::Scale(
+                    factor, about,
+                ))
             }
 
             /// Rotate a built chart and its whole drawn family about a scene axis.
@@ -143,7 +141,6 @@ macro_rules! coordinate_placement {
         }
     };
 }
-pub(crate) use coordinate_placement;
 coordinate_placement!(Axes);
 
 #[cfg(test)]
@@ -176,7 +173,10 @@ mod tests {
             .y_range([-1.0, 3.0, 1.0])
             .width(6.0)
             .height(3.0)
-            .axis_config(AxisConfig { include_tip: Some(true), ..Default::default() })
+            .axis_config(AxisConfig {
+                include_tip: Some(true),
+                ..Default::default()
+            })
             .build(&FontBook::bundled().unwrap())
             .unwrap()
     }
@@ -204,16 +204,27 @@ mod tests {
             let factor = if i % 2 == 0 { -0.75 } else { 1.5 };
             let pivot = [0.3, -0.7, 0.2];
             let axis = [1.0, 2.0, 3.0];
-            let after = base.clone().scaled_about(factor, pivot)
-                .rotated_about(angle, axis, pivot).shifted([2.0, -3.0, 1.0]);
-            let expected = base.vmob().clone().scaled_about(factor, pivot)
-                .rotated_about(angle, axis, pivot).shifted([2.0, -3.0, 1.0]);
+            let after = base
+                .clone()
+                .scaled_about(factor, pivot)
+                .rotated_about(angle, axis, pivot)
+                .shifted([2.0, -3.0, 1.0]);
+            let expected = base
+                .vmob()
+                .clone()
+                .scaled_about(factor, pivot)
+                .rotated_about(angle, axis, pivot)
+                .shifted([2.0, -3.0, 1.0]);
             family_near(after.vmob(), &expected);
             for p in [[0.0, 0.0], [1.0, -0.25], [-3.5, 5.25]] {
                 near(after.p2c(after.c2p(&p)), [p[0], p[1], 0.0]);
             }
-            assert!((after.x_axis().effective_unit_size()
-                - factor.abs() * base.x_axis().effective_unit_size()).abs() < 1e-12);
+            assert!(
+                (after.x_axis().effective_unit_size()
+                    - factor.abs() * base.x_axis().effective_unit_size())
+                .abs()
+                    < 1e-12
+            );
         }
     }
 
@@ -226,7 +237,14 @@ mod tests {
             family_near(placed.vmob(), &expected);
             let delta = super::super::sub(expected.center_point(), before.vmob().center_point());
             near(placed.origin(), super::super::add(before.origin(), delta));
-            near(placed.clone().moved_to([2.0, -1.0, 0.0]).vmob().center_point(), [2.0, -1.0, 0.0]);
+            near(
+                placed
+                    .clone()
+                    .moved_to([2.0, -1.0, 0.0])
+                    .vmob()
+                    .center_point(),
+                [2.0, -1.0, 0.0],
+            );
         }
     }
 
@@ -239,23 +257,34 @@ mod tests {
         let old_graph = before.get_graph(f).build().unwrap();
         let graph = after.get_graph(f).build().unwrap();
         family_near(&graph, &old_graph.clone().shifted(shift));
-        let bins = after.get_riemann_rectangles(&f, Some([-1.0, 2.0]), Some(0.4), "center").unwrap();
-        let old_bins = before.get_riemann_rectangles(&f, Some([-1.0, 2.0]), Some(0.4), "center").unwrap();
+        let bins = after
+            .get_riemann_rectangles(&f, Some([-1.0, 2.0]), Some(0.4), "center")
+            .unwrap();
+        let old_bins = before
+            .get_riemann_rectangles(&f, Some([-1.0, 2.0]), Some(0.4), "center")
+            .unwrap();
         family_near(&bins, &old_bins.shifted(shift));
         let area = after.get_area_under_graph(&graph, [-2.0, 4.0], Some([-1.0, 2.0]));
         let old_area = before.get_area_under_graph(&old_graph, [-2.0, 4.0], Some([-1.0, 2.0]));
         family_near(&area, &old_area.shifted(shift));
-        near(after.get_tangent_line(1.0, &f, 2.0).center_point(), after.i2gp(1.0, &f));
+        near(
+            after.get_tangent_line(1.0, &f, 2.0).center_point(),
+            after.i2gp(1.0, &f),
+        );
     }
 
     #[test]
     fn adding_number_labels_does_not_reset_placement() {
         let book = FontBook::bundled().unwrap();
-        let mut after = axes().scaled_about(0.75, ORIGIN).rotated_about(PI / 5.0, OUT, ORIGIN)
+        let mut after = axes()
+            .scaled_about(0.75, ORIGIN)
+            .rotated_about(PI / 5.0, OUT, ORIGIN)
             .shifted([-2.0, 1.0, 0.0]);
         let origin = after.origin();
         let point = after.c2p(&[1.0, 2.0]);
-        after.add_coordinate_labels(&book, Some(&[1.0]), Some(&[2.0]), None, None).unwrap();
+        after
+            .add_coordinate_labels(&book, Some(&[1.0]), Some(&[2.0]), None, None)
+            .unwrap();
         near(after.origin(), origin);
         near(after.c2p(&[1.0, 2.0]), point);
         family_near(after.x_axis().vmob(), &after.vmob().children()[0]);
@@ -266,7 +295,9 @@ mod tests {
     fn number_line_scale_carries_endpoints_and_units_before_and_after_build() {
         for built in [false, true] {
             let mut line = NumberLine::new([-2.0, 3.0, 1.0]).width(10.0);
-            if built { line = line.build().unwrap(); }
+            if built {
+                line = line.build().unwrap();
+            }
             let old = line.clone();
             let after = line.scaled_about(-2.0, [1.0, 0.0, 0.0]);
             assert_eq!(after.effective_unit_size(), 4.0);
