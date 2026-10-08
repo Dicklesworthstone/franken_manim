@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use fmn_output::negotiate::{EncoderPreset, EncoderTune, VideoQuality};
 use fmn_output::{
-    Boundary, ColorDescription, Container, EncoderCapabilities, EncoderChoice,
-    FfmpegTool, JobLimits, VideoJob, WireFormat,
+    Boundary, ColorDescription, Container, EncoderCapabilities, EncoderChoice, FfmpegTool,
+    JobLimits, VideoJob, WireFormat,
 };
 use fmn_platform::process::{FfmpegLocator, StdFfmpegLocator, StdProcessRunner};
 
@@ -20,10 +20,10 @@ fn actual_streaming_child_receives_the_negotiated_quality_exactly() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = Path::new("/tmp").canonicalize().unwrap().join(format!(
-        "fmn-quality-argv-{}-{unique}",
-        std::process::id()
-    ));
+    let root = Path::new("/tmp")
+        .canonicalize()
+        .unwrap()
+        .join(format!("fmn-quality-argv-{}-{unique}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let locator = StdFfmpegLocator::default();
@@ -36,26 +36,38 @@ fn actual_streaming_child_receives_the_negotiated_quality_exactly() {
     let boundary = Boundary::new(
         tool,
         runner,
-        JobLimits { keep_workdir: true, ..JobLimits::default() },
+        JobLimits {
+            keep_workdir: true,
+            ..JobLimits::default()
+        },
         root.clone(),
     )
     .unwrap();
     let policies = [
-        ("libx264", VideoQuality {
-            crf: Some(16),
-            preset: Some(EncoderPreset::Slow),
-            tune: Some(EncoderTune::Animation),
-            bitrate: None,
-        }),
-        ("libx264", VideoQuality {
-            crf: Some(0),
-            preset: Some(EncoderPreset::UltraFast),
-            ..VideoQuality::default()
-        }),
-        ("h264_nvenc", VideoQuality {
-            bitrate: Some(12_000_000),
-            ..VideoQuality::default()
-        }),
+        (
+            "libx264",
+            VideoQuality {
+                crf: Some(16),
+                preset: Some(EncoderPreset::Slow),
+                tune: Some(EncoderTune::Animation),
+                bitrate: None,
+            },
+        ),
+        (
+            "libx264",
+            VideoQuality {
+                crf: Some(0),
+                preset: Some(EncoderPreset::UltraFast),
+                ..VideoQuality::default()
+            },
+        ),
+        (
+            "h264_nvenc",
+            VideoQuality {
+                bitrate: Some(12_000_000),
+                ..VideoQuality::default()
+            },
+        ),
         ("libx264", VideoQuality::default()),
     ];
     for container in [Container::Mp4, Container::Mov] {
@@ -81,10 +93,9 @@ fn actual_streaming_child_receives_the_negotiated_quality_exactly() {
             assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
             assert_eq!(report.invocations.len(), 1);
             let invocation = &report.invocations[0];
-            let log = std::fs::read_to_string(
-                invocation.artifact.parent().unwrap().join("argv.log"),
-            )
-            .unwrap();
+            let log =
+                std::fs::read_to_string(invocation.artifact.parent().unwrap().join("argv.log"))
+                    .unwrap();
             assert_eq!(log.trim_end(), invocation.provenance.argv.join(" "));
             assert_eq!(invocation.provenance.encoder.as_deref(), Some(name));
             assert_eq!(invocation.provenance.tool_sha256_hex.len(), 64);
@@ -92,12 +103,18 @@ fn actual_streaming_child_receives_the_negotiated_quality_exactly() {
             let input = argv.iter().position(|arg| arg == "-i").unwrap();
             for (flag, value) in [
                 ("-crf", quality.crf.map(|value| value.to_string())),
-                ("-preset", quality.preset.map(|value| value.as_str().to_owned())),
+                (
+                    "-preset",
+                    quality.preset.map(|value| value.as_str().to_owned()),
+                ),
                 ("-tune", quality.tune.map(|value| value.as_str().to_owned())),
                 ("-b:v", quality.bitrate.map(|value| value.to_string())),
             ] {
-                let positions: Vec<_> = argv.iter().enumerate()
-                    .filter_map(|(at, arg)| (arg == flag).then_some(at)).collect();
+                let positions: Vec<_> = argv
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, arg)| (arg == flag).then_some(at))
+                    .collect();
                 match value {
                     None => assert!(positions.is_empty()),
                     Some(value) => {

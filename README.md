@@ -125,6 +125,8 @@ The `Tex` mobject above is laid out by fmd-math from bundled Computer Modern (sa
 
 `RenderOptions::with_format(path, RenderFormat::Gif | RenderFormat::Y4m)` selects the other native codecs. For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.
 
+For a long-form example, [`crates/fmn/examples/hoeffding_d`](crates/fmn/examples/hoeffding_d/main.rs) is an eight-chapter explainer of Hoeffding's D, about 4,000 lines of Rust. It runs over four minutes at 1080p60 with a procedurally synthesized score mixed natively. Its readouts recompute the statistic from live dot positions every frame. Run `cargo run --release -p fmn --example hoeffding_d -- render all` for MP4 (ffmpeg on `PATH`), or add `--format png --res 480x270 --fps 15` for a fully native draft. The e2e suite renders all eight chapters on every commit (`render_matrix.hoeffding_d_chapters.v1`).
+
 ---
 
 ## The design commitments

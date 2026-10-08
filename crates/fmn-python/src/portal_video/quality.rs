@@ -9,10 +9,7 @@ use pyo3::types::PyBool;
 /// Stock and older writers have no quality attributes. Missing/None means
 /// no override, preserving the installed encoder's defaults. Do not suppress
 /// descriptor failures other than Python's ordinary missing-attribute signal.
-fn optional<'py>(
-    writer: &Bound<'py, PyAny>,
-    name: &str,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn optional<'py>(writer: &Bound<'py, PyAny>, name: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
     match writer.getattr(name) {
         Ok(value) if value.is_none() => Ok(None),
         Ok(value) => Ok(Some(value)),
@@ -66,9 +63,7 @@ pub(super) fn from_writer(writer: &Bound<'_, PyAny>) -> PyResult<VideoQuality> {
             value
                 .extract::<String>()?
                 .parse::<EncoderTune>()
-                .map_err(|error| {
-                    PyValueError::new_err(format!("file_writer.video_tune: {error}"))
-                })
+                .map_err(|error| PyValueError::new_err(format!("file_writer.video_tune: {error}")))
         })
         .transpose()?;
     let bitrate = unsigned(writer, "video_bitrate", 1, u32::MAX)?;
@@ -87,8 +82,8 @@ mod tests {
     #[test]
     fn portal_video_quality_acceptance_suite() {
         crate::with_python_test_module("portal video quality", |py, _module, globals| {
-            let source = std::ffi::CString::new(include_str!("../../tests/video_quality.py"))
-                .unwrap();
+            let source =
+                std::ffi::CString::new(include_str!("../../tests/video_quality.py")).unwrap();
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("writer quality reaches native negotiation and the video bitstream");

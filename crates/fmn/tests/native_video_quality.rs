@@ -319,7 +319,12 @@ fn native_mp4_mov_quality_survives_into_provenance_and_x264_sei() {
                 }
                 let report = render_with_fs(&mut Picture, options, Arc::new(StdFs)).unwrap();
                 assert_eq!(report.artifact.video_quality, Some(quality));
-                assert_eq!(report.artifact.frame_count, 2);
+                // Every runtime capture reaches the encoder, one per clock
+                // frame (as native_video.rs asserts): a 0.2 s wait at 10 fps
+                // is three clock frames, as a 0.2 s play is in native_render.rs.
+                let clock_frames = u64::try_from(report.scene.time.frames()).unwrap();
+                assert_eq!(report.artifact.frame_count, clock_frames);
+                assert_eq!(clock_frames, 3);
                 assert_eq!(report.artifact.ffmpeg.len(), 1);
                 let provenance = &report.artifact.ffmpeg[0].provenance;
                 assert_eq!(provenance.encoder.as_deref(), Some("libx264"));

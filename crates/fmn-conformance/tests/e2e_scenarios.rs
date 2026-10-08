@@ -64,6 +64,26 @@
 #[path = "support/semantic_routes.rs"]
 mod semantic_routes;
 
+// fm-longform-native-e2e-hoeffding-l59d: the Hoeffding's D explainer
+// (crates/fmn/examples/hoeffding_d), compiled here from its own sources so
+// both tiers render the real chapters through `fmn::render`. The chapters
+// name their siblings as `crate::kit` etc., hence the crate-root modules.
+#[allow(dead_code)]
+#[path = "../../fmn/examples/hoeffding_d/chapters/mod.rs"]
+mod chapters;
+#[allow(dead_code)]
+#[path = "../../fmn/examples/hoeffding_d/kit.rs"]
+mod kit;
+#[allow(dead_code)]
+#[path = "../../fmn/examples/hoeffding_d/narration.rs"]
+mod narration;
+#[allow(dead_code)]
+#[path = "../../fmn/examples/hoeffding_d/sound.rs"]
+mod sound;
+#[allow(dead_code)]
+#[path = "../../fmn/examples/hoeffding_d/stats.rs"]
+mod stats;
+
 use fmn_anim::animation::Animation as _;
 use fmn_anim::{FramePacket, MoveAlongPath, RateFunc, Timeline};
 use fmn_conformance::e2e::{
@@ -5332,6 +5352,240 @@ fn parity_markdown_inline_math_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
 }
 
 // ---------------------------------------------------------------------------
+// The long-form regime: the Hoeffding's D explainer
+// ---------------------------------------------------------------------------
+
+/// The explainer's background as RGB8 (`kit::BACKGROUND`, `#RRGGBB`).
+fn hoeffding_background() -> Result<[u8; 3], ScenarioError> {
+    let hex = kit::BACKGROUND.trim_start_matches('#');
+    let channel = |at: usize| {
+        hex.get(at..at + 2)
+            .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+            .ok_or_else(|| fail(format!("background {:?} is not #RRGGBB", kit::BACKGROUND)))
+    };
+    Ok([channel(0)?, channel(2)?, channel(4)?])
+}
+
+/// The worked example's statistics, pinned before any chapter renders: the
+/// article's Q, D1/D2/D3 and D = 0.4107142857.
+fn hoeffding_self_check(ctx: &mut RunCtx) -> Result<(), ScenarioError> {
+    let worked = stats::hoeffding(&stats::HEIGHTS, &stats::WEIGHTS);
+    let pinned = worked.q == [1.0, 2.0, 4.0, 4.0, 7.0, 3.0, 4.0, 8.5, 8.5, 8.5]
+        && (worked.d1, worked.d2, worked.d3) == (196.25, 10696.0, 1329.5)
+        && (worked.d - 0.410_714_285_714_285_7).abs() < 1e-15;
+    ctx.event(
+        LogEvent::new("e2e.hoeffding.self_check")
+            .field("d", format!("{:.10}", worked.d))
+            .field("pinned", truth(pinned)),
+    );
+    if !pinned {
+        return Err(fail(format!(
+            "Hoeffding's D left the worked example: {worked:?}"
+        )));
+    }
+    ctx.counter("hoeffding_self_check", 1);
+    Ok(())
+}
+
+/// Peak resident set size of this process in KiB (Linux `VmHWM`; 0 where
+/// unavailable). Calibration data only, never a gate.
+fn peak_rss_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmHWM:"))
+                .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Fast-tier geometry: 160x90 at 2 fps (566 frames, 84 s unoptimized). Every
+/// play and updater still runs; at 10 fps the unoptimized test profile took
+/// 327 s for 2,572 frames, too much for the per-commit tier.
+const HOEFFDING_FAST: (u32, u32, u32) = (160, 90, 2);
+
+/// fm-longform-native-e2e-hoeffding-l59d, fast tier: the long-form regime.
+/// All eight chapters of the Hoeffding's D explainer (dozens of plays each,
+/// `always_redraw` readouts recomputing D from live dot positions every
+/// frame, `TransformMatchingTex`, 150-dot `Transform` morphs) render silently
+/// through `fmn::render` to PNG sequences. Each chapter publishes one frame
+/// per clock frame; its last frame is the bare background, because every
+/// chapter closes by fading everything out; and nine in ten of its frames
+/// carry ink, so no chapter plays to an empty screen.
+fn hoeffding_d_chapters_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    hoeffding_self_check(ctx)?;
+    let (width, height, fps) = HOEFFDING_FAST;
+    let background = hoeffding_background()?;
+    let mut total_frames = 0;
+    let mut chapters_clean = 0;
+    for entry in chapters::registry() {
+        let started = std::time::Instant::now();
+        let kit = kit::Kit::new().map_err(|error| fail(format!("kit: {error}")))?;
+        let mut scene = (entry.make)(kit);
+        let root = format!("/hoeffding/{}", entry.key);
+        let mut options = fmn::RenderOptions::with_format(&root, fmn::RenderFormat::PngSequence)
+            .map_err(|error| fail(format!("bundled config: {error}")))?;
+        options.config.camera.resolution = (width, height);
+        options.config.camera.fps = fps;
+        options.config.camera.background_color = kit::BACKGROUND.to_owned();
+        options.typeset_cache = false;
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let report = fmn::render_with_fs(scene.as_mut(), options, fs.clone())
+            .map_err(|error| fail(format!("{}: {error}", entry.key)))?;
+        let frames = report.artifact.frame_count;
+        let clock_frames = u64::try_from(report.scene.time.frames()).unwrap_or(u64::MAX);
+        let mut inked = 0_u64;
+        let mut last_inked = true;
+        for index in 0..frames {
+            let path = PathBuf::from(format!("{root}/frame_{index:06}.png"));
+            let bytes = fs
+                .read(&path)
+                .map_err(|error| fail(format!("read {}: {error}", path.display())))?;
+            let image = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(format!("decode {}: {error}", path.display())))?;
+            let ink = image.rgba.as_chunks::<4>().0.iter().any(|pixel| {
+                pixel[..3]
+                    .iter()
+                    .zip(background)
+                    .any(|(&channel, ground)| channel.abs_diff(ground) > 8)
+            });
+            inked += u64::from(ink);
+            last_inked = ink;
+        }
+        let clean = frames > 0 && frames == clock_frames && !last_inked && inked * 10 >= frames * 9;
+        ctx.event(
+            LogEvent::new("e2e.hoeffding.chapter")
+                .field("chapter", entry.key)
+                .field("frames", frames)
+                .field("clock_frames", clock_frames)
+                .field("plays", report.scene.play_count)
+                .field("inked_frames", inked)
+                .field("last_frame_blank", truth(!last_inked))
+                .field("wall_ms", started.elapsed().as_millis().to_string())
+                .field("clean", truth(clean)),
+        );
+        if !clean {
+            return Err(fail(format!(
+                "{}: {frames} frames for {clock_frames} clock frames, {inked} inked, last inked: {last_inked}",
+                entry.key
+            )));
+        }
+        total_frames += frames;
+        chapters_clean += 1;
+    }
+    ctx.counter("hoeffding_chapters", chapters_clean);
+    ctx.counter("hoeffding_frames", total_frames);
+    Ok(RunOutcome::ok()
+        .with_counter("hoeffding_self_check", 1)
+        .with_counter("hoeffding_chapters", chapters_clean)
+        .with_counter("hoeffding_frames", total_frames))
+}
+
+/// fm-longform-native-e2e-hoeffding-l59d, full tier (`FMN_E2E_FULL=1`; run it
+/// under `--release`): the whole explainer at 1920x1080, 60 fps, through the
+/// host's ffmpeg to one MP4 per chapter with the procedural score mixed
+/// natively. Each chapter's video and soundtrack agree to within one frame,
+/// its score cues mix without clipping, and the encode names the hashed
+/// ffmpeg it ran. Wall time and peak RSS are logged as calibration data,
+/// never gated. The MP4s stay in the scenario directory the log names.
+fn hoeffding_d_full_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    hoeffding_self_check(ctx)?;
+    let dir = scenario_dir("hoeffding_d_full")?;
+    let audio = dir.join("audio");
+    std::fs::create_dir_all(&audio)
+        .map_err(|error| fail(format!("create {}: {error}", audio.display())))?;
+    let started = std::time::Instant::now();
+    let mut total_frames = 0;
+    let mut chapters_clean = 0;
+    for entry in chapters::registry() {
+        let chapter_started = std::time::Instant::now();
+        let mut kit = kit::Kit::new().map_err(|error| fail(format!("kit: {error}")))?;
+        kit.score = Some(sound::Score {
+            dir: audio.clone(),
+            under_voice: false,
+        });
+        let mut scene = (entry.make)(kit);
+        let mut options = fmn::RenderOptions::with_format(
+            dir.join(format!("{}.mp4", entry.key)),
+            fmn::RenderFormat::Mp4,
+        )
+        .map_err(|error| fail(format!("bundled config: {error}")))?;
+        options.config.camera.resolution = (1920, 1080);
+        options.config.camera.fps = 60;
+        options.config.camera.background_color = kit::BACKGROUND.to_owned();
+        options.typeset_cache = false;
+        options.ffmpeg = Some(fmn::FfmpegCapability {
+            runner: Arc::new(fmn_platform::process::StdProcessRunner),
+            locator: Arc::new(fmn_platform::process::StdFfmpegLocator::from_host_path()),
+            // The boundary refuses a workdir under a group-writable ancestor,
+            // so its private jobs stay in the system temp dir.
+            workdir_root: std::env::temp_dir(),
+        });
+        let report =
+            fmn::render_with_fs(scene.as_mut(), options, Arc::new(fmn_platform::fs::StdFs))
+                .map_err(|error| fail(format!("{}: {error}", entry.key)))?;
+        let frames = report.artifact.frame_count;
+        let clock_frames = u64::try_from(report.scene.time.frames()).unwrap_or(u64::MAX);
+        let soundtrack = report.artifact.soundtrack.as_ref();
+        // Durations as exact rationals: |samples/rate - frames/fps| <= 1/fps.
+        let drift_within_a_frame = soundtrack.is_some_and(|track| {
+            let audio = u128::from(track.sample_frames) * 60;
+            let video = u128::from(frames) * u128::from(track.sample_rate);
+            audio.abs_diff(video) <= u128::from(track.sample_rate)
+        });
+        let cues = soundtrack.map_or(0, |track| track.cues_mixed);
+        let clipped = soundtrack.map_or(0, |track| track.clipped_samples);
+        let fingerprint = report
+            .artifact
+            .ffmpeg
+            .first()
+            .map(|invocation| invocation.provenance.tool_sha256_hex.clone())
+            .unwrap_or_default();
+        let clean = frames > 0
+            && frames == clock_frames
+            && drift_within_a_frame
+            && cues > 0
+            && clipped == 0
+            && fingerprint.len() == 64;
+        ctx.event(
+            LogEvent::new("e2e.hoeffding.full_chapter")
+                .field("chapter", entry.key)
+                .field("frames", frames)
+                .field("clock_frames", clock_frames)
+                .field("bytes", report.artifact.bytes)
+                .field("cues_mixed", cues as u64)
+                .field("clipped_samples", clipped)
+                .field("av_within_one_frame", truth(drift_within_a_frame))
+                .field("ffmpeg_sha256", fingerprint.as_str())
+                .field("path", report.artifact.path.display().to_string())
+                .field("wall_ms", chapter_started.elapsed().as_millis().to_string())
+                .field("clean", truth(clean)),
+        );
+        if !clean {
+            return Err(fail(format!(
+                "{}: {frames} frames ({clock_frames} on the clock), soundtrack {soundtrack:?}, ffmpeg {fingerprint:?}",
+                entry.key
+            )));
+        }
+        total_frames += frames;
+        chapters_clean += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.hoeffding.full_calibration")
+            .field("frames", total_frames)
+            .field("wall_ms", started.elapsed().as_millis().to_string())
+            .field("peak_rss_kib", peak_rss_kib())
+            .field("dir", dir.display().to_string()),
+    );
+    ctx.counter("hoeffding_full_chapters", chapters_clean);
+    Ok(RunOutcome::ok()
+        .with_counter("hoeffding_self_check", 1)
+        .with_counter("hoeffding_full_chapters", chapters_clean))
+}
+
+// ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
 
@@ -5448,6 +5702,41 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![FieldPred::str_eq("identical", "true")],
         )],
     ));
+    specs.push(spec(
+        "render_matrix.hoeffding_d_chapters.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(hoeffding_d_chapters_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("hoeffding_self_check", 1),
+            counter_eq("hoeffding_chapters", 8),
+            // The explainer's pacing on the clock: plays and waits summed.
+            counter_eq("hoeffding_frames", 566),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.hoeffding.self_check",
+            vec![FieldPred::str_eq("d", "0.4107142857")],
+        )],
+    ));
+    specs.push(
+        spec(
+            "render_matrix.hoeffding_d_full_mp4.v1",
+            ScenarioClass::RenderMatrix,
+            Surface::RustApi,
+            Invocation::new(hoeffding_d_full_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("hoeffding_self_check", 1),
+                counter_eq("hoeffding_full_chapters", 8),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.hoeffding.full_calibration",
+                vec![],
+            )],
+        )
+        .tier(Tier::Full),
+    );
     specs.push(spec(
         "render_matrix.cli_primitive_builtins.v1",
         ScenarioClass::RenderMatrix,
@@ -6878,6 +7167,27 @@ fn python_studio_capture_scenario_passes() {
         .expect("Python Studio capture is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// fm-longform-native-e2e-hoeffding-l59d: the whole explainer at 1080p60 with
+/// sound, focused: green under `FMN_E2E_FULL=1` (run it with `--release`), a
+/// SKIP otherwise. Its chapters' fast row runs once, in the fast tier.
+#[test]
+fn hoeffding_d_full_scenario_passes_when_enabled() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.hoeffding_d_full_mp4.v1")
+        .expect("the Hoeffding's D full scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    if e2e::full_matrix_from_env() {
+        assert!(report.is_pass(), "{}", report.summary());
+    } else {
+        assert!(
+            matches!(report.status, Status::Skipped(_)),
+            "{}",
+            report.summary()
+        );
+    }
 }
 
 /// The facade's video formats need an explicit ffmpeg capability (D2).
