@@ -217,6 +217,23 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 | Live iteration | Studio: crash-isolated worker, checkpoints, scrubbing | IPython embed | Jupyter | ✓ editor | ✓ editor |
 | Scaling | Frame-parallel + pipelined + SIMD tiers + optional GPU annex | Single-threaded Python | Single-threaded Python | Browser-bound | Parallel via cloud renders |
 
+### Install footprint, measured
+
+A real-world check is a separate showcase crate, the Hoeffding's D explainer: a 7½-minute narrated 4K video with formulas, live plots and animations. It was written against the native `fmn` facade and compiles to a single 9.2 MB binary. These figures were measured on macOS arm64 in October 2026, and exclude narration.
+
+| What you install to make that video | Download | Installed |
+|---|---|---|
+| **franken_manim**: the explainer binary (9,242,880 B) or `fmn` (13,030,096 B), plus Homebrew ffmpeg for MP4 | **58–62 MB** | **154–158 MB** |
+| manim CE 0.21 + MacTeX 2026 (the docs' recommendation) | 7,001.8 MB | 10,875.4 MB |
+| manim CE 0.21 + BasicTeX + manim's tlmgr extras (the smallest LaTeX that works) | 351.5 MB | 865.4 MB |
+| manimgl 1.7.2 + MacTeX 2026 | 7,059.1 MB | 11,064.1 MB |
+| Linux: manim CE + `texlive-full` (the docs' Linux recommendation) | 4,679.3 MB | 9,472.4 MB |
+
+- **What's in the binary.** `fmn` links only libSystem, libobjc, libiconv and four system frameworks. The fmd-math TeX engine and its Computer Modern and IBM Plex fonts are compiled in.
+- **Proof that nothing external is used.** Sandboxed so it couldn't read MacTeX, Homebrew or any system font folder, the explainer still typeset its formulas byte-identically.
+- **What the legacy rows include.** A uv-managed CPython, the wheels, Homebrew `cairo pkg-config` (plus `ffmpeg` for manimgl) and the LaTeX distribution.
+- **Not counted.** The Xcode Command Line Tools that pycairo needs in order to compile: 1.96 GB.
+
 ## The `fmn` CLI
 
 > The CLI keeps the Reference's flag surface where it still means something, with exit codes and flag interactions pinned in the API schema. Every command in the first block exits 0 with the latest release (v0.5.0). The last block is the 1.0 target contract and fails closed today. Standalone `fmn` renders built-in scenes and compiled FMTL/1 bundles; your own scenes reach it through the Rust library (or the Python portal). Releases through v0.4.0 rendered the vector 2D path vertically mirrored (fm-sq8.9); v0.5.0 is upright.
@@ -460,6 +477,15 @@ Numbers below are the CI **gates** (§17.2 of the plan), to be enforced on pinne
 | PG-6 Memory | ≤ 1.5 GB peak on the 4K 3D gallery; zero leaks over a 1 h soak; **zero steady-state heap allocations per frame** |
 | PG-7 Typesetting | median corpus formula < 3 ms cold, < 100 µs cached; 10k-glyph text layout < 20 ms |
 | PG-8 Binding tax | native built-ins ≤ 1.10× pure-Rust; per-frame-callback, point-transform, and dynamic-subclass classes each carry a published budget |
+
+**A field measurement (not a qualified gate observation).** The 4K explainer above was measured on a shared 128-thread Threadripper dev host: 600 frames of its densest chapter at 3840×2160, 60 fps, `--threads 16`, h264_nvenc.
+- **Before:** 22.0 s.
+- **After:** 10.0 s, about 60 fps per process (2.2×). Three changes produced the gain:
+  - NV12 conversion now runs on the render team's threads, right after rasterization.
+  - The 66 MB RGBA16F raster is recycled instead of freshly zero-allocated every frame, which also moves PG-6 toward zero steady-state allocations.
+  - A recycled raster that provably still holds its worker's previous frame keeps its reused tiles in place, instead of copying them back from the tile cache.
+- **Output:** decoded frames are byte-identical to the old route.
+- **Whole video:** all eight chapters (31,130 frames) rendered concurrently in 162 s with the host idle.
 
 GPU annex engines are measured under their own profiles (PG-A), gate **annex changes only**, and never gate core merges; the CPU engine must stand on its own so acceleration can never mask a core regression. The scaling hierarchy, outermost first: multi-scene batch → frame-parallel pure segments → pipelined frame stages → the tile pool → SIMD within a tile.
 
