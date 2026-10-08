@@ -12,11 +12,12 @@ use fmn_library::{Tex, TexEngine, TexText};
 
 /// Formulas within ±5% of the Reference on both axes: 24 when this oracle
 /// landed (2026-10-04), 26 after the display-integral fix (franken_markdown
-/// 68fe29b), 39 after rule-17 italic corrections (4c8caa2). Raise it when
+/// 68fe29b), 39 after rule-17 italic corrections (4c8caa2), 42 after plain
+/// TeX's `\ldots` and amsmath's `\pmod` (a3578a0, fm-y5fl). Raise it when
 /// layout improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 39;
-/// The same at ±10%: 57, then 60, then 65.
-const WITHIN_10_PERCENT_FLOOR: usize = 65;
+const WITHIN_5_PERCENT_FLOOR: usize = 42;
+/// The same at ±10%: 57, then 60, then 65, then 67.
+const WITHIN_10_PERCENT_FLOOR: usize = 67;
 
 struct Row {
     width: f64,
@@ -62,6 +63,25 @@ fn texttext_apostrophe_is_the_reference_right_quote() {
         (width / 0.080 - 1.0).abs() <= 0.10 && (height / 0.186 - 1.0).abs() <= 0.10,
         "apostrophe {width:.3} x {height:.3} against the Reference's 0.080 x 0.186"
     );
+}
+
+/// fm-y5fl: `\cdots` and `\ldots` are three dots, one glyph each, as the
+/// Reference's SVG sets them (they were one ellipsis glyph), and the
+/// leading space of `\text{ terms}` is an interword space (it was dropped).
+#[test]
+fn ellipses_are_three_glyphs_and_text_boxes_keep_their_leading_space() {
+    let engine = TexEngine::new("fmd-math/pack/default", None).expect("engine");
+    for source in [r"\cdots", r"\ldots"] {
+        let tex = Tex::new(source).build(&engine).expect(source);
+        assert_eq!(tex.vmob.children().len(), 3, "{source}");
+    }
+    let width = |source: &str| {
+        let tex = Tex::new(source).build(&engine).expect(source);
+        let (min, max) = tex.vmob.extent().expect("a typeset formula has extent");
+        max[0] - min[0]
+    };
+    let space = width(r"n\text{ terms}") - width(r"n\text{terms}");
+    assert!(space > 0.05, "the leading space added {space:.3} units");
 }
 
 #[test]

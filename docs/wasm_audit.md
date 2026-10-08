@@ -1,6 +1,19 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run 2026-10-07 against `Cargo.lock` `a1f1461f` and `SUITE.lock`
+**Status:** re-run 2026-10-07 against `Cargo.lock` `b40a0537` and `SUITE.lock`
+`a162ded1`, for the franken_markdown repin from `0a028127` to `a3578a0f` (fm-y5fl):
+fmd-math `\ldots`/`\cdots` as three punctuation dots, `\pmod`, and text-mode spaces. No package version changes.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines with
+  no fmd or franken_markdown package. The lock change moves only the three
+  franken_markdown packages' rev, none of which is in that graph.
+- The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
+  wasm graph changed since the run below.
+
+Earlier re-run, 2026-10-07, against `Cargo.lock` `a1f1461f` and `SUITE.lock`
 `c4d868ff`, for the franken_markdown repin from `bfb3221c` to `0a028127` (fm-5wq.56):
 fmd-math text-mode quote and dash ligatures. No package version changes.
 **The release package gate still FAILS at its size budget** (fm-8j70), so this
@@ -235,8 +248,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `c4d868ff8df81d57a158831dc16ac16b1f45d6ec6184e2372ee72e4d24fefff1`
-- `Cargo.lock` SHA-256: `a1f1461ff93a1a739db64a4fbbf50bcf4b634bf426337130ba809e634565f61c`
+- `SUITE.lock` SHA-256: `a162ded14d4ee6e9bfded373ef4f36b411b4b656777f365c6998f7494037eb2f`
+- `Cargo.lock` SHA-256: `b40a0537e9ef4a03f4a1d17895df68ba3819ddc1d62282561217d73a4b61621b`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `4c58a1bb52b3e6e833fcc0cc50cfbf086a3b8889e4790480c291b64b44382f1a`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

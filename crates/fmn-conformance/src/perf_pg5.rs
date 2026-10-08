@@ -1157,11 +1157,13 @@ mod tests {
             // mirror, 685c4f68's near-straight quadratic strokes, the three
             // Tex scenes' rule-17 italic corrections at franken_markdown
             // 4c8caa2, c1ee7836's Reference extents for Brace, marks, Title
-            // and BulletedList, then title_underlined.v2 framed into view)
+            // and BulletedList, then title_underlined.v2 framed into view,
+            // then tex_overbrace.v1's \cdots dots and "n terms" space at
+            // franken_markdown a3578a0)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "882a4ae0db7617503dda2b7112bd2f871eba26c4c19facbfe2bfb0df4fddb583"
+                "23c1517385e08c080d79a0bf85ac76444b5f2731d45821bd3a8969eb5789324b"
             );
         }
     }

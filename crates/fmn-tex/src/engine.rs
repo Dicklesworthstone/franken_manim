@@ -605,7 +605,9 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
     /// Constructs chosen to touch every layout mechanism: glyph metrics
     /// and kerning, scripts, fractions, radicals, big operators, accents,
     /// drawn delimiters past the ceiling, environments, stretchy bands,
-    /// and text mode. A semantics change anywhere shows up here.
+    /// inner dots and generated material, and text mode. A semantics
+    /// change anywhere shows up here, so a layout change that no probe
+    /// touches needs a probe that does.
     const PROBES: &[&str] = &[
         r"ax + b^2_c",
         r"\frac{1}{1+\frac{1}{x}}",
@@ -617,10 +619,18 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
         r"\begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}",
         r"\widehat{x+y} + \overbrace{a+b}",
         r"\mathbb{R} \mathrm{d} \mathbf{v}",
+        r"1 + \cdots + n, \ldots \equiv k \pmod{p}",
     ];
+    /// TexText material: the text font's quote and dash ligatures, and the
+    /// interword space after an inline island.
+    const TEXT_PROBES: &[&str] = &["can't -- ``x'' --- $y$ z"];
     let mut material = Vec::new();
-    for probe in PROBES {
-        match math.typeset(probe, Style::Display) {
+    let laid = PROBES
+        .iter()
+        .map(|probe| math.typeset(probe, Style::Display))
+        .chain(TEXT_PROBES.iter().map(|probe| math.typeset_text(probe)));
+    for layout in laid {
+        match layout {
             Ok(layout) => {
                 material.extend_from_slice(fmd_math::paths::layout_dump(&layout).as_bytes());
                 if let Ok(contours) = fmd_math::paths::resolve_paths(math, &layout) {
