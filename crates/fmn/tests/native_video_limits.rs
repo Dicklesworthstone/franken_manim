@@ -92,8 +92,8 @@ fn explicit_long_video_allowance_reaches_the_real_capability_boundary() {
     for format in [RenderFormat::Mp4, RenderFormat::Mov] {
         let (mut options, calls) = options(format);
         options.ffmpeg_limits.timeout = Duration::from_secs(7_200);
-        let error = render_with_fs(&mut MustNotRun, options, Arc::new(VirtualFs::new()))
-            .unwrap_err();
+        let error =
+            render_with_fs(&mut MustNotRun, options, Arc::new(VirtualFs::new())).unwrap_err();
         assert!(matches!(
             error,
             RenderError::FfmpegUnavailable(FfmpegLocatorError::NotFound)
@@ -104,7 +104,11 @@ fn explicit_long_video_allowance_reaches_the_real_capability_boundary() {
 
 #[test]
 fn native_outputs_do_not_consult_an_irrelevant_ffmpeg_policy() {
-    for format in [RenderFormat::PngSequence, RenderFormat::Gif, RenderFormat::Y4m] {
+    for format in [
+        RenderFormat::PngSequence,
+        RenderFormat::Gif,
+        RenderFormat::Y4m,
+    ] {
         let (mut options, calls) = options(format);
         options.ffmpeg_limits.timeout = Duration::ZERO;
         options.ffmpeg_limits.max_log_bytes = 0;
@@ -128,7 +132,9 @@ fn video_receipts_record_the_admitted_policy_and_tiny_artifacts_never_publish() 
     impl SceneConstruct for SoundStill {
         fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
             stage.add(Circle::new().radius(0.4).color(BLUE))?;
-            stage.scene_mut().add_sound(self.0.clone(), 0.0, None, None)?;
+            stage
+                .scene_mut()
+                .add_sound(self.0.clone(), 0.0, None, None)?;
             stage.wait(0.2)?;
             Ok(())
         }
@@ -146,10 +152,8 @@ fn video_receipts_record_the_admitted_policy_and_tiny_artifacts_never_publish() 
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "fmn-video-limits-{}-{unique}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("fmn-video-limits-{}-{unique}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     let root = root.canonicalize().unwrap();
     let sound = root.join("cue.wav");
@@ -178,12 +182,8 @@ fn video_receipts_record_the_admitted_policy_and_tiny_artifacts_never_publish() 
             if camera {
                 options.camera = Some(options.camera_config().unwrap());
             }
-            let report = render_with_fs(
-                &mut SoundStill(sound.clone()),
-                options,
-                Arc::new(StdFs),
-            )
-            .unwrap();
+            let report =
+                render_with_fs(&mut SoundStill(sound.clone()), options, Arc::new(StdFs)).unwrap();
             let policy = report.artifact.ffmpeg_limits.unwrap();
             assert_eq!(policy.timeout, Duration::new(1_803, 123_456));
             assert_eq!(policy.max_log_bytes, 2 << 20);
@@ -202,6 +202,9 @@ fn video_receipts_record_the_admitted_policy_and_tiny_artifacts_never_publish() 
     options.ffmpeg = Some(capability);
     options.ffmpeg_limits.max_artifact_bytes = 1;
     assert!(render_with_fs(&mut Still, options, Arc::new(StdFs)).is_err());
-    assert!(!refused.exists(), "a rejected encode published a partial movie");
+    assert!(
+        !refused.exists(),
+        "a rejected encode published a partial movie"
+    );
     // Preserve the unique evidence directory; never remove another run's output.
 }

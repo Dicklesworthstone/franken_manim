@@ -46,22 +46,68 @@ fn options(format: RenderFormat) -> (RenderOptions, Arc<AtomicUsize>) {
 #[test]
 fn incompatible_quality_refuses_before_tool_discovery_or_scene_work() {
     let cases = [
-        ("libx264", VideoQuality { crf: Some(52), ..VideoQuality::default() }),
-        ("libx264", VideoQuality { bitrate: Some(0), ..VideoQuality::default() }),
-        ("libx264", VideoQuality { crf: Some(18), bitrate: Some(8_000_000), ..VideoQuality::default() }),
-        ("libx265", VideoQuality { tune: Some(EncoderTune::Film), ..VideoQuality::default() }),
-        ("h264_nvenc", VideoQuality { crf: Some(18), ..VideoQuality::default() }),
-        ("h264_videotoolbox", VideoQuality { preset: Some(EncoderPreset::Slow), ..VideoQuality::default() }),
-        ("qtrle", VideoQuality { bitrate: Some(8_000_000), ..VideoQuality::default() }),
+        (
+            "libx264",
+            VideoQuality {
+                crf: Some(52),
+                ..VideoQuality::default()
+            },
+        ),
+        (
+            "libx264",
+            VideoQuality {
+                bitrate: Some(0),
+                ..VideoQuality::default()
+            },
+        ),
+        (
+            "libx264",
+            VideoQuality {
+                crf: Some(18),
+                bitrate: Some(8_000_000),
+                ..VideoQuality::default()
+            },
+        ),
+        (
+            "libx265",
+            VideoQuality {
+                tune: Some(EncoderTune::Film),
+                ..VideoQuality::default()
+            },
+        ),
+        (
+            "h264_nvenc",
+            VideoQuality {
+                crf: Some(18),
+                ..VideoQuality::default()
+            },
+        ),
+        (
+            "h264_videotoolbox",
+            VideoQuality {
+                preset: Some(EncoderPreset::Slow),
+                ..VideoQuality::default()
+            },
+        ),
+        (
+            "qtrle",
+            VideoQuality {
+                bitrate: Some(8_000_000),
+                ..VideoQuality::default()
+            },
+        ),
     ];
     for format in [RenderFormat::Mp4, RenderFormat::Mov] {
         for (codec, quality) in cases {
             let (mut options, calls) = options(format);
             options.config.file_writer.video_codec = codec.to_owned();
             options.video_quality = quality;
-            let error = render_with_fs(&mut MustNotRun, options, Arc::new(VirtualFs::new()))
-                .unwrap_err();
-            assert!(matches!(error, RenderError::Negotiation(_)), "{codec}: {error}");
+            let error =
+                render_with_fs(&mut MustNotRun, options, Arc::new(VirtualFs::new())).unwrap_err();
+            assert!(
+                matches!(error, RenderError::Negotiation(_)),
+                "{codec}: {error}"
+            );
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
     }
@@ -75,11 +121,15 @@ fn incompatible_quality_refuses_before_tool_discovery_or_scene_work() {
 
 #[test]
 fn video_quality_on_native_formats_is_not_silently_discarded() {
-    for format in [RenderFormat::PngSequence, RenderFormat::Gif, RenderFormat::Y4m] {
+    for format in [
+        RenderFormat::PngSequence,
+        RenderFormat::Gif,
+        RenderFormat::Y4m,
+    ] {
         let (mut options, calls) = options(format);
         options.video_quality.crf = Some(16);
-        let error = render_with_fs(&mut MustNotRun, options, Arc::new(VirtualFs::new()))
-            .unwrap_err();
+        let error =
+            render_with_fs(&mut MustNotRun, options, Arc::new(VirtualFs::new())).unwrap_err();
         assert!(matches!(error, RenderError::InvalidOptions(_)), "{error}");
         assert!(error.to_string().contains("video_quality"));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -96,13 +146,18 @@ fn x264_sei(bytes: &[u8]) -> Option<String> {
         let size = u32::from_be_bytes(header[..4].try_into().ok()?);
         let (header_len, size) = if size == 1 {
             let wide = bytes.get(at.checked_add(8)?..at.checked_add(16)?)?;
-            (16, usize::try_from(u64::from_be_bytes(wide.try_into().ok()?)).ok()?)
+            (
+                16,
+                usize::try_from(u64::from_be_bytes(wide.try_into().ok()?)).ok()?,
+            )
         } else if size == 0 {
             (8, bytes.len().checked_sub(at)?)
         } else {
             (8, usize::try_from(size).ok()?)
         };
-        if size < header_len { return None; }
+        if size < header_len {
+            return None;
+        }
         let end = at.checked_add(size)?;
         let body = bytes.get(at.checked_add(header_len)?..end)?;
         if &header[4..8] == b"mdat" {
@@ -113,7 +168,9 @@ fn x264_sei(bytes: &[u8]) -> Option<String> {
                 cursor = cursor.checked_add(4)?;
                 let end = cursor.checked_add(length)?;
                 let nal = body.get(cursor..end)?;
-                if let Some(text) = user_data_sei(nal) { return Some(text); }
+                if let Some(text) = user_data_sei(nal) {
+                    return Some(text);
+                }
                 cursor = end;
             }
         }
@@ -123,7 +180,9 @@ fn x264_sei(bytes: &[u8]) -> Option<String> {
 }
 
 fn user_data_sei(nal: &[u8]) -> Option<String> {
-    if nal.first()? & 0x1f != 6 { return None; }
+    if nal.first()? & 0x1f != 6 {
+        return None;
+    }
     let mut rbsp = Vec::new();
     let mut zeros = 0;
     for &byte in &nal[1..] {
@@ -140,7 +199,9 @@ fn user_data_sei(nal: &[u8]) -> Option<String> {
             let byte = *bytes.get(*at)?;
             *at = at.checked_add(1)?;
             value = value.checked_add(usize::from(byte))?;
-            if byte != 255 { return Some(value); }
+            if byte != 255 {
+                return Some(value);
+            }
         }
     }
     let mut at = 0;
@@ -153,7 +214,12 @@ fn user_data_sei(nal: &[u8]) -> Option<String> {
             // user_data_unregistered: 16 UUID bytes precede the encoder text.
             let text = &payload[16..];
             if text.starts_with(b"x264 - core ") {
-                return Some(std::str::from_utf8(text).ok()?.trim_end_matches('\0').to_owned());
+                return Some(
+                    std::str::from_utf8(text)
+                        .ok()?
+                        .trim_end_matches('\0')
+                        .to_owned(),
+                );
             }
         }
         at = end;
@@ -172,20 +238,29 @@ fn bitstream_probe_reads_sei_not_metadata_and_refuses_truncation() {
     let mut nal = vec![6];
     let mut zeros = 0;
     for byte in rbsp {
-        if zeros == 2 && byte <= 3 { nal.push(3); zeros = 0; }
+        if zeros == 2 && byte <= 3 {
+            nal.push(3);
+            zeros = 0;
+        }
         nal.push(byte);
         zeros = if byte == 0 { zeros + 1 } else { 0 };
     }
     let mut body = u32::try_from(nal.len()).unwrap().to_be_bytes().to_vec();
     body.extend(nal);
-    let mut movie = u32::try_from(body.len() + 8).unwrap().to_be_bytes().to_vec();
+    let mut movie = u32::try_from(body.len() + 8)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
     movie.extend_from_slice(b"mdat");
     movie.extend(body);
     let expected = std::str::from_utf8(text).unwrap().trim_end_matches('\0');
     assert_eq!(x264_sei(&movie).as_deref(), Some(expected));
     assert!(x264_sei(&movie[..movie.len() - 1]).is_none());
     movie[4..8].copy_from_slice(b"free");
-    assert!(x264_sei(&movie).is_none(), "metadata text is not encoder SEI");
+    assert!(
+        x264_sei(&movie).is_none(),
+        "metadata text is not encoder SEI"
+    );
     movie[4..8].copy_from_slice(b"mdat");
     movie[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(x264_sei(&movie).is_none());
@@ -214,10 +289,11 @@ fn native_mp4_mov_quality_survives_into_provenance_and_x264_sei() {
         return;
     }
     let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "fmn-video-quality-{}-{unique}", std::process::id()
-    ));
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("fmn-video-quality-{}-{unique}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     let root = root.canonicalize().unwrap();
     let capability = FfmpegCapability {
@@ -238,20 +314,43 @@ fn native_mp4_mov_quality_survives_into_provenance_and_x264_sei() {
                     bitrate: None,
                 };
                 options.video_quality = quality;
-                if camera { options.camera = Some(options.camera_config().unwrap()); }
+                if camera {
+                    options.camera = Some(options.camera_config().unwrap());
+                }
                 let report = render_with_fs(&mut Picture, options, Arc::new(StdFs)).unwrap();
                 assert_eq!(report.artifact.video_quality, Some(quality));
                 assert_eq!(report.artifact.frame_count, 2);
                 assert_eq!(report.artifact.ffmpeg.len(), 1);
                 let provenance = &report.artifact.ffmpeg[0].provenance;
                 assert_eq!(provenance.encoder.as_deref(), Some("libx264"));
-                assert!(provenance.argv.windows(2).any(|pair| pair == ["-preset", "slow"]));
-                assert!(provenance.argv.windows(2).any(|pair| pair == ["-tune", "animation"]));
+                assert!(
+                    provenance
+                        .argv
+                        .windows(2)
+                        .any(|pair| pair == ["-preset", "slow"])
+                );
+                assert!(
+                    provenance
+                        .argv
+                        .windows(2)
+                        .any(|pair| pair == ["-tune", "animation"])
+                );
                 let bytes = std::fs::read(&report.artifact.path).unwrap();
                 let sei = x264_sei(&bytes).expect("output contains x264 user-data SEI");
-                assert!(sei.split_whitespace().any(|word| word == format!("crf={crf}.0")), "{sei}");
-                assert!(sei.split_whitespace().any(|word| word == "subme=8"), "slow preset: {sei}");
-                assert!(sei.split_whitespace().any(|word| word.starts_with("psy_rd=0.40:")), "animation tune: {sei}");
+                assert!(
+                    sei.split_whitespace()
+                        .any(|word| word == format!("crf={crf}.0")),
+                    "{sei}"
+                );
+                assert!(
+                    sei.split_whitespace().any(|word| word == "subme=8"),
+                    "slow preset: {sei}"
+                );
+                assert!(
+                    sei.split_whitespace()
+                        .any(|word| word.starts_with("psy_rd=0.40:")),
+                    "animation tune: {sei}"
+                );
                 eprintln!("{}: {sei}", report.artifact.path.display());
             }
         }
