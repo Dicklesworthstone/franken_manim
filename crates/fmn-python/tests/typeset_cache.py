@@ -81,7 +81,7 @@ def run_rendered_cache_acceptance(m):
         configure_tex_cache(enabled=False)
 
 
-if __name__ == "__main__":
+if __name__ in ("__main__", "<run_path>"):
     import manimlib as m
     run_typeset_cache(m)
     run_rendered_cache_acceptance(m)

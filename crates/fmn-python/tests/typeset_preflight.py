@@ -91,7 +91,7 @@ def run_typeset_preflight(m):
         configure(enabled=False)
 
 
-if __name__ == "__main__":
+if __name__ in ("__main__", "<run_path>"):
     import manimlib as m
     run_typeset_preflight(m)
     print("native preflight: geometry, constructor cache reuse, ordering and refusals passed")

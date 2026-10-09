@@ -168,7 +168,7 @@ def run_config_selected_cache(m):
         assert any((cache / "ns" / "typeset").rglob("objects/*/*"))
 
 
-if __name__ == "__main__":
+if __name__ in ("__main__", "<run_path>"):
     import manimlib as m
     run_static_preflight(m)
     run_config_selected_cache(m)
