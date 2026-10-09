@@ -19,12 +19,13 @@ use fmn_conformance::ratchet::{corpus_digest, parse_corpus_entry};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
-/// Sampled strings within 5% of TeX's box: 188 of 563 when this oracle landed
-/// (franken_markdown a8aab0d, 2026-10-09). Raise it when layout improves;
-/// never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 188;
-/// The same at 10%: 312.
-const WITHIN_10_PERCENT_FLOOR: usize = 312;
+/// Sampled strings within 5% of TeX's box: 188 of 563 when this oracle was
+/// first measured (franken_markdown a8aab0d), 189 once the Tex surface's rows
+/// opened up by \jot (d664c13). Raise it when layout improves; never lower it
+/// to land a change.
+const WITHIN_5_PERCENT_FLOOR: usize = 189;
+/// The same at 10%: 315, then 316.
+const WITHIN_10_PERCENT_FLOOR: usize = 316;
 
 struct Row {
     digest: &'static str,
