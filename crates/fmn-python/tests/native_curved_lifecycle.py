@@ -247,6 +247,53 @@ class NativeCurvedLifecycle(unittest.TestCase):
         # second tip. Do not pin the old, incorrect end-at-RIGHT assertion.
         self.assertGreater(double.get_end()[0], 1.1)
 
+    def test_angle_getters_measure_through_the_tip_aware_endpoints(self):
+        # geometry.py Arc.get_start_angle/get_stop_angle (pinned 6199a00d):
+        # angle_of_vector(self.get_start()/get_end() - self.get_arc_center()) % TAU,
+        # through TipableVMobject's tip-aware accessors (fm-8pj7). The controls are
+        # the Reference class sweep's own measurements of CurvedArrow(LEFT, RIGHT)
+        # and CurvedDoubleArrow(LEFT, RIGHT) (reference_classes.v1.ndjson, 1e-3
+        # quanta): its get_start_angle getter and the polar angle of its end tip's
+        # first point about its measured arc center.
+        import math
+
+        def polar(point, center):
+            return math.atan2(point[1] - center[1], point[0] - center[0]) % math.tau
+
+        tol = 2e-3
+        single = m.CurvedArrow(m.LEFT, m.RIGHT)
+        double = m.CurvedDoubleArrow(m.LEFT, m.RIGHT)
+        cases = (
+            (single.get_start_angle(), 3.787),
+            (single.get_stop_angle(), polar((1.0, 0.0), (0.0, 0.753))),
+            (double.get_start_angle(), 3.805),
+            (double.get_stop_angle(), polar((1.169, 0.316), (-0.035, 0.755))),
+        )
+        for actual, reference in cases:
+            self.assertAlmostEqual(actual, reference, delta=tol)
+        # Planted negative: the shaft's own anchors (the measurement this replaced)
+        # sit outside the tolerance, so the checks above tell the two apart.
+        center = double.get_arc_center()
+        self.assertGreater(abs(polar(m.VMobject.get_start(double), center) - 3.805), 100 * tol)
+        center = single.get_arc_center()
+        self.assertGreater(
+            abs(polar(m.VMobject.get_end(single), center) - polar((1.0, 0.0), (0.0, 0.753))),
+            100 * tol)
+
+        # Dispatch is through the public, overridable accessor.
+        class Pinned(m.CurvedArrow):
+            def get_start(self):
+                return self.get_arc_center() + m.UP
+
+        self.assertAlmostEqual(Pinned(m.LEFT, m.RIGHT).get_start_angle(), math.pi / 2, places=9)
+
+        # An untipped arc reads its first and last anchors, in [0, TAU).
+        arc = m.Arc(start_angle=-1.0, angle=2.0)
+        center = arc.get_arc_center()
+        self.assertAlmostEqual(arc.get_start_angle(), polar(arc.get_points()[0], center), places=12)
+        self.assertAlmostEqual(arc.get_start_angle(), math.tau - 1.0, places=6)
+        self.assertAlmostEqual(arc.get_stop_angle(), polar(arc.get_points()[-1], center), places=12)
+
     def test_endpoint_pair_is_owned_shaft_data_not_tip_positions(self):
         for cls in (m.CurvedArrow, m.CurvedDoubleArrow):
             with self.subTest(cls=cls.__name__):

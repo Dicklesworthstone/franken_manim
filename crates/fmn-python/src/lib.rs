@@ -3847,28 +3847,6 @@ impl BridgeMobject {
         })
     }
 
-    /// `Arc.get_start_angle` over live transformed geometry.
-    fn _arc_start_angle(slf: &Bound<'_, Self>) -> PyResult<f64> {
-        crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| {
-            fmn_library::arc::start_angle_of(&stage.get_points(mob).unwrap_or_default())
-        })?
-        .ok_or_else(|| {
-            PyValueError::new_err("an arc start angle requires at least one quadratic component")
-        })
-    }
-
-    /// `Arc.get_stop_angle` over live transformed geometry.
-    fn _arc_stop_angle(slf: &Bound<'_, Self>) -> PyResult<f64> {
-        crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| {
-            fmn_library::arc::stop_angle_of(&stage.get_points(mob).unwrap_or_default())
-        })?
-        .ok_or_else(|| {
-            PyValueError::new_err("an arc stop angle requires at least one quadratic component")
-        })
-    }
-
     /// `Circle.get_radius` over this entry's current world-space points.
     fn _circle_radius(slf: &Bound<'_, Self>) -> PyResult<f64> {
         crossing::record(CrossingClass::Other);

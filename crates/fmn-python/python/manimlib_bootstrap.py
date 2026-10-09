@@ -5193,11 +5193,16 @@ class Arc(TipableVMobject):
     def get_arc_center(self):
         return _np.array(self._arc_center())
 
+    # The Reference measures both angles through the public, tip-aware and
+    # overridable get_start/get_end: a start tip's point, not the shaft's
+    # first anchor (fm-8pj7). Untipped arcs read the same anchors as before.
     def get_start_angle(self):
-        return self._arc_start_angle()
+        offset = self.get_start() - self.get_arc_center()
+        return _BridgeMobject._angle_of_vector(_vec3(offset)) % _math.tau
 
     def get_stop_angle(self):
-        return self._arc_stop_angle()
+        offset = self.get_end() - self.get_arc_center()
+        return _BridgeMobject._angle_of_vector(_vec3(offset)) % _math.tau
 
     def move_arc_center_to(self, point):
         self.shift(_np.array(_vec3(point)) - self.get_arc_center())

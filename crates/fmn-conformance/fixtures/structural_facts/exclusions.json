@@ -268,15 +268,6 @@
       "reason": "Flatten-first boolean results: point counts, start point, orientation and inherited style differ, with no Behavior Note."
     },
     {
-      "id": "fm-8pj7-curved-arrow-roots",
-      "kind": "open-bead",
-      "ref": "fm-8pj7",
-      "scope": ["classes"],
-      "class": ["CurvedArrow", "CurvedDoubleArrow"],
-      "fact": ["n_points", "points", "points_sha256", "bbox", "getters", "getters.*"],
-      "reason": "Tip accommodation rescales the arc in the Reference. The corpus differential (portal wheels db9baeba and 6d4a4463) finds no scene where it applies, so it covers the class sweep only."
-    },
-    {
       "id": "fm-ym2i-glow-factor-field",
       "kind": "open-bead",
       "ref": "fm-ym2i",
