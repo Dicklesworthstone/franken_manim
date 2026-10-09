@@ -26,6 +26,23 @@ Sans Math face is the project's curated symbol subset (its TTF name table
 is stripped by construction, so its manifest `version` is `null` — the
 manifest records facts, not inventions).
 
+**Known glyph gaps** (fm-binom-delimiters-glyph-gaps-ed1k). These are measured
+from the bundled bytes, not inferred from font names:
+
+- **✗ U+2717, ✘ U+2718, ✕ U+2715 and ✔ U+2714 are in no bundled face.** The
+  fallback subset's curated range U+2713–U+2718 yields only ✓ U+2713,
+  because Noto Sans Math carries nothing else in it. `Text("✗")` fails with
+  the precise error `character '✗' (U+2717) has no glyph in the selected
+  faces` and never substitutes. Comparison tables use the drawn
+  `checkmark`/`exmark` mobjects (`fmn_library::matchers`), or `×` U+00D7,
+  which IBM Plex Sans and the fallback carry.
+- **θ U+03B8 in Computer Modern draws as ϑ.** In all three bundled CMU
+  faces (`cmunrm`, `cmunbx`, `cmunti`) the `theta` glyph is
+  outline-identical to `theta1` (ϑ U+03D1), so CM text and `\theta` set the
+  script form (math-mode report fm-5wq.60). The closed θ needs another
+  glyph source: the CM math faces of ADR-0028
+  (fm-cm-math-faces-impl-n12u). IBM Plex Sans's θ is the closed form.
+
 ## Generation
 
 ```bash
