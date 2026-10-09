@@ -43,6 +43,17 @@ impl Fixture {
         panic!("could not allocate a unique typeset-cache fixture");
     }
 
+    /// The fixture's home directory, canonical. On macOS the temp dir lives
+    /// under the `/var` -> `/private/var` link. Explicit `--cache-dir` roots
+    /// below that link are accepted, but the platform-convention base under a
+    /// linked `$HOME` is still refused (fm-macos-var-symlink-gate-aqr1). A real
+    /// home is never under `/var`, so the home itself is resolved.
+    fn home(&self) -> PathBuf {
+        let home = self.root.join("home");
+        fs::create_dir_all(&home).expect("fixture home");
+        fs::canonicalize(&home).expect("canonical fixture home")
+    }
+
     fn cache(&self) -> PathBuf {
         self.root.join("cache")
     }
@@ -70,9 +81,10 @@ fn fmn_with_home(fixture: &Fixture, args: &[OsString], home: bool) -> Output {
         .stdin(Stdio::null());
     if home {
         // The store's protected-path check needs a home to compare against.
-        let home = fixture.root.join("home");
-        fs::create_dir_all(&home).expect("fixture home");
-        command.env(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, home);
+        command.env(
+            if cfg!(windows) { "USERPROFILE" } else { "HOME" },
+            fixture.home(),
+        );
     }
     command.output().expect("the shipped fmn binary runs")
 }
@@ -406,7 +418,7 @@ fn without_a_cache_dir_the_render_uses_the_platform_convention_under_home() {
     let fixture = Fixture::new();
     let cold = render(&fixture, "cold", "2", &[]);
     assert!(cold.flag("persistent"), "{}", cold.typesetting());
-    let home = fixture.root.join("home");
+    let home = fixture.home();
     let root = if cfg!(target_os = "macos") {
         home.join("Library").join("Caches").join("franken-manim")
     } else if cfg!(windows) {
