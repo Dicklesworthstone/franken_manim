@@ -35,10 +35,39 @@ use fmn::rendering::{EncoderPreset, EncoderTune, VideoQuality};
 
 use crate::kit::{BACKGROUND, Kit};
 
-const USAGE: &str = "usage: hoeffding_d stats | script | glyphs OUT | render all|CHAPTER... [--res WxH] [--fps N] [--out DIR] [--format mp4|png|y4m]";
+const USAGE: &str = "\
+usage: hoeffding_d <command> [options]
 
+commands:
+  stats                    print the numbers every chapter shows
+  script                   print the narration lines as TSV (id, text)
+  glyphs [OUT]             render the typesetting probe sheet (PNG sequence)
+  render [all|CHAPTER...]  render chapters to OUT/<chapter>
+                           (01_hook 02_gallery 03_quadruples 04_ranks
+                            05_counting 06_formula 07_shuffle 08_outro)
+  help                     show this text
+
+render options:
+  --res WxH         frame size (default 1920x1080)
+  --fps N           frame rate (default 60)
+  --out DIR         output directory (default renders)
+  --format FMT      mp4 (default; needs ffmpeg on PATH), png or y4m
+  --narration DIR   voice-over: one <id>.wav per script line
+  --silent          no narration and no score
+  --threads N       fixed render thread count
+  --encoder NAME    libx264 (default), libx265, h264_nvenc, hevc_nvenc or
+                    h264_videotoolbox
+  --crf N           constant rate factor (libx264/libx265)
+  --preset NAME     x264/x265 preset, ultrafast..placebo
+  --bitrate BPS     target video bitrate in bits per second
+  --max-frames N    stop after N frames (profiling: the render then fails
+                    by design and publishes nothing)
+";
+
+#[derive(Debug)]
 struct Args {
     command: String,
+    help: bool,
     targets: Vec<String>,
     res: (u32, u32),
     fps: u32,
@@ -62,10 +91,14 @@ fn value<T: std::str::FromStr>(
         .map_err(|_| format!("bad {flag} value"))
 }
 
-fn parse_args() -> Result<Args, String> {
-    let mut it = std::env::args().skip(1);
-    let command = it.next().ok_or(USAGE)?;
+/// Parses the arguments after the program name. A mistyped flag is an error,
+/// never a chapter name: `render all --fsp 30` must not render every chapter
+/// at the default frame rate.
+fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
+    let mut it = argv.into_iter();
+    let command = it.next().ok_or("missing command")?;
     let mut args = Args {
+        help: matches!(command.as_str(), "help" | "-h" | "--help"),
         command,
         targets: Vec::new(),
         res: (1920, 1080),
@@ -116,6 +149,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--max-frames" => args.max_frames = Some(value(&mut it, "--max-frames")?),
             "--threads" => args.threads = Some(value(&mut it, "--threads")?),
+            "-h" | "--help" => args.help = true,
+            other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => args.targets.push(other.to_owned()),
         }
     }
@@ -148,9 +183,19 @@ fn options(
     Ok(options)
 }
 
+/// Reports a command-line mistake with the usage text and exits with status 2.
+fn usage_error(error: &str) -> ! {
+    eprintln!("hoeffding_d: {error}\n\n{USAGE}");
+    std::process::exit(2);
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     stats::self_check();
-    let args = parse_args()?;
+    let args = parse_args(std::env::args().skip(1)).unwrap_or_else(|error| usage_error(&error));
+    if args.help {
+        print!("{USAGE}");
+        return Ok(());
+    }
     match args.command.as_str() {
         "stats" => print_stats(),
         "script" => {
@@ -172,7 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("glyph sheet -> {}", report.artifact.path.display());
         }
         "render" => render_chapters(&args)?,
-        other => return Err(format!("unknown command {other}\n{USAGE}").into()),
+        other => usage_error(&format!("unknown command {other}")),
     }
     Ok(())
 }
@@ -314,4 +359,115 @@ fn print_stats() {
         h.r, h.s, h.q, h.d1, h.d2, h.d3, h.d
     );
     println!("C(5000,4) = {}", stats::choose(5000, 4));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(line: &str) -> Result<Args, String> {
+        parse_args(line.split_whitespace().map(str::to_owned))
+    }
+
+    #[test]
+    fn typos_are_errors_not_chapter_names() {
+        for (line, flag) in [
+            ("render --fsp 30", "--fsp"),
+            ("render all --fsp 30", "--fsp"),
+            ("render 01_hook --fsp 30", "--fsp"),
+            ("render 01_hook -r 1920x1080", "-r"),
+            ("stats --verbose", "--verbose"),
+            ("glyphs out --dpi 2", "--dpi"),
+        ] {
+            assert_eq!(
+                parse(line).err().as_deref(),
+                Some(format!("unknown option {flag}").as_str()),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_values_are_errors() {
+        for line in [
+            "",
+            "render --fps",
+            "render --fps sixty",
+            "render --res 1920",
+            "render --res 1920xtall",
+            "render --format webm",
+            "render --preset ludicrous",
+            "render --crf",
+            "render --threads -4",
+            "render --max-frames many",
+        ] {
+            assert!(parse(line).is_err(), "{line:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn every_valid_flag_still_parses() {
+        let a = parse(
+            "render 01_hook 08_outro --res 3840x2160 --fps 30 --out out/4k --format y4m \
+             --narration narration_v5 --silent --threads 16 --encoder libx265 --crf 18 \
+             --preset slow --bitrate 8000000 --max-frames 900",
+        )
+        .unwrap();
+        assert_eq!(a.command, "render");
+        assert_eq!(a.targets, ["01_hook", "08_outro"]);
+        assert_eq!((a.res, a.fps), ((3840, 2160), 30));
+        assert_eq!(a.out, PathBuf::from("out/4k"));
+        assert_eq!(a.format, RenderFormat::Y4m);
+        assert_eq!(a.narration, Some(PathBuf::from("narration_v5")));
+        assert!(a.silent && !a.help);
+        assert_eq!((a.threads, a.max_frames), (Some(16), Some(900)));
+        assert_eq!(a.encoder, "libx265");
+        assert_eq!(
+            a.quality,
+            VideoQuality {
+                crf: Some(18),
+                preset: Some(EncoderPreset::Slow),
+                tune: None,
+                bitrate: Some(8_000_000),
+            }
+        );
+        assert_eq!(
+            parse("render --format png").unwrap().format,
+            RenderFormat::PngSequence
+        );
+        assert_eq!(
+            parse("render --format mp4").unwrap().format,
+            RenderFormat::Mp4
+        );
+        assert_eq!(parse("glyphs sheet").unwrap().targets, ["sheet"]);
+    }
+
+    #[test]
+    fn defaults_and_the_libx264_animation_tune() {
+        let a = parse("render").unwrap();
+        assert!(a.targets.is_empty() && !a.silent && !a.help);
+        assert_eq!((a.res, a.fps), ((1920, 1080), 60));
+        assert_eq!(a.out, PathBuf::from("renders"));
+        assert_eq!(a.format, RenderFormat::Mp4);
+        assert_eq!(a.encoder, "libx264");
+        assert_eq!(a.quality, VideoQuality::default());
+        assert!(a.narration.is_none() && a.threads.is_none() && a.max_frames.is_none());
+        // Rate control on libx264 tunes for flat-shaded animation; other
+        // encoders keep their own defaults.
+        let tuned = parse("render --crf 16").unwrap().quality.tune;
+        assert_eq!(tuned, Some(EncoderTune::Animation));
+        let nvenc = parse("render --encoder h264_nvenc --crf 16")
+            .unwrap()
+            .quality
+            .tune;
+        assert_eq!(nvenc, None);
+    }
+
+    #[test]
+    fn help_in_any_position() {
+        for line in ["help", "-h", "--help", "render --help", "render 01_hook -h"] {
+            assert!(parse(line).unwrap().help, "{line}");
+        }
+        assert!(!parse("stats").unwrap().help);
+    }
 }

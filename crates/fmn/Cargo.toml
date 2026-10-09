@@ -33,5 +33,11 @@ fmn-platform = { workspace = true, features = ["exact-process"] }
 # callers may instead inject their own `FfmpegCapability`.
 ffmpeg = ["fmn-platform/exact-process", "fmn-output/exact-process"]
 
+# `cargo test` runs the explainer's own unit tests (its argument parser);
+# examples are otherwise only compiled, never tested.
+[[example]]
+name = "hoeffding_d"
+test = true
+
 [lints]
 workspace = true
