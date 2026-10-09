@@ -1306,6 +1306,7 @@ where
     ) -> std::result::Result<(), SceneError> {
         let construction = (|| -> Result<()> {
             typesetting::preflight(self.program, self.typesetting, self.preflight_workers)?;
+            self.typesetting.note_construct_begin();
             let mut stage = Stage {
                 scene,
                 sink,

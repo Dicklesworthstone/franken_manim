@@ -235,7 +235,10 @@ fn segment_accounting_separates_layouts_before_the_first_frame_from_play() {
 
     let session = TexSession::default();
     bytes(&session, "a+b");
+    session.note_construct_begin();
     bytes(&session, "c+d");
+    // Only the first construct boundary is recorded.
+    session.note_construct_begin();
     session.note_first_frame();
     // Only the first frame's boundary is recorded.
     bytes(&session, "k+l");
@@ -254,6 +257,7 @@ fn segment_accounting_separates_layouts_before_the_first_frame_from_play() {
     session.note_segment_begin();
     session.note_segment_end();
     let report = session.report();
+    assert_eq!(report.layouts_before_construct, Some(1));
     assert_eq!(report.layouts_before_first_frame, Some(2));
     assert_eq!(report.layouts_inside_segments, 2);
     assert_eq!(report.layout_computations, 6);

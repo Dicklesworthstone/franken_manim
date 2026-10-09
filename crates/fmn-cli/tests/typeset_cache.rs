@@ -272,8 +272,12 @@ fn twenty_static_formulas_are_typeset_on_several_workers_before_the_first_frame(
         render.typesetting()
     );
     assert_eq!(render.count("batches"), 1);
-    // Every layout of the run happened before the first frame; none in play.
+    // The preflight did every layout of the run before construct() began:
+    // construction laid out nothing, and nothing was laid out in play. (The
+    // sheet builds every formula before its first play, so "none in play"
+    // alone would hold without a preflight; "none in construct" would not.)
     assert_eq!(render.count("misses"), SHEET_LAYOUTS);
+    assert_eq!(render.count("layouts_before_construct"), SHEET_LAYOUTS);
     assert_eq!(render.count("layouts_before_first_frame"), SHEET_LAYOUTS);
     assert_eq!(render.count("layouts_inside_play"), 0);
     let parallelism = std::thread::available_parallelism().map_or(1, usize::from);

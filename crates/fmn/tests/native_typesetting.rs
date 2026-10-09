@@ -356,6 +356,8 @@ fn the_report_separates_preflighted_layouts_from_typesetting_inside_play() {
     let clean = run(Vec::new());
     assert_eq!(clean.preflight.requests, 1);
     assert_eq!(clean.layout_computations, 2);
+    // Both layouts happened in the preflight, before construct() began.
+    assert_eq!(clean.layouts_before_construct, Some(2));
     assert_eq!(clean.layouts_before_first_frame, Some(2));
     assert_eq!(clean.layouts_inside_segments, 0);
 

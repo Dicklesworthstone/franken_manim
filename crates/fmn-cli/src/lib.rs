@@ -6372,7 +6372,8 @@ fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
         ",\"typesetting\":{{\"initialized\":{},\"persistent\":{},\"cache_error\":{},\
          \"hits\":{},\"memory_hits\":{},\"disk_hits\":{},\"misses\":{},\
          \"bytes_read\":{},\"bytes_written\":{},\"rejected\":{},\
-         \"layouts_before_first_frame\":{},\"layouts_inside_play\":{},\
+         \"layouts_before_construct\":{},\"layouts_before_first_frame\":{},\
+         \"layouts_inside_play\":{},\
          \"preflight\":{{\"batches\":{},\"requests\":{},\"workers\":{},\
          \"active_workers\":{},\"wall_ns\":{}}}}}",
         report.initialized,
@@ -6385,6 +6386,9 @@ fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
         report.persistent_bytes_read,
         report.persistent_bytes_written,
         report.persistent_rejected,
+        report
+            .layouts_before_construct
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
         report
             .layouts_before_first_frame
             .map_or_else(|| "null".to_owned(), |value| value.to_string()),
@@ -6427,6 +6431,16 @@ fn typesetting_human_summary(report: &fmn::tex::TypesetSessionReport) -> String 
             preflight.requests,
             preflight.active_workers,
             preflight.wall_ns as f64 / 1e6,
+        );
+    }
+    if let (Some(before_construct), Some(before_frame)) = (
+        report.layouts_before_construct,
+        report.layouts_before_first_frame,
+    ) {
+        let _ = write!(
+            summary,
+            "; {} layouts in construct",
+            before_frame.saturating_sub(before_construct)
         );
     }
     let _ = write!(

@@ -3357,6 +3357,7 @@ fn typeset_preflight_before_first_play(ctx: &mut RunCtx) -> Result<RunOutcome, S
     let requests = typesetting_field(&record, "requests")?;
     let workers = typesetting_field(&record, "workers")?;
     let active = typesetting_field(&record, "active_workers")?;
+    let preflighted = typesetting_field(&record, "layouts_before_construct")?;
     let before = typesetting_field(&record, "layouts_before_first_frame")?;
     let inside = typesetting_field(&record, "layouts_inside_play")?;
     let layouts = typesetting_field(&record, "misses")?;
@@ -3367,6 +3368,8 @@ fn typeset_preflight_before_first_play(ctx: &mut RunCtx) -> Result<RunOutcome, S
             .field("workers", workers)
             .field("active_workers", active)
             .field("wall_ns", wall_ns)
+            .field("layouts_before_construct", preflighted)
+            .field("layouts_in_construct", before.saturating_sub(preflighted))
             .field("layouts_before_first_frame", before)
             .field("layouts_inside_play", inside)
             .field("before_first_frame", truth(before == layouts)),
@@ -3377,13 +3380,15 @@ fn typeset_preflight_before_first_play(ctx: &mut RunCtx) -> Result<RunOutcome, S
     if requests != 20
         || layouts != FORMULA_SHEET_LAYOUTS
         || before != layouts
+        || preflighted != layouts
         || inside != 0
         || !parallel
         || frames.is_empty()
     {
         return Err(fail(format!(
             "preflight contract broke: requests={requests} workers={workers} active={active} \
-             layouts={layouts} before_first_frame={before} inside_play={inside}"
+             layouts={layouts} before_construct={preflighted} before_first_frame={before} \
+             inside_play={inside}"
         )));
     }
     Ok(RunOutcome::ok()
@@ -5903,6 +5908,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             e2e::spans::PREFLIGHT,
             vec![
                 FieldPred::u64_eq("requests", 20),
+                FieldPred::u64_eq("layouts_in_construct", 0),
                 FieldPred::u64_eq("layouts_inside_play", 0),
                 FieldPred::str_eq("before_first_frame", "true"),
             ],

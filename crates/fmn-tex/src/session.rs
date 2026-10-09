@@ -39,8 +39,13 @@ pub struct TypesetSessionReport {
     pub layout_computations: u64,
     /// Parallel preflight batches run on this session's engine.
     pub preflight: TypesetPreflightStats,
+    /// Layouts completed before the scene's `construct` began: the work its
+    /// front-door preflight moved ahead of construction. `None` when the
+    /// front door never reached `construct`.
+    pub layouts_before_construct: Option<u64>,
     /// Layouts completed before the scene's first frame (the first play,
-    /// wait, or still); `None` when the scene produced no frame.
+    /// wait, or still); `None` when the scene produced no frame. Minus
+    /// `layouts_before_construct`, this is what `construct` laid out itself.
     pub layouts_before_first_frame: Option<u64>,
     /// Layouts computed while a play/wait segment was driving frames: the
     /// typesetting a complete preflight leaves inside `play()`, ideally none.
@@ -64,6 +69,7 @@ impl TypesetSessionReport {
 /// Segment-boundary accounting, recorded by the scene front door.
 #[derive(Default)]
 struct SegmentAccounting {
+    before_construct: Cell<Option<u64>>,
     before_first: Cell<Option<u64>>,
     open_since: Cell<Option<u64>>,
     inside: Cell<u64>,
@@ -180,8 +186,17 @@ impl TexSession {
             persistent_rejected: engine.persistent_rejected_entries(),
             layout_computations: engine.layout_computations(),
             preflight: engine.preflight_stats(),
+            layouts_before_construct: self.segments.before_construct.get(),
             layouts_before_first_frame: self.segments.before_first.get(),
             layouts_inside_segments: inside,
+        }
+    }
+
+    /// Record that the scene's `construct` is about to run, after any
+    /// front-door preflight. Only the first call counts.
+    pub fn note_construct_begin(&self) {
+        if self.segments.before_construct.get().is_none() {
+            self.segments.before_construct.set(Some(self.layouts()));
         }
     }
 
