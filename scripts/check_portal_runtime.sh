@@ -118,10 +118,15 @@ python3 crates/fmn-python/tests/native_svg_paints.py
 python3 crates/fmn-python/tests/svg_paint_ingress.py
 python3 crates/fmn-python/tests/svg_lifecycle.py
 
+# Single and paired (--save-last-frame) batch recovery against real native
+# outputs and the console: failure, resume, skip, and corruption refusal.
+python3 crates/fmn-python/tests/batch_checkpoint_acceptance.py
+
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
 python3 crates/fmn-python/tests/test_bundle_checkpoint_protocol.py
 python3 crates/fmn-python/tests/test_bundle_resume_cli_protocol.py
 python3 crates/fmn-python/tests/test_paired_output_protocol.py
+python3 crates/fmn-python/tests/paired_checkpoint_unit.py
 python3 crates/fmn-python/tests/test_scene_attributes.py
 python3 crates/fmn-python/tests/test_project_editor_facade.py
 python3 crates/fmn-python/tests/test_batch_checkpoint_identity.py
