@@ -1438,9 +1438,11 @@ mod std_runner {
                 Instant::now() < deadline,
                 "the stdin pipe never filled ({seen} bytes accepted)"
             );
-            if let Ok((write, _)) = done_rx.try_recv() {
-                panic!("the writer returned before cancellation after {seen} bytes: {write}");
-            }
+            let early = done_rx.try_recv().ok().map(|(write, _)| write.to_string());
+            assert_eq!(
+                early, None,
+                "the writer returned before cancellation after {seen} bytes"
+            );
             thread::sleep(Duration::from_millis(10));
             let now = delivered.load(Ordering::Acquire);
             if now != seen || !writing.load(Ordering::Acquire) {
@@ -1459,13 +1461,14 @@ mod std_runner {
             .expect("cancellation must unblock a writer blocked on a full stdin pipe");
         // The blocked write returns only because the killed child's end of
         // the pipe closed, never through the cancelled-before-write check.
-        match &write {
-            ProcessError::Plumbing { detail, .. } => assert!(
-                detail.starts_with("stdin write failed"),
-                "the blocked write must fail on the closed pipe: {detail}"
-            ),
-            other => panic!("the blocked write must fail on the closed pipe: {other}"),
-        }
+        let pipe_closed = matches!(
+            &write,
+            ProcessError::Plumbing { detail, .. } if detail.starts_with("stdin write failed")
+        );
+        assert!(
+            pipe_closed,
+            "the blocked write must fail on the closed pipe: {write}"
+        );
         assert!(delivered.load(Ordering::Acquire) < MAX_TOTAL);
         assert_eq!(
             finish.expect("supervisor outcome").termination,
