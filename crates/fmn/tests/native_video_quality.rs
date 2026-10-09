@@ -294,7 +294,12 @@ fn native_mp4_mov_quality_survives_into_provenance_and_x264_sei() {
         .as_nanos();
     let root =
         std::env::temp_dir().join(format!("fmn-video-quality-{}-{unique}", std::process::id()));
-    std::fs::create_dir(&root).unwrap();
+    // The root is the ffmpeg workdir root, which the boundary refuses when
+    // group-writable: make it private whatever the host's umask.
+    let mut private = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut private, 0o700);
+    private.create(&root).unwrap();
     let root = root.canonicalize().unwrap();
     let capability = FfmpegCapability {
         runner: Arc::new(StdProcessRunner),
