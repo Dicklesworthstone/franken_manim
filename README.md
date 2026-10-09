@@ -221,7 +221,7 @@ Honest framing. `franken_manim` is the only entry that combines a one-binary ins
 
 ### Install footprint, measured
 
-A real-world check is a separate showcase crate, the Hoeffding's D explainer: a 7½-minute narrated 4K video with formulas, live plots and animations. It was written against the native `fmn` facade and compiles to a single 9.2 MB binary. These figures were measured on macOS arm64 in October 2026, and exclude narration.
+A real-world check is a separate showcase crate, the Hoeffding's D explainer: a narrated 4K video, 8 min 27 s long with 7 min 21 s of narration, with formulas, live plots and animations. It was written against the native `fmn` facade and compiles to a single 9.2 MB binary. These figures were measured on macOS arm64 in October 2026, and exclude narration.
 
 | What you install to make that video | Download | Installed |
 |---|---|---|
@@ -487,7 +487,7 @@ Numbers below are the CI **gates** (§17.2 of the plan), to be enforced on pinne
   - The 66 MB RGBA16F raster is recycled instead of freshly zero-allocated every frame, which also moves PG-6 toward zero steady-state allocations.
   - A recycled raster that provably still holds its worker's previous frame keeps its reused tiles in place, instead of copying them back from the tile cache.
 - **Output:** decoded frames are byte-identical to the old route.
-- **Whole video:** all eight chapters (31,130 frames) rendered concurrently in 162 s with the host idle.
+- **Whole video:** all eight chapters of the shipped cut (30,431 frames) rendered concurrently in 141 s.
 
 GPU annex engines are measured under their own profiles (PG-A), gate **annex changes only**, and never gate core merges; the CPU engine must stand on its own so acceleration can never mask a core regression. The scaling hierarchy, outermost first: multi-scene batch → frame-parallel pure segments → pipelined frame stages → the tile pool → SIMD within a tile.
 
