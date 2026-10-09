@@ -666,7 +666,7 @@ impl LogRecord {
 }
 
 /// Escape a string into its JSON form (quotes included) per RFC 8259.
-fn escape_json_string(s: &str, out: &mut String) {
+pub(crate) fn escape_json_string(s: &str, out: &mut String) {
     out.push('"');
     for ch in s.chars() {
         match ch {

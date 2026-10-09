@@ -438,11 +438,21 @@ pub struct Pending {
 #[must_use]
 pub fn render_dashboard(
     baseline: &Baseline,
+    oracle: &OracleSummary,
     parse_pending: &[Pending],
     layout_pending: &[Pending],
     trend: &[Baseline],
 ) -> String {
     let [po, pu, lo, lu] = baseline.percentages();
+    let share = |part: u64, whole: u64| {
+        if whole == 0 {
+            0.0
+        } else {
+            100.0 * part as f64 / whole as f64
+        }
+    };
+    let oracle_occ = share(oracle.occurrences_within_5, baseline.occurrence_total);
+    let oracle_uniq = share(oracle.within_5 as u64, baseline.unique_total);
     let mut out = String::new();
     let _ = writeln!(out, "# The fmd-math coverage ratchet\n");
     let _ = writeln!(
@@ -466,13 +476,17 @@ pub fn render_dashboard(
         out,
         "| **Parse + typeset returned Ok** | {lo:.3} % | {lu:.3} % |"
     );
-    let _ = writeln!(out, "| **Layout checked by an oracle** | 0 % | 0 % |");
+    let _ = writeln!(
+        out,
+        "| **Layout within 5% of real TeX (oracle)** | {oracle_occ:.3} % | {oracle_uniq:.3} % |"
+    );
     let _ = writeln!(
         out,
         "\n\"Typeset returned Ok\" means fmd-math produced a layout without an \
-         error. It does not show that the layout is right. No layout-correctness \
-         oracle runs over the corpus yet (fm-tex-layout-oracle-bkbc), so that row \
-         is 0 until one lands."
+         error. It does not show that the layout is right. {} The oracle row \
+         counts only those verified strings against the whole corpus; \
+         unsampled strings count as unverified.",
+        oracle_dashboard_line(oracle)
     );
     let _ = writeln!(out, "\n## Pending constructs (parse plane)\n");
     let _ = writeln!(out, "| Construct | Occurrences blocked | Tracked at |");
@@ -532,6 +546,262 @@ pub fn render_dashboard(
          private fixture; this dashboard publishes **numbers, construct names,\n\
          and hashes only**. Anyone with the pinned trees can reproduce the\n\
          denominator byte-for-byte via `scripts/harvest_tex_corpus.py`."
+    );
+    out
+}
+
+// ── The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) ───────────────
+
+/// The oracle's committed fixture: real TeX's boxes for a stratified corpus
+/// sample, captured by `scripts/capture_tex_corpus_boxes.py`. Rows name
+/// their strings by digest only (§15.3).
+pub const ORACLE_FIXTURE: &str = include_str!("../fixtures/tex_corpus_boxes.v1.tsv");
+
+/// One fixture row: real TeX's box for one sampled corpus string, in ems.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OracleRow {
+    /// The string's public digest, `sha256(mode + NUL + string)`.
+    pub digest: String,
+    /// TeX's `\wd`.
+    pub width: f64,
+    /// TeX's `\ht`.
+    pub height: f64,
+    /// TeX's `\dp`.
+    pub depth: f64,
+    /// Occurrences across the corpus.
+    pub count: u64,
+    /// Construct classes the string exercises.
+    pub classes: Vec<String>,
+}
+
+/// Parse the oracle fixture. Comment lines (`#`) and blank lines are
+/// skipped.
+///
+/// # Errors
+///
+/// A row without six tab-separated fields, or with an unparsable number.
+pub fn parse_oracle_fixture(text: &str) -> Result<Vec<OracleRow>, String> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|(i, line)| {
+            let bad = || format!("oracle fixture line {}: {line:?}", i + 1);
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [digest, width, height, depth, count, classes] = fields.as_slice() else {
+                return Err(bad());
+            };
+            let number = |field: &str| field.parse::<f64>().map_err(|_| bad());
+            Ok(OracleRow {
+                digest: (*digest).to_owned(),
+                width: number(width)?,
+                height: number(height)?,
+                depth: number(depth)?,
+                count: count.parse().map_err(|_| bad())?,
+                // `|` appears in no construct name (`\,` and `\ ` do).
+                classes: classes.split('|').map(str::to_owned).collect(),
+            })
+        })
+        .collect()
+}
+
+/// fmd-math's box (width, height, depth in ems) for one sampled string, or
+/// `None` where fmd-math refused it.
+pub type OracleBox = Option<(f64, f64, f64)>;
+
+/// Lay out every sampled string as the Tex surface does: display style,
+/// the default macro pack. `texts` maps digests to the private corpus
+/// strings.
+///
+/// # Errors
+///
+/// A fixture row whose digest `texts` lacks, or a missing face or pack.
+pub fn run_layout_oracle(
+    rows: &[OracleRow],
+    texts: &std::collections::HashMap<String, String>,
+) -> Result<Vec<OracleBox>, String> {
+    let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
+    let pack = fmd_math::MacroSet::pack("fmd-math/pack/default")
+        .ok_or_else(|| "the default macro pack is missing".to_owned())?;
+    rows.iter()
+        .map(|row| {
+            let text = texts
+                .get(&row.digest)
+                .ok_or_else(|| format!("fixture row {} is not in the corpus", row.digest))?;
+            Ok(engine
+                .typeset_with_macros(text, fmd_math::Style::Display, &pack)
+                .ok()
+                .map(|layout| (layout.width, layout.height, layout.depth)))
+        })
+        .collect()
+}
+
+/// How far fmd-math's box is from TeX's: the larger of the relative width
+/// error and the height and depth errors relative to TeX's total height,
+/// so a misplaced baseline counts too. Multi-line strings keep their first
+/// row's baseline on both sides, as the Reference's align* rows do.
+/// Infinite where fmd-math refused the string.
+#[must_use]
+pub fn oracle_error(row: &OracleRow, laid: OracleBox) -> f64 {
+    let Some((width, height, depth)) = laid else {
+        return f64::INFINITY;
+    };
+    let total = row.height + row.depth;
+    let w = (width / row.width - 1.0).abs();
+    let h = (height - row.height).abs() / total;
+    let d = (depth - row.depth).abs() / total;
+    w.max(h).max(d)
+}
+
+/// The oracle's counts over its sample.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OracleSummary {
+    /// Sampled strings.
+    pub rows: usize,
+    /// Strings within 5% of TeX's box.
+    pub within_5: usize,
+    /// Within 10%.
+    pub within_10: usize,
+    /// Strings fmd-math refused.
+    pub refused: usize,
+    /// Corpus occurrences of the sampled strings.
+    pub occurrences: u64,
+    /// Occurrences of the strings within 5%.
+    pub occurrences_within_5: u64,
+}
+
+/// Tally per-row errors into the oracle's counts.
+#[must_use]
+pub fn summarize_oracle(rows: &[OracleRow], errors: &[f64]) -> OracleSummary {
+    let mut s = OracleSummary::default();
+    for (row, &error) in rows.iter().zip(errors) {
+        s.rows += 1;
+        s.within_5 += usize::from(error <= 0.05);
+        s.within_10 += usize::from(error <= 0.10);
+        s.refused += usize::from(error.is_infinite());
+        s.occurrences += row.count;
+        if error <= 0.05 {
+            s.occurrences_within_5 += row.count;
+        }
+    }
+    s
+}
+
+/// The sentence the dashboard publishes about the oracle. The oracle test
+/// requires the committed dashboard to carry it verbatim, so the published
+/// numbers cannot drift from what the oracle measures.
+#[must_use]
+pub fn oracle_dashboard_line(s: &OracleSummary) -> String {
+    format!(
+        "The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out {} \
+         strings, sampled by construct class and occurrence ({} occurrences), \
+         and compares each box with real TeX's: {} are within 5% and {} within \
+         10%, covering {} occurrences within 5%.",
+        s.rows, s.occurrences, s.within_5, s.within_10, s.occurrences_within_5
+    )
+}
+
+const ORACLE_SCHEMA: &str = "fmn.tex-corpus-boxes.v1";
+
+/// A JSON number with five decimals; `null` for a refusal's infinite error.
+fn json_number(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.5}")
+    } else {
+        "null".to_owned()
+    }
+}
+
+/// The oracle run as bounded, deterministic NDJSON (schema
+/// `fmn.tex-corpus-boxes.v1`): one `row` record per sampled string in
+/// fixture order (digest, occurrences, TeX's and fmd-math's boxes, error),
+/// one `class` record per construct class with the lowest within-5% share
+/// first, and a closing `summary` with the floors and the decision. Rows
+/// carry digests, never strings (§15.3).
+#[must_use]
+pub fn oracle_ndjson(
+    rows: &[OracleRow],
+    laid: &[OracleBox],
+    errors: &[f64],
+    floors: (usize, usize),
+) -> String {
+    #[derive(Default)]
+    struct Class<'a> {
+        rows: usize,
+        within_5: usize,
+        within_10: usize,
+        worst: f64,
+        worst_digest: &'a str,
+    }
+    let mut out = String::new();
+    let mut classes: std::collections::BTreeMap<&str, Class<'_>> =
+        std::collections::BTreeMap::new();
+    for ((row, laid), &error) in rows.iter().zip(laid).zip(errors) {
+        let native = laid.map_or_else(
+            || "null".to_owned(),
+            |(w, h, d)| format!("[{w:.5},{h:.5},{d:.5}]"),
+        );
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"{ORACLE_SCHEMA}\",\"kind\":\"row\",\"digest\":\"{}\",\"count\":{},\
+             \"tex\":[{:.5},{:.5},{:.5}],\"native\":{native},\"error\":{}}}",
+            row.digest,
+            row.count,
+            row.width,
+            row.height,
+            row.depth,
+            json_number(error)
+        );
+        for class in &row.classes {
+            let tally = classes.entry(class).or_default();
+            tally.rows += 1;
+            tally.within_5 += usize::from(error <= 0.05);
+            tally.within_10 += usize::from(error <= 0.10);
+            if error >= tally.worst {
+                tally.worst = error;
+                tally.worst_digest = &row.digest;
+            }
+        }
+    }
+    let mut table: Vec<(&&str, &Class<'_>)> = classes.iter().collect();
+    let share = |c: &Class<'_>| c.within_5 as f64 / c.rows as f64;
+    table.sort_by(|a, b| {
+        share(a.1)
+            .total_cmp(&share(b.1))
+            .then(b.1.rows.cmp(&a.1.rows))
+    });
+    for (name, c) in table {
+        let mut class = String::new();
+        crate::e2e::escape_json_string(name, &mut class);
+        let _ = writeln!(
+            out,
+            "{{\"schema\":\"{ORACLE_SCHEMA}\",\"kind\":\"class\",\"class\":{class},\"rows\":{},\
+             \"within_5\":{},\"within_10\":{},\"worst\":{},\"worst_digest\":\"{}\"}}",
+            c.rows,
+            c.within_5,
+            c.within_10,
+            json_number(c.worst),
+            c.worst_digest
+        );
+    }
+    let s = summarize_oracle(rows, errors);
+    let decision = if s.within_5 >= floors.0 && s.within_10 >= floors.1 {
+        "pass"
+    } else {
+        "below_floor"
+    };
+    let _ = writeln!(
+        out,
+        "{{\"schema\":\"{ORACLE_SCHEMA}\",\"kind\":\"summary\",\"rows\":{},\"within_5\":{},\
+         \"within_10\":{},\"refused\":{},\"occurrences\":{},\"occurrences_within_5\":{},\
+         \"floor_5\":{},\"floor_10\":{},\"decision\":\"{decision}\"}}",
+        s.rows,
+        s.within_5,
+        s.within_10,
+        s.refused,
+        s.occurrences,
+        s.occurrences_within_5,
+        floors.0,
+        floors.1
     );
     out
 }
@@ -899,8 +1169,17 @@ mod tests {
 
     #[test]
     fn dashboard_renders_numbers_and_never_strings() {
+        let oracle = OracleSummary {
+            rows: 20,
+            within_5: 8,
+            within_10: 12,
+            refused: 0,
+            occurrences: 400,
+            occurrences_within_5: 250,
+        };
         let d = render_dashboard(
             &base(),
+            &oracle,
             &[Pending {
                 construct: "\\substack".to_owned(),
                 occurrences: 5,
@@ -912,5 +1191,44 @@ mod tests {
         assert!(d.contains("95.000 %"));
         assert!(d.contains("\\substack"));
         assert!(d.contains("escalation path"));
+        // 250 of the corpus's 1000 occurrences and 8 of its 100 strings are
+        // verified within 5%.
+        assert!(d.contains("| 25.000 % | 8.000 % |"));
+        assert!(d.contains(&oracle_dashboard_line(&oracle)));
+    }
+
+    #[test]
+    fn oracle_fixture_rows_parse_and_errors_tally() {
+        let rows = parse_oracle_fixture(
+            "# header\n\
+             aa\t1.00000\t0.60000\t0.40000\t3\t\\frac|script:sup\n\
+             bb\t2.00000\t0.50000\t0.00000\t1\t(plain)\n",
+        )
+        .expect("well-formed");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].classes, ["\\frac", "script:sup"]);
+        // Width 2% wide, height 3% of the total high: within 5%.
+        let near = oracle_error(&rows[0], Some((1.02, 0.63, 0.40)));
+        assert!((near - 0.03).abs() < 1e-12, "{near}");
+        let refused = oracle_error(&rows[1], None);
+        assert!(refused.is_infinite());
+        let s = summarize_oracle(&rows, &[near, refused]);
+        assert_eq!((s.rows, s.within_5, s.within_10, s.refused), (2, 1, 1, 1));
+        assert_eq!((s.occurrences, s.occurrences_within_5), (4, 3));
+        let log = oracle_ndjson(
+            &rows,
+            &[Some((1.02, 0.63, 0.40)), None],
+            &[near, refused],
+            (1, 1),
+        );
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2 + 3 + 1, "two rows, three classes, a summary");
+        assert!(lines[1].contains("\"native\":null,\"error\":null"));
+        assert!(
+            lines[2].contains("\"class\":\"(plain)\""),
+            "worst class first"
+        );
+        assert!(lines[5].ends_with("\"decision\":\"pass\"}"));
+        assert!(parse_oracle_fixture("aa\t1.0\t0.5\n").is_err());
     }
 }

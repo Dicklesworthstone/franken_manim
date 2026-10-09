@@ -16,9 +16,11 @@
 //! dashboard in one stroke).
 
 use fmn_conformance::ratchet::{
-    Baseline, Pending, parse_corpus_entry, parse_trend_tsv, ratchet_violations, render_dashboard,
+    Baseline, ORACLE_FIXTURE, OracleSummary, Pending, corpus_digest, oracle_error,
+    parse_corpus_entry, parse_oracle_fixture, parse_trend_tsv, ratchet_violations,
+    render_dashboard, run_layout_oracle, summarize_oracle,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -101,7 +103,9 @@ fn dashboard_headline_matches_the_baseline() -> Result<(), String> {
     for needle in [
         format!("| **Parse** | {po:.3} % | {pu:.3} % |"),
         format!("| **Parse + typeset returned Ok** | {lo:.3} % | {lu:.3} % |"),
-        "| **Layout checked by an oracle** | 0 % | 0 % |".to_owned(),
+        // The oracle row's numbers need the corpus; tex_corpus_boxes checks
+        // them where it is present.
+        "| **Layout within 5% of real TeX (oracle)** | ".to_owned(),
         baseline.corpus_hash.clone(),
     ] {
         assert!(
@@ -331,7 +335,23 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
     );
     let advanced = current != committed;
     if std::env::var("RATCHET_UPDATE").is_ok() {
-        bless(&current, &parse_pending, &layout_pending)?;
+        // The dashboard publishes the TeX box oracle's counts beside the
+        // coverage (tests/tex_corpus_boxes.rs checks they stay current).
+        let texts: HashMap<String, String> = data
+            .lines()
+            .filter_map(parse_corpus_entry)
+            .filter(|entry| entry.mode == "math")
+            .map(|entry| (corpus_digest("math", &entry.text), entry.text))
+            .collect();
+        let rows = parse_oracle_fixture(ORACLE_FIXTURE)?;
+        let laid = run_layout_oracle(&rows, &texts)?;
+        let errors: Vec<f64> = rows
+            .iter()
+            .zip(&laid)
+            .map(|(row, &laid)| oracle_error(row, laid))
+            .collect();
+        let oracle = summarize_oracle(&rows, &errors);
+        bless(&current, &oracle, &parse_pending, &layout_pending)?;
         eprintln!("ratchet blessed at {}", current.franken_markdown_rev);
     } else if advanced {
         return Err(
@@ -347,6 +367,7 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
 
 fn bless(
     current: &Baseline,
+    oracle: &OracleSummary,
     parse_pending: &BTreeMap<String, u64>,
     layout_pending: &BTreeMap<String, u64>,
 ) -> Result<(), String> {
@@ -406,6 +427,7 @@ fn bless(
     };
     let dashboard = render_dashboard(
         current,
+        oracle,
         &to_pending(parse_pending),
         &to_pending(layout_pending),
         &trend,
