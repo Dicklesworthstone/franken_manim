@@ -11671,6 +11671,13 @@ assert np.array_equal(
     [2, 6],
 )
 assert len(topology.get_subpaths_from_points(np.zeros((0, 3)))) == 0
+# Appendix C-23: the Reference's match_points keeps a cached subpath-end list, so
+# after matching a shorter path its ends index past the points (its next joint
+# refresh raises IndexError). The portal reads the ends from the live points.
+rematched = topology.copy()
+assert np.array_equal(rematched.get_subpath_end_indices(), [2, 6])
+rematched.match_points(VMobject().set_points_as_corners([[0, 0, 0], [1, 0, 0], [1, 1, 0]]))
+assert np.array_equal(rematched.get_subpath_end_indices(), [4])
 
 single_insert = topology.insert_n_curves_to_point_list(
     2, np.array([[2.0, 3.0, 0.0]], dtype=np.float32)

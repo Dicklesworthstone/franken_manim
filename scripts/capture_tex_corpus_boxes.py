@@ -10,8 +10,8 @@ Each string is stripped, as the Reference strips it. A single line is braced
 as amsmath braces an align* cell; multi-line strings (`\\\\` or `&`) are
 boxed as a top-aligned `aligned`, the inner form of the Reference's align*
 wrapper, without its invisible row struts and trailing column glue. No SVG
-conversion is involved: TeX Live 2025 with dvisvgm 3.6 corrupts some of the
-Reference's SVG extents (fm-0v8k), but not TeX's own boxes.
+conversion or Reference SVG cache is involved, so the Reference's cache race
+(Appendix C-22, fm-0v8k) cannot reach these boxes.
 
 The corpus is a private fixture (plan §15.3): its strings never ship. The
 committed fixture `crates/fmn-conformance/fixtures/tex_corpus_boxes.v1.tsv`

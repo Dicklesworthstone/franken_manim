@@ -100,9 +100,15 @@ violation under `envelope_violations`.
 ## Running it
 
 ```bash
-# Reference facts (regenerate only on purpose; the header line records the command)
-PYTHONPATH=scripts/manim_ref xvfb-run -a <ref-venv>/bin/python \
-  crates/fmn-conformance/python/structural_facts.py extract \
+# Reference facts (regenerate only on purpose; the header line records the command).
+# Run from an empty directory whose custom_config.yml gives the Reference a private
+# base directory (its latex_cache) and SVG cache. The default cache, ~/.cache/manim,
+# is shared by every Reference run on the host, and concurrent runs poison it
+# (Appendix C-22, fm-0v8k).
+mkdir ref-facts && cd ref-facts
+printf 'directories:\n  base: "%s/out"\n  cache: "%s/svg"\n' "$PWD" "$PWD" > custom_config.yml
+PYTHONPATH=$REPO/scripts/manim_ref xvfb-run -a <ref-venv>/bin/python \
+  $REPO/crates/fmn-conformance/python/structural_facts.py extract \
   --engine-id 3b1b/manim@6199a00d4c1b1127ebe45cb629c3f22538b10e13 --points full OUT.ndjson
 
 # Gate: installed portal against the checked-in Reference facts (check_portal_runtime.sh)

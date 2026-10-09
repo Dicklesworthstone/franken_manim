@@ -1041,7 +1041,7 @@ mod tests {
             .build(&engine)
             .expect("builds");
         assert_eq!(dump_family(&default.vmob), dump_family(&display.vmob));
-        // Reference (6199a00d, TeX Live 2025): 1.331 tall in display style;
+        // Reference (6199a00d, TeX Live 2025): 1.413 tall in display style;
         // the text-style layout is under half that.
         assert!(
             height(&default) > 1.8 * height(&text),

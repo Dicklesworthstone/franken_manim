@@ -669,8 +669,7 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
 
     def drawn(record):
         # Point-bearing members in each subtree: an envelope violation between families of
-        # different sizes may be a reshaped tree (or, for Tex on the differential host, the
-        # Reference's broken TeX spans, fm-0v8k), not a moved object.
+        # different sizes may be a reshaped tree, not a moved object.
         counts = {}
         for m in record.get("members", ()):
             if m.get("n_points"):

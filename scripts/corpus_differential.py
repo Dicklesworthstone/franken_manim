@@ -31,6 +31,8 @@ import itertools
 import json
 import os
 import pathlib
+import queue
+import subprocess
 import sys
 import threading
 import time
@@ -69,19 +71,58 @@ def run_portal(args, module, scene, work):
     return run_child(argv, args.workdir, env, args.timeout), png
 
 
+def tex_slots(out: pathlib.Path, count: int) -> queue.Queue:
+    """Private TeX caches for concurrent Reference runs, one config file per slot (fm-0v8k).
+
+    The Reference compiles every TeX string as `working.tex` in one `latex_cache` directory
+    and caches the SVG on disk under the string's hash (manimlib/utils/tex_file_writing.py).
+    Reference processes sharing those directories read each other's DVI and cache it under
+    the wrong string (Appendix C-22). The default cache (~/.cache/manim) then serves that
+    SVG to every later run. A slot is used by one Reference run at a time, and its cache
+    starts empty, so every string is compiled here, by this host's TeX."""
+    slots = queue.Queue()
+    for k in range(count):
+        slot = out / "reference_tex" / f"slot{k}"
+        (slot / "latex").mkdir(parents=True, exist_ok=True)
+        (slot / "svg").mkdir(exist_ok=True)
+        config = slot / "config.yml"
+        # JSON is YAML. Absolute subdirs override the corpus config's base directory.
+        config.write_text(json.dumps({"directories": {
+            "cache": str(slot / "svg"), "subdirs": {"latex_cache": str(slot / "latex")}}}))
+        slots.put(config)
+    return slots
+
+
+def tex_toolchain() -> str:
+    """The Reference's TeX toolchain, which its Tex structure depends on (dvisvgm's SVG)."""
+    versions = []
+    for argv in (["pdftex", "--version"], ["dvisvgm", "--version"]):
+        try:
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            out = ""
+        versions.append(out.splitlines()[0].strip() if out.strip() else f"{argv[0]} unavailable")
+    return "; ".join(versions)
+
+
 def run_reference(args, module, scene, work):
     media = work / "reference_media"
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp"),
            "PYTHONPATH": f"{args.reference_root}{os.pathsep}{args.videos}"}
-    for attempt in range(3):
-        argv = ["xvfb-run", "-n", str(_display()), "-s", "-screen 0 1920x1080x24",
-                args.reference_python, str(FACTS_TOOL), "run-scene",
-                "--facts", str(work / "reference.ndjson"), "--engine", "reference", "--",
-                str(args.videos / module), scene, "-s", "-w", "-r", "320x180", "--video_dir", str(media)]
-        result = run_child(argv, args.workdir, env, args.timeout)
-        # xvfb-run exits 1 before starting Python when its display is taken; retry on a new one.
-        if not (result[0] == 1 and "Xvfb failed" in result[1]):
-            break
+    config = args.tex_slots.get()
+    try:
+        for attempt in range(3):
+            argv = ["xvfb-run", "-n", str(_display()), "-s", "-screen 0 1920x1080x24",
+                    args.reference_python, str(FACTS_TOOL), "run-scene",
+                    "--facts", str(work / "reference.ndjson"), "--engine", "reference", "--",
+                    str(args.videos / module), scene, "-s", "-w", "-r", "320x180",
+                    "--video_dir", str(media), "--config_file", str(config)]
+            result = run_child(argv, args.workdir, env, args.timeout)
+            # xvfb-run exits 1 before starting Python when its display is taken; retry on a new one.
+            if not (result[0] == 1 and "Xvfb failed" in result[1]):
+                break
+    finally:
+        args.tex_slots.put(config)
     pngs = sorted(media.rglob("*.png")) if media.exists() else []
     return result, (pngs[-1] if pngs else media / "absent.png")
 
@@ -102,8 +143,9 @@ def _smoke(ref_png, portal_png):
         from PIL import Image
     except ImportError:
         return None
-    a = np.asarray(Image.open(ref_png).convert("L").resize((320, 180)), dtype=np.float64)
-    b = np.asarray(Image.open(portal_png).convert("L").resize((320, 180)), dtype=np.float64)
+    with Image.open(ref_png) as ref_image, Image.open(portal_png) as portal_image:
+        a = np.asarray(ref_image.convert("L").resize((320, 180)), dtype=np.float64)
+        b = np.asarray(portal_image.convert("L").resize((320, 180)), dtype=np.float64)
     blocks = lambda x: x[: x.shape[0] // 8 * 8, : x.shape[1] // 8 * 8].reshape(  # noqa: E731
         x.shape[0] // 8, 8, x.shape[1] // 8, 8).swapaxes(1, 2).reshape(-1, 64)
     xa, xb = blocks(a), blocks(b)
@@ -268,7 +310,7 @@ def write_dashboard(records, path, title):
               "Size is the largest relative extent change; centre is the largest centre offset in units. "
               "\"Same family\" counts violations whose member has as many point-bearing descendants in both "
               "engines: those compare like with like. A violation between families of different sizes may be "
-              "a reshaped tree, or for Tex the differential host's broken Reference TeX (fm-0v8k). "
+              "a reshaped tree, such as a different glyph grouping inside a Tex. "
               "\"Size\" counts violations whose own extent breaks the envelope; the rest are position-only, "
               "which in scenes mostly inherit another object's size difference through next_to/align_to "
               "layout (the minimized repros in fm-5wq.45 are of that kind).", "",
@@ -467,7 +509,8 @@ def main():
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
     args.exclusions = sf.in_scope(sf.load_exclusions(args.exclusions_file), "scenes")
-    args.engine_ids = f"reference={args.reference_id} portal={args.portal_id}"
+    args.engine_ids = f"reference={args.reference_id} ({tex_toolchain()}) portal={args.portal_id}"
+    args.tex_slots = tex_slots(args.out, max(args.jobs, 1))
     args.workdir = args.videos
     if args.config:
         args.workdir = args.out / "workdir"
