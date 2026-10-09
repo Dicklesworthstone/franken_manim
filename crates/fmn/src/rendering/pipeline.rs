@@ -268,7 +268,8 @@ impl PipelineStages for NativeFrameStages {
     // threads, which are otherwise idle until the next frame arrives. The
     // output team has at most two SMT siblings (one E-core on macOS); at 4K
     // the conversion there was the pipeline's serial bottleneck. Same bytes:
-    // on trj, 600 4K frames took 13.3 s fused vs 13.5 s on the output team.
+    // on a 128-thread Linux host, 600 4K frames took 13.3 s fused vs 13.5 s
+    // on the output team.
     fn convert(
         &self,
         output: FrameReservation,
