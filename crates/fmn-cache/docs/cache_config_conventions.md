@@ -92,6 +92,20 @@ optimization, never an oracle — `--clear-cache` can never change a render.
   contract are pinned to each other by test
   (`doctor_uses_the_same_platform_default_cache_root_as_the_store_contract`).
 
+## Renders use the same root
+
+Every front door that typesets opens the store at this same resolved root,
+lazily, when a scene first needs a formula: `fmn` renders (`fmn batch`
+included), `fmn::render`, and `fmn-python` scenes. The typeset cache lives in
+the `ns/typeset/v<TYPESET_FORMAT_VERSION>` namespace. The portal reads
+`directories.cache` from `custom_config.yml` before falling back to the
+platform convention. An unavailable or refused root never fails a render: the
+scene typesets in memory and the render record reports why (`cache_error`).
+Each `fmn` render record carries a `typesetting` object with that run's hits,
+misses, bytes read and written, corrupt entries recomputed, and the preflight's
+request count, workers and wall time. These are diagnostics, never manifest
+inputs: a warm cache renders the same certified bits as a cold one.
+
 ## Config file locations
 
 The CLI first looks for one optional per-user config, using the native platform

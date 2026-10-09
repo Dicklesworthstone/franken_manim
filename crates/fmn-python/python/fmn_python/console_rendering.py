@@ -24,6 +24,7 @@ from .rendering import (
     RenderSession, _positive_integer, _apply_output_options, _runtime_identities,
 )
 from .scene_loading import SceneSource
+from .typesetting import describe_receipt, typesetting_receipt
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
 from .paired_output import (
@@ -124,7 +125,7 @@ def _message(error):
     return f"{name}: {message}"
 
 
-def _single_result(native, result, robot, source, selected):
+def _single_result(native, result, robot, source, selected, typesetting=None):
     if isinstance(result, PairedRenderResult):
         return native._portal_cli_emit(
             0, "success", "render-paired",
@@ -151,10 +152,13 @@ def _single_result(native, result, robot, source, selected):
     details["frame_count"] = count
     unit = "sample frames" if result.format == "wav" else "frames"
     manifest_part = f"; manifest {result.manifest}" if result.manifest else ""
+    typeset_part = "" if typesetting is None else describe_receipt(typesetting)
+    if typesetting is not None:
+        details["typesetting"] = typesetting
     return native._portal_cli_emit(
         0, "success", "render",
-        f"rendered {count} {result.format} {unit} to {result.destination}{manifest_part}", robot,
-        source=source, scene=selected, rendered=True, **details,
+        f"rendered {count} {result.format} {unit} to {result.destination}{manifest_part}{typeset_part}",
+        robot, source=source, scene=selected, rendered=True, **details,
     )
 
 
@@ -405,4 +409,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        **_partial_output(session, subdivide))
     if batch:
         return _emit_result(native, report, robot, source, destination)
-    return _single_result(native, session.result, robot, source, selected)
+    try:
+        typesetting = typesetting_receipt(scene)
+    except Exception:
+        # Diagnostics never turn a published render into a failure.
+        typesetting = None
+    return _single_result(native, session.result, robot, source, selected, typesetting)

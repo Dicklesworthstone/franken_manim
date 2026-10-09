@@ -5,14 +5,18 @@ fmn-tex owns layouts and source spans. No cache payload is parsed in Python.
 """
 from __future__ import annotations
 
+import ast
 from copy import deepcopy
 from functools import wraps
 from importlib import import_module
+import inspect
 import json
 import os
 from pathlib import Path
 import sys
+import textwrap
 from threading import local
+import time
 from typing import Any
 
 
@@ -56,12 +60,98 @@ def _diagnose(report: dict[str, Any]) -> None:
         pass
 
 
+_MAX_STATIC_REQUESTS = 4096
+_MAX_STATIC_SOURCE_BYTES = 262_144
+_MAX_STATIC_BATCH_BYTES = 4 * 1024 * 1024
+_OPTION_KEYWORDS = ("template", "additional_preamble", "alignment")
+
+
+def _configured_cache_directory(native: Any) -> str | None:
+    """The config's ``directories.cache`` (custom_config.yml), or None."""
+    config = getattr(native, "manim_config", None)
+    try:
+        directories = config["directories"] if config is not None else None
+        value = directories.get("cache") if directories is not None else None
+    except (KeyError, TypeError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _literal(node: ast.AST) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _static_tex_requests(scene_type: type, native: Any) -> list[tuple[str, str, str, bool, str]]:
+    """Statically discover the literal Tex/TexText constructions a scene makes.
+
+    Only calls whose callee resolves, in the defining module, to the portal's
+    exact ``Tex`` or ``TexText`` class and whose layout inputs (positional
+    strings, ``template``, ``additional_preamble``, ``alignment``) are all
+    string literals are collected. Anything dynamic is left to construction:
+    a missed or mismatched guess only costs an unused warm entry, never ink.
+    Returns de-duplicated ``(source, template, preamble, text_mode, align)``.
+    """
+    kinds = {id(native.Tex): False, id(native.TexText): True}
+    stop = native.Scene
+    found: dict[tuple[str, str, str, bool, str], None] = {}
+    for cls in scene_type.__mro__:
+        if cls is stop or not issubclass(cls, stop):
+            break
+        module = sys.modules.get(cls.__module__)
+        if module is None or cls.__module__.startswith(("manimlib", "fmn_python")):
+            continue
+        try:
+            tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
+        except (OSError, TypeError, SyntaxError, ValueError):
+            continue
+        namespace = vars(module)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            text_mode = kinds.get(id(namespace.get(node.func.id)))
+            if text_mode is None or not node.args:
+                continue
+            parts = [_literal(arg) for arg in node.args]
+            if any(part is None for part in parts):
+                continue
+            options = {"template": "", "additional_preamble": "", "alignment": "\\centering"}
+            dynamic = False
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    dynamic = True  # **kwargs may carry layout options
+                elif keyword.arg in _OPTION_KEYWORDS:
+                    value = _literal(keyword.value)
+                    if value is None:
+                        dynamic = True
+                    else:
+                        options[keyword.arg] = value
+            if dynamic:
+                continue
+            # Tex.__init__: strip the outer ends, join on one space, strip.
+            parts[0], parts[-1] = parts[0].lstrip(), parts[-1].rstrip()
+            source = " ".join(parts).strip() or "\\\\"
+            try:
+                align = native._tex_line_align(options["alignment"], text_mode)
+            except Exception:
+                continue
+            key = (source, options["template"], options["additional_preamble"], text_mode, align)
+            found.setdefault(key)
+            if len(found) >= _MAX_STATIC_REQUESTS:
+                return list(found)
+    return list(found)
+
+
 def install_typesetting(native: Any) -> None:
     """Install once per native module; each host thread has its own engines.
 
-    Scene construction configures the persistent cache before construct().
+    Scene construction configures the persistent cache before construct():
+    the config's ``directories.cache`` when set, else the platform default.
     Direct Tex construction outside a Scene uses the same binding through the
     native option-validation seam. Importing the package alone does no I/O.
+
+    ``Scene.run`` also runs the static preflight before setup(): every literal
+    Tex/TexText string the scene's own source constructs is typeset on the
+    native worker pool, so construct() and play() find them warm.
     """
     g = vars(native)
     if _STATE in g:
@@ -82,7 +172,7 @@ def install_typesetting(native: Any) -> None:
 
     def ensure():
         if not hasattr(state, "report"):
-            configure()
+            configure(_configured_cache_directory(native))
 
     def info():
         ensure()
@@ -92,9 +182,51 @@ def install_typesetting(native: Any) -> None:
             report["templates"][name].update(values)
         return report
 
+    def static_preflight(scene) -> dict[str, Any]:
+        """Typeset a scene's literal Tex strings before its lifecycle runs."""
+        started = time.perf_counter_ns()
+        report = {"schema": "fmn-python.static-tex-preflight", "version": 1,
+                  "enabled": getattr(state, "static_preflight", True),
+                  "discovered": 0, "requests": 0, "succeeded": 0, "failed": 0,
+                  "batches": 0, "worker_limit": 0, "wall_ns": 0}
+        if not report["enabled"]:
+            return report
+        requests = _static_tex_requests(type(scene), native)
+        report["discovered"] = len(requests)
+        groups: dict[tuple[str, str, bool, str], list[str]] = {}
+        total = 0
+        for source, template, preamble, text_mode, align in requests:
+            size = len(source.encode("utf-8")) + len(preamble.encode("utf-8"))
+            if (len(source.encode("utf-8")) > _MAX_STATIC_SOURCE_BYTES
+                    or len(preamble.encode("utf-8")) > _MAX_STATIC_SOURCE_BYTES
+                    or len(template.encode("utf-8")) > 1024
+                    or total + size > _MAX_STATIC_BATCH_BYTES):
+                continue
+            total += size
+            groups.setdefault((template, preamble, text_mode, align), []).append(source)
+        workers = max(1, min(32, os.cpu_count() or 1))
+        report["worker_limit"] = workers
+        for (template, preamble, text_mode, align), sources in groups.items():
+            try:
+                receipt = g["_preflight_tex"](sources, template=template, preamble=preamble,
+                                              text_mode=text_mode, alignment=align,
+                                              max_workers=workers)
+            except (ValueError, TypeError, NotImplementedError, MemoryError):
+                # Template/preamble refusals surface again, precisely, at
+                # construction; the preflight is only a warm-up.
+                report["failed"] += len(sources)
+                continue
+            report["batches"] += 1
+            report["requests"] += receipt["count"]
+            report["succeeded"] += receipt["succeeded"]
+            report["failed"] += receipt["failed"]
+        report["wall_ns"] = time.perf_counter_ns() - started
+        return report
+
     Scene = g["Scene"]
     previous_init = Scene.__init__
     previous_validate = g["_validate_tex_options"]
+    previous_lifecycle = Scene._run_lifecycle
 
     @wraps(previous_init)
     def scene_init(self, *args, **kwargs):
@@ -108,11 +240,29 @@ def install_typesetting(native: Any) -> None:
         ensure()
         return result
 
+    @wraps(previous_lifecycle)
+    def run_lifecycle(self):
+        ensure()
+        # The static strings are known before setup()/construct() build any
+        # Tex, so their layouts run in parallel ahead of the first play().
+        before = inspect_backend()
+        report = static_preflight(self)
+        report["before"], report["after"] = before, inspect_backend()
+        self._fmn_static_tex_preflight = report
+        return previous_lifecycle(self)
+
+    def set_static_preflight(enabled=True):
+        if not isinstance(enabled, bool):
+            raise TypeError("static Tex preflight enabled must be bool")
+        state.static_preflight = enabled
+
     Scene.__init__ = scene_init
+    Scene._run_lifecycle = run_lifecycle
     g["_validate_tex_options"] = validate
     g["_fmn_configure_tex_cache"] = configure
     g["_fmn_tex_cache_info"] = info
     g["_fmn_ensure_tex_cache"] = ensure
+    g["_fmn_set_static_tex_preflight"] = set_static_preflight
     g[_STATE] = state
 
 
@@ -129,6 +279,65 @@ def configure_tex_cache(
     generation, useful after clearing the cache. No public class is replaced.
     """
     return import_module("manimlib")._fmn_configure_tex_cache(directory, enabled=enabled)
+
+
+def configure_static_tex_preflight(enabled: bool = True) -> None:
+    """Enable or disable the current thread's automatic static preflight.
+
+    When enabled (the default), ``Scene.run`` first typesets every literal
+    ``Tex``/``TexText`` string found in the scene class's own source on the
+    native worker pool. The receipt is ``scene._fmn_static_tex_preflight``.
+    """
+    import_module("manimlib")._fmn_set_static_tex_preflight(enabled)
+
+
+_RECEIPT_COUNTERS = ("memory_hits", "disk_hits", "layout_computations", "disk_bytes_read",
+                     "disk_bytes_written", "disk_rejected")
+
+
+def typesetting_receipt(scene: Any) -> dict[str, Any] | None:
+    """One ``Scene.run``'s typesetting, as observed: cache traffic since its
+    static preflight began, summed over the template engines, plus the
+    preflight itself. Diagnostic only; never part of a certified manifest.
+    ``misses`` counts fresh layouts (requests no cache layer served).
+    """
+    report = getattr(scene, "_fmn_static_tex_preflight", None)
+    if not isinstance(report, dict) or "before" not in report:
+        return None
+    now = import_module("manimlib")._fmn_tex_cache_info()["templates"]
+    totals = dict.fromkeys(_RECEIPT_COUNTERS, 0)
+    for name, row in now.items():
+        start = report["before"].get(name, {})
+        for key in _RECEIPT_COUNTERS:
+            totals[key] += int(row.get(key, 0)) - int(start.get(key, 0))
+    after = report["after"].get("default", {})
+    return {
+        "persistent": bool(now.get("default", {}).get("persistent")),
+        "hits": totals["memory_hits"] + totals["disk_hits"],
+        "memory_hits": totals["memory_hits"], "disk_hits": totals["disk_hits"],
+        "misses": totals["layout_computations"],
+        "bytes_read": totals["disk_bytes_read"], "bytes_written": totals["disk_bytes_written"],
+        "rejected": totals["disk_rejected"],
+        "preflight": {key: report[key] for key in ("enabled", "discovered", "requests",
+                                                  "succeeded", "failed", "wall_ns")}
+        | {"workers": int(after.get("preflight_workers", 0)),
+           "active_workers": int(after.get("preflight_active_workers", 0))},
+    }
+
+
+def describe_receipt(receipt: dict[str, Any]) -> str:
+    """The human render line's typesetting clause."""
+    store = "typeset cache" if receipt["persistent"] else "typeset memory cache"
+    text = (f"; {store}: {receipt['hits']} hits ({receipt['disk_hits']} from disk), "
+            f"{receipt['misses']} misses, {receipt['bytes_read']} bytes read, "
+            f"{receipt['bytes_written']} bytes written")
+    if receipt["rejected"]:
+        text += f", {receipt['rejected']} corrupt entries recomputed"
+    preflight = receipt["preflight"]
+    if preflight["requests"]:
+        text += (f"; preflight {preflight['requests']} static strings on "
+                 f"{preflight['active_workers']} workers in {preflight['wall_ns'] / 1e6:.1f} ms")
+    return text
 
 
 def tex_cache_info() -> dict[str, Any]:

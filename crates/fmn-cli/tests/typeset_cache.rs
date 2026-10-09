@@ -30,8 +30,10 @@ impl Fixture {
     fn new() -> Self {
         for _ in 0..1_024 {
             let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir()
-                .join(format!("fmn-typeset-cache-{}-{sequence}", std::process::id()));
+            let root = std::env::temp_dir().join(format!(
+                "fmn-typeset-cache-{}-{sequence}",
+                std::process::id()
+            ));
             match fs::create_dir(&root) {
                 Ok(()) => return Self { root },
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -222,11 +224,19 @@ fn a_warm_second_process_serves_every_formula_from_disk_with_identical_certified
     assert_eq!(cold.count("misses"), SHEET_LAYOUTS);
     let written = cold.count("bytes_written");
     assert!(written > 0, "the cold run publishes its layouts");
-    assert_eq!(typeset_objects(&fixture.cache()).len() as u64, SHEET_LAYOUTS);
+    assert_eq!(
+        typeset_objects(&fixture.cache()).len() as u64,
+        SHEET_LAYOUTS
+    );
 
     // A fresh process: nothing survives but the persistent store.
     let warm = render(&fixture, "warm", "2", &cache);
-    assert_eq!(warm.count("disk_hits"), SHEET_LAYOUTS, "{}", warm.typesetting());
+    assert_eq!(
+        warm.count("disk_hits"),
+        SHEET_LAYOUTS,
+        "{}",
+        warm.typesetting()
+    );
     assert_eq!(warm.count("misses"), 0, "no formula is laid out again");
     assert_eq!(warm.count("bytes_read"), written);
     assert_eq!(warm.count("bytes_written"), 0);
@@ -243,7 +253,12 @@ fn a_warm_second_process_serves_every_formula_from_disk_with_identical_certified
 fn twenty_static_formulas_are_typeset_on_several_workers_before_the_first_frame() {
     let fixture = Fixture::new();
     let render = render(&fixture, "out", "4", &cache_dir_args(&fixture.cache()));
-    assert_eq!(render.count("requests"), SHEET_FORMULAS, "{}", render.typesetting());
+    assert_eq!(
+        render.count("requests"),
+        SHEET_FORMULAS,
+        "{}",
+        render.typesetting()
+    );
     assert_eq!(render.count("batches"), 1);
     // Every layout of the run happened before the first frame; none in play.
     assert_eq!(render.count("misses"), SHEET_LAYOUTS);
@@ -252,15 +267,27 @@ fn twenty_static_formulas_are_typeset_on_several_workers_before_the_first_frame(
     let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
     if parallelism >= 2 {
         assert!(render.count("workers") >= 2, "{}", render.typesetting());
-        assert!(render.count("active_workers") >= 2, "{}", render.typesetting());
+        assert!(
+            render.count("active_workers") >= 2,
+            "{}",
+            render.typesetting()
+        );
     }
     assert!(render.count("wall_ns") > 0);
 
     // The preflight ceiling follows the render's thread budget.
-    let serial = self::render(&fixture, "serial", "1", &cache_dir_args(&fixture.root.join("c1")));
+    let serial = self::render(
+        &fixture,
+        "serial",
+        "1",
+        &cache_dir_args(&fixture.root.join("c1")),
+    );
     assert_eq!(serial.count("workers"), 1);
     assert_eq!(serial.count("layouts_inside_play"), 0);
-    assert!(serial.frames == render.frames, "worker count changed the frames");
+    assert!(
+        serial.frames == render.frames,
+        "worker count changed the frames"
+    );
 }
 
 #[test]
@@ -278,11 +305,22 @@ fn a_corrupt_entry_is_detected_recomputed_and_republished_across_processes() {
     fs::write(victim, &bytes).expect("tamper with a cache object");
 
     let recovering = render(&fixture, "recovering", "2", &cache);
-    assert_eq!(recovering.count("rejected"), 1, "{}", recovering.typesetting());
+    assert_eq!(
+        recovering.count("rejected"),
+        1,
+        "{}",
+        recovering.typesetting()
+    );
     assert_eq!(recovering.count("disk_hits"), SHEET_LAYOUTS - 1);
     assert_eq!(recovering.count("misses"), 1);
-    assert!(recovering.count("bytes_written") > 0, "the entry is republished");
-    assert!(recovering.frames == cold.frames, "a corrupt entry changed a frame");
+    assert!(
+        recovering.count("bytes_written") > 0,
+        "the entry is republished"
+    );
+    assert!(
+        recovering.frames == cold.frames,
+        "a corrupt entry changed a frame"
+    );
 
     let healed = render(&fixture, "healed", "2", &cache);
     assert_eq!(healed.count("rejected"), 0);
@@ -296,7 +334,10 @@ fn clear_cache_empties_the_store_and_the_next_render_is_cold_with_the_same_bits(
     let fixture = Fixture::new();
     let cache = cache_dir_args(&fixture.cache());
     let before = render(&fixture, "before", "2", &cache);
-    assert_eq!(typeset_objects(&fixture.cache()).len() as u64, SHEET_LAYOUTS);
+    assert_eq!(
+        typeset_objects(&fixture.cache()).len() as u64,
+        SHEET_LAYOUTS
+    );
 
     let mut clear: Vec<OsString> = vec!["--clear-cache".into()];
     clear.extend(cache.iter().cloned());
@@ -306,13 +347,22 @@ fn clear_cache_empties_the_store_and_the_next_render_is_cold_with_the_same_bits(
     assert!(cleared.status.success(), "{stdout}");
     assert!(stdout.contains("\"kind\":\"cache_clear\""), "{stdout}");
     assert!(stdout.contains("\"outcome\":\"cleared\""), "{stdout}");
-    assert!(typeset_objects(&fixture.cache()).is_empty(), "the store is empty");
+    assert!(
+        typeset_objects(&fixture.cache()).is_empty(),
+        "the store is empty"
+    );
 
     let after = render(&fixture, "after", "2", &cache);
     assert_eq!(after.count("disk_hits"), 0, "{}", after.typesetting());
     assert_eq!(after.count("misses"), SHEET_LAYOUTS);
-    assert!(after.frames == before.frames, "--clear-cache changed a render");
-    assert_eq!(typeset_objects(&fixture.cache()).len() as u64, SHEET_LAYOUTS);
+    assert!(
+        after.frames == before.frames,
+        "--clear-cache changed a render"
+    );
+    assert_eq!(
+        typeset_objects(&fixture.cache()).len() as u64,
+        SHEET_LAYOUTS
+    );
 }
 
 #[test]
@@ -364,7 +414,11 @@ fn without_a_cache_dir_the_render_uses_the_platform_convention_under_home() {
     } else {
         home.join(".cache").join("franken-manim")
     };
-    assert_eq!(typeset_objects(&root).len() as u64, SHEET_LAYOUTS, "{root:?}");
+    assert_eq!(
+        typeset_objects(&root).len() as u64,
+        SHEET_LAYOUTS,
+        "{root:?}"
+    );
     let warm = render(&fixture, "warm", "2", &[]);
     assert_eq!(warm.count("disk_hits"), SHEET_LAYOUTS);
     assert!(warm.frames == cold.frames);

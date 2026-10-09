@@ -3211,6 +3211,187 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_manifest", 1))
 }
 
+/// One certified in-process render of the CLI's `formula_sheet.v1` builtin
+/// against `cache`, returning the render record and its frames in order.
+fn formula_sheet_render(
+    scenario: &str,
+    cache: &std::path::Path,
+    threads: &str,
+) -> Result<(String, Vec<Vec<u8>>), ScenarioError> {
+    let dir = scenario_dir(scenario)?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("typeset scenario output path is not UTF-8"))?;
+    let cache_text = cache
+        .to_str()
+        .ok_or_else(|| fail("typeset scenario cache path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--reproducible",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "160x90",
+        "--fps",
+        "8",
+        "--threads",
+        threads,
+        "--cache-dir",
+        cache_text,
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        fmn::builtins::FORMULA_SHEET_SCENE_NAME,
+    ]);
+    if output.code != 0 {
+        return Err(fail(format!(
+            "formula sheet render failed: code={} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    let record = output
+        .stdout
+        .lines()
+        .find(|line| line.contains("\"kind\":\"render\""))
+        .ok_or_else(|| fail(format!("no render record in {:?}", output.stdout)))?
+        .to_owned();
+    let sequence = dir.join(fmn::builtins::FORMULA_SHEET_SCENE_NAME);
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&sequence)
+        .map_err(|error| fail(format!("list {}: {error}", sequence.display())))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+        .collect();
+    paths.sort();
+    let frames = paths
+        .iter()
+        .map(|path| {
+            std::fs::read(path).map_err(|error| fail(format!("read {}: {error}", path.display())))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((record, frames))
+}
+
+/// One unsigned field of a render record's `typesetting` object.
+fn typesetting_field(record: &str, field: &str) -> Result<u64, ScenarioError> {
+    let typesetting = record
+        .split_once("\"typesetting\":{")
+        .ok_or_else(|| fail(format!("render record has no typesetting object: {record}")))?
+        .1;
+    let prefix = format!("\"{field}\":");
+    let tail = typesetting
+        .split_once(&prefix)
+        .ok_or_else(|| fail(format!("typesetting.{field} missing: {typesetting}")))?
+        .1;
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    tail[..digits]
+        .parse()
+        .map_err(|_| fail(format!("typesetting.{field} is not a count: {typesetting}")))
+}
+
+/// The formula sheet's twenty formulas plus the scale-calibration probe.
+const FORMULA_SHEET_LAYOUTS: u64 = 21;
+
+/// fm-typeset-cache-preflight-wiring-1sn0: the CLI renders a Tex-heavy
+/// builtin twice against one persistent typeset cache. The first run lays out
+/// all twenty formulas and publishes them; the second, a fresh session that
+/// shares nothing but the store, serves every one from disk, lays out none,
+/// and publishes byte-identical certified frames.
+fn typeset_cache_warm_second_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cache = scenario_dir("typeset_cache_root")?.join("cache");
+    let (cold, cold_frames) = formula_sheet_render("typeset_cache_cold", &cache, "2")?;
+    let (warm, warm_frames) = formula_sheet_render("typeset_cache_warm", &cache, "2")?;
+    let mut counts = Vec::new();
+    for (run, record) in [("cold", &cold), ("warm", &warm)] {
+        let row = [
+            typesetting_field(record, "disk_hits")?,
+            typesetting_field(record, "misses")?,
+            typesetting_field(record, "bytes_read")?,
+            typesetting_field(record, "bytes_written")?,
+        ];
+        ctx.event(
+            LogEvent::new("e2e.typeset.cache")
+                .field("run", run)
+                .field("disk_hits", row[0])
+                .field("misses", row[1])
+                .field("bytes_read", row[2])
+                .field("bytes_written", row[3])
+                .field("persistent", truth(record.contains("\"persistent\":true"))),
+        );
+        counts.push(row);
+    }
+    let identical = !cold_frames.is_empty() && cold_frames == warm_frames;
+    ctx.event(
+        LogEvent::new("e2e.typeset.cache_bits")
+            .field("frames", cold_frames.len() as u64)
+            .field("hit_equals_miss", truth(identical)),
+    );
+    let [cold_hits, cold_misses, _, written] = counts[0];
+    let [warm_hits, warm_misses, read, warm_written] = counts[1];
+    if cold_hits != 0
+        || cold_misses != FORMULA_SHEET_LAYOUTS
+        || warm_hits != FORMULA_SHEET_LAYOUTS
+        || warm_misses != 0
+        || read != written
+        || warm_written != 0
+        || !identical
+    {
+        return Err(fail(format!(
+            "warm second run broke: cold={:?} warm={:?} identical={identical}",
+            counts[0], counts[1]
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("typeset_cold_misses", cold_misses)
+        .with_counter("typeset_warm_disk_hits", warm_hits)
+        .with_counter("typeset_warm_misses", warm_misses)
+        .with_counter("typeset_hit_equals_miss", 1))
+}
+
+/// fm-typeset-cache-preflight-wiring-1sn0: the formula sheet's twenty static
+/// formulas are typeset by the front door's preflight on several workers
+/// before the first frame, and no layout happens inside a play.
+fn typeset_preflight_before_first_play(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cache = scenario_dir("typeset_preflight_root")?.join("cache");
+    let (record, frames) = formula_sheet_render("typeset_preflight", &cache, "4")?;
+    let requests = typesetting_field(&record, "requests")?;
+    let workers = typesetting_field(&record, "workers")?;
+    let active = typesetting_field(&record, "active_workers")?;
+    let before = typesetting_field(&record, "layouts_before_first_frame")?;
+    let inside = typesetting_field(&record, "layouts_inside_play")?;
+    let layouts = typesetting_field(&record, "misses")?;
+    let wall_ns = typesetting_field(&record, "wall_ns")?;
+    ctx.event(
+        LogEvent::new(e2e::spans::PREFLIGHT)
+            .field("requests", requests)
+            .field("workers", workers)
+            .field("active_workers", active)
+            .field("wall_ns", wall_ns)
+            .field("layouts_before_first_frame", before)
+            .field("layouts_inside_play", inside)
+            .field("before_first_frame", truth(before == layouts)),
+    );
+    ctx.counter(e2e::counters::TYPESETS, layouts);
+    let parallel = std::thread::available_parallelism().map_or(1, usize::from) < 2
+        || (workers >= 2 && active >= 2);
+    if requests != 20
+        || layouts != FORMULA_SHEET_LAYOUTS
+        || before != layouts
+        || inside != 0
+        || !parallel
+        || frames.is_empty()
+    {
+        return Err(fail(format!(
+            "preflight contract broke: requests={requests} workers={workers} active={active} \
+             layouts={layouts} before_first_frame={before} inside_play={inside}"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("typeset_preflight_requests", requests)
+        .with_counter("typeset_layouts_inside_play", inside)
+        .with_counter("preflight_before_first_frame", 1))
+}
+
 /// The CLI's camera builtins (fm-cli-camera-route-i1zc): a lit surface,
 /// depth-sorted dots, a sampled image, and 2D drawn over 3D, each through the
 /// fixed camera.
@@ -5683,6 +5864,51 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = Vec::new();
 
     specs.push(spec(
+        "lifecycle.typeset_cache_warm_second_run.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::CliInProcess,
+        Invocation::new(typeset_cache_warm_second_run),
+        vec![
+            counter_eq("typeset_cold_misses", FORMULA_SHEET_LAYOUTS),
+            counter_eq("typeset_warm_disk_hits", FORMULA_SHEET_LAYOUTS),
+            counter_eq("typeset_warm_misses", 0),
+            counter_eq("typeset_hit_equals_miss", 1),
+        ],
+        vec![
+            LogExpect::span_present(
+                "e2e.typeset.cache",
+                vec![
+                    FieldPred::str_eq("run", "warm"),
+                    FieldPred::u64_eq("misses", 0),
+                    FieldPred::str_eq("persistent", "true"),
+                ],
+            ),
+            LogExpect::span_present(
+                "e2e.typeset.cache_bits",
+                vec![FieldPred::str_eq("hit_equals_miss", "true")],
+            ),
+        ],
+    ));
+    specs.push(spec(
+        "lifecycle.typeset_preflight_before_first_play.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::CliInProcess,
+        Invocation::new(typeset_preflight_before_first_play),
+        vec![
+            counter_eq("typeset_preflight_requests", 20),
+            counter_eq("typeset_layouts_inside_play", 0),
+            counter_eq("preflight_before_first_frame", 1),
+        ],
+        vec![LogExpect::span_present(
+            e2e::spans::PREFLIGHT,
+            vec![
+                FieldPred::u64_eq("requests", 20),
+                FieldPred::u64_eq("layouts_inside_play", 0),
+                FieldPred::str_eq("before_first_frame", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.cli_doctor_capabilities.v1",
         ScenarioClass::LifecycleDrill,
         Surface::CliInProcess,
@@ -7752,6 +7978,23 @@ fn python_scene_console_scenario_passes() {
         .expect("Python scene console scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// The typeset cache and preflight lifecycle scenarios
+/// (fm-typeset-cache-preflight-wiring-1sn0), focused.
+#[test]
+fn typeset_cache_and_preflight_scenarios_pass() {
+    for name in [
+        "lifecycle.typeset_cache_warm_second_run.v1",
+        "lifecycle.typeset_preflight_before_first_play.v1",
+    ] {
+        let scenario = catalog()
+            .into_iter()
+            .find(|scenario| scenario.name == name)
+            .expect("the typeset scenario is registered");
+        let report = Runner::from_env().run(scenario);
+        assert!(report.is_pass(), "{}", report.summary());
+    }
 }
 
 /// The CLI builtin scenarios (fm-cli-camera-route-i1zc,

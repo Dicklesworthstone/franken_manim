@@ -364,7 +364,10 @@ impl TexEngine {
     /// Preflight batches observed on this engine since creation.
     #[must_use]
     pub fn preflight_stats(&self) -> TypesetPreflightStats {
-        *self.preflight.lock().unwrap_or_else(PoisonError::into_inner)
+        *self
+            .preflight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The resolved pack's content id (provenance, `fmn doctor`).
@@ -610,7 +613,10 @@ impl TexEngine {
         let (outcomes, run) = preflight_jobs(count, workers, spawner, job)?;
         if count > 0 {
             let wall_ns = stopwatch.elapsed_ns();
-            let mut stats = self.preflight.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut stats = self
+                .preflight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             stats.batches = stats.batches.saturating_add(1);
             stats.requests = stats.requests.saturating_add(count as u64);
             stats.workers = stats.workers.max(run.workers as u64);
@@ -980,7 +986,11 @@ mod tests {
     fn engine_identity_names_the_pinned_layout_code_and_every_bundled_face() {
         let identity = std::str::from_utf8(engine_identity()).expect("identity is text");
         let rev = suite_revision(SUITE_LOCK, "franken_markdown");
-        assert_eq!(rev.len(), 40, "SUITE.lock pins franken_markdown to a full rev");
+        assert_eq!(
+            rev.len(),
+            40,
+            "SUITE.lock pins franken_markdown to a full rev"
+        );
         assert!(rev.bytes().all(|b| b.is_ascii_hexdigit()));
         assert!(identity.starts_with(&format!("fmd-rev:{rev}")));
         for (name, bytes) in fmn_text::bundled_faces() {
@@ -999,7 +1009,10 @@ mod tests {
         assert_eq!(suite_revision(lock, "franken_numpy"), "abc");
         // A missing row folds the whole lock in rather than an empty string.
         assert_eq!(suite_revision(lock, "frankentorch"), lock);
-        assert_eq!(suite_revision("franken_markdown\t\tnote", "franken_markdown"), "franken_markdown\t\tnote");
+        assert_eq!(
+            suite_revision("franken_markdown\t\tnote", "franken_markdown"),
+            "franken_markdown\t\tnote"
+        );
     }
 
     #[test]
@@ -1027,7 +1040,10 @@ mod tests {
             .preflight_with_spawner(&items, 4, &RefusingScopedSpawner::new(0))
             .expect("result storage");
         let stats = fallback.preflight_stats();
-        assert_eq!((stats.workers, stats.active_workers, stats.requests), (1, 1, 4));
+        assert_eq!(
+            (stats.workers, stats.active_workers, stats.requests),
+            (1, 1, 4)
+        );
         // Empty batches are not batches.
         fallback.preflight(&[]).expect("empty batch");
         assert_eq!(fallback.preflight_stats().batches, 1);

@@ -63,8 +63,8 @@ use fmn_platform::fs::FsError;
 use fmn_platform::process::{FfmpegLocatorError, ProcessError};
 use fmn_platform::topology::TopologyError;
 use fmn_scene::{
-    CaptureReason, IntegrationError, LifecycleEvent, LifecyclePhase, PlayOverrides,
-    RuntimeConfig, Scene, SceneError, SceneProgram, SceneRunReport, SceneSink,
+    CaptureReason, IntegrationError, LifecycleEvent, LifecyclePhase, PlayOverrides, RuntimeConfig,
+    Scene, SceneError, SceneProgram, SceneRunReport, SceneSink,
 };
 use fmn_tex::{TexEngine, TexError, TexSession, TypesetRequest, TypesetSessionReport};
 
@@ -393,11 +393,7 @@ pub mod builtins {
                     stage.scale(formula, (CELL_WIDTH - 0.3) / width);
                 }
                 let (column, row) = ((index % COLUMNS) as f64, (index / COLUMNS) as f64);
-                let center = [
-                    (column - 1.5) * CELL_WIDTH,
-                    (2.0 - row) * CELL_HEIGHT,
-                    0.0,
-                ];
+                let center = [(column - 1.5) * CELL_WIDTH, (2.0 - row) * CELL_HEIGHT, 0.0];
                 stage.move_to(formula, center, ORIGIN);
                 stage.set_fill(
                     formula,
@@ -1446,7 +1442,10 @@ where
         typesetting,
         preflight_workers,
     };
-    let mut sink = SegmentAccountingSink { inner: sink, typesetting };
+    let mut sink = SegmentAccountingSink {
+        inner: sink,
+        typesetting,
+    };
     let run = scene.run(&mut adapter, &mut sink);
     if let Some(error) = adapter.front_door_error {
         return Err(error);

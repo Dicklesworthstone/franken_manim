@@ -165,10 +165,9 @@ impl TexSession {
             return TypesetSessionReport::default();
         };
         let inside = self.segments.inside.get().saturating_add(
-            self.segments
-                .open_since
-                .get()
-                .map_or(0, |start| engine.layout_computations().saturating_sub(start)),
+            self.segments.open_since.get().map_or(0, |start| {
+                engine.layout_computations().saturating_sub(start)
+            }),
         );
         TypesetSessionReport {
             initialized: true,

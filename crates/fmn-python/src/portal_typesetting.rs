@@ -18,7 +18,16 @@ fn stats<'py>(py: Python<'py>, engine: &fmn_library::TexEngine) -> PyResult<Boun
     row.set_item("memory_entries", memory.entries)?;
     row.set_item("memory_bytes", memory.bytes)?;
     row.set_item("disk_hits", engine.persistent_cache_hits())?;
+    row.set_item("disk_bytes_read", engine.persistent_bytes_read())?;
+    row.set_item("disk_bytes_written", engine.persistent_bytes_written())?;
+    row.set_item("disk_rejected", engine.persistent_rejected_entries())?;
     row.set_item("layout_computations", engine.layout_computations())?;
+    let preflight = engine.preflight_stats();
+    row.set_item("preflight_batches", preflight.batches)?;
+    row.set_item("preflight_requests", preflight.requests)?;
+    row.set_item("preflight_workers", preflight.workers)?;
+    row.set_item("preflight_active_workers", preflight.active_workers)?;
+    row.set_item("preflight_wall_ns", preflight.wall_ns)?;
     row.set_item("pack", engine.pack_content_id())?;
     Ok(row)
 }
@@ -240,6 +249,27 @@ mod tests {
                 .call1((module,))
                 .inspect_err(|error| error.print(py))
                 .unwrap();
+        });
+    }
+
+    #[test]
+    fn scene_run_preflights_literal_tex_and_honours_the_configured_cache() {
+        crate::with_python_test_module("static typeset preflight", |py, module, globals| {
+            let source =
+                std::ffi::CString::new(include_str!("../tests/typeset_static_preflight.py"))
+                    .expect("static preflight tests contain no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            for suite in ["run_static_preflight", "run_config_selected_cache"] {
+                globals
+                    .get_item(suite)
+                    .unwrap()
+                    .unwrap()
+                    .call1((module,))
+                    .inspect_err(|error| error.print(py))
+                    .unwrap();
+            }
         });
     }
 

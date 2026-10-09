@@ -169,7 +169,10 @@ fn reports_count_disk_bytes_and_recover_a_corrupt_entry_by_recomputing_it() {
     let expected: Vec<Vec<u8>> = sources.iter().map(|s| bytes(&cold, s)).collect();
     let report = cold.report();
     assert_eq!(report.layout_computations, 3);
-    assert_eq!((report.persistent_hits, report.persistent_bytes_read), (0, 0));
+    assert_eq!(
+        (report.persistent_hits, report.persistent_bytes_read),
+        (0, 0)
+    );
     assert_eq!(report.cache_misses(), 3);
     let written = report.persistent_bytes_written;
     assert_eq!(
@@ -194,14 +197,20 @@ fn reports_count_disk_bytes_and_recover_a_corrupt_entry_by_recomputing_it() {
     // Detected and recomputed: identical bytes, two hits, one layout.
     let recovering = session(&config, &fs);
     let recovered: Vec<Vec<u8>> = sources.iter().map(|s| bytes(&recovering, s)).collect();
-    assert_eq!(recovered, expected, "a corrupt entry never changes a layout");
+    assert_eq!(
+        recovered, expected,
+        "a corrupt entry never changes a layout"
+    );
     let report = recovering.report();
     assert_eq!(report.persistent_rejected, 1, "the corruption is reported");
     assert_eq!(report.persistent_hits, 2);
     assert_eq!(report.layout_computations, 1);
     assert_eq!(report.cache_hits(), 2);
     assert!(report.persistent_bytes_read > 0);
-    assert!(report.persistent_bytes_written > 0, "the entry is republished");
+    assert!(
+        report.persistent_bytes_written > 0,
+        "the entry is republished"
+    );
     drop(recovering);
 
     // Healed: the next fresh session hits all three.
