@@ -101,7 +101,7 @@ impl RenderFormat {
 /// The process capability behind video formats: the one external tool (D2).
 ///
 /// It is never ambient in [`render_with_fs`] or the other explicit-capability
-/// entry points; [`render`] supplies [`FfmpegCapability::host`] only when the
+/// entry points; [`render`] supplies `FfmpegCapability::host()` only when the
 /// crate's `ffmpeg` feature is enabled and the caller left
 /// [`RenderOptions::ffmpeg`] unset. Its absence is a capability error that
 /// names the native alternatives, never a silent format substitution.
@@ -274,7 +274,7 @@ pub struct RenderOptions {
     pub typeset_preflight_workers: NonZeroUsize,
     /// The ffmpeg process capability for [`RenderFormat::Mp4`] and
     /// [`RenderFormat::Mov`]. Native formats never use it. When unset,
-    /// [`render`] supplies [`FfmpegCapability::host`] if the `ffmpeg` feature
+    /// [`render`] supplies `FfmpegCapability::host()` if the `ffmpeg` feature
     /// is enabled; every other entry point refuses video by name.
     pub ffmpeg: Option<FfmpegCapability>,
     /// Explicit bounds for each render-time ffmpeg invocation. The default
