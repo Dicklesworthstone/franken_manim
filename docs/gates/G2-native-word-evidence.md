@@ -35,7 +35,7 @@ The eight criteria are quoted from `fm-i1q` (plan §20.3).
 | (2) Span map drives isolate / t2c / slicing / TransformMatchingTex end-to-end | `crates/fmn-library/src/tex.rs` (isolate/t2c by source identity), `crates/fmn-anim/src/transform_matching.rs` (native span keys), portal binds `8ec3b03`/`d7fab57`/`511f7f1`; the portal gate suites `matching_transform_semantics`, `matching_authoring`, `live_tex` and `bridge` exercise them (`scripts/check_portal_runtime.sh`) | **Green** |
 | (3) De-TeX'd classes native (W7DETEX) | `fm-y69` and `fm-ebl` closed; `crates/fmn-library/src/brace.rs`, `numbers.rs` (DecimalNumber), `matchers.rs`/`controls.rs` (Checkmark/Exmark, controls), matrix delimiters from the extensible-delimiter engine | **Green** |
 | (4) SVGMobject works for user files (W2SVG) | `fm-6nm` and `fm-5wq.4.50` closed: portal `SVGMobject` builds a VMobject family through Chisel's hardened processor (`crates/fmn-geom/src/svg.rs`), covered by `crates/fmn-python/tests/bridge.py` | **Green** |
-| (5) Typeset caching live (W6TEX + W8CACHE) | All three front doors attach the persistent typeset store at the one resolved root: standalone `fmn` (`0126fd51`), `fmn::render` (`a89eaee9`) and `fmn-python` (`59807496`, plus `directories.cache` from the config). Cache keys name the bundled faces' SHA-256s and the pinned `franken_markdown` rev. Fresh-process acceptance passes on Linux (`crates/fmn-cli/tests/typeset_cache.rs`): a warm second run serves 21/21 layouts from disk with byte-identical `--reproducible` frames; a corrupt entry is detected and recomputed; `--clear-cache` empties the store. Static strings are preflighted on the worker pool before the first frame, with 0 layouts inside play: native scenes from a declared manifest, portal scenes from literal `Tex`/`TexText` calls found in their source. Open: PG-7 through these entry points, the clean-wheel portal receipt, and a macOS run (`fm-typeset-cache-preflight-wiring-1sn0`) | **Partial** |
+| (5) Typeset caching live (W6TEX + W8CACHE) | All three front doors attach the persistent typeset store at the one resolved root: standalone `fmn` (`0126fd51`), `fmn::render` (`a89eaee9`) and `fmn-python` (`59807496`, plus `directories.cache` from the config). Cache keys name the bundled faces' SHA-256s and the pinned `franken_markdown` rev. Fresh-process acceptance passes on Linux (`crates/fmn-cli/tests/typeset_cache.rs`): a warm second run serves 21/21 layouts from disk with byte-identical `--reproducible` frames; a corrupt entry is detected and recomputed; `--clear-cache` empties the store. Static strings are preflighted on the worker pool before `construct` (the formula sheet: 21 layouts before construct, 0 in construct, 0 in play): native scenes from a declared manifest, portal scenes from literal `Tex`/`TexText` calls found in their source. The same tests pass on macOS arm64, and the portal suites pass on a fresh wheel. Open: PG-7's formula workloads measure the memory front, not layouts (`fm-a87y`); native scenes need a declared manifest (`fm-typeset-cache-preflight-wiring-1sn0`) | **Partial** |
 | (6) Coverage-ratchet dashboard public and live (W6RATCHET) | `docs/ratchet/dashboard.md`, regenerated at the `68fe29b8` pin (`8e6d7372`): frozen G0-4 denominator, CI-enforced pin/ratchet lockstep, and honest columns ("typeset returned Ok" apart from "checked by an oracle"). Recomputing it needs the private corpus, which exists only on the project host | **Green** |
 | (7) fmd renders `$…$` in HTML/PDF via the same crates | Re-measured at the `f059cac6` pin (see "Cross-repo payoff"): PDF inline and display math both go through fmd-math `Layout` (`fm-djcw`, UPSTREAM_LEDGER row 21). HTML emits MathML from the fmd-math parse tree and the browser lays it out; this packet records that as **not** using the shared layout | **PDF GREEN; HTML NOT GREEN (MathML; owner decision on whether it satisfies "via the same crates")** |
 | (8) PG-1(G2) and PG-7 enforced and blocking | Policy rows are `blocking` in `docs/performance/PERF_GATES.tsv` and the rig is in-tree (`crates/fmn-conformance/src/perf_pg7.rs`, `perf_frontdoor.rs`, `bin/fmn-perf.rs`). ADR-0024 makes host qualification satisfiable (`fm-5wq.8` closed), but no pinned-host observation is committed (`fm-inr.1`), and the Reference side of PG-1 is still a calibration capture (`fm-5wq.17`) | **NOT GREEN** |
@@ -207,14 +207,32 @@ Acceptance evidence (Linux, through RCH):
 - **e2e.** `lifecycle.typeset_cache_warm_second_run.v1` and
   `lifecycle.typeset_preflight_before_first_play.v1` run in the fast tier.
 
+Further evidence, 2026-10-09:
+- **macOS 26.2 arm64, local:**
+  - the CLI cache and preflight tests pass 7/7;
+  - fmn-tex and fmn-cache pass;
+  - the portal typesetting suites pass 3/3.
+  - Explicit cache roots under `$TMPDIR` (behind the `/var` link) stay
+    persistent. The platform-convention base under a linked `$HOME` is still
+    refused; that is recorded on `fm-macos-var-symlink-gate-aqr1`.
+- **Clean wheel.** At `6a21499d` (CPython 3.13, Linux), the three typesetting
+  suites pass and the runtime receipt passes (2007 reviewed rows, 0
+  contradictions). The gate now runs those suites (`3e14c40e`). Separately,
+  the gate is red on `paired_output_cli` (`fm-djox`), which also fails at
+  `241def91`, before this work.
+- **Front-door timing.** `fmn` (release-perf), formula sheet, preflight wall
+  for 20 formulas, on a shared 128-thread Linux host at load 2–6. These are
+  unqualified observations, not a PG-7 pass:
+  - cold: 114 ms on 1 worker, 64 ms on 20;
+  - warm, from disk: about 1 ms;
+  - frames identical.
+
 What keeps this row partial:
-- No PG-7 observation through these entry points. PG-7's `formula-cached`
-  workload is defined against a fresh cache root
-  (`docs/performance/PERFORMANCE_GATES.md` §canonical PG-7 workloads), so the
-  latency claim will be measured, not asserted.
-- No clean-wheel portal receipt (`scripts/check_portal_runtime.sh`) for the
-  portal change.
-- The new tests have not run on macOS.
+- PG-7's `formula-cold` and `formula-cached` producers time the engine's
+  memory front (median 1.7 µs) and not a layout or a disk hit. This has been
+  true since `472a19c0`, so they cannot fail on the workload they name
+  (`fm-a87y`). No PG-7 number for typesetting means anything until that is
+  fixed.
 - Native scenes are preflighted only from their declared manifest. Rust
   source cannot be inspected at run time, and an undeclared static `Tex` is
   laid out in `construct`, not on the pool.
@@ -300,9 +318,9 @@ HOLD, but it is also not a pass, and G2 makes these gates blocking.
    - The metric and glyph misses the box oracle names (`fm-tex-metrics-glyphs-ru72`).
    - A corpus-wide layout oracle (`fm-tex-layout-oracle-bkbc`).
    - A Look Gallery regenerated from production entry points with an owner verdict lane (`fm-5wq.50`).
-2. **Criterion 5:** a PG-7 observation through the front doors, the
-   clean-wheel portal receipt and a macOS run of the cache and preflight
-   acceptance tests (`fm-typeset-cache-preflight-wiring-1sn0`).
+2. **Criterion 5:** a PG-7 producer that times real layouts and disk hits
+   (`fm-a87y`), then a qualified observation (`fm-inr.1`); native preflight
+   without a declared manifest (`fm-typeset-cache-preflight-wiring-1sn0`).
 3. **Criterion 7:** PDF is done (`fm-djcw`). HTML math is browser-laid-out
    MathML from the fmd-math parser; whether criterion 7 requires fmd-math
    `Layout` for HTML too is an owner ruling (`fm-mmzl`).
