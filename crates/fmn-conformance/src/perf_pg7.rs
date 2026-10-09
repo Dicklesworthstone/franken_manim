@@ -1194,7 +1194,7 @@ mod tests {
         assert!(cold.to_tsv().contains("timed_layer\tlayout\n"));
         assert_eq!(
             cold.digest().to_string(),
-            "2eca85145debba19d93469715b489db2d751f19fa07d16070f4652dade1b9045"
+            "56ffb7669c3c5287c5fc4148f5cd76cad8e203c5a422e69e0da40d3a499c0e2e"
         );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
@@ -1221,7 +1221,7 @@ mod tests {
         );
         assert_eq!(
             cached.digest().to_string(),
-            "d2b51d37e999edc47bbf3998f5a7b8db6755b436c339813e3b299cdc1f1fe047"
+            "202fe88afec4a0063e4ddb5207e5b4dfcea0fec2aa7906c7d929796a1486dbab"
         );
 
         let text = Pg7Definition::new(Pg7Scenario::Text10kGlyph).expect("text definition");

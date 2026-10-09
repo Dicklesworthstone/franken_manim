@@ -26,8 +26,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
-fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "e4e8e2ee1b8e559f87e3131d07dfee3c41f7e034", features = ["bundled-faces"] }
-fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "e4e8e2ee1b8e559f87e3131d07dfee3c41f7e034" }
+fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "798de11bb51c151b7381b4879614356789cdfbfe", features = ["bundled-faces"] }
+fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "798de11bb51c151b7381b4879614356789cdfbfe" }
 [dependencies.fmn-codec]
 path = "../crates/fmn-codec"
 

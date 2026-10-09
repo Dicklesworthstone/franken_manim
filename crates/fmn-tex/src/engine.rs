@@ -782,9 +782,10 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
     /// Constructs chosen to touch every layout mechanism: glyph metrics
     /// and kerning, scripts, fractions, radicals, big operators, accents,
     /// drawn delimiters past the ceiling, environments, stretchy bands,
-    /// inner, vertical and diagonal dots, generated material, and text
-    /// mode. A semantics change anywhere shows up here, so a layout change
-    /// that no probe touches needs a probe that does.
+    /// inner, vertical and diagonal dots, generated material, the Tex
+    /// surface's align* rows, and text mode. A semantics change anywhere
+    /// shows up here, so a layout change that no probe touches needs a
+    /// probe that does.
     const PROBES: &[&str] = &[
         r"ax + b^2_c",
         r"\frac{1}{1+\frac{1}{x}}",
@@ -797,6 +798,7 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
         r"\widehat{x+y} + \overbrace{a+b}",
         r"\mathbb{R} \mathrm{d} \mathbf{v}",
         r"1 + \cdots + n, \ldots \equiv k \pmod{p}",
+        r"x + 1 &= y \\ &\approx 2 \\ z",
     ];
     /// TexText material: the text font's quote and dash ligatures, and the
     /// interword space after an inline island.
