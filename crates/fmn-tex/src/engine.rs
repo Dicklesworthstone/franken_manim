@@ -416,6 +416,19 @@ impl TexEngine {
             .stats()
     }
 
+    /// Drop every payload resident in the engine-local memory front, so the
+    /// next request for any source is served by the attached store or by a
+    /// fresh layout. The store binding, its files, and every cumulative
+    /// counter are unchanged; typesets already returned are caller-owned and
+    /// unaffected. A latency probe uses this to time the layer it names
+    /// rather than a memory hit.
+    pub fn clear_memory_cache(&self) {
+        self.memory_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
     /// Typeset through the memory cache, then the optional disk cache. A
     /// verified hit reconstructs the layout and spans without re-layout;
     /// callers always receive independently mutable data. Preflight warms

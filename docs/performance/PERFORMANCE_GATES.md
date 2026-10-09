@@ -478,12 +478,12 @@ The `fmn-perf-pg7-definition/1` bytes bind the source, semantic configuration,
 engine identity, cache state, fixed sample plan, and an exact output
 self-golden. All initialization, priming, cache proof, warmup, and final-result
 checks remain outside the timed regions and are recorded separately in the
-`fmn-perf-pg7-trace/1` evidence.
+`fmn-perf-pg7-trace/2` evidence.
 
 | Scenario | Timed production path | Required state | Strict target |
 |---|---|---|---|
-| `formula-cold` | `fmn-tex` math-display layout of the fixed synthetic structural isomorph of the G0-4 corpus median | content cache disabled; engine and CPU warmed | < 3 ms |
-| `formula-cached` | `fmn-tex` lookup and bit-exact payload decode for that formula | exact-key miss proven, one-item production `preflight` succeeds, exact stored payload decodes and matches the self-golden, the entry is pinned against in-process eviction, exact-key hit proven again after timing | < 100 µs |
+| `formula-cold` | `fmn-tex` math-display layout of the fixed synthetic structural isomorph of the G0-4 corpus median | content cache disabled; engine and CPU warmed; engine memory front cleared before every repetition | < 3 ms |
+| `formula-cached` | `fmn-tex` verified store read and bit-exact payload decode for that formula | exact-key miss proven, one-item production `preflight` succeeds, exact stored payload decodes and matches the self-golden, the entry is pinned against in-process eviction, engine memory front cleared before every repetition, exact-key hit proven again after timing | < 100 µs |
 | `text-10k-glyph` | `fmn-text::layout_text` with the bundled `FontBook` and plain-text defaults | cache absent; deterministic ASCII source produces exactly 10,000 non-whitespace glyphs, one line, and no decorations | < 20 ms |
 
 The formula result digest is SHA-256 over `Typeset::to_bytes`; the native-text
@@ -492,6 +492,19 @@ position, span, and style field. A producer refuses to emit timing evidence if
 either primed or final output differs. The cached path also refuses an already
 warm store: the miss-to-hit transition must be observed in this run, never
 declared by caller metadata.
+
+`TexEngine::typeset` answers a repeated source from its engine-local memory
+front before it consults a store or lays anything out. A formula repetition
+therefore clears that front first, outside the timed region, and reads the
+engine's layout, store-hit and memory-front-hit counters on both sides of the
+clock. The producer refuses the run unless each `formula-cold` repetition was
+exactly one layout and each `formula-cached` repetition exactly one verified
+store hit, with no memory-front hit in either. The trace records the summed
+counts (`timed_layer`, `timed_layouts`, `timed_store_hits`,
+`timed_memory_front_hits`). Trace schema `/1` predates this check (fm-a87y):
+from 472a19c0 until the fix, both formula workloads timed memory-front hits
+(about 1.7 µs) and no `/1` formula observation is evidence of a layout or a
+store hit.
 
 The formula workload derives reproducibly from G0-4's ratified corpus rules
 v1: math-mode entries are ordered by UTF-8 byte length, construct count, then

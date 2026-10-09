@@ -60,6 +60,14 @@ impl MemoryCache {
         Some(bytes)
     }
 
+    /// Drop every resident payload. Hit and miss counters are cumulative and
+    /// survive; readers holding a payload keep their own `Arc`.
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.stats.entries = 0;
+        self.stats.bytes = 0;
+    }
+
     pub(crate) fn insert(&mut self, key: CacheKey, bytes: Vec<u8>) {
         if bytes.len() > TYPESET_MEMORY_CACHE_MAX_BYTES
             || self.entries.iter().any(|entry| entry.key == key)
@@ -113,6 +121,30 @@ mod tests {
         // Repeated publication from a racing miss cannot consume the budget.
         cache.insert(key(0), vec![9; 100]);
         assert_eq!(cache.stats.bytes, TYPESET_MEMORY_CACHE_MAX_ENTRIES * 8);
+    }
+
+    #[test]
+    fn clear_empties_residency_but_keeps_cumulative_counters_and_readers() {
+        let mut cache = MemoryCache::default();
+        cache.insert(key(0), vec![5; 16]);
+        let retained = cache.get(&key(0)).unwrap();
+        assert!(cache.get(&key(1)).is_none());
+        cache.clear();
+        assert_eq!(
+            cache.stats(),
+            TypesetCacheStats {
+                hits: 1,
+                misses: 1,
+                entries: 0,
+                bytes: 0,
+            }
+        );
+        assert!(cache.get(&key(0)).is_none());
+        assert_eq!(cache.stats().misses, 2);
+        assert_eq!(&*retained, &[5; 16]);
+        // The budget is fully available again after a clear.
+        cache.insert(key(2), vec![1; TYPESET_MEMORY_CACHE_MAX_BYTES]);
+        assert_eq!(cache.stats().bytes, TYPESET_MEMORY_CACHE_MAX_BYTES);
     }
 
     #[test]

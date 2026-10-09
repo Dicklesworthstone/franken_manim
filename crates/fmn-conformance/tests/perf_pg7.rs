@@ -204,6 +204,33 @@ fn release_perf_producer_emits_replayable_real_samples_and_trace() {
             );
             assert!(artifacts.trace_tsv.contains("cache_after\texact-key-hit\n"));
         }
+        // fm-a87y: every timed formula repetition is the layer it names,
+        // never a memory-front hit.
+        let (layer, layouts, store_hits) = match scenario {
+            Pg7Scenario::FormulaCold => ("layout", PG7_SAMPLE_COUNT, 0),
+            Pg7Scenario::FormulaCached => ("verified-store-hit", 0, PG7_SAMPLE_COUNT),
+            Pg7Scenario::Text10kGlyph => ("none", 0, 0),
+        };
+        assert!(
+            artifacts
+                .trace_tsv
+                .contains(&format!("timed_layer\t{layer}\n")),
+            "{scenario}"
+        );
+        if scenario == Pg7Scenario::Text10kGlyph {
+            assert!(
+                artifacts.trace_tsv.contains("timed_layouts\t-\n"),
+                "{scenario}"
+            );
+        } else {
+            for expected in [
+                "timed_memory_front_hits\t0\n".to_owned(),
+                format!("timed_layouts\t{layouts}\n"),
+                format!("timed_store_hits\t{store_hits}\n"),
+            ] {
+                assert!(artifacts.trace_tsv.contains(&expected), "{scenario}");
+            }
+        }
         assert_eq!(artifacts.batch.evidence.len(), 1);
         assert_eq!(
             artifacts.batch.evidence[0].digest,

@@ -148,6 +148,50 @@ fn disk_hits_promote_to_memory_and_attaching_a_store_populates_it() {
 }
 
 #[test]
+fn clearing_the_memory_front_forces_a_fresh_layout_or_a_verified_store_hit() {
+    let source = "q^7+z";
+    // No store: a repeat request is a memory hit; after a clear it is a
+    // fresh layout again, with the counters cumulative across the clear.
+    let e = engine();
+    let expected = e.typeset(MATH, source).unwrap().to_bytes().unwrap();
+    e.typeset(MATH, source).unwrap();
+    assert_eq!(e.layout_computations(), 1);
+    assert_eq!(e.memory_cache_stats().hits, 1);
+    e.clear_memory_cache();
+    let cleared = e.memory_cache_stats();
+    assert_eq!(
+        (cleared.hits, cleared.misses, cleared.entries, cleared.bytes),
+        (1, 1, 0, 0)
+    );
+    assert_eq!(
+        e.typeset(MATH, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
+    assert_eq!(e.layout_computations(), 2);
+    assert_eq!(e.memory_cache_stats().hits, 1);
+
+    // With a store: a cleared front is served by a verified store hit, not
+    // by a layout, and the clear leaves the store's entry in place.
+    let store = store();
+    let e = engine().with_cache(&store).unwrap();
+    e.typeset(MATH, source).unwrap();
+    e.clear_memory_cache();
+    assert_eq!(
+        e.typeset(MATH, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
+    assert_eq!(e.layout_computations(), 1);
+    assert_eq!(e.persistent_cache_hits(), 1);
+    assert_eq!(e.memory_cache_stats().hits, 0);
+    // Without a clear the same request is a memory hit and the store is
+    // never read: exactly what a store-latency probe must not time.
+    e.typeset(MATH, source).unwrap();
+    assert_eq!(e.persistent_cache_hits(), 1);
+    assert_eq!(e.memory_cache_stats().hits, 1);
+    assert!(e.persistent_cache_enabled());
+}
+
+#[test]
 fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
     let store = store();
     let e = engine().with_cache(&store).unwrap();

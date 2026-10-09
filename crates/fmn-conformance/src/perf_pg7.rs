@@ -4,9 +4,13 @@
 //! the engine and CPU warm while deliberately leaving the content cache
 //! disabled. Formula-cached proves an exact-key miss, primes through the real
 //! preflight mechanism, verifies and decodes the exact stored payload, then
-//! times cache hits. Native text lays out exactly 10,000 non-whitespace
-//! glyphs through `fmn-text`. All three paths verify a bit-level result
-//! self-golden before and after timing.
+//! times verified store hits. Both formula workloads clear the engine's
+//! memory front before every repetition, outside the timed region, and refuse
+//! a repetition unless the engine's own counters show it was served by
+//! exactly the layer the scenario names: one layout, or one verified store
+//! hit, and never a memory-front hit. Native text lays out exactly 10,000
+//! non-whitespace glyphs through `fmn-text`. All three paths verify a
+//! bit-level result self-golden before and after timing.
 
 use crate::perf::{
     Baseline, EvidenceKind, EvidenceRef, GateId, MeasurementBatch, MetricUnit, PerfError, Sample,
@@ -25,7 +29,7 @@ use std::time::{Duration, Instant};
 /// Stable fixture-definition schema.
 pub const PG7_DEFINITION_SCHEMA: &str = "fmn-perf-pg7-definition/1";
 /// Stable phase-trace schema.
-pub const PG7_TRACE_SCHEMA: &str = "fmn-perf-pg7-trace/1";
+pub const PG7_TRACE_SCHEMA: &str = "fmn-perf-pg7-trace/2";
 /// Total repetitions: 21 required valid observations plus three retained
 /// host-quality failures allowed by the policy catalog.
 pub const PG7_SAMPLE_COUNT: usize = 24;
@@ -132,6 +136,15 @@ impl Pg7Scenario {
         match self {
             Self::FormulaCold | Self::FormulaCached => FORMULA_OUTPUT_MODE,
             Self::Text10kGlyph => TEXT_OUTPUT_MODE,
+        }
+    }
+
+    /// The one engine layer that must serve each timed formula repetition.
+    const fn timed_layer(self) -> Option<TimedLayer> {
+        match self {
+            Self::FormulaCold => Some(TimedLayer::Layout),
+            Self::FormulaCached => Some(TimedLayer::StoreHit),
+            Self::Text10kGlyph => None,
         }
     }
 
@@ -252,6 +265,11 @@ impl Pg7Definition {
                     } else {
                         "none"
                     },
+                );
+                row("memory_front", &"cleared-before-each-repetition");
+                row(
+                    "timed_layer",
+                    &self.scenario.timed_layer().map_or("none", TimedLayer::name),
                 );
             }
             Pg7Scenario::Text10kGlyph => {
@@ -460,7 +478,7 @@ fn measure_formula_cold(definition: &Pg7Definition) -> Result<Measured, Pg7Error
     )];
 
     let golden_start = Instant::now();
-    let prime = typeset_formula(&engine, FORMULA_SOURCE)?;
+    let (_, prime, _) = formula_repetition(&engine, TimedLayer::Layout)?;
     let prime_digest = typeset_digest(&prime)?;
     require_self_golden(definition, prime_digest)?;
     phases.push(PhaseTiming::new(
@@ -470,7 +488,7 @@ fn measure_formula_cold(definition: &Pg7Definition) -> Result<Measured, Pg7Error
 
     let warmup_start = Instant::now();
     for _ in 0..PG7_WARMUP_ITERATIONS {
-        let output = typeset_formula(&engine, FORMULA_SOURCE)?;
+        let (_, output, _) = formula_repetition(&engine, TimedLayer::Layout)?;
         black_box(output);
     }
     phases.push(PhaseTiming::new(
@@ -478,25 +496,17 @@ fn measure_formula_cold(definition: &Pg7Definition) -> Result<Measured, Pg7Error
         warmup_start.elapsed(),
     ));
 
-    let mut elapsed_ns = Vec::with_capacity(PG7_SAMPLE_COUNT);
-    let mut final_output = prime;
-    for _ in 0..PG7_SAMPLE_COUNT {
-        let start = Instant::now();
-        let output = typeset_formula(&engine, FORMULA_SOURCE)?;
-        let elapsed = start.elapsed().as_nanos();
-        black_box(&output);
-        elapsed_ns.push(elapsed);
-        final_output = output;
-    }
-    let result_digest = typeset_digest(&final_output)?;
+    let timed = formula_samples(&engine, TimedLayer::Layout, prime)?;
+    let result_digest = typeset_digest(&timed.final_output)?;
     require_unchanged(definition, prime_digest, result_digest)?;
     Ok(Measured {
         phases,
-        elapsed_ns,
+        elapsed_ns: timed.elapsed_ns,
         result_digest,
         cache_before: "disabled",
         cache_after: "disabled",
         cache_payload_digest: None,
+        timed_layers: Some(timed.layers),
     })
 }
 
@@ -568,7 +578,7 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
 
     let warmup_start = Instant::now();
     for _ in 0..PG7_WARMUP_ITERATIONS {
-        let output = typeset_formula(&engine, FORMULA_SOURCE)?;
+        let (_, output, _) = formula_repetition(&engine, TimedLayer::StoreHit)?;
         black_box(output);
     }
     phases.push(PhaseTiming::new(
@@ -576,16 +586,7 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
         warmup_start.elapsed(),
     ));
 
-    let mut elapsed_ns = Vec::with_capacity(PG7_SAMPLE_COUNT);
-    let mut final_output = decoded;
-    for _ in 0..PG7_SAMPLE_COUNT {
-        let start = Instant::now();
-        let output = typeset_formula(&engine, FORMULA_SOURCE)?;
-        let elapsed = start.elapsed().as_nanos();
-        black_box(&output);
-        elapsed_ns.push(elapsed);
-        final_output = output;
-    }
+    let timed = formula_samples(&engine, TimedLayer::StoreHit, decoded)?;
 
     let after_start = Instant::now();
     let after_payload = namespace
@@ -599,7 +600,7 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
             "exact-key payload changed during cached measurement".to_owned(),
         ));
     }
-    let result_digest = typeset_digest(&final_output)?;
+    let result_digest = typeset_digest(&timed.final_output)?;
     require_unchanged(definition, prime_digest, result_digest)?;
     phases.push(PhaseTiming::new(
         "post-measurement-cache-hit-proof",
@@ -607,11 +608,12 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
     ));
     Ok(Measured {
         phases,
-        elapsed_ns,
+        elapsed_ns: timed.elapsed_ns,
         result_digest,
         cache_before: "exact-key-miss",
         cache_after: "exact-key-hit",
         cache_payload_digest: Some(payload_digest),
+        timed_layers: Some(timed.layers),
     })
 }
 
@@ -668,6 +670,7 @@ fn measure_text(definition: &Pg7Definition) -> Result<Measured, Pg7Error> {
         cache_before: "not-applicable",
         cache_after: "not-applicable",
         cache_payload_digest: None,
+        timed_layers: None,
     })
 }
 
@@ -679,6 +682,143 @@ fn typeset_formula(engine: &TexEngine, source: &str) -> Result<Typeset, Pg7Error
     engine
         .typeset(Mode::Math(Style::Display), source)
         .map_err(|error| Pg7Error::Workload(error.to_string()))
+}
+
+/// The engine layer that must serve a timed formula repetition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimedLayer {
+    /// A fresh `fmd-math` layout: no memory-front hit and no store hit.
+    Layout,
+    /// A checksum-verified store hit: no memory-front hit and no layout.
+    StoreHit,
+}
+
+impl TimedLayer {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Layout => "layout",
+            Self::StoreHit => "verified-store-hit",
+        }
+    }
+
+    /// The exact counter movement of one repetition served by this layer.
+    const fn one_repetition(self) -> LayerCounters {
+        match self {
+            Self::Layout => LayerCounters {
+                memory_front_hits: 0,
+                layouts: 1,
+                store_hits: 0,
+            },
+            Self::StoreHit => LayerCounters {
+                memory_front_hits: 0,
+                layouts: 0,
+                store_hits: 1,
+            },
+        }
+    }
+}
+
+/// The engine's cumulative layer counters, or a difference of two readings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LayerCounters {
+    memory_front_hits: u64,
+    layouts: u64,
+    store_hits: u64,
+}
+
+impl LayerCounters {
+    fn read(engine: &TexEngine) -> Self {
+        Self {
+            memory_front_hits: engine.memory_cache_stats().hits,
+            layouts: engine.layout_computations(),
+            store_hits: engine.persistent_cache_hits(),
+        }
+    }
+
+    fn since(self, before: Self) -> Result<Self, Pg7Error> {
+        let delta = |after: u64, before: u64, name: &str| {
+            after.checked_sub(before).ok_or_else(|| {
+                Pg7Error::CacheState(format!("engine {name} counter moved backwards"))
+            })
+        };
+        Ok(Self {
+            memory_front_hits: delta(
+                self.memory_front_hits,
+                before.memory_front_hits,
+                "memory-front hit",
+            )?,
+            layouts: delta(self.layouts, before.layouts, "layout")?,
+            store_hits: delta(self.store_hits, before.store_hits, "store hit")?,
+        })
+    }
+
+    const fn saturating_add(self, other: Self) -> Self {
+        Self {
+            memory_front_hits: self
+                .memory_front_hits
+                .saturating_add(other.memory_front_hits),
+            layouts: self.layouts.saturating_add(other.layouts),
+            store_hits: self.store_hits.saturating_add(other.store_hits),
+        }
+    }
+}
+
+/// Refuse a repetition the named layer did not serve alone.
+fn require_timed_layer(layer: TimedLayer, delta: LayerCounters) -> Result<(), Pg7Error> {
+    if delta == layer.one_repetition() {
+        Ok(())
+    } else {
+        Err(Pg7Error::CacheState(format!(
+            "a timed repetition must be exactly one {}, but the engine counted \
+             {} memory-front hit(s), {} layout(s) and {} store hit(s)",
+            layer.name(),
+            delta.memory_front_hits,
+            delta.layouts,
+            delta.store_hits
+        )))
+    }
+}
+
+/// One formula repetition with a cold memory front. Clearing the front and
+/// both counter readings stay outside the timed region.
+fn formula_repetition(
+    engine: &TexEngine,
+    layer: TimedLayer,
+) -> Result<(u128, Typeset, LayerCounters), Pg7Error> {
+    engine.clear_memory_cache();
+    let before = LayerCounters::read(engine);
+    let start = Instant::now();
+    let output = typeset_formula(engine, FORMULA_SOURCE)?;
+    let elapsed = start.elapsed().as_nanos();
+    black_box(&output);
+    let delta = LayerCounters::read(engine).since(before)?;
+    require_timed_layer(layer, delta)?;
+    Ok((elapsed, output, delta))
+}
+
+struct FormulaSamples {
+    elapsed_ns: Vec<u128>,
+    final_output: Typeset,
+    layers: LayerCounters,
+}
+
+fn formula_samples(
+    engine: &TexEngine,
+    layer: TimedLayer,
+    initial: Typeset,
+) -> Result<FormulaSamples, Pg7Error> {
+    let mut samples = FormulaSamples {
+        elapsed_ns: Vec::with_capacity(PG7_SAMPLE_COUNT),
+        final_output: initial,
+        layers: LayerCounters::default(),
+    };
+    for _ in 0..PG7_SAMPLE_COUNT {
+        let (elapsed, output, delta) = formula_repetition(engine, layer)?;
+        samples.elapsed_ns.push(elapsed);
+        samples.final_output = output;
+        samples.layers = samples.layers.saturating_add(delta);
+    }
+    Ok(samples)
 }
 
 fn text_source() -> String {
@@ -879,6 +1019,8 @@ struct Measured {
     cache_before: &'static str,
     cache_after: &'static str,
     cache_payload_digest: Option<Digest>,
+    /// Engine layer counts summed over the timed repetitions only.
+    timed_layers: Option<LayerCounters>,
 }
 
 fn latency_samples(elapsed_ns: &[u128]) -> Vec<Sample> {
@@ -921,6 +1063,25 @@ fn render_trace(definition: &Pg7Definition, measured: &Measured, samples: &[Samp
             .cache_payload_digest
             .map_or_else(|| "-".to_owned(), |digest| digest.to_string()),
     );
+    row(
+        "timed_layer",
+        &definition
+            .scenario
+            .timed_layer()
+            .map_or("none", TimedLayer::name),
+    );
+    let layer_count = |count: fn(&LayerCounters) -> u64| {
+        measured
+            .timed_layers
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |layers| count(layers).to_string())
+    };
+    row(
+        "timed_memory_front_hits",
+        &layer_count(|layers| layers.memory_front_hits),
+    );
+    row("timed_layouts", &layer_count(|layers| layers.layouts));
+    row("timed_store_hits", &layer_count(|layers| layers.store_hits));
     row("warmup_iterations", &PG7_WARMUP_ITERATIONS);
     row("sample_count", &samples.len());
     row("result_digest", &measured.result_digest);
@@ -1026,9 +1187,14 @@ mod tests {
             cold.to_tsv()
                 .contains(&format!("fixture_relation\t{FORMULA_FIXTURE_RELATION}\n"))
         );
+        assert!(
+            cold.to_tsv()
+                .contains("memory_front\tcleared-before-each-repetition\n")
+        );
+        assert!(cold.to_tsv().contains("timed_layer\tlayout\n"));
         assert_eq!(
             cold.digest().to_string(),
-            "4714d047835e9df04fb10bc43ed75fd5d629150362462b1b7e99b85ae61e6b05"
+            "2eca85145debba19d93469715b489db2d751f19fa07d16070f4652dade1b9045"
         );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
@@ -1043,15 +1209,27 @@ mod tests {
                 .to_tsv()
                 .contains("cache_eviction_guard\texact-key-pin\n")
         );
+        assert!(
+            cached
+                .to_tsv()
+                .contains("memory_front\tcleared-before-each-repetition\n")
+        );
+        assert!(
+            cached
+                .to_tsv()
+                .contains("timed_layer\tverified-store-hit\n")
+        );
         assert_eq!(
             cached.digest().to_string(),
-            "e0cb953f481e4ef0e11406fbd4b474259acac09e7f58a46fbdef5443035c680c"
+            "d2b51d37e999edc47bbf3998f5a7b8db6755b436c339813e3b299cdc1f1fe047"
         );
 
         let text = Pg7Definition::new(Pg7Scenario::Text10kGlyph).expect("text definition");
         assert!(text.to_tsv().contains("expected_glyphs\t10000\n"));
         assert!(text.to_tsv().contains("ligatures\tfalse\n"));
         assert!(text.to_tsv().contains("cache_state\tnone\n"));
+        assert!(!text.to_tsv().contains("memory_front"));
+        // The text workload is unchanged by fm-a87y, so its digest is too.
         assert_eq!(
             text.digest().to_string(),
             "763bca0fd907333fe2f4fcd881e3376da684b84a5b87e13b635ddc20804e6248"
@@ -1103,10 +1281,102 @@ mod tests {
         assert_eq!(measured.cache_after, "exact-key-hit");
         assert!(measured.cache_payload_digest.is_some());
         assert_eq!(measured.elapsed_ns.len(), PG7_SAMPLE_COUNT);
+        // Every timed repetition read the store; none was a memory-front hit
+        // or a silent fallback to a fresh layout.
+        assert_eq!(
+            measured.timed_layers,
+            Some(LayerCounters {
+                memory_front_hits: 0,
+                layouts: 0,
+                store_hits: PG7_SAMPLE_COUNT as u64,
+            })
+        );
+        let trace = render_trace(
+            &definition,
+            &measured,
+            &latency_samples(&measured.elapsed_ns),
+        );
+        assert!(
+            trace.contains("timed_layer\tverified-store-hit\n"),
+            "{trace}"
+        );
+        assert!(trace.contains("timed_memory_front_hits\t0\n"), "{trace}");
+        assert!(trace.contains("timed_layouts\t0\n"), "{trace}");
+        assert!(
+            trace.contains(&format!("timed_store_hits\t{PG7_SAMPLE_COUNT}\n")),
+            "{trace}"
+        );
 
         let error = measure_formula_cached(&definition, &store)
             .expect_err("reused cache must not masquerade as a proved transition");
         assert!(error.to_string().contains("already present"), "{error}");
+    }
+
+    #[test]
+    fn cold_workload_times_fresh_layouts_not_memory_front_hits() {
+        let definition = Pg7Definition::new(Pg7Scenario::FormulaCold).expect("cold definition");
+        let measured = measure_formula_cold(&definition).expect("cold measurement");
+        assert_eq!(measured.elapsed_ns.len(), PG7_SAMPLE_COUNT);
+        assert_eq!(
+            measured.timed_layers,
+            Some(LayerCounters {
+                memory_front_hits: 0,
+                layouts: PG7_SAMPLE_COUNT as u64,
+                store_hits: 0,
+            })
+        );
+        let trace = render_trace(
+            &definition,
+            &measured,
+            &latency_samples(&measured.elapsed_ns),
+        );
+        assert!(trace.contains("timed_layer\tlayout\n"), "{trace}");
+        assert!(trace.contains("timed_memory_front_hits\t0\n"), "{trace}");
+        assert!(
+            trace.contains(&format!("timed_layouts\t{PG7_SAMPLE_COUNT}\n")),
+            "{trace}"
+        );
+    }
+
+    #[test]
+    fn a_timed_repetition_served_by_the_wrong_layer_is_refused() {
+        // Planted negative on the real engine: a repeated request without a
+        // cleared front is a memory-front hit, which is what both formula
+        // workloads timed between 472a19c0 and fm-a87y.
+        let engine = build_tex_engine().expect("formula engine");
+        typeset_formula(&engine, FORMULA_SOURCE).expect("first layout");
+        let before = LayerCounters::read(&engine);
+        typeset_formula(&engine, FORMULA_SOURCE).expect("memory-front hit");
+        let memory_hit = LayerCounters::read(&engine)
+            .since(before)
+            .expect("monotonic counters");
+        assert_eq!(
+            memory_hit,
+            LayerCounters {
+                memory_front_hits: 1,
+                layouts: 0,
+                store_hits: 0,
+            }
+        );
+        for layer in [TimedLayer::Layout, TimedLayer::StoreHit] {
+            let error = require_timed_layer(layer, memory_hit)
+                .expect_err("a memory-front hit is never a timed layer");
+            assert!(error.to_string().contains("1 memory-front hit"), "{error}");
+        }
+
+        // A store probe that silently fell back to a layout is refused too.
+        let (_, _, layout) =
+            formula_repetition(&engine, TimedLayer::Layout).expect("cleared-front layout");
+        assert_eq!(layout, TimedLayer::Layout.one_repetition());
+        let error = require_timed_layer(TimedLayer::StoreHit, layout)
+            .expect_err("a layout is not a verified store hit");
+        assert!(error.to_string().contains("verified-store-hit"), "{error}");
+        let error = formula_repetition(&engine, TimedLayer::StoreHit)
+            .expect_err("an engine without a store cannot produce store hits");
+        assert!(error.to_string().contains("1 layout(s)"), "{error}");
+
+        let backwards = LayerCounters::default().since(memory_hit);
+        assert!(backwards.is_err());
     }
 
     #[test]
