@@ -8,17 +8,55 @@
 //! commit `fixtures/topology_<platform>.snapshot.txt`.
 
 use fmn_platform::fs::VirtualFs;
-use fmn_platform::topology::{HardwareTopology, PerfClass, TopologyError};
+use fmn_platform::topology::{
+    CacheDomain, HardwareTopology, PerfClass, SysctlSnapshot, TopologyError,
+};
 use std::path::PathBuf;
 
-fn load_tree(name: &str) -> VirtualFs {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")
-        .join(name);
-    let manifest = std::fs::read_to_string(path).expect("fixture manifest present");
+        .join(name)
+}
+
+fn load_tree(name: &str) -> VirtualFs {
+    let manifest = std::fs::read_to_string(fixture_path(name)).expect("fixture manifest present");
     let fs = VirtualFs::new();
     fs.load_manifest(&manifest);
     fs
+}
+
+/// The real Apple M4 Pro (10P + 4E) `sysctl` recording.
+const M4_PRO_SYSCTL: &str = "sysctl_macos-aarch64_m4pro.txt";
+/// The committed snapshot derived from that recording.
+const MACOS_AARCH64_SNAPSHOT: &str = "topology_macos-aarch64.snapshot.txt";
+
+fn m4_pro_listing() -> String {
+    std::fs::read_to_string(fixture_path(M4_PRO_SYSCTL)).expect("sysctl fixture present")
+}
+
+/// Detect from the M4 Pro recording with exactly one line replaced, so each
+/// planted negative changes one recorded fact.
+fn detect_m4_pro_with(line: &str, replacement: &str) -> Result<HardwareTopology, TopologyError> {
+    let listing = m4_pro_listing();
+    assert!(
+        listing.lines().any(|l| l == line),
+        "the recording carries {line:?}"
+    );
+    let edited: String = listing
+        .lines()
+        .map(|l| if l == line { replacement } else { l })
+        .collect::<Vec<_>>()
+        .join("\n");
+    HardwareTopology::detect_macos(&SysctlSnapshot::parse(&edited).expect("edited listing parses"))
+}
+
+fn without_simd_line(snapshot: &str) -> String {
+    snapshot
+        .lines()
+        .filter(|line| !line.starts_with("simd_tier\t"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -168,4 +206,239 @@ fn real_machine_detects_and_snapshot_recorded() {
             .expect("committed topology snapshot for linux-x86_64; record with REGEN_TOPOLOGY=1");
         assert!(text.starts_with("# fmn hardware-topology snapshot v1\n"));
     }
+}
+
+/// fm-macos-hardware-topology-l29x acceptance: the real M4 Pro recording
+/// yields 10 performance + 4 efficiency cores, two 5-core P clusters on a
+/// 16 MiB L2 each, and one 4-core E cluster on a 4 MiB L2.
+#[test]
+fn macos_m4_pro_sysctl_derives_ten_p_four_e_and_their_l2_clusters() {
+    let sysctl = SysctlSnapshot::parse(&m4_pro_listing()).expect("recording parses");
+    let t = HardwareTopology::detect_macos(&sysctl).expect("detect");
+
+    assert_eq!(t.logical_cores(), 14);
+    assert_eq!(t.physical_cores, 14);
+    assert_eq!(t.packages, 1);
+    assert!(!t.smt_active());
+    let ids_of = |class: PerfClass| -> Vec<u32> {
+        t.cpus
+            .iter()
+            .filter(|cpu| cpu.class == class)
+            .map(|cpu| cpu.id)
+            .collect()
+    };
+    assert_eq!(ids_of(PerfClass::Performance), (0..10).collect::<Vec<_>>());
+    assert_eq!(ids_of(PerfClass::Efficiency), (10..14).collect::<Vec<_>>());
+    assert!(
+        t.cpus
+            .iter()
+            .all(|cpu| cpu.capacity.is_none() && cpu.max_freq_khz.is_none()),
+        "macOS reports neither capacity nor frequency"
+    );
+
+    let l2 = |size_mib: u64, cpus: std::ops::Range<u32>| CacheDomain {
+        level: 2,
+        size_bytes: Some(size_mib * 1024 * 1024),
+        cpus: cpus.collect(),
+    };
+    assert_eq!(
+        t.l2_domains,
+        vec![l2(16, 0..5), l2(16, 5..10), l2(4, 10..14)]
+    );
+    // Apple's system-level cache is not reported as an L3.
+    assert!(t.l3_domains.is_empty());
+    assert_eq!(t.numa_nodes.len(), 1);
+    assert_eq!(t.numa_nodes[0].cpus.len(), 14);
+    assert_eq!(t.processor_groups.len(), 1);
+    assert_eq!(t.total_memory_bytes, Some(64 * 1024 * 1024 * 1024));
+
+    // Planted negative: the L2 assertion reads the recorded cluster width.
+    // A 10-wide P cluster is one domain, so the expectation above fails.
+    let wide = detect_m4_pro_with("hw.perflevel0.cpusperl2: 5", "hw.perflevel0.cpusperl2: 10")
+        .expect("detect");
+    assert_eq!(wide.l2_domains[0].cpus, (0..10).collect::<Vec<_>>());
+    assert_ne!(wide.l2_domains, t.l2_domains);
+}
+
+/// The committed `topology_macos-aarch64.snapshot.txt` is the snapshot of
+/// the recorded M4 Pro (the real-machine fixture fm-0do asks for on macOS).
+/// The SIMD tier is the running process's `std::arch` answer, not a sysctl
+/// fact, so that one line is compared only on aarch64 macOS. Re-record on
+/// such a host with `REGEN_TOPOLOGY=1`.
+#[test]
+fn macos_snapshot_fixture_is_the_recorded_m4_pro() {
+    let sysctl = SysctlSnapshot::parse(&m4_pro_listing()).expect("recording parses");
+    let t = HardwareTopology::detect_macos(&sysctl).expect("detect");
+    let path = fixture_path(MACOS_AARCH64_SNAPSHOT);
+    let on_recorded_platform = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+    if on_recorded_platform && std::env::var_os("REGEN_TOPOLOGY").is_some() {
+        std::fs::write(&path, t.snapshot_text()).expect("write snapshot");
+        eprintln!("recorded {}", path.display());
+        return;
+    }
+    let committed = std::fs::read_to_string(&path).expect("committed macOS snapshot");
+    assert!(committed.starts_with("# fmn hardware-topology snapshot v1\n"));
+    assert!(committed.contains("\nsimd_tier\taarch64-neon\n"));
+    if on_recorded_platform {
+        assert_eq!(committed, t.snapshot_text());
+    } else {
+        assert_eq!(
+            without_simd_line(&committed),
+            without_simd_line(&t.snapshot_text())
+        );
+    }
+
+    // Planted negative: one recorded fact moves the snapshot, so the lock
+    // above is not tautological.
+    let smaller =
+        detect_m4_pro_with("hw.memsize: 68719476736", "hw.memsize: 34359738368").expect("detect");
+    assert_ne!(
+        without_simd_line(&committed),
+        without_simd_line(&smaller.snapshot_text())
+    );
+}
+
+#[test]
+fn macos_levels_must_partition_the_machine() {
+    // A level that loses a core no longer sums to hw.logicalcpu/physicalcpu.
+    for (line, replacement) in [
+        ("hw.perflevel1.logicalcpu: 4", "hw.perflevel1.logicalcpu: 3"),
+        (
+            "hw.perflevel1.physicalcpu: 4",
+            "hw.perflevel1.physicalcpu: 3",
+        ),
+    ] {
+        assert!(
+            matches!(
+                detect_m4_pro_with(line, replacement),
+                Err(TopologyError::Invalid { detail }) if detail.contains("performance levels hold")
+            ),
+            "{replacement}"
+        );
+    }
+    // A level count beyond the recorded levels reads an absent level.
+    assert!(matches!(
+        detect_m4_pro_with("hw.nperflevels: 2", "hw.nperflevels: 3"),
+        Err(TopologyError::MissingSysctl { name }) if name == "hw.perflevel2.logicalcpu"
+    ));
+    for count in ["0", "9"] {
+        assert!(matches!(
+            detect_m4_pro_with("hw.nperflevels: 2", &format!("hw.nperflevels: {count}")),
+            Err(TopologyError::Invalid { detail }) if detail.contains("hw.nperflevels")
+        ));
+    }
+    assert!(matches!(
+        detect_m4_pro_with("hw.packages: 1", "hw.packages: 2"),
+        Err(TopologyError::Invalid { detail }) if detail.contains("hw.packages")
+    ));
+}
+
+#[test]
+fn macos_missing_and_malformed_sysctls_are_named() {
+    assert!(matches!(
+        detect_m4_pro_with("hw.logicalcpu: 14", ""),
+        Err(TopologyError::MissingSysctl { name }) if name == "hw.logicalcpu"
+    ));
+    assert!(matches!(
+        detect_m4_pro_with("hw.perflevel1.physicalcpu: 4", ""),
+        Err(TopologyError::MissingSysctl { name }) if name == "hw.perflevel1.physicalcpu"
+    ));
+    assert!(matches!(
+        detect_m4_pro_with("hw.memsize: 68719476736", "hw.memsize: lots"),
+        Err(TopologyError::SysctlParse { name, .. }) if name == "hw.memsize"
+    ));
+    assert!(matches!(
+        detect_m4_pro_with("hw.physicalcpu: 14", "hw.physicalcpu: 4294967296"),
+        Err(TopologyError::SysctlParse { name, detail }) if name == "hw.physicalcpu" && detail.contains("u32")
+    ));
+    // Optional facts degrade to "unknown", never to a guess.
+    let no_memory = detect_m4_pro_with("hw.memsize: 68719476736", "").expect("detect");
+    assert_eq!(no_memory.total_memory_bytes, None);
+    let no_width = detect_m4_pro_with("hw.perflevel1.cpusperl2: 4", "").expect("detect");
+    assert_eq!(
+        no_width.l2_domains.len(),
+        2,
+        "no E-cluster domain without its width"
+    );
+}
+
+#[test]
+fn macos_smt_levels_and_pre_perflevel_hosts() {
+    // One level with two threads per core: siblings are adjacent ids.
+    let smt = SysctlSnapshot::parse(
+        "hw.logicalcpu: 8\nhw.physicalcpu: 4\nhw.nperflevels: 1\n\
+         hw.perflevel0.logicalcpu: 8\nhw.perflevel0.physicalcpu: 4\n\
+         hw.perflevel0.l2cachesize: 262144\nhw.perflevel0.cpusperl2: 2\n",
+    )
+    .expect("synthetic listing");
+    let t = HardwareTopology::detect_macos(&smt).expect("detect");
+    assert!(t.smt_active());
+    assert_eq!(t.physical_cores, 4);
+    assert_eq!(t.cpus[1].core_id, 0);
+    assert_eq!(t.cpus[2].core_id, 1);
+    assert!(t.cpus.iter().all(|cpu| cpu.class == PerfClass::Performance));
+    assert_eq!(t.l2_domains.len(), 4);
+    assert_eq!(t.l2_domains[3].cpus, vec![6, 7]);
+
+    // macOS before performance levels: one uniform level, cache sharing
+    // from hw.cacheconfig (memory, L1, L2, L3 widths).
+    let legacy = SysctlSnapshot::parse(
+        "hw.logicalcpu: 8\nhw.physicalcpu: 4\nhw.cacheconfig: 8 2 2 8 0 0 0 0 0 0\n\
+         hw.l2cachesize: 262144\nhw.l3cachesize: 8388608\n",
+    )
+    .expect("synthetic listing");
+    let t = HardwareTopology::detect_macos(&legacy).expect("detect");
+    assert_eq!(t.logical_cores(), 8);
+    assert!(t.cpus.iter().all(|cpu| cpu.class == PerfClass::Performance));
+    assert_eq!(t.l2_domains.len(), 4);
+    assert_eq!(t.l3_domains.len(), 1);
+    assert_eq!(t.l3_domains[0].cpus.len(), 8);
+    assert_eq!(t.l3_domains[0].size_bytes, Some(8 * 1024 * 1024));
+
+    // A level whose threads do not divide evenly over its cores is refused.
+    let ragged = SysctlSnapshot::parse(
+        "hw.logicalcpu: 3\nhw.physicalcpu: 2\nhw.nperflevels: 1\n\
+         hw.perflevel0.logicalcpu: 3\nhw.perflevel0.physicalcpu: 2\n",
+    )
+    .expect("synthetic listing");
+    assert!(matches!(
+        HardwareTopology::detect_macos(&ragged),
+        Err(TopologyError::Invalid { detail }) if detail.contains("performance level 0")
+    ));
+}
+
+#[test]
+fn sysctl_listings_parse_strictly() {
+    for (bad, why) in [
+        ("hw.logicalcpu 14\n", "not `name: value`"),
+        ("hw logicalcpu: 14\n", "malformed OID name"),
+        (
+            "hw.logicalcpu: 14\nhw.logicalcpu: 8\n",
+            "repeats hw.logicalcpu",
+        ),
+    ] {
+        assert!(
+            matches!(
+                SysctlSnapshot::parse(bad),
+                Err(TopologyError::Invalid { detail }) if detail.contains(why)
+            ),
+            "{bad:?}"
+        );
+    }
+    let long_value = format!("hw.memsize: {}\n", "9".repeat(4097));
+    assert!(SysctlSnapshot::parse(&long_value).is_err());
+    let many: String = (0..4097).map(|i| format!("hw.x{i}: 1\n")).collect();
+    assert!(matches!(
+        SysctlSnapshot::parse(&many),
+        Err(TopologyError::Invalid { detail }) if detail.contains("entry limit")
+    ));
+    // Comments, blank lines and CRLF endings are tolerated.
+    let ok = SysctlSnapshot::parse("# header\n\nhw.logicalcpu: 1\r\nhw.physicalcpu: 1\n")
+        .expect("parses");
+    assert_eq!(
+        HardwareTopology::detect_macos(&ok)
+            .expect("detect")
+            .logical_cores(),
+        1
+    );
 }

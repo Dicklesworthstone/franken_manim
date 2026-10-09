@@ -13,6 +13,16 @@
 //! [`HardwareTopology::detect_linux`] — that is how the aarch64 big.LITTLE
 //! and Windows processor-group shapes are tested on any host.
 //!
+//! **macOS** detection reads the `hw.*` sysctl MIB **through**
+//! [`SysctlSource`]: [`HardwareTopology::detect_macos`] maps Apple's
+//! performance levels (`hw.perflevel{N}`) to P/E classes and their
+//! `cpusperl2` widths to L2 cluster domains, and a recorded `sysctl(8)`
+//! listing ([`SysctlSnapshot`]) is its fixture on any host. A *live* source
+//! needs `sysctlbyname(3)`, which is FFI. D3 forbids authoring that here, and
+//! no governed dependency exposes it safely yet, so [`HardwareTopology::current`]
+//! still uses the flat fallback on macOS until a governed suite crate supplies
+//! the reader.
+//!
 //! **Windows processor groups (§17.4):** systems above 64 logical processors
 //! span groups, and explicit scheduling code must know it. The model here is
 //! groups of at most 64 logical CPUs; [`HardwareTopology::from_group_sizes`]
@@ -24,6 +34,7 @@
 //! groups. R18's functional CI keeps this honest.
 
 use crate::fs::{FileSystem, FsError};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -156,6 +167,18 @@ pub enum TopologyError {
         /// What was wrong.
         detail: String,
     },
+    /// A required `sysctl` OID is absent.
+    MissingSysctl {
+        /// The missing OID name.
+        name: String,
+    },
+    /// A `sysctl` OID existed but its value did not parse.
+    SysctlParse {
+        /// The offending OID name.
+        name: String,
+        /// What was wrong.
+        detail: String,
+    },
 }
 
 impl fmt::Display for TopologyError {
@@ -166,6 +189,10 @@ impl fmt::Display for TopologyError {
                 write!(f, "topology parse failure at {}: {detail}", path.display())
             }
             Self::Invalid { detail } => write!(f, "invalid topology: {detail}"),
+            Self::MissingSysctl { name } => write!(f, "topology sysctl missing: {name}"),
+            Self::SysctlParse { name, detail } => {
+                write!(f, "topology sysctl parse failure at {name}: {detail}")
+            }
         }
     }
 }
@@ -314,6 +341,248 @@ pub fn detect_simd_tier() -> SimdTier {
     }
 }
 
+/// The macOS `sysctl` MIB that [`HardwareTopology::detect_macos`] reads: the
+/// Darwin counterpart of the sysfs files [`HardwareTopology::detect_linux`]
+/// reads through [`FileSystem`].
+///
+/// Detection is a pure function of this capability, so a recorded machine is
+/// a fixture on any host. A live implementation calls `sysctlbyname(3)`. That
+/// is FFI, which D3 keeps out of this crate.
+pub trait SysctlSource {
+    /// The value of `name` exactly as `sysctl(8)` prints it, or `None` when
+    /// the OID does not exist on this machine.
+    fn value(&self, name: &str) -> Option<String>;
+}
+
+/// Byte ceiling for one recorded `sysctl(8)` listing.
+const MAX_SYSCTL_LISTING_BYTES: usize = 1024 * 1024;
+/// Entry ceiling for one recorded `sysctl(8)` listing.
+const MAX_SYSCTL_ENTRIES: usize = 4096;
+/// Length ceiling for one OID name.
+const MAX_SYSCTL_NAME_BYTES: usize = 128;
+/// Preview ceiling for malformed values quoted in errors.
+const MAX_SYSCTL_PREVIEW_BYTES: usize = 64;
+/// Ceiling on `hw.nperflevels` (Apple ships two; the bound keeps a corrupt
+/// value from driving an unbounded OID walk).
+const MAX_PERF_LEVELS: u32 = 8;
+
+/// A recorded `sysctl(8)` listing: `name: value` lines, with blank lines and
+/// `#` comments ignored. The committed `fixtures/sysctl_*.txt` files are
+/// unedited `sysctl` stdout under a comment header.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SysctlSnapshot {
+    values: BTreeMap<String, String>,
+}
+
+impl SysctlSnapshot {
+    /// Parse a `sysctl(8)` listing.
+    ///
+    /// # Errors
+    /// [`TopologyError::Invalid`] for a listing over the size or entry
+    /// budget, a line that is not `name: value`, a malformed OID name, an
+    /// oversized value, or a duplicated OID.
+    pub fn parse(text: &str) -> Result<Self, TopologyError> {
+        if text.len() > MAX_SYSCTL_LISTING_BYTES {
+            return Err(TopologyError::Invalid {
+                detail: format!(
+                    "sysctl listing exceeds the {MAX_SYSCTL_LISTING_BYTES}-byte limit ({} bytes)",
+                    text.len()
+                ),
+            });
+        }
+        let mut values = BTreeMap::new();
+        for (index, line) in text.lines().enumerate() {
+            let line = line.trim_end_matches('\r');
+            if line.trim().is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let line_no = index + 1;
+            let Some((name, value)) = line.split_once(": ") else {
+                return Err(TopologyError::Invalid {
+                    detail: format!("sysctl listing line {line_no} is not `name: value`"),
+                });
+            };
+            if name.is_empty()
+                || name.len() > MAX_SYSCTL_NAME_BYTES
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_')
+            {
+                return Err(TopologyError::Invalid {
+                    detail: format!("sysctl listing line {line_no} has a malformed OID name"),
+                });
+            }
+            if value.len() > MAX_TOPOLOGY_SCALAR_BYTES {
+                return Err(TopologyError::Invalid {
+                    detail: format!(
+                        "sysctl listing line {line_no} value exceeds the \
+                         {MAX_TOPOLOGY_SCALAR_BYTES}-byte limit"
+                    ),
+                });
+            }
+            if values.len() == MAX_SYSCTL_ENTRIES {
+                return Err(TopologyError::Invalid {
+                    detail: format!("sysctl listing exceeds the {MAX_SYSCTL_ENTRIES}-entry limit"),
+                });
+            }
+            if values.insert(name.to_string(), value.to_string()).is_some() {
+                return Err(TopologyError::Invalid {
+                    detail: format!("sysctl listing repeats {name} (line {line_no})"),
+                });
+            }
+        }
+        Ok(Self { values })
+    }
+}
+
+impl SysctlSource for SysctlSnapshot {
+    fn value(&self, name: &str) -> Option<String> {
+        self.values.get(name).cloned()
+    }
+}
+
+/// One Darwin performance level (`hw.perflevel{N}`), or the whole machine
+/// when the OS predates performance levels.
+struct DarwinLevel {
+    logical: u32,
+    physical: u32,
+    l2: SharedCache,
+    l3: SharedCache,
+}
+
+/// A cache level as Darwin reports it: a size and how many logical CPUs share
+/// one instance. Darwin reports widths, never memberships.
+struct SharedCache {
+    size_bytes: Option<u64>,
+    cpus_per_domain: Option<u32>,
+}
+
+fn sysctl_optional_u64(
+    sysctl: &dyn SysctlSource,
+    name: &str,
+) -> Result<Option<u64>, TopologyError> {
+    let Some(raw) = sysctl.value(name) else {
+        return Ok(None);
+    };
+    raw.trim()
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| TopologyError::SysctlParse {
+            name: name.to_string(),
+            detail: format!(
+                "expected an unsigned integer, found {:?}",
+                sysctl_preview(&raw)
+            ),
+        })
+}
+
+fn sysctl_optional_u32(
+    sysctl: &dyn SysctlSource,
+    name: &str,
+) -> Result<Option<u32>, TopologyError> {
+    sysctl_optional_u64(sysctl, name)?
+        .map(|value| {
+            u32::try_from(value).map_err(|_| TopologyError::SysctlParse {
+                name: name.to_string(),
+                detail: format!("{value} exceeds u32"),
+            })
+        })
+        .transpose()
+}
+
+fn sysctl_u32(sysctl: &dyn SysctlSource, name: &str) -> Result<u32, TopologyError> {
+    sysctl_optional_u32(sysctl, name)?.ok_or_else(|| TopologyError::MissingSysctl {
+        name: name.to_string(),
+    })
+}
+
+/// `hw.cacheconfig`: logical CPUs sharing each level (index 0 is memory,
+/// then L1, L2, L3, …); `0` means the level is absent.
+fn sysctl_cacheconfig(sysctl: &dyn SysctlSource) -> Result<Vec<u32>, TopologyError> {
+    const NAME: &str = "hw.cacheconfig";
+    let Some(raw) = sysctl.value(NAME) else {
+        return Ok(Vec::new());
+    };
+    raw.split_whitespace()
+        .map(|field| {
+            field
+                .parse::<u32>()
+                .map_err(|_| TopologyError::SysctlParse {
+                    name: NAME.to_string(),
+                    detail: format!(
+                        "expected unsigned sharing counts, found {:?}",
+                        sysctl_preview(&raw)
+                    ),
+                })
+        })
+        .collect()
+}
+
+fn sysctl_preview(raw: &str) -> String {
+    raw.chars().take(MAX_SYSCTL_PREVIEW_BYTES).collect()
+}
+
+fn darwin_levels(sysctl: &dyn SysctlSource) -> Result<Vec<DarwinLevel>, TopologyError> {
+    let Some(count) = sysctl_optional_u32(sysctl, "hw.nperflevels")? else {
+        // Pre-performance-level macOS: one uniform level, with cache sharing
+        // from `hw.cacheconfig` when it is reported.
+        let sharing = sysctl_cacheconfig(sysctl)?;
+        let width = |level: usize| sharing.get(level).copied().filter(|&n| n > 0);
+        return Ok(vec![DarwinLevel {
+            logical: sysctl_u32(sysctl, "hw.logicalcpu")?,
+            physical: sysctl_u32(sysctl, "hw.physicalcpu")?,
+            l2: SharedCache {
+                size_bytes: sysctl_optional_u64(sysctl, "hw.l2cachesize")?,
+                cpus_per_domain: width(2),
+            },
+            l3: SharedCache {
+                size_bytes: sysctl_optional_u64(sysctl, "hw.l3cachesize")?,
+                cpus_per_domain: width(3),
+            },
+        }]);
+    };
+    if count == 0 || count > MAX_PERF_LEVELS {
+        return Err(TopologyError::Invalid {
+            detail: format!("hw.nperflevels is {count}; expected 1..={MAX_PERF_LEVELS}"),
+        });
+    }
+    (0..count)
+        .map(|level| {
+            let key = |field: &str| format!("hw.perflevel{level}.{field}");
+            Ok(DarwinLevel {
+                logical: sysctl_u32(sysctl, &key("logicalcpu"))?,
+                physical: sysctl_u32(sysctl, &key("physicalcpu"))?,
+                l2: SharedCache {
+                    size_bytes: sysctl_optional_u64(sysctl, &key("l2cachesize"))?,
+                    cpus_per_domain: sysctl_optional_u32(sysctl, &key("cpusperl2"))?
+                        .filter(|&n| n > 0),
+                },
+                l3: SharedCache {
+                    size_bytes: sysctl_optional_u64(sysctl, &key("l3cachesize"))?,
+                    cpus_per_domain: sysctl_optional_u32(sysctl, &key("cpusperl3"))?
+                        .filter(|&n| n > 0),
+                },
+            })
+        })
+        .collect()
+}
+
+/// Append one cache domain per `cpus_per_domain`-wide run of `cpus`. Unknown
+/// sharing records no domain: a width is never guessed.
+fn push_darwin_domains(out: &mut Vec<CacheDomain>, level: u8, cache: &SharedCache, cpus: &[u32]) {
+    let Some(width) = cache.cpus_per_domain else {
+        return;
+    };
+    let width = usize::try_from(width).unwrap_or(usize::MAX);
+    for chunk in cpus.chunks(width) {
+        out.push(CacheDomain {
+            level,
+            size_bytes: cache.size_bytes,
+            cpus: chunk.to_vec(),
+        });
+    }
+}
+
 const SYS_CPU: &str = "/sys/devices/system/cpu";
 const SYS_NODE: &str = "/sys/devices/system/node";
 const PROC_MEMINFO: &str = "/proc/meminfo";
@@ -337,7 +606,9 @@ impl HardwareTopology {
     /// The topology of the running machine. Linux introspects sysfs; other
     /// hosts (and a sysfs read failure) fall back to
     /// [`HardwareTopology::fallback`] over `available_parallelism` — the
-    /// planner always gets *a* topology, just a flat one.
+    /// planner always gets *a* topology, just a flat one. macOS included:
+    /// [`HardwareTopology::detect_macos`] needs a live [`SysctlSource`],
+    /// and no governed dependency provides one yet (see the module doc).
     ///
     /// wasm32 (W5 tier 1, fm-l97): the browser sandbox is single-threaded —
     /// no shared memory, no atomics, no cross-origin isolation (that is the
@@ -513,6 +784,125 @@ impl HardwareTopology {
             processor_groups: group_by_split(&ids),
             simd_tier: detect_simd_tier(),
             total_memory_bytes,
+            cpus,
+        })
+    }
+
+    /// Introspect a macOS `hw.*` sysctl MIB through the sysctl capability.
+    ///
+    /// Each performance level (`hw.perflevel{N}`, highest performance first)
+    /// contributes its cores in order: level 0 is [`PerfClass::Performance`],
+    /// every later level [`PerfClass::Efficiency`]. A level's `cpusperl2` /
+    /// `cpusperl3` width splits its CPUs into cache domains. macOS predating
+    /// performance levels is one uniform level, with cache sharing from
+    /// `hw.cacheconfig`.
+    ///
+    /// macOS exposes neither a per-CPU cluster map nor thread affinity, so
+    /// CPU ids here are stable labels in performance-level order (SMT
+    /// siblings adjacent), not kernel processor numbers. Capacities and
+    /// frequencies are not reported and stay `None`.
+    ///
+    /// # Errors
+    /// [`TopologyError::MissingSysctl`] when `hw.logicalcpu`,
+    /// `hw.physicalcpu` or a level's CPU counts are absent;
+    /// [`TopologyError::SysctlParse`] for a malformed value; and
+    /// [`TopologyError::Invalid`] when the levels do not partition the
+    /// machine, a level's logical CPUs are not a whole multiple of its cores,
+    /// or the host reports more than one package.
+    pub fn detect_macos(sysctl: &dyn SysctlSource) -> Result<Self, TopologyError> {
+        let logical = sysctl_u32(sysctl, "hw.logicalcpu")?;
+        let physical = sysctl_u32(sysctl, "hw.physicalcpu")?;
+        let logical_entries = usize::try_from(logical).unwrap_or(usize::MAX);
+        if logical == 0 || physical == 0 || physical > logical {
+            return Err(TopologyError::Invalid {
+                detail: format!("{logical} logical CPUs over {physical} physical cores"),
+            });
+        }
+        if logical_entries > MAX_CPU_LIST_ENTRIES {
+            return Err(TopologyError::Invalid {
+                detail: format!(
+                    "{logical} logical CPUs exceed the {MAX_CPU_LIST_ENTRIES}-CPU limit"
+                ),
+            });
+        }
+        if let Some(packages) = sysctl_optional_u32(sysctl, "hw.packages")?
+            && packages != 1
+        {
+            return Err(TopologyError::Invalid {
+                detail: format!(
+                    "hw.packages is {packages}; Darwin reports no CPU-to-package map, \
+                     so only single-package hosts are modeled"
+                ),
+            });
+        }
+
+        let levels = darwin_levels(sysctl)?;
+        let (level_logical, level_physical) =
+            levels.iter().fold((0_u64, 0_u64), |(l, p), level| {
+                (l + u64::from(level.logical), p + u64::from(level.physical))
+            });
+        if level_logical != u64::from(logical) || level_physical != u64::from(physical) {
+            return Err(TopologyError::Invalid {
+                detail: format!(
+                    "performance levels hold {level_logical} logical CPUs over \
+                     {level_physical} cores; the host reports {logical} over {physical}"
+                ),
+            });
+        }
+
+        let mut cpus = Vec::with_capacity(logical_entries);
+        let mut l2_domains = Vec::new();
+        let mut l3_domains = Vec::new();
+        let mut next_id = 0_u32;
+        let mut next_core = 0_u32;
+        for (index, level) in levels.iter().enumerate() {
+            if level.physical == 0 || !level.logical.is_multiple_of(level.physical) {
+                return Err(TopologyError::Invalid {
+                    detail: format!(
+                        "performance level {index} has {} logical CPUs over {} cores",
+                        level.logical, level.physical
+                    ),
+                });
+            }
+            let class = if index == 0 {
+                PerfClass::Performance
+            } else {
+                PerfClass::Efficiency
+            };
+            let threads_per_core = level.logical / level.physical;
+            let first = next_id;
+            for _ in 0..level.physical {
+                for _ in 0..threads_per_core {
+                    cpus.push(LogicalCpu {
+                        id: next_id,
+                        package_id: 0,
+                        core_id: next_core,
+                        capacity: None,
+                        max_freq_khz: None,
+                        class,
+                    });
+                    next_id += 1;
+                }
+                next_core += 1;
+            }
+            let ids: Vec<u32> = (first..next_id).collect();
+            push_darwin_domains(&mut l2_domains, 2, &level.l2, &ids);
+            push_darwin_domains(&mut l3_domains, 3, &level.l3, &ids);
+        }
+
+        let ids: Vec<u32> = cpus.iter().map(|cpu| cpu.id).collect();
+        Ok(Self {
+            physical_cores: physical,
+            packages: 1,
+            l2_domains,
+            l3_domains,
+            numa_nodes: vec![NumaNode {
+                id: 0,
+                cpus: ids.clone(),
+            }],
+            processor_groups: group_by_split(&ids),
+            simd_tier: detect_simd_tier(),
+            total_memory_bytes: sysctl_optional_u64(sysctl, "hw.memsize")?,
             cpus,
         })
     }
