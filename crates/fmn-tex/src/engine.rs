@@ -791,7 +791,7 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
         r"\frac{1}{1+\frac{1}{x}}",
         r"\sqrt[3]{x+1}",
         r"\sum_{n=1}^{N} n \int_0^1 x\,dx",
-        r"\hat x + \overline{AB}",
+        r"\hat x + \vec{v} + \overline{AB} + \big( x \big)",
         r"\left(\frac{\frac{1}{2}}{\frac{3}{4}}\right)",
         r"\begin{pmatrix} a & \cdots & b \\ \vdots & \ddots & \vdots \\ c & \cdots & d \end{pmatrix}",
         r"\begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}",

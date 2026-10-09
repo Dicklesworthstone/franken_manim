@@ -965,11 +965,12 @@ mod tests {
             // then tex_overbrace.v1's \cdots dots and "n terms" space at
             // franken_markdown a3578a0, then tex_fraction.v1 and
             // tex_display_sum.v1's null delimiters at franken_markdown
-            // e4e8e2e)
+            // e4e8e2e, then matrix_2x2.v1 and decimal_matrix.v1's array
+            // struts at franken_markdown bd00a24)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "eee63c619942b6817c8282dd51d08382d382c4e93d8e3d94f29768ebff13ba17"
+                "320e569342842e15116f1705095fd95a73d2261960f15a0f34481b5d90ac1b48"
             );
         }
     }

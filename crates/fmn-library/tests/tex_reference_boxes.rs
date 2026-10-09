@@ -14,11 +14,12 @@ use fmn_library::{Tex, TexEngine, TexText};
 /// landed (2026-10-04), 26 after the display-integral fix (franken_markdown
 /// 68fe29b), 39 after rule-17 italic corrections (4c8caa2), 42 after plain
 /// TeX's `\ldots` and amsmath's `\pmod` (a3578a0, fm-y5fl), 43 after TeX's
-/// null delimiters around fractions (e4e8e2e). Raise it when layout improves;
+/// null delimiters around fractions (e4e8e2e), 44 with TeX's accent geometry,
+/// \big sizes and array struts (bd00a24). Raise it when layout improves;
 /// never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 43;
-/// The same at ±10%: 57, then 60, then 65, then 67, then 70.
-const WITHIN_10_PERCENT_FLOOR: usize = 70;
+const WITHIN_5_PERCENT_FLOOR: usize = 44;
+/// The same at ±10%: 57, then 60, then 65, then 67, then 70, then 73.
+const WITHIN_10_PERCENT_FLOOR: usize = 73;
 
 struct Row {
     width: f64,
