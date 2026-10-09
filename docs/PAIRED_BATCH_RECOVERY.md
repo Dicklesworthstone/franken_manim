@@ -76,3 +76,6 @@ and a renderer double. The second uses the installed native wheel and existing
 console entry point; it retains the six single-format regressions and adds
 four native paired formats plus paired CLI failure/resume/corruption coverage.
 Passing the protocol tests is not evidence that the native render suite ran.
+`scripts/check_portal_runtime.sh` runs both against the freshly installed
+wheel, and its paired console refusal table keeps subdivided paired recovery
+refused before the source is imported.
