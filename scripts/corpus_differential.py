@@ -217,6 +217,15 @@ TRIAGE = (
      "a private asset (image, SVG, sound, data) is absent"),
     ("reference", "unexpected keyword argument", "portal-leniency",
      "the Reference rejects a keyword the portal accepts"),
+    ("reference", r"^KeyError: 'stroke_color'$", "reference-defect",
+     "NumberPlane replaces its default background_line_style with a partial one, then reads "
+     "the missing stroke_color (Appendix C-24, BN-07)"),
+    ("reference", r"^Exception: Only VMobjects can be passed into VGroup$", "reference-defect",
+     "AnimationGroup over a generator: the Reference checks for VMobjects on the exhausted "
+     "generator (Appendix C-25)"),
+    ("reference", r"^ValueError: not enough values to unpack \(expected 3, got 2\)$", "portal-leniency",
+     "a two-value t_range or x_range, which the Reference's ParametricCurve rejects; the portal "
+     "samples it with its default step"),
 )
 
 
@@ -229,6 +238,10 @@ def triage(record):
             error = record[name].get("error") or ""
             if re.search(pattern, error):
                 return {"label": label, "side": name, "rule": pattern, "reason": reason}
+    for name in ("reference", "portal"):
+        if record[name].get("exit") is None:
+            return {"label": "timeout", "side": name, "rule": "exit is None",
+                    "reason": "the run exceeded the differential's --timeout"}
     return {"label": "untriaged"}
 
 
@@ -478,6 +491,7 @@ def main():
         records = sf.read_ndjson(args.rediff / "records.ndjson")
         for r in records:
             if r["outcome"] != "both":
+                r["triage"] = triage(r)
                 continue
             work = args.rediff / "scenes" / _slug(r["module"], r["scene"])
             ref, portal = _facts(work / "reference.ndjson"), _facts(work / "portal.ndjson")

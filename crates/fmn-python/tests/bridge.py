@@ -11678,6 +11678,15 @@ rematched = topology.copy()
 assert np.array_equal(rematched.get_subpath_end_indices(), [2, 6])
 rematched.match_points(VMobject().set_points_as_corners([[0, 0, 0], [1, 0, 0], [1, 1, 0]]))
 assert np.array_equal(rematched.get_subpath_end_indices(), [4])
+# Appendix C-24: a partial background_line_style keeps the default stroke color,
+# where the Reference raises KeyError: 'stroke_color'.
+partial_plane = manimlib.NumberPlane(background_line_style={"stroke_width": 3})
+assert partial_plane.background_lines[0].get_stroke_color().upper() == "#29ABCA"
+assert partial_plane.background_lines[0].get_stroke_width() == 3
+# Appendix C-26: a proportion along a zero-length path is its start point, where
+# the Reference's point_from_proportion asserts.
+flat_arc = manimlib.Arc(angle=0, radius=0.5)
+assert np.allclose(flat_arc.pfp(0.3), flat_arc.get_start())
 
 single_insert = topology.insert_n_curves_to_point_list(
     2, np.array([[2.0, 3.0, 0.0]], dtype=np.float32)

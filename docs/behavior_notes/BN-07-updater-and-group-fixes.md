@@ -1,4 +1,4 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
@@ -258,4 +258,34 @@ Locked by the C-23 assertions in `crates/fmn-python/tests/bridge.py`
 (`get_subpath_end_indices()` is `[4]` after matching a 5-point path).
 
 **Migration:** none needed. Such scenes could only have raised in the
+Reference.
+
+## C-24 — a partial `background_line_style` keeps the other defaults
+
+The Reference's `NumberPlane` copies a caller's `background_line_style` in
+place of its default dict, then reads `stroke_color` from it to style the
+faded lines. `NumberPlane(background_line_style={"stroke_width": 3})`
+raises `KeyError: 'stroke_color'`. Two corpus scenes do this.
+
+**FrankenManim:** the caller's keys merge over the default style, so that
+plane draws its background lines in the default `BLUE_D` at width 3.
+
+Locked by the C-24 assertions in `crates/fmn-python/tests/bridge.py`.
+
+**Migration:** none needed. Such calls could only have raised in the
+Reference.
+
+## C-26 — a proportion along a zero-length path is its start point
+
+The Reference's `point_from_proportion` handles an empty path, but not a
+non-empty one of zero length: it computes a curve index one past the last
+curve and asserts. `Arc(angle=0).pfp(0.3)` raises `AssertionError`. A
+corpus scene hits this with an arc that follows a line's angle while the
+angle is 0.
+
+**FrankenManim:** the call returns the path's start point.
+
+Locked by the C-26 assertions in `crates/fmn-python/tests/bridge.py`.
+
+**Migration:** none needed. Such calls could only have raised in the
 Reference.
