@@ -156,6 +156,8 @@ A reviewed row in `API_OVERLAY.tsv` is an authored compatibility claim, not runt
 scripts/check_portal_runtime.sh
 ```
 
+Run it on CPython 3.13 with the wheel installed (the wheel brings `numpy==2.5.2`) and `IPython==9.14.0`: `source_autoreload` drives a real embedded IPython. A host without IPython stops in the script's preamble.
+
 That gate proves two independent properties:
 
 1. the installed wheel's own `fmn-python --audit-parity --robot` resolves every reviewed SAME/IMPROVED symbol to a non-placeholder runtime value; and

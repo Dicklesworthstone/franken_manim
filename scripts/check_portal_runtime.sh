@@ -4,6 +4,20 @@ cd "$(dirname "$0")/.."
 
 python3 - <<'PY'
 import importlib
+import importlib.metadata
+import sys
+
+# The gate's host environment (fm-jfrr): CPython 3.13 with the installed
+# wheel (it brings numpy==2.5.2) and IPython==9.14.0, the pin the repo's
+# workflows use. source_autoreload drives a real embedded IPython, so a host
+# without it stops here instead of four errors deep in the run.
+try:
+    ipython = importlib.metadata.version("ipython")
+except importlib.metadata.PackageNotFoundError:
+    raise SystemExit("clean-wheel gate host environment: install IPython==9.14.0 "
+                     "(source_autoreload drives an embedded IPython)")
+if ipython != "9.14.0":
+    print(f"note: IPython {ipython} is installed; the gate's pin is 9.14.0", file=sys.stderr)
 module = importlib.import_module("manimlib")
 path = getattr(module, "__file__", None)
 if not path:
