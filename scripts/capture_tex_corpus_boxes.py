@@ -6,10 +6,12 @@ TeX itself reports each formula's box: width, height and depth, from \\wd,
 \\ht and \\dp of a saved box, in display style. The preamble is the pinned
 Reference's default template (scripts/manim_ref/manimlib/tex_templates.yml,
 packages and \\minus), and the document class is 10 pt, so 1 em = 10 pt.
-Multi-line strings (`\\\\` or `&`) are boxed as `aligned`, the inner form of
-the Reference's align* wrapper. No SVG conversion is involved: TeX Live 2025
-with dvisvgm 3.6 corrupts some of the Reference's SVG extents (fm-0v8k), but
-not TeX's own boxes.
+Each string is stripped, as the Reference strips it. A single line is braced
+as amsmath braces an align* cell; multi-line strings (`\\\\` or `&`) are
+boxed as a top-aligned `aligned`, the inner form of the Reference's align*
+wrapper, without its invisible row struts and trailing column glue. No SVG
+conversion is involved: TeX Live 2025 with dvisvgm 3.6 corrupts some of the
+Reference's SVG extents (fm-0v8k), but not TeX's own boxes.
 
 The corpus is a private fixture (plan §15.3): its strings never ship. The
 committed fixture `crates/fmn-conformance/fixtures/tex_corpus_boxes.v1.tsv`
@@ -78,16 +80,36 @@ def reference_preamble() -> str:
 
 
 def measure_one(text: str, preamble: str) -> tuple[float, float, float] | None:
+    # The Reference strips the joined Tex string; a leading newline would
+    # otherwise put a blank line (\par) inside the math.
+    text = text.strip()
     multiline = "\\\\" in text or "&" in text
-    body = f"\\begin{{aligned}}\n{text}\n\\end{{aligned}}" if multiline else text
+    # A single line is braced as amsmath braces an align* cell
+    # ($\m@th\displaystyle{##}$): a top-level \over then forms a display
+    # fraction instead of swallowing \displaystyle into its numerator. As in
+    # the Reference, a newline follows the text, so a trailing `\` is a
+    # control space.
+    # Multi-line strings are set as `aligned`, top-aligned ([t]) so the box
+    # keeps its first row's baseline, as the Reference's align* rows do; a
+    # centred `aligned` clips a short row's negative depth.
+    body = (
+        f"\\begin{{aligned}}[t]\n{text}\n\\end{{aligned}}" if multiline else f"{{{text}\n}}"
+    )
     # amsmath's alignment rows carry an invisible strut (\strut@) that pads
     # the first row's height and the last row's depth. The Reference measures
     # ink, so that padding never reaches the screen; drop it. Row pitch
     # (\baselineskip + \jot) is unaffected. Array struts stay: they are an
-    # array's visible row spacing.
-    unstrut = "\\makeatletter\\def\\strut@{}\\makeatother\n" if multiline else ""
+    # array's visible row spacing. `aligned` also ends a one-row string's
+    # last column with \minalignsep (10 pt) of glue that is no ink; zero it.
+    # It is the space between column pairs too, and no sampled row has two
+    # top-level pairs.
+    unpad = (
+        "\\makeatletter\\def\\strut@{}\\makeatother\\renewcommand{\\minalignsep}{0pt}\n"
+        if multiline
+        else ""
+    )
     document = (
-        "\\documentclass{article}\n" + preamble + "\n" + unstrut
+        "\\documentclass{article}\n" + preamble + "\n" + unpad
         + "\\newsavebox\\fmnbox\n\\begin{document}\n"
         "\\sbox\\fmnbox{$\\displaystyle\n" + body + "\n$}\n"
         "\\typeout{FMNBOX \\the\\wd\\fmnbox\\space\\the\\ht\\fmnbox\\space\\the\\dp\\fmnbox}\n"
@@ -129,9 +151,10 @@ def main() -> int:
         "# Real TeX boxes for a stratified corpus sample (fm-tex-layout-oracle-bkbc).",
         "# Strings are private fixtures (plan §15.3): each row names its corpus string by",
         "# sha256(mode + NUL + string). Width, height and depth are TeX's \\wd, \\ht and \\dp",
-        "# of the string boxed in display style, in ems at 10 pt. Multi-line strings are boxed",
-        "# as `aligned` without amsmath's invisible row struts. Preamble: the pinned",
-        "# Reference's default template (3b1b/manim 6199a00d); TeX Live 2025 on the dev host.",
+        "# of the stripped string boxed in display style, in ems at 10 pt: braced like an align*",
+        "# cell, or for multi-line strings as `aligned`[t] without its invisible struts and glue.",
+        "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live",
+        "# 2025 on the dev host.",
         f"# Sample: up to {PER_CLASS} strings per construct class by",
         f"# occurrence, then the most frequent remaining strings, {len(items)} candidates;",
         f"# {failed} TeX could not typeset alone (fragments of multi-argument Tex calls) are",

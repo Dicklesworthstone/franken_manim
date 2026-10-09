@@ -21,11 +21,13 @@ use std::path::PathBuf;
 
 /// Sampled strings within 5% of TeX's box: 188 of 563 when this oracle was
 /// first measured (franken_markdown a8aab0d), 189 once the Tex surface's rows
-/// opened up by \jot (d664c13). Raise it when layout improves; never lower it
-/// to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 189;
-/// The same at 10%: 315, then 316.
-const WITHIN_10_PERCENT_FLOOR: usize = 316;
+/// opened up by \jot (d664c13), 197 of 585 once the capture set strings as
+/// the Reference's align* does (stripped, braced, multi-line rows on their
+/// first baseline). Raise it when layout improves; never lower it to land a
+/// change.
+const WITHIN_5_PERCENT_FLOOR: usize = 197;
+/// The same at 10%: 315, 316, then 330.
+const WITHIN_10_PERCENT_FLOOR: usize = 330;
 
 struct Row {
     digest: &'static str,
@@ -95,15 +97,11 @@ struct Class {
 
 /// The larger of the relative width error and the height and depth errors
 /// relative to TeX's total height, so a misplaced baseline counts too.
-/// Multi-line strings (`\\` or `&`) compare width and total height only: TeX
-/// boxed them as a vertically centred `aligned`, while the Reference's
-/// align* surface keeps its first baseline, and only the ink is shown.
-fn box_error(row: &Row, layout: &fmd_math::Layout, multiline: bool) -> f64 {
+/// Multi-line strings keep their first row's baseline on both sides, as the
+/// Reference's align* rows do.
+fn box_error(row: &Row, layout: &fmd_math::Layout) -> f64 {
     let total = row.height + row.depth;
     let width = (layout.width / row.width - 1.0).abs();
-    if multiline {
-        return width.max((layout.height + layout.depth - total).abs() / total);
-    }
     let height = (layout.height - row.height).abs() / total;
     let depth = (layout.depth - row.depth).abs() / total;
     width.max(height).max(depth)
@@ -134,12 +132,13 @@ fn corpus_boxes_track_tex_and_never_regress() {
     let mut classes: BTreeMap<&str, Class> = BTreeMap::new();
     let (mut five, mut ten, mut errors) = (0_usize, 0_usize, 0_usize);
     let (mut weight, mut weight_five) = (0_u64, 0_u64);
+    let mut worst_rows: Vec<(f64, &Row)> = Vec::with_capacity(rows.len());
     for row in &rows {
         let text = texts
             .get(row.digest)
             .unwrap_or_else(|| panic!("fixture row {} is not in {}", row.digest, path.display()));
         let error = match engine.typeset_with_macros(text, fmd_math::Style::Display, &pack) {
-            Ok(layout) => box_error(row, &layout, text.contains("\\\\") || text.contains('&')),
+            Ok(layout) => box_error(row, &layout),
             Err(_) => {
                 errors += 1;
                 f64::INFINITY
@@ -149,6 +148,7 @@ fn corpus_boxes_track_tex_and_never_regress() {
         five += usize::from(error <= 0.05);
         ten += usize::from(error <= 0.10);
         weight_five += if error <= 0.05 { row.count } else { 0 };
+        worst_rows.push((error, row));
         for class in &row.classes {
             let tally = classes.entry(class).or_default();
             tally.rows += 1;
@@ -184,6 +184,12 @@ fn corpus_boxes_track_tex_and_never_regress() {
             c.worst,
             &c.worst_digest[..12]
         );
+    }
+    // The individual rows furthest from TeX, by digest only.
+    worst_rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    eprintln!("  worst rows: digest\toccurrences\terror");
+    for (error, row) in worst_rows.iter().take(30) {
+        eprintln!("  {}\t{}\t{error:.3}", &row.digest[..12], row.count);
     }
     assert!(
         five >= WITHIN_5_PERCENT_FLOOR,
