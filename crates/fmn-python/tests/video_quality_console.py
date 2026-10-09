@@ -29,16 +29,31 @@ def invocations(value):
             yield from invocations(child)
 
 
-def assert_quality(report, expected_count, crf=16):
+def assert_quality(report, encodes, soundtrack_muxes, crf=16):
+    """Each published clip is exactly one libx264 encode carrying the console
+    quality flags. A subdivided MP4/MOV clip also muxes its scene-window
+    soundtrack, exact-duration silence when no cue exists
+    (docs/python/subdivided-recording.md). The receipt marks that stream-copy
+    job with encoder None; it must copy the encoded video, so it can neither
+    re-encode at another quality nor pass for a second encode (fm-3s7c)."""
     actual = list(invocations(report))
-    assert len(actual) == expected_count, report
-    for invocation in actual:
+    encoded = [invocation for invocation in actual if invocation["encoder"] is not None]
+    muxed = [invocation for invocation in actual if invocation["encoder"] is None]
+    assert len(encoded) == encodes, report
+    assert len(muxed) == soundtrack_muxes, report
+    for invocation in encoded:
         assert invocation["encoder"] == "libx264", invocation
         argv = invocation["argv"]
         for flag, value in (("-crf", str(crf)), ("-preset", "slow"), ("-tune", "animation")):
             assert argv.count(flag) == 1 and argv.index(flag) > argv.index("-i") + 1, argv
             assert argv[argv.index(flag) + 1] == value, argv
         assert "-b:v" not in argv and "-vf" not in argv, argv
+    for invocation in muxed:
+        argv = invocation["argv"]
+        assert argv.count("-c:v") == 1 and argv[argv.index("-c:v") + 1] == "copy", argv
+        assert argv.count("-c:a") == 1 and argv[argv.index("-c:a") + 1] == "aac", argv
+        for flag in ("-crf", "-preset", "-tune", "-b:v", "-vf"):
+            assert flag not in argv, argv
 
 
 ffmpeg = shutil.which("ffmpeg")
@@ -118,23 +133,26 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-quality-console-") as directo
         assert not destination.exists()
 
     if ffmpeg:
+        # (name, selectors, constructors, encodes, soundtrack muxes). The
+        # scene has no sound cues: whole-scene exports carry no audio track,
+        # and each of the two subdivided clips muxes its silent window.
         cases = [
-            ("single.mp4", ("First", "--format", "mp4"), ["First"], 1),
-            ("single.mov", ("First", "--format", "mov"), ["First"], 1),
-            ("named", ("Second", "First", "--format", "mp4"), ["Second", "First"], 2),
-            ("all", ("--write_all", "--format", "mov"), ["First", "Second"], 2),
-            ("clips", ("First", "--format", "mp4", "--subdivide"), ["First"], 2),
-            ("paired.mp4", ("First", "--format", "mp4", "--save-last-frame"), ["First"], 1),
-            ("paired-clips", ("First", "--format", "mp4", "--subdivide", "--save-last-frame"), ["First"], 2),
+            ("single.mp4", ("First", "--format", "mp4"), ["First"], 1, 0),
+            ("single.mov", ("First", "--format", "mov"), ["First"], 1, 0),
+            ("named", ("Second", "First", "--format", "mp4"), ["Second", "First"], 2, 0),
+            ("all", ("--write_all", "--format", "mov"), ["First", "Second"], 2, 0),
+            ("clips", ("First", "--format", "mp4", "--subdivide"), ["First"], 2, 2),
+            ("paired.mp4", ("First", "--format", "mp4", "--save-last-frame"), ["First"], 1, 0),
+            ("paired-clips", ("First", "--format", "mp4", "--subdivide", "--save-last-frame"), ["First"], 2, 2),
         ]
-        for name, selectors, expected_constructors, count in cases:
+        for name, selectors, expected_constructors, encodes, muxes in cases:
             constructed.write_text("", encoding="utf-8")
             destination = root / name
             code, report = console(*selectors, "--video_dir", str(destination),
                                    "--ffmpeg_bin", ffmpeg,
                                    "--crf=16", "--preset", "slow", "--tune=animation")
             assert code == 0, report
-            assert_quality(report, count)
+            assert_quality(report, encodes, muxes)
             assert constructed.read_text().splitlines() == expected_constructors, report
             if "--save-last-frame" in selectors:
                 still = (destination.with_name(destination.name + ".png") if "--subdivide" in selectors
