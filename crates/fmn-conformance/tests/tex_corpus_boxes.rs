@@ -23,11 +23,12 @@ use std::path::PathBuf;
 /// first measured (franken_markdown a8aab0d), 189 once the Tex surface's rows
 /// opened up by \jot (d664c13), 197 of 585 once the capture set strings as
 /// the Reference's align* does (stripped, braced, multi-line rows on their
-/// first baseline). Raise it when layout improves; never lower it to land a
-/// change.
-const WITHIN_5_PERCENT_FLOOR: usize = 197;
-/// The same at 10%: 315, 316, then 330.
-const WITHIN_10_PERCENT_FLOOR: usize = 330;
+/// first baseline), 233 once fractions carried TeX's null delimiters and
+/// \vdots, \ddots and trailing `\\` rows were TeX's (e4e8e2e). Raise it when
+/// layout improves; never lower it to land a change.
+const WITHIN_5_PERCENT_FLOOR: usize = 233;
+/// The same at 10%: 315, 316, 330, then 365.
+const WITHIN_10_PERCENT_FLOOR: usize = 365;
 
 struct Row {
     digest: &'static str,

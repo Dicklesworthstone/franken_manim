@@ -207,10 +207,11 @@
       "id": "fm-tex-metrics-glyphs-ru72-extent",
       "kind": "open-bead",
       "ref": "fm-tex-metrics-glyphs-ru72",
+      "scope": ["classes", "scenes"],
       "class": ["Tex", "TexText", "SingleStringTex", "OldTex", "OldTexText"],
       "fact": ["bbox"],
       "envelope": {"size_rel": 0.4, "center_abs": 0.05},
-      "reason": "Known metric bug past bn05-text-geometry's 10%: formulas run 2-18% narrow and fallback glyphs run wide (display integrals up to +35%, Tex('a + b') +23% from the '+'). The envelope states that magnitude, so a 2x Tex still fails."
+      "reason": "Known metric bug past bn05-text-geometry's 10%: formulas run 2-18% narrow and fallback glyphs run wide (display integrals up to +35%, Tex('a + b') +23% from the '+'). The envelope states that magnitude, so a 2x Tex still fails. Since franken_markdown e4e8e2e (TeX's null delimiters around fractions) the construction set's Tex matches the Reference without this row, so it no longer covers constructions."
     },
     {
       "id": "adr0020-drawings-shelf",

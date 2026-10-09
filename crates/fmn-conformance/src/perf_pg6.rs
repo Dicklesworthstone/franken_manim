@@ -963,11 +963,13 @@ mod tests {
             // 4c8caa2, c1ee7836's Reference extents for Brace, marks, Title
             // and BulletedList, then title_underlined.v2 framed into view,
             // then tex_overbrace.v1's \cdots dots and "n terms" space at
-            // franken_markdown a3578a0)
+            // franken_markdown a3578a0, then tex_fraction.v1 and
+            // tex_display_sum.v1's null delimiters at franken_markdown
+            // e4e8e2e)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "157c14b1d956ad70eb66c4035ae217aeaacbd9c0e08493009a651e210b528507"
+                "eee63c619942b6817c8282dd51d08382d382c4e93d8e3d94f29768ebff13ba17"
             );
         }
     }

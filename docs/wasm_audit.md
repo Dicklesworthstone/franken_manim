@@ -1,7 +1,7 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run against `Cargo.lock` `c88db1db` and `SUITE.lock`
-`1a4972d1`, for the franken_markdown repin from `a8aab0db` to `d664c138`
+**Status:** re-run against `Cargo.lock` `1e9b139f` and `SUITE.lock`
+`d7608aa8`, for the franken_markdown repin from `d664c138` to `e4e8e2ee`
 (fm-tex-layout-oracle-bkbc). No package version changes in this graph.
 **The release package gate still FAILS at its size budget** (fm-8j70), so this
 audit does not claim a passing package.
@@ -12,6 +12,10 @@ audit does not claim a passing package.
   franken_markdown packages' rev, none of which is in that graph.
 - The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
   wasm graph changed since the run below.
+
+Earlier re-run, 2026-10-09, against `Cargo.lock` `c88db1db` and `SUITE.lock`
+`1a4972d1`, for the franken_markdown repin from `a8aab0db` to `d664c138`
+(fm-tex-layout-oracle-bkbc): the same mechanical check, unchanged at 134 lines.
 
 Earlier re-run, 2026-10-08, against `Cargo.lock` `ce8fdfe2` and `SUITE.lock`
 `565f56fe`, for the franken_markdown repin from `a3578a0f` to `a8aab0db`
@@ -275,8 +279,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `1a4972d16fcb5945fcd67f4bf18ba79e73b3fc8d27b54bc9972fd617d6e996ab`
-- `Cargo.lock` SHA-256: `c88db1db799e5b40a5d0247a2852e616b9c8655b4dca8cab03d72b5b3d51927c`
+- `SUITE.lock` SHA-256: `d7608aa8382192ec88e2ffbb6d8378c28c27a9c168e1c66bda4a5c75c2469671`
+- `Cargo.lock` SHA-256: `1e9b139f973eb7d39cce808351060cfbda6f47dc134b8b7621c1b24f4746b5e9`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `4c58a1bb52b3e6e833fcc0cc50cfbf086a3b8889e4790480c291b64b44382f1a`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

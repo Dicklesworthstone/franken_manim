@@ -769,9 +769,9 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
     /// Constructs chosen to touch every layout mechanism: glyph metrics
     /// and kerning, scripts, fractions, radicals, big operators, accents,
     /// drawn delimiters past the ceiling, environments, stretchy bands,
-    /// inner dots and generated material, and text mode. A semantics
-    /// change anywhere shows up here, so a layout change that no probe
-    /// touches needs a probe that does.
+    /// inner, vertical and diagonal dots, generated material, and text
+    /// mode. A semantics change anywhere shows up here, so a layout change
+    /// that no probe touches needs a probe that does.
     const PROBES: &[&str] = &[
         r"ax + b^2_c",
         r"\frac{1}{1+\frac{1}{x}}",
@@ -779,7 +779,7 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
         r"\sum_{n=1}^{N} n \int_0^1 x\,dx",
         r"\hat x + \overline{AB}",
         r"\left(\frac{\frac{1}{2}}{\frac{3}{4}}\right)",
-        r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}",
+        r"\begin{pmatrix} a & \cdots & b \\ \vdots & \ddots & \vdots \\ c & \cdots & d \end{pmatrix}",
         r"\begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}",
         r"\widehat{x+y} + \overbrace{a+b}",
         r"\mathbb{R} \mathrm{d} \mathbf{v}",
