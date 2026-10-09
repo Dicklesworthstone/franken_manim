@@ -1387,32 +1387,86 @@ mod std_runner {
 
     #[test]
     fn external_cancellation_unblocks_a_full_stdin_pipe_and_reaps_the_child() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::time::Instant;
+
+        // The child never reads its stdin, a Unix socket. How much the kernel
+        // accepts before a write blocks is host-tuned: 8 KiB on macOS, about
+        // 200 KiB on a stock Linux, 16 MiB where net.core.wmem_default is
+        // raised. No fixed payload is known to fill it (fm-3u4o: an 8 MiB
+        // write completed before cancellation on such a host). So the writer
+        // streams chunks until one blocks, and cancellation is sent only once
+        // progress has stalled with that write in flight.
+        const CHUNK: usize = 1 << 20;
+        const MAX_TOTAL: u64 = 1 << 30;
+        const STALL: Duration = Duration::from_millis(500);
         let cancellation = ProcessCancellation::new();
         let process = StdProcessRunner
             .start(
                 &spec(&host_bin("sleep"), &["30"]),
                 cancellation.clone(),
-                ProcessStdinLimits::new(8 << 20, 8 << 20),
+                ProcessStdinLimits::new(CHUNK as u64, MAX_TOTAL),
             )
             .expect("start sleeping child");
-        let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let worker = thread::spawn(move || {
-            let mut process = process;
-            started_tx.send(()).expect("start signal");
-            let write = process.write_stdin(&vec![0u8; 8 << 20]);
-            let finish = process.finish();
-            (write, finish)
-        });
+        let delivered = Arc::new(AtomicU64::new(0));
+        let writing = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        {
+            let delivered = Arc::clone(&delivered);
+            let writing = Arc::clone(&writing);
+            thread::spawn(move || {
+                let mut process = process;
+                let chunk = vec![0u8; CHUNK];
+                writing.store(true, Ordering::Release);
+                let write = loop {
+                    if let Err(error) = process.write_stdin(&chunk) {
+                        break error;
+                    }
+                    delivered.fetch_add(CHUNK as u64, Ordering::AcqRel);
+                };
+                let _ = done_tx.send((write, process.finish()));
+            });
+        }
 
-        started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("writer started");
-        thread::sleep(Duration::from_millis(50));
+        // A full pipe: the writer is running, has not returned, and has made
+        // no progress for STALL.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = delivered.load(Ordering::Acquire);
+        let mut unchanged_since = Instant::now();
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "the stdin pipe never filled ({seen} bytes accepted)"
+            );
+            if let Ok((write, _)) = done_rx.try_recv() {
+                panic!("the writer returned before cancellation after {seen} bytes: {write}");
+            }
+            thread::sleep(Duration::from_millis(10));
+            let now = delivered.load(Ordering::Acquire);
+            if now != seen || !writing.load(Ordering::Acquire) {
+                seen = now;
+                unchanged_since = Instant::now();
+            } else if unchanged_since.elapsed() >= STALL {
+                break;
+            }
+        }
+
         // ubs:ignore - elapsed-time assertion, not security-token generation.
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         cancellation.cancel();
-        let (write, finish) = worker.join().expect("writer thread");
-        assert!(write.is_err(), "the killed child's pipe must close");
+        let (write, finish) = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("cancellation must unblock a writer blocked on a full stdin pipe");
+        // The blocked write returns only because the killed child's end of
+        // the pipe closed, never through the cancelled-before-write check.
+        match &write {
+            ProcessError::Plumbing { detail, .. } => assert!(
+                detail.starts_with("stdin write failed"),
+                "the blocked write must fail on the closed pipe: {detail}"
+            ),
+            other => panic!("the blocked write must fail on the closed pipe: {other}"),
+        }
+        assert!(delivered.load(Ordering::Acquire) < MAX_TOTAL);
         assert_eq!(
             finish.expect("supervisor outcome").termination,
             ProcessTermination::Cancelled
