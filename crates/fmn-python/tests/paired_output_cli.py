@@ -212,10 +212,11 @@ class Interrupted(A):
         self.receipt(report["pair"]["still"])
 
     def test_incompatible_options_refuse_before_source_loading(self):
+        # A paired batch with --checkpoint/--resume-key is supported since
+        # 5a3dcc97; batch_checkpoint_acceptance.py proves it resumes.
         cases = (("png", (), 2), ("svg", (), 2), ("y4m", ("-s",), 2),
                  ("png_sequence", ("--reproducible",), 4),
-                 ("y4m", ("--save_last_frame",), 2),
-                 ("y4m", ("--checkpoint", str(self.root / "journal"), "--resume-key", "inputs"), 2))
+                 ("y4m", ("--save_last_frame",), 2))
         for index, (format, extra, expected) in enumerate(cases):
             with self.subTest(format=format, extra=extra):
                 self.events.clear()
