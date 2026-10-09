@@ -52,9 +52,11 @@ impl Drop for Fixture {
     }
 }
 
-/// One fresh `fmn` process with no ambient user directories.
-fn fmn(fixture: &Fixture, args: &[OsString]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fmn"))
+/// One fresh `fmn` process whose home is the fixture's own directory, so no
+/// user config or cache is read. With `home` false there is no home at all.
+fn fmn_with_home(fixture: &Fixture, args: &[OsString], home: bool) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fmn"));
+    command
         .args(args)
         .current_dir(&fixture.root)
         .env_remove("XDG_CONFIG_HOME")
@@ -63,9 +65,18 @@ fn fmn(fixture: &Fixture, args: &[OsString]) -> Output {
         .env_remove("APPDATA")
         .env_remove("LOCALAPPDATA")
         .env_remove("USERPROFILE")
-        .stdin(Stdio::null())
-        .output()
-        .expect("the shipped fmn binary runs")
+        .stdin(Stdio::null());
+    if home {
+        // The store's protected-path check needs a home to compare against.
+        let home = fixture.root.join("home");
+        fs::create_dir_all(&home).expect("fixture home");
+        command.env(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, home);
+    }
+    command.output().expect("the shipped fmn binary runs")
+}
+
+fn fmn(fixture: &Fixture, args: &[OsString]) -> Output {
+    fmn_with_home(fixture, args, true)
 }
 
 /// What one render reported and published.
@@ -117,6 +128,16 @@ fn number(record: &str, field: &str) -> Option<u64> {
 
 /// Render the formula sheet as a certified PNG sequence in a fresh process.
 fn render(fixture: &Fixture, output: &str, threads: &str, extra: &[OsString]) -> Render {
+    render_with_home(fixture, output, threads, extra, true)
+}
+
+fn render_with_home(
+    fixture: &Fixture,
+    output: &str,
+    threads: &str,
+    extra: &[OsString],
+    home: bool,
+) -> Render {
     let video_dir = fixture.root.join(output);
     let mut args: Vec<OsString> = [
         "--robot",
@@ -138,7 +159,7 @@ fn render(fixture: &Fixture, output: &str, threads: &str, extra: &[OsString]) ->
     args.push(video_dir.clone().into_os_string());
     args.push("@builtin".into());
     args.push("formula_sheet.v1".into());
-    let output = fmn(fixture, &args);
+    let output = fmn_with_home(fixture, &args, home);
     let stdout = String::from_utf8(output.stdout).expect("robot stdout is UTF-8");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -319,7 +340,7 @@ fn an_unavailable_platform_cache_degrades_to_memory_and_says_why() {
     let fixture = Fixture::new();
     // No --cache-dir and no HOME/XDG/LOCALAPPDATA: the platform convention
     // has no trustworthy base, so the store refuses to guess.
-    let render = render(&fixture, "out", "2", &[]);
+    let render = render_with_home(&fixture, "out", "2", &[], false);
     assert!(!render.flag("persistent"), "{}", render.typesetting());
     assert!(
         !render.typesetting().contains("\"cache_error\":null"),
@@ -328,4 +349,23 @@ fn an_unavailable_platform_cache_degrades_to_memory_and_says_why() {
     );
     assert_eq!(render.count("misses"), SHEET_LAYOUTS);
     assert!(!fixture.root.join(".cache").exists());
+}
+
+#[test]
+fn without_a_cache_dir_the_render_uses_the_platform_convention_under_home() {
+    let fixture = Fixture::new();
+    let cold = render(&fixture, "cold", "2", &[]);
+    assert!(cold.flag("persistent"), "{}", cold.typesetting());
+    let home = fixture.root.join("home");
+    let root = if cfg!(target_os = "macos") {
+        home.join("Library").join("Caches").join("franken-manim")
+    } else if cfg!(windows) {
+        home.join("AppData").join("Local").join("franken-manim")
+    } else {
+        home.join(".cache").join("franken-manim")
+    };
+    assert_eq!(typeset_objects(&root).len() as u64, SHEET_LAYOUTS, "{root:?}");
+    let warm = render(&fixture, "warm", "2", &[]);
+    assert_eq!(warm.count("disk_hits"), SHEET_LAYOUTS);
+    assert!(warm.frames == cold.frames);
 }

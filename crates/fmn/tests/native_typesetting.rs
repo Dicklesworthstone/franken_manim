@@ -284,3 +284,84 @@ fn memory_scene_runs_expose_observed_work_and_bundle_export_honors_the_template(
     ));
     assert!(!scene.constructed);
 }
+
+/// A formula built in `construct`, then a held segment of real frames.
+struct HeldFormula;
+
+impl SceneConstruct for HeldFormula {
+    fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
+        vec![TypesetRequest::math(FORMULA)]
+    }
+
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let formula = Tex::new(FORMULA).build(stage.tex_engine()?)?;
+        stage.add(formula)?;
+        stage.wait(0.3)?;
+        Ok(())
+    }
+}
+
+/// Typesets one queued formula per capture: stand-in for a dynamic string
+/// that only exists once frames are running (an updater's readout, say).
+struct TypesettingSink<'a> {
+    session: &'a TexSession,
+    pending: Vec<&'static str>,
+    captures: usize,
+}
+
+impl SceneSink for TypesettingSink<'_> {
+    fn capture(
+        &mut self,
+        _reason: CaptureReason,
+        _packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
+        self.captures += 1;
+        if let Some(source) = self.pending.pop() {
+            self.session
+                .engine()
+                .and_then(|engine| engine.typeset(Mode::Math(MathStyle::Display), source))
+                .map_err(|error| IntegrationError::new("test sink", error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn the_report_separates_preflighted_layouts_from_typesetting_inside_play() {
+    let run = |pending: Vec<&'static str>| {
+        let session = TexSession::default();
+        let mut sink = TypesettingSink {
+            session: &session,
+            pending,
+            captures: 0,
+        };
+        let completed = run_scene_with_typesetting(
+            &mut HeldFormula,
+            RuntimeConfig {
+                fps: 10,
+                ..RuntimeConfig::default()
+            },
+            0,
+            &mut sink,
+            &session,
+            NonZeroUsize::new(2).unwrap(),
+        )
+        .unwrap();
+        assert!(sink.captures >= 3, "the held segment produced frames");
+        completed.typesetting_report().clone()
+    };
+
+    // Everything static was preflighted: the formula and the calibration
+    // probe are laid out before the first frame and nothing inside play.
+    let clean = run(Vec::new());
+    assert_eq!(clean.preflight.requests, 1);
+    assert_eq!(clean.layout_computations, 2);
+    assert_eq!(clean.layouts_before_first_frame, Some(2));
+    assert_eq!(clean.layouts_inside_segments, 0);
+
+    // Planted: two strings typeset while frames run are caught as such.
+    let dynamic = run(vec![r"\sqrt{2}", r"\frac{3}{4}"]);
+    assert_eq!(dynamic.layouts_before_first_frame, Some(2));
+    assert_eq!(dynamic.layouts_inside_segments, 2);
+    assert_eq!(dynamic.layout_computations, 4);
+}
