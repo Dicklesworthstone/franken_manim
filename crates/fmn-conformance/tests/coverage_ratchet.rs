@@ -16,7 +16,7 @@
 //! dashboard in one stroke).
 
 use fmn_conformance::ratchet::{
-    Baseline, Pending, parse_trend_tsv, ratchet_violations, render_dashboard,
+    Baseline, Pending, parse_corpus_entry, parse_trend_tsv, ratchet_violations, render_dashboard,
 };
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -265,8 +265,8 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
         if line.trim().is_empty() {
             continue;
         }
-        let entry =
-            parse_entry(line).ok_or_else(|| format!("corpus line {}: bad JSON", lineno + 1))?;
+        let entry = parse_corpus_entry(line)
+            .ok_or_else(|| format!("corpus line {}: bad JSON", lineno + 1))?;
         current.unique_total += 1;
         current.occurrence_total += entry.count;
         let parse_result = if entry.mode == "text" {
@@ -443,174 +443,5 @@ fn track_of(construct: &str) -> &'static str {
         TRACK_EXT
     } else {
         TRACK_T2
-    }
-}
-
-// ── A minimal JSON-object reader for the corpus lines (governed closure:
-//    no serde) ──────────────────────────────────────────────────────────
-
-struct Entry {
-    mode: String,
-    text: String,
-    count: u64,
-}
-
-fn parse_entry(line: &str) -> Option<Entry> {
-    let mut mode = None;
-    let mut text = None;
-    let mut count = None;
-    let bytes = line.as_bytes();
-    let mut i = skip_ws(bytes, 0);
-    if bytes.get(i) != Some(&b'{') {
-        return None;
-    }
-    i += 1;
-    loop {
-        i = skip_ws(bytes, i);
-        match bytes.get(i) {
-            Some(b'}') => break,
-            Some(b',') => {
-                i += 1;
-                continue;
-            }
-            Some(b'"') => {}
-            _ => return None,
-        }
-        let (key, ni) = read_string(line, i)?;
-        i = skip_ws(bytes, ni);
-        if bytes.get(i) != Some(&b':') {
-            return None;
-        }
-        i = skip_ws(bytes, i + 1);
-        match key.as_str() {
-            "mode" => {
-                let (v, ni) = read_string(line, i)?;
-                mode = Some(v);
-                i = ni;
-            }
-            "text" => {
-                let (v, ni) = read_string(line, i)?;
-                text = Some(v);
-                i = ni;
-            }
-            "count" => {
-                let (v, ni) = read_number(bytes, i)?;
-                count = Some(v);
-                i = ni;
-            }
-            _ => i = skip_value(line, i)?,
-        }
-    }
-    Some(Entry {
-        mode: mode?,
-        text: text?,
-        count: count?,
-    })
-}
-
-fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
-    while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-        i += 1;
-    }
-    i
-}
-
-fn read_string(s: &str, start: usize) -> Option<(String, usize)> {
-    let bytes = s.as_bytes();
-    if bytes.get(start) != Some(&b'"') {
-        return None;
-    }
-    let mut out = String::new();
-    let mut i = start + 1;
-    loop {
-        let rest = s.get(i..)?;
-        let mut chars = rest.char_indices();
-        let (_, c) = chars.next()?;
-        match c {
-            '"' => return Some((out, i + 1)),
-            '\\' => {
-                let (_, esc) = chars.next()?;
-                i += 1 + esc.len_utf8();
-                match esc {
-                    '"' => out.push('"'),
-                    '\\' => out.push('\\'),
-                    '/' => out.push('/'),
-                    'b' => out.push('\u{0008}'),
-                    'f' => out.push('\u{000C}'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    'u' => {
-                        let hex = s.get(i..i + 4)?;
-                        let cp = u32::from_str_radix(hex, 16).ok()?;
-                        i += 4;
-                        if (0xD800..0xDC00).contains(&cp) {
-                            if s.get(i..i + 2)? != "\\u" {
-                                return None;
-                            }
-                            let lo = u32::from_str_radix(s.get(i + 2..i + 6)?, 16).ok()?;
-                            i += 6;
-                            let combined =
-                                0x10000 + ((cp - 0xD800) << 10) + lo.checked_sub(0xDC00)?;
-                            out.push(char::from_u32(combined)?);
-                        } else {
-                            out.push(char::from_u32(cp)?);
-                        }
-                    }
-                    _ => return None,
-                }
-            }
-            other => {
-                out.push(other);
-                i += other.len_utf8();
-            }
-        }
-    }
-}
-
-fn read_number(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
-    let mut i = start;
-    let mut val: u64 = 0;
-    let mut any = false;
-    while let Some(d) = bytes.get(i).copied().filter(u8::is_ascii_digit) {
-        val = val.checked_mul(10)?.checked_add(u64::from(d - b'0'))?;
-        i += 1;
-        any = true;
-    }
-    any.then_some((val, i))
-}
-
-fn skip_value(s: &str, start: usize) -> Option<usize> {
-    let bytes = s.as_bytes();
-    match bytes.get(start)? {
-        b'"' => read_string(s, start).map(|(_, i)| i),
-        b'[' => {
-            let mut depth = 0_usize;
-            let mut i = start;
-            loop {
-                match bytes.get(i)? {
-                    b'"' => i = read_string(s, i)?.1,
-                    b'[' => {
-                        depth += 1;
-                        i += 1;
-                    }
-                    b']' => {
-                        depth -= 1;
-                        i += 1;
-                        if depth == 0 {
-                            return Some(i);
-                        }
-                    }
-                    _ => i += 1,
-                }
-            }
-        }
-        _ => {
-            let mut i = start;
-            while !matches!(bytes.get(i), None | Some(b',' | b'}' | b']')) {
-                i += 1;
-            }
-            Some(i)
-        }
     }
 }
