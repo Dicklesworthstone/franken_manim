@@ -1952,6 +1952,7 @@ impl Store {
             pins,
             access: Mutex::new(AccessLog::default()),
             held_lock: Mutex::new(None),
+            rejected: AtomicU64::new(0),
         };
         ns.load_index();
         Ok(ns)
@@ -2002,6 +2003,9 @@ pub struct Namespace {
     access: Mutex<AccessLog>,
     /// The exact lock-token bytes we hold, if any (release verifies them).
     held_lock: Mutex<Option<Vec<u8>>>,
+    /// Entries this handle found corrupt on read, evicted, and reported as
+    /// misses. Diagnostic only; never part of any certified identity.
+    rejected: AtomicU64,
 }
 
 impl fmt::Debug for Namespace {
@@ -2025,6 +2029,14 @@ impl Namespace {
     #[must_use]
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Entries this handle detected as corrupt on read since it was opened.
+    /// Each was evicted and served as a miss, so the consumer recomputed and
+    /// may republish it. Diagnostic only, like every cache counter.
+    #[must_use]
+    pub fn rejected_entries(&self) -> u64 {
+        self.rejected.load(Ordering::Relaxed)
     }
 }
 /// The traversal-safe object path relative to a namespace's objects
@@ -2139,6 +2151,7 @@ impl Namespace {
             Err(_corrupt) => {
                 // Evicted, never trusted, never fatal: the next lookup is a
                 // clean miss and the consumer recomputes.
+                self.rejected.fetch_add(1, Ordering::Relaxed);
                 let _ = self.inner.remove_file(&path);
                 self.forget(digest);
                 Ok(None)

@@ -4,7 +4,7 @@
 //! TeX request creates one engine, resolves its template, and attaches the
 //! existing content-addressed store. Storage is optional; layout is not.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use fmn_config::{Config, PackRegistry};
 use fmn_platform::clock::Clock;
 use fmn_platform::fs::FileSystem;
 
-use crate::{TexEngine, TexError, TypesetCacheStats};
+use crate::{TexEngine, TexError, TypesetCacheStats, TypesetPreflightStats};
 
 /// Actual work performed by a session, not part of certified scene identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -28,8 +28,45 @@ pub struct TypesetSessionReport {
     pub memory: TypesetCacheStats,
     /// Checksum-verified persistent hits, excluding memory-front hits.
     pub persistent_hits: u64,
-    /// Actual layouts, excluding engine-fingerprint probes.
+    /// Encoded bytes those persistent hits read.
+    pub persistent_bytes_read: u64,
+    /// Encoded bytes of fresh layouts published to the persistent cache.
+    pub persistent_bytes_written: u64,
+    /// Corrupt persistent entries detected, evicted, and recomputed.
+    pub persistent_rejected: u64,
+    /// Actual layouts, excluding engine-fingerprint probes. Every request
+    /// that neither cache layer served is one layout: the run's misses.
     pub layout_computations: u64,
+    /// Parallel preflight batches run on this session's engine.
+    pub preflight: TypesetPreflightStats,
+    /// Layouts completed before the scene's first frame (the first play,
+    /// wait, or still); `None` when the scene produced no frame.
+    pub layouts_before_first_frame: Option<u64>,
+    /// Layouts computed while a play/wait segment was driving frames: the
+    /// typesetting a complete preflight leaves inside `play()`, ideally none.
+    pub layouts_inside_segments: u64,
+}
+
+impl TypesetSessionReport {
+    /// Requests served by either cache layer (memory front or verified disk).
+    #[must_use]
+    pub const fn cache_hits(&self) -> u64 {
+        self.memory.hits.saturating_add(self.persistent_hits)
+    }
+
+    /// Requests no cache layer could serve, each of which was laid out.
+    #[must_use]
+    pub const fn cache_misses(&self) -> u64 {
+        self.layout_computations
+    }
+}
+
+/// Segment-boundary accounting, recorded by the scene front door.
+#[derive(Default)]
+struct SegmentAccounting {
+    before_first: Cell<Option<u64>>,
+    open_since: Cell<Option<u64>>,
+    inside: Cell<u64>,
 }
 
 struct CacheBinding {
@@ -48,6 +85,7 @@ pub struct TexSession {
     cache: Option<CacheBinding>,
     engine: OnceCell<TexEngine>,
     cache_error: RefCell<Option<String>>,
+    segments: SegmentAccounting,
 }
 
 impl TexSession {
@@ -59,6 +97,7 @@ impl TexSession {
             cache: None,
             engine: OnceCell::new(),
             cache_error: RefCell::new(None),
+            segments: SegmentAccounting::default(),
         }
     }
 
@@ -117,19 +156,76 @@ impl TexSession {
     }
 
     /// Inspect counters without initializing the engine or touching the cache.
+    ///
+    /// A session whose engine was never needed reports exactly the default:
+    /// no fonts, no cache, no typesetting, so no segment accounting either.
     #[must_use]
     pub fn report(&self) -> TypesetSessionReport {
         let Some(engine) = self.engine.get() else {
             return TypesetSessionReport::default();
         };
+        let inside = self.segments.inside.get().saturating_add(
+            self.segments
+                .open_since
+                .get()
+                .map_or(0, |start| engine.layout_computations().saturating_sub(start)),
+        );
         TypesetSessionReport {
             initialized: true,
             persistent: engine.persistent_cache_enabled(),
             cache_error: self.cache_error.borrow().clone(),
             memory: engine.memory_cache_stats(),
             persistent_hits: engine.persistent_cache_hits(),
+            persistent_bytes_read: engine.persistent_bytes_read(),
+            persistent_bytes_written: engine.persistent_bytes_written(),
+            persistent_rejected: engine.persistent_rejected_entries(),
             layout_computations: engine.layout_computations(),
+            preflight: engine.preflight_stats(),
+            layouts_before_first_frame: self.segments.before_first.get(),
+            layouts_inside_segments: inside,
         }
+    }
+
+    /// Record that the scene is about to produce its first frame.
+    ///
+    /// The scene front door calls this and the segment notes below at the
+    /// runtime's lifecycle boundaries, so the report can prove where
+    /// typesetting happened: before the first frame (the preflight's job) or
+    /// inside a play/wait (dynamic strings no preflight could know). These
+    /// notes are accounting only; they never initialize the engine.
+    pub fn note_first_frame(&self) {
+        if self.segments.before_first.get().is_none() {
+            self.segments.before_first.set(Some(self.layouts()));
+        }
+    }
+
+    /// Record that a play/wait segment begins driving frames.
+    pub fn note_segment_begin(&self) {
+        self.note_first_frame();
+        let now = self.layouts();
+        // A segment that ended without its notification is closed here.
+        self.close_segment(now);
+        self.segments.open_since.set(Some(now));
+    }
+
+    /// Record that the current segment finished.
+    pub fn note_segment_end(&self) {
+        self.close_segment(self.layouts());
+    }
+
+    fn close_segment(&self, now: u64) {
+        if let Some(start) = self.segments.open_since.take() {
+            self.segments.inside.set(
+                self.segments
+                    .inside
+                    .get()
+                    .saturating_add(now.saturating_sub(start)),
+            );
+        }
+    }
+
+    fn layouts(&self) -> u64 {
+        self.engine.get().map_or(0, TexEngine::layout_computations)
     }
 }
 

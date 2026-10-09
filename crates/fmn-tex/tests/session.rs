@@ -145,3 +145,107 @@ fn the_selected_template_reaches_the_engine_and_empty_means_default() {
         assert!(!session.report().persistent);
     }
 }
+
+fn object_files(fs: &VirtualFs, dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(children) = fs.list_dir(dir) {
+        for child in children {
+            if fs.read(&child).is_ok() {
+                if child.components().any(|part| part.as_os_str() == "objects") {
+                    out.push(child);
+                }
+            } else {
+                object_files(fs, &child, out);
+            }
+        }
+    }
+}
+
+#[test]
+fn reports_count_disk_bytes_and_recover_a_corrupt_entry_by_recomputing_it() {
+    let fs = Arc::new(VirtualFs::new());
+    let config = config();
+    let sources = [r"\frac{a}{b}", r"\sqrt{x+1}", r"\sum_{n=1}^{N} n"];
+    let cold = session(&config, &fs);
+    let expected: Vec<Vec<u8>> = sources.iter().map(|s| bytes(&cold, s)).collect();
+    let report = cold.report();
+    assert_eq!(report.layout_computations, 3);
+    assert_eq!((report.persistent_hits, report.persistent_bytes_read), (0, 0));
+    assert_eq!(report.cache_misses(), 3);
+    let written = report.persistent_bytes_written;
+    assert_eq!(
+        written,
+        expected.iter().map(|b| b.len() as u64).sum::<u64>(),
+        "every fresh layout's encoded payload is published"
+    );
+    assert_eq!(report.persistent_rejected, 0);
+    drop(cold);
+
+    // Flip one byte in the middle of one published entry.
+    let mut objects = Vec::new();
+    object_files(&fs, Path::new(root()), &mut objects);
+    objects.sort();
+    assert_eq!(objects.len(), 3, "one object per formula: {objects:?}");
+    let victim = &objects[1];
+    let mut tampered = fs.read(victim).unwrap();
+    let middle = tampered.len() / 2;
+    tampered[middle] ^= 0x20;
+    fs.write_atomic(victim, &tampered).unwrap();
+
+    // Detected and recomputed: identical bytes, two hits, one layout.
+    let recovering = session(&config, &fs);
+    let recovered: Vec<Vec<u8>> = sources.iter().map(|s| bytes(&recovering, s)).collect();
+    assert_eq!(recovered, expected, "a corrupt entry never changes a layout");
+    let report = recovering.report();
+    assert_eq!(report.persistent_rejected, 1, "the corruption is reported");
+    assert_eq!(report.persistent_hits, 2);
+    assert_eq!(report.layout_computations, 1);
+    assert_eq!(report.cache_hits(), 2);
+    assert!(report.persistent_bytes_read > 0);
+    assert!(report.persistent_bytes_written > 0, "the entry is republished");
+    drop(recovering);
+
+    // Healed: the next fresh session hits all three.
+    let healed = session(&config, &fs);
+    let again: Vec<Vec<u8>> = sources.iter().map(|s| bytes(&healed, s)).collect();
+    assert_eq!(again, expected);
+    let report = healed.report();
+    assert_eq!((report.persistent_hits, report.layout_computations), (3, 0));
+    assert_eq!(report.persistent_rejected, 0);
+    assert_eq!(report.persistent_bytes_read, written);
+    assert_eq!(report.persistent_bytes_written, 0);
+}
+
+#[test]
+fn segment_accounting_separates_layouts_before_the_first_frame_from_play() {
+    let session = TexSession::default();
+    // A lazy session stays lazy: segment notes alone report nothing.
+    session.note_first_frame();
+    session.note_segment_begin();
+    session.note_segment_end();
+    assert_eq!(session.report(), TypesetSessionReport::default());
+
+    let session = TexSession::default();
+    bytes(&session, "a+b");
+    bytes(&session, "c+d");
+    session.note_first_frame();
+    // Only the first frame's boundary is recorded.
+    bytes(&session, "k+l");
+    session.note_first_frame();
+    session.note_segment_begin();
+    session.note_segment_end();
+    // Typesetting between segments (construct code) is not inside play.
+    bytes(&session, "e+f");
+    session.note_segment_begin();
+    bytes(&session, "g+h");
+    session.note_segment_end();
+    session.note_segment_begin();
+    bytes(&session, "i+j");
+    // An open segment counts too; a later begin closes it.
+    assert_eq!(session.report().layouts_inside_segments, 2);
+    session.note_segment_begin();
+    session.note_segment_end();
+    let report = session.report();
+    assert_eq!(report.layouts_before_first_frame, Some(2));
+    assert_eq!(report.layouts_inside_segments, 2);
+    assert_eq!(report.layout_computations, 6);
+}

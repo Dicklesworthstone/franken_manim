@@ -6,16 +6,26 @@
 //! A typeset result is cached under the digest of its **complete semantic
 //! inputs**: the mode and style, the source string, the macro table's
 //! canonical bytes (pack plus caller definitions — a pack edit re-typesets,
-//! correctly), and the **engine fingerprint**. The fingerprint is the
-//! digest of a fixed probe set typeset at construction — a dozen constructs
-//! spanning every mechanism (glyph metrics, fractions, scripts, radicals,
-//! drawn delimiters, environments, stretchy bands), resolved to canonical
-//! path bytes. Any change to fmd-math's layout semantics or to the bundled
-//! faces changes the fingerprint, so a SUITE.lock pin bump cold-starts the
-//! cache **by construction** — no manually-bumped version constant to
-//! forget. Cold and warm are definitionally equivalent; the serialization
-//! codec round-trips bit-for-bit (tested), so certified renders are
-//! cache-consistent per §16.7.
+//! correctly), and the **engine fingerprint**. The fingerprint folds in
+//! the engine's identity three ways:
+//!
+//! - **Font hashes**: the SHA-256 of every bundled face's exact bytes, so a
+//!   glyph edit cold-starts the cache even where no probe draws that glyph.
+//! - **Engine version**: the pinned `franken_markdown` revision recorded in
+//!   `SUITE.lock` (fmd-math and fmd-font come from that one rev) and this
+//!   crate's version, so a pin bump cold-starts the cache **by construction**
+//!   even when the layout change it carries is one no probe touches.
+//! - **Probe layouts**: a fixed probe set typeset at construction, a dozen
+//!   constructs spanning every mechanism (glyph metrics, fractions, scripts,
+//!   radicals, drawn delimiters, environments, stretchy bands), resolved to
+//!   canonical path bytes. A semantic change that slips past both identities
+//!   above (an unpinned local build, say) still shows up here.
+//!
+//! There is no manually-bumped version constant to forget. Cold and warm
+//! are definitionally equivalent; the serialization codec round-trips
+//! bit-for-bit (tested), so certified renders are cache-consistent per
+//! §16.7. A change to this crate's own typeset encoding bumps
+//! [`TYPESET_FORMAT_VERSION`], which opens a fresh namespace.
 //!
 //! # The preflight (§11.5 — PG-4's design mechanism)
 //!
@@ -38,7 +48,7 @@ use fmd_math::{Layout, MacroSet, PathContour, Style};
 use fmn_cache::{CacheKey, KeyBuilder, Namespace};
 use fmn_config::{Config, PackRegistry};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 trait ScopedSpawner {
     fn spawn<'scope, 'env: 'scope, F>(
@@ -68,6 +78,60 @@ impl ScopedSpawner for NativeScopedSpawner {
 type PreflightOutcome = Result<(), TexError>;
 type PreflightSlot = Mutex<Option<PreflightOutcome>>;
 
+/// Observed preflight work on one engine. Diagnostic only: worker counts and
+/// wall time depend on the host and its load, so none of this is certified
+/// scene identity, and none of it can change a layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TypesetPreflightStats {
+    /// Non-empty preflight batches run on this engine.
+    pub batches: u64,
+    /// Requests submitted across those batches, each typeset (or served from
+    /// the cache) exactly once.
+    pub requests: u64,
+    /// The most worker threads any one batch ran. When no thread could be
+    /// started, the calling thread ran the batch and counts as one worker.
+    pub workers: u64,
+    /// The most workers in any one batch that typeset at least one request.
+    pub active_workers: u64,
+    /// Wall-clock nanoseconds across all batches. Zero on targets without a
+    /// monotonic clock (wasm32), where preflight also runs on the caller.
+    pub wall_ns: u64,
+}
+
+/// What one batch's scheduler actually did.
+#[derive(Clone, Copy, Debug, Default)]
+struct PreflightRun {
+    workers: usize,
+    active_workers: usize,
+}
+
+/// A monotonic stopwatch for preflight diagnostics; inert on wasm32, whose
+/// `Instant::now` panics and whose preflight runs on the calling thread.
+struct Stopwatch {
+    #[cfg(not(target_arch = "wasm32"))]
+    started: std::time::Instant,
+}
+
+impl Stopwatch {
+    fn start() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn elapsed_ns(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
+        }
+    }
+}
+
 /// How a string is typeset: mathematics at a style, or the TexText
 /// text-mainland contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,7 +154,12 @@ pub struct TexEngine {
     cache: Mutex<Option<Arc<Namespace>>>,
     memory_cache: Mutex<MemoryCache>,
     persistent_hits: AtomicU64,
+    persistent_bytes_read: AtomicU64,
+    persistent_bytes_written: AtomicU64,
+    /// Verified envelopes whose payload did not decode to this request.
+    persistent_payload_rejections: AtomicU64,
     layout_computations: AtomicU64,
+    preflight: Mutex<TypesetPreflightStats>,
 }
 
 impl core::fmt::Debug for TexEngine {
@@ -134,7 +203,11 @@ impl TexEngine {
             cache: Mutex::new(None),
             memory_cache: Mutex::new(MemoryCache::default()),
             persistent_hits: AtomicU64::new(0),
+            persistent_bytes_read: AtomicU64::new(0),
+            persistent_bytes_written: AtomicU64::new(0),
+            persistent_payload_rejections: AtomicU64::new(0),
             layout_computations: AtomicU64::new(0),
+            preflight: Mutex::new(TypesetPreflightStats::default()),
         })
     }
 
@@ -259,6 +332,41 @@ impl TexEngine {
         self.layout_computations.load(Ordering::Relaxed)
     }
 
+    /// Encoded payload bytes served by verified disk hits since creation.
+    #[must_use]
+    pub fn persistent_bytes_read(&self) -> u64 {
+        self.persistent_bytes_read.load(Ordering::Relaxed)
+    }
+
+    /// Encoded payload bytes of fresh layouts accepted by the attached store
+    /// since creation (an identical incumbent from a concurrent writer counts:
+    /// the entry is published either way).
+    #[must_use]
+    pub fn persistent_bytes_written(&self) -> u64 {
+        self.persistent_bytes_written.load(Ordering::Relaxed)
+    }
+
+    /// Corrupt persistent entries detected on read: envelopes the currently
+    /// attached namespace evicted, plus verified envelopes whose payload did
+    /// not decode to the requested source. Each was served as a miss and
+    /// recomputed; none was ever trusted. Diagnostic only.
+    #[must_use]
+    pub fn persistent_rejected_entries(&self) -> u64 {
+        let envelopes = self
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map_or(0, |ns| ns.rejected_entries());
+        envelopes.saturating_add(self.persistent_payload_rejections.load(Ordering::Relaxed))
+    }
+
+    /// Preflight batches observed on this engine since creation.
+    #[must_use]
+    pub fn preflight_stats(&self) -> TypesetPreflightStats {
+        *self.preflight.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// The resolved pack's content id (provenance, `fmn doctor`).
     #[must_use]
     pub fn pack_content_id(&self) -> &'static str {
@@ -339,17 +447,30 @@ impl TexEngine {
             .clone();
         if let Some(ns) = &cache
             && let Ok(Some(bytes)) = ns.get(&key)
-            && let Ok(hit) = Typeset::from_bytes(&bytes)
-            && hit.source == source
         {
-            self.persistent_hits.fetch_add(1, Ordering::Relaxed);
-            self.remember(key, bytes);
-            return Ok(hit);
+            match Typeset::from_bytes(&bytes) {
+                Ok(hit) if hit.source == source => {
+                    self.persistent_hits.fetch_add(1, Ordering::Relaxed);
+                    self.persistent_bytes_read
+                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    self.remember(key, bytes);
+                    return Ok(hit);
+                }
+                // A checksum-valid envelope with a foreign payload is never
+                // trusted either: count it, then recompute.
+                _ => {
+                    self.persistent_payload_rejections
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
         let fresh = self.layout(mode, source)?;
         if let Ok(bytes) = fresh.to_bytes() {
-            if let Some(ns) = &cache {
-                let _ = ns.put(&key, &bytes);
+            if let Some(ns) = &cache
+                && ns.put(&key, &bytes).is_ok()
+            {
+                self.persistent_bytes_written
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             }
             self.remember(key, bytes);
         }
@@ -470,11 +591,33 @@ impl TexEngine {
             .map(std::num::NonZero::get)
             .unwrap_or(1)
             .min(max_workers.get());
-        preflight_jobs(items.len(), workers, &NativeScopedSpawner, &|index| {
+        self.observed_preflight(items.len(), workers, &NativeScopedSpawner, &|index| {
             let item = items[index];
             self.typeset_aligned(item.mode, item.source, item.preamble, item.align)
                 .map(|_| ())
         })
+    }
+
+    /// Run one batch and fold what its scheduler did into the diagnostics.
+    fn observed_preflight<Spawner: ScopedSpawner, Job: Fn(usize) -> PreflightOutcome + Sync>(
+        &self,
+        count: usize,
+        workers: usize,
+        spawner: &Spawner,
+        job: &Job,
+    ) -> Result<Vec<PreflightOutcome>, PreflightError> {
+        let stopwatch = Stopwatch::start();
+        let (outcomes, run) = preflight_jobs(count, workers, spawner, job)?;
+        if count > 0 {
+            let wall_ns = stopwatch.elapsed_ns();
+            let mut stats = self.preflight.lock().unwrap_or_else(PoisonError::into_inner);
+            stats.batches = stats.batches.saturating_add(1);
+            stats.requests = stats.requests.saturating_add(count as u64);
+            stats.workers = stats.workers.max(run.workers as u64);
+            stats.active_workers = stats.active_workers.max(run.active_workers as u64);
+            stats.wall_ns = stats.wall_ns.saturating_add(wall_ns);
+        }
+        Ok(outcomes)
     }
 
     fn preflight_with_spawner<Spawner>(
@@ -486,7 +629,7 @@ impl TexEngine {
     where
         Spawner: ScopedSpawner,
     {
-        preflight_jobs(items.len(), workers, spawner, &|index| {
+        self.observed_preflight(items.len(), workers, spawner, &|index| {
             let (mode, source) = items[index];
             self.typeset(mode, source).map(|_| ())
         })
@@ -516,20 +659,22 @@ fn preflight_jobs<Spawner: ScopedSpawner, Job: Fn(usize) -> PreflightOutcome + S
     workers: usize,
     spawner: &Spawner,
     job: &Job,
-) -> Result<Vec<PreflightOutcome>, PreflightError> {
+) -> Result<(Vec<PreflightOutcome>, PreflightRun), PreflightError> {
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), PreflightRun::default()));
     }
     let workers = workers.clamp(1, count);
     let next = AtomicUsize::new(0);
+    let active = AtomicUsize::new(0);
     let (results, mut outcomes) = preflight_storage(count)?;
-    std::thread::scope(|scope| {
+    let started = std::thread::scope(|scope| {
         let mut spawned = 0;
         for _ in 0..workers {
             let next = &next;
             let results = &results;
+            let active = &active;
             if spawner
-                .spawn(scope, move || preflight_worker(job, next, results))
+                .spawn(scope, move || preflight_worker(job, next, results, active))
                 .is_err()
             {
                 break;
@@ -537,7 +682,10 @@ fn preflight_jobs<Spawner: ScopedSpawner, Job: Fn(usize) -> PreflightOutcome + S
             spawned += 1;
         }
         if spawned == 0 {
-            preflight_worker(job, &next, &results);
+            preflight_worker(job, &next, &results, &active);
+            1
+        } else {
+            spawned
         }
     });
     for (index, slot) in results.into_iter().enumerate() {
@@ -547,19 +695,29 @@ fn preflight_jobs<Spawner: ScopedSpawner, Job: Fn(usize) -> PreflightOutcome + S
                 .unwrap_or_else(|| job(index)),
         );
     }
-    Ok(outcomes)
+    let run = PreflightRun {
+        workers: started,
+        active_workers: active.into_inner(),
+    };
+    Ok((outcomes, run))
 }
 
 fn preflight_worker<Job: Fn(usize) -> PreflightOutcome + Sync>(
     job: &Job,
     next: &AtomicUsize,
     results: &[PreflightSlot],
+    active: &AtomicUsize,
 ) {
+    let mut typeset_any = false;
     loop {
         let index = next.fetch_add(1, Ordering::Relaxed);
         let Some(slot) = results.get(index) else {
             break;
         };
+        if !typeset_any {
+            typeset_any = true;
+            active.fetch_add(1, Ordering::Relaxed);
+        }
         let outcome = job(index);
         let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
         *slot = Some(outcome);
@@ -651,7 +809,52 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
     // cannot see that policy; fold it in so a change cold-starts the cache.
     material.extend_from_slice(b"keyword-ink:");
     material.extend_from_slice(KEYWORD_INK_COMMANDS.join(",").as_bytes());
+    material.push(0x1e);
+    material.extend_from_slice(engine_identity());
     CacheKey::of_content(&material)
+}
+
+/// The pinned suite identity every typeset output depends on, as recorded in
+/// `SUITE.lock` (the CI-enforced source of the Cargo git revs).
+const SUITE_LOCK: &str = include_str!("../../../SUITE.lock");
+
+/// The engine's static identity, computed once per process: the pinned
+/// `franken_markdown` revision (fmd-math layout and fmd-font decoding), this
+/// crate's version, and the SHA-256 of every bundled face's exact bytes.
+/// Probes sample layout behaviour; this names the code and fonts outright,
+/// so a pin bump or a font edit cold-starts the cache even when no probe
+/// would have noticed.
+fn engine_identity() -> &'static [u8] {
+    static IDENTITY: OnceLock<Vec<u8>> = OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        let mut identity = Vec::new();
+        identity.extend_from_slice(b"fmd-rev:");
+        identity.extend_from_slice(suite_revision(SUITE_LOCK, "franken_markdown").as_bytes());
+        identity.extend_from_slice(b"\x1ffmn-tex:");
+        identity.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
+        for (name, bytes) in fmn_text::bundled_faces() {
+            identity.push(0x1f);
+            identity.extend_from_slice(name.as_bytes());
+            identity.push(b'=');
+            identity.extend_from_slice(CacheKey::of_content(bytes).digest().to_hex().as_bytes());
+        }
+        identity
+    })
+}
+
+/// The pinned revision of one suite repository in `SUITE.lock`'s
+/// tab-separated `name<TAB>rev<TAB>note` rows. A missing row folds the whole
+/// lock in instead, which is still a correct (if over-eager) identity.
+fn suite_revision<'a>(lock: &'a str, repository: &str) -> &'a str {
+    lock.lines()
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            (fields.next() == Some(repository))
+                .then(|| fields.next())
+                .flatten()
+                .filter(|rev| !rev.is_empty())
+        })
+        .unwrap_or(lock)
 }
 
 #[cfg(test)]
@@ -771,6 +974,63 @@ mod tests {
             .expect("empty storage");
         assert!(outcomes.is_empty());
         assert_eq!(spawner.attempts(), 0);
+    }
+
+    #[test]
+    fn engine_identity_names_the_pinned_layout_code_and_every_bundled_face() {
+        let identity = std::str::from_utf8(engine_identity()).expect("identity is text");
+        let rev = suite_revision(SUITE_LOCK, "franken_markdown");
+        assert_eq!(rev.len(), 40, "SUITE.lock pins franken_markdown to a full rev");
+        assert!(rev.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(identity.starts_with(&format!("fmd-rev:{rev}")));
+        for (name, bytes) in fmn_text::bundled_faces() {
+            let digest = CacheKey::of_content(bytes).digest().to_hex();
+            assert!(
+                identity.contains(&format!("{name}={digest}")),
+                "face {name} is not hashed into the engine identity"
+            );
+        }
+    }
+
+    #[test]
+    fn suite_revision_reads_the_named_row_and_never_a_reduced_identity() {
+        let lock = "# comment\nfranken_numpy\tabc\tnote\nfranken_markdown\tdef123\tnote\n";
+        assert_eq!(suite_revision(lock, "franken_markdown"), "def123");
+        assert_eq!(suite_revision(lock, "franken_numpy"), "abc");
+        // A missing row folds the whole lock in rather than an empty string.
+        assert_eq!(suite_revision(lock, "frankentorch"), lock);
+        assert_eq!(suite_revision("franken_markdown\t\tnote", "franken_markdown"), "franken_markdown\t\tnote");
+    }
+
+    #[test]
+    fn preflight_reports_its_workers_requests_and_wall_time() {
+        let engine = TexEngine::new("fmd-math/pack/default", None).expect("bundled engine");
+        assert_eq!(engine.preflight_stats(), TypesetPreflightStats::default());
+        let items = [
+            (Mode::Math(Style::Display), "a + b"),
+            (Mode::Math(Style::Display), r"\frac{a}{b}"),
+            (Mode::Math(Style::Display), r"\sqrt{a}"),
+            (Mode::Math(Style::Display), r"a^{b^c}"),
+        ];
+        let outcomes = engine
+            .preflight_with_spawner(&items, 3, &NativeScopedSpawner)
+            .expect("result storage");
+        assert!(outcomes.iter().all(Result::is_ok));
+        let stats = engine.preflight_stats();
+        assert_eq!((stats.batches, stats.requests, stats.workers), (1, 4, 3));
+        assert!((1..=3).contains(&stats.active_workers));
+        assert!(stats.wall_ns > 0, "a native batch has a measured wall time");
+
+        // A batch whose every spawn is refused runs on the caller: one worker.
+        let fallback = TexEngine::new("fmd-math/pack/default", None).expect("bundled engine");
+        fallback
+            .preflight_with_spawner(&items, 4, &RefusingScopedSpawner::new(0))
+            .expect("result storage");
+        let stats = fallback.preflight_stats();
+        assert_eq!((stats.workers, stats.active_workers, stats.requests), (1, 1, 4));
+        // Empty batches are not batches.
+        fallback.preflight(&[]).expect("empty batch");
+        assert_eq!(fallback.preflight_stats().batches, 1);
     }
 
     #[test]

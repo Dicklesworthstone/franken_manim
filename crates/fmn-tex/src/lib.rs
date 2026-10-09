@@ -42,7 +42,7 @@ mod request;
 mod session;
 mod typeset;
 
-pub use engine::{Mode, TexEngine};
+pub use engine::{Mode, TexEngine, TypesetPreflightStats};
 pub use error::{PreflightError, TexError};
 pub use memory_cache::{
     TYPESET_MEMORY_CACHE_MAX_BYTES, TYPESET_MEMORY_CACHE_MAX_ENTRIES, TypesetCacheStats,

@@ -78,7 +78,13 @@ where
         typesetting: &typesetting,
         preflight_workers,
     };
-    let run = scene.run(&mut adapter, &mut sink);
+    let run = scene.run(
+        &mut adapter,
+        &mut crate::SegmentAccountingSink {
+            inner: &mut sink,
+            typesetting: &typesetting,
+        },
+    );
     sink.inner.surface_failure()?;
     if let Some(error) = adapter.front_door_error.take() {
         return Err(RenderError::Scene(error));

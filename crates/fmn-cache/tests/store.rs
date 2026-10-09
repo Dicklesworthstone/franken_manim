@@ -543,9 +543,15 @@ fn flipped_bytes_are_detected_evicted_and_recomputed() {
     bytes[mid] ^= 0x40;
     fs.write_atomic(victim_path, &bytes).unwrap();
 
-    // Detected → evicted (file gone) → miss, never an error.
+    // Detected → evicted (file gone) → miss, never an error, and counted so
+    // a front door can report the recovery instead of a silent recompute.
+    assert_eq!(n.rejected_entries(), 0, "nothing rejected before the read");
     assert_eq!(n.get(&k).unwrap(), None, "corrupt entry reads as a miss");
     assert!(!fs.exists(victim_path), "corrupt entry was evicted");
+    assert_eq!(n.rejected_entries(), 1, "the rejection is reported once");
+    // The evicted entry is now plain absence, not a second rejection.
+    assert_eq!(n.get(&k).unwrap(), None);
+    assert_eq!(n.rejected_entries(), 1, "absence is not corruption");
 
     // The recompute path repopulates cleanly.
     let out: Vec<u8> = n

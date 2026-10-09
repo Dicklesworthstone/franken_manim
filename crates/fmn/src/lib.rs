@@ -63,8 +63,8 @@ use fmn_platform::fs::FsError;
 use fmn_platform::process::{FfmpegLocatorError, ProcessError};
 use fmn_platform::topology::TopologyError;
 use fmn_scene::{
-    IntegrationError, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram,
-    SceneRunReport, SceneSink,
+    CaptureReason, IntegrationError, LifecycleEvent, LifecyclePhase, PlayOverrides,
+    RuntimeConfig, Scene, SceneError, SceneProgram, SceneRunReport, SceneSink,
 };
 use fmn_tex::{TexEngine, TexError, TexSession, TypesetRequest, TypesetSessionReport};
 
@@ -323,6 +323,112 @@ pub mod builtins {
         (name == TEX_SPAN_SCENE_NAME).then_some(TexSpanScene {
             name: TEX_SPAN_SCENE_NAME,
             collector: crate::library::SpanCollector::default(),
+        })
+    }
+
+    /// Stable name of the formula-sheet scene outside the pinned G1 corpus.
+    ///
+    /// Twenty static display formulas of the kind an explainer typesets on
+    /// every draft render. The scene declares all of them as its
+    /// [`SceneConstruct::tex_preflight`] manifest, so the front door typesets
+    /// them on the worker pool before construction, and every frame comes
+    /// after the last layout. A second render with the same persistent typeset
+    /// cache serves all twenty from disk. Selected by explicit name only.
+    pub const FORMULA_SHEET_SCENE_NAME: &str = "formula_sheet.v1";
+
+    /// The formula sheet's sources, in grid order (four columns, five rows).
+    pub const FORMULA_SHEET: [&str; 20] = [
+        r"e^{i\pi} + 1 = 0",
+        r"a^2 + b^2 = c^2",
+        r"\frac{a}{b} + \frac{c}{d} = \frac{ad + bc}{bd}",
+        r"x_{1,2} = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
+        r"\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}",
+        r"\int_0^1 x^2 \, dx = \frac{1}{3}",
+        r"\prod_{k=1}^{n} k = n!",
+        r"\lim_{h \to 0} \frac{f(x+h) - f(x)}{h}",
+        r"\binom{n}{k} = \frac{n!}{k!\,(n-k)!}",
+        r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}",
+        r"f(x) = \begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}",
+        r"\sqrt[3]{x + 1}",
+        r"\nabla \cdot \mathbf{E} = \frac{\rho}{\varepsilon_0}",
+        r"\mathbb{E}[X] = \sum_x x \, p(x)",
+        r"\sigma^2 = \mathbb{E}\left[(X - \mu)^2\right]",
+        r"P(A \mid B) = \frac{P(B \mid A)\, P(A)}{P(B)}",
+        r"\left| \sum_i a_i b_i \right| \le \sqrt{\sum_i a_i^2} \sqrt{\sum_i b_i^2}",
+        r"\hat{x} + \overline{AB}",
+        r"\bar{X}_n = \frac{1}{n} \sum_{i=1}^{n} X_i",
+        r"P\left(|\bar{X}_n - \mu| \ge t\right) \le 2 e^{-2 n t^2}",
+    ];
+
+    /// The native formula-sheet scene: twenty preflighted formulas, one play.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct FormulaSheetScene {
+        name: &'static str,
+    }
+
+    impl SceneConstruct for FormulaSheetScene {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
+            FORMULA_SHEET
+                .iter()
+                .map(|source| TypesetRequest::math(source))
+                .collect()
+        }
+
+        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+            const COLUMNS: usize = 4;
+            const CELL_WIDTH: f64 = 3.4;
+            const CELL_HEIGHT: f64 = 1.45;
+            let mut first = None;
+            for (index, source) in FORMULA_SHEET.iter().enumerate() {
+                let formula = Tex::new(source)
+                    .font_size(26.0)
+                    .build(stage.tex_engine()?)?;
+                let formula = stage.add(formula.vmob)?;
+                let width = stage.get_width(formula);
+                if width > CELL_WIDTH - 0.3 {
+                    stage.scale(formula, (CELL_WIDTH - 0.3) / width);
+                }
+                let (column, row) = ((index % COLUMNS) as f64, (index / COLUMNS) as f64);
+                let center = [
+                    (column - 1.5) * CELL_WIDTH,
+                    (2.0 - row) * CELL_HEIGHT,
+                    0.0,
+                ];
+                stage.move_to(formula, center, ORIGIN);
+                stage.set_fill(
+                    formula,
+                    Some(COLORS[index % COLORS.len()]),
+                    Some(1.0),
+                    None,
+                    true,
+                );
+                first.get_or_insert(formula);
+            }
+            if let Some(first) = first {
+                let builder = first
+                    .animate()
+                    .set_anim_args(AnimateArgs {
+                        run_time: Some(0.25),
+                        rate_func: Some(crate::core::rate::linear),
+                        ..AnimateArgs::default()
+                    })?
+                    .shift([0.0, 0.2, 0.0])?;
+                stage.play(builder)?;
+            }
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+
+    /// Resolve the built-in formula-sheet scene by its stable name.
+    #[must_use]
+    pub fn formula_sheet_scene(name: &str) -> Option<FormulaSheetScene> {
+        (name == FORMULA_SHEET_SCENE_NAME).then_some(FormulaSheetScene {
+            name: FORMULA_SHEET_SCENE_NAME,
         })
     }
 
@@ -1227,6 +1333,35 @@ where
     }
 }
 
+/// Forwards every event and capture unchanged, noting the runtime's frame
+/// and segment boundaries on the typesetting session so its report can show
+/// whether any typesetting happened inside `play()`.
+pub(crate) struct SegmentAccountingSink<'a> {
+    pub(crate) inner: &'a mut dyn SceneSink,
+    pub(crate) typesetting: &'a TexSession,
+}
+
+impl SceneSink for SegmentAccountingSink<'_> {
+    fn event(&mut self, event: LifecycleEvent) -> std::result::Result<(), IntegrationError> {
+        match event.phase {
+            // The one-shot preflight point precedes the first capture.
+            LifecyclePhase::Preflight => self.typesetting.note_first_frame(),
+            LifecyclePhase::PrePlay => self.typesetting.note_segment_begin(),
+            LifecyclePhase::PostPlay => self.typesetting.note_segment_end(),
+            _ => {}
+        }
+        self.inner.event(event)
+    }
+
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: fmn_anim::FramePacket,
+    ) -> std::result::Result<(), IntegrationError> {
+        self.inner.capture(reason, packet)
+    }
+}
+
 /// A successfully completed native scene.
 pub struct CompletedScene {
     scene: Scene,
@@ -1311,7 +1446,8 @@ where
         typesetting,
         preflight_workers,
     };
-    let run = scene.run(&mut adapter, sink);
+    let mut sink = SegmentAccountingSink { inner: sink, typesetting };
+    let run = scene.run(&mut adapter, &mut sink);
     if let Some(error) = adapter.front_door_error {
         return Err(error);
     }

@@ -2646,6 +2646,11 @@ struct CompletedRender {
     prerun: Option<PreRunSummary>,
     manifest: Option<ProvenanceManifest>,
     manifest_path: Option<PathBuf>,
+    /// The live scene run's typesetting and typeset-cache work. Diagnostic
+    /// only: hits and misses never enter the manifest, because a warm cache
+    /// must produce the same certified bits as a cold one. `None` for a
+    /// compiled artifact, which replays recorded geometry without typesetting.
+    typesetting: Option<fmn::tex::TypesetSessionReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2725,14 +2730,14 @@ impl RenderCancellation {
     }
 }
 
-struct CancellableSceneSink<'a, S> {
+struct CancellableSceneSink<'a, S: ?Sized> {
     inner: &'a mut S,
     cancellation: &'a RenderCancellation,
 }
 
 impl<S> SceneSink for CancellableSceneSink<'_, S>
 where
-    S: SceneSink,
+    S: SceneSink + ?Sized,
 {
     fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
         self.cancellation.scene_checkpoint()?;
@@ -5455,9 +5460,10 @@ fn resolve_native_render_input(
             return Err(CliError::new(
                 "scene",
                 format!(
-                    "select a built-in scene or pass --write_all; available scenes: {}, plus {}, {} and {} for --format wav; camera scenes: {}",
+                    "select a built-in scene or pass --write_all; available scenes: {}, plus {}, {}, {} and {} for --format wav; camera scenes: {}",
                     fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
                     fmn::builtins::TEX_SPAN_SCENE_NAME,
+                    fmn::builtins::FORMULA_SHEET_SCENE_NAME,
                     fmn::builtins::SEMANTIC_WITNESS_SCENE_NAME,
                     fmn::builtins::SOUND_CUE_SCENE_NAME,
                     camera_route::CAMERA_SCENE_NAMES.join(", "),
@@ -5476,15 +5482,17 @@ fn resolve_native_render_input(
             if fmn::builtins::primitive_scene(name).is_none()
                 && fmn::builtins::sound_scene(name).is_none()
                 && fmn::builtins::tex_span_scene(name).is_none()
+                && fmn::builtins::formula_sheet_scene(name).is_none()
                 && fmn::builtins::semantic_witness_scene(name).is_none()
                 && camera_route::builtin(name).is_none()
             {
                 return Err(CliError::new(
                     "scene",
                     format!(
-                        "unknown built-in scene {name:?}; available scenes: {} plus {}, {} and {}; camera scenes: {}",
+                        "unknown built-in scene {name:?}; available scenes: {} plus {}, {}, {} and {}; camera scenes: {}",
                         fmn::builtins::PRIMITIVE_SCENE_NAMES.join(", "),
                         fmn::builtins::TEX_SPAN_SCENE_NAME,
+                        fmn::builtins::FORMULA_SHEET_SCENE_NAME,
                         fmn::builtins::SEMANTIC_WITNESS_SCENE_NAME,
                         fmn::builtins::SOUND_CUE_SCENE_NAME,
                         camera_route::CAMERA_SCENE_NAMES.join(", "),
@@ -5587,6 +5595,9 @@ fn resolve_builtin_program(name: &str) -> Result<Box<dyn fmn::SceneConstruct>, C
     if let Some(scene) = fmn::builtins::tex_span_scene(name) {
         return Ok(Box::new(scene));
     }
+    if let Some(scene) = fmn::builtins::formula_sheet_scene(name) {
+        return Ok(Box::new(scene));
+    }
     if let Some(scene) = fmn::builtins::semantic_witness_scene(name) {
         return Ok(Box::new(scene));
     }
@@ -5607,30 +5618,72 @@ fn prerun_builtin_scene(
     command: &RenderCommand,
     config: &fmn_config::Config,
     cancellation: Option<&RenderCancellation>,
+    typesetting: &BuiltinTypesetting,
 ) -> Result<PreRunSummary, CliError> {
     let mut scene = resolve_builtin_program(name)?;
     let mut counter = PreRunCounter::new(command.subdivide);
+    run_builtin_scene(
+        &mut *scene,
+        command,
+        config,
+        &mut counter,
+        cancellation,
+        typesetting,
+    )?;
+    Ok(counter.finish())
+}
+
+/// One builtin scene's typesetting: the persistent typeset cache at the
+/// configured root (`directories.cache`, `--cache-dir`, or the platform
+/// convention, the same root `--clear-cache` and `fmn doctor` resolve), and
+/// the ceiling for the scene's declared preflight. A counting prerun and the
+/// render share it, so the render's constructors hit the prerun's layouts.
+struct BuiltinTypesetting {
+    session: fmn::tex::TexSession,
+    preflight_workers: std::num::NonZeroUsize,
+}
+
+impl BuiltinTypesetting {
+    /// An unavailable or refused cache root is not an error: the session
+    /// typesets in memory and reports why in `cache_error`. The preflight
+    /// uses at most the render's planned threads.
+    fn new(fs: &Arc<dyn FileSystem>, config: &fmn_config::Config, render_threads: usize) -> Self {
+        Self {
+            session: fmn::tex::TexSession::with_cache(
+                config,
+                Arc::clone(fs),
+                Arc::new(fmn_platform::clock::StdClock::new()),
+            ),
+            preflight_workers: std::num::NonZeroUsize::new(render_threads)
+                .unwrap_or(std::num::NonZeroUsize::MIN),
+        }
+    }
+}
+
+/// Run one builtin through the real lifecycle on its typesetting session,
+/// checkpointing cancellation at every lifecycle boundary when requested.
+fn run_builtin_scene(
+    scene: &mut dyn fmn::SceneConstruct,
+    command: &RenderCommand,
+    config: &fmn_config::Config,
+    sink: &mut dyn SceneSink,
+    cancellation: Option<&RenderCancellation>,
+    typesetting: &BuiltinTypesetting,
+) -> Result<fmn::CompletedScene, CliError> {
+    let runtime = command.runtime_config(config);
+    let seed = config.determinism.seed;
+    let session = &typesetting.session;
+    let workers = typesetting.preflight_workers;
     if let Some(cancellation) = cancellation {
         let mut cancellable = CancellableSceneSink {
-            inner: &mut counter,
+            inner: sink,
             cancellation,
         };
-        fmn::run_scene(
-            &mut *scene,
-            command.runtime_config(config),
-            config.determinism.seed,
-            &mut cancellable,
-        )
+        fmn::run_scene_with_typesetting(scene, runtime, seed, &mut cancellable, session, workers)
     } else {
-        fmn::run_scene(
-            &mut *scene,
-            command.runtime_config(config),
-            config.determinism.seed,
-            &mut counter,
-        )
+        fmn::run_scene_with_typesetting(scene, runtime, seed, sink, session, workers)
     }
-    .map_err(native_scene_error)?;
-    Ok(counter.finish())
+    .map_err(native_scene_error)
 }
 
 fn execute_native_render_with_cancellation(
@@ -5819,6 +5872,7 @@ fn execute_native_render_with_cancellation(
             prerun,
             manifest: Some(manifest),
             manifest_path: None,
+            typesetting: None,
         };
         if manifest_publication == ManifestPublication::Adjacent {
             let destination = adjacent_manifest_destination(report.artifact.path())?;
@@ -5837,8 +5891,11 @@ fn execute_native_render_with_cancellation(
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
+                let typesetting = BuiltinTypesetting::new(&fs, &config, render_threads);
                 let summary = (command.prerun || command.subdivide)
-                    .then(|| prerun_builtin_scene(&name, command, &config, cancellation))
+                    .then(|| {
+                        prerun_builtin_scene(&name, command, &config, cancellation, &typesetting)
+                    })
                     .transpose()?;
                 if command.subdivide {
                     let summary = summary.ok_or_else(|| {
@@ -5869,26 +5926,14 @@ fn execute_native_render_with_cancellation(
                         summary.segment_count(),
                     )?;
                     let mut scene = resolve_builtin_program(&name)?;
-                    if let Some(cancellation) = cancellation {
-                        let mut cancellable = CancellableSceneSink {
-                            inner: &mut sink,
-                            cancellation,
-                        };
-                        fmn::run_scene(
-                            &mut *scene,
-                            command.runtime_config(&config),
-                            config.determinism.seed,
-                            &mut cancellable,
-                        )
-                    } else {
-                        fmn::run_scene(
-                            &mut *scene,
-                            command.runtime_config(&config),
-                            config.determinism.seed,
-                            &mut sink,
-                        )
-                    }
-                    .map_err(native_scene_error)?;
+                    run_builtin_scene(
+                        &mut *scene,
+                        command,
+                        &config,
+                        &mut sink,
+                        cancellation,
+                        &typesetting,
+                    )?;
                     if let Some(cancellation) = cancellation {
                         cancellation.cli_checkpoint()?;
                     }
@@ -5903,15 +5948,18 @@ fn execute_native_render_with_cancellation(
                     reports.try_reserve(artifacts.len()).map_err(|error| {
                         CliError::new("budget", format!("subdivision report table: {error}"))
                     })?;
+                    let typeset = typesetting.session.report();
                     for (play_index, artifact) in artifacts {
-                        reports.push(complete(
+                        let mut report = complete(
                             RenderSourceReport::Builtin,
                             builtin_source_item(&name)?,
                             name.clone(),
                             artifact,
                             Some(play_index),
                             prerun.take(),
-                        )?);
+                        )?;
+                        report.typesetting = Some(typeset.clone());
+                        reports.push(report);
                     }
                     continue;
                 }
@@ -5929,27 +5977,14 @@ fn execute_native_render_with_cancellation(
                         )?;
                     }
                     let mut scene = resolve_builtin_program(&name)?;
-                    let mut discard = NullSceneSink;
-                    let completed = if let Some(cancellation) = cancellation {
-                        let mut cancellable = CancellableSceneSink {
-                            inner: &mut discard,
-                            cancellation,
-                        };
-                        fmn::run_scene(
-                            &mut *scene,
-                            command.runtime_config(&config),
-                            config.determinism.seed,
-                            &mut cancellable,
-                        )
-                    } else {
-                        fmn::run_scene(
-                            &mut *scene,
-                            command.runtime_config(&config),
-                            config.determinism.seed,
-                            &mut discard,
-                        )
-                    }
-                    .map_err(native_scene_error)?;
+                    let completed = run_builtin_scene(
+                        &mut *scene,
+                        command,
+                        &config,
+                        &mut NullSceneSink,
+                        cancellation,
+                        &typesetting,
+                    )?;
                     if let Some(cancellation) = cancellation {
                         cancellation.cli_checkpoint()?;
                     }
@@ -5984,7 +6019,7 @@ fn execute_native_render_with_cancellation(
                             )
                         }
                     };
-                    reports.push(complete(
+                    let mut report = complete(
                         RenderSourceReport::Builtin,
                         builtin_source_item(&name)?,
                         name,
@@ -5995,7 +6030,9 @@ fn execute_native_render_with_cancellation(
                         },
                         None,
                         summary,
-                    )?);
+                    )?;
+                    report.typesetting = Some(typesetting.session.report());
+                    reports.push(report);
                     continue;
                 }
                 let artifact_destination = destination(&name);
@@ -6024,27 +6061,14 @@ fn execute_native_render_with_cancellation(
                 if command.skip_animations
                     || matches!(target, RenderTarget::Native(NativeFrameFormat::Png))
                 {
-                    let mut discard = NullSceneSink;
-                    let completed = if let Some(cancellation) = cancellation {
-                        let mut cancellable = CancellableSceneSink {
-                            inner: &mut discard,
-                            cancellation,
-                        };
-                        fmn::run_scene(
-                            &mut *scene,
-                            command.runtime_config(&config),
-                            config.determinism.seed,
-                            &mut cancellable,
-                        )
-                    } else {
-                        fmn::run_scene(
-                            &mut *scene,
-                            command.runtime_config(&config),
-                            config.determinism.seed,
-                            &mut discard,
-                        )
-                    }
-                    .map_err(native_scene_error)?;
+                    let completed = run_builtin_scene(
+                        &mut *scene,
+                        command,
+                        &config,
+                        &mut NullSceneSink,
+                        cancellation,
+                        &typesetting,
+                    )?;
                     // Skip mode advances semantic state without ordinary
                     // captures. A still has the same composition shape even
                     // without `--skip_animations`: run to completion, then
@@ -6061,40 +6085,30 @@ fn execute_native_render_with_cancellation(
                     }
                     .map_err(|error| CliError::new("scene", error.to_string()))?;
                 } else {
-                    if let Some(cancellation) = cancellation {
-                        let mut cancellable = CancellableSceneSink {
-                            inner: &mut sink,
-                            cancellation,
-                        };
-                        fmn::run_scene(
-                            &mut *scene,
-                            command.runtime_config(&config),
-                            config.determinism.seed,
-                            &mut cancellable,
-                        )
-                    } else {
-                        fmn::run_scene(
-                            &mut *scene,
-                            command.runtime_config(&config),
-                            config.determinism.seed,
-                            &mut sink,
-                        )
-                    }
-                    .map_err(native_scene_error)?;
+                    run_builtin_scene(
+                        &mut *scene,
+                        command,
+                        &config,
+                        &mut sink,
+                        cancellation,
+                        &typesetting,
+                    )?;
                 }
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
                 let artifact = sink.finish()?;
                 let source_item = builtin_source_item(&name)?;
-                reports.push(complete(
+                let mut report = complete(
                     RenderSourceReport::Builtin,
                     source_item,
                     name,
                     artifact,
                     None,
                     summary,
-                )?);
+                )?;
+                report.typesetting = Some(typesetting.session.report());
+                reports.push(report);
             }
         }
         NativeRenderInput::Compiled {
@@ -6347,6 +6361,82 @@ fn configured_output_directory(config: &fmn_config::Config) -> PathBuf {
     }
 }
 
+/// The render record's `typesetting` object: one scene run's typeset-cache
+/// traffic and preflight, as observed. Hits and misses are scheduling- and
+/// history-dependent diagnostics, so they live here and never in the
+/// manifest. `misses` counts fresh layouts: requests neither the memory
+/// front nor the persistent cache served.
+fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
+    let preflight = &report.preflight;
+    format!(
+        ",\"typesetting\":{{\"initialized\":{},\"persistent\":{},\"cache_error\":{},\
+         \"hits\":{},\"memory_hits\":{},\"disk_hits\":{},\"misses\":{},\
+         \"bytes_read\":{},\"bytes_written\":{},\"rejected\":{},\
+         \"layouts_before_first_frame\":{},\"layouts_inside_play\":{},\
+         \"preflight\":{{\"batches\":{},\"requests\":{},\"workers\":{},\
+         \"active_workers\":{},\"wall_ns\":{}}}}}",
+        report.initialized,
+        report.persistent,
+        json_option(report.cache_error.as_deref()),
+        report.cache_hits(),
+        report.memory.hits,
+        report.persistent_hits,
+        report.cache_misses(),
+        report.persistent_bytes_read,
+        report.persistent_bytes_written,
+        report.persistent_rejected,
+        report
+            .layouts_before_first_frame
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        report.layouts_inside_segments,
+        preflight.batches,
+        preflight.requests,
+        preflight.workers,
+        preflight.active_workers,
+        preflight.wall_ns,
+    )
+}
+
+/// The human render line's typesetting clause, for scenes that typeset.
+fn typesetting_human_summary(report: &fmn::tex::TypesetSessionReport) -> String {
+    let cache = match (&report.cache_error, report.persistent) {
+        (Some(error), _) => format!("typeset cache unavailable ({error})"),
+        (None, true) => "typeset cache".to_owned(),
+        (None, false) => "typeset memory cache".to_owned(),
+    };
+    let mut summary = format!(
+        "; {cache}: {} hits ({} from disk), {} misses, {} bytes read, {} bytes written",
+        report.cache_hits(),
+        report.persistent_hits,
+        report.cache_misses(),
+        report.persistent_bytes_read,
+        report.persistent_bytes_written,
+    );
+    if report.persistent_rejected > 0 {
+        let _ = write!(
+            summary,
+            ", {} corrupt entries recomputed",
+            report.persistent_rejected
+        );
+    }
+    let preflight = &report.preflight;
+    if preflight.requests > 0 {
+        let _ = write!(
+            summary,
+            "; preflight {} strings on {} workers in {:.1} ms",
+            preflight.requests,
+            preflight.active_workers,
+            preflight.wall_ns as f64 / 1e6,
+        );
+    }
+    let _ = write!(
+        summary,
+        "; {} layouts inside play",
+        report.layouts_inside_segments
+    );
+    summary
+}
+
 fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRender>) -> RunOutput {
     let mut stdout = String::new();
     for CompletedRender {
@@ -6360,6 +6450,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         prerun,
         manifest,
         manifest_path,
+        typesetting,
     } in reports
     {
         let source_artifact = source.artifact().map_or_else(String::new, |path| {
@@ -6409,6 +6500,13 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         let human_manifest = manifest_path
             .as_ref()
             .map_or_else(String::new, |path| format!("; manifest {}", path.display()));
+        let typesetting_json = typesetting
+            .as_ref()
+            .map_or_else(String::new, typesetting_robot_json);
+        let human_typesetting = typesetting
+            .as_ref()
+            .filter(|report| report.initialized)
+            .map_or_else(String::new, typesetting_human_summary);
         let mut backend_json = format!(
             ",\"backend\":{{\"route\":{},\"frames\":{},\"upload_bytes\":{},\"readback_bytes\":{},\"elapsed_ns\":{}}}",
             json_string(backend.route),
@@ -6471,11 +6569,12 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                     );
                     stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
+                    stdout.push_str(&typesetting_json);
                     stdout.push_str("}\n");
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source}{human_subdivision} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_backend}{human_manifest})",
+                        "rendered {scene}{human_source}{human_subdivision} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_backend}{human_manifest}{human_typesetting})",
                         match report.kind {
                             fmn_output::NativeArtifactKind::PngSequence => "PNG sequence",
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
@@ -6521,11 +6620,12 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                     );
                     stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
+                    stdout.push_str(&typesetting_json);
                     stdout.push_str("}\n");
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source}{human_subdivision} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_backend}{human_manifest})",
+                        "rendered {scene}{human_source}{human_subdivision} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_backend}{human_manifest}{human_typesetting})",
                         report.path.display(),
                         report.frame_count,
                         report.input_bytes,
