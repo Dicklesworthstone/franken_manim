@@ -137,6 +137,11 @@ def install_string_lifecycle(native):
     Markup, Tex = g["MarkupText"], g["Tex"]
 
     def init_colors(self):
+        # The Reference's StringMobject passes no fill opacity and a zero
+        # stroke width to its own VMobject init, so its point-less root
+        # reports 0 for both while the glyphs carry the paint (fm-78b6).
+        self.set_fill(opacity=0.0, recurse=False)
+        self.set_stroke(width=0.0, recurse=False)
         # Only explicit caller styles override the native per-glyph paints.
         # Give the mutating style adapter a fresh dictionary on every call.
         g["_apply_vmobject_style_kwargs"](self, dict(self._fmn_string_style))
