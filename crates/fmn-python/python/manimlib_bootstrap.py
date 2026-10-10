@@ -1134,8 +1134,9 @@ class Mobject(_BridgeMobject):
                     ]
                 )
 
+        family = self.get_family()
         try:
-            for mob in self.get_family():
+            for mob in family:
                 box = (
                     mob.get_bounding_box().copy()
                     if works_on_bounding_box
@@ -1178,12 +1179,13 @@ class Mobject(_BridgeMobject):
 
         install_cached_boxes()
         # Reference mobject.py:303: a box-preserving map refreshes only the
-        # parents; any other map recomputes every box in the family.
-        if works_on_bounding_box:
-            for parent in self.parents:
-                parent.refresh_bounding_box()
-        else:
-            self.refresh_bounding_box(recurse_down=True)
+        # parents; any other map recomputes every box in the family. That is
+        # the family the loop above walked, so it is not walked again (an
+        # overridden get_family runs once, fm-5wq.4.10).
+        if not works_on_bounding_box:
+            for mob in family:
+                mob._refresh_point_free_anchors(False)
+        self._refresh_parent_boxes()
         return self
 
     def apply_function(self, function, **kwargs):
