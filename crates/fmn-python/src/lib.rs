@@ -3856,16 +3856,6 @@ impl BridgeMobject {
         })
     }
 
-    /// `Circle.point_at_angle` over its current world-space path.
-    fn _circle_point_at_angle(slf: &Bound<'_, Self>, angle: f64) -> PyResult<[f64; 3]> {
-        crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| {
-            let points = stage.get_points(mob).unwrap_or_default();
-            fmn_library::arc::point_at_angle(&fmn_library::VMobject::from_points(points), angle)
-        })?
-        .ok_or_else(|| PyValueError::new_err("point_at_angle requires a nonempty circle path"))
-    }
-
     /// `Stage::put_start_and_end_on` over the Stage-visible family.
     fn _put_start_and_end_on(
         slf: &Bound<'_, Self>,

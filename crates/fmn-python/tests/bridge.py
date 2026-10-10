@@ -10753,6 +10753,23 @@ circle_query.scale(1.5)
 assert math.isclose(circle_query.get_radius(), 3.0, abs_tol=1e-6)
 assert np.allclose(circle_query.point_at_angle(math.pi), [-2.0, -1.0, 0.0])
 
+
+# geometry.py Circle.point_at_angle measures from self.get_start_angle() and
+# walks self.point_from_proportion(), so a subclass overriding either one is
+# honored, as it is in the Reference.
+class _QuarterStartCircle(geometry.Circle):
+    def get_start_angle(self):
+        return math.tau / 4.0
+
+
+class _ProportionReportingCircle(geometry.Circle):
+    def point_from_proportion(self, alpha):
+        return np.array([alpha, 9.0, 0.0])
+
+
+assert np.allclose(_QuarterStartCircle(radius=2.0).point_at_angle(math.pi / 2.0), [2.0, 0.0, 0.0])
+assert np.allclose(_ProportionReportingCircle().point_at_angle(math.pi), [0.5, 9.0, 0.0])
+
 ellipse = geometry.Ellipse(
     width=4.0,
     height=1.5,

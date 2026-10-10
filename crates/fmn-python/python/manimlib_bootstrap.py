@@ -5320,8 +5320,13 @@ class Circle(Arc):
     def get_radius(self):
         return self._circle_radius()
 
+    # geometry.py measures from the public, overridable get_start_angle (the
+    # tip-aware angle of fm-8pj7) and walks the overridable
+    # point_from_proportion, BN-03's true arclength here.
     def point_at_angle(self, angle):
-        return _np.array(self._circle_point_at_angle(float(angle)))
+        start_angle = self.get_start_angle()
+        alpha = ((float(angle) - start_angle) % _math.tau) / _math.tau
+        return self.point_from_proportion(alpha)
 
 
 class Dot(Circle):
