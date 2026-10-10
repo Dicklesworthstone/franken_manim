@@ -966,11 +966,13 @@ mod tests {
             // franken_markdown a3578a0, then tex_fraction.v1 and
             // tex_display_sum.v1's null delimiters at franken_markdown
             // e4e8e2e, then matrix_2x2.v1 and decimal_matrix.v1's array
-            // struts at franken_markdown bd00a24)
+            // struts at franken_markdown bd00a24, then tex_overbrace.v1's
+            // LaTeX brace fill and tex_fraction.v1 and tex_display_sum.v1's
+            // emission order at franken_markdown 3ed1d33)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "320e569342842e15116f1705095fd95a73d2261960f15a0f34481b5d90ac1b48"
+                "bf1b61a2d8d2b199d17fbdea8484a28e84a0da6032284c4a30379955980d8390"
             );
         }
     }

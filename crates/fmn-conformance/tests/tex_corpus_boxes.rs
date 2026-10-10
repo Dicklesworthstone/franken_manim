@@ -33,11 +33,12 @@ use std::path::PathBuf;
 /// first baseline), 233 once fractions carried TeX's null delimiters and
 /// \vdots, \ddots and trailing `\\` rows were TeX's (e4e8e2e), 235 once the
 /// Tex surface's rows were align* rows (798de11), 252 with TeX's accent
-/// geometry, \big sizes and array struts (bd00a24). Raise it when layout
-/// improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 252;
-/// The same at 10%: 315, 316, 330, 365, 367, then 385.
-const WITHIN_10_PERCENT_FLOOR: usize = 385;
+/// geometry, \big sizes and array struts (bd00a24), 279 with TeX's
+/// \scriptspace, cmsy's prime character and LaTeX's brace fills (3ed1d33).
+/// Raise it when layout improves; never lower it to land a change.
+const WITHIN_5_PERCENT_FLOOR: usize = 279;
+/// The same at 10%: 315, 316, 330, 365, 367, 385, then 421.
+const WITHIN_10_PERCENT_FLOOR: usize = 421;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")

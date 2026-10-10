@@ -1,8 +1,8 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run against `Cargo.lock` `726da0b5` and `SUITE.lock`
-`a6e3520b`, for the franken_markdown repin from `798de11b` to `bd00a247`
-(fm-tex-layout-oracle-bkbc). No package version changes in this graph.
+**Status:** re-run against `Cargo.lock` `0d6dfdaa` and `SUITE.lock`
+`af634982`, for the franken_markdown repin from `bd00a247` to `3ed1d332`
+(fm-tex-layout-oracle-bkbc, fm-aia1). No package version changes in this graph.
 **The release package gate still FAILS at its size budget** (fm-8j70), so this
 audit does not claim a passing package.
 
@@ -12,6 +12,10 @@ audit does not claim a passing package.
   franken_markdown packages' rev, none of which is in that graph.
 - The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
   wasm graph changed since the run below.
+
+Earlier re-run, 2026-10-09, against `Cargo.lock` `726da0b5` and `SUITE.lock`
+`a6e3520b`, for the franken_markdown repin from `798de11b` to `bd00a247`
+(fm-tex-layout-oracle-bkbc): the same mechanical check, unchanged at 134 lines.
 
 Earlier re-run, 2026-10-09, against `Cargo.lock` `7fcc7866` and `SUITE.lock`
 `4385c9af`, for the franken_markdown repin from `e4e8e2ee` to `798de11b`
@@ -287,8 +291,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `a6e3520b0fc1e4135c5eb13a81c18f63d3ff776ca5b1cda19f281a2bea7fe10d`
-- `Cargo.lock` SHA-256: `726da0b5f5b8c166a6ee80a85688840fb2a9e65a12c75c1296411a56132e2873`
+- `SUITE.lock` SHA-256: `af634982e489712ddcc480ede63f8146294aef3a9b6c73332c229d13486523de`
+- `Cargo.lock` SHA-256: `0d6dfdaa72981d03380bfe05b9bad518690fbe3847c1d19afd583b5fd69ab4a2`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `4c58a1bb52b3e6e833fcc0cc50cfbf086a3b8889e4790480c291b64b44382f1a`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

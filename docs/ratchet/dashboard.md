@@ -5,15 +5,15 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `bd00a2471566`.**
+**Computed against franken_markdown `3ed1d3320069`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
 | **Parse** | 99.994 % | 99.989 % |
 | **Parse + typeset returned Ok** | 99.994 % | 99.989 % |
-| **Layout within 5% of real TeX (oracle)** | 25.137 % | 2.719 % |
+| **Layout within 5% of real TeX (oracle)** | 25.589 % | 3.010 % |
 
-"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out 585 strings, sampled by construct class and occurrence (6847 occurrences), and compares each box with real TeX's: 252 are within 5% and 385 within 10%, covering 4452 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; unsampled strings count as unverified.
+"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out 585 strings, sampled by construct class and occurrence (6847 occurrences), and compares each box with real TeX's: 279 are within 5% and 421 within 10%, covering 4532 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; unsampled strings count as unverified.
 
 ## Pending constructs (parse plane)
 
@@ -50,6 +50,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 | `e4e8e2ee1b8e` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `798de11bb51c` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `bd00a2471566` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `3ed1d3320069` | 99.994 | 99.989 | 99.994 | 99.989 |
 
 ## How this is enforced
 

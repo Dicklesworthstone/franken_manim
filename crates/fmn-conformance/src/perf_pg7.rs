@@ -67,8 +67,8 @@ const TEXT_CACHE_STATE: &str = "none";
 // semantic or fixture drift must be reviewed explicitly rather than silently
 // changing the workload being timed.
 const FORMULA_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
-    0x89, 0x27, 0xa3, 0x52, 0x4c, 0xb5, 0xb8, 0x3c, 0x5f, 0x82, 0xb0, 0x11, 0x80, 0x80, 0xda, 0x76,
-    0xd8, 0x85, 0x5b, 0xdf, 0x8b, 0x15, 0x43, 0x53, 0xd3, 0x2c, 0x9a, 0x35, 0x4c, 0x9b, 0x72, 0xac,
+    0xbd, 0xcf, 0x1c, 0x5a, 0x20, 0xc0, 0x8c, 0xae, 0x08, 0x76, 0xea, 0x98, 0xa1, 0xf3, 0x95, 0x94,
+    0xf3, 0x8c, 0x2e, 0xd6, 0x82, 0xaf, 0x7a, 0x71, 0xa5, 0xf2, 0x24, 0xe6, 0x92, 0x9a, 0x28, 0x2c,
 ]);
 const TEXT_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
     0x31, 0xc6, 0xd1, 0xaa, 0x62, 0xd1, 0x13, 0x6d, 0x6f, 0x23, 0x6f, 0x96, 0x5a, 0xdd, 0x48, 0xa9,
@@ -1194,7 +1194,7 @@ mod tests {
         assert!(cold.to_tsv().contains("timed_layer\tlayout\n"));
         assert_eq!(
             cold.digest().to_string(),
-            "9e0e3fccace333266efbfa646e88be02ad55d0c7ecce64d9fb112d92af28de02"
+            "62ce6b78f945f297d3cbc5a5a958bc299cd1ca23f75a0da55b75e6f752eb93bb"
         );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
@@ -1221,7 +1221,7 @@ mod tests {
         );
         assert_eq!(
             cached.digest().to_string(),
-            "4a61e07257dd6dff1c06e5e295a8fb8b271065288d015d0129776fcaf5637a16"
+            "f14d713e6d85af76880ea18944a66ec510a01dbe3f1b00aeb97f65e14529c574"
         );
 
         let text = Pg7Definition::new(Pg7Scenario::Text10kGlyph).expect("text definition");

@@ -12,7 +12,7 @@ use fmn_platform::fs::VirtualFs;
 use fmn_tex::{MacroSet, Mode, Style, TexEngine, Typeset, TypesetError};
 use std::sync::Arc;
 
-const MAGIC_V1: &[u8; 8] = b"FMNTEX\x00\x01";
+const MAGIC_V2: &[u8; 8] = b"FMNTEX\x00\x02";
 
 fn engine() -> TexEngine {
     TexEngine::new("fmd-math/pack/default", None).expect("engine")
@@ -220,12 +220,14 @@ fn the_codec_round_trips_exactly() {
 }
 
 #[test]
-fn the_codec_preserves_the_v1_bytes_for_valid_values() {
+fn the_codec_preserves_the_v2_bytes_for_valid_values() {
     let t = Typeset::new("x".to_owned(), fmn_tex::Layout::default()).unwrap();
-    let mut expected = MAGIC_V1.to_vec();
+    let mut expected = MAGIC_V2.to_vec();
     expected.extend_from_slice(&1_u32.to_le_bytes());
     expected.push(b'x');
-    expected.resize(53, 0);
+    // Then width, height, depth and the glyph, rule, path, emission-order
+    // and submobject counts, all zero.
+    expected.resize(57, 0);
 
     assert_eq!(t.to_bytes().unwrap(), expected);
 }
@@ -241,6 +243,75 @@ fn the_codec_refuses_a_noncanonical_public_submobject_table() {
         t.to_bytes(),
         Err(TypesetError::NonCanonical {
             field: "submobject table",
+            ..
+        })
+    ));
+}
+
+/// fm-aia1: submobjects follow TeX's emission order, as the Reference's do
+/// (measured on 6199a00d): `G` a glyph, `R` a rule, `P` a drawn path.
+#[test]
+fn submobjects_follow_tex_emission_order() {
+    let e = engine();
+    let kinds = |src: &str| -> String {
+        let t = e.typeset(Mode::Math(Style::Display), src).unwrap();
+        t.subs
+            .iter()
+            .map(|sub| match sub.prim {
+                fmn_tex::Prim::Glyph(_) => 'G',
+                fmn_tex::Prim::Rule(_) => 'R',
+                fmn_tex::Prim::Path(_) => 'P',
+            })
+            .collect()
+    };
+    // d, =, s, the fraction bar, the surd (a glyph or a drawn path), its
+    // bar, then the radicand.
+    let fraction = kinds(r"d = \frac{s}{\sqrt{\sigma_1^2 + \sigma_2^2}}");
+    assert_eq!(&fraction[..4], "GGGR", "{fraction}");
+    assert!(matches!(&fraction[4..6], "GR" | "PR"), "{fraction}");
+    assert!(fraction[6..].chars().all(|c| c == 'G'), "{fraction}");
+    // Upper limit, operator, lower limit: the sum sign is the second
+    // submobject, after N.
+    let t = e
+        .typeset(Mode::Math(Style::Display), r"\sum_{n=1}^{N} n")
+        .unwrap();
+    let chars: Vec<char> = t
+        .subs
+        .iter()
+        .map(|sub| match sub.prim {
+            fmn_tex::Prim::Glyph(g) => t.layout.glyphs[g].ch,
+            _ => '?',
+        })
+        .collect();
+    assert_eq!(chars.iter().collect::<String>(), "N∑n=1n");
+}
+
+#[test]
+fn the_codec_refuses_a_broken_emission_order() {
+    let e = engine();
+    let t = e
+        .typeset(Mode::Math(Style::Display), r"\frac{1}{2}")
+        .unwrap();
+    // A repeated primitive is refused on encode.
+    let mut repeated = t.clone();
+    repeated.layout.order[1] = repeated.layout.order[0];
+    assert!(matches!(
+        repeated.to_bytes(),
+        Err(TypesetError::NonCanonical {
+            field: "emission order",
+            ..
+        })
+    ));
+    // An undefined primitive tag is refused on decode. The order table
+    // is the last section before the four-byte submobject count.
+    let mut bytes = t.to_bytes().unwrap();
+    let entries = t.layout.order.len();
+    let first_tag = bytes.len() - 4 - 5 * entries;
+    bytes[first_tag] = 7;
+    assert!(matches!(
+        Typeset::from_bytes(&bytes),
+        Err(TypesetError::NonCanonical {
+            field: "emission order",
             ..
         })
     ));
@@ -284,7 +355,7 @@ fn corrupt_cache_payloads_decode_to_none_never_panic() {
 
 #[test]
 fn impossible_declared_counts_fail_before_collection_reservation() {
-    let mut bytes = MAGIC_V1.to_vec();
+    let mut bytes = MAGIC_V2.to_vec();
     bytes.extend_from_slice(&0_u32.to_le_bytes()); // empty source
     bytes.extend_from_slice(&0_f64.to_bits().to_le_bytes());
     bytes.extend_from_slice(&0_f64.to_bits().to_le_bytes());

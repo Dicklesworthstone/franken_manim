@@ -822,14 +822,14 @@ fn fingerprint_with_identity(
     identity: &[u8],
 ) -> CacheKey {
     /// Constructs chosen to touch every layout mechanism: glyph metrics
-    /// and kerning, scripts, fractions, radicals, big operators, accents,
+    /// and kerning, scripts and primes, fractions, radicals, big operators, accents,
     /// drawn delimiters past the ceiling, environments, stretchy bands,
     /// inner, vertical and diagonal dots, generated material, the Tex
     /// surface's align* rows, and text mode. A semantics change anywhere
     /// shows up here, so a layout change that no probe touches needs a
     /// probe that does.
     const PROBES: &[&str] = &[
-        r"ax + b^2_c",
+        r"ax + b^2_c + f''(x)",
         r"\frac{1}{1+\frac{1}{x}}",
         r"\sqrt[3]{x+1}",
         r"\sum_{n=1}^{N} n \int_0^1 x\,dx",
