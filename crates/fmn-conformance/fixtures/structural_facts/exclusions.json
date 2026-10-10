@@ -250,15 +250,6 @@
       "reason": "Composite children are plain VMobject or differently structured (class sweep)."
     },
     {
-      "id": "fm-c1up-error-classes",
-      "kind": "open-bead",
-      "ref": "fm-c1up",
-      "scope": "classes",
-      "subject": "StringMobject",
-      "fact": "error",
-      "reason": "The Reference refuses to instantiate the abstract StringMobject with TypeError; the portal raises a different exception."
-    },
-    {
       "id": "fm-ui0c-boolean-structure",
       "kind": "open-bead",
       "ref": "fm-ui0c",

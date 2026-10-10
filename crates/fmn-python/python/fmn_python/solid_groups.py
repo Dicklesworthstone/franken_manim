@@ -108,7 +108,7 @@ def install_solid_groups(native):
              square_resolution=(2, 2), side_length=2, **kwargs):
         depth_test = bool(kwargs.pop("depth_test", True))
         z_index = int(kwargs.pop("z_index", 0))
-        g["_refuse_unrouted"](type(self).__name__ + "()", [(key, True) for key in sorted(kwargs)])
+        g["_refuse_surface_keywords"](type(self).__name__ + "()", kwargs)
         shape = grid_shape(square_resolution, copies=6)
         side_length = _finite(side_length, "Cube side_length")
         opacity = _finite(1.0 if opacity is None else opacity, "Cube opacity")
