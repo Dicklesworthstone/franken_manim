@@ -2004,10 +2004,16 @@ def _install_camera_choreography(g):
             # Keep the camera itself detached. Adopt ordinary animated roots
             # through the existing arena path; the private point-free slot
             # is removed before every user callback/updater and at teardown.
+            # Like the Reference's begin_animations, add only roots not yet
+            # in the scene: `add` re-appends, which would move a present
+            # root to the top of the draw order (fm-kpvx).
+            present = set(self.get_mobject_family_members())
             for animation in animations:
                 if drawable[id(animation)]:
                     for root in g["_fmn_animated_mobjects"](animation):
-                        self.add(root)
+                        if root not in present:
+                            self.add(root)
+                            present.update(root.get_family())
                 children.append(make_driver(self, animation))
             self._adopt(slot)
             clock = ClockDriver(self, slot, children, animations)
