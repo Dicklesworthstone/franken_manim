@@ -287,16 +287,6 @@
       "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults. Class-sweep scope is pinned to the subjects that need it (13 measured 2026-09-28, fm-qead; 7 since fm-78b6's native-root defaults fixed AnnularSector, ArrowTip and Sector, 2026-10-10), so a style regression elsewhere, e.g. Square(color=RED, fill_color=BLUE), is no longer masked."
     },
     {
-      "id": "fm-fc53-empty-position",
-      "kind": "open-bead",
-      "ref": "fm-fc53",
-      "scope": ["classes", "scenes"],
-      "class": ["VGroup", "Group", "VMobject", "Mobject"],
-      "fact": "bbox",
-      "empty_only": true,
-      "reason": "Point-less mobjects stay at the origin through shift/move_to/next_to in the portal; the Reference moves their bounding box."
-    },
-    {
       "id": "fm-c1up-rounded-rectangle-corners",
       "kind": "open-bead",
       "ref": "fm-c1up",

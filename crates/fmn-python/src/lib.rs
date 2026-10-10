@@ -2683,6 +2683,25 @@ impl BridgeMobject {
         })
     }
 
+    /// `Stage::refresh_bounding_box` without the upward walk: return this
+    /// entry (and, with `recurse_down`, its Stage family) to the origin when
+    /// it has no point records (fm-fc53). The bootstrap walks parents over
+    /// the Python graph, which also spans detached owners.
+    fn _refresh_point_free_anchors(slf: &Bound<'_, Self>, recurse_down: bool) -> PyResult<()> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            stage.refresh_bounding_box(mob, recurse_down, false);
+        })
+    }
+
+    /// `Stage::set_point_free_anchor`: place a point-less entry's degenerate
+    /// box at `point` (the Reference's `works_on_bounding_box=True` map of
+    /// its cached box). A no-op returning `False` for an entry with records.
+    fn _set_point_free_anchor(slf: &Bound<'_, Self>, point: [f64; 3]) -> PyResult<bool> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.set_point_free_anchor(mob, point))?.map_err(stage_error)
+    }
+
     /// The frame half-extents `(FRAME_X_RADIUS, FRAME_Y_RADIUS)` the border
     /// alignment surface is defined against.
     #[staticmethod]

@@ -462,7 +462,20 @@ impl Stage {
     /// column true to the points through every channel that can write them.
     /// A point run that violates the shared-anchor invariant is a typed
     /// error, not a silently malformed path.
+    ///
+    /// Like the Reference's `resize_points`, this refreshes the bounding box
+    /// of `mob` and its ancestors: a point-free ancestor returns to the
+    /// origin (fm-fc53).
     pub fn set_points(&mut self, mob: Mob, points: &[Vec3]) -> Result<(), StageError> {
+        self.write_points(mob, points)?;
+        self.refresh_bounding_box(mob, false, true);
+        Ok(())
+    }
+
+    /// [`Stage::set_points`] without the Reference's bounding-box refresh:
+    /// the representation path (placement baking, pointwise maps whose
+    /// caller refreshes once afterwards).
+    fn write_points(&mut self, mob: Mob, points: &[Vec3]) -> Result<(), StageError> {
         let angles: Option<Vec<f64>> = if self.is_vmobject_schema(mob)? {
             let path = QuadPath::from_points(points.to_vec()).map_err(StageError::Geometry)?;
             Some(path.joint_angles())
@@ -617,7 +630,8 @@ impl Stage {
             entry.set_placement(Placement::IDENTITY);
             return Ok(true);
         };
-        self.set_points(mob, &points)?;
+        // A representation change, not a Reference point edit: no refresh.
+        self.write_points(mob, &points)?;
         Ok(true)
     }
 
@@ -675,7 +689,7 @@ impl Stage {
         let entry = self.get(mob).ok_or(StageError::StaleHandle)?;
         let columns = mapped_auxiliary_points(&entry.buffer, entry.placement(), &map);
         if let Some(points) = points {
-            self.set_points(mob, &points)?;
+            self.write_points(mob, &points)?;
         } else {
             self.set_placement(mob, Placement::IDENTITY)?;
         }
@@ -710,6 +724,98 @@ impl Stage {
         self
     }
 
+    // ------------------------------------------- point-free positions (fm-fc53)
+    //
+    // The Reference keeps one cached `[min, mid, max]` box per mobject
+    // (mobject.py:338). A point-less family's box is that cache: the
+    // box-preserving maps (`shift`, `scale`, `stretch`, and everything built
+    // on them) transform it in place, and a refresh recomputes it, which for
+    // a family without points is the origin (mobject.py:344). Here an entry
+    // without records keeps that position as its placement's translation, so
+    // the refresh is a placement reset. An entry WITH records is never
+    // touched: its box is always recomputed from its points.
+
+    /// Every transitive parent of `mob`, each once.
+    fn ancestors(&self, mob: Mob) -> Vec<Mob> {
+        let mut out: Vec<Mob> = Vec::new();
+        let mut pending: Vec<Mob> = self
+            .get(mob)
+            .map(|entry| entry.parents().to_vec())
+            .unwrap_or_default();
+        while let Some(current) = pending.pop() {
+            if out.contains(&current) {
+                continue;
+            }
+            if let Some(entry) = self.get(current) {
+                pending.extend_from_slice(entry.parents());
+                out.push(current);
+            }
+        }
+        out
+    }
+
+    /// Return a record-less entry to the origin; entries with records keep
+    /// their placement.
+    fn reset_point_free_anchor(&mut self, mob: Mob) {
+        if let Some(entry) = self.get_mut(mob)
+            && entry.buffer.is_empty()
+        {
+            entry.set_placement(Placement::IDENTITY);
+        }
+    }
+
+    /// Reference `refresh_bounding_box(recurse_down, recurse_up)`
+    /// (mobject.py:362): recompute the box of `mob` (and its whole family
+    /// with `recurse_down`, and every ancestor with `recurse_up`).
+    ///
+    /// Boxes over points are recomputed lazily anyway, so the observable
+    /// effect is on point-free families: their retained position returns to
+    /// the origin, where the Reference's recomputed empty box is.
+    pub fn refresh_bounding_box(
+        &mut self,
+        mob: Mob,
+        recurse_down: bool,
+        recurse_up: bool,
+    ) -> &mut Self {
+        let mut members = if recurse_down {
+            self.family(mob)
+        } else {
+            vec![mob]
+        };
+        if recurse_up {
+            members.extend(self.ancestors(mob));
+        }
+        for member in members {
+            self.reset_point_free_anchor(member);
+        }
+        self
+    }
+
+    /// The Reference's `for parent in self.parents: parent.refresh_bounding_box()`
+    /// after a box-preserving map (mobject.py:306).
+    fn refresh_ancestor_boxes(&mut self, mob: Mob) -> &mut Self {
+        for ancestor in self.ancestors(mob) {
+            self.reset_point_free_anchor(ancestor);
+        }
+        self
+    }
+
+    /// Place a record-less entry's degenerate box at `point`: the Reference's
+    /// cached box after `apply_points_function(..., works_on_bounding_box=True)`
+    /// maps it through an arbitrary function. Returns `false`, changing
+    /// nothing, for an entry with records.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`].
+    pub fn set_point_free_anchor(&mut self, mob: Mob, point: Vec3) -> Result<bool, StageError> {
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        if !entry.buffer.is_empty() {
+            return Ok(false);
+        }
+        entry.set_placement(Placement::from_translation(point));
+        Ok(true)
+    }
+
     /// Compose one world-space affine operation over every family member.
     ///
     /// `affine` acts after each member's current placement. Object-space points
@@ -717,8 +823,13 @@ impl Stage {
     /// the authoritative buffer. In that case the operation bakes through the
     /// existing generation so V3's engine-write visibility remains true for
     /// zero-copy NumPy views.
+    ///
+    /// A general map is the Reference's `apply_matrix`, which recomputes
+    /// every box afterwards: point-free family members and ancestors return
+    /// to the origin ([`Stage::refresh_bounding_box`]).
     pub fn apply_affine(&mut self, mob: Mob, affine: Placement) -> &mut Self {
-        self.apply_affine_many(&[mob], affine)
+        self.apply_affine_many(&[mob], affine);
+        self.refresh_bounding_box(mob, true, true)
     }
 
     /// The Reference's `apply_points_function` made public: apply `f` to
@@ -726,6 +837,9 @@ impl Stage {
     /// `about_point` wins; else the box point at `about_edge`; both `None`
     /// transforms in place). `Mobject.apply_function`'s default is
     /// `about_point = ORIGIN` — pass `Some(ORIGIN)` for that surface.
+    /// Boxes are recomputed afterwards, as in the Reference
+    /// (`works_on_bounding_box=False`): point-free members and ancestors
+    /// return to the origin.
     pub fn apply_points_function(
         &mut self,
         mob: Mob,
@@ -735,13 +849,15 @@ impl Stage {
     ) -> &mut Self {
         let pivot = self.resolve_pivot(mob, about_point, about_edge);
         self.transform_points(mob, pivot, f);
-        self
+        self.refresh_bounding_box(mob, true, true)
     }
 
     /// Reference `rotate` (mobject.py): rotate the family about `axis` by
     /// `angle`, pivoting on `about_point` (or the box point at
     /// `about_edge`; both `None` defaults to the box center, the
-    /// Reference's `about_edge = ORIGIN`).
+    /// Reference's `about_edge = ORIGIN`). Rotation is not a box-preserving
+    /// map, so the Reference recomputes every box: a point-free family
+    /// returns to the origin (fm-fc53).
     pub fn rotate(
         &mut self,
         mob: Mob,
@@ -797,13 +913,20 @@ impl Stage {
             }
         }
         entry.set_placement(placement);
+        // The Reference resizes through `resize_points`, which refreshes this
+        // box and every ancestor's: matching an empty source leaves no
+        // position behind (fm-fc53).
+        self.refresh_bounding_box(mob, false, true);
     }
 
     // ---------------------------------------------------------- positional API
 
-    /// Shift every point by `vector`.
+    /// Shift every point by `vector`. A point-free family keeps its position
+    /// and moves with it; its point-free ancestors' boxes are refreshed, as
+    /// the Reference's `apply_points_function` refreshes `self.parents`.
     pub fn shift(&mut self, mob: Mob, vector: Vec3) -> &mut Self {
-        self.shift_many(&[mob], vector)
+        self.apply_affine_many(&[mob], Placement::from_translation(vector));
+        self.refresh_ancestor_boxes(mob)
     }
 
     /// Shift the union of several families, visiting shared members once.
@@ -836,7 +959,10 @@ impl Stage {
             || Placement::new(linear, [0.0; 3]),
             |p| Placement::about(linear, p),
         );
-        self.apply_affine(mob, affine)
+        // Box-preserving (`works_on_bounding_box=True`): a point-free family
+        // scales its position about the pivot; only ancestors refresh.
+        self.apply_affine_many(&[mob], affine);
+        self.refresh_ancestor_boxes(mob)
     }
 
     /// Uniformly scale the union of several families about one shared point.
@@ -874,7 +1000,9 @@ impl Stage {
             || Placement::new(linear, [0.0; 3]),
             |p| Placement::about(linear, p),
         );
-        self.apply_affine(mob, affine)
+        // Box-preserving, like `scale_about`.
+        self.apply_affine_many(&[mob], affine);
+        self.refresh_ancestor_boxes(mob)
     }
 
     /// Stretch the union of several families along one axis about one point.

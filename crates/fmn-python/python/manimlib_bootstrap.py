@@ -741,6 +741,28 @@ def _family_preorder(root):
     return result
 
 
+def _point_free_family_ids(root):
+    """Ids of the members of `root`'s family whose own family has no points.
+
+    The Reference's box of such a member is its own cached degenerate box,
+    which a box-preserving map moves (fm-fc53).
+    """
+    _family_preorder(root)  # refuses a cycle before the walk below
+    has_points = {}
+
+    def visit(mobject):
+        marker = id(mobject)
+        if marker not in has_points:
+            # Visit every child (no short-circuit) so shared descendants are
+            # answered once and all of them are classified.
+            children = [visit(child) for child in mobject.submobjects]
+            has_points[marker] = bool(mobject.has_points()) or any(children)
+        return has_points[marker]
+
+    visit(root)
+    return {marker for marker, value in has_points.items() if not value}
+
+
 def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
     if memo is None:
         memo = {}
@@ -1060,7 +1082,12 @@ class Mobject(_BridgeMobject):
             lows.append(low)
             highs.append(high)
         if not lows:
-            return _np.zeros((3, 3))
+            # A point-less family's box is the root's own (Reference
+            # compute_bounding_box ignores members without points): the
+            # degenerate box its positional operations moved, which the
+            # nursery keeps as the root's placement (fm-fc53).
+            low, mid, high = self._get_bbox()
+            return _np.array([low, mid, high])
         low = _np.min(_np.array(lows), axis=0)
         high = _np.max(_np.array(highs), axis=0)
         return _np.array([low, (low + high) / 2.0, high])
@@ -1086,6 +1113,9 @@ class Mobject(_BridgeMobject):
             about_point = self.get_bounding_box_point(about_edge)
         pivot = None if about_point is None else _np.array(_vec3(about_point))
         cached_boxes = []
+        # A point-less family's box is its own position, which the mapped
+        # rows move (fm-fc53); boxes over points stay cached rows only.
+        point_free = _point_free_family_ids(self) if works_on_bounding_box else ()
 
         def install_cached_boxes():
             # Install only after all writes observed so far, so each entry is
@@ -1093,6 +1123,10 @@ class Mobject(_BridgeMobject):
             # Reference's member-by-member partial state if a later callback
             # raises; the callback exception itself is never translated.
             for cached_mob, cached_box in cached_boxes:
+                if id(cached_mob) in point_free:
+                    cached_mob._set_point_free_anchor(
+                        tuple(float(component) for component in cached_box[1])
+                    )
                 cached_mob._cache_bbox_rows(
                     [
                         tuple(float(component) for component in row)
@@ -1143,6 +1177,13 @@ class Mobject(_BridgeMobject):
             raise
 
         install_cached_boxes()
+        # Reference mobject.py:303: a box-preserving map refreshes only the
+        # parents; any other map recomputes every box in the family.
+        if works_on_bounding_box:
+            for parent in self.parents:
+                parent.refresh_bounding_box()
+        else:
+            self.refresh_bounding_box(recurse_down=True)
         return self
 
     def apply_function(self, function, **kwargs):
@@ -1212,6 +1253,7 @@ class Mobject(_BridgeMobject):
         native_edge = None if about_edge is None else _vec3(about_edge)
         for target in self._each_stage_target():
             target._apply_matrix(native_matrix, native_point, native_edge)
+        self._refresh_parent_boxes()
         return self
 
     def apply_complex_function(self, function, **kwargs):
@@ -1226,6 +1268,7 @@ class Mobject(_BridgeMobject):
         vector = _vec3(vector)
         for target in self._each_stage_target():
             target._shift(vector)
+        self._refresh_parent_boxes()
         return self
 
     def scale(
@@ -1248,6 +1291,7 @@ class Mobject(_BridgeMobject):
                 for dim, value in enumerate(values[:3]):
                     target._stretch_about(float(value), dim, pivot)
             side_effect_factor = values
+        self._refresh_parent_boxes()
         # The Reference's per-member hook (DecimalNumber tracks font_size
         # through it, mobject.py:955).
         for mob in _family_preorder(self):
@@ -1269,6 +1313,7 @@ class Mobject(_BridgeMobject):
             )
         for target in self._each_stage_target():
             target._stretch_about(float(factor), int(dim), pivot)
+        self._refresh_parent_boxes()
         return self
 
     def stretch_about_point(self, factor, dim, point):
@@ -1286,7 +1331,9 @@ class Mobject(_BridgeMobject):
             )
         axis = _vec3(axis)
         for target in self._each_stage_target():
+            # Native rotate recomputes each box it touches (fm-fc53).
             target._rotate_about(float(angle), axis, pivot)
+        self._refresh_parent_boxes()
         return self
 
     def rotate_about_origin(self, angle, axis=_OUT):
@@ -1302,6 +1349,7 @@ class Mobject(_BridgeMobject):
     def align_on_border(self, direction, buff=_DEFAULT_MOBJECT_TO_EDGE_BUFF):
         if self._is_bound():
             self._to_edge(_vec3(direction), float(buff))
+            self._refresh_parent_boxes()
             return self
         direction = _np.array(_vec3(direction))
         x_radius, y_radius = type(self)._frame_radii()
@@ -1835,11 +1883,30 @@ class Mobject(_BridgeMobject):
         return _np.array([mins, (mins + maxs) / 2, maxs])
 
     def refresh_bounding_box(self, recurse_down=False, recurse_up=True):
-        # RecordBuffer writes, live writable views, family edits, and retained
-        # placements all invalidate Marionette's box through their revision
-        # channels.  Accept the Reference cache-control surface while leaving
-        # invalidation to that existing authority.
-        del recurse_down, recurse_up
+        # Reference mobject.py:362. RecordBuffer writes, live writable views,
+        # family edits, and retained placements already invalidate
+        # Marionette's box over points through their revision channels. What
+        # a refresh still changes is a point-less member's box: its retained
+        # position returns to the origin, where the Reference's recomputed
+        # empty box is (fm-fc53). A bound member's Stage walks its own family
+        # in one call; parents are walked here, where the whole graph is.
+        if recurse_down and self._is_bound():
+            self._refresh_point_free_anchors(True)
+        else:
+            for mob in self.get_family(recurse_down):
+                mob._refresh_point_free_anchors(False)
+        if recurse_up:
+            for parent in self.parents:
+                parent.refresh_bounding_box()
+        return self
+
+    def _refresh_parent_boxes(self):
+        # The Reference's `for parent in self.parents:
+        # parent.refresh_bounding_box()` after a box-preserving map. A native
+        # map refreshes only its own Stage's ancestors; a detached family's
+        # graph lives here (fm-fc53).
+        for parent in self.parents:
+            parent.refresh_bounding_box()
         return self
 
     def get_bounding_box_point(self, direction):
@@ -1980,10 +2047,14 @@ class Mobject(_BridgeMobject):
         resized = resize_func(source, new_length)
         if new_length == len(data):
             data[:] = resized
-            return self
-        self.resize(new_length)
-        if new_length > 0:
-            self.data[:] = resized
+        else:
+            self.resize(new_length)
+            if new_length > 0:
+                self.data[:] = resized
+        # Reference resize_points closes with refresh_bounding_box(): a
+        # mobject left without points, and point-less ancestors, return to
+        # the origin (fm-fc53).
+        self.refresh_bounding_box()
         return self
 
     def set_points(self, points):
@@ -2025,6 +2096,9 @@ class Mobject(_BridgeMobject):
         target = self.data
         for key in self.pointlike_data_keys:
             target[key][:] = source[key]
+        # The Reference resizes through resize_points, which refreshes the
+        # box (fm-fc53).
+        self.refresh_bounding_box()
         return self
 
     # Color surface (fm-d3gt): Reference bodies over the live record views.
@@ -2472,10 +2546,13 @@ class Mobject(_BridgeMobject):
         return self
 
     def note_changed_family(self, only_changed_order=False):
-        # No Python-side family or bounding-box caches exist to drop (the
-        # engine derives both lazily from the live graph); preserve the
-        # upward recursion contract so callers stay Reference-shaped.
-        del only_changed_order
+        # No Python-side family cache exists to drop (the engine derives it
+        # lazily from the live graph). The Reference also refreshes the
+        # bounding box here (mobject.py:417), which returns a point-less
+        # family to the origin (fm-fc53); each parent's own call below
+        # refreshes the ancestors.
+        if not only_changed_order:
+            self.refresh_bounding_box(recurse_up=False)
         for parent in list(self.parents):
             parent.note_changed_family()
         return self
