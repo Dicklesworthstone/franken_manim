@@ -4014,6 +4014,66 @@ fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         .with_counter("lifecycle_points_post", points_post))
 }
 
+/// A redraw may reuse a live source that another scene placement also owns.
+fn lifecycle_always_redraw_shared_source_run(
+    ctx: &mut RunCtx,
+) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let source = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+    let other_parent = stage.add(Mobject::new());
+    stage
+        .attach(other_parent, source)
+        .map_err(|error| fail(format!("shared source attaches: {error}")))?;
+    let calls = Rc::new(Cell::new(0_u64));
+    let factory_calls = Rc::clone(&calls);
+    let redraw = stage.always_redraw(move |_| {
+        factory_calls.set(factory_calls.get() + 1);
+        source
+    });
+    // Batch admission preserves both placements of their shared child.
+    stage
+        .add_many_to_scene(&[other_parent, redraw])
+        .map_err(|error| fail(format!("shared redraw enters scene: {error}")))?;
+
+    let mut shared_links = true;
+    let mut current_geometry = true;
+    for point in [[1.0, -1.0, 0.0], [2.0, 1.0, 0.0], [-3.0, 2.0, 0.0]] {
+        stage
+            .set_points(source, &[point])
+            .map_err(|error| fail(format!("shared redraw source moves: {error}")))?;
+        stage.update(0.125);
+        shared_links &= stage
+            .get(redraw)
+            .is_some_and(|entry| entry.submobjects() == &[source])
+            && stage
+                .get(other_parent)
+                .is_some_and(|entry| entry.submobjects() == &[source]);
+        current_geometry &= stage.get_points(source) == Some(vec![point]);
+    }
+    let source_alive = stage.contains(source);
+    let other_parent_alive = stage.contains(other_parent);
+    let roots_preserved = stage.roots() == &[other_parent, redraw];
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.always_redraw_shared_source")
+            .field("factory_calls", calls.get())
+            .field("source_alive", truth(source_alive))
+            .field("other_parent_alive", truth(other_parent_alive))
+            .field("shared_links", truth(shared_links))
+            .field("current_geometry", truth(current_geometry))
+            .field("roots_preserved", truth(roots_preserved)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("redraw_factory_calls", calls.get())
+        .with_counter("redraw_source_alive", u64::from(source_alive))
+        .with_counter("redraw_other_parent_alive", u64::from(other_parent_alive))
+        .with_counter("redraw_shared_links", u64::from(shared_links))
+        .with_counter("redraw_current_geometry", u64::from(current_geometry))
+        .with_counter("redraw_roots_preserved", u64::from(roots_preserved)))
+}
+
 /// Journal round-trip: the scene's command record (add, pure play,
 /// stateful wait) serializes, deserializes, hashes identically, and
 /// `plan_replay` reuses exactly the non-barrier prefix — and stops with
@@ -5912,6 +5972,35 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = Vec::new();
 
+    specs.push(
+        spec(
+            "lifecycle.always_redraw_shared_source.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(lifecycle_always_redraw_shared_source_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("redraw_factory_calls", 4),
+                counter_eq("redraw_source_alive", 1),
+                counter_eq("redraw_other_parent_alive", 1),
+                counter_eq("redraw_shared_links", 1),
+                counter_eq("redraw_current_geometry", 1),
+                counter_eq("redraw_roots_preserved", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.always_redraw_shared_source",
+                vec![
+                    FieldPred::u64_eq("factory_calls", 4),
+                    FieldPred::str_eq("source_alive", "true"),
+                    FieldPred::str_eq("other_parent_alive", "true"),
+                    FieldPred::str_eq("shared_links", "true"),
+                    FieldPred::str_eq("current_geometry", "true"),
+                    FieldPred::str_eq("roots_preserved", "true"),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
     specs.push(spec(
         "lifecycle.typeset_cache_warm_second_run.v1",
         ScenarioClass::LifecycleDrill,
@@ -7508,6 +7597,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 // Test entry points
 // ---------------------------------------------------------------------------
+
+#[test]
+fn always_redraw_shared_source_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.always_redraw_shared_source.v1")
+        .expect("the shared-source redraw lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
 
 #[test]
 fn piano_keyboard_scenario_passes() {

@@ -4,7 +4,8 @@
 //! the C-6 group-addition correction.
 
 use fmn_mobject::{Mob, Mobject, Stage, StageError, TrackerKind};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 fn square() -> Mobject {
@@ -335,9 +336,13 @@ fn always_redraw_rebuilds_per_tick_without_arena_growth() {
     let mut stage = Stage::new();
     let phase = Rc::new(RefCell::new(0.0_f64));
     let phase_for_closure = Rc::clone(&phase);
+    let built = Rc::new(RefCell::new(Vec::new()));
+    let built_for_closure = Rc::clone(&built);
     let drawn = stage.always_redraw(move |stage| {
         let x = *phase_for_closure.borrow();
-        stage.add(Mobject::from_points(&[[x, 0.0, 0.0]]))
+        let fresh = stage.add(Mobject::from_points(&[[x, 0.0, 0.0]]));
+        built_for_closure.borrow_mut().push(fresh);
+        fresh
     });
     stage.add_to_scene(drawn).unwrap();
 
@@ -356,6 +361,218 @@ fn always_redraw_rebuilds_per_tick_without_arena_growth() {
         stage.update(0.1);
     }
     assert_eq!(stage.family(drawn).len(), after_two);
+    let built = built.borrow();
+    let (current, retired) = built.split_last().unwrap();
+    assert!(stage.contains(*current));
+    for &mob in retired {
+        assert!(
+            !stage.contains(mob),
+            "retired content must be reclaimed, not merely detached: {mob:?}"
+        );
+    }
+}
+
+#[test]
+fn always_redraw_keeps_reused_content_alive_even_when_pinned() {
+    for pinned in [false, true] {
+        let mut stage = Stage::new();
+        let original = stage.add(square());
+        let points = stage.get_points(original).unwrap();
+        let drawn = stage.always_redraw(move |_| original);
+        stage.add_to_scene(drawn).unwrap();
+        if pinned {
+            stage.pin(original).unwrap();
+        }
+
+        for _ in 0..3 {
+            stage.update(0.1);
+            assert_eq!(stage.get(drawn).unwrap().submobjects(), &[original]);
+            assert_eq!(stage.get_points(original).unwrap(), points);
+        }
+        if pinned {
+            stage.unpin(original);
+        }
+        assert!(
+            stage.contains(original),
+            "reused content must never acquire a deferred deletion"
+        );
+    }
+}
+
+#[test]
+fn always_redraw_factory_can_reuse_a_detached_descendant() {
+    let mut stage = Stage::new();
+    let old = stage.add(Mobject::new());
+    let reused = stage.add(square());
+    let discarded = stage.add(square());
+    stage.attach(old, reused).unwrap();
+    stage.attach(old, discarded).unwrap();
+    let first = Cell::new(true);
+    let drawn = stage.always_redraw(move |stage| {
+        if first.replace(false) {
+            return old;
+        }
+        assert!(stage.contains(reused), "factory reads the previous family");
+        stage.detach(old, reused);
+        stage.delete(old).unwrap();
+        reused
+    });
+    stage.add_to_scene(drawn).unwrap();
+
+    stage.update(0.1);
+
+    assert_eq!(stage.get(drawn).unwrap().submobjects(), &[reused]);
+    assert!(stage.contains(reused));
+    assert!(!stage.contains(old));
+    assert!(
+        !stage.contains(discarded),
+        "capture the old family before the factory removes its wrapper"
+    );
+}
+
+#[test]
+fn always_redraw_preserves_shared_and_rooted_subtrees() {
+    for independently_rooted in [false, true] {
+        let mut stage = Stage::new();
+        let old = stage.add(Mobject::new());
+        let shared = stage.add(Mobject::new());
+        let leaf = stage.add(square());
+        let points = stage.get_points(leaf).unwrap();
+        let outside = stage.add(Mobject::new());
+        let fresh = stage.add(square());
+        stage.attach(old, shared).unwrap();
+        stage.attach(shared, leaf).unwrap();
+        if independently_rooted {
+            stage.add_to_scene(shared).unwrap();
+        } else {
+            stage.attach(outside, shared).unwrap();
+            stage.add_to_scene(outside).unwrap();
+        }
+        let next = Rc::new(Cell::new(old));
+        let next_for_closure = Rc::clone(&next);
+        let drawn = stage.always_redraw(move |_| next_for_closure.get());
+        next.set(fresh);
+
+        // Keep the independent scene admission while driving this updater.
+        stage.update_mobject(drawn, 0.1);
+
+        assert_eq!(stage.get(drawn).unwrap().submobjects(), &[fresh]);
+        assert!(!stage.contains(old), "the exclusive wrapper is retired");
+        assert!(stage.contains(shared));
+        assert!(stage.contains(leaf), "retention protects the full subtree");
+        assert_eq!(stage.family(shared), vec![shared, leaf]);
+        assert_eq!(stage.get_points(leaf).unwrap(), points);
+        if independently_rooted {
+            assert_eq!(stage.roots(), &[shared]);
+        } else {
+            assert_eq!(stage.roots(), &[outside]);
+            assert_eq!(stage.get(outside).unwrap().submobjects(), &[shared]);
+        }
+    }
+}
+
+#[test]
+fn always_redraw_factory_panic_keeps_published_content() {
+    let mut stage = Stage::new();
+    let original = stage.add(square());
+    let points = stage.get_points(original).unwrap();
+    let fail = Rc::new(Cell::new(false));
+    let fail_for_closure = Rc::clone(&fail);
+    let drawn = stage.always_redraw(move |_| {
+        if fail_for_closure.get() {
+            std::panic::panic_any("factory refused");
+        }
+        original
+    });
+    fail.set(true);
+
+    let failure = catch_unwind(AssertUnwindSafe(|| stage.update_mobject(drawn, 0.1)));
+    assert!(failure.is_err());
+    assert_eq!(stage.get(drawn).unwrap().submobjects(), &[original]);
+    assert_eq!(stage.get_points(original).unwrap(), points);
+
+    fail.set(false);
+    stage.update_mobject(drawn, 0.1);
+    assert_eq!(stage.get(drawn).unwrap().submobjects(), &[original]);
+}
+
+#[test]
+fn always_redraw_invalid_replacement_keeps_published_content() {
+    for cyclic in [false, true] {
+        let mut stage = Stage::new();
+        let original = stage.add(square());
+        let points = stage.get_points(original).unwrap();
+        let stale = stage.add(Mobject::new());
+        stage.delete(stale).unwrap();
+        let next = Rc::new(Cell::new(original));
+        let next_for_closure = Rc::clone(&next);
+        let drawn = stage.always_redraw(move |_| next_for_closure.get());
+        next.set(if cyclic { drawn } else { stale });
+
+        let failure = catch_unwind(AssertUnwindSafe(|| stage.update_mobject(drawn, 0.1)))
+            .expect_err("an invalid factory result must be reported");
+        let expected = if cyclic {
+            StageError::CycleDetected
+        } else {
+            StageError::StaleHandle
+        };
+        assert_eq!(failure.downcast_ref::<StageError>(), Some(&expected));
+        assert_eq!(stage.get(drawn).unwrap().submobjects(), &[original]);
+        assert_eq!(stage.get_points(original).unwrap(), points);
+        assert_eq!(stage.get(original).unwrap().parents(), &[drawn]);
+
+        next.set(original);
+        stage.update_mobject(drawn, 0.1);
+        assert_eq!(stage.get(drawn).unwrap().submobjects(), &[original]);
+    }
+}
+
+#[test]
+fn always_redraw_rejects_a_stale_initial_result() {
+    let mut stage = Stage::new();
+    let stale = stage.add(square());
+    stage.delete(stale).unwrap();
+    let failure = catch_unwind(AssertUnwindSafe(|| stage.always_redraw(move |_| stale)))
+        .expect_err("an invalid initial factory result must be reported");
+    assert_eq!(
+        failure.downcast_ref::<StageError>(),
+        Some(&StageError::StaleHandle)
+    );
+}
+
+#[test]
+fn always_redraw_reclaims_private_dag_with_pinned_parent_and_live_view() {
+    let mut stage = Stage::new();
+    let old = stage.add(Mobject::new());
+    let left = stage.add(Mobject::new());
+    let right = stage.add(Mobject::new());
+    let leaf = stage.add(square());
+    let fresh = stage.add(square());
+    stage.attach(old, left).unwrap();
+    stage.attach(old, right).unwrap();
+    stage.attach(left, leaf).unwrap();
+    stage.attach(right, leaf).unwrap();
+    stage.pin(old).unwrap();
+    let view = stage.get_mut(leaf).unwrap().buffer.export_view(false);
+    let next = Rc::new(Cell::new(old));
+    let next_for_closure = Rc::clone(&next);
+    let drawn = stage.always_redraw(move |_| next_for_closure.get());
+    next.set(fresh);
+
+    stage.update_mobject(drawn, 0.1);
+
+    assert_eq!(stage.get(drawn).unwrap().submobjects(), &[fresh]);
+    assert!(stage.contains(old), "the explicit pin defers destruction");
+    for retired in [left, right, leaf] {
+        assert!(
+            !stage.contains(retired),
+            "a pending parent or a second private DAG edge cannot leak {retired:?}"
+        );
+    }
+    assert_eq!(view.read(0, "point"), Some(vec![-0.5, -0.5, 0.0]));
+    stage.unpin(old);
+    assert!(!stage.contains(old));
+    assert!(stage.contains(fresh));
 }
 
 #[test]
