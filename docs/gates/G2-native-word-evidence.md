@@ -226,7 +226,19 @@ Further evidence, 2026-10-09:
   - the portal typesetting suites pass 3/3.
   - Explicit cache roots under `$TMPDIR` (behind the `/var` link) stay
     persistent. The platform-convention base under a linked `$HOME` is still
-    refused; that is recorded on `fm-macos-var-symlink-gate-aqr1`.
+    refused; that is recorded on `fm-macos-var-symlink-gate-aqr1`. The
+    render reports it (`persistent: false`, `cache_error` naming the `/var`
+    link) and finishes in memory.
+  - After the store-error fix (`c21d049e`), on the same Mac: the CLI suite
+    passes 8/8, including the read/write-failure test (42 store errors for
+    21 requests, frames identical); fmn-tex passes 74/74. With the counting
+    removed, that test fails (0 store errors), as does its fmn-tex
+    counterpart.
+  - Hit and miss are byte-identical for `png`, `png_sequence` and `y4m`
+    under `--reproducible`, with the same closure digest for the same cache
+    root. A different `--cache-dir` changes the closure digest, because the
+    resolved config (C4) includes `directories.cache`
+    (`fm-cache-dir-in-certified-closure-2y2a`).
 - **Clean wheel.** At `6a21499d` (CPython 3.13, Linux), the three typesetting
   suites pass and the runtime receipt passes (2007 reviewed rows, 0
   contradictions). The gate now runs those suites (`3e14c40e`). Separately,
