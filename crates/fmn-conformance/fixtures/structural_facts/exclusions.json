@@ -91,9 +91,10 @@
       "id": "fm-78b6-text-root-style",
       "kind": "open-bead",
       "ref": "fm-78b6",
+      "scope": ["classes", "scenes"],
       "class": ["Text", "MarkupText", "Tex", "TexText"],
       "fact": ["style.fill_opacity", "style.stroke_width"],
-      "reason": "The point-less Text/Tex root reports opacity and width 1 where the Reference reports 0."
+      "reason": "A point-less Text/Tex root built outside the string front doors (Matrix entries, control labels) reports opacity and width 1 where the Reference reports 0; the front doors match since fm-78b6's string_lifecycle fix."
     },
     {
       "id": "bn08-brace-path-family",
