@@ -88,15 +88,6 @@
       "reason": "Glyph outlines inside text are BN-05 native typesetting. Glyph members align by index only, so their boxes are bounded through the text root's envelope."
     },
     {
-      "id": "fm-78b6-text-root-style",
-      "kind": "open-bead",
-      "ref": "fm-78b6",
-      "scope": ["classes", "scenes"],
-      "class": ["Text", "MarkupText", "Tex", "TexText"],
-      "fact": ["style.fill_opacity", "style.stroke_width"],
-      "reason": "A point-less Text/Tex root built outside the string front doors (Matrix entries, control labels) reports opacity and width 1 where the Reference reports 0; the front doors match since fm-78b6's string_lifecycle fix."
-    },
-    {
       "id": "bn08-brace-path-family",
       "kind": "behavior-note",
       "ref": "BN-08",
@@ -144,9 +135,9 @@
       "id": "fm-78b6-style-defaults",
       "kind": "open-bead",
       "ref": "fm-78b6",
-      "class": ["Annulus", "VCube", "NumberLine"],
+      "class": ["VCube", "NumberLine"],
       "fact": ["style.stroke_color", "style.fill_color"],
-      "reason": "Default stroke/fill colors differ: Annulus and VCube stroke, NumberPlane axis fill."
+      "reason": "Default stroke/fill colors differ: VCube stroke, NumberPlane axis fill. Annulus has taken VMobject's unset-channel defaults since fm-78b6's native-root fix."
     },
     {
       "id": "fm-6l2i-camera-frame-root",
@@ -299,10 +290,10 @@
       "kind": "open-bead",
       "ref": "fm-78b6",
       "scope": ["classes"],
-      "subject": ["AnnularSector", "AnnularSector#1", "ArrowTip", "ArrowTip#1", "BackgroundRectangle#1", "DashedVMobject#1", "Sector", "Sector#1", "SurfaceMesh#1", "VPrism", "VPrism#1", "VectorizedPoint", "VectorizedPoint#1"],
+      "subject": ["BackgroundRectangle#1", "DashedVMobject#1", "SurfaceMesh#1", "VPrism", "VPrism#1", "VectorizedPoint", "VectorizedPoint#1"],
       "class": ["AnnularSector", "Sector", "ArrowTip", "VPrism", "DashedVMobject", "VectorizedPoint", "BackgroundRectangle", "Prismify", "SurfaceMesh", "VGroup", "Square", "Rectangle", "Line", "Text", "RoundedRectangle"],
       "fact": ["style.stroke_color", "style.fill_color", "style.fill_opacity", "style.stroke_width", "style.stroke_opacity"],
-      "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults. Class-sweep scope is pinned to the 13 subjects that need it (measured 2026-09-28, fm-qead), so a style regression elsewhere, e.g. Square(color=RED, fill_color=BLUE), is no longer masked."
+      "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults. Class-sweep scope is pinned to the subjects that need it (13 measured 2026-09-28, fm-qead; 7 since fm-78b6's native-root defaults fixed AnnularSector, ArrowTip and Sector, 2026-10-10), so a style regression elsewhere, e.g. Square(color=RED, fill_color=BLUE), is no longer masked."
     },
     {
       "id": "fm-fc53-empty-position",

@@ -4301,6 +4301,22 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
         fill_opacity = opacity
     if stroke_opacity is None:
         stroke_opacity = opacity
+    # A native build never ran VMobject.__init__, which resolves an unset
+    # channel to the configured default (GREY_C fill, GREY_A stroke) on the
+    # mobject itself, before any submobject is added. Give such a root the
+    # same defaults; its children keep their own styles (fm-78b6). String
+    # and number classes are white in the Reference (their constructors pass
+    # their own colors), so they keep the native record.
+    if (
+        "fill_color" not in vars(mob)
+        and "stroke_color" not in vars(mob)
+        and not isinstance(mob, (StringMobject, DecimalNumber))
+    ):
+        defaults = _pinned_manim_config().vmobject
+        if stroke_color is None:
+            mob.set_stroke(color=defaults.default_stroke_color, recurse=False)
+        if fill_color is None:
+            mob.set_fill(color=defaults.default_fill_color, recurse=False)
     if any(
         value is not None
         for value in (stroke_color, stroke_width, stroke_opacity, stroke_behind, flat_stroke)
@@ -9198,6 +9214,10 @@ def _decorate_matrix_tex_entry(entry, source, font_size):
     # source unit; substring-granular selection is deliberately not claimed.
     entry._string_sub_spans = [(0, len(source.encode("utf-8")))]
     entry._string_sub_paths = [[]]
+    # A Reference Tex's point-less root has fill opacity 0 and stroke width
+    # 0; its glyphs carry the paint (fm-78b6, as in string_lifecycle).
+    entry.set_fill(opacity=0.0, recurse=False)
+    entry.set_stroke(width=0.0, recurse=False)
 
 
 def _decorate_matrix_decimal_entry(entry, value, font_size, places, style):
