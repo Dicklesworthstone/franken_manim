@@ -4074,6 +4074,76 @@ fn lifecycle_always_redraw_shared_source_run(
         .with_counter("redraw_roots_preserved", u64::from(roots_preserved)))
 }
 
+/// fm-c1up: TracingTail seeds its updater history while its public geometry
+/// stays empty until the first positive-dt observation is published.
+fn lifecycle_tracing_tail_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let initial = [2.0, 1.0, 0.0];
+    let current = [3.0, 2.0, 0.0];
+    let mut stage = Stage::new();
+    let source = stage.add(VMobject::from_points(vec![initial]));
+    let tail = fmn_library::TracingTail::new()
+        .with_time_traced(0.5)
+        .with_time_per_anchor(0.125)
+        .and_then(|tail| tail.add_to_stage(&mut stage, source))
+        .map_err(|error| fail(format!("tracing tail constructs: {error}")))?;
+    stage
+        .add_to_scene(tail)
+        .map_err(|error| fail(format!("tracing tail enters scene: {error}")))?;
+    let initial_points = stage
+        .get_points(tail)
+        .ok_or_else(|| fail("tracing tail handle is stale after construction"))?
+        .len() as u64;
+    stage
+        .set_points(source, &[current])
+        .map_err(|error| fail(format!("traced source moves: {error}")))?;
+    stage.update(0.0);
+    let zero_dt_points = stage
+        .get_points(tail)
+        .ok_or_else(|| fail("tracing tail handle is stale after zero dt"))?
+        .len() as u64;
+    stage.update(0.125);
+    let points = stage
+        .get_points(tail)
+        .ok_or_else(|| fail("tracing tail handle is stale after positive dt"))?;
+    let seed_preserved = points.first() == Some(&initial);
+    let endpoint_matches = points.last() == Some(&current);
+    let entry = stage
+        .get(tail)
+        .ok_or_else(|| fail("tracing tail style handle is stale"))?;
+    let widths = entry
+        .buffer
+        .read_column("stroke_width")
+        .ok_or_else(|| fail("tracing tail has no stroke width field"))?;
+    let rgba = entry
+        .buffer
+        .read_column("stroke_rgba")
+        .ok_or_else(|| fail("tracing tail has no stroke color field"))?;
+    let tapers_preserved = widths.first() == Some(&0.0)
+        && widths.last() == Some(&3.0)
+        && rgba.get(3) == Some(&0.0)
+        && rgba.last() == Some(&1.0);
+    let stateful = !fmn_anim::purity::classify_wait(&stage, false).is_pure();
+
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.tracing_tail")
+            .field("initial_points", initial_points)
+            .field("zero_dt_points", zero_dt_points)
+            .field("updated_points", points.len() as u64)
+            .field("seed_preserved", truth(seed_preserved))
+            .field("endpoint_matches", truth(endpoint_matches))
+            .field("tapers_preserved", truth(tapers_preserved))
+            .field("stateful", truth(stateful)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("trace_initial_points", initial_points)
+        .with_counter("trace_zero_dt_points", zero_dt_points)
+        .with_counter("trace_updated_points", points.len() as u64)
+        .with_counter("trace_seed_preserved", u64::from(seed_preserved))
+        .with_counter("trace_endpoint_matches", u64::from(endpoint_matches))
+        .with_counter("trace_tapers_preserved", u64::from(tapers_preserved))
+        .with_counter("trace_stateful", u64::from(stateful)))
+}
+
 /// Journal round-trip: the scene's command record (add, pure play,
 /// stateful wait) serializes, deserializes, hashes identically, and
 /// `plan_replay` reuses exactly the non-barrier prefix — and stops with
@@ -6002,6 +6072,33 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .tier(Tier::Fast),
     );
     specs.push(spec(
+        "lifecycle.tracing_tail_empty_until_update.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_tracing_tail_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("trace_initial_points", 0),
+            counter_eq("trace_zero_dt_points", 0),
+            counter_ge("trace_updated_points", 3),
+            counter_eq("trace_seed_preserved", 1),
+            counter_eq("trace_endpoint_matches", 1),
+            counter_eq("trace_tapers_preserved", 1),
+            counter_eq("trace_stateful", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.tracing_tail",
+            vec![
+                FieldPred::u64_eq("initial_points", 0),
+                FieldPred::u64_eq("zero_dt_points", 0),
+                FieldPred::str_eq("seed_preserved", "true"),
+                FieldPred::str_eq("endpoint_matches", "true"),
+                FieldPred::str_eq("tapers_preserved", "true"),
+                FieldPred::str_eq("stateful", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.typeset_cache_warm_second_run.v1",
         ScenarioClass::LifecycleDrill,
         Surface::CliInProcess,
@@ -7604,6 +7701,16 @@ fn always_redraw_shared_source_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.always_redraw_shared_source.v1")
         .expect("the shared-source redraw lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tracing_tail_lifecycle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.tracing_tail_empty_until_update.v1")
+        .expect("the tracing-tail lifecycle scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

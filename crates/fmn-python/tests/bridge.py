@@ -17670,11 +17670,19 @@ func_tail_widths = np.asarray(
 ).reshape(-1)
 assert func_tail_widths[0] < func_tail_widths[-1]
 
-# The mobject-traced native path still constructs against a bound target.
+# The native path seeds history against a bound target but publishes no
+# geometry until its first positive scene update.
 tail_traced_dot = manimlib.Dot()
 func_tail_scene.add(tail_traced_dot)
 mobject_tail = manimlib.TracingTail(tail_traced_dot)
-assert mobject_tail.get_num_points() > 0
+assert mobject_tail.get_num_points() == 0
+func_tail_scene.add(mobject_tail)
+func_tail_scene.update_frame(0)
+assert mobject_tail.get_num_points() == 0
+tail_traced_dot.shift(manimlib.RIGHT)
+func_tail_scene.update_frame(1.0 / 15)
+assert np.allclose(mobject_tail.get_start(), manimlib.ORIGIN)
+assert np.allclose(mobject_tail.get_end(), manimlib.RIGHT)
 
 # Named negative: neither a Mobject nor a callable.
 try:
@@ -18468,10 +18476,10 @@ else:
     raise AssertionError("element_to_mobject accepted a non-Matrix self")
 
 # fm-5wq.4.123: TracingTail's leftover constructor kwargs — the schema's
-# TracedPath chain carries time_per_anchor (stored-but-inert for the callable
-# path, exactly like TracedPath's own) and VMobject style keys; the native
-# tail routes that cadence into its constructor prefill, and unknown keys
-# stay named TypeErrors.
+# TracedPath chain carries time_per_anchor and VMobject style keys. The
+# native tail uses that cadence for its temporal grid after the first
+# positive update; construction and zero-dt updates publish no geometry.
+# Unknown keys stay named TypeErrors.
 tail_kw_func = manimlib.TracingTail(
     lambda: (0.0, 0.0, 0.0),
     time_per_anchor=1.0 / 30,
@@ -18484,13 +18492,28 @@ tail_kw_dot = manimlib.Dot()
 tail_kw_scene.add(tail_kw_dot)
 tail_kw_native = manimlib.TracingTail(tail_kw_dot, fill_opacity=0.0)
 assert tail_kw_native.time_per_anchor == 1.0 / 15
-assert tail_kw_native.get_num_points() == 29
+assert tail_kw_native.get_num_points() == 0
 tail_kw_native_30hz = manimlib.TracingTail(
     tail_kw_dot,
     time_per_anchor=1.0 / 30,
 )
 assert tail_kw_native_30hz.time_per_anchor == 1.0 / 30
-assert tail_kw_native_30hz.get_num_points() == 59
+assert tail_kw_native_30hz.get_num_points() == 0
+tail_kw_scene.add(tail_kw_native, tail_kw_native_30hz)
+tail_kw_scene.update_frame(0)
+assert tail_kw_native.get_num_points() == 0
+assert tail_kw_native_30hz.get_num_points() == 0
+tail_kw_dot.shift(manimlib.RIGHT)
+tail_kw_scene.update_frame(1.0 / 15)
+# One second contains 15 or 30 complete anchor intervals, with both
+# endpoints present. Each smoothed interval contributes two quad points.
+assert tail_kw_native.get_num_points() == 31
+assert tail_kw_native_30hz.get_num_points() == 61
+for updated_native_tail in (tail_kw_native, tail_kw_native_30hz):
+    assert np.allclose(updated_native_tail.get_start(), manimlib.ORIGIN)
+    assert np.allclose(updated_native_tail.get_end(), manimlib.RIGHT)
+    assert updated_native_tail.get_stroke_widths()[0] < updated_native_tail.get_stroke_widths()[-1]
+    assert updated_native_tail.get_stroke_opacities()[0] < updated_native_tail.get_stroke_opacities()[-1]
 
 for invalid_time_per_anchor in (0.0, -1.0, float("inf"), float("nan")):
     try:
