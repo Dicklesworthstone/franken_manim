@@ -201,7 +201,7 @@ fn overlap_with_rectangle(polygon: &[[f64; 2]], min: [f64; 3], max: [f64; 3]) ->
             0,
             "closed outline has paired crossings"
         );
-        for span in crossings.chunks_exact(2) {
+        for span in crossings.as_chunks::<2>().0 {
             area +=
                 (interval[1] - interval[0]) * (span[1].min(max[1]) - span[0].max(min[1])).max(0.0);
         }
