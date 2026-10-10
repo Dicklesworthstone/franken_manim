@@ -1410,10 +1410,15 @@ mod std_runner {
             .expect("start sleeping child");
         let delivered = Arc::new(AtomicU64::new(0));
         let writing = Arc::new(AtomicBool::new(false));
-        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        // The write's outcome is reported the moment it returns, before
+        // `finish` waits on the child, so a write that ends without being
+        // unblocked is seen as returning early rather than after the cancel.
+        let (write_tx, write_rx) = mpsc::sync_channel(1);
+        let (finish_tx, finish_rx) = mpsc::sync_channel(1);
         {
             let delivered = Arc::clone(&delivered);
             let writing = Arc::clone(&writing);
+            let observer = cancellation.clone();
             thread::spawn(move || {
                 let mut process = process;
                 let chunk = vec![0u8; CHUNK];
@@ -1424,7 +1429,12 @@ mod std_runner {
                     }
                     delivered.fetch_add(CHUNK as u64, Ordering::AcqRel);
                 };
-                let _ = done_tx.send((write, process.finish()));
+                // A write that cancellation unblocked returns after the
+                // request; one that fails on its own (a non-blocking pipe, a
+                // write timeout) returns before it.
+                let after_cancel = observer.is_cancelled();
+                let _ = write_tx.send((write, after_cancel));
+                let _ = finish_tx.send(process.finish());
             });
         }
 
@@ -1438,7 +1448,7 @@ mod std_runner {
                 Instant::now() < deadline,
                 "the stdin pipe never filled ({seen} bytes accepted)"
             );
-            let early = done_rx.try_recv().ok().map(|(write, _)| write.to_string());
+            let early = write_rx.try_recv().ok().map(|(write, _)| write.to_string());
             assert_eq!(
                 early, None,
                 "the writer returned before cancellation after {seen} bytes"
@@ -1456,9 +1466,13 @@ mod std_runner {
         // ubs:ignore - elapsed-time assertion, not security-token generation.
         let started = Instant::now();
         cancellation.cancel();
-        let (write, finish) = done_rx
+        let (write, after_cancel) = write_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("cancellation must unblock a writer blocked on a full stdin pipe");
+        assert!(
+            after_cancel,
+            "the write failed before cancellation was requested: {write}"
+        );
         // The blocked write returns only because the killed child's end of
         // the pipe closed, never through the cancelled-before-write check.
         let pipe_closed = matches!(
@@ -1470,6 +1484,9 @@ mod std_runner {
             "the blocked write must fail on the closed pipe: {write}"
         );
         assert!(delivered.load(Ordering::Acquire) < MAX_TOTAL);
+        let finish = finish_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the cancelled session finishes");
         assert_eq!(
             finish.expect("supervisor outcome").termination,
             ProcessTermination::Cancelled

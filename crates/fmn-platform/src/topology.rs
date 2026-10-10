@@ -807,8 +807,9 @@ impl HardwareTopology {
     /// `hw.physicalcpu` or a level's CPU counts are absent;
     /// [`TopologyError::SysctlParse`] for a malformed value; and
     /// [`TopologyError::Invalid`] when the levels do not partition the
-    /// machine, a level's logical CPUs are not a whole multiple of its cores,
-    /// or the host reports more than one package.
+    /// machine, a level has no cores, fewer logical CPUs than cores, or
+    /// logical CPUs that are not a whole multiple of its cores, or the host
+    /// reports more than one package.
     pub fn detect_macos(sysctl: &dyn SysctlSource) -> Result<Self, TopologyError> {
         let logical = sysctl_u32(sysctl, "hw.logicalcpu")?;
         let physical = sysctl_u32(sysctl, "hw.physicalcpu")?;
@@ -856,7 +857,12 @@ impl HardwareTopology {
         let mut next_id = 0_u32;
         let mut next_core = 0_u32;
         for (index, level) in levels.iter().enumerate() {
-            if level.physical == 0 || !level.logical.is_multiple_of(level.physical) {
+            // Every core carries at least one logical CPU: zero is a whole
+            // multiple of any core count, so it is refused by name.
+            if level.physical == 0
+                || level.logical < level.physical
+                || !level.logical.is_multiple_of(level.physical)
+            {
                 return Err(TopologyError::Invalid {
                     detail: format!(
                         "performance level {index} has {} logical CPUs over {} cores",

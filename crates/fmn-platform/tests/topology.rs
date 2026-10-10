@@ -405,6 +405,21 @@ fn macos_smt_levels_and_pre_perflevel_hosts() {
         HardwareTopology::detect_macos(&ragged),
         Err(TopologyError::Invalid { detail }) if detail.contains("performance level 0")
     ));
+
+    // A level with cores but no logical CPUs is refused too, although zero
+    // is a whole multiple of any core count and the levels still sum to the
+    // host's totals. Admitted, it would report 10 cores without SMT while
+    // its CPU list holds 5 cores of two threads each.
+    let hollow = SysctlSnapshot::parse(
+        "hw.logicalcpu: 10\nhw.physicalcpu: 10\nhw.nperflevels: 2\n\
+         hw.perflevel0.logicalcpu: 10\nhw.perflevel0.physicalcpu: 5\n\
+         hw.perflevel1.logicalcpu: 0\nhw.perflevel1.physicalcpu: 5\n",
+    )
+    .expect("synthetic listing");
+    assert!(matches!(
+        HardwareTopology::detect_macos(&hollow),
+        Err(TopologyError::Invalid { detail }) if detail.contains("performance level 1")
+    ));
 }
 
 #[test]
