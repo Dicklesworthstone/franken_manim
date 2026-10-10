@@ -352,16 +352,52 @@ pub struct PianoBuild {
     pub black_key_indices: Vec<usize>,
 }
 
+/// Keep the group and its white/black keys within the 65,536-member
+/// family budget, including a pattern that places a black key in every gap.
+pub const MAX_PIANO_WHITE_KEYS: usize = 32_768;
+
+/// Invalid keyboard dimensions or a failure to cut the neighboring keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PianoError {
+    /// A constructor argument cannot describe a finite keyboard.
+    InvalidParameter(&'static str),
+    /// Native key geometry or boolean notching failed.
+    Geometry(BooleanMobjectError),
+}
+
+impl fmt::Display for PianoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidParameter(name) => write!(f, "invalid Piano {name}"),
+            Self::Geometry(error) => write!(f, "Piano key geometry: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PianoError {}
+
+impl From<BooleanMobjectError> for PianoError {
+    fn from(error: BooleanMobjectError) -> Self {
+        Self::Geometry(error)
+    }
+}
+
+impl From<fmn_geom::GeomError> for PianoError {
+    fn from(error: fmn_geom::GeomError) -> Self {
+        Self::Geometry(error.into())
+    }
+}
+
 /// `Piano` (drawings.py:593): `n_white_keys` white keys, black keys at the
-/// octave positions the pattern skips, each neighboring white key notched
+/// octave positions included in the pattern, each neighboring white key notched
 /// by a boolean difference against the enlarged black key — the
 /// Reference's `wk.become(Difference(wk, big_bk))` running on the
 /// certified Chisel kernel. Keys sort by x, all but the last
 /// point-reverse, and the keyboard fits to `total_width`.
 ///
 /// # Errors
-/// [`BooleanMobjectError`] from the boolean notching or the key geometry.
-pub fn piano() -> Result<VMobject, BooleanMobjectError> {
+/// [`PianoError`] from the boolean notching or the key geometry.
+pub fn piano() -> Result<VMobject, PianoError> {
     Ok(piano_with(
         52,
         &[0, 2, 3, 5, 6],
@@ -380,7 +416,10 @@ pub fn piano() -> Result<VMobject, BooleanMobjectError> {
 /// child indices for the Piano3D elevation.
 ///
 /// # Errors
-/// [`BooleanMobjectError`] from the boolean notching or the key geometry.
+/// [`PianoError::InvalidParameter`] for zero key counts, a count above
+/// [`MAX_PIANO_WHITE_KEYS`], nonpositive or non-finite dimensions/total
+/// width, a negative/non-finite gap, or a cutter that erases a white key.
+/// [`PianoError::Geometry`] from the boolean notching or the key geometry.
 #[allow(clippy::too_many_arguments)]
 pub fn piano_with(
     n_white_keys: usize,
@@ -392,7 +431,49 @@ pub fn piano_with(
     white_key_color: Srgb,
     black_key_color: Srgb,
     total_width: f64,
-) -> Result<PianoBuild, BooleanMobjectError> {
+) -> Result<PianoBuild, PianoError> {
+    if n_white_keys == 0 {
+        return Err(PianoError::InvalidParameter(
+            "n_white_keys: must be positive",
+        ));
+    }
+    if n_white_keys > MAX_PIANO_WHITE_KEYS {
+        return Err(PianoError::InvalidParameter(
+            "n_white_keys: family budget exceeded",
+        ));
+    }
+    if white_keys_per_octave == 0 {
+        return Err(PianoError::InvalidParameter(
+            "white_keys_per_octave: must be positive",
+        ));
+    }
+    for (name, value) in [
+        ("white_key_dims width", white_key_dims.0),
+        ("white_key_dims height", white_key_dims.1),
+        ("black_key_dims width", black_key_dims.0),
+        ("black_key_dims height", black_key_dims.1),
+        ("total_width", total_width),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(PianoError::InvalidParameter(name));
+        }
+    }
+    if !key_buff.is_finite() || key_buff < 0.0 {
+        return Err(PianoError::InvalidParameter(
+            "key_buff: must be finite and nonnegative",
+        ));
+    }
+    let keyboard_width = f64::from(n_white_keys as u32) * white_key_dims.0
+        + f64::from((n_white_keys - 1) as u32) * key_buff;
+    if !keyboard_width.is_finite()
+        || !(white_key_dims.0 + key_buff).is_finite()
+        || !(black_key_dims.0 + key_buff).is_finite()
+        || !(black_key_dims.1 + key_buff).is_finite()
+    {
+        return Err(PianoError::InvalidParameter(
+            "key dimensions overflow the keyboard extent",
+        ));
+    }
     let white_style = Style::default()
         .fill(white_key_color, 1.0)
         .stroke(white_key_color, 0.0, 1.0);
@@ -401,22 +482,24 @@ pub fn piano_with(
         .stroke(black_key_color, 0.0, 1.0);
     let (ww, wh) = white_key_dims;
     let (bw, bh) = black_key_dims;
+    let white_key = crate::poly::Rectangle::new()
+        .width(ww)
+        .height(wh)
+        .style(white_style)
+        .build()?;
+    let black_key = crate::poly::Rectangle::new()
+        .width(bw)
+        .height(bh)
+        .style(black_style)
+        .build()?;
     let mut white_keys: Vec<VMobject> = Vec::with_capacity(n_white_keys);
     for i in 0..n_white_keys {
         let x = f64::from(i as u32) * (ww + key_buff);
-        white_keys.push(
-            crate::poly::Rectangle::new()
-                .width(ww)
-                .height(wh)
-                .style(white_style)
-                .build()
-                .expect("a piano key builds: pure geometry")
-                .moved_to([x + ww / 2.0, 0.0, 0.0]),
-        );
+        white_keys.push(white_key.clone().moved_to([x + ww / 2.0, 0.0, 0.0]));
     }
     let mut black_keys: Vec<VMobject> = Vec::new();
     for i in 0..n_white_keys.saturating_sub(1) {
-        if black_pattern.contains(&(i % white_keys_per_octave)) {
+        if !black_pattern.contains(&(i % white_keys_per_octave)) {
             continue;
         }
         let top1 = white_keys[i]
@@ -426,25 +509,25 @@ pub fn piano_with(
             .bbox_point(UP)
             .expect("a white key has an extent");
         let midpoint = [0.5 * (top1[0] + top2[0]), 0.5 * (top1[1] + top2[1]), 0.0];
-        let black = crate::poly::Rectangle::new()
-            .width(bw)
-            .height(bh)
-            .style(black_style)
-            .build()
-            .expect("a piano key builds: pure geometry")
-            .moved_to_aligned(midpoint, UP);
+        let black = black_key.clone().moved_to_aligned(midpoint, UP);
         // The enlarged cutter, then the notch (Difference(wk, big_bk)).
         let (gw, gh) = black
             .extent()
             .map_or((bw, bh), |(min, max)| (max[0] - min[0], max[1] - min[1]));
         let big_black = black
             .clone()
-            .scaled_about((gw + key_buff) / gw.max(1e-9), ORIGIN)
-            .stretched_about((gh + key_buff) / gh.max(1e-9), 1, ORIGIN)
+            .stretched_about((gw + key_buff) / gw, 0, ORIGIN)
+            .stretched_about((gh + key_buff) / gh, 1, ORIGIN)
             .moved_to_aligned(midpoint, UP);
-        white_keys[i] = crate::boolean_ops::difference(&white_keys[i], &big_black)?
-            .into_mobject()
-            .map_style(move |_| white_style);
+        for neighbor in &mut white_keys[i..=i + 1] {
+            let notched = crate::boolean_ops::difference(neighbor, &big_black)?.into_mobject();
+            if notched.points().is_empty() {
+                return Err(PianoError::InvalidParameter(
+                    "black_key_dims erase a white key",
+                ));
+            }
+            *neighbor = notched.map_style(move |_| white_style);
+        }
         black_keys.push(black);
     }
     // sort_keys: one x-sorted child list, tracking which are black.
@@ -472,8 +555,15 @@ pub fn piano_with(
             key.reversed_points()
         });
     }
+    let keyboard = v_group(keyboard).moved_to(ORIGIN);
+    let scale = total_width / keyboard.length_over_dim(0);
+    if !scale.is_finite() || scale <= 0.0 || !(keyboard.length_over_dim(1) * scale).is_finite() {
+        return Err(PianoError::InvalidParameter(
+            "total_width: scaled keyboard must remain finite",
+        ));
+    }
     Ok(PianoBuild {
-        vmob: v_group(keyboard).with_width(total_width, true),
+        vmob: keyboard.with_width(total_width, false),
         black_key_indices,
     })
 }
@@ -483,8 +573,8 @@ pub fn piano_with(
 /// depth-tested, with the black keys elevated along OUT and recolored.
 ///
 /// # Errors
-/// [`fmn_geom::GeomError`] from the 2D piano or the extrusions.
-pub fn piano_3d() -> Result<VMobject, BooleanMobjectError> {
+/// [`PianoError`] from the 2D piano's key geometry or notching.
+pub fn piano_3d() -> Result<VMobject, PianoError> {
     let build = piano_with(
         52,
         &[0, 2, 3, 5, 6],
@@ -496,6 +586,11 @@ pub fn piano_3d() -> Result<VMobject, BooleanMobjectError> {
         GREY_E,
         13.0,
     )?;
+    let shade = |mut uniforms: fmn_mobject::Uniforms| {
+        uniforms.shading = [1.0, 0.2, 0.2];
+        uniforms.depth_test = true;
+        uniforms
+    };
     let black: std::collections::HashSet<usize> = build.black_key_indices.iter().copied().collect();
     let keys: Vec<VMobject> = build
         .vmob
@@ -503,7 +598,13 @@ pub fn piano_3d() -> Result<VMobject, BooleanMobjectError> {
         .iter()
         .enumerate()
         .map(|(index, key)| {
-            let mut extruded = crate::solids::Prismify::new(key.clone()).depth(0.1).build();
+            // Prismify's visible geometry lives in its flat face children;
+            // changing only a key or piano group leaves their lighting stale.
+            let mut extruded = crate::solids::Prismify::new(key.clone())
+                .depth(0.1)
+                .build()
+                .map_children(|face| face.map_uniforms(shade))
+                .map_uniforms(shade);
             if black.contains(&index) {
                 extruded = extruded
                     .shifted(fmn_core::constants::OUT.map(|c| c * 0.05))
@@ -514,11 +615,7 @@ pub fn piano_3d() -> Result<VMobject, BooleanMobjectError> {
         .collect();
     Ok(v_group(keys)
         .map_style_deep(|style| style.stroke(BLACK, 0.25, 1.0))
-        .with_uniforms(fmn_mobject::Uniforms {
-            shading: [1.0, 0.2, 0.2],
-            depth_test: true,
-            ..fmn_mobject::Uniforms::default()
-        }))
+        .map_uniforms(shade))
 }
 
 // ------------------------------------------------ tranche 3 (fm-3kr): the

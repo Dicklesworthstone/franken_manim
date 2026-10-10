@@ -4115,6 +4115,50 @@ fn lifecycle_journal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
 // fm-3kr / fm-n64 enhanced-surface lifecycle drills
 // ---------------------------------------------------------------------------
 
+/// fm-c1up: an 88-key keyboard keeps its musical layout and proportions
+/// through native stage adoption and real frame rendering.
+fn piano_keyboard_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let keyboard = fmn_library::drawings::piano()
+        .map_err(|error| fail(format!("native piano construction: {error}")))?;
+    let keys = keyboard.children().len() as u64;
+    let black = keyboard
+        .children()
+        .iter()
+        .filter(|key| key.style().fill_color == fmn_core::constants::GREY_E)
+        .count() as u64;
+    let expected_height = 13.0 / (52.0 * 0.15 + 51.0 * 0.02);
+    let centered = keyboard
+        .center_point()
+        .iter()
+        .all(|value| value.abs() < 1e-9);
+    let proportions = (keyboard.length_over_dim(0) - 13.0).abs() < 1e-9
+        && (keyboard.length_over_dim(1) - expected_height).abs() < 1e-9;
+    let mut stage = Stage::new();
+    let root = stage.add(keyboard);
+    stage
+        .add_to_scene(root)
+        .map_err(|error| fail(format!("piano stage adoption: {error}")))?;
+    let initial = render_certified_doc(&stage);
+    stage.shift(root, UP);
+    let moved = render_certified_doc(&stage);
+    let blank = render_certified_doc(&Stage::new());
+    let visible_motion = initial != blank && moved != blank && initial != moved;
+    ctx.event(
+        LogEvent::new("e2e.drawings.piano")
+            .field("keys", keys)
+            .field("black_keys", black)
+            .field("centered", truth(centered))
+            .field("proportions", truth(proportions))
+            .field("visible_motion", truth(visible_motion)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("piano_keys", keys)
+        .with_counter("piano_black_keys", black)
+        .with_counter("piano_centered", u64::from(centered))
+        .with_counter("piano_proportions", u64::from(proportions))
+        .with_counter("piano_visible_motion", u64::from(visible_motion)))
+}
+
 /// The drawings shelf's asset-backed families refuse by name (ADR-0020):
 /// every default constructor surfaces `AssetNotShipped` naming its class
 /// and file — never a placeholder build.
@@ -7218,6 +7262,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     // ------------------------------------------------------------------
     specs.push(
         spec(
+            "drawings.piano_keyboard.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(piano_keyboard_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("piano_keys", 88),
+                counter_eq("piano_black_keys", 36),
+                counter_eq("piano_centered", 1),
+                counter_eq("piano_proportions", 1),
+                counter_eq("piano_visible_motion", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.drawings.piano",
+                vec![
+                    FieldPred::u64_eq("keys", 88),
+                    FieldPred::u64_eq("black_keys", 36),
+                    FieldPred::str_eq("visible_motion", "true"),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
             "drawings.asset_refusals_named.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -7439,6 +7508,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 // Test entry points
 // ---------------------------------------------------------------------------
+
+#[test]
+fn piano_keyboard_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "drawings.piano_keyboard.v1")
+        .expect("native piano keyboard scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
 
 /// fm-5wq.46's native semantic-oracle scenario, focused.
 #[test]
