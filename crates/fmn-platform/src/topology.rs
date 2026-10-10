@@ -567,13 +567,21 @@ fn darwin_levels(sysctl: &dyn SysctlSource) -> Result<Vec<DarwinLevel>, Topology
         .collect()
 }
 
-/// Append one cache domain per `cpus_per_domain`-wide run of `cpus`. Unknown
-/// sharing records no domain: a width is never guessed.
+/// Append one cache domain per `cpus_per_domain`-wide run of `cpus`; a width
+/// at least as wide as `cpus` is one domain holding all of them. Unknown
+/// sharing records no domain: a width is never guessed, and neither is a
+/// membership. A narrower width that does not divide `cpus` would end in a
+/// shorter run that Darwin never reported (the M4 Pro's `hw.cacheconfig`
+/// gives an L2 width of 4 over 14 CPUs clustered 5 + 5 + 4), so it records
+/// none.
 fn push_darwin_domains(out: &mut Vec<CacheDomain>, level: u8, cache: &SharedCache, cpus: &[u32]) {
     let Some(width) = cache.cpus_per_domain else {
         return;
     };
     let width = usize::try_from(width).unwrap_or(usize::MAX);
+    if width < cpus.len() && !cpus.len().is_multiple_of(width) {
+        return;
+    }
     for chunk in cpus.chunks(width) {
         out.push(CacheDomain {
             level,
@@ -793,7 +801,8 @@ impl HardwareTopology {
     /// Each performance level (`hw.perflevel{N}`, highest performance first)
     /// contributes its cores in order: level 0 is [`PerfClass::Performance`],
     /// every later level [`PerfClass::Efficiency`]. A level's `cpusperl2` /
-    /// `cpusperl3` width splits its CPUs into cache domains. macOS predating
+    /// `cpusperl3` width splits its CPUs into cache domains when it divides
+    /// them (a width that does not records none). macOS predating
     /// performance levels is one uniform level, with cache sharing from
     /// `hw.cacheconfig`.
     ///

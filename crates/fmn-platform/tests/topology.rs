@@ -438,6 +438,35 @@ fn macos_smt_levels_and_pre_perflevel_hosts() {
     ));
 }
 
+/// Darwin reports how many CPUs share a cache, never which ones. A width that
+/// does not divide a level cannot place the remainder, so no domain is
+/// recorded for it rather than a guessed short one.
+#[test]
+fn macos_cache_widths_that_do_not_divide_a_level_record_no_domain() {
+    let l2 = |size_mib: u64, cpus: std::ops::Range<u32>| CacheDomain {
+        level: 2,
+        size_bytes: Some(size_mib * 1024 * 1024),
+        cpus: cpus.collect(),
+    };
+
+    // The M4 Pro's own hw.cacheconfig says 4 CPUs share an L2, over 14 CPUs
+    // whose real clusters are 5 + 5 + 4. Read without its performance levels,
+    // that is no domain, not 4 + 4 + 4 + 2.
+    let flat = detect_m4_pro_with("hw.nperflevels: 2", "").expect("detect");
+    assert_eq!(flat.logical_cores(), 14);
+    assert!(flat.l2_domains.is_empty(), "{:?}", flat.l2_domains);
+
+    // A P-level width of 4 over its 10 CPUs: no P domain, the E cluster stays.
+    let ragged = detect_m4_pro_with("hw.perflevel0.cpusperl2: 5", "hw.perflevel0.cpusperl2: 4")
+        .expect("detect");
+    assert_eq!(ragged.l2_domains, vec![l2(4, 10..14)]);
+
+    // A width at least as wide as the level is one domain holding all of it.
+    let wider = detect_m4_pro_with("hw.perflevel0.cpusperl2: 5", "hw.perflevel0.cpusperl2: 12")
+        .expect("detect");
+    assert_eq!(wider.l2_domains, vec![l2(16, 0..10), l2(4, 10..14)]);
+}
+
 #[test]
 fn sysctl_listings_parse_strictly() {
     for (bad, why) in [
