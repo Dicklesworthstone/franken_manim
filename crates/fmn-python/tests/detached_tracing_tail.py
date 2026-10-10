@@ -19,9 +19,13 @@ class DetachedTailTests(unittest.TestCase):
         self.assertNotIn(source, tail.get_family())
         self.assertIs(type(tail), QualifiedTail)
         self.assertIsInstance(tail, m.TracedPath)
-        np.testing.assert_allclose(tail.get_end(), m.LEFT)
+        self.assertEqual(tail.get_num_points(), 0)
+        self.assertEqual(len(tail.traced_points), 4)
+        tail.update(0)
+        self.assertEqual(tail.get_num_points(), 0)
         source.shift(2 * m.RIGHT)
         tail.update(.125)
+        np.testing.assert_allclose(tail.get_start(), m.LEFT)
         np.testing.assert_allclose(tail.get_end(), m.RIGHT)
 
     def test_later_adoption_uses_the_same_live_source_and_scene_clock(self):
