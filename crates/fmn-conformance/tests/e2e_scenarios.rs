@@ -4067,9 +4067,9 @@ fn lifecycle_install_shared_family_run(ctx: &mut RunCtx) -> Result<RunOutcome, S
         && stage.get_points(shared_leaf) == Some(vec![[2.0, 1.0, 0.0]])
         && stage
             .get(outside)
-            .is_some_and(|entry| entry.submobjects() == &[shared]);
+            .is_some_and(|entry| entry.submobjects() == [shared]);
     let rooted_preserved = stage.get_points(rooted) == Some(vec![[3.0, -1.0, 0.0]]);
-    let roots_preserved = stage.roots() == &[owner, outside, rooted];
+    let roots_preserved = stage.roots() == [owner, outside, rooted];
     let installed = stage.family(owner);
     let replacement_geometry = stage.get_points(owner)
         == Some(vec![[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
@@ -4129,15 +4129,15 @@ fn lifecycle_always_redraw_shared_source_run(
         stage.update(0.125);
         shared_links &= stage
             .get(redraw)
-            .is_some_and(|entry| entry.submobjects() == &[source])
+            .is_some_and(|entry| entry.submobjects() == [source])
             && stage
                 .get(other_parent)
-                .is_some_and(|entry| entry.submobjects() == &[source]);
+                .is_some_and(|entry| entry.submobjects() == [source]);
         current_geometry &= stage.get_points(source) == Some(vec![point]);
     }
     let source_alive = stage.contains(source);
     let other_parent_alive = stage.contains(other_parent);
-    let roots_preserved = stage.roots() == &[other_parent, redraw];
+    let roots_preserved = stage.roots() == [other_parent, redraw];
     ctx.event(
         LogEvent::new("e2e.lifecycle.always_redraw_shared_source")
             .field("factory_calls", calls.get())
@@ -6122,9 +6122,7 @@ fn spec(
 /// The seed scenario catalog: every registered e2e scenario, as data.
 #[must_use]
 pub fn catalog() -> Vec<ScenarioSpec> {
-    let mut specs = Vec::new();
-
-    specs.push(
+    let mut specs = vec![
         spec(
             "lifecycle.install_shared_family.v1",
             ScenarioClass::LifecycleDrill,
@@ -6152,7 +6150,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             )],
         )
         .tier(Tier::Fast),
-    );
+    ];
     specs.push(
         spec(
             "lifecycle.always_redraw_shared_source.v1",
