@@ -1687,6 +1687,92 @@ fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("studio_backend_journaled", 1))
 }
 
+/// Exercise the live mixed 3D registration through the public Studio root.
+/// Surfaces, point clouds, images and vectors must reach the camera renderer,
+/// retain their motion, and produce identical pixels at either thread width.
+fn studio_camera_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let fs = fmn_platform::fs::VirtualFs::new();
+    let mut baseline = None;
+    let mut camera_frames = 0_u64;
+    let mut moving_runs = 0_u64;
+    let mut matching_runs = 0_u64;
+    let mut artifact = Vec::new();
+    for threads in ["1", "4"] {
+        let invocation = fmn_cli::parse_args([
+            "studio",
+            "--no-browser",
+            "--resolution",
+            "64x48",
+            "--fps",
+            "8",
+            "--threads",
+            threads,
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "mixed_camera.v1",
+        ])
+        .map_err(|error| fail(format!("parse live camera Studio: {error}")))?;
+        let fmn_cli::Invocation::Studio(command) = invocation else {
+            return Err(fail("camera Studio parsed to a different front door"));
+        };
+        let mut frames = Vec::new();
+        for index in [0, 8] {
+            let stream = fmn_cli::compose_studio_preview_frame(&fs, &command, index)
+                .map_err(|error| fail(format!("compose live camera frame: {error}")))?;
+            stream
+                .validate(fmn_studio::ProtocolLimits::default())
+                .map_err(|error| fail(format!("validate live camera frame: {error}")))?;
+            let camera_identity = stream.render_backends.len() == 1
+                && stream.render_backends[0]
+                    .identity()
+                    .windows(b"lumen-retained-camera-cpu-v1".len())
+                    .any(|part| part == b"lumen-retained-camera-cpu-v1");
+            if !camera_identity
+                || stream.scene != "mixed_camera.v1"
+                || stream.frame_index != index as u64
+                || (stream.width, stream.height) != (64, 48)
+            {
+                return Err(fail(
+                    "live Studio lost its requested scene, frame or camera renderer",
+                ));
+            }
+            let fmn_studio::FramePayload::Pipe { bytes, .. } = stream.payload else {
+                return Err(fail("live camera Studio omitted its bounded PNG payload"));
+            };
+            let decoded = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(format!("decode live camera frame: {error}")))?;
+            if (decoded.width, decoded.height) != (64, 48) {
+                return Err(fail(
+                    "live camera PNG dimensions differ from the frame protocol",
+                ));
+            }
+            camera_frames += 1;
+            ctx.event(
+                LogEvent::new("e2e.studio.camera_preview")
+                    .field("scene", "mixed_camera.v1")
+                    .field("threads", threads)
+                    .field("frame", index as u64)
+                    .field("camera_identity", truth(camera_identity))
+                    .field("sha256", sha256(&decoded.rgba).to_hex()),
+            );
+            frames.push(decoded.rgba);
+            if threads == "1" && index == 8 {
+                artifact = bytes;
+            }
+        }
+        moving_runs += u64::from(frames[0] != frames[1]);
+        if let Some(expected) = &baseline {
+            matching_runs += u64::from(&frames == expected);
+        } else {
+            baseline = Some(frames);
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("studio_camera_frame.png", artifact)
+        .with_counter("studio_camera_frames", camera_frames)
+        .with_counter("studio_camera_moving_runs", moving_runs)
+        .with_counter("studio_camera_matching_runs", matching_runs))
+}
+
 const STUDIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const STUDIO_HEADER_LIMIT: usize = 16 * 1024;
 const STUDIO_BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -6721,6 +6807,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.studio_camera_preview.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::StudioInProcess,
+        Invocation::new(studio_camera_preview_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["studio_camera_frame.png".to_owned()]),
+            counter_eq("studio_camera_frames", 4),
+            counter_eq("studio_camera_moving_runs", 2),
+            counter_eq("studio_camera_matching_runs", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.camera_preview",
+            vec![
+                FieldPred::str_eq("scene", "mixed_camera.v1"),
+                FieldPred::str_eq("camera_identity", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_native_worker.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioSubprocess,
@@ -8369,6 +8475,16 @@ fn python_portal_png_still_scenario_passes() {
 }
 
 /// Focused entry for the same mandatory fast-tier production lifecycle row.
+#[test]
+fn studio_camera_preview_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.studio_camera_preview.v1")
+        .expect("the live Studio camera scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 #[test]
 fn studio_native_worker_lifecycle_scenario_passes() {
     let scenario = catalog()

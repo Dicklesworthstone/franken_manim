@@ -1,9 +1,9 @@
-//! Offline camera selection is an input capability, not a completion-order guess.
+//! Camera selection is an input capability, not a completion-order guess.
 //!
 //! Vector-only inputs retain their original affine path. A compiled artifact
 //! with camera-only draws uses one fixed camera for the entire generation,
-//! including frames before/after a 3D object appears. The exporter did not
-//! record a camera-rig binding in FMTL/1; no tracker family is guessed as one.
+//! including frames before/after a 3D object appears. Camera-bearing FMTL/1
+//! artifacts replay their exact captured track; no tracker family is guessed.
 
 use super::{CliError, NativeRenderInput};
 use fmn_render::{Camera, CameraConfig, CameraFrame};
@@ -35,6 +35,10 @@ pub(super) fn for_input(
 }
 
 pub(super) fn camera(config: &fmn_config::Config) -> Result<Camera, CliError> {
+    Camera::new(camera_config(config)?).map_err(|error| CliError::new("config", error.to_string()))
+}
+
+pub(super) fn camera_config(config: &fmn_config::Config) -> Result<CameraConfig, CliError> {
     let frame_config = super::resolved_frame_config(config)?;
     let (width, height) = config.camera.resolution;
     let mut frame = CameraFrame::default();
@@ -44,14 +48,13 @@ pub(super) fn camera(config: &fmn_config::Config) -> Result<Camera, CliError> {
             config.sizes.frame_height,
         ])
         .map_err(|error| CliError::new("config", error.to_string()))?;
-    Camera::new(CameraConfig {
+    Ok(CameraConfig {
         resolution: (width, height),
         fps: config.camera.fps,
         background: frame_config.background,
         frame,
         ..CameraConfig::default()
     })
-    .map_err(|error| CliError::new("config", error.to_string()))
 }
 
 /// Content descriptor for the actual perspective kernel and fixed camera.
@@ -105,6 +108,15 @@ pub(super) struct CameraScene {
     name: &'static str,
 }
 
+pub(super) const CAMERA_SCENE_RUN_TIME: f64 = 0.25;
+
+/// Shape registrations whose authored animation is shared by offline playback
+/// and the live Studio worker. The separate typesetting witness is not a live
+/// native-program registration.
+pub(super) fn studio_builtin(name: &str) -> Option<CameraScene> {
+    builtin(name).filter(|scene| scene.name != SEMANTIC_WITNESS_CAMERA_SCENE_NAME)
+}
+
 const fn witness_scene() -> fmn::builtins::SemanticWitnessScene {
     fmn::builtins::SemanticWitnessScene::new()
 }
@@ -125,21 +137,34 @@ impl fmn::SceneConstruct for CameraScene {
     }
 
     fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
-        use fmn::prelude::*;
-        use fmn_library::{DotCloud, ImageMobject};
         if self.name == SEMANTIC_WITNESS_CAMERA_SCENE_NAME {
             return witness_scene().construct(stage);
         }
+        if let Some(mob) = self.populate(stage.scene_mut())? {
+            stage.play(Self::movement(mob)?)?;
+        }
+        Ok(())
+    }
+}
+
+impl CameraScene {
+    fn populate(&self, scene: &mut fmn_scene::Scene) -> fmn::Result<Option<fmn::mobject::Mob>> {
+        use fmn::prelude::*;
+        use fmn_library::{DotCloud, ImageMobject};
         let mixed = self.name == "mixed_camera.v1";
         let mut moving = None;
         if mixed || self.name == "surface_cube.v1" {
-            let cube = stage.add(Cube::new(1.8).color(BLUE))?;
-            stage.rotate(cube, 0.45, [1.0, 1.0, 0.0], Some(ORIGIN), None);
-            stage.shift(cube, if mixed { [-1.8, 0.0, 0.0] } else { ORIGIN });
+            let cube = scene.add_mobject(Cube::new(1.8).color(BLUE))?;
+            scene
+                .stage_mut()
+                .rotate(cube, 0.45, [1.0, 1.0, 0.0], Some(ORIGIN), None);
+            scene
+                .stage_mut()
+                .shift(cube, if mixed { [-1.8, 0.0, 0.0] } else { ORIGIN });
             moving = Some(cube);
         }
         if mixed || self.name == "dot_cloud_depth.v1" {
-            let dots = stage.add(
+            let dots = scene.add_mobject(
                 DotCloud::new([[-0.55, -0.5, -0.6], [0.0, 0.5, 0.4], [0.55, -0.25, 0.8]])
                     .colored(YELLOW, 1.0)
                     .with_radius(0.24)
@@ -161,25 +186,58 @@ impl fmn::SceneConstruct for CameraScene {
                     error.to_string(),
                 ))
             })?;
-            let image = stage.add(image.with_height(1.8))?;
-            stage.shift(image, if mixed { [1.8, 0.0, 0.0] } else { ORIGIN });
+            let image = scene.add_mobject(image.with_height(1.8))?;
+            scene
+                .stage_mut()
+                .shift(image, if mixed { [1.8, 0.0, 0.0] } else { ORIGIN });
             moving.get_or_insert(image);
         }
-        let marker = stage.add(Circle::new().radius(0.14).color(WHITE))?;
-        stage.set_fill(marker, Some(WHITE), Some(1.0), None, true);
-        stage.shift(marker, [0.0, 1.5, 0.0]);
+        let marker = scene.add_mobject(Circle::new().radius(0.14).color(WHITE))?;
+        scene
+            .stage_mut()
+            .set_fill(marker, Some(WHITE), Some(1.0), None, true);
+        scene.stage_mut().shift(marker, [0.0, 1.5, 0.0]);
+        Ok(moving)
+    }
+
+    fn movement(
+        mob: fmn::mobject::Mob,
+    ) -> Result<fmn::mobject::AnimBuilder, fmn::mobject::AnimateError> {
+        mob.animate()
+            .set_anim_args(fmn::mobject::animate::AnimateArgs {
+                run_time: Some(CAMERA_SCENE_RUN_TIME),
+                rate_func: Some(fmn::core::rate::linear),
+                ..Default::default()
+            })?
+            .shift([0.5, 0.0, 0.0])
+    }
+
+    /// Construct only the initial graph. The worker's existing stepped driver
+    /// owns later captures, so pausing never executes future scene work.
+    pub(super) fn native_program(
+        &self,
+        runtime: fmn_scene::RuntimeConfig,
+        seed: u64,
+        frame_limit: u64,
+    ) -> Result<fmn_studio::native::NativeSceneProgram, fmn_studio::ServiceError> {
+        let failed = |error: String| {
+            fmn_studio::ServiceError::new(fmn_studio::WorkerErrorCode::ExecutionFailed, error)
+        };
+        let mut scene = fmn_scene::Scene::new(runtime, seed).map_err(|e| failed(e.to_string()))?;
+        let moving = self
+            .populate(&mut scene)
+            .map_err(|e| failed(e.to_string()))?;
+        let mut segments = Vec::new();
         if let Some(mob) = moving {
-            stage.play(
-                mob.animate()
-                    .set_anim_args(AnimateArgs {
-                        run_time: Some(0.25),
-                        rate_func: Some(fmn::core::rate::linear),
-                        ..AnimateArgs::default()
-                    })?
-                    .shift([0.5, 0.0, 0.0])?,
-            )?;
+            let movement = Self::movement(mob).map_err(|e| failed(e.to_string()))?;
+            let animation = fmn::animation::prepare_animation(movement, scene.stage_mut())
+                .map_err(|e| failed(e.to_string()))?;
+            segments.push(fmn_studio::native::NativeSegment::Play {
+                animations: vec![animation],
+                overrides: fmn_scene::PlayOverrides::default(),
+            });
         }
-        Ok(())
+        fmn_studio::native::NativeSceneProgram::new(scene, segments, frame_limit)
     }
 }
 

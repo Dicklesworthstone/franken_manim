@@ -1,4 +1,4 @@
-//! On-demand Studio playback of immutable camera-bearing FMTL artifacts.
+//! On-demand Studio playback of immutable FMTL artifacts through a camera.
 //!
 //! The bundle reader owns reconstruction and Lumen owns rendering. A committed
 //! command selects a recorded frame; it never re-executes authored callbacks or
@@ -36,6 +36,23 @@ fn replay_failed(message: &str) -> ServiceError {
     ServiceError::new(WorkerErrorCode::ReplayFailed, message)
 }
 
+/// The explicitly selected view of a compiled Studio timeline.
+///
+/// Camera-bearing artifacts own every camera sample and require `fixed_camera`
+/// to be `None`. Older artifacts containing surfaces, images or point clouds
+/// require an explicit fixed camera instead. Its complete pose, lighting and
+/// background enter the replay input identity; no default camera is inferred
+/// from arbitrary tracker records or substituted for a captured camera.
+#[derive(Clone, Debug)]
+pub struct CameraBundleView {
+    /// Actual camera renderer, including its viewport and certified CPU kernel.
+    pub renderer: RetainedFrameRendererConfig,
+    /// Deterministic scene-state seed used by the seek journal.
+    pub seed: u64,
+    /// Caller-selected camera for an artifact without a camera track.
+    pub fixed_camera: Option<Camera>,
+}
+
 /// A code-free camera timeline hosted by the existing isolated worker protocol.
 ///
 /// Only the immutable bundle, one decoded endpoint cache, and one retained
@@ -51,6 +68,7 @@ pub struct CameraBundleWorker {
     rgba: FrameBuffer,
     reads: Vec<AssetRead>,
     backend: RenderBackendRecord,
+    fixed_camera: Option<Camera>,
     seed: u64,
     position: u32,
     journal_position: u64,
@@ -64,19 +82,19 @@ impl CameraBundleWorker {
     /// The caller supplies the digest/path of the bytes used by the production
     /// TimelineBundle reader; it must not read a different generation here.
     ///
-    /// The complete artifact binds every camera/geometry pair, including views
-    /// whose geometry happens to be identical. The additional native record
-    /// binds the viewport, actual CPU kernel, build and deterministic state seed.
+    /// The artifact binds geometry and every recorded camera sample, including
+    /// views whose geometry happens to be identical. The additional native
+    /// record binds an explicit fixed camera when supplied, the viewport, actual
+    /// CPU kernel, build and deterministic state seed.
     pub fn input_reads(
         build_id: Digest,
         source: &AssetRead,
         bundle: &TimelineBundle,
-        renderer: RetainedFrameRendererConfig,
-        seed: u64,
+        view: &CameraBundleView,
     ) -> Result<Vec<AssetRead>, ServiceError> {
-        if !bundle.has_camera_track() || bundle.frame_count() == 0 {
+        if bundle.frame_count() == 0 {
             return Err(invalid(
-                "Studio camera playback requires a nonempty camera-bearing FMTL bundle",
+                "Studio camera playback requires a nonempty FMTL bundle",
             ));
         }
         if source.path.is_empty()
@@ -86,20 +104,20 @@ impl CameraBundleWorker {
         {
             return Err(invalid("invalid compiled camera source identity"));
         }
-        if renderer.frame.aa != fmn_core::AaPolicy::Adaptive {
+        if view.renderer.frame.aa != fmn_core::AaPolicy::Adaptive {
             return Err(invalid(
                 "camera-bundle playback requires adaptive camera coverage",
             ));
         }
-        let viewport = renderer.frame.viewport;
+        let viewport = view.renderer.frame.viewport;
         if u64::from(viewport.width) * u64::from(viewport.height) > 16_777_216 {
             return Err(invalid("Studio camera viewport exceeds 16M pixels"));
         }
-        let backend = Self::capture_backend(source, bundle, renderer)?;
+        let backend = Self::capture_backend(source, bundle, view)?;
         let mut identity = Writer::new(Schema::new(*b"FMCB", 1, 1, 0));
         identity
             .put_bytes(build_id.as_bytes())
-            .put_u64(seed)
+            .put_u64(view.seed)
             .put_bytes(backend.identity());
         Ok(vec![
             source.clone(),
@@ -113,20 +131,42 @@ impl CameraBundleWorker {
     fn capture_backend(
         source: &AssetRead,
         bundle: &TimelineBundle,
-        renderer: RetainedFrameRendererConfig,
+        view: &CameraBundleView,
     ) -> Result<RenderBackendRecord, ServiceError> {
-        let viewport = renderer.frame.viewport;
-        let camera = bundle
-            .camera_at(0, (viewport.width, viewport.height))
-            .map_err(failed)?
-            .ok_or_else(|| invalid("missing recorded camera"))?;
-        let policy = camera_capture_backend(&camera, renderer)?;
-        // One immutable track identity, not a growing backend catalog per pose.
-        // The source digest binds every per-frame view, background and light;
-        // the nested descriptor names the actual kernel and output viewport.
+        let viewport = view.renderer.frame.viewport;
+        let camera = if bundle.has_camera_track() {
+            if view.fixed_camera.is_some() {
+                return Err(invalid(
+                    "a fixed camera cannot override a recorded FMTL camera track",
+                ));
+            }
+            bundle
+                .camera_at(0, (viewport.width, viewport.height))
+                .map_err(failed)?
+                .ok_or_else(|| invalid("missing recorded camera"))?
+        } else {
+            let camera = view.fixed_camera.clone().ok_or_else(|| {
+                invalid("FMTL without a camera track requires an explicit fixed camera")
+            })?;
+            if camera.fps() != bundle.fps() {
+                return Err(invalid(
+                    "fixed camera frame rate must match the compiled timeline",
+                ));
+            }
+            camera
+        };
+        let policy = camera_capture_backend(&camera, view.renderer)?;
+        // One immutable view identity, not a growing backend catalog per pose.
+        // The source digest binds the geometry and any recorded camera track;
+        // the nested descriptor also binds the explicit fixed camera, when
+        // supplied, and names the actual kernel and output viewport.
         let mut identity = Writer::new(Schema::new(*b"FMCB", 2, 1, 0));
         identity
-            .put_str("lumen-recorded-camera-bundle-v1")
+            .put_str(if view.fixed_camera.is_some() {
+                "lumen-fixed-camera-bundle-v1"
+            } else {
+                "lumen-recorded-camera-bundle-v1"
+            })
             .put_bytes(source.digest.as_bytes())
             .put_bytes(policy.identity());
         RenderBackendRecord::new(
@@ -139,22 +179,21 @@ impl CameraBundleWorker {
     /// Create a worker from an already bounded, validated artifact generation.
     /// Camera rendering must be admitted as the real certified-CPU kernel by
     /// the composition root, even when the source's determinism mode is standard.
-    /// No accelerator/affine fallback or camera override is substituted.
+    /// No accelerator/affine fallback or recorded-camera override is substituted.
     pub fn new(
         scene: String,
         build_id: Digest,
         source: AssetRead,
         bundle: TimelineBundle,
-        renderer: RetainedFrameRendererConfig,
-        seed: u64,
+        view: CameraBundleView,
     ) -> Result<Self, ServiceError> {
         studio_seek_command(&scene, 0).map_err(failed)?;
-        let reads = Self::input_reads(build_id, &source, &bundle, renderer, seed)?;
-        let backend = Self::capture_backend(&source, &bundle, renderer)?;
+        let reads = Self::input_reads(build_id, &source, &bundle, &view)?;
+        let backend = Self::capture_backend(&source, &bundle, &view)?;
         let layout = FrameLayout::tight(
             PixelFormat::Rgba8,
-            renderer.frame.viewport.width,
-            renderer.frame.viewport.height,
+            view.renderer.frame.viewport.width,
+            view.renderer.frame.viewport.height,
         )
         .map_err(failed)?;
         Ok(Self {
@@ -162,10 +201,11 @@ impl CameraBundleWorker {
             scene,
             reads,
             backend,
-            seed,
+            seed: view.seed,
+            fixed_camera: view.fixed_camera,
             bundle: bundle.into_shared().map_err(failed)?,
             cache: TimelineFrameCache::default(),
-            renderer: RetainedFrameRenderer::new(renderer).map_err(failed)?,
+            renderer: RetainedFrameRenderer::new(view.renderer).map_err(failed)?,
             rgba: FrameBuffer::new(layout),
             position: 0,
             journal_position: 0,
@@ -201,7 +241,9 @@ impl CameraBundleWorker {
             .map_err(failed)?;
         Ok((
             stage,
-            camera.ok_or_else(|| invalid("camera track disappeared"))?,
+            camera
+                .or_else(|| self.fixed_camera.clone())
+                .ok_or_else(|| invalid("compiled camera view disappeared"))?,
         ))
     }
 
