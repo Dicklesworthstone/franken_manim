@@ -513,8 +513,19 @@ impl CoordinateSystem for ThreeDAxes {
         self.num_sampled_graph_points_per_tick
     }
 
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        self.sampling_budget
+    }
+
     fn dimension(&self) -> usize {
         3
+    }
+}
+
+impl ThreeDAxes {
+    pub(crate) fn coordinate_axes(&self) -> Option<[&NumberLine; 3]> {
+        let built = self.built.as_ref()?;
+        Some([built.axes.x_axis(), built.axes.y_axis(), &built.z_axis])
     }
 }
 
@@ -873,6 +884,17 @@ impl CoordinateSystem for NumberPlane {
     fn num_sampled_graph_points_per_tick(&self) -> f64 {
         self.num_sampled_graph_points_per_tick
     }
+
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        self.sampling_budget
+    }
+}
+
+impl NumberPlane {
+    pub(crate) fn coordinate_axes(&self) -> Option<[&NumberLine; 2]> {
+        let built = self.built.as_ref()?;
+        Some([built.axes.x_axis(), built.axes.y_axis()])
+    }
 }
 
 /// `ComplexPlane` — a [`NumberPlane`] whose coordinate labels are
@@ -1163,6 +1185,16 @@ impl CoordinateSystem for ComplexPlane {
 
     fn num_sampled_graph_points_per_tick(&self) -> f64 {
         CoordinateSystem::num_sampled_graph_points_per_tick(&self.plane)
+    }
+
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        self.plane.graph_sampling_budget()
+    }
+}
+
+impl ComplexPlane {
+    pub(crate) fn coordinate_axes(&self) -> Option<[&NumberLine; 2]> {
+        self.plane.coordinate_axes()
     }
 }
 

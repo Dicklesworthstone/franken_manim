@@ -4122,6 +4122,121 @@ fn coordinate_placement_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("coordinate_visible", u64::from(visible)))
 }
 
+/// A live chart follows the real native Transform samples; graphs created
+/// afterward use that moved map while a previously captured map stays frozen.
+fn live_coordinate_animation_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, Transform};
+    use fmn_library::CoordinateSystem;
+
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("live coordinate fonts: {error}")))?;
+    let plane = NumberPlane::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .faded_line_ratio(1)
+        .build(&book)
+        .map_err(|error| fail(format!("build live plane: {error}")))?;
+    let mut stage = Stage::new();
+    let root = stage.add(plane.vmob().clone());
+    stage
+        .add_to_scene(root)
+        .map_err(|error| fail(format!("adopt live plane: {error}")))?;
+    let live = plane
+        .bind(&stage, root)
+        .map_err(|error| fail(format!("bind live plane: {error}")))?;
+    let frozen = live
+        .snapshot(&stage)
+        .map_err(|error| fail(format!("freeze initial chart: {error}")))?;
+    let target = stage
+        .copy_family(root)
+        .map_err(|error| fail(format!("copy chart animation target: {error}")))?;
+    let offset = [-2.0, 1.0, 0.0];
+    stage.shift(target, offset);
+    let mut timeline =
+        Timeline::new(4).map_err(|error| fail(format!("chart animation clock: {error}")))?;
+    timeline
+        .play(vec![Box::new(Transform::new(root, target).with_config(
+            AnimConfig {
+                run_time: 0.5,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            },
+        ))])
+        .map_err(|error| fail(format!("schedule chart movement: {error}")))?;
+    let mut sampled_origins = Vec::new();
+    timeline
+        .render(&mut stage, &RngRoot::from_seed(53), &mut |packet| {
+            sampled_origins.push(live.c2p(&packet.materialize_stage(), &[0.0, 0.0]));
+        })
+        .map_err(|error| fail(format!("animate live chart: {error}")))?;
+    let origins = sampled_origins
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| fail(format!("read chart animation sample: {error}")))?;
+    let near = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6);
+    let follows_frames =
+        origins.len() == 2 && near(origins[0], [-1.0, 0.5, 0.0]) && near(origins[1], offset);
+    let moved = live
+        .snapshot(&stage)
+        .map_err(|error| fail(format!("read moved chart: {error}")))?;
+    let frozen_unchanged =
+        near(frozen.c2p(&[0.0, 0.0]), [0.0; 3]) && near(moved.c2p(&[0.0, 0.0]), offset);
+    let inverse = [[-1.0, 0.5], [0.0, 0.0], [2.0, -3.0]]
+        .into_iter()
+        .all(|coords| near(moved.p2c(moved.c2p(&coords)), [coords[0], coords[1], 0.0]));
+    let graph = moved
+        .get_graph(|x| 0.5 * x)
+        .build()
+        .map_err(|error| fail(format!("build graph after chart movement: {error}")))?;
+    let endpoint = graph
+        .points()
+        .last()
+        .is_some_and(|&point| near(point, [-1.0, 1.5, 0.0]));
+    let graph = stage.add(graph);
+    stage
+        .add_to_scene(graph)
+        .map_err(|error| fail(format!("adopt live graph: {error}")))?;
+
+    let mut expected = Stage::new();
+    let expected_plane = expected.add(plane.vmob().clone().shifted(offset));
+    expected
+        .add_to_scene(expected_plane)
+        .map_err(|error| fail(format!("adopt expected plane: {error}")))?;
+    let original_graph = plane
+        .get_graph(|x| 0.5 * x, None)
+        .build()
+        .map_err(|error| fail(format!("build independent expected graph: {error}")))?;
+    let expected_graph = expected.add(original_graph.shifted(offset));
+    expected
+        .add_to_scene(expected_graph)
+        .map_err(|error| fail(format!("adopt expected graph: {error}")))?;
+    let rendered = render_certified_doc(&stage);
+    let rendered_match = rendered == render_certified_doc(&expected);
+    let visible = rendered != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.live_coordinate_animation")
+            .field("frames", origins.len() as u64)
+            .field("follows_frames", truth(follows_frames))
+            .field("frozen_unchanged", truth(frozen_unchanged))
+            .field("inverse", truth(inverse))
+            .field("endpoint", truth(endpoint))
+            .field("rendered_match", truth(rendered_match))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("live_coordinate_frames", origins.len() as u64)
+        .with_counter("live_coordinate_follows_frames", u64::from(follows_frames))
+        .with_counter(
+            "live_coordinate_frozen_unchanged",
+            u64::from(frozen_unchanged),
+        )
+        .with_counter("live_coordinate_inverse", u64::from(inverse))
+        .with_counter("live_coordinate_endpoint", u64::from(endpoint))
+        .with_counter("live_coordinate_rendered_match", u64::from(rendered_match))
+        .with_counter("live_coordinate_visible", u64::from(visible)))
+}
+
 /// Construct → snapshot → transform → snapshot: the scene_goldens
 /// lifecycle form with geometry assertions (member/point counts move with
 /// the lifecycle points, never silently empty).
@@ -6752,6 +6867,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.live_coordinate_animation.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(live_coordinate_animation_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("live_coordinate_frames", 2),
+            counter_eq("live_coordinate_follows_frames", 1),
+            counter_eq("live_coordinate_frozen_unchanged", 1),
+            counter_eq("live_coordinate_inverse", 1),
+            counter_eq("live_coordinate_endpoint", 1),
+            counter_eq("live_coordinate_rendered_match", 1),
+            counter_eq("live_coordinate_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.live_coordinate_animation",
+            vec![
+                FieldPred::str_eq("follows_frames", "true"),
+                FieldPred::str_eq("frozen_unchanged", "true"),
+                FieldPred::str_eq("rendered_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.bundle_render_state.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -8517,6 +8656,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 // Test entry points
 // ---------------------------------------------------------------------------
+
+#[test]
+fn live_coordinate_animation_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.live_coordinate_animation.v1")
+        .expect("the live coordinate animation scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
 
 #[test]
 fn coordinate_placement_scenario_passes() {

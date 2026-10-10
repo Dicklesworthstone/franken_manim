@@ -47,7 +47,10 @@
 //! * **Invalid `input_sample_type` is a typed error** ([`CoordsError`]),
 //!   where the Reference raises a bare `Exception`.
 
+mod live;
 pub(crate) mod placement;
+
+pub use live::{CoordinateFrame, CoordinateFrameError, LiveCoordinateSystem};
 
 use fmn_core::color::{Srgb, color_gradient};
 use fmn_core::constants::{
@@ -102,6 +105,10 @@ pub trait CoordinateSystem {
     fn num_sampled_graph_points_per_tick(&self) -> f64 {
         5.0
     }
+    /// Resource limit carried into graphs sampled from this coordinate system.
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        SamplingBudget::default()
+    }
     /// The coordinate dimension (2 for `Axes`, 3 for `ThreeDAxes`).
     fn dimension(&self) -> usize {
         2
@@ -130,6 +137,8 @@ pub enum CoordsError {
     /// A Riemann range that decreases, has a non-positive step, or whose
     /// step cannot advance the bound (BN-20).
     InvalidRiemannRange(&'static str),
+    /// A live native chart no longer describes a finite affine frame.
+    LiveFrame(CoordinateFrameError),
 }
 
 impl std::fmt::Display for CoordsError {
@@ -146,6 +155,7 @@ impl std::fmt::Display for CoordsError {
             Self::Dash(e) => write!(f, "coordinate dash construction failed: {e}"),
             Self::Tex(e) => write!(f, "coordinate label failed to typeset: {e}"),
             Self::InvalidRiemannRange(reason) => write!(f, "invalid Riemann range: {reason}"),
+            Self::LiveFrame(e) => write!(f, "live coordinate frame failed: {e}"),
         }
     }
 }
@@ -157,6 +167,7 @@ impl std::error::Error for CoordsError {
             Self::Text(e) => Some(e),
             Self::Dash(e) => Some(e),
             Self::Tex(e) => Some(e),
+            Self::LiveFrame(e) => Some(e),
             Self::InvalidSampleType(_) | Self::InvalidRiemannRange(_) => None,
         }
     }
@@ -183,6 +194,12 @@ impl From<DashError> for CoordsError {
 impl From<TexMobjectError> for CoordsError {
     fn from(e: TexMobjectError) -> Self {
         Self::Tex(e)
+    }
+}
+
+impl From<CoordinateFrameError> for CoordsError {
+    fn from(e: CoordinateFrameError) -> Self {
+        Self::LiveFrame(e)
     }
 }
 
@@ -1882,6 +1899,10 @@ impl CoordinateSystem for Axes {
 
     fn num_sampled_graph_points_per_tick(&self) -> f64 {
         self.num_sampled_graph_points_per_tick
+    }
+
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        self.sampling_budget
     }
 }
 
