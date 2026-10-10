@@ -4,8 +4,12 @@ use fmn_geom::space_ops::{cross, dot};
 use fmn_mobject::{CopyMap, Mob, Stage};
 
 use super::{Axes, CoordinateSystem, CoordsError, NumberLine, Vec3, add, scale, sub};
-use crate::graphs::{ParametricCurve, SamplingBudget, graph_parametric};
+use crate::graphs::{
+    GraphError, ParametricCurve, ParametricCurveSpec, SamplingBudget, graph_parametric,
+};
 use crate::planes::{ComplexPlane, NumberPlane, ThreeDAxes};
+use crate::solids::{ParametricSurface, Surface, SurfaceSampleError, SurfaceSpec};
+use crate::vmobject::VMobject;
 
 /// Why a native chart cannot supply an affine coordinate map.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +46,13 @@ pub enum CoordinateFrameError {
     DegenerateBasis,
     /// A live conversion received or produced non-finite coordinates.
     NonFiniteCoordinates,
+    /// The requested construction needs a different coordinate dimension.
+    DimensionMismatch {
+        /// Required number of coordinate axes.
+        expected: usize,
+        /// Number of axes in the bound frame.
+        actual: usize,
+    },
 }
 
 impl std::fmt::Display for CoordinateFrameError {
@@ -67,6 +78,12 @@ impl std::fmt::Display for CoordinateFrameError {
             }
             Self::DegenerateBasis => f.write_str("coordinate axes have no stable affine inverse"),
             Self::NonFiniteCoordinates => f.write_str("coordinate conversion is not finite"),
+            Self::DimensionMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "construction requires {expected} coordinate axes, got {actual}"
+                )
+            }
         }
     }
 }
@@ -330,6 +347,43 @@ impl LiveCoordinateSystem {
     ) -> Result<ParametricCurve, CoordsError> {
         Ok(self.snapshot(stage)?.get_graph(function))
     }
+
+    /// Build `(x(t), y(t), z(t))` from one snapshot of the current Stage axes.
+    ///
+    /// The curve inherits this chart's curve sampling budget. Parameter range,
+    /// discontinuities, and smoothing remain configurable on the returned builder.
+    pub fn get_parametric_curve(
+        &self,
+        stage: &Stage,
+        function: impl Fn(f64) -> Vec3 + 'static,
+    ) -> Result<ParametricCurve, CoordsError> {
+        Ok(self.snapshot(stage)?.get_parametric_curve(function))
+    }
+
+    /// Build `z = function(x, y)` over the current 3D chart's x/y ranges.
+    ///
+    /// A 2D binding returns a typed dimension error. Surface sampling uses
+    /// ParametricSurface's independent grid budget and configurable resolution.
+    pub fn get_surface(
+        &self,
+        stage: &Stage,
+        function: impl Fn(f64, f64) -> f64 + 'static,
+    ) -> Result<ParametricSurface, CoordsError> {
+        self.snapshot(stage)?.get_surface(function)
+    }
+
+    /// Build a parameterized surface from one current affine chart snapshot.
+    ///
+    /// Vertices and derivative probes use the same snapshot, even if the Stage
+    /// moves before the returned builder is sampled. For a borrowed or fallible
+    /// callback, use `snapshot(stage)?.try_parametric_surface(...)` instead.
+    pub fn get_parametric_surface(
+        &self,
+        stage: &Stage,
+        function: impl Fn(f64, f64) -> Vec3 + 'static,
+    ) -> Result<ParametricSurface, CoordsError> {
+        Ok(self.snapshot(stage)?.get_parametric_surface(function))
+    }
 }
 
 /// An immutable affine chart, suitable for graph, surface, and field builders.
@@ -404,6 +458,87 @@ impl CoordinateFrame {
             self.samples_per_tick,
             self.sampling_budget,
         )
+    }
+
+    /// Build a curve from chart coordinates `(x(t), y(t), z(t))`.
+    ///
+    /// Like ThreeDAxes' helper, this keeps ParametricCurve's default parameter
+    /// range and inherits the chart's curve sampling budget. All ordinary curve
+    /// builder overrides remain available. A 2D frame uses the first two
+    /// returned coordinates and embeds the curve in its plane.
+    #[must_use]
+    pub fn get_parametric_curve(
+        &self,
+        function: impl Fn(f64) -> Vec3 + 'static,
+    ) -> ParametricCurve {
+        let frame = self.clone();
+        ParametricCurve::new(move |t| frame.c2p(&function(t))).sampling_budget(self.sampling_budget)
+    }
+
+    /// Sample a borrowed, fallible curve callback in this frozen chart.
+    ///
+    /// The explicit specification owns sampling controls and its budget. The
+    /// shared native sampler admits work before invoking the callback, preserves
+    /// the first callback error, and refuses non-finite mapped record points.
+    pub fn try_parametric_curve<E>(
+        &self,
+        mut function: impl FnMut(f64) -> Result<Vec3, E>,
+        spec: &ParametricCurveSpec,
+    ) -> Result<VMobject, GraphError<E>> {
+        spec.try_sample(|t| function(t).map(|point| self.c2p(&point)))
+    }
+
+    /// Build a height surface `z = function(x, y)` over this chart's x/y ranges.
+    ///
+    /// The returned builder uses ParametricSurface's independent grid budget;
+    /// range, resolution, color, opacity, and shading overrides are unchanged.
+    /// A 2D frame returns [`CoordinateFrameError::DimensionMismatch`] rather than
+    /// discarding the height coordinate.
+    pub fn get_surface(
+        &self,
+        function: impl Fn(f64, f64) -> f64 + 'static,
+    ) -> Result<ParametricSurface, CoordsError> {
+        if self.dimension() != 3 {
+            return Err(CoordinateFrameError::DimensionMismatch {
+                expected: 3,
+                actual: self.dimension(),
+            }
+            .into());
+        }
+        Ok(self
+            .get_parametric_surface(move |x, y| [x, y, function(x, y)])
+            .u_range(self.ranges[0][0], self.ranges[0][1])
+            .v_range(self.ranges[1][0], self.ranges[1][1]))
+    }
+
+    /// Build a parameterized surface in this frozen coordinate frame.
+    ///
+    /// Both parameter ranges default to `(0, 1)`. The native surface sampler
+    /// maps vertices and derivative probes through c2p before deriving normals,
+    /// so lighting follows nonuniform scale, shear, and reflection. A 2D frame
+    /// produces a surface embedded in its plane using the first two coordinates.
+    #[must_use]
+    pub fn get_parametric_surface(
+        &self,
+        function: impl Fn(f64, f64) -> Vec3 + 'static,
+    ) -> ParametricSurface {
+        let frame = self.clone();
+        ParametricSurface::new(move |u, v| frame.c2p(&function(u, v)))
+    }
+
+    /// Sample a borrowed, fallible surface callback in this frozen chart.
+    ///
+    /// The explicit native specification and grid budget are authoritative.
+    /// Admission, callback errors, and non-finite/f32-unrepresentable mapped
+    /// samples use the existing [`SurfaceSampleError`] contract; no partial
+    /// surface is returned. Derivative probes also pass through this frame.
+    pub fn try_parametric_surface<E>(
+        &self,
+        mut function: impl FnMut(f64, f64) -> Result<Vec3, E>,
+        spec: &SurfaceSpec,
+        budget: SamplingBudget,
+    ) -> Result<Surface, SurfaceSampleError<E>> {
+        spec.try_sample_with_budget(|u, v| function(u, v).map(|point| self.c2p(&point)), budget)
     }
 
     /// The world-space graph point `c2p(x, function(x))`.
@@ -551,6 +686,304 @@ mod tests {
             Err(CoordsError::LiveFrame(error)) => error,
             other => panic!("expected a typed live-frame error, got {other:?}"),
         }
+    }
+
+    fn three_dimensional_chart() -> ThreeDAxes {
+        ThreeDAxes::new()
+            .x_range([-2.0, 3.0, 1.0])
+            .y_range([-1.0, 2.0, 1.0])
+            .z_range([-3.0, 1.0, 1.0])
+            .width(4.0)
+            .height(6.0)
+            .depth(8.0)
+            .axis_config(AxisConfig {
+                include_tip: Some(true),
+                include_ticks: Some(false),
+                ..AxisConfig::default()
+            })
+            .build(&FontBook::bundled().unwrap())
+            .unwrap()
+    }
+
+    fn surface_affine() -> Placement {
+        // A reflection with shear and unequal scales exercises normal mapping.
+        Placement::new(
+            [[1.25, 0.3, -0.4], [-0.2, 0.9, 0.6], [0.5, -0.7, -1.1]],
+            [2.0, -1.0, 0.5],
+        )
+    }
+
+    #[test]
+    fn live_parametric_curves_sample_three_axes_and_freeze_their_creation_frame() {
+        let chart = three_dimensional_chart();
+        let mut stage = Stage::new();
+        let root = stage.add(chart.clone());
+        let live = chart.bind(&stage, root).unwrap();
+        let deferred = live
+            .get_parametric_curve(&stage, |t| [t, t * t, 1.0 - t])
+            .unwrap();
+        let affine = surface_affine();
+        stage.apply_affine(root, affine);
+        let curve = live
+            .get_parametric_curve(&stage, |t| [t, t * t, 1.0 - t])
+            .unwrap()
+            .t_range([-1.0, 1.0, 0.5])
+            .use_smoothing(false)
+            .build()
+            .unwrap();
+        let anchors = curve.path().unwrap().anchors();
+        assert_eq!(anchors.len(), 5);
+        for (point, t) in anchors.into_iter().zip([-1.0, -0.5, 0.0, 0.5, 1.0]) {
+            near(point, affine.apply_point(chart.c2p(&[t, t * t, 1.0 - t])));
+        }
+        // The unmodified parameter domain is 0..1, independent of x_range.
+        let original = deferred.build().unwrap();
+        near(original.points()[0], chart.c2p(&[0.0, 0.0, 1.0]));
+        near(
+            *original.points().last().unwrap(),
+            chart.c2p(&[1.0, 1.0, 0.0]),
+        );
+    }
+
+    #[test]
+    fn live_height_surfaces_use_chart_ranges_and_affine_derivative_normals() {
+        // Surface grids keep their own budget: the twelve vertices below exceed
+        // the chart's four-sample curve budget and are still admitted.
+        let chart = three_dimensional_chart().sampling_budget(SamplingBudget::new(4));
+        let mut stage = Stage::new();
+        let root = stage.add(chart.clone());
+        let live = chart.bind(&stage, root).unwrap();
+        let affine = surface_affine();
+        stage.apply_affine(root, affine);
+        let surface = live
+            .get_surface(&stage, |x, y| 2.0 * x - 3.0 * y + 0.5)
+            .unwrap()
+            .resolution(3, 4)
+            .build();
+        assert_eq!(surface.u_range(), (-2.0, 3.0));
+        assert_eq!(surface.v_range(), (-1.0, 2.0));
+        assert_eq!(surface.resolution(), (3, 4));
+        assert_eq!(surface.triangle_indices().len(), 36);
+        for (i, x) in [-2.0, 0.5, 3.0].into_iter().enumerate() {
+            for (j, y) in [-1.0, 0.0, 1.0, 2.0].into_iter().enumerate() {
+                near(
+                    surface.points()[i * 4 + j],
+                    affine.apply_point(chart.c2p(&[x, y, 2.0 * x - 3.0 * y + 0.5])),
+                );
+            }
+        }
+        let dx = affine.apply_vector(sub(chart.c2p(&[1.0, 0.0, 2.0]), chart.origin()));
+        let dy = affine.apply_vector(sub(chart.c2p(&[0.0, 1.0, -3.0]), chart.origin()));
+        let expected_normal = fmn_geom::space_ops::normalize(cross(dx, dy));
+        for normal in surface.unit_normals() {
+            near(normal, expected_normal);
+        }
+    }
+
+    #[test]
+    fn live_parametric_surfaces_keep_uv_controls_and_snapshot_positions() {
+        let chart = three_dimensional_chart();
+        let mut stage = Stage::new();
+        let root = stage.add(chart.clone());
+        let live = chart.bind(&stage, root).unwrap();
+        let affine = surface_affine();
+        stage.apply_affine(root, affine);
+        let frame = live.snapshot(&stage).unwrap();
+        let pending = live
+            .get_parametric_surface(&stage, |u, v| [u + v, u - v, u * v])
+            .unwrap();
+        stage.shift(root, [7.0, 0.0, -2.0]);
+        let surface = pending.resolution(2, 2).build();
+        assert_eq!(surface.u_range(), (0.0, 1.0));
+        assert_eq!(surface.v_range(), (0.0, 1.0));
+        for (point, coordinates) in surface.points().iter().zip([
+            [0.0, 0.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 0.0, 1.0],
+        ]) {
+            near(*point, affine.apply_point(chart.c2p(&coordinates)));
+        }
+        let explicit = frame
+            .get_parametric_surface(|u, v| [u + v, u - v, u * v])
+            .u_range(-1.0, 1.0)
+            .v_range(2.0, 3.0)
+            .resolution(2, 2)
+            .build();
+        for (i, u) in [-1.0, 1.0].into_iter().enumerate() {
+            for (j, v) in [2.0, 3.0].into_iter().enumerate() {
+                near(
+                    explicit.points()[i * 2 + j],
+                    affine.apply_point(chart.c2p(&[u + v, u - v, u * v])),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_height_surface_requires_three_dimensions_but_planar_surfaces_are_supported() {
+        let chart = axes(false);
+        let mut stage = Stage::new();
+        let root = stage.add(chart.clone());
+        let live = chart.bind(&stage, root).unwrap();
+        stage.apply_affine(root, surface_affine());
+        let frame = live.snapshot(&stage).unwrap();
+        for result in [
+            live.get_surface(&stage, |x, y| x + y),
+            frame.get_surface(|x, y| x + y),
+        ] {
+            assert!(matches!(
+                result,
+                Err(CoordsError::LiveFrame(
+                    CoordinateFrameError::DimensionMismatch {
+                        expected: 3,
+                        actual: 2,
+                    }
+                ))
+            ));
+        }
+        let planar = frame
+            .get_parametric_surface(|u, v| [u, v, 99.0])
+            .resolution(2, 2)
+            .build();
+        for (point, coordinates) in
+            planar
+                .points()
+                .iter()
+                .zip([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]])
+        {
+            near(*point, frame.c2p(&coordinates));
+        }
+    }
+
+    #[test]
+    fn live_parametric_curve_budget_and_fallible_sampling_preserve_native_errors() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let chart = three_dimensional_chart().sampling_budget(SamplingBudget::new(4));
+        let mut stage = Stage::new();
+        let root = stage.add(chart.clone());
+        let live = chart.bind(&stage, root).unwrap();
+        stage.apply_affine(root, surface_affine());
+        let calls = Rc::new(Cell::new(0));
+        let sample_calls = calls.clone();
+        let denied = live
+            .get_parametric_curve(&stage, move |t| {
+                sample_calls.set(sample_calls.get() + 1);
+                [t, t * t, -t]
+            })
+            .unwrap()
+            .build();
+        assert!(matches!(
+            denied,
+            Err(GraphError::Sampling(crate::SamplingError::LimitExceeded {
+                max_samples: 4,
+                ..
+            }))
+        ));
+        assert_eq!(calls.get(), 0);
+        let frame = live.snapshot(&stage).unwrap();
+        let spec = ParametricCurveSpec {
+            t_range: [0.0, 1.0, 0.25],
+            use_smoothing: false,
+            sampling_budget: SamplingBudget::new(5),
+            ..ParametricCurveSpec::default()
+        };
+        let mut sampled = Vec::new();
+        let failed = frame.try_parametric_curve(
+            |t| {
+                sampled.push(t);
+                if t == 0.5 {
+                    Err("curve sample failed")
+                } else {
+                    Ok([t, t * t, -t])
+                }
+            },
+            &spec,
+        );
+        assert!(matches!(
+            failed,
+            Err(GraphError::Callback("curve sample failed"))
+        ));
+        assert_eq!(sampled, vec![0.0, 0.25, 0.5]);
+        let curve = frame
+            .try_parametric_curve(|t| Ok::<_, ()>([t, t * t, -t]), &spec)
+            .unwrap();
+        near(
+            *curve.points().last().unwrap(),
+            surface_affine().apply_point(chart.c2p(&[1.0, 1.0, -1.0])),
+        );
+        assert!(matches!(
+            frame.try_parametric_curve(|_| Ok::<_, ()>([1e40, 0.0, 0.0]), &spec),
+            Err(GraphError::InvalidPoint { index: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn live_fallible_surfaces_admit_before_callbacks_and_stop_at_failed_derivative_probes() {
+        let chart = three_dimensional_chart();
+        let mut stage = Stage::new();
+        let root = stage.add(chart.clone());
+        let live = chart.bind(&stage, root).unwrap();
+        stage.apply_affine(root, surface_affine());
+        let frame = live.snapshot(&stage).unwrap();
+        let spec = SurfaceSpec {
+            u_range: (-2.0, 1.0),
+            v_range: (2.0, 3.0),
+            resolution: (3, 4),
+            ..SurfaceSpec::default()
+        };
+        let mut sampled = Vec::new();
+        let denied = frame.try_parametric_surface(
+            |u, v| {
+                sampled.push((u, v));
+                Ok::<_, &'static str>([u, v, u + v])
+            },
+            &spec,
+            SamplingBudget::new(11),
+        );
+        assert!(matches!(denied, Err(SurfaceSampleError::Budget(_))));
+        assert!(sampled.is_empty());
+        let failed = frame.try_parametric_surface(
+            |u, v| {
+                sampled.push((u, v));
+                if sampled.len() == 2 {
+                    Err("u derivative failed")
+                } else {
+                    Ok([u, v, u + v])
+                }
+            },
+            &spec,
+            SamplingBudget::new(12),
+        );
+        assert!(matches!(
+            failed,
+            Err(SurfaceSampleError::Callback("u derivative failed"))
+        ));
+        assert_eq!(sampled, vec![(-2.0, 2.0), (-2.0 + spec.epsilon, 2.0)]);
+        let surface = frame
+            .try_parametric_surface(
+                |u, v| Ok::<_, ()>([u, v, u + v]),
+                &spec,
+                SamplingBudget::new(12),
+            )
+            .unwrap();
+        assert_eq!(surface.points().len(), 12);
+        near(
+            surface.points()[0],
+            surface_affine().apply_point(chart.c2p(&[-2.0, 2.0, 0.0])),
+        );
+        assert!(matches!(
+            frame.try_parametric_surface(
+                |_, _| Ok::<_, ()>([1e40, 0.0, 0.0]),
+                &spec,
+                SamplingBudget::new(12),
+            ),
+            Err(SurfaceSampleError::InvalidSample {
+                index: 0,
+                probe: "point"
+            })
+        ));
     }
 
     #[test]

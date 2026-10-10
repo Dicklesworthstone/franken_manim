@@ -1341,7 +1341,10 @@ fn native_updater_attributes_rebind_across_stages_and_match_updaters() {
     let next = fresh.add_dt_updater(cleared, |_, _, _| {}, false).unwrap();
     assert!(next.raw() > id.raw());
     assert_eq!(
-        fresh.updater_state::<NativeHistory>(cleared, id).unwrap().samples,
+        fresh
+            .updater_state::<NativeHistory>(cleared, id)
+            .unwrap()
+            .samples,
         vec![1.0]
     );
 }

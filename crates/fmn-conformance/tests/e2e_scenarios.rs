@@ -4043,6 +4043,41 @@ fn render_certified_doc(stage: &Stage) -> Vec<u8> {
     encode_frame(&frame).expect("the frame encodes into its canonical document")
 }
 
+/// Surface and vector geometry share the production camera-bound painter.
+/// Keep the same viewport, scene scale, and certified identity as the 2D rows.
+fn render_certified_camera_doc(stage: &Stage) -> Vec<u8> {
+    use fmn_render::{
+        Camera, CameraConfig, CameraFrame, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    };
+
+    let config = scene_goldens::frame_config();
+    let mut camera_frame = CameraFrame::default();
+    camera_frame
+        .set_shape([
+            f64::from(config.viewport.width) / config.map.scale,
+            f64::from(config.viewport.height) / config.map.scale,
+        ])
+        .expect("bounded camera fixture shape");
+    let camera = Camera::new(CameraConfig {
+        resolution: (config.viewport.width, config.viewport.height),
+        background: config.background,
+        frame: camera_frame,
+        ..CameraConfig::default()
+    })
+    .expect("valid camera document fixture");
+    let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+        frame: config,
+        tiling: TILING,
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    })
+    .expect("bounded camera document renderer");
+    renderer
+        .render_with_camera(stage, &camera)
+        .expect("the camera route renders the surface and vector frame");
+    encode_frame(renderer.frame()).expect("the camera frame encodes into its canonical document")
+}
+
 /// A graph generated after native plane placement must occupy that plane's
 /// chart. The independent drawing oracle translates the original geometry;
 /// the negative witness leaves the graph at the old origin.
@@ -4557,6 +4592,85 @@ fn lifecycle_bundle_render_state_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("bundle_render_state_matches", matches))
 }
 
+/// Live 3D helpers feed ordinary native surface and curve primitives through
+/// the same renderer as independently translated owning-chart constructions.
+fn live_coordinate_surface_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("live surface fonts: {error}")))?;
+    let axes = fmn_library::ThreeDAxes::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .z_range([-1.0, 1.0, 1.0])
+        .build(&book)
+        .map_err(|error| fail(format!("build live surface chart: {error}")))?;
+    let mut stage = Stage::new();
+    let chart = stage.add(axes.clone());
+    let live = axes
+        .bind(&stage, chart)
+        .map_err(|error| fail(format!("bind live surface chart: {error}")))?;
+    let offset = [0.5, -0.25, 0.25];
+    stage.shift(chart, offset);
+    let height = |x: f64, y: f64| 0.25 * x + 0.5 * y;
+    let path = |t: f64| [t, 0.0, 0.5];
+    let surface = live
+        .get_surface(&stage, height)
+        .map_err(|error| fail(format!("map live surface: {error}")))?
+        .resolution(5, 5)
+        .color(TEAL_B)
+        .shading([0.0; 3])
+        .build();
+    let vertices = surface.points().len() as u64;
+    let curve = live
+        .get_parametric_curve(&stage, path)
+        .map_err(|error| fail(format!("map live 3D curve: {error}")))?
+        .t_range([-0.75, 0.75, 0.25])
+        .build()
+        .map_err(|error| fail(format!("sample live 3D curve: {error}")))?;
+    let surface = stage.add(surface);
+    let curve = stage.add(curve);
+    stage
+        .add_many_to_scene(&[surface, curve])
+        .map_err(|error| fail(format!("adopt live 3D geometry: {error}")))?;
+
+    let mut expected = Stage::new();
+    let surface = expected.add(
+        axes.get_graph(height)
+            .resolution(5, 5)
+            .color(TEAL_B)
+            .shading([0.0; 3])
+            .build(),
+    );
+    let curve = expected.add(
+        axes.get_parametric_curve(path)
+            .t_range([-0.75, 0.75, 0.25])
+            .build()
+            .map_err(|error| fail(format!("sample independent 3D curve: {error}")))?,
+    );
+    expected
+        .add_many_to_scene(&[surface, curve])
+        .map_err(|error| fail(format!("adopt independent 3D geometry: {error}")))?;
+    let unmoved = render_certified_camera_doc(&expected);
+    expected.shift(surface, offset);
+    expected.shift(curve, offset);
+    let rendered = render_certified_camera_doc(&stage);
+    let matches = rendered == render_certified_camera_doc(&expected);
+    let rejects_unmoved = rendered != unmoved;
+    let visible = rendered != render_certified_camera_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.live_coordinate_surface")
+            .field("vertices", vertices)
+            .field("matches", truth(matches))
+            .field("rejects_unmoved", truth(rejects_unmoved))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("live_surface_vertices", vertices)
+        .with_counter("live_surface_matches", u64::from(matches))
+        .with_counter("live_surface_rejects_unmoved", u64::from(rejects_unmoved))
+        .with_counter("live_surface_visible", u64::from(visible)))
+}
+
 /// A native timeline must capture the configured temporal detail and duration
 /// of a trace, with a visible tapered stroke and no construction-time sample.
 fn lifecycle_traced_path_cadence_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -4778,7 +4892,8 @@ fn lifecycle_succession_reverse_seek_run(ctx: &mut RunCtx) -> Result<RunOutcome,
         .map_err(|error| fail(format!("adopt succession square: {error}")))?;
     let initial_frame = render_certified_doc(&stage);
     let mut members: Vec<Box<dyn fmn_anim::Animation>> = Vec::new();
-    for x in [2.0, 4.0] {
+    // Keep the entire one-unit square inside the certified viewport at peak.
+    for x in [1.0, 2.0] {
         let target = stage
             .copy_family(mob)
             .map_err(|error| fail(format!("copy succession target: {error}")))?;
@@ -4814,7 +4929,7 @@ fn lifecycle_succession_reverse_seek_run(ctx: &mut RunCtx) -> Result<RunOutcome,
         && centers.last().is_some_and(|point| point[0].abs() < 1e-9);
     let moves = centers
         .get(3)
-        .is_some_and(|point| (point[0] - 4.0).abs() < 1e-6)
+        .is_some_and(|point| (point[0] - 2.0).abs() < 1e-6)
         && serial_frames
             .get(3)
             .is_some_and(|frame| *frame != initial_frame);
@@ -6891,6 +7006,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.live_coordinate_surface.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(live_coordinate_surface_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("live_surface_vertices", 25),
+            counter_eq("live_surface_matches", 1),
+            counter_eq("live_surface_rejects_unmoved", 1),
+            counter_eq("live_surface_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.live_coordinate_surface",
+            vec![
+                FieldPred::str_eq("matches", "true"),
+                FieldPred::str_eq("rejects_unmoved", "true"),
+                FieldPred::str_eq("visible", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.bundle_render_state.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -8656,6 +8792,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 // Test entry points
 // ---------------------------------------------------------------------------
+
+#[test]
+fn live_coordinate_surface_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.live_coordinate_surface.v1")
+        .expect("the live 3D coordinate surface scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
 
 #[test]
 fn live_coordinate_animation_scenario_passes() {
