@@ -8149,6 +8149,8 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
     }
     if reproducible {
         portal_provenance::certified_build_check()?;
+        // C4 must be statable before any frame exists (fm-arog).
+        portal_provenance::certified_render_config((width, height), fps, threads, seed)?;
     }
     portal_video::check_scene_ownership(slf)?;
     let render_slot = Arc::clone(&slf.borrow().render);

@@ -200,6 +200,56 @@ def test_both_scene_front_doors_publish_real_png_and_manifest():
     assert "installed-payload-sha256=" in session.runtime_identities["wheel"]
 
 
+class _OnePlay(ml.Scene):
+    """One half-second play: its frame count follows fps."""
+
+    def construct(self):
+        self.play(ml.Dot().animate.shift(ml.RIGHT), run_time=0.5)
+
+
+def _c4(result):
+    return [item["digest"] for item in _items(result) if item["id"] == 4]
+
+
+def _render_one_play(tag, fps, threads, seed=None):
+    folder = _ROOT / f"c4-{tag}"
+    folder.mkdir()
+    scene = _OnePlay()
+    if seed is not None:
+        scene.random_seed = seed
+    return folder, scene.render(folder / "frames.png", format="png_sequence", reproducible=True,
+                                sources=_SOURCE, resolution=(64, 36), fps=fps, threads=threads)
+
+
+def test_certified_closure_states_fps_and_seed_but_not_threads():
+    # fm-arog: C4 is the configuration the render resolved, not the defaults
+    # document, so frames that differ in fps differ in closure (§16.7).
+    _, slow = _render_one_play("fps10", 10, 1)
+    _, fast = _render_one_play("fps20", 20, 1)
+    _, wide = _render_one_play("fps10-threads4", 10, 4)
+    _, seeded = _render_one_play("seed7", 10, 1, seed=7)
+    assert (slow.frame_count, fast.frame_count) == (5, 10)
+    assert fast.closure_digest != slow.closure_digest
+    assert _c4(fast) != _c4(slow)
+    assert _c4(seeded) != _c4(slow) and seeded.closure_digest != slow.closure_digest
+    # The scheduler width is inert: the same frames under the same closure.
+    assert wide.digest == slow.digest
+    assert wide.closure_digest == slow.closure_digest and _c4(wide) == _c4(slow)
+    # A seed the configuration cannot state is refused before any output exists.
+    folder = _ROOT / "c4-unstatable-seed"
+    folder.mkdir()
+    scene = _OnePlay()
+    scene.random_seed = 2**63
+    try:
+        scene.render(folder / "frames.png", format="png_sequence", reproducible=True,
+                     sources=_SOURCE, resolution=(64, 36), fps=10, threads=1)
+    except Exception as error:
+        assert "C4" in str(error) and "signed 64-bit" in str(error), error
+    else:
+        raise AssertionError("a seed C4 cannot state was certified")
+    assert list(folder.iterdir()) == []
+
+
 def test_false_runtime_labels_refuse_without_native_publication():
     destination = _ROOT / "refused.png"
     scene = ml.Scene()
@@ -218,7 +268,7 @@ def test_false_runtime_labels_refuse_without_native_publication():
 assert getattr(ml, "__franken_manim__", False), "requires the installed native FrankenManim portal"
 _cases = sorted((name, case) for name, case in globals().items()
                 if name.startswith("test_") and callable(case))
-assert len(_cases) == 6, "runtime provenance native acceptance inventory changed"
+assert len(_cases) == 7, "runtime provenance native acceptance inventory changed"
 for _name, _case in _cases:
     _case()
     print("runtime provenance native acceptance passed:", _name)
