@@ -69,3 +69,8 @@ plays are chunked.
   the Reference's `arange` output, drift test, coverage property).
 - Reference: `manimlib/scene/scene.py::get_time_progression` at the
   pinned commit.
+- The corpus differential counts each Reference segment by this rule
+  (`time_bn02` in `structural_facts.py`); a scene whose portal clock equals
+  that count differs only under this note (exclusion row
+  `bn02-frame-count`). `UniformSamples` (`_2023/convolutions2/continuous.py`)
+  waits 0.1 s a hundred times: 35.000 s in the Reference, 38.333 s here.

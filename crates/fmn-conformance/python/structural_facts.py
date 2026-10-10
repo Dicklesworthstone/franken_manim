@@ -370,8 +370,56 @@ def scene_facts(scene, namespace=None, points_mode: str = "digest") -> dict:
     roots = [m for m in scene.mobjects if type(m).__name__ != "CameraFrame"]
     record = extract(type(scene).__name__, roots, namespace=namespace, points_mode=points_mode)
     record["camera_frame_roots"] = len(scene.mobjects) - len(roots)
-    record["time"] = quantize(getattr(scene, "time", None))
+    time = getattr(scene, "time", None)
+    record["time"] = quantize(
+        None if time is None else time + getattr(scene, "_fmn_skipped_frame_rounding", 0.0))
+    bn02 = getattr(scene, "_fmn_bn02_frame_rounding", None)
+    if time is not None and bn02 is not None:
+        record["time_bn02"] = quantize(time + bn02)
     return record
+
+
+def _observe_reference_playback_clock(manimlib):
+    """Make the Reference's `time` fact its playback clock under `-s`.
+
+    Played, the Reference advances a segment over `arange(0, run_time, 1/fps)
+    + 1/fps`, ending on the frame at or after `run_time` (scene.py:477).
+    Skipped, it advances by `run_time` itself (scene.py:474), so its clock
+    under `-s` differs from the same scene played: `wait(0.25)` at 30 fps is
+    0.2667 s played, 0.25 s skipped. The portal keeps one clock for both
+    (BN-02). This records, per skipped segment, the rounding playback would
+    add; the Reference's behavior is untouched.
+
+    It also records the same segments counted by BN-02's rule,
+    `ceil(run_time * fps)` frames on the exact value of the f64 duration
+    (`time_bn02`). `arange` can count one frame fewer when the f64 sits just
+    above a frame boundary (`wait(0.1)` at 30 fps: 3 frames, BN-02 4).
+    Returns the restorer.
+    """
+    from fractions import Fraction
+
+    import numpy as np
+
+    original = manimlib.Scene.get_time_progression
+
+    def get_time_progression(self, run_time, *args, **kwargs):
+        times = original(self, run_time, *args, **kwargs)
+        override = kwargs.get("override_skip_animations", args[2] if len(args) > 2 else False)
+        if self.skip_animations and not override:
+            fps = self.camera.fps
+            duration = float(run_time)  # exact for NumPy scalars too
+            played = np.arange(0, run_time, 1 / fps) + 1 / fps
+            if len(played):
+                self._fmn_skipped_frame_rounding = (
+                    getattr(self, "_fmn_skipped_frame_rounding", 0.0)
+                    + float(played[-1]) - duration)
+            frames = math.ceil(Fraction(duration) * Fraction(float(fps))) if duration > 0 else 0
+            self._fmn_bn02_frame_rounding = (
+                getattr(self, "_fmn_bn02_frame_rounding", 0.0) + frames / fps - duration)
+        return times
+
+    manimlib.Scene.get_time_progression = get_time_progression
+    return lambda: setattr(manimlib.Scene, "get_time_progression", original)
 
 
 def run_scene(facts_path: str, engine: str, engine_argv, points_mode: str = "digest") -> int:
@@ -397,6 +445,7 @@ def run_scene(facts_path: str, engine: str, engine_argv, points_mode: str = "dig
         return original(self)
 
     manimlib.Scene.tear_down = tear_down
+    restore_clock = _observe_reference_playback_clock(manimlib) if engine == "reference" else None
     code = 1
     try:
         if engine == "reference":
@@ -409,6 +458,8 @@ def run_scene(facts_path: str, engine: str, engine_argv, points_mode: str = "dig
         code = exit_.code if isinstance(exit_.code, int) else (0 if exit_.code is None else 1)
     finally:
         manimlib.Scene.tear_down = original
+        if restore_clock is not None:
+            restore_clock()
         if not records:
             records.append(extract_error("scene", RuntimeError("tear_down was never reached")))
         Path(facts_path).write_text("".join(canonical(r) + "\n" for r in records), encoding="utf-8")
@@ -737,7 +788,10 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
         if key in ref or key in portal:
             a, b = ref.get(key, "absent"), portal.get(key, "absent")
             if not same(a, b):
-                note("", None, key, a, b)
+                # A time the Reference's segments reach under BN-02's frame
+                # count is the fact `time.bn02`, for that Behavior Note's row.
+                bn02 = key == "time" and "time_bn02" in ref and same(ref["time_bn02"], b)
+                note("", None, "time.bn02" if bn02 else key, a, b)
     shown = [d for d in differences if d is not None]
     verdict = "differs" if differences else ("equal-with-exclusions" if excluded else "equal")
     return {

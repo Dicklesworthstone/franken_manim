@@ -312,6 +312,15 @@ class RowScoping(unittest.TestCase):
         c = dict(b, camera_frame_roots=1, time=2001)
         self.assertEqual(sf.diff_subject(a, c)["verdict"], "equal")
 
+    def test_a_time_equal_to_the_bn02_recount_is_only_that_fact(self):
+        rows = [{"id": "bn02", "kind": "behavior-note", "ref": "BN-02", "scope": "scenes",
+                 "fact": "time.bn02", "reason": "t"}]
+        ref = dict(facts([Square(SQUARE)]), time=3000, time_bn02=3067)
+        counted = sf.diff_subject(ref, dict(facts([Square(SQUARE)]), time=3067), rows)
+        self.assertEqual((counted["verdict"], counted["excluded"]), ("equal-with-exclusions", {"bn02": 1}))
+        other = sf.diff_subject(ref, dict(facts([Square(SQUARE)]), time=3100), rows)
+        self.assertEqual(other["first_difference"]["fact"], "time")
+
 
 class ClassSweep(unittest.TestCase):
     def test_sweep_lists_each_default_then_its_declared_calls(self):

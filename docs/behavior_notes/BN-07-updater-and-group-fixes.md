@@ -1,4 +1,4 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
@@ -289,3 +289,23 @@ Locked by the C-26 assertions in `crates/fmn-python/tests/bridge.py`.
 
 **Migration:** none needed. Such calls could only have raised in the
 Reference.
+
+## C-29 — `restore()` and `become()` carry a point-less member's style
+
+A point-less Reference mobject keeps its colors in `_data_defaults`, not in
+`data` (`mobject.py:1329`, `vectorized_mobject.py:264`), and `become()`
+copies `data` only (`mobject.py:730`). So `restore()` leaves every point-less
+member of the family (an `Integer` root, the group inside it, a `VGroup`)
+with the style it had before the call, while members with points return to
+the saved state. `get_fill_opacity()` on such a member then reads the stale
+value: in `_2020/hamming.py` `OneGroupPerParityBit`, a grid of `Integer`
+bits is faded by subgroup and restored four times, and every root a fade
+ever reached stays at opacity 0, though its glyph is visible again.
+
+**FrankenManim:** `become()` and `restore()` carry each member's style,
+with or without points.
+
+Locked by the C-29 assertions in `crates/fmn-python/tests/bridge.py`.
+
+**Migration:** none needed. A scene that reads a restored member's style
+gets the saved value, matching what is drawn.

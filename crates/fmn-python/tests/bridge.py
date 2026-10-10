@@ -11687,6 +11687,16 @@ assert partial_plane.background_lines[0].get_stroke_width() == 3
 # the Reference's point_from_proportion asserts.
 flat_arc = manimlib.Arc(angle=0, radius=0.5)
 assert np.allclose(flat_arc.pfp(0.3), flat_arc.get_start())
+# Appendix C-29: restore() brings back a point-less member's style too. The
+# Reference's become() copies point data only, so a faded Integer root stays
+# faded after restore while its glyphs come back.
+saved_bits = manimlib.VGroup(manimlib.Integer(0), manimlib.Integer(1))
+saved_bits[1].set_opacity(0)
+saved_bits.save_state()
+saved_bits.set_fill(opacity=0)
+saved_bits.restore()
+assert [m.get_fill_opacity() for m in saved_bits] == [1.0, 0.0]
+assert saved_bits[0][0].get_fill_opacity() == 1.0
 
 single_insert = topology.insert_n_curves_to_point_list(
     2, np.array([[2.0, 3.0, 0.0]], dtype=np.float32)

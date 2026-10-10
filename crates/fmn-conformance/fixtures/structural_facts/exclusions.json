@@ -156,6 +156,14 @@
       "reason": "The Reference's scene.mobjects starts with the CameraFrame; the portal's does not."
     },
     {
+      "id": "bn02-frame-count",
+      "kind": "behavior-note",
+      "ref": "BN-02",
+      "scope": "scenes",
+      "fact": "time.bn02",
+      "reason": "The portal's clock equals the Reference's segments counted by BN-02's rule, ceil(run_time * fps) on the exact f64 duration; the Reference's arange counts one frame fewer just above a frame boundary (wait(0.1) at 30 fps: 3 frames, BN-02 4)."
+    },
+    {
       "id": "bn08-drawn-natives",
       "kind": "behavior-note",
       "ref": "BN-08",
