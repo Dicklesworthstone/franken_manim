@@ -256,11 +256,30 @@ fn a_warm_second_process_serves_every_formula_from_disk_with_identical_certified
     assert_eq!(warm.count("store_errors"), 0);
 
     // Under --reproducible a hit is bit-identical to a miss, and warming the
-    // cache never changes the certified closure. (Its configured location
-    // does: `directories.cache` is part of the resolved config, C4.)
+    // cache never changes the certified closure.
     assert_eq!(warm.frames.len(), cold.frames.len());
     assert!(warm.frames == cold.frames, "hit and miss frames differ");
     assert_eq!(warm.closure_digest(), cold.closure_digest());
+
+    // Nor does where the cache lives: another root (cold there) renders the
+    // same frames under the same closure, because the resolved config (C4)
+    // carries `directories.cache` only as an inert marker.
+    let elsewhere = render(
+        &fixture,
+        "elsewhere",
+        "2",
+        &cache_dir_args(&fixture.root.join("another-cache")),
+    );
+    assert_eq!(elsewhere.count("misses"), SHEET_LAYOUTS);
+    assert!(
+        elsewhere.frames == cold.frames,
+        "a cache root changed the frames"
+    );
+    assert_eq!(
+        elsewhere.closure_digest(),
+        cold.closure_digest(),
+        "a cache root changed the certified closure"
+    );
 }
 
 #[test]
@@ -329,6 +348,8 @@ fn a_corrupt_entry_is_detected_recomputed_and_republished_across_processes() {
         "{}",
         recovering.typesetting()
     );
+    // A corrupt entry is evicted and republished: no read or write failed.
+    assert_eq!(recovering.count("store_errors"), 0);
     assert_eq!(recovering.count("disk_hits"), SHEET_LAYOUTS - 1);
     assert_eq!(recovering.count("misses"), 1);
     assert!(

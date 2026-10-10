@@ -440,10 +440,18 @@ impl Config {
     /// Serialize the fully merged, closure-relevant document after all
     /// precedence and CLI overlays. Map order is retained because open maps
     /// such as directory aliases are observably ordered; scalar spellings
-    /// have already been resolved to their typed meaning. The one deliberate
-    /// normalization is `render.threads`: §16.7 proves scheduler width inert
-    /// and explicitly excludes it from the input closure, so every valid
-    /// thread policy receives the same structural marker.
+    /// have already been resolved to their typed meaning. Two operational
+    /// settings are normalized, each to its own structural marker, because
+    /// neither can change a certified byte:
+    /// - `render.threads`: §16.7 proves scheduler width inert and explicitly
+    ///   excludes it from the input closure.
+    /// - `directories.cache` (`--cache-dir`): it only selects where the
+    ///   content-addressed store lives, and a verified cache hit is
+    ///   bit-identical to a fresh computation, so two cache roots render the
+    ///   same frames and must name the same closure.
+    ///
+    /// Everything else, the typesetting inputs included (`tex.template`,
+    /// `text.font`), is serialized as resolved.
     ///
     /// # Errors
     /// Canonical document size/allocation failure.
@@ -458,7 +466,18 @@ impl Config {
 enum ConfigLocation {
     Root,
     Render,
+    Directories,
     Other,
+}
+
+/// The structural marker that replaces an operational setting proven inert
+/// for certified output, or `None` for a closure-relevant key.
+fn inert_marker(location: ConfigLocation, key: &str) -> Option<&'static str> {
+    match (location, key) {
+        (ConfigLocation::Render, "threads") => Some("scheduler-width-proven-inert/v1"),
+        (ConfigLocation::Directories, "cache") => Some("cache-location-proven-inert/v1"),
+        _ => None,
+    }
 }
 
 fn put_config_value(writer: &mut Writer, value: &Value, location: ConfigLocation) {
@@ -484,13 +503,13 @@ fn put_config_value(writer: &mut Writer, value: &Value, location: ConfigLocation
                 .put_u64(u64::try_from(entries.len()).unwrap_or(u64::MAX));
             for (key, value) in entries {
                 writer.put_str(key);
-                if location == ConfigLocation::Render && key == "threads" {
-                    writer.put_u8(4).put_str("scheduler-width-proven-inert/v1");
+                if let Some(marker) = inert_marker(location, key) {
+                    writer.put_u8(4).put_str(marker);
                 } else {
-                    let child_location = if location == ConfigLocation::Root && key == "render" {
-                        ConfigLocation::Render
-                    } else {
-                        ConfigLocation::Other
+                    let child_location = match (location, key.as_str()) {
+                        (ConfigLocation::Root, "render") => ConfigLocation::Render,
+                        (ConfigLocation::Root, "directories") => ConfigLocation::Directories,
+                        _ => ConfigLocation::Other,
                     };
                     put_config_value(writer, value, child_location);
                 }
@@ -884,6 +903,53 @@ mod tests {
                 .canonical_bytes()
                 .expect("sixteen-thread config serializes");
         assert_eq!(one_thread, sixteen_threads);
+    }
+
+    fn canonical(pairs: &[(&str, &str)]) -> Vec<u8> {
+        let values = pairs
+            .iter()
+            .map(|&(path, value)| (path, Value::Str(value.to_owned())));
+        Config::resolve(&[], Some(overlay(values)))
+            .expect("config resolves")
+            .config
+            .canonical_bytes()
+            .expect("config serializes")
+    }
+
+    #[test]
+    fn the_cache_location_is_normalized_but_every_output_input_still_binds() {
+        // `--cache-dir A` and `--cache-dir B` (and the platform default) name
+        // one certified config: the cache only decides where layouts are kept.
+        let defaults = canonical(&[]);
+        let a = canonical(&[("directories.cache", "/cache/a")]);
+        let b = canonical(&[("directories.cache", "relative/b")]);
+        assert_eq!(a, b);
+        assert_eq!(a, defaults);
+
+        // Inputs that do change output still separate configs, with or
+        // without a cache root, and a neighbouring directory key is not
+        // swept up by the normalization.
+        for (path, value) in [
+            ("tex.template", "basic"),
+            ("text.font", "IBM Plex Sans"),
+            ("directories.base", "/elsewhere"),
+            ("directories.subdirs.raster_images", "pictures"),
+        ] {
+            let changed = canonical(&[(path, value)]);
+            assert_ne!(changed, defaults, "{path} must stay in the closure");
+            assert_eq!(
+                canonical(&[(path, value), ("directories.cache", "/cache/a")]),
+                changed,
+                "{path}"
+            );
+        }
+
+        // Only `directories.cache` is inert: a `cache` key in any other
+        // section is serialized as resolved.
+        assert_ne!(
+            canonical(&[("render.cache", "x")]),
+            canonical(&[("render.cache", "y")])
+        );
     }
 
     #[test]

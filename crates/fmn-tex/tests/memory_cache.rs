@@ -233,6 +233,33 @@ fn an_attached_store_that_can_neither_read_nor_write_counts_every_failure() {
 }
 
 #[test]
+fn a_layout_over_the_store_ceiling_bypasses_retention_without_a_store_error() {
+    let source = "q^7+z";
+    let expected = engine().typeset(MATH, source).unwrap().to_bytes().unwrap();
+    // The store's per-entry ceiling sits one byte below this layout: the
+    // documented retention bypass, not a store that failed to write.
+    let store = Store::open(
+        Arc::new(VirtualFs::new()),
+        Arc::new(FakeClock::new()),
+        ROOT,
+        StoreConfig {
+            max_entry_bytes: expected.len() - 1,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    let e = engine().with_cache(&store).unwrap();
+    assert_eq!(
+        e.typeset(MATH, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
+    assert_eq!(e.persistent_store_errors(), 0);
+    assert_eq!(e.persistent_bytes_written(), 0);
+    assert_eq!(e.persistent_rejected_entries(), 0);
+    assert_eq!(e.layout_computations(), 1);
+}
+
+#[test]
 fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
     let store = store();
     let e = engine().with_cache(&store).unwrap();
