@@ -25,10 +25,12 @@
 //!   the single RNG's named [`STREAM_LINES_SUBSTREAM`] substream
 //!   (`RngRoot::substream`), so field seeding never perturbs another
 //!   subsystem's draws (§6.5). The Reference's global `np.random` is dead.
-//! * **Timestamped finite tails.** `TracingTail` retains an elapsed-time
-//!   window on its declared anchor grid, replacing the Reference's estimate
-//!   from the most recent frame delta. Only observed source positions are
-//!   interpolated; a finite window bounds both storage and work per update.
+//! * **Elapsed-time traces.** `TracedPath` and `TracingTail` retain their
+//!   elapsed-time window on the declared anchor grid, replacing the
+//!   Reference's estimate from the most recent frame delta. Only observed
+//!   source positions are interpolated; finite windows bound storage and
+//!   work per update. An unbounded-duration trace refuses before exceeding
+//!   the shared 100,000-anchor resource ceiling rather than dropping history.
 //!
 //! **Purity (§9.5).** `TimeVaryingVectorField`, `AnimatedStreamLines`,
 //! `TracedPath`, `TracingTail`, and `AnimatedBoundary` are updater-bound
@@ -1826,6 +1828,8 @@ impl AnimatedStreamLines {
 
 // -------------------------------------------------------------- tracers
 
+const MAX_TRACE_ANCHORS: usize = 100_000;
+
 /// A stroke-width (or opacity) profile along a traced path: one value, or
 /// a taper distributed by TRUE arc length (BN-03).
 #[derive(Debug, Clone, PartialEq)]
@@ -1845,7 +1849,7 @@ impl StrokeProfile {
     }
 }
 
-/// A finite tail's regularly spaced observations, newest first. Ages are
+/// A trace's regularly spaced observations, newest first. Ages are
 /// relative to the latest observation rather than an ever-growing clock.
 /// Keeping the grid point before the cutoff permits exact temporal clipping;
 /// the current endpoint is published separately between grid observations.
@@ -1855,6 +1859,7 @@ struct TailSamples {
     phase: f64,
     previous: Vec3,
     anchors: VecDeque<Vec3>,
+    limit: usize,
 }
 
 impl TailSamples {
@@ -1865,6 +1870,20 @@ impl TailSamples {
             phase: 0.0,
             previous: start,
             anchors: VecDeque::from(vec![start; intervals + 1]),
+            limit: intervals + 1,
+        }
+    }
+
+    /// TracedPath begins when its source is first observed. It never
+    /// fabricates the stationary prehistory that TracingTail requests.
+    fn first_observation(window: f64, spacing: f64, intervals: usize, point: Vec3) -> Self {
+        Self {
+            window,
+            spacing,
+            phase: 0.0,
+            previous: point,
+            anchors: VecDeque::from([point]),
+            limit: intervals + 1,
         }
     }
 
@@ -1895,28 +1914,50 @@ impl TailSamples {
         // The deque spans the full window and its predecessor. Iterating
         // backward from the newest grid point skips the expired prefix of a
         // large step without computing an unbounded absolute grid index.
-        let new_count = (0..self.anchors.len())
+        // A finite trace can discard observations outside its window. An
+        // infinite-duration trace must retain every grid point, so one
+        // extra candidate detects a full history before any state changes.
+        let candidate_limit = if self.window.is_finite() {
+            self.limit
+        } else {
+            self.limit - self.anchors.len() + 1
+        };
+        let new_count = (0..candidate_limit)
             .take_while(|&index| phase + index as f64 * self.spacing < dt)
             .count();
+        if !self.window.is_finite() && new_count > self.limit - self.anchors.len() {
+            std::panic::panic_any(SamplingError::LimitExceeded {
+                context: "TracedPath history; use a finite window or increase time_per_anchor",
+                max_samples: MAX_TRACE_ANCHORS,
+            });
+        }
         for index in (0..new_count).rev() {
             let age = phase + index as f64 * self.spacing;
             let alpha = (1.0 - age / dt).clamp(0.0, 1.0);
             let anchor = lerp3(self.previous, point, alpha);
-            let _ = self.anchors.pop_back();
+            if self.anchors.len() == self.limit {
+                let _ = self.anchors.pop_back();
+            }
             self.anchors.push_front(anchor);
         }
         self.phase = phase;
         self.previous = point;
 
         let mut points = Vec::with_capacity(self.anchors.len() + 1);
-        if self.window < phase {
+        if !self.window.is_finite() {
+            points.extend(self.anchors.iter().rev().copied());
+        } else if self.window < phase {
             // Both the cutoff and the endpoint lie after the newest grid
             // observation; no expired grid point belongs in the visible path.
             points.push(lerp3(self.anchors[0], point, 1.0 - self.window / phase));
         } else {
             let intervals = (self.window - phase) / self.spacing;
-            let inside = intervals.ceil() as usize;
-            let boundary = if inside == 0 {
+            let inside = (intervals.ceil() as usize).min(self.anchors.len() - 1);
+            let boundary = if intervals > (self.anchors.len() - 1) as f64 {
+                // The configured window reaches before the first observed
+                // point. Start at that point, without invented prehistory.
+                self.anchors[inside]
+            } else if inside == 0 {
                 self.anchors[0]
             } else {
                 lerp3(
@@ -1959,7 +2000,8 @@ impl Default for TracedPath {
 }
 
 impl TracedPath {
-    /// The Reference's defaults: unbounded memory, anchor cadence 1/15 s.
+    /// The Reference's defaults: unbounded duration, anchor cadence 1/15 s.
+    /// History still obeys the shared 100,000-anchor resource ceiling.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -2006,7 +2048,17 @@ impl TracedPath {
     /// Reference's zero-argument closure). Returns the trace's handle.
     ///
     /// # Errors
-    /// [`FieldError::Stage`] on a stale handle.
+    /// [`FieldError::Stage`] on a stale handle;
+    /// [`FieldError::NonFiniteControl`] for an invalid window/cadence;
+    /// [`FieldError::Sampling`] when the finite window exceeds the shared
+    /// 100,000-anchor resource ceiling. Refusal precedes stage adoption.
+    ///
+    /// # Panics
+    /// The installed updater requires finite, nonnegative deltas and finite
+    /// source coordinates. An infinite-duration trace also refuses a step
+    /// that exceeds its anchor budget. These refusals preserve its previous
+    /// history and geometry; the infallible [`Stage::update`] API does not
+    /// roll back its clock or arbitrary effects of the source callback.
     pub fn add_to_stage(
         self,
         stage: &mut Stage,
@@ -2023,6 +2075,25 @@ impl TracedPath {
         traced_point_func: impl Fn(&Stage) -> Vec3 + 'static,
         mut tail_samples: Option<TailSamples>,
     ) -> Result<Mob, FieldError> {
+        if self.time_traced.is_nan() || self.time_traced < 0.0 {
+            return Err(FieldError::NonFiniteControl {
+                context: "TracedPath time_traced must be nonnegative or positive infinity",
+            });
+        }
+        ensure_positive(
+            "TracedPath time_per_anchor must be finite and positive",
+            self.time_per_anchor,
+        )?;
+        let intervals = if self.time_traced.is_finite() {
+            let intervals = (self.time_traced / self.time_per_anchor).ceil() as usize;
+            SamplingBudget::new(MAX_TRACE_ANCHORS - 3)
+                .ensure_total("TracedPath finite sample history", intervals)?;
+            intervals
+        } else {
+            // One initial grid point and one possible between-grid endpoint
+            // count toward the same ceiling as finite traces and the portal.
+            MAX_TRACE_ANCHORS - 2
+        };
         let mob = stage.add(VMobject::new().with_style(Style::default().stroke(
             self.stroke_color,
             match &self.stroke_width {
@@ -2034,50 +2105,36 @@ impl TracedPath {
                 StrokeProfile::Taper(p) => p.first().copied().unwrap_or(0.0),
             },
         )));
-        let mut traced_points: Vec<Vec3> = Vec::new();
         let config = self;
         stage.add_dt_updater(
             mob,
             move |stage: &mut Stage, mob: Mob, dt: f64| {
-                if tail_samples.is_some() {
-                    // Stage's updater API is infallible. Refuse violations
-                    // of its tail time precondition before source sampling or
-                    // changing geometry/history, rather than hiding errors.
-                    assert!(
-                        dt.is_finite() && dt >= 0.0,
-                        "TracingTail updater dt must be finite and nonnegative"
-                    );
-                }
+                // Stage's updater API is infallible. Refuse invalid deltas
+                // before source sampling or changing trace history/geometry.
+                assert!(
+                    dt.is_finite() && dt >= 0.0,
+                    "TracedPath/TracingTail updater dt must be finite and nonnegative"
+                );
                 // changing.py:92 update_path: dt == 0 is an explicit no-op.
                 if dt == 0.0 {
                     return;
                 }
                 let point = (traced_point_func)(stage);
+                assert!(
+                    point.iter().all(|coordinate| coordinate.is_finite()),
+                    "TracedPath/TracingTail source must return a finite 3D point"
+                );
 
                 let points = if let Some(samples) = tail_samples.as_mut() {
                     samples.advance(point, dt)
-                } else if config.time_traced.is_finite() {
-                    traced_points.push(point);
-                    // A zero/sub-frame window still observes its current
-                    // point. Otherwise the empty window never publishes any
-                    // geometry, even after the source starts moving.
-                    let n_relevant = (((config.time_traced / dt) + 0.5) as usize).max(1);
-                    let n_tps = traced_points.len();
-                    let window = if n_tps < n_relevant {
-                        let mut w = traced_points.clone();
-                        w.resize(n_relevant, point);
-                        w
-                    } else {
-                        traced_points[n_tps - n_relevant..].to_vec()
-                    };
-                    // Every now and then refresh the list (changing.py:106).
-                    if n_tps > 10 * n_relevant {
-                        traced_points = traced_points[n_tps - n_relevant..].to_vec();
-                    }
-                    window
                 } else {
-                    traced_points.push(point);
-                    traced_points.clone()
+                    tail_samples = Some(TailSamples::first_observation(
+                        config.time_traced,
+                        config.time_per_anchor,
+                        intervals,
+                        point,
+                    ));
+                    vec![point]
                 };
 
                 if !points.is_empty() {
@@ -2200,7 +2257,7 @@ impl TracingTail {
                 context: "TracingTail time_traced must be finite and nonnegative",
             });
         }
-        SamplingBudget::new(100_000 - 3)
+        SamplingBudget::new(MAX_TRACE_ANCHORS - 3)
             .ensure_total("TracingTail initial sample history", self.prefill)?;
         stage.try_get(target)?;
         let start = stage.get_center(target);
@@ -3031,6 +3088,245 @@ mod tests {
     fn traced_path_stores_custom_time_per_anchor() {
         let traced = TracedPath::new().with_time_per_anchor(1.0 / 30.0);
         assert_eq!(traced.time_per_anchor, 1.0 / 30.0);
+    }
+
+    #[test]
+    fn traced_path_begins_at_its_first_observation_and_clips_the_window() {
+        let mut stage = Stage::new();
+        let cursor = stage.add(VMobject::from_points(vec![[0.0; 3]]));
+        let traced = TracedPath::new()
+            .with_time_traced(0.5)
+            .with_time_per_anchor(0.25)
+            .add_to_stage(&mut stage, move |s| s.get_center(cursor))
+            .unwrap();
+        stage.add_to_scene(traced).unwrap();
+        assert!(stage.get_points(traced).unwrap().is_empty());
+        stage.update(0.0);
+        assert!(stage.get_points(traced).unwrap().is_empty());
+        stage.set_points(cursor, &[[0.125, 0.0, 0.0]]).unwrap();
+        stage.update(0.125);
+        assert_eq!(stage.get_points(traced).unwrap(), vec![[0.125, 0.0, 0.0]]);
+        stage.set_points(cursor, &[[0.25, 0.0, 0.0]]).unwrap();
+        stage.update(0.125);
+        stage.set_points(cursor, &[[0.75, 0.0, 0.0]]).unwrap();
+        stage.update(0.5);
+        let anchors: Vec<_> = stage
+            .get_points(traced)
+            .unwrap()
+            .into_iter()
+            .step_by(2)
+            .collect();
+        assert_eq!(
+            anchors,
+            vec![
+                [0.25, 0.0, 0.0],
+                [0.375, 0.0, 0.0],
+                [0.625, 0.0, 0.0],
+                [0.75, 0.0, 0.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn traced_path_irregular_updates_preserve_duration_and_cadence() {
+        fn run(deltas: &[f64]) -> Vec<Vec3> {
+            let mut stage = Stage::new();
+            let cursor = stage.add(VMobject::from_points(vec![[0.0; 3]]));
+            let traced = TracedPath::new()
+                .with_time_traced(0.875)
+                .with_time_per_anchor(0.25)
+                .add_to_stage(&mut stage, move |s| s.get_center(cursor))
+                .unwrap();
+            stage.add_to_scene(traced).unwrap();
+            // Unlike TracingTail, TracedPath has no construction-time sample.
+            stage.update(0.125);
+            let mut time = 0.0;
+            for &dt in deltas {
+                time += dt;
+                stage
+                    .set_points(cursor, &[[time, 2.0 * time, 0.0]])
+                    .unwrap();
+                stage.update(dt);
+            }
+            stage
+                .get_points(traced)
+                .unwrap()
+                .into_iter()
+                .step_by(2)
+                .collect()
+        }
+        let expected = vec![
+            [0.625, 1.25, 0.0],
+            [0.75, 1.5, 0.0],
+            [1.0, 2.0, 0.0],
+            [1.25, 2.5, 0.0],
+            [1.5, 3.0, 0.0],
+        ];
+        assert_eq!(run(&[0.125; 12]), expected);
+        assert_eq!(
+            run(&[0.375, 0.125, 0.75, 0.000_976_562_5, 0.249_023_437_5]),
+            expected
+        );
+    }
+
+    #[test]
+    fn traced_path_finite_history_is_bounded_under_small_updates() {
+        let mut stage = Stage::new();
+        let cursor = stage.add(VMobject::from_points(vec![[0.0; 3]]));
+        let traced = TracedPath::new()
+            .with_time_traced(1.0)
+            .with_time_per_anchor(0.25)
+            .add_to_stage(&mut stage, move |s| s.get_center(cursor))
+            .unwrap();
+        stage.add_to_scene(traced).unwrap();
+        for (dt, point) in [
+            (1.0 / 1024.0, [1.0, 0.0, 0.0]),
+            (1.0 / 2048.0, [2.0, 0.0, 0.0]),
+            (0.5, [3.0, 0.0, 0.0]),
+            (1.0 / 1024.0, [4.0, 0.0, 0.0]),
+        ] {
+            stage.set_points(cursor, &[point]).unwrap();
+            stage.update(dt);
+            let points = stage.get_points(traced).unwrap();
+            assert!(
+                points.len() <= 13,
+                "history follows cadence, not window / dt"
+            );
+            assert_eq!(points.last(), Some(&point));
+        }
+    }
+
+    #[test]
+    fn traced_path_unbounded_history_uses_the_declared_grid() {
+        for (spacing, expected_anchors) in [(0.25, 5), (0.5, 3)] {
+            let mut stage = Stage::new();
+            let cursor = stage.add(VMobject::from_points(vec![[0.0; 3]]));
+            let traced = TracedPath::new()
+                .with_time_per_anchor(spacing)
+                .add_to_stage(&mut stage, move |s| s.get_center(cursor))
+                .unwrap();
+            stage.add_to_scene(traced).unwrap();
+            stage.update(0.125);
+            for index in 1..=8 {
+                stage
+                    .set_points(cursor, &[[index as f64 / 8.0, 0.0, 0.0]])
+                    .unwrap();
+                stage.update(0.125);
+            }
+            let anchors: Vec<_> = stage
+                .get_points(traced)
+                .unwrap()
+                .into_iter()
+                .step_by(2)
+                .collect();
+            assert_eq!(anchors.len(), expected_anchors);
+            for (index, point) in anchors.iter().enumerate() {
+                assert_eq!(*point, [index as f64 * spacing, 0.0, 0.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn traced_path_refuses_invalid_configuration_before_adoption() {
+        let mut stage = Stage::new();
+        for window in [-1.0, f64::NAN, f64::NEG_INFINITY] {
+            let epoch = stage.topology_epoch();
+            assert!(matches!(
+                TracedPath::new()
+                    .with_time_traced(window)
+                    .add_to_stage(&mut stage, |_| [0.0; 3]),
+                Err(FieldError::NonFiniteControl { .. })
+            ));
+            assert_eq!(stage.topology_epoch(), epoch);
+        }
+        for spacing in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let epoch = stage.topology_epoch();
+            assert!(matches!(
+                TracedPath::new()
+                    .with_time_per_anchor(spacing)
+                    .add_to_stage(&mut stage, |_| [0.0; 3]),
+                Err(FieldError::NonFiniteControl { .. })
+            ));
+            assert_eq!(stage.topology_epoch(), epoch);
+        }
+        let epoch = stage.topology_epoch();
+        assert!(matches!(
+            TracedPath::new()
+                .with_time_traced(99_997.25)
+                .with_time_per_anchor(1.0)
+                .add_to_stage(&mut stage, |_| [0.0; 3]),
+            Err(FieldError::Sampling(_))
+        ));
+        assert_eq!(stage.topology_epoch(), epoch);
+    }
+
+    #[test]
+    fn traced_path_invalid_updates_preserve_history_and_allow_retry() {
+        use std::cell::Cell;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::rc::Rc;
+
+        let point = Rc::new(Cell::new([0.0; 3]));
+        let calls = Rc::new(Cell::new(0));
+        let mut stage = Stage::new();
+        let traced = TracedPath::new()
+            .with_time_traced(0.5)
+            .with_time_per_anchor(0.25)
+            .add_to_stage(&mut stage, {
+                let point = Rc::clone(&point);
+                let calls = Rc::clone(&calls);
+                move |_| {
+                    calls.set(calls.get() + 1);
+                    point.get()
+                }
+            })
+            .unwrap();
+        stage.add_to_scene(traced).unwrap();
+        stage.update(0.125);
+        let before = stage.get_points(traced).unwrap();
+        for dt in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(catch_unwind(AssertUnwindSafe(|| stage.update(dt))).is_err());
+            assert_eq!(calls.get(), 1, "invalid dt must not sample the source");
+            assert_eq!(stage.get_points(traced).unwrap(), before);
+        }
+        point.set([f64::NAN, 0.0, 0.0]);
+        assert!(catch_unwind(AssertUnwindSafe(|| stage.update(0.125))).is_err());
+        assert_eq!(stage.get_points(traced).unwrap(), before);
+        point.set([1.0, 0.0, 0.0]);
+        stage.update(0.25);
+        assert_eq!(
+            stage.get_points(traced).unwrap(),
+            vec![[0.0; 3], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]
+        );
+    }
+
+    #[test]
+    fn traced_path_unbounded_budget_refusal_does_not_discard_history() {
+        use std::cell::Cell;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::rc::Rc;
+
+        let point = Rc::new(Cell::new([0.0; 3]));
+        let mut stage = Stage::new();
+        let traced = TracedPath::new()
+            .with_time_per_anchor(0.25)
+            .add_to_stage(&mut stage, {
+                let point = Rc::clone(&point);
+                move |_| point.get()
+            })
+            .unwrap();
+        stage.add_to_scene(traced).unwrap();
+        stage.update(0.125);
+        point.set([99.0, 0.0, 0.0]);
+        assert!(catch_unwind(AssertUnwindSafe(|| stage.update(f64::MAX))).is_err());
+        assert_eq!(stage.get_points(traced).unwrap(), vec![[0.0; 3]]);
+        point.set([1.0, 0.0, 0.0]);
+        stage.update(0.25);
+        assert_eq!(
+            stage.get_points(traced).unwrap().last(),
+            Some(&[1.0, 0.0, 0.0])
+        );
+        assert_eq!(stage.get_points(traced).unwrap().len(), 3);
     }
 
     #[test]

@@ -4277,6 +4277,112 @@ fn lifecycle_bundle_render_state_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("bundle_render_state_matches", matches))
 }
 
+/// A native timeline must capture the configured temporal detail and duration
+/// of a trace, with a visible tapered stroke and no construction-time sample.
+fn lifecycle_traced_path_cadence_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::{StrokeProfile, TracedPath};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let calls = Rc::new(Cell::new(0_u64));
+    let mut stage = Stage::new();
+    let trace = TracedPath::new()
+        .with_time_traced(0.5)
+        .with_time_per_anchor(0.25)
+        .with_stroke_width(StrokeProfile::Taper(vec![0.0, 4.0]))
+        .with_stroke_opacity(StrokeProfile::Taper(vec![0.0, 1.0]))
+        .add_to_stage(&mut stage, {
+            let calls = Rc::clone(&calls);
+            move |stage| {
+                calls.set(calls.get() + 1);
+                [stage.time(), 0.5 * stage.time(), 0.0]
+            }
+        })
+        .map_err(|error| fail(format!("construct native trace: {error}")))?;
+    stage
+        .add_to_scene(trace)
+        .map_err(|error| fail(format!("adopt native trace: {error}")))?;
+    stage.update(0.0);
+    let starts_empty = stage
+        .get_points(trace)
+        .is_some_and(|points| points.is_empty())
+        && calls.get() == 0;
+    let mut timeline =
+        Timeline::new(8).map_err(|error| fail(format!("create native trace clock: {error}")))?;
+    timeline
+        .wait(1.0)
+        .map_err(|error| fail(format!("schedule native trace: {error}")))?;
+    let mut captures = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &RngRoot::from_seed(41), &mut |packet| {
+            captures.push(packet.materialize_stage());
+        })
+        .map_err(|error| fail(format!("capture native trace: {error}")))?;
+    let first = captures
+        .first()
+        .ok_or_else(|| fail("trace omitted its first capture"))?;
+    let last = captures
+        .last()
+        .ok_or_else(|| fail("trace omitted its final capture"))?;
+    let first_observation = first.get_points(trace) == Some(vec![[0.125, 0.0625, 0.0]]);
+    let points = last
+        .get_points(trace)
+        .ok_or_else(|| fail("trace capture lost its drawable"))?;
+    let anchors: Vec<_> = points.iter().copied().step_by(2).collect();
+    let cadence_and_window = anchors
+        == vec![
+            [0.5, 0.25, 0.0],
+            [0.625, 0.3125, 0.0],
+            [0.875, 0.4375, 0.0],
+            [1.0, 0.5, 0.0],
+        ];
+    let entry = last
+        .get(trace)
+        .ok_or_else(|| fail("trace capture lost its style"))?;
+    let widths = entry
+        .buffer
+        .read_column("stroke_width")
+        .ok_or_else(|| fail("trace has no widths"))?;
+    let rgba = entry
+        .buffer
+        .read_column("stroke_rgba")
+        .ok_or_else(|| fail("trace has no stroke color"))?;
+    let tapers = widths.first() == Some(&0.0)
+        && widths.last() == Some(&4.0)
+        && rgba.get(3) == Some(&0.0)
+        && rgba.last() == Some(&1.0);
+    let stateful = reports.len() == 1 && !reports[0].purity.is_pure();
+    let rendered = render_certified_doc(last);
+    let visible = rendered != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.traced_path_cadence")
+            .field("frames", captures.len() as u64)
+            .field("source_calls", calls.get())
+            .field("starts_empty", truth(starts_empty))
+            .field("first_observation", truth(first_observation))
+            .field("cadence_and_window", truth(cadence_and_window))
+            .field("tapers", truth(tapers))
+            .field("stateful", truth(stateful))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("traced_path_frames", captures.len() as u64)
+        .with_counter("traced_path_source_calls", calls.get())
+        .with_counter("traced_path_starts_empty", u64::from(starts_empty))
+        .with_counter(
+            "traced_path_first_observation",
+            u64::from(first_observation),
+        )
+        .with_counter(
+            "traced_path_cadence_and_window",
+            u64::from(cadence_and_window),
+        )
+        .with_counter("traced_path_tapers", u64::from(tapers))
+        .with_counter("traced_path_stateful", u64::from(stateful))
+        .with_counter("traced_path_visible", u64::from(visible)))
+}
+
 /// fm-c1up: TracingTail seeds its updater history while its public geometry
 /// stays empty until the first positive-dt observation is published.
 fn lifecycle_tracing_tail_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -6293,6 +6399,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(spec(
+        "lifecycle.traced_path_cadence.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_traced_path_cadence_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("traced_path_frames", 8),
+            counter_eq("traced_path_source_calls", 8),
+            counter_eq("traced_path_starts_empty", 1),
+            counter_eq("traced_path_first_observation", 1),
+            counter_eq("traced_path_cadence_and_window", 1),
+            counter_eq("traced_path_tapers", 1),
+            counter_eq("traced_path_stateful", 1),
+            counter_eq("traced_path_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.traced_path_cadence",
+            vec![
+                FieldPred::str_eq("cadence_and_window", "true"),
+                FieldPred::str_eq("stateful", "true"),
+                FieldPred::str_eq("visible", "true"),
+            ],
+        )],
+    ));
     specs.push(
         spec(
             "lifecycle.always_redraw_shared_source.v1",
@@ -7972,6 +8103,16 @@ fn always_redraw_shared_source_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.always_redraw_shared_source.v1")
         .expect("the shared-source redraw lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn traced_path_cadence_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.traced_path_cadence.v1")
+        .expect("the native traced-path cadence scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
