@@ -572,4 +572,48 @@ class ModernTexFamilies(unittest.TestCase):
         self.assertTrue(all(child.has_points() for child in target))
 
 
+class StringMobjectAbstractness(unittest.TestCase):
+    # The Reference's StringMobject(SVGMobject, ABC) at 6199a00d: the class
+    # sweep records StringMobject() -> "TypeError: Can't instantiate abstract
+    # class StringMobject without an implementation for abstract methods
+    # 'get_attr_dict_from_command_pair', 'get_command_flag', ...".
+    STEPS = frozenset((
+        "get_attr_dict_from_command_pair", "get_command_flag", "get_command_matches",
+        "get_command_string", "get_configured_items", "get_content_prefix_and_suffix",
+        "get_svg_string_by_content", "replace_for_content", "replace_for_matching",
+    ))
+
+    def test_the_base_refuses_instantiation_like_the_reference(self):
+        for args in ((), ("x",)):
+            with self.assertRaises(TypeError) as caught:
+                m.StringMobject(*args)
+            self.assertTrue(str(caught.exception).startswith(
+                "Can't instantiate abstract class StringMobject without an "
+                "implementation for abstract methods 'get_attr_dict_from_command_pair', "
+                "'get_command_flag', 'get_command_matches', 'get_command_string', 'get_c"),
+                caught.exception)
+        self.assertEqual(m.StringMobject.__abstractmethods__, self.STEPS)
+
+    def test_a_direct_subclass_must_implement_every_step(self):
+        class Partial(m.StringMobject):
+            @staticmethod
+            def get_command_flag(match_obj):
+                return 0
+        self.assertEqual(Partial.__abstractmethods__, self.STEPS - {"get_command_flag"})
+        with self.assertRaises(TypeError):
+            Partial("x")
+
+    def test_concrete_string_classes_still_construct(self):
+        for build in (lambda: m.Text("x"), lambda: m.MarkupText("x"),
+                      lambda: m.Code("x = 1"), lambda: m.Tex("x"), lambda: m.TexText("x")):
+            mob = build()
+            self.assertIsInstance(mob, m.StringMobject)
+            self.assertFalse(type(mob).__abstractmethods__)
+            self.assertGreater(len(mob.get_all_points()), 0)
+        # The steps keep the portal's by-name render-twice refusal.
+        with self.assertRaises(Exception) as caught:
+            m.Text("x").get_command_flag(None)
+        self.assertIn("get_command_flag", str(caught.exception))
+
+
 if __name__=='__main__':unittest.main()

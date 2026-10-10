@@ -6,8 +6,19 @@ No SVG parser, second typesetter, or substitute interpolation is introduced.
 """
 from __future__ import annotations
 
+import abc
+from bisect import bisect_left
 from .coordinate_lifecycle import _bind
 from .copying import FamilyRefs
+
+
+# The Reference's StringMobject (an ABC) declares these render-twice steps
+# abstract; Tex and MarkupText implement them.
+_ABSTRACT_STRING_STEPS = (
+    "get_attr_dict_from_command_pair", "get_command_flag", "get_command_matches",
+    "get_command_string", "get_configured_items", "get_content_prefix_and_suffix",
+    "get_svg_string_by_content", "replace_for_content", "replace_for_matching",
+)
 
 
 def explicit_channel_colors(style):
@@ -159,4 +170,13 @@ def install_string_lifecycle(native):
         return init_colors(self)
     _bind(Markup, "init_colors", text_colors)
     _bind(Tex, "init_colors", tex_colors)
+    # StringMobject() raises the Reference's TypeError, and a direct subclass
+    # must implement these steps, as with the Reference's ABC. The portal's
+    # by-name refusers stay their bodies. MarkupText, Tex and their portal
+    # subclasses keep the empty abstract sets they were created with.
+    base = g["StringMobject"]
+    for name in _ABSTRACT_STRING_STEPS:
+        member = vars(base)[name]
+        getattr(member, "__func__", member).__isabstractmethod__ = True
+    abc.update_abstractmethods(base)
     g["_FMN_STRING_LIFECYCLE_INSTALLED"] = True
