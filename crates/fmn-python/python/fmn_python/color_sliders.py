@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from functools import wraps
 import inspect
+import math
 from typing import Any
 
 
@@ -96,6 +97,7 @@ def install_color_sliders(native: Any) -> None:
     original_init = Bank.__init__
     original_get_value = Bank.get_value
     np = g["_np"]
+    typed_shapes = all(name in g for name in ("Rectangle", "Square", "VGroup"))
 
     @wraps(original_init)
     def initialize(self, *args, **kwargs):
@@ -124,6 +126,14 @@ def install_color_sliders(native: Any) -> None:
                 setattr(self, name, channel)
             self._color_slider_components = values
             self._fmn_color_channels_ready = True
+            if typed_shapes:
+                # Public constructors retain their normal hooks and methods;
+                # the native bank supplies placement, not anonymous children.
+                selection = g["Rectangle"](
+                    stroke_color=g["WHITE"], **self.rect_kwargs,
+                )
+                selection.move_to(self.selected_color_box)
+                self.selected_color_box = selection
             background = self.get_background()
             if not isinstance(background, g["Mobject"]):
                 raise TypeError("ColorSliders.get_background must return a Mobject")
@@ -161,9 +171,33 @@ def install_color_sliders(native: Any) -> None:
         # The Reference's aggregate setter has no fluent return.
 
     def get_background(self):
-        values = tuple(channel.get_value() for channel in _channels(self))
-        swatch, _, _ = self._native_color_slider_parts(values, apply_value=True)
-        background = swatch.submobjects[0]
+        if typed_shapes:
+            length = float(self.background_grid_kwargs["single_square_len"])
+            width, height = float(self.rect_kwargs["width"]), float(self.rect_kwargs["height"])
+            if not all(math.isfinite(value) and value > 0 for value in (length, width, height)):
+                raise ValueError("ColorSliders grid dimensions must be finite and positive")
+            counts = height / length, width / length
+            if not all(math.isfinite(value) and value <= 65536 for value in counts):
+                raise ValueError("ColorSliders background exceeds 65536 squares")
+            rows, columns = (max(1, int(value)) for value in counts)
+            if columns % 2 == 0:
+                columns += 1
+            if rows * columns > 65536:
+                raise ValueError("ColorSliders background exceeds 65536 squares")
+            colors = tuple(self._background_grid_colors)
+            if not colors:
+                raise ValueError("ColorSliders background colors must not be empty")
+            background = g["Square"](length).get_grid(n_rows=rows, n_cols=columns, buff=0.)
+            background.stretch_to_fit_width(width)
+            background.stretch_to_fit_height(height)
+            for index, square in enumerate(background):
+                square.set_stroke(width=0., opacity=0.)
+                square.set_fill(colors[index % len(colors)], opacity=1.)
+        else:
+            # Reduced orchestration embeddings provide their own geometry.
+            values = tuple(channel.get_value() for channel in _channels(self))
+            swatch, _, _ = self._native_color_slider_parts(values, apply_value=True)
+            background = swatch.submobjects[0]
         background.move_to(self.selected_color_box)
         background.fix_in_frame()
         return background
@@ -211,6 +245,40 @@ def _install_panel_content(g):
     def validate(controls):
         if not all(is_control(control) for control in controls):
             raise TypeError("ControlPanel controls must be ControlMobject instances")
+
+    if all(name in g for name in ("Rectangle", "Text", "_NATIVE_VMOBJECT_STYLE_KEYS")):
+        original_parts = Panel._native_control_panel_parts
+        from .control_events import _shape
+
+        @wraps(original_parts)
+        def typed_parts(self, opener_text, opener_font_size, controls, *, open):
+            targets = original_parts(self, opener_text, opener_font_size, controls, open=open)
+            if getattr(self, "panel", None) is not None:
+                # Open/close only consumes placement targets. Preserve the
+                # already-authored panel, label, and their event listeners.
+                return targets
+            panel_target, opener_target, _ = targets
+            panel_style = dict(width=g["_FRAME_SHAPE"][0] / 4,
+                               height=g["_MED_SMALL_BUFF"] + g["_FRAME_HEIGHT"],
+                               fill_opacity=1., stroke_width=0.)
+            opener_style = dict(width=g["_FRAME_SHAPE"][0] / 8, height=.5, fill_opacity=1.)
+            for recipe, values in ((panel_style, self.panel_kwargs),
+                                   (opener_style, self.opener_kwargs)):
+                recipe.update(values)
+                recipe.setdefault("fill_color", recipe.get("color", g["_GREY_C"]))
+                recipe.setdefault("stroke_color", recipe.get("color", g["_GREY_A"]))
+            panel = _shape(g, "Rectangle", panel_style, "panel_kwargs")
+            opener_rect = _shape(g, "Rectangle", opener_style, "opener_kwargs")
+            text_style = dict(self.opener_text_kwargs)
+            text_style.pop("text", None)
+            text_style["font_size"] = opener_font_size
+            label = g["Text"](opener_text, **text_style)
+            panel.move_to(panel_target)
+            opener_rect.move_to(opener_target[0])
+            label.move_to(opener_rect)
+            return panel, Group(opener_rect, label), Group(*controls)
+
+        _method(Panel, "_native_control_panel_parts", typed_parts)
 
     @wraps(original)
     def initialize(self, *controls, **kwargs):
