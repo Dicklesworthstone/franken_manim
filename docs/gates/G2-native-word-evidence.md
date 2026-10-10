@@ -31,7 +31,7 @@ The eight criteria are quoted from `fm-i1q` (plan §20.3).
 
 | G2 criterion | Evidence | Result |
 |---|---|---|
-| (1) Tier-1 construct set lays out correctly and beautifully | Typesetting returns Ok for 99.994 % of corpus occurrences, but no oracle checks corpus geometry (dashboard row "Layout checked by an oracle": 0 %, `fm-tex-layout-oracle-bkbc`). The one real layout oracle, `crates/fmn-library/tests/tex_reference_boxes.rs`, puts 26/111 tier-1 formulas within 5 % of the Reference's measured `Tex` box and 60/111 within 10 %. Beauty: the `text_sample` and math panels are ratified (`fm-6ppv`, ADR-0018 delegated review), but the gallery is static spike renders (`fm-5wq.50`) | **Partial** |
+| (1) Tier-1 construct set lays out correctly and beautifully | Typesetting returns Ok for 99.994 % of corpus occurrences, but only a sample is checked against real TeX: the dashboard's oracle row ("Layout within 5% of real TeX", `fm-tex-layout-oracle-bkbc`) is 25.589 % of occurrences and 3.010 % of unique strings at the `3ed1d332` pin, with unsampled strings counted as unverified. `crates/fmn-library/tests/tex_reference_boxes.rs` puts 49/111 authored tier-1 formulas within 5 % of the Reference's measured `Tex` box and 75/111 within 10 % (`ef0eddb2`; the test's floors). Beauty: the `text_sample` and math panels are ratified (`fm-6ppv`, ADR-0018 delegated review), but the gallery is static spike renders (`fm-5wq.50`) | **Partial** |
 | (2) Span map drives isolate / t2c / slicing / TransformMatchingTex end-to-end | `crates/fmn-library/src/tex.rs` (isolate/t2c by source identity), `crates/fmn-anim/src/transform_matching.rs` (native span keys), portal binds `8ec3b03`/`d7fab57`/`511f7f1`; the portal gate suites `matching_transform_semantics`, `matching_authoring`, `live_tex` and `bridge` exercise them (`scripts/check_portal_runtime.sh`) | **Green** |
 | (3) De-TeX'd classes native (W7DETEX) | `fm-y69` and `fm-ebl` closed; `crates/fmn-library/src/brace.rs`, `numbers.rs` (DecimalNumber), `matchers.rs`/`controls.rs` (Checkmark/Exmark, controls), matrix delimiters from the extensible-delimiter engine | **Green** |
 | (4) SVGMobject works for user files (W2SVG) | `fm-6nm` and `fm-5wq.4.50` closed: portal `SVGMobject` builds a VMobject family through Chisel's hardened processor (`crates/fmn-geom/src/svg.rs`), covered by `crates/fmn-python/tests/bridge.py` | **Green** |
@@ -57,13 +57,14 @@ Of `fm-i1q`'s 25 blockers, 18 are closed and 7 are open.
 
 ## The coverage ratchet (criterion 1 numerator, criterion 6)
 
-`docs/ratchet/dashboard.md`, computed against `franken_markdown f059cac6b861`:
+`docs/ratchet/dashboard.md`, computed against `franken_markdown 3ed1d3320069`
+(`ef0eddb2`):
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
 | Parse | 99.994 % | 99.989 % |
 | Parse + typeset returned Ok | 99.994 % | 99.989 % |
-| Layout checked by an oracle | 0 % | 0 % |
+| Layout within 5% of real TeX (oracle) | 25.589 % | 3.010 % |
 
 - Denominator frozen at G0-4: 9269 distinct strings, 17711 occurrences,
   corpus hash `a8325e49…4bf883fc`, rules_version 1.
@@ -86,8 +87,9 @@ no public construct-sprint amendment is required at these numbers.
 
 - **Box oracle.** `crates/fmn-library/tests/tex_reference_boxes.rs`
   compares native `Tex` boxes with the Reference's measured boxes for 111
-  authored tier-1 formulas. At `68fe29b8`, 26/111 are within 5 % on both
-  axes and 60/111 within 10 %; those are the test's ratchet floors. Run it
+  authored tier-1 formulas. At the `3ed1d332` pin (`ef0eddb2`), 49/111 are
+  within 5 % on both axes and 75/111 within 10 %; those are the test's
+  ratchet floors (26 and 60 at `68fe29b8`). Run it
   with `cargo test -p fmn-library --test tex_reference_boxes -- --nocapture`.
   The output logs every row.
 - **Style.** Every `Tex` used to be laid out in TeX text style, while the
@@ -108,8 +110,10 @@ no public construct-sprint amendment is required at these numbers.
     (`fm-tex-metrics-glyphs-ru72`).
 
   The README formula is 3.606 x 1.128 against the Reference's 3.941 x 1.150.
-- **Corpus scale.** No layout-correctness oracle runs over the 9269-string
-  corpus yet (`fm-tex-layout-oracle-bkbc`). The G0-3 ratification and
+- **Corpus scale.** The corpus TeX box oracle (`fm-tex-layout-oracle-bkbc`,
+  open) compares a 585-string sample (6847 occurrences) with real TeX's
+  boxes: 279 within 5 % and 421 within 10 % at `3ed1d332`. The rest of the
+  9269-string corpus is unverified. The G0-3 ratification and
   `crates/fmn-tex/tests/fmd_math_surface.rs` check fmd-math against TeX's
   published rules construct by construct, not corpus-wide.
 
@@ -239,9 +243,11 @@ Further evidence, 2026-10-09:
     root. A different `--cache-dir` changes the closure digest, because the
     resolved config (C4) includes `directories.cache`
     (`fm-cache-dir-in-certified-closure-2y2a`).
-- **Clean wheel.** At `6a21499d` (CPython 3.13, Linux), the three typesetting
+- **Clean wheel.** At `e5b0163f` (CPython 3.13, Linux), the three typesetting
   suites pass and the runtime receipt passes (2007 reviewed rows, 0
-  contradictions). The gate now runs those suites (`3e14c40e`). Separately,
+  contradictions). The wheel was built from `6a21499d`, the same patch
+  before a rebase onto a different base; that SHA is not on `main`. The
+  gate now runs those suites (`3a625f16`). Separately,
   the gate is red on `paired_output_cli` (`fm-djox`), which also fails at
   `241def91`, before this work.
 - **Front-door timing.** `fmn` (release-perf), formula sheet, preflight wall
