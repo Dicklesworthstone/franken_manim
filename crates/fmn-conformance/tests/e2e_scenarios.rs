@@ -4014,6 +4014,88 @@ fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         .with_counter("lifecycle_points_post", points_post))
 }
 
+/// Installing a rebuilt value preserves shared placements and retires private history.
+fn lifecycle_install_shared_family_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let owner = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    let private = stage.add(Mobject::new());
+    let private_leaf = stage.add(Mobject::from_points(&[[-2.0, -1.0, 0.0]]));
+    let shared = stage.add(Mobject::new());
+    let shared_leaf = stage.add(Mobject::from_points(&[[2.0, 1.0, 0.0]]));
+    let rooted = stage.add(Mobject::from_points(&[[3.0, -1.0, 0.0]]));
+    let outside = stage.add(Mobject::new());
+    for (parent, child) in [
+        (owner, private),
+        (private, private_leaf),
+        (private, rooted),
+        (owner, shared),
+        (shared, shared_leaf),
+        (outside, shared),
+    ] {
+        stage
+            .attach(parent, child)
+            .map_err(|error| fail(format!("install source family attaches: {error}")))?;
+    }
+    // One admission preserves both shared and independently rooted placements.
+    stage
+        .add_many_to_scene(&[owner, outside, rooted])
+        .map_err(|error| fail(format!("install source family enters scene: {error}")))?;
+    let calls = Rc::new(Cell::new(0_u64));
+    let updater_calls = Rc::clone(&calls);
+    stage
+        .add_updater(
+            owner,
+            move |_, _| updater_calls.set(updater_calls.get() + 1),
+            false,
+        )
+        .map_err(|error| fail(format!("install owner updater registers: {error}")))?;
+
+    let mut replacement = Mobject::from_points(&[[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]]);
+    replacement
+        .submobjects
+        .push(Mobject::from_points(&[[7.0, 1.0, 0.0]]));
+    stage
+        .install(owner, replacement)
+        .map_err(|error| fail(format!("value installs over its existing handle: {error}")))?;
+    stage.update(0.125);
+
+    let private_reclaimed = !stage.contains(private) && !stage.contains(private_leaf);
+    let shared_preserved = stage.family(shared) == vec![shared, shared_leaf]
+        && stage.get_points(shared_leaf) == Some(vec![[2.0, 1.0, 0.0]])
+        && stage
+            .get(outside)
+            .is_some_and(|entry| entry.submobjects() == &[shared]);
+    let rooted_preserved = stage.get_points(rooted) == Some(vec![[3.0, -1.0, 0.0]]);
+    let roots_preserved = stage.roots() == &[owner, outside, rooted];
+    let installed = stage.family(owner);
+    let replacement_geometry = stage.get_points(owner)
+        == Some(vec![[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
+        && installed.len() == 2
+        && stage.get_points(installed[1]) == Some(vec![[7.0, 1.0, 0.0]]);
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.install_shared_family")
+            .field("private_reclaimed", truth(private_reclaimed))
+            .field("shared_preserved", truth(shared_preserved))
+            .field("rooted_preserved", truth(rooted_preserved))
+            .field("roots_preserved", truth(roots_preserved))
+            .field("replacement_geometry", truth(replacement_geometry))
+            .field("updater_calls", calls.get()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("install_private_reclaimed", u64::from(private_reclaimed))
+        .with_counter("install_shared_preserved", u64::from(shared_preserved))
+        .with_counter("install_rooted_preserved", u64::from(rooted_preserved))
+        .with_counter("install_roots_preserved", u64::from(roots_preserved))
+        .with_counter(
+            "install_replacement_geometry",
+            u64::from(replacement_geometry),
+        )
+        .with_counter("install_updater_calls", calls.get()))
+}
+
 /// A redraw may reuse a live source that another scene placement also owns.
 fn lifecycle_always_redraw_shared_source_run(
     ctx: &mut RunCtx,
@@ -6044,6 +6126,35 @@ pub fn catalog() -> Vec<ScenarioSpec> {
 
     specs.push(
         spec(
+            "lifecycle.install_shared_family.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(lifecycle_install_shared_family_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("install_private_reclaimed", 1),
+                counter_eq("install_shared_preserved", 1),
+                counter_eq("install_rooted_preserved", 1),
+                counter_eq("install_roots_preserved", 1),
+                counter_eq("install_replacement_geometry", 1),
+                counter_eq("install_updater_calls", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.install_shared_family",
+                vec![
+                    FieldPred::str_eq("private_reclaimed", "true"),
+                    FieldPred::str_eq("shared_preserved", "true"),
+                    FieldPred::str_eq("rooted_preserved", "true"),
+                    FieldPred::str_eq("roots_preserved", "true"),
+                    FieldPred::str_eq("replacement_geometry", "true"),
+                    FieldPred::u64_eq("updater_calls", 1),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
             "lifecycle.always_redraw_shared_source.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -7694,6 +7805,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 // Test entry points
 // ---------------------------------------------------------------------------
+
+#[test]
+fn install_shared_family_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.install_shared_family.v1")
+        .expect("the shared-family install lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
 
 #[test]
 fn always_redraw_shared_source_scenario_passes() {

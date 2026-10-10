@@ -1022,3 +1022,149 @@ fn install_replaces_content_and_subtree_over_the_same_handle() {
         "identity-linked updaters survive the install"
     );
 }
+
+#[test]
+fn install_reclaims_nested_private_descendants() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let old = stage.add(Mobject::new());
+    let child = stage.add(Mobject::new());
+    let leaf = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+    stage.attach(root, old).unwrap();
+    stage.attach(old, child).unwrap();
+    stage.attach(child, leaf).unwrap();
+    stage.add_to_scene(root).unwrap();
+
+    stage
+        .install(root, Mobject::from_points(&[[4.0, 5.0, 6.0]]))
+        .unwrap();
+
+    assert_eq!(stage.roots(), &[root]);
+    assert_eq!(stage.get_points(root).unwrap(), vec![[4.0, 5.0, 6.0]]);
+    assert!(stage.get(root).unwrap().submobjects().is_empty());
+    for retired in [old, child, leaf] {
+        assert!(
+            !stage.contains(retired),
+            "the complete replaced subtree must be reclaimed: {retired:?}"
+        );
+    }
+}
+
+#[test]
+fn install_preserves_shared_and_rooted_subtrees() {
+    for directly_attached in [false, true] {
+        for independently_rooted in [false, true] {
+            let mut stage = Stage::new();
+            let root = stage.add(Mobject::new());
+            let shared = stage.add(Mobject::new());
+            let leaf = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+            stage.attach(shared, leaf).unwrap();
+            let wrapper = if directly_attached {
+                stage.attach(root, shared).unwrap();
+                None
+            } else {
+                let wrapper = stage.add(Mobject::new());
+                stage.attach(root, wrapper).unwrap();
+                stage.attach(wrapper, shared).unwrap();
+                Some(wrapper)
+            };
+            let outside = if independently_rooted {
+                shared
+            } else {
+                let parent = stage.add(Mobject::new());
+                stage.attach(parent, shared).unwrap();
+                parent
+            };
+            // One batch intentionally admits both shared placements.
+            stage.add_many_to_scene(&[root, outside]).unwrap();
+
+            stage
+                .install(root, Mobject::from_points(&[[4.0, 5.0, 6.0]]))
+                .unwrap();
+
+            assert!(stage.contains(shared), "the shared handle must survive");
+            assert!(stage.contains(leaf), "retention includes descendants");
+            assert_eq!(stage.family(shared), vec![shared, leaf]);
+            assert_eq!(stage.get_points(leaf).unwrap(), vec![[1.0, 2.0, 3.0]]);
+            assert_eq!(stage.roots(), &[root, outside], "both placements survive");
+            assert!(stage.get(root).unwrap().submobjects().is_empty());
+            assert_eq!(stage.get_points(root).unwrap(), vec![[4.0, 5.0, 6.0]]);
+            if independently_rooted {
+                assert!(stage.get(shared).unwrap().parents().is_empty());
+            } else {
+                assert_eq!(stage.get(outside).unwrap().submobjects(), &[shared]);
+                assert_eq!(stage.get(shared).unwrap().parents(), &[outside]);
+            }
+            if let Some(wrapper) = wrapper {
+                assert!(!stage.contains(wrapper), "the exclusive wrapper is retired");
+            }
+        }
+    }
+}
+
+#[test]
+fn install_reclaims_pinned_private_dag_and_preserves_root_runtime_state() {
+    let mut stage = Stage::new();
+    let root = stage.add_value_tracker(2.5);
+    let target = stage.generate_target(root).unwrap();
+    let saved = stage.save_state(root).unwrap();
+    let host = stage.add(Mobject::new());
+    let old = stage.add(Mobject::new());
+    let left = stage.add(Mobject::new());
+    let right = stage.add(Mobject::new());
+    let leaf = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+    stage.attach(host, root).unwrap();
+    stage.attach(root, old).unwrap();
+    stage.attach(old, left).unwrap();
+    stage.attach(old, right).unwrap();
+    stage.attach(left, leaf).unwrap();
+    stage.attach(right, leaf).unwrap();
+    stage.add_to_scene(host).unwrap();
+    stage.pin(root).unwrap();
+    stage.pin(old).unwrap();
+    let updater = stage.add_updater(root, |_stage, _mob| {}, false).unwrap();
+    stage.suspend_updating(root, false);
+    stage.set_animating_status(root, true, false);
+    let view = stage.get_mut(leaf).unwrap().buffer.export_view(false);
+
+    stage
+        .install(root, Mobject::from_points(&[[9.0, 8.0, 7.0]]))
+        .unwrap();
+
+    assert_eq!(stage.roots(), &[host]);
+    assert_eq!(stage.get(host).unwrap().submobjects(), &[root]);
+    assert_eq!(stage.get(root).unwrap().parents(), &[host]);
+    assert_eq!(stage.get(root).unwrap().pins(), 1);
+    assert_eq!(stage.updater_ids(root), vec![updater]);
+    assert!(stage.is_updating_suspended(root));
+    assert!(stage.is_animating(root));
+    assert_eq!(stage.tracker_value(root), Some(2.5));
+    assert_eq!(stage.target(root), Some(target));
+    assert!(stage.contains(target));
+    assert_eq!(
+        stage.saved_state(root),
+        None,
+        "old shape-keyed state is unlinked"
+    );
+    assert!(stage.contains(saved), "unlinking is not explicit deletion");
+    assert_eq!(stage.get_points(root).unwrap(), vec![[9.0, 8.0, 7.0]]);
+    assert!(
+        stage.contains(old),
+        "the pin defers the wrapper's destruction"
+    );
+    assert!(stage.get(old).unwrap().submobjects().is_empty());
+    for retired in [left, right, leaf] {
+        assert!(
+            !stage.contains(retired),
+            "a pinned parent or a private diamond edge must not leak {retired:?}"
+        );
+    }
+    assert_eq!(view.read(0, "point"), Some(vec![1.0, 2.0, 3.0]));
+    stage.unpin(old);
+    assert!(!stage.contains(old));
+    stage.unpin(root);
+    assert!(
+        stage.contains(root),
+        "the rebuilt root never becomes pending deletion"
+    );
+}

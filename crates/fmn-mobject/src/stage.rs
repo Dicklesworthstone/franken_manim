@@ -1453,11 +1453,14 @@ impl Stage {
     /// runtime state this method deliberately preserves — while everything
     /// content-shaped is replaced from the value: buffer, uniforms,
     /// z-index, semantic shape slot, render primitive, image, and the child
-    /// subtree (old children are detached and deleted with their subtrees;
-    /// the value's children are added and attached, mirroring
-    /// [`Stage::add`]). The shape-keyed `save_state` copy is cleared as
-    /// stale, and placement resets to identity because the value's
-    /// geometry is authoritative.
+    /// subtree. Old members are reclaimed unless they remain scene roots
+    /// or have parents outside the replaced family; retained members keep
+    /// their complete descendants. Cached raw handles alone do not retain
+    /// retired content, and pinned retired members follow [`Stage::delete`]'s
+    /// deferred destruction rules. The value's children are added and
+    /// attached, mirroring [`Stage::add`]. The shape-keyed `save_state` copy
+    /// is cleared as stale, and placement resets to identity because the
+    /// value's geometry is authoritative.
     ///
     /// This is the primitive structurally-changing rebuilds need (the
     /// numbers family's `set_value` crossing a digit count, fm-jh7):
@@ -1466,9 +1469,8 @@ impl Stage {
     ///
     /// # Errors
     ///
-    /// [`StageError::StaleHandle`] for a dead `mob`, a deferred delete for
-    /// a pinned old child, or the attach errors reported while wiring the
-    /// value's children.
+    /// [`StageError::StaleHandle`] for a dead `mob`, or the attach errors
+    /// reported while wiring the value's children.
     pub fn install(&mut self, mob: Mob, mobject: impl Into<Mobject>) -> Result<(), StageError> {
         let Mobject {
             buffer,
@@ -1481,14 +1483,51 @@ impl Stage {
             defaults_row,
         } = mobject.into();
         drop(defaults_row);
-        let old_children: Vec<Mob> = self
-            .get(mob)
-            .ok_or(StageError::StaleHandle)?
-            .submobjects
-            .clone();
-        for child in old_children {
-            self.detach(mob, child);
-            self.delete(child)?;
+        // Content-only installs (notably animated numbers) need no scene
+        // scan or topology change when there is no old child family.
+        if !self.try_get(mob)?.submobjects.is_empty() {
+            let old: Vec<_> = self.family(mob).into_iter().skip(1).collect();
+            let old_members: HashSet<Mob, IdBuildHasher> = old.iter().copied().collect();
+            self.replace_children(mob, &[])?;
+
+            // Mark after detaching the rebuilt root: its old edges must
+            // not count as outside ownership of every replaced child.
+            let mut pending: Vec<_> = self
+                .roots
+                .iter()
+                .copied()
+                .filter(|root| old_members.contains(root))
+                .collect();
+            for &member in &old {
+                if self.get(member).is_some_and(|entry| {
+                    entry
+                        .parents
+                        .iter()
+                        .any(|parent| !old_members.contains(parent))
+                }) {
+                    pending.push(member);
+                }
+            }
+            let mut retained: HashSet<Mob, IdBuildHasher> = HashSet::default();
+            while let Some(member) = pending.pop() {
+                if !retained.insert(member) {
+                    continue;
+                }
+                if let Some(entry) = self.get(member) {
+                    pending.extend_from_slice(&entry.submobjects);
+                }
+            }
+
+            // Fixed candidate/retention sets reclaim private descendants
+            // through diamonds and pinned parents. Clear outgoing edges
+            // before deletion's family-based scene removal can reach a
+            // retained descendant, including on a later unpin.
+            for member in old {
+                if !retained.contains(&member) && self.contains(member) {
+                    self.replace_children(member, &[])?;
+                    self.delete(member)?;
+                }
+            }
         }
         let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
         entry.buffer = buffer;
