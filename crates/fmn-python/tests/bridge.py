@@ -5043,21 +5043,21 @@ assert len(textbox.updaters) == 1
 assert len(textbox.text.updaters) == 1
 
 text_proxy = textbox.text
-seed_points = text_proxy.get_points().copy()
+seed_points = text_proxy.get_all_points().copy()
 assert textbox.set_value("committed") is textbox
 assert textbox.get_value() == "committed"
 assert textbox.text is text_proxy
-committed_points = text_proxy.get_points().copy()
+committed_points = text_proxy.get_all_points().copy()
 assert not np.array_equal(committed_points, seed_points)
 
 assert textbox.update_text("preview") is None
 assert textbox.get_value() == "committed"
 assert textbox.text is text_proxy
-preview_points = text_proxy.get_points().copy()
+preview_points = text_proxy.get_all_points().copy()
 assert not np.array_equal(preview_points, committed_points)
 
 atomic_value = textbox.get_value()
-atomic_points = textbox.text.get_points().copy()
+atomic_points = textbox.text.get_all_points().copy()
 atomic_children = list(textbox.submobjects)
 try:
     textbox.set_value("\U0001f980")
@@ -5068,7 +5068,7 @@ else:
 assert textbox.get_value() == atomic_value
 assert textbox.text is text_proxy
 assert list(textbox.submobjects) == atomic_children
-assert np.array_equal(textbox.text.get_points(), atomic_points)
+assert np.array_equal(textbox.text.get_all_points(), atomic_points)
 
 failed_textbox = interactive.Textbox.__new__(interactive.Textbox)
 try:
@@ -22847,7 +22847,7 @@ except TypeError:
 _check("textbox refuses non-string writes", _tbx_str_refused)
 _tbx.set_value("world")
 _check("textbox set value rewrites text",
-       _tbx.get_value() == "world" and _tbx.text.has_points())
+       _tbx.get_value() == "world" and len(_tbx.text.get_all_points()) > 0)
 _tbx_nonstr_update = False
 try:
     _tbx.update_text(None)

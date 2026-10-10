@@ -216,6 +216,118 @@ def _typed_scalar_constructors(g):
             for name in ("EnableDisableButton", "LinearNumberSlider", "Checkbox") if name in g}
 
 
+def _follow_textbox(text):
+    # A direct family reference is remapped by the normal Mobject copier.
+    # Closing over the original Textbox would make copied labels follow it.
+    text.move_to(text._fmn_textbox_box)
+
+
+def _typed_textbox_constructor(g):
+    """Keep editable Text and its source-span map on the ordinary Scribe path."""
+    names = ("Textbox", "Text", "Rectangle", "_NATIVE_VMOBJECT_STYLE_KEYS")
+    if not all(name in g for name in names):
+        return None  # Reduced event-only embeddings own their geometry.
+    Textbox, Text = g["Textbox"], g["Text"]
+    signature = inspect.signature(Textbox.__init__)
+    from .string_lifecycle import _publish
+
+    def parts(self, current, replacement):
+        value = current if replacement is None else replacement
+        if not isinstance(value, str):
+            raise TypeError("Textbox value must be a string")
+        box = getattr(self, "box", None)
+        if box is None:
+            box_style = dict(width=2., height=1., fill_opacity=1.)
+            box_style.update(self.box_kwargs)
+            box_style.setdefault("fill_color", box_style.get("color", g["WHITE"]))
+            box = _shape(g, "Rectangle", box_style, "box_kwargs")
+            box.set_stroke(self.active_color if self.isActive else self.deactive_color)
+        text = Text(value, **self.text_kwargs)
+        width = box.get_width() - 2 * self.text_buff
+        if not math.isfinite(width) or width < 0:
+            raise ValueError("Textbox padding must leave a nonnegative finite text width")
+        height = text.get_height()
+        if text.get_width() > 0:
+            text.set_width(width)
+            if text.get_height() > height:
+                text.set_height(height)
+        text.move_to(box)
+        if box.is_fixed_in_frame():
+            text.fix_in_frame()
+        return box, text
+
+    def initialize(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        p = bound.arguments
+        if p["kwargs"]:
+            raise TypeError("unexpected keyword arguments: " + ", ".join(sorted(p["kwargs"])))
+        if not isinstance(p["value"], str):
+            raise TypeError("Textbox value must be a string")
+        configurations = []
+        for name in ("box_kwargs", "text_kwargs"):
+            value = p[name]
+            if not isinstance(value, Mapping):
+                raise TypeError(name + " must be a mapping")
+            if len(value) > 4096:
+                raise ValueError(name + " exceeds 4096 entries")
+            configurations.append(dict(value))
+        self.box_kwargs, self.text_kwargs = configurations
+        self.text_buff = float(p["text_buff"])
+        if not math.isfinite(self.text_buff) or self.text_buff < 0:
+            raise ValueError("Textbox text_buff must be finite and nonnegative")
+        self.value_type = g["_np"].dtype(p["value_type"]).type
+        self.isInitiallyActive = self.isActive = bool(p["isInitiallyActive"])
+        self.active_color, self.deactive_color = p["active_color"], p["deactive_color"]
+        if any(not g["_np"].isfinite(g["_color_to_rgb"](color)).all()
+               for color in (self.active_color, self.deactive_color)):
+            raise ValueError("Textbox state colors must be finite")
+        self._textbox_value = p["value"]
+        self.box, self.text = self._native_textbox_parts(p["value"], None)
+        # Strings remain the portal's value state; the existing scalar tracker
+        # lifecycle still owns the root schema, hooks, and dynamic marker.
+        super(Textbox, self).__init__(0., self.box, self.text)
+        self.text._fmn_textbox_box = self.box
+        self.text.add_updater(_follow_textbox)
+        self.active_anim(self.isActive)
+
+    def update_text(self, value):
+        if not isinstance(value, str):
+            raise TypeError("Textbox value must be a string")
+        _, candidate = self._native_textbox_parts(self._textbox_value, value)
+        if not isinstance(candidate, Text):
+            raise TypeError("Textbox text factory must return a Text")
+        text = self.text
+        # Scribe's publishing protocol replaces its owned glyphs, preserves
+        # authored children, and remaps selectors. Family alignment via become
+        # would keep padded old glyphs and leave the source spans stale.
+        _publish(g, text, candidate, ())
+        text.match_style(candidate, recurse=False)
+        for name in (
+            "text", "string", "font", "font_size", "weight", "slant", "alignment",
+            "line_width", "justify", "indent", "lsh", "global_config", "local_configs",
+            "disable_ligatures", "isolate", "use_labelled_svg", "base_color", "protect",
+            "t2c", "t2f", "t2s", "t2w", "t2g", "_fmn_text_options", "_fmn_string_style",
+        ):
+            setattr(text, name, getattr(candidate, name))
+        if self.box.is_fixed_in_frame():
+            text.fix_in_frame()
+        else:
+            text.unfix_from_frame()
+
+    def set_value(self, value):
+        if not isinstance(value, str):
+            raise TypeError("Textbox value must be a string")
+        self.set_value_anim(value)
+        self._textbox_value = value
+        return self
+
+    _method(Textbox, "_native_textbox_parts", parts)
+    _method(Textbox, "update_text", update_text)
+    _method(Textbox, "set_value", set_value)
+    return initialize
+
+
 def _install_transitions(g, *, typed_checkbox=False):
     Checkbox = g.get("Checkbox")
     if Checkbox is not None:
@@ -321,6 +433,9 @@ def install_control_events(native: Any) -> None:
     if g.get("_FMN_CONTROL_EVENTS_INSTALLED", False):
         return
     constructors = _typed_scalar_constructors(g)
+    textbox = _typed_textbox_constructor(g)
+    if textbox is not None:
+        constructors["Textbox"] = textbox
     _install_transitions(g, typed_checkbox="Checkbox" in constructors)
     bindings = {
         "MotionMobject": (("mobject", "MouseDragEvent", "add_mouse_drag_listner", "mob_on_mouse_drag"),),
