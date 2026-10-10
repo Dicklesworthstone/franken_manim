@@ -4,7 +4,7 @@
   "hash_convention": "sha256 (fmn-hash, FIPS 180-4; lowercase hex via Digest::to_hex) over the exact bundled TTF bytes of fmd-font's ALL_FACES at the SUITE.lock pin — the same identity the §16.7 input closure and the typeset cache fingerprint key against",
   "suite_lock": {
     "repo": "franken_markdown",
-    "rev": "3ed1d3320069beb6a462e6447c12361fe670a8ea"
+    "rev": "126a5304e8d94eaea62b1b8e13bbe9c40918ac72"
   },
   "faces": [
     {

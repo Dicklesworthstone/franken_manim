@@ -968,11 +968,13 @@ mod tests {
             // e4e8e2e, then matrix_2x2.v1 and decimal_matrix.v1's array
             // struts at franken_markdown bd00a24, then tex_overbrace.v1's
             // LaTeX brace fill and tex_fraction.v1 and tex_display_sum.v1's
-            // emission order at franken_markdown 3ed1d33)
+            // emission order at franken_markdown 3ed1d33, then their rule
+            // contours from the bottom-right corner at franken_markdown
+            // 126a530)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "bf1b61a2d8d2b199d17fbdea8484a28e84a0da6032284c4a30379955980d8390"
+                "b4e080d7860c32109e6db021168d7bbc58f60c47ed47952bb57cba568e61b6e0"
             );
         }
     }
