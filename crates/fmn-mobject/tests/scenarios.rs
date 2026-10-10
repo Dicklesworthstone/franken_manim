@@ -367,3 +367,134 @@ fn cycle_attach_is_refused() {
     assert_eq!(stage.family(a), vec![a, b, c]);
     assert!(stage.get(a).unwrap().parents().is_empty());
 }
+
+#[test]
+fn family_checkpoint_restores_shared_topology_and_content_without_arena_rollback() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let left = stage.add(Mobject::new());
+    let right = stage.add(Mobject::new());
+    let shared = stage.add(square());
+    let outside = stage.add(Mobject::new());
+    stage.attach(root, left).unwrap();
+    stage.attach(root, right).unwrap();
+    stage.attach(left, shared).unwrap();
+    stage.attach(right, shared).unwrap();
+    stage.attach(outside, shared).unwrap();
+    stage.add_to_scene(root).unwrap();
+    stage.add_to_scene(outside).unwrap();
+    stage.set_animating_status(shared, true, false);
+    stage.suspend_updating(shared, false);
+    stage.get_mut(shared).unwrap().uniforms_mut().depth_test = true;
+    let storage = stage.get(shared).unwrap().buffer.storage_id();
+    let saved = stage.checkpoint_family(root).unwrap();
+    assert_eq!(
+        stage.get(shared).unwrap().buffer.storage_id(),
+        storage,
+        "CoW capture"
+    );
+
+    // The new layout has opposite edges between old members. Restoring each
+    // saved edge without first detaching changed edges would transiently cycle.
+    stage.replace_children(root, &[shared]).unwrap();
+    stage.replace_children(left, &[]).unwrap();
+    stage.replace_children(right, &[]).unwrap();
+    stage.attach(shared, right).unwrap();
+    stage.replace_children(right, &[left]).unwrap();
+    let newly_authored = stage.add(square());
+    stage.attach(outside, newly_authored).unwrap();
+    stage.add_to_scene(newly_authored).unwrap();
+    let roots = stage.roots().to_vec();
+    stage.set_time_from_clock(73.25);
+    stage.shift(newly_authored, [9.0, 0.0, 0.0]);
+    stage.get_mut(shared).unwrap().buffer =
+        fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), 1).unwrap();
+    stage.get_mut(shared).unwrap().uniforms_mut().depth_test = false;
+    stage.set_animating_status(shared, false, false);
+    stage.resume_updating(shared, false, false);
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = std::rc::Rc::clone(&calls);
+    stage
+        .add_updater(shared, move |_, _| counter.set(counter.get() + 1), false)
+        .unwrap();
+
+    stage.restore_family_checkpoint(&saved).unwrap();
+    assert_eq!(stage.family(root), [root, left, shared, right]);
+    assert_eq!(stage.get(left).unwrap().submobjects(), &[shared]);
+    assert_eq!(stage.get(right).unwrap().submobjects(), &[shared]);
+    assert!(stage.get(shared).unwrap().parents().contains(&outside));
+    assert_eq!(
+        stage.get(outside).unwrap().submobjects(),
+        &[shared, newly_authored]
+    );
+    assert_eq!(stage.roots(), roots);
+    assert_eq!(stage.time(), 73.25);
+    assert_eq!(stage.get_center(newly_authored)[0], 9.0);
+    assert_eq!(stage.get(shared).unwrap().buffer.len(), 4);
+    assert_eq!(
+        stage.get(shared).unwrap().buffer.schema(),
+        &fmn_mobject::RecordSchema::mobject()
+    );
+    assert!(stage.get(shared).unwrap().uniforms().depth_test);
+    assert!(stage.is_animating(shared));
+    assert!(stage.is_updating_suspended(shared));
+    stage.resume_updating(shared, false, true);
+    assert_eq!(
+        calls.get(),
+        1,
+        "updater registered after capture is preserved"
+    );
+}
+
+#[test]
+fn family_checkpoint_refuses_stale_and_foreign_handles_before_changing_anything() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let child = stage.add(square());
+    stage.attach(root, child).unwrap();
+    let saved = stage.checkpoint_family(root).unwrap();
+    stage.delete(child).unwrap();
+    let replacement = stage.add(square());
+    stage.attach(root, replacement).unwrap();
+    stage.shift(replacement, [4.0, 0.0, 0.0]);
+    assert_eq!(
+        stage.restore_family_checkpoint(&saved),
+        Err(StageError::StaleHandle)
+    );
+    assert_eq!(stage.family(root), [root, replacement]);
+    assert_eq!(stage.get_center(replacement)[0], 4.0);
+
+    let mut other = Stage::new();
+    let foreign = other.add(square());
+    assert_eq!(
+        other.restore_family_checkpoint(&saved),
+        Err(StageError::StaleHandle)
+    );
+    assert_eq!(other.get_center(foreign), [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn family_checkpoint_detaches_live_views_and_does_not_retain_future_children() {
+    let mut stage = Stage::new();
+    let root = stage.add(square());
+    let saved = stage.checkpoint_family(root).unwrap();
+    let view = stage.get_mut(root).unwrap().buffer.export_view(true);
+    assert!(view.write(0, "point", &[40.0, 40.0, 0.0]));
+    let extra = stage.add(square());
+    stage.attach(root, extra).unwrap();
+    stage.restore_family_checkpoint(&saved).unwrap();
+    assert_eq!(
+        stage.get(root).unwrap().buffer.read(0, "point"),
+        Some(vec![1.0, 1.0, 0.0])
+    );
+    assert!(stage.get(root).unwrap().submobjects().is_empty());
+    assert!(
+        stage.contains(extra),
+        "content restore never deletes arena identities"
+    );
+    assert!(view.write(0, "point", &[99.0, 99.0, 0.0]));
+    assert_eq!(
+        stage.get(root).unwrap().buffer.read(0, "point"),
+        Some(vec![1.0, 1.0, 0.0])
+    );
+}

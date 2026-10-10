@@ -932,10 +932,9 @@ impl TimeVaryingVectorField {
     pub fn add_to_stage(self, stage: &mut Stage) -> Result<Mob, FieldError> {
         let time_func = std::rc::Rc::new(self.time_func);
         let cs = self.cs;
-        let time = std::rc::Rc::new(std::cell::Cell::new(self.time));
-        let time_for_func = std::rc::Rc::clone(&time);
+        let time = self.time;
         let tf_for_build = std::rc::Rc::clone(&time_func);
-        let func = move |coords: &[[f64; 3]]| tf_for_build(coords, time_for_func.get());
+        let func = move |coords: &[[f64; 3]]| tf_for_build(coords, time);
         let built = build_field(
             &func,
             &*cs,
@@ -960,9 +959,13 @@ impl TimeVaryingVectorField {
         let sample_points = built.sample_points.clone();
         let mob = built.add_to_stage(stage);
 
-        let update = move |stage: &mut Stage, mob: Mob, dt: f64| {
-            time.set(time.get() + dt);
-            let outputs = time_func(&sample_coords, time.get());
+        let update = move |stage: &mut Stage, mob: Mob, id, dt: f64| {
+            let time = stage
+                .updater_state_mut::<f64>(mob, id)
+                .expect("time-varying field clock is installed");
+            *time += dt;
+            let time = *time;
+            let outputs = time_func(&sample_coords, time);
             if outputs.len() != sample_coords.len() {
                 return; // the Reference would raise next frame; hold the last good frame
             }
@@ -979,8 +982,7 @@ impl TimeVaryingVectorField {
         };
         // One immediate pass so the arrows match `time` even before the
         // first tick (the Reference's constructor drew at time 0).
-        update(stage, mob, 0.0);
-        stage.add_dt_updater(mob, update, false)?;
+        stage.add_dt_updater_with_state(mob, time, |_, _| {}, update, true)?;
         Ok(mob)
     }
 }
@@ -1662,6 +1664,12 @@ pub struct AnimatedStreamLines {
     taper_width: f64,
 }
 
+#[derive(Clone)]
+struct StreamLineState {
+    children: Vec<Mob>,
+    times: Vec<f64>,
+}
+
 impl fmt::Debug for AnimatedStreamLines {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnimatedStreamLines")
@@ -1742,7 +1750,7 @@ impl AnimatedStreamLines {
         for _ in 0..prior_draws {
             let _ = rng_gen.next_f64();
         }
-        let mut times: Vec<f64> = (0..children.len())
+        let times: Vec<f64> = (0..children.len())
             .map(|_| -self.lag_range * rng_gen.next_f64())
             .collect();
 
@@ -1782,18 +1790,28 @@ impl AnimatedStreamLines {
         }
 
         let time_width = self.time_width;
-        stage.add_dt_updater(
+        stage.add_dt_updater_with_state(
             group,
-            move |stage: &mut Stage, _mob: Mob, dt: f64| {
-                for (i, &child) in children.iter().enumerate() {
-                    times[i] += dt;
-                    let run_time = run_times[i];
+            StreamLineState { children, times },
+            |state, map| {
+                for child in &mut state.children {
+                    *child = map.get(*child).unwrap_or(*child);
+                }
+            },
+            move |stage: &mut Stage, mob: Mob, id, dt: f64| {
+                for (i, &run_time) in run_times.iter().enumerate() {
+                    let state = stage
+                        .updater_state_mut::<StreamLineState>(mob, id)
+                        .expect("stream-line updater attributes are installed");
+                    state.times[i] += dt;
+                    let time = state.times[i];
+                    let child = state.children[i];
                     if run_time.is_nan() || run_time <= 0.0 {
                         continue;
                     }
                     // vector_field.py:474 update(): adjusted time mod the
                     // flash's run time, linear rate.
-                    let adjusted = times[i].max(0.0).rem_euclid(run_time);
+                    let adjusted = time.max(0.0).rem_euclid(run_time);
                     let alpha = adjusted / run_time;
                     // indication.py:222's gaussian sweep (σ = tw/6, swept
                     // −tw/2 → 1 + tw/2), zeroed outside 3σ.
@@ -1853,6 +1871,7 @@ impl StrokeProfile {
 /// relative to the latest observation rather than an ever-growing clock.
 /// Keeping the grid point before the cutoff permits exact temporal clipping;
 /// the current endpoint is published separately between grid observations.
+#[derive(Clone)]
 struct TailSamples {
     window: f64,
     spacing: f64,
@@ -1860,6 +1879,17 @@ struct TailSamples {
     previous: Vec3,
     anchors: VecDeque<Vec3>,
     limit: usize,
+}
+
+enum TraceSource {
+    PointFunction(Box<dyn Fn(&Stage) -> Vec3>),
+    Mobject(Mob),
+}
+
+#[derive(Clone)]
+struct TraceState {
+    samples: Option<TailSamples>,
+    target: Option<Mob>,
 }
 
 impl TailSamples {
@@ -2064,7 +2094,11 @@ impl TracedPath {
         stage: &mut Stage,
         traced_point_func: impl Fn(&Stage) -> Vec3 + 'static,
     ) -> Result<Mob, FieldError> {
-        self.add_to_stage_with_history(stage, traced_point_func, None)
+        self.add_to_stage_with_history(
+            stage,
+            TraceSource::PointFunction(Box::new(traced_point_func)),
+            None,
+        )
     }
 
     /// Seed observations without publishing a path before the first updater
@@ -2072,8 +2106,8 @@ impl TracedPath {
     fn add_to_stage_with_history(
         self,
         stage: &mut Stage,
-        traced_point_func: impl Fn(&Stage) -> Vec3 + 'static,
-        mut tail_samples: Option<TailSamples>,
+        source: TraceSource,
+        tail_samples: Option<TailSamples>,
     ) -> Result<Mob, FieldError> {
         if self.time_traced.is_nan() || self.time_traced < 0.0 {
             return Err(FieldError::NonFiniteControl {
@@ -2105,10 +2139,23 @@ impl TracedPath {
                 StrokeProfile::Taper(p) => p.first().copied().unwrap_or(0.0),
             },
         )));
+        let (target, point_func) = match source {
+            TraceSource::PointFunction(func) => (None, Some(func)),
+            TraceSource::Mobject(target) => (Some(target), None),
+        };
         let config = self;
-        stage.add_dt_updater(
+        stage.add_dt_updater_with_state(
             mob,
-            move |stage: &mut Stage, mob: Mob, dt: f64| {
+            TraceState {
+                samples: tail_samples,
+                target,
+            },
+            |state, map| {
+                if let Some(target) = state.target {
+                    state.target = Some(map.get(target).unwrap_or(target));
+                }
+            },
+            move |stage: &mut Stage, mob: Mob, id, dt: f64| {
                 // Stage's updater API is infallible. Refuse invalid deltas
                 // before source sampling or changing trace history/geometry.
                 assert!(
@@ -2119,16 +2166,27 @@ impl TracedPath {
                 if dt == 0.0 {
                     return;
                 }
-                let point = (traced_point_func)(stage);
+                let target = stage
+                    .updater_state::<TraceState>(mob, id)
+                    .expect("trace updater attributes are installed")
+                    .target;
+                let point = if let Some(target) = target {
+                    stage.get_center(target)
+                } else {
+                    point_func.as_ref().expect("point-function trace source")(stage)
+                };
                 assert!(
                     point.iter().all(|coordinate| coordinate.is_finite()),
                     "TracedPath/TracingTail source must return a finite 3D point"
                 );
 
-                let points = if let Some(samples) = tail_samples.as_mut() {
+                let state = stage
+                    .updater_state_mut::<TraceState>(mob, id)
+                    .expect("trace updater attributes are installed");
+                let points = if let Some(samples) = state.samples.as_mut() {
                     samples.advance(point, dt)
                 } else {
-                    tail_samples = Some(TailSamples::first_observation(
+                    state.samples = Some(TailSamples::first_observation(
                         config.time_traced,
                         config.time_per_anchor,
                         intervals,
@@ -2267,11 +2325,8 @@ impl TracingTail {
             self.prefill,
             start,
         );
-        self.traced.add_to_stage_with_history(
-            stage,
-            move |s: &Stage| s.get_center(target),
-            Some(samples),
-        )
+        self.traced
+            .add_to_stage_with_history(stage, TraceSource::Mobject(target), Some(samples))
     }
 }
 
@@ -2305,6 +2360,14 @@ pub struct AnimatedBoundary {
     back_and_forth: bool,
     draw_rate_func: Box<dyn Fn(f64) -> f64 + 'static>,
     fade_rate_func: Box<dyn Fn(f64) -> f64 + 'static>,
+}
+
+#[derive(Clone)]
+struct BoundaryState {
+    total_time: f64,
+    source_family: Vec<Mob>,
+    growing_family: Vec<Mob>,
+    fading_family: Vec<Mob>,
 }
 
 impl fmt::Debug for AnimatedBoundary {
@@ -2399,6 +2462,7 @@ impl AnimatedBoundary {
                 context: "animated boundary colors",
             });
         }
+        stage.try_get(source)?;
         // The Reference's boundary copies: same geometry, no stroke, no
         // fill. Mirror the source family member-for-member so the
         // become-partial zip lines up (changing.py:81
@@ -2423,18 +2487,40 @@ impl AnimatedBoundary {
         let group = stage.add(crate::vmobject::v_group(Vec::new()));
         stage.attach(group, growing)?;
         stage.attach(group, fading)?;
-        let growing_family = stage.family(growing);
-        let fading_family = stage.family(fading);
+        // These are flat ghost families: one child per source member. Their
+        // empty wrapper is not a copy of the source's first member.
+        let growing_family = stage.family(growing).into_iter().skip(1).collect();
+        let fading_family = stage.family(fading).into_iter().skip(1).collect();
 
         let config = self;
-        let mut total_time = 0.0f64;
-        stage.add_dt_updater(
+        stage.add_dt_updater_with_state(
             group,
-            move |stage: &mut Stage, _mob: Mob, dt: f64| {
+            BoundaryState {
+                total_time: 0.0,
+                source_family,
+                growing_family,
+                fading_family,
+            },
+            |state, map| {
+                for family in [
+                    &mut state.source_family,
+                    &mut state.growing_family,
+                    &mut state.fading_family,
+                ] {
+                    for member in family {
+                        *member = map.get(*member).unwrap_or(*member);
+                    }
+                }
+            },
+            move |stage: &mut Stage, mob: Mob, id, dt: f64| {
                 // changing.py:44 update_boundary_copies.
-                let time = total_time * config.cycle_rate;
+                let state = stage
+                    .updater_state::<BoundaryState>(mob, id)
+                    .expect("boundary updater attributes are installed");
+                let time = state.total_time * config.cycle_rate;
+                let members = state.source_family.len();
                 let n_colors = config.colors.len();
-                let index = (time % n_colors as f64) as usize;
+                let color_index = (time % n_colors as f64) as usize;
                 let alpha = time % 1.0;
                 let draw_alpha = (config.draw_rate_func)(alpha);
                 let fade_alpha = (config.fade_rate_func)(alpha);
@@ -2444,32 +2530,45 @@ impl AnimatedBoundary {
                 } else {
                     (0.0, draw_alpha)
                 };
-                for (member, src) in growing_family.iter().zip(&source_family) {
-                    if stage.contains(*member) && stage.contains(*src) {
-                        let _ = stage.pointwise_become_partial(*member, *src, a, b);
+                for index in 0..members {
+                    let state = stage
+                        .updater_state::<BoundaryState>(mob, id)
+                        .expect("boundary updater attributes are installed");
+                    let member = state.growing_family[index];
+                    let src = state.source_family[index];
+                    if stage.contains(member) && stage.contains(src) {
+                        let _ = stage.pointwise_become_partial(member, src, a, b);
                         write_uniform_stroke(
                             stage,
-                            *member,
-                            config.colors[index],
+                            member,
+                            config.colors[color_index],
                             config.max_stroke_width,
                         );
                     }
                 }
                 if time >= 1.0 {
-                    let fade_color = config.colors[(index + n_colors - 1) % n_colors];
-                    for (member, src) in fading_family.iter().zip(&source_family) {
-                        if stage.contains(*member) && stage.contains(*src) {
-                            let _ = stage.pointwise_become_partial(*member, *src, 0.0, 1.0);
+                    let fade_color = config.colors[(color_index + n_colors - 1) % n_colors];
+                    for index in 0..members {
+                        let state = stage
+                            .updater_state::<BoundaryState>(mob, id)
+                            .expect("boundary updater attributes are installed");
+                        let member = state.fading_family[index];
+                        let src = state.source_family[index];
+                        if stage.contains(member) && stage.contains(src) {
+                            let _ = stage.pointwise_become_partial(member, src, 0.0, 1.0);
                             write_uniform_stroke(
                                 stage,
-                                *member,
+                                member,
                                 fade_color,
                                 (1.0 - fade_alpha) * config.max_stroke_width,
                             );
                         }
                     }
                 }
-                total_time += dt;
+                stage
+                    .updater_state_mut::<BoundaryState>(mob, id)
+                    .expect("boundary updater attributes are installed")
+                    .total_time += dt;
             },
             false,
         )?;
@@ -3583,10 +3682,10 @@ mod tests {
                 .traced
                 .add_to_stage_with_history(
                     stage,
-                    move |_| {
+                    TraceSource::PointFunction(Box::new(move |_| {
                         calls.set(calls.get() + 1);
                         source.get()
-                    },
+                    })),
                     Some(samples),
                 )
                 .unwrap();
@@ -3728,6 +3827,243 @@ mod tests {
             "the field did not redraw at the new time"
         );
         assert!(after.iter().all(|p| p.iter().all(|v| v.is_finite())));
+    }
+
+    #[test]
+    fn owned_updater_traced_path_copy_branches_from_its_existing_history() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let point = Rc::new(Cell::new([0.0; 3]));
+        let source = Rc::clone(&point);
+        let mut stage = Stage::new();
+        let trace = TracedPath::new()
+            .with_time_traced(1.0)
+            .with_time_per_anchor(0.25)
+            .add_to_stage(&mut stage, move |_| source.get())
+            .unwrap();
+        stage.update_mobject(trace, 0.125);
+        point.set([0.25, 0.0, 0.0]);
+        stage.update_mobject(trace, 0.25);
+        let copied = stage.copy_family(trace).unwrap();
+        assert_eq!(stage.updater_ids(trace), stage.updater_ids(copied));
+        let original_points = stage.get_points(trace).unwrap();
+        point.set([2.0, 0.0, 0.0]);
+        stage.update_mobject(copied, 0.25);
+        assert_eq!(stage.get_points(trace).unwrap(), original_points);
+        point.set([0.5, 0.0, 0.0]);
+        stage.update_mobject(trace, 0.25);
+        let anchors = |mob| {
+            stage
+                .get_points(mob)
+                .unwrap()
+                .into_iter()
+                .step_by(2)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            anchors(trace),
+            vec![[0.0; 3], [0.25, 0.0, 0.0], [0.5, 0.0, 0.0]]
+        );
+        assert_eq!(
+            anchors(copied),
+            vec![[0.0; 3], [0.25, 0.0, 0.0], [2.0, 0.0, 0.0]]
+        );
+    }
+
+    #[test]
+    fn owned_updater_trace_snapshots_freeze_history_and_restore_replay() {
+        let mut stage = Stage::new();
+        let cursor = stage.add(VMobject::from_points(vec![[0.0; 3]]));
+        let trace = TracedPath::new()
+            .with_time_traced(1.0)
+            .with_time_per_anchor(0.25)
+            .add_to_stage(&mut stage, move |stage| stage.get_center(cursor))
+            .unwrap();
+        stage.update_mobject(trace, 0.125);
+        stage.set_points(cursor, &[[0.25, 0.0, 0.0]]).unwrap();
+        stage.update_mobject(trace, 0.25);
+        let snapshot = stage.snapshot();
+        stage.set_points(cursor, &[[0.5, 0.0, 0.0]]).unwrap();
+        stage.update_mobject(trace, 0.25);
+        let replayed = stage.get_points(trace).unwrap();
+        for endpoint in [8.0, 4.0, 2.0] {
+            let mut branch = snapshot.materialize();
+            branch.set_points(cursor, &[[endpoint, 0.0, 0.0]]).unwrap();
+            branch.update_mobject(trace, 0.25);
+            let anchors = branch
+                .get_points(trace)
+                .unwrap()
+                .into_iter()
+                .step_by(2)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                anchors,
+                vec![[0.0; 3], [0.25, 0.0, 0.0], [endpoint, 0.0, 0.0]]
+            );
+            assert_eq!(stage.get_points(trace).unwrap(), replayed);
+        }
+        stage.restore(&snapshot);
+        stage.set_points(cursor, &[[0.5, 0.0, 0.0]]).unwrap();
+        stage.update_mobject(trace, 0.25);
+        assert_eq!(stage.get_points(trace).unwrap(), replayed);
+    }
+
+    #[test]
+    fn owned_updater_tail_copy_remaps_the_traced_family_member() {
+        for cross_stage in [false, true] {
+            let mut stage = Stage::new();
+            let cursor = stage.add(VMobject::from_points(vec![[0.0; 3]]));
+            let tail = TracingTail::new()
+                .with_time_traced(0.5)
+                .with_time_per_anchor(0.25)
+                .unwrap()
+                .add_to_stage(&mut stage, cursor)
+                .unwrap();
+            let family = stage.add(crate::vmobject::v_group(Vec::new()));
+            stage.attach(family, cursor).unwrap();
+            stage.attach(family, tail).unwrap();
+            stage.set_points(cursor, &[[1.0, 0.0, 0.0]]).unwrap();
+            stage.update_mobject(tail, 0.25);
+            let before = stage.get_points(tail).unwrap();
+            let mut other = Stage::new();
+            let copied = if cross_stage {
+                stage.copy_into(family, &mut other).unwrap()
+            } else {
+                stage.copy_family(family).unwrap()
+            };
+            let destination = if cross_stage { &mut other } else { &mut stage };
+            let copy_children = destination.get(copied).unwrap().submobjects().to_vec();
+            let copy_cursor = copy_children[0];
+            let copy_tail = copy_children[1];
+            destination
+                .set_points(copy_cursor, &[[10.0, 0.0, 0.0]])
+                .unwrap();
+            destination.update_mobject(copy_tail, 0.25);
+            let copy_anchors = destination
+                .get_points(copy_tail)
+                .unwrap()
+                .into_iter()
+                .step_by(2)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                copy_anchors,
+                vec![[0.0; 3], [1.0, 0.0, 0.0], [10.0, 0.0, 0.0]]
+            );
+            assert_eq!(stage.get_points(tail).unwrap(), before);
+            stage.set_points(cursor, &[[2.0, 0.0, 0.0]]).unwrap();
+            stage.update_mobject(tail, 0.25);
+            let anchors = stage
+                .get_points(tail)
+                .unwrap()
+                .into_iter()
+                .step_by(2)
+                .collect::<Vec<_>>();
+            assert_eq!(anchors, vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+        }
+    }
+
+    #[test]
+    fn owned_updater_boundary_copy_updates_its_own_ghosts_and_clock() {
+        let mut stage = Stage::new();
+        let source = stage.add(crate::vmobject::v_group(vec![
+            VMobject::from_points(vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+            VMobject::from_points(vec![[10.0, 0.0, 0.0], [11.0, 0.0, 0.0], [12.0, 0.0, 0.0]]),
+        ]));
+        let boundary = AnimatedBoundary::new()
+            .with_cycle_rate(1.0)
+            .with_draw_rate_func(|alpha| alpha)
+            .add_to_stage(&mut stage, source)
+            .unwrap();
+        stage.update_mobject(boundary, 0.25);
+        stage.update_mobject(boundary, 0.25);
+        let growing = stage.get(boundary).unwrap().submobjects()[0];
+        let ghosts = stage.get(growing).unwrap().submobjects();
+        assert_eq!(
+            stage.get_points(ghosts[1]).unwrap().last(),
+            Some(&[0.5, 0.0, 0.0])
+        );
+        assert_eq!(
+            stage.get_points(ghosts[2]).unwrap().last(),
+            Some(&[10.5, 0.0, 0.0])
+        );
+        let points = |stage: &Stage, mob| {
+            stage
+                .family(mob)
+                .iter()
+                .map(|&child| stage.get_points(child).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let copied = stage.copy_family(boundary).unwrap();
+        let before = points(&stage, boundary);
+        stage.update_mobject(copied, 0.25);
+        assert_eq!(
+            points(&stage, boundary),
+            before,
+            "copy must not write original ghosts"
+        );
+        assert_ne!(points(&stage, copied), before, "copy's clock must advance");
+        stage.update_mobject(boundary, 0.25);
+        assert_eq!(points(&stage, copied), points(&stage, boundary));
+    }
+
+    #[test]
+    fn owned_updater_time_varying_field_copies_advance_independent_clocks() {
+        let mut stage = Stage::new();
+        let field = TimeVaryingVectorField::new(
+            |coords, time| vec![[1.0, time, 0.0]; coords.len()],
+            axes(),
+        )
+        .with_sample_coords(vec![[0.0; 3], [1.0, 0.0, 0.0]])
+        .add_to_stage(&mut stage)
+        .unwrap();
+        stage.update_mobject(field, 0.25);
+        let copied = stage.copy_family(field).unwrap();
+        let before = stage.get_points(field).unwrap();
+        stage.update_mobject(copied, 0.5);
+        assert_eq!(stage.get_points(field).unwrap(), before);
+        assert_ne!(stage.get_points(copied).unwrap(), before);
+        stage.update_mobject(field, 0.5);
+        assert_eq!(stage.get_points(field), stage.get_points(copied));
+    }
+
+    #[test]
+    fn owned_updater_stream_line_copies_write_their_own_children() {
+        let mut stage = Stage::new();
+        let rng = RngRoot::from_seed(11);
+        let streams = StreamLines::new(rotation_field, axes(), &rng)
+            .with_sample_coords(vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+            .with_noise_factor(0.0)
+            .with_solution_time(1.0)
+            .with_samples_per_line(12);
+        let original = AnimatedStreamLines::new(streams)
+            .with_lag_range(0.01)
+            .add_to_stage(&mut stage)
+            .unwrap();
+        stage.update_mobject(original, 0.25);
+        let widths = |stage: &Stage, mob| {
+            stage
+                .get(mob)
+                .unwrap()
+                .submobjects()
+                .iter()
+                .map(|&child| {
+                    stage
+                        .get(child)
+                        .unwrap()
+                        .buffer
+                        .read_column("stroke_width")
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let copied = stage.copy_family(original).unwrap();
+        let before = widths(&stage, original);
+        stage.update_mobject(copied, 0.25);
+        assert_eq!(widths(&stage, original), before);
+        assert_ne!(widths(&stage, copied), before);
+        stage.update_mobject(original, 0.25);
+        assert_eq!(widths(&stage, original), widths(&stage, copied));
     }
 
     #[test]

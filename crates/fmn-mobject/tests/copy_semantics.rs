@@ -1168,3 +1168,206 @@ fn install_reclaims_pinned_private_dag_and_preserves_root_runtime_state() {
         "the rebuilt root never becomes pending deletion"
     );
 }
+
+#[derive(Clone, Debug, PartialEq)]
+struct NativeHistory {
+    samples: Vec<f64>,
+    child: Mob,
+    external: Mob,
+}
+
+fn remap_history(state: &mut NativeHistory, map: &fmn_mobject::CopyMap) {
+    state.child = map.get(state.child).unwrap_or(state.child);
+    state.external = map.get(state.external).unwrap_or(state.external);
+}
+
+#[test]
+fn native_updater_attributes_copy_remap_and_snapshot_independently() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let child = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    let external = stage.add(Mobject::from_points(&[[9.0; 3]]));
+    stage.attach(root, child).unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let callable_calls = Rc::clone(&calls);
+    let id = stage
+        .add_dt_updater_with_state(
+            root,
+            NativeHistory {
+                samples: vec![0.0],
+                child,
+                external,
+            },
+            remap_history,
+            move |stage, me, id, dt| {
+                callable_calls.set(callable_calls.get() + 1);
+                let state = stage.updater_state_mut::<NativeHistory>(me, id).unwrap();
+                let next = state.samples.last().unwrap() + dt;
+                state.samples.push(next);
+                let child = state.child;
+                stage.set_points(child, &[[next, 0.0, 0.0]]).unwrap();
+            },
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        calls.get(),
+        1,
+        "registration calls once after state installation"
+    );
+    stage.update_mobject(root, 1.0);
+    let snapshot = stage.snapshot();
+    let copied = stage.copy_family_mapped(root).unwrap();
+    let copy_root = copied.root();
+    let copy_child = copied.get(child).unwrap();
+    assert_eq!(stage.updater_ids(copy_root), vec![id]);
+    let copy_state = stage.updater_state::<NativeHistory>(copy_root, id).unwrap();
+    assert_eq!(copy_state.child, copy_child);
+    assert_eq!(copy_state.external, external);
+    stage.update_mobject(copy_root, 2.0);
+    assert_eq!(stage.get_points(copy_child).unwrap(), vec![[3.0, 0.0, 0.0]]);
+    assert_eq!(stage.get_points(child).unwrap(), vec![[1.0, 0.0, 0.0]]);
+    stage.update_mobject(root, 4.0);
+    assert_eq!(stage.get_points(child).unwrap(), vec![[5.0, 0.0, 0.0]]);
+    assert_eq!(
+        calls.get(),
+        4,
+        "the callable itself remains shared by reference"
+    );
+
+    let mut first = snapshot.materialize();
+    let mut second = snapshot.materialize();
+    first.update_mobject(root, 8.0);
+    second.update_mobject(root, 16.0);
+    assert_eq!(first.get_points(child).unwrap(), vec![[9.0, 0.0, 0.0]]);
+    assert_eq!(second.get_points(child).unwrap(), vec![[17.0, 0.0, 0.0]]);
+    stage.restore(&snapshot);
+    stage.update_mobject(root, 4.0);
+    assert_eq!(stage.get_points(child).unwrap(), vec![[5.0, 0.0, 0.0]]);
+    assert_eq!(
+        stage
+            .updater_state::<NativeHistory>(root, id)
+            .unwrap()
+            .samples,
+        vec![0.0, 0.0, 1.0, 5.0],
+        "restoring a snapshot also restores the native observation history"
+    );
+}
+
+#[test]
+fn native_updater_attributes_rebind_across_stages_and_match_updaters() {
+    let mut source = Stage::new();
+    let root = source.add(Mobject::new());
+    let child = source.add(Mobject::from_points(&[[0.0; 3]]));
+    let external = source.add(Mobject::new());
+    source.attach(root, child).unwrap();
+    let id = source
+        .add_dt_updater_with_state(
+            root,
+            NativeHistory {
+                samples: vec![1.0],
+                child,
+                external,
+            },
+            remap_history,
+            |stage, me, id, dt| {
+                let state = stage.updater_state_mut::<NativeHistory>(me, id).unwrap();
+                state.samples.push(dt);
+                let child = state.child;
+                stage.shift(child, [dt, 0.0, 0.0]);
+            },
+            false,
+        )
+        .unwrap();
+    let mut target = Stage::new();
+    let copied = source.copy_into(root, &mut target).unwrap();
+    let copy_child = target.get(copied).unwrap().submobjects()[0];
+    target.update_mobject(copied, 2.0);
+    assert_eq!(
+        target.get_points(copy_child).unwrap(),
+        vec![[2.0, 0.0, 0.0]]
+    );
+    assert_eq!(source.get_points(child).unwrap(), vec![[0.0; 3]]);
+    let state = target.updater_state::<NativeHistory>(copied, id).unwrap();
+    assert_eq!(state.child, copy_child);
+    assert_eq!(
+        state.external, external,
+        "external references are not invented"
+    );
+
+    let peer = target.copy_family(copied).unwrap();
+    let peer_child = target.get(peer).unwrap().submobjects()[0];
+    target.clear_updaters(peer, true);
+    target.update_mobject(copied, 3.0);
+    target.match_updaters(peer, copied).unwrap();
+    target.update_mobject(peer, 4.0);
+    assert_eq!(
+        target.get_points(peer_child).unwrap(),
+        vec![[6.0, 0.0, 0.0]]
+    );
+    assert_eq!(
+        target.get_points(copy_child).unwrap(),
+        vec![[5.0, 0.0, 0.0]]
+    );
+    assert_eq!(
+        target
+            .updater_state::<NativeHistory>(copied, id)
+            .unwrap()
+            .samples,
+        vec![1.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        target
+            .updater_state::<NativeHistory>(peer, id)
+            .unwrap()
+            .samples,
+        vec![1.0, 2.0, 3.0, 4.0]
+    );
+    let incompatible = target.add(Mobject::new());
+    assert_eq!(
+        target.match_updaters(incompatible, copied),
+        Err(StageError::FamilyShapeMismatch)
+    );
+    assert!(target.updater_ids(incompatible).is_empty());
+
+    // Native attributes remain when a callback is cleared. Importing that
+    // object must still reserve their identities against future registrations.
+    source.clear_updaters(root, true);
+    let mut fresh = Stage::new();
+    let cleared = source.copy_into(root, &mut fresh).unwrap();
+    let next = fresh.add_dt_updater(cleared, |_, _, _| {}, false).unwrap();
+    assert!(next.raw() > id.raw());
+    assert_eq!(
+        fresh.updater_state::<NativeHistory>(cleared, id).unwrap().samples,
+        vec![1.0]
+    );
+}
+
+#[test]
+fn become_preserves_native_attributes_until_updaters_are_matched() {
+    let mut stage = Stage::new();
+    let original = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    let id = stage
+        .add_dt_updater_with_state(
+            original,
+            1.0_f64,
+            |_, _| {},
+            |stage, me, id, dt| {
+                *stage.updater_state_mut::<f64>(me, id).unwrap() += dt;
+            },
+            false,
+        )
+        .unwrap();
+    let copied = stage.copy_family(original).unwrap();
+    stage.update_mobject(copied, 2.0);
+    stage.become_mobject(original, copied, false).unwrap();
+    assert_eq!(stage.updater_state::<f64>(original, id), Some(&1.0));
+    stage.become_mobject(original, copied, true).unwrap();
+    assert_eq!(stage.updater_state::<f64>(original, id), Some(&3.0));
+    stage.update_mobject(original, 4.0);
+    assert_eq!(stage.updater_state::<f64>(copied, id), Some(&3.0));
+    assert_eq!(stage.updater_state::<f64>(original, id), Some(&7.0));
+}

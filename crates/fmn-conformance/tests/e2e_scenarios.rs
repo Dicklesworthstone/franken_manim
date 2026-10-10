@@ -4548,6 +4548,108 @@ fn lifecycle_traced_path_cadence_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("traced_path_visible", u64::from(visible)))
 }
 
+/// Native updater attributes must branch with a copied family and remain
+/// frozen in frame snapshots, including their references to the traced source.
+fn lifecycle_owned_tail_branches_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let tail_failure = |error| fail(format!("native tail branch: {error}"));
+    let mut original = Stage::new();
+    let source = original.add(VMobject::from_points(vec![[0.0; 3]]));
+    let tail = fmn_library::TracingTail::new()
+        .with_time_traced(0.5)
+        .with_time_per_anchor(0.25)
+        .and_then(|tail| tail.add_to_stage(&mut original, source))
+        .map_err(|error| fail(format!("construct owned tail: {error}")))?;
+    let family = original.add(fmn_library::vmobject::v_group(Vec::new()));
+    original.attach(family, source).map_err(tail_failure)?;
+    original.attach(family, tail).map_err(tail_failure)?;
+    original.add_to_scene(family).map_err(tail_failure)?;
+    original
+        .set_points(source, &[[1.0, 0.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let frozen = original.snapshot();
+    let early_frame = render_certified_doc(&original);
+    let early_points = original.get_points(tail);
+
+    let mut copied = Stage::new();
+    let copied_family = original
+        .copy_into(family, &mut copied)
+        .map_err(tail_failure)?;
+    copied.add_to_scene(copied_family).map_err(tail_failure)?;
+    let children = copied
+        .get(copied_family)
+        .ok_or_else(|| fail("copied tail family is missing"))?
+        .submobjects()
+        .to_vec();
+    let [copied_source, copied_tail] = children.as_slice() else {
+        return Err(fail("copied tail family lost its source or trail"));
+    };
+    copied
+        .set_points(*copied_source, &[[2.0, -1.0, 0.0]])
+        .map_err(tail_failure)?;
+    copied.update(0.25);
+    let independent_history = original.get_points(tail) == early_points;
+    let anchors = |stage: &Stage, mob| {
+        stage
+            .get_points(mob)
+            .unwrap_or_default()
+            .into_iter()
+            .step_by(2)
+            .collect::<Vec<_>>()
+    };
+    let copied_source_remapped =
+        anchors(&copied, *copied_tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, -1.0, 0.0]];
+    original
+        .set_points(source, &[[2.0, 1.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let original_history =
+        anchors(&original, tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 1.0, 0.0]];
+    let original_frame = render_certified_doc(&original);
+    let copied_frame = render_certified_doc(&copied);
+    let snapshot_frozen = frozen.materialize().get_points(tail) == early_points
+        && render_certified_doc(&frozen.materialize()) == early_frame;
+
+    // Replaying from the captured frame must restore the internal history as
+    // well as the already drawn points, after both live branches have advanced.
+    original.restore(&frozen);
+    original
+        .set_points(source, &[[2.0, 1.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let snapshot_replay = render_certified_doc(&original) == original_frame
+        && anchors(&original, tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 1.0, 0.0]];
+    let empty_frame = render_certified_doc(&Stage::new());
+    let visible = original_frame != empty_frame && copied_frame != empty_frame;
+    let distinct_frames = original_frame != copied_frame;
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.owned_tail_branches")
+            .field("source_remapped", truth(copied_source_remapped))
+            .field("independent_history", truth(independent_history))
+            .field("original_history", truth(original_history))
+            .field("snapshot_frozen", truth(snapshot_frozen))
+            .field("snapshot_replay", truth(snapshot_replay))
+            .field("visible", truth(visible))
+            .field("distinct_frames", truth(distinct_frames))
+            .field("original_sha256", sha256(&original_frame).to_hex())
+            .field("copied_sha256", sha256(&copied_frame).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter(
+            "owned_tail_source_remapped",
+            u64::from(copied_source_remapped),
+        )
+        .with_counter(
+            "owned_tail_independent_history",
+            u64::from(independent_history),
+        )
+        .with_counter("owned_tail_original_history", u64::from(original_history))
+        .with_counter("owned_tail_snapshot_frozen", u64::from(snapshot_frozen))
+        .with_counter("owned_tail_snapshot_replay", u64::from(snapshot_replay))
+        .with_counter("owned_tail_visible", u64::from(visible))
+        .with_counter("owned_tail_distinct_frames", u64::from(distinct_frames)))
+}
+
 /// fm-c1up: TracingTail seeds its updater history while its public geometry
 /// stays empty until the first positive-dt observation is published.
 fn lifecycle_tracing_tail_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -6611,6 +6713,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(spec(
+        "lifecycle.owned_tail_branches.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_owned_tail_branches_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("owned_tail_source_remapped", 1),
+            counter_eq("owned_tail_independent_history", 1),
+            counter_eq("owned_tail_original_history", 1),
+            counter_eq("owned_tail_snapshot_frozen", 1),
+            counter_eq("owned_tail_snapshot_replay", 1),
+            counter_eq("owned_tail_visible", 1),
+            counter_eq("owned_tail_distinct_frames", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.owned_tail_branches",
+            vec![
+                FieldPred::str_eq("source_remapped", "true"),
+                FieldPred::str_eq("snapshot_frozen", "true"),
+                FieldPred::str_eq("snapshot_replay", "true"),
+                FieldPred::str_eq("distinct_frames", "true"),
+            ],
+        )],
+    ));
     specs.push(
         spec(
             "lifecycle.always_redraw_shared_source.v1",
@@ -8330,6 +8457,16 @@ fn traced_path_cadence_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.traced_path_cadence.v1")
         .expect("the native traced-path cadence scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn owned_tail_branches_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.owned_tail_branches.v1")
+        .expect("the owned-tail copy and snapshot scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

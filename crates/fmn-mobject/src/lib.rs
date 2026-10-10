@@ -62,8 +62,8 @@ pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordError, RecordSchema, 
 pub use render_snapshot::{RenderSnapshotError, RenderSnapshotLimits};
 pub use shape::ShapeTag;
 pub use stage::{
-    CopyMap, Entry, IdBuildHasher, IdHasher, Mob, Snapshot, Stage, UpdaterFn, UpdaterId,
-    UpdaterSlot,
+    CopyMap, Entry, FamilyCheckpoint, IdBuildHasher, IdHasher, Mob, Snapshot, Stage, UpdaterFn,
+    UpdaterId, UpdaterSlot,
 };
 pub use uniforms::{JointType, Uniforms};
 
