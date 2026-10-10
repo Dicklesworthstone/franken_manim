@@ -242,7 +242,14 @@ def _typed_textbox_constructor(g):
             box_style.setdefault("fill_color", box_style.get("color", g["WHITE"]))
             box = _shape(g, "Rectangle", box_style, "box_kwargs")
             box.set_stroke(self.active_color if self.isActive else self.deactive_color)
-        text = Text(value, **self.text_kwargs)
+        try:
+            text = Text(value, **self.text_kwargs)
+        except ValueError as error:
+            # Keep the portal's schema-level Textbox refusal (the native
+            # textbox_error spelling) while preserving Scribe's diagnostic.
+            if "has no glyph" not in str(error):
+                raise
+            raise ValueError("unmapped glyph: " + str(error)) from error
         width = box.get_width() - 2 * self.text_buff
         if not math.isfinite(width) or width < 0:
             raise ValueError("Textbox padding must leave a nonnegative finite text width")

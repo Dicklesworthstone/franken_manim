@@ -97,7 +97,7 @@ def install_color_sliders(native: Any) -> None:
     original_init = Bank.__init__
     original_get_value = Bank.get_value
     np = g["_np"]
-    typed_shapes = all(name in g for name in ("Rectangle", "Square", "VGroup"))
+    typed_shapes = all(name in g for name in ("Rectangle", "Square", "VGroup", "_ColorValue"))
 
     @wraps(original_init)
     def initialize(self, *args, **kwargs):
@@ -184,7 +184,10 @@ def install_color_sliders(native: Any) -> None:
                 columns += 1
             if rows * columns > 65536:
                 raise ValueError("ColorSliders background exceeds 65536 squares")
-            colors = tuple(self._background_grid_colors)
+            # The bank stores each validated grid color as an RGB triple. A
+            # bare triple passed to set_fill is a three-color gradient of
+            # scalars, so each one becomes an exact single color value.
+            colors = tuple(g["_ColorValue"](rgb) for rgb in self._background_grid_colors)
             if not colors:
                 raise ValueError("ColorSliders background colors must not be empty")
             background = g["Square"](length).get_grid(n_rows=rows, n_cols=columns, buff=0.)

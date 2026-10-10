@@ -473,7 +473,7 @@ Textbox.active_anim	Textbox	fmn_python.control_events	1	fmn_python.control_event
 Textbox.box_on_mouse_press	Textbox	bootstrap	1	bootstrap
 Textbox.on_key_press	Textbox	fmn_python.control_events	1	fmn_python.control_events
 Textbox.set_value_anim	Textbox	bootstrap	1	bootstrap
-Textbox.update_text	Textbox	bootstrap	1	bootstrap
+Textbox.update_text	Textbox	fmn_python.control_events	1	fmn_python.control_events
 DecimalMatrix.__init__	DecimalMatrix	fmn_python.matrix	1	fmn_python.matrix
 DecimalMatrix.element_to_mobject	DecimalMatrix	fmn_python.matrix	1	fmn_python.matrix
 IntegerMatrix.__init__	IntegerMatrix	fmn_python.matrix	1	fmn_python.matrix

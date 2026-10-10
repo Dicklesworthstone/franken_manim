@@ -224,6 +224,23 @@ class ColorSliderAcceptance(unittest.TestCase):
         native, _, _ = bank._native_color_slider_parts((255.,255.,255.,1.), apply_value=False)
         for square, template in zip(bank.background, native[0]):
             np.testing.assert_allclose(square.get_bounding_box(), template.get_bounding_box(), atol=3e-6)
+    def test_default_checkerboard_matches_the_reference_grid(self):
+        # The Reference's ColorSliders() (class-sweep facts at 6199a00d):
+        # 105 Square members in a 5x21 grid whose fills alternate GREY_A and
+        # GREY_C (53 and 52) behind zero-width, transparent strokes.
+        bank = self.bank()
+        self.assertEqual(len(bank.background), 105)
+        for index, square in enumerate(bank.background):
+            self.assertIs(type(square), m.Square)
+            self.assertEqual(square.get_fill_color(), (m.GREY_A, m.GREY_C)[index % 2])
+            self.assertEqual(square.get_fill_opacity(), 1.)
+            self.assertEqual(square.get_stroke_width(), 0.)
+            self.assertEqual(square.get_stroke_opacity(), 0.)
+        fills = [square.get_fill_color() for square in bank.background]
+        self.assertEqual((fills.count(m.GREY_A), fills.count(m.GREY_C)), (53, 52))
+        # A regenerated grid paints from the same validated authored colors.
+        fresh = bank.get_background()
+        self.assertEqual([square.get_fill_color() for square in fresh], fills)
     def test_background_uses_public_square_hooks_without_recasting_authored_children(self):
         original, calls = m.Square.init_points, []
         def points(square):
