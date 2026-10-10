@@ -85,10 +85,11 @@ def _literal(node: ast.AST) -> str | None:
 def _static_tex_requests(scene_type: type, native: Any) -> list[tuple[str, str, str, bool, str]]:
     """Statically discover the literal Tex/TexText constructions a scene makes.
 
-    Every user-authored class ahead of the portal's ``Scene`` in the MRO is
-    read: the scene class, its scene bases, and mixins wherever they sit
-    among them (a mixin listed first must not hide the bases after it).
-    Only calls whose callee resolves, in the defining module, to the portal's
+    Every user-authored class in the MRO is read once: the scene class, its
+    scene bases, and mixins wherever C3 linearization places them (a mixin
+    listed first must not hide the bases after it, and one listed after a
+    scene base sits behind the portal's ``Scene`` itself). The portal's own
+    classes and the standard library are skipped. Only calls whose callee resolves, in the defining module, to the portal's
     exact ``Tex`` or ``TexText`` class and whose layout inputs (positional
     strings, ``template``, ``additional_preamble``, ``alignment``) are all
     string literals are collected. Anything dynamic is left to construction:
@@ -101,10 +102,13 @@ def _static_tex_requests(scene_type: type, native: Any) -> list[tuple[str, str, 
     stop = native.Scene
     found: dict[tuple[str, str, str, bool, str], None] = {}
     for cls in scene_type.__mro__:
-        if cls is stop:
-            break
-        module = sys.modules.get(cls.__module__)
-        if module is None or cls.__module__.startswith(("manimlib", "fmn_python")):
+        name = getattr(cls, "__module__", None)
+        if (cls is stop or not isinstance(name, str)
+                or name.startswith(("manimlib", "fmn_python"))
+                or name.partition(".")[0] in sys.stdlib_module_names):
+            continue
+        module = sys.modules.get(name)
+        if module is None:
             continue
         try:
             tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
@@ -337,8 +341,12 @@ def typesetting_receipt(scene: Any) -> dict[str, Any] | None:
         for key in _RECEIPT_COUNTERS:
             totals[key] += int(row.get(key, 0)) - int(start.get(key, 0))
     after = report["after"].get("default", {})
+    binding = now.get("default", {})
     return {
-        "persistent": bool(now.get("default", {}).get("persistent")),
+        "persistent": bool(binding.get("persistent")),
+        # Why the store is not attached (a refused or unavailable root), as
+        # the CLI's record names it; None while it is attached.
+        "cache_error": binding.get("error") or None,
         "hits": totals["memory_hits"] + totals["disk_hits"],
         "memory_hits": totals["memory_hits"], "disk_hits": totals["disk_hits"],
         "misses": totals["layout_computations"],
@@ -354,8 +362,11 @@ def typesetting_receipt(scene: Any) -> dict[str, Any] | None:
 
 
 def describe_receipt(receipt: dict[str, Any]) -> str:
-    """The human render line's typesetting clause."""
-    store = "typeset cache" if receipt["persistent"] else "typeset memory cache"
+    """The human render line's typesetting clause, worded like ``fmn``'s."""
+    if receipt.get("cache_error"):
+        store = f"typeset cache unavailable ({receipt['cache_error']})"
+    else:
+        store = "typeset cache" if receipt["persistent"] else "typeset memory cache"
     text = (f"; {store}: {receipt['hits']} hits ({receipt['disk_hits']} from disk), "
             f"{receipt['misses']} misses, {receipt['bytes_read']} bytes read, "
             f"{receipt['bytes_written']} bytes written")

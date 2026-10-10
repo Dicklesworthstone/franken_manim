@@ -13147,10 +13147,10 @@ assert sphere.n_records() == 15
 
 failed_sphere = three_dimensions.Sphere.__new__(three_dimensions.Sphere)
 try:
-    three_dimensions.Sphere.__init__(failed_sphere, bogus=True)
+    three_dimensions.Sphere.__init__(failed_sphere, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Sphere() keyword(s) not yet routed to the native builder: bogus"
+        "Sphere() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Sphere keyword reached the native builder")
@@ -13206,10 +13206,10 @@ assert cylinder_order_scene.get_mobjects() == [back_cylinder, front_cylinder]
 
 failed_cylinder = three_dimensions.Cylinder.__new__(three_dimensions.Cylinder)
 try:
-    three_dimensions.Cylinder.__init__(failed_cylinder, bogus=True)
+    three_dimensions.Cylinder.__init__(failed_cylinder, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Cylinder() keyword(s) not yet routed to the native builder: bogus"
+        "Cylinder() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Cylinder keyword reached the native builder")
@@ -13344,10 +13344,10 @@ assert cone_order_scene.get_mobjects() == [back_cone, front_cone]
 
 failed_cone = three_dimensions.Cone.__new__(three_dimensions.Cone)
 try:
-    three_dimensions.Cone.__init__(failed_cone, bogus=True)
+    three_dimensions.Cone.__init__(failed_cone, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Cone() keyword(s) not yet routed to the native builder: bogus"
+        "Cone() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Cone keyword reached the native builder")
@@ -13397,11 +13397,11 @@ try:
         failed_line3d,
         manimlib.LEFT,
         manimlib.RIGHT,
-        bogus=True,
+        texture_paths={},
     )
 except NotImplementedError as error:
     assert str(error) == (
-        "Line3D() keyword(s) not yet routed to the native builder: bogus"
+        "Line3D() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Line3D keyword reached the native builder")
@@ -13429,10 +13429,10 @@ assert disk3d_order_scene.get_mobjects() == [back_disk3d, front_disk3d]
 
 failed_disk3d = three_dimensions.Disk3D.__new__(three_dimensions.Disk3D)
 try:
-    three_dimensions.Disk3D.__init__(failed_disk3d, bogus=True)
+    three_dimensions.Disk3D.__init__(failed_disk3d, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Disk3D() keyword(s) not yet routed to the native builder: bogus"
+        "Disk3D() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Disk3D keyword reached the native builder")
@@ -13465,10 +13465,10 @@ assert square3d_order_scene.get_mobjects() == [back_square3d, front_square3d]
 
 failed_square3d = three_dimensions.Square3D.__new__(three_dimensions.Square3D)
 try:
-    three_dimensions.Square3D.__init__(failed_square3d, bogus=True)
+    three_dimensions.Square3D.__init__(failed_square3d, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Square3D() keyword(s) not yet routed to the native builder: bogus"
+        "Square3D() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Square3D keyword reached the native builder")
@@ -13500,10 +13500,10 @@ assert cube_order_scene.get_mobjects() == [back_cube, front_cube]
 
 failed_cube = three_dimensions.Cube.__new__(three_dimensions.Cube)
 try:
-    three_dimensions.Cube.__init__(failed_cube, bogus=True)
+    three_dimensions.Cube.__init__(failed_cube, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Cube() keyword(s) not yet routed to the native builder: bogus"
+        "Cube() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Cube keyword reached the native builder")
@@ -13587,10 +13587,10 @@ assert prism_order_scene.get_mobjects() == [back_prism, front_prism]
 
 failed_prism = three_dimensions.Prism.__new__(three_dimensions.Prism)
 try:
-    three_dimensions.Prism.__init__(failed_prism, bogus=True)
+    three_dimensions.Prism.__init__(failed_prism, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Prism() keyword(s) not yet routed to the native builder: bogus"
+        "Prism() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Prism keyword reached the native builder")
@@ -14255,10 +14255,10 @@ else:
 
 failed_torus = three_dimensions.Torus.__new__(three_dimensions.Torus)
 try:
-    three_dimensions.Torus.__init__(failed_torus, bogus=True)
+    three_dimensions.Torus.__init__(failed_torus, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Torus() keyword(s) not yet routed to the native builder: bogus"
+        "Torus() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Torus keyword reached the native builder")
@@ -21950,14 +21950,46 @@ assert np.allclose(
 
 failed_surface = surface_types.Surface.__new__(surface_types.Surface)
 try:
-    surface_types.Surface.__init__(failed_surface, bogus=True)
+    surface_types.Surface.__init__(failed_surface, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Surface() keyword(s) not yet routed to the native builder: bogus"
+        "Surface() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Surface keyword reached the native builder")
 assert not hasattr(failed_surface, "submobjects")
+
+# fm-c1up: a keyword outside the Reference's Surface/Mobject chain is the
+# Reference's own TypeError (Cone(direction=RIGHT) raises it at 6199a00d),
+# never the unrouted-routing refusal, and it fails before any state exists.
+for solid, arguments in (
+    (surface_types.Surface, ()),
+    (three_dimensions.Sphere, ()),
+    (three_dimensions.Torus, ()),
+    (three_dimensions.Cylinder, ()),
+    (three_dimensions.Cone, ()),
+    (three_dimensions.Line3D, (manimlib.LEFT, manimlib.RIGHT)),
+    (three_dimensions.Disk3D, ()),
+    (three_dimensions.Square3D, ()),
+    (three_dimensions.Cube, ()),
+    (three_dimensions.Prism, ()),
+):
+    unknown_solid = solid.__new__(solid)
+    try:
+        solid.__init__(unknown_solid, *arguments, direction=manimlib.RIGHT, bogus=True)
+    except TypeError as error:
+        assert str(error) == (
+            "Mobject.__init__() got an unexpected keyword argument 'direction'"
+        ), (solid.__name__, error)
+    else:
+        raise AssertionError(solid.__name__ + " accepted an unknown keyword")
+    assert not hasattr(unknown_solid, "submobjects"), solid.__name__
+try:
+    three_dimensions.Cone(direction=manimlib.RIGHT)
+except TypeError as error:
+    assert "unexpected keyword argument 'direction'" in str(error), error
+else:
+    raise AssertionError("Cone accepted direction=")
 
 left_sheet = surface_types.ParametricSurface(
     lambda u, v: [u, v, 0.0],

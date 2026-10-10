@@ -3,8 +3,10 @@
 Invoked by the Rust portal test against the real extension; also runnable
 directly against an installed wheel. No layout or render substitute is used.
 """
+from contextlib import redirect_stderr
 import gc
 import importlib.util
+import io
 import os
 from pathlib import Path
 import sys
@@ -146,6 +148,28 @@ class Annotating:
 class Mixed(Annotating, LabelledBase):
     def construct(self):
         self.add(*self.label(), self.note(), Tex(r"c^2"))
+
+
+class Trailing(LabelledBase, Annotating):
+    """The mixin listed after the scene base: its MRO slot is behind Scene."""
+
+    def construct(self):
+        self.add(*self.label(), self.note())
+
+
+class Upper(LabelledBase):
+    def upper(self):
+        return Tex(r"u^2"), Tex(r"a^2 + b^2")
+
+
+class Lower(LabelledBase):
+    def lower(self):
+        return Tex(r"l^2")
+
+
+class Diamond(Upper, Lower):
+    def construct(self):
+        self.add(*self.upper(), *self.lower(), *self.label())
 '''
 
 _EDITED_LATER = '''from manimlib import *
@@ -179,6 +203,14 @@ def run_discovery_robustness(m):
             sources = sorted(source for source, *_ in _static_tex_requests(module.Mixed, m))
             # The mixin's string and both base strings, not only Mixed's own.
             assert sources == sorted([r"c^2", r"\sqrt{2}", r"a^2 + b^2", "Pythagoras"]), sources
+            mro = [cls.__name__ for cls in module.Trailing.__mro__]
+            assert mro.index("Annotating") > mro.index("Scene"), mro
+            sources = sorted(source for source, *_ in _static_tex_requests(module.Trailing, m))
+            assert sources == sorted([r"\sqrt{2}", r"a^2 + b^2", "Pythagoras"]), sources
+            # A diamond reads its shared base once, and a string two classes
+            # construct is one request.
+            sources = [source for source, *_ in _static_tex_requests(module.Diamond, m)]
+            assert sorted(sources) == sorted([r"u^2", r"a^2 + b^2", r"l^2", "Pythagoras"]), sources
 
             module, path = _load_named(directory, "fmn_static_edited_scene", _EDITED_LATER)
             assert [source for source, *_ in _static_tex_requests(module.Edited, m)] == ["e^x"]
@@ -207,6 +239,8 @@ def run_store_errors_reported(m):
             scene, cold_png = _render(m, module.Stored, root / "cold.png")
             healthy = typesetting_receipt(scene)
             assert healthy["store_errors"] == 0 and healthy["bytes_written"] > 0, healthy
+            assert healthy["cache_error"] is None, healthy
+            assert describe_receipt(healthy).startswith("; typeset cache: "), healthy
             # The namespace's object directory becomes a plain file: the root
             # still opens (persistent), but nothing can be read or written.
             (objects,) = (root / "cache" / "ns" / "typeset").glob("v*/objects")
@@ -221,6 +255,24 @@ def run_store_errors_reported(m):
             assert receipt["disk_hits"] == 0 and receipt["bytes_written"] == 0, receipt
             assert "cache reads or writes failed" in describe_receipt(receipt)
             assert broken_png == cold_png, "a store that cannot cache changed the PNG"
+
+            # A root the cache refuses (an existing folder that is no store)
+            # is never attached: like fmn's record and line, the receipt
+            # names the refusal (`cache_error`) instead of a bare memory cache.
+            foreign = root / "foreign"
+            foreign.mkdir()
+            (foreign / "notes.txt").write_bytes(b"not cache data")
+            with redirect_stderr(io.StringIO()) as diagnostic:
+                configure_tex_cache(foreign)
+            assert "typeset-cache-unavailable" in diagnostic.getvalue()
+            scene, refused_png = _render(m, module.Stored, root / "refused.png")
+            receipt = typesetting_receipt(scene)
+            assert not receipt["persistent"] and receipt["store_errors"] == 0, receipt
+            assert isinstance(receipt["cache_error"], str) and receipt["cache_error"], receipt
+            line = describe_receipt(receipt)
+            assert line.startswith(f"; typeset cache unavailable ({receipt['cache_error']}): "), line
+            assert refused_png == cold_png, "a refused root changed the PNG"
+            assert (foreign / "notes.txt").read_bytes() == b"not cache data"
         finally:
             configure_tex_cache(enabled=False)
             sys.modules.pop("fmn_static_store_scene", None)
