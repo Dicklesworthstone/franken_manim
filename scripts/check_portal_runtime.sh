@@ -25,20 +25,44 @@ if not path:
 print(f"auditing imported manimlib: {path}")
 PY
 
-for suite in surface_alignment paired_output_cli paired_output batch_checkpoint_acceptance capture_output copying_semantics copying_render tex_preamble tex_preamble_render decimal_authoring complex_matrix complex_readouts_render checkpoint_identity fill_profile_pixels fill_profile_animation functional_color pointwise_color pointwise_paint_integration textured_surfaces portal_initialization point_editing text_authoring code_authoring persistent_recovery fading_family bridge animation_semantics matching_transform_semantics matching_authoring composition_lifecycle camera_animation_semantics camera_motion camera_execution updater_family drawing_runtime creation_semantics subset_reveal text_reveal native_outputs programmatic_rendering runtime_provenance batch_rendering reproducible_batch builder_playback restore_playback cyclic_replace deferred_transform_playback fading_semantics movement_semantics rotation_semantics indication_semantics deferred_indications composite_effects tracker_interpolation live_tex live_tex_render live_rates animation_updaters native_animation_updaters deferred_animation_updaters console_rendering scene_state temporal_visualization detached_tracing_tail streamline_authoring streamline_rebuild control_interaction color_sliders scene_execution matrix_authoring source_autoreload scene_project scene_project_editor live_graphing live_vector_fields video_options callback_cleanup semantic_witness typeset_cache typeset_preflight typeset_static_preflight; do
+for suite in paired_output_cli paired_output batch_checkpoint_acceptance capture_output copying_semantics copying_render tex_preamble tex_preamble_render decimal_authoring complex_matrix complex_readouts_render checkpoint_identity fill_profile_pixels fill_profile_animation functional_color pointwise_color pointwise_paint_integration portal_initialization point_editing text_authoring code_authoring persistent_recovery fading_family bridge animation_semantics matching_transform_semantics matching_authoring composition_lifecycle camera_animation_semantics camera_motion camera_execution updater_family drawing_runtime creation_semantics subset_reveal text_reveal native_outputs programmatic_rendering runtime_provenance batch_rendering reproducible_batch builder_playback restore_playback cyclic_replace deferred_transform_playback fading_semantics movement_semantics rotation_semantics indication_semantics deferred_indications composite_effects tracker_interpolation live_tex live_tex_render live_rates animation_updaters native_animation_updaters deferred_animation_updaters console_rendering scene_state temporal_visualization detached_tracing_tail streamline_authoring streamline_rebuild control_interaction color_sliders scene_execution matrix_authoring source_autoreload scene_project scene_project_editor live_graphing live_vector_fields video_options semantic_witness typeset_cache typeset_preflight typeset_static_preflight; do
     python3 - "$suite" <<'PY'
+import ast
 import pathlib
 import runpy
 import sys
 import tomllib
 
+
+def main_only(node):
+    """A top-level `if __name__ == "__main__":` with no else branch."""
+    if not isinstance(node, ast.If) or node.orelse or not isinstance(node.test, ast.Compare):
+        return False
+    test = node.test
+    operands = [test.left, *test.comparators]
+    return (len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+            and any(isinstance(item, ast.Name) and item.id == "__name__" for item in operands)
+            and any(isinstance(item, ast.Constant) and item.value == "__main__" for item in operands))
+
+
 root = pathlib.Path.cwd()
 version = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]["version"]
 suite = root / "crates" / "fmn-python" / "tests" / (sys.argv[1] + ".py")
+# runpy names the module "<run_path>", so a suite that starts its tests only
+# under `__main__` would run none of them here and still print "passed".
+if any(main_only(node) for node in ast.parse(suite.read_text(encoding="utf-8"), str(suite)).body):
+    raise SystemExit(f"{suite.name} starts its tests only under __main__, where this runner "
+                     "runs none of them; run it directly instead")
 runpy.run_path(str(suite), init_globals={"_expected_package_version": version})
 print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
+
+# These suites start their tests only under `if __name__ == "__main__"`, so
+# they run directly; the loop above refuses such a suite.
+python3 crates/fmn-python/tests/surface_alignment.py
+python3 crates/fmn-python/tests/textured_surfaces.py
+python3 crates/fmn-python/tests/callback_cleanup.py
 
 python3 crates/fmn-conformance/python/test_structural_facts.py
 # Structural parity with the pinned Reference (fm-5wq.36): the installed
