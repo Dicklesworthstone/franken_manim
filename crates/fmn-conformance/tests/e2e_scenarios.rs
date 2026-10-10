@@ -4043,6 +4043,85 @@ fn render_certified_doc(stage: &Stage) -> Vec<u8> {
     encode_frame(&frame).expect("the frame encodes into its canonical document")
 }
 
+/// A graph generated after native plane placement must occupy that plane's
+/// chart. The independent drawing oracle translates the original geometry;
+/// the negative witness leaves the graph at the old origin.
+fn coordinate_placement_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::CoordinateSystem;
+
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("coordinate fonts: {error}")))?;
+    let base = NumberPlane::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .faded_line_ratio(1)
+        .build(&book)
+        .map_err(|error| fail(format!("construct coordinate plane: {error}")))?;
+    let offset = [-2.0, 1.0, 0.0];
+    let placed = base.clone().shifted(offset);
+    let function = |x: f64| 0.5 * x;
+    let original_graph = base
+        .get_graph(function, None)
+        .build()
+        .map_err(|error| fail(format!("construct original graph: {error}")))?;
+    let graph = placed
+        .get_graph(function, None)
+        .build()
+        .map_err(|error| fail(format!("construct placed graph: {error}")))?;
+    let near = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-9);
+    let endpoints = graph
+        .points()
+        .first()
+        .is_some_and(|&point| near(point, [-3.0, 0.5, 0.0]))
+        && graph
+            .points()
+            .last()
+            .is_some_and(|&point| near(point, [-1.0, 1.5, 0.0]));
+    let inverse = [[-1.0, 0.5], [0.0, 0.0], [2.0, -3.0]]
+        .into_iter()
+        .all(|point| near(placed.p2c(placed.c2p(&point)), [point[0], point[1], 0.0]));
+    let drawing = |plane: VMobject, curve: VMobject| -> Result<Stage, ScenarioError> {
+        let mut stage = Stage::new();
+        let plane = stage.add(plane);
+        let curve = stage.add(curve);
+        stage
+            .add_to_scene(plane)
+            .map_err(|error| fail(error.to_string()))?;
+        stage
+            .add_to_scene(curve)
+            .map_err(|error| fail(error.to_string()))?;
+        Ok(stage)
+    };
+    let actual = drawing(placed.vmob().clone(), graph)?;
+    let expected = drawing(
+        base.vmob().clone().shifted(offset),
+        original_graph.clone().shifted(offset),
+    )?;
+    let wrong = drawing(placed.vmob().clone(), original_graph)?;
+    let pixels = render_certified_doc(&actual);
+    let rendered_match = pixels == render_certified_doc(&expected);
+    let rejects_unmoved_graph = pixels != render_certified_doc(&wrong);
+    let visible = pixels != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.coordinate_placement")
+            .field("endpoints", truth(endpoints))
+            .field("inverse", truth(inverse))
+            .field("rendered_match", truth(rendered_match))
+            .field("rejects_unmoved_graph", truth(rejects_unmoved_graph))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&pixels).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("coordinate_endpoints", u64::from(endpoints))
+        .with_counter("coordinate_inverse", u64::from(inverse))
+        .with_counter("coordinate_rendered_match", u64::from(rendered_match))
+        .with_counter(
+            "coordinate_rejects_unmoved_graph",
+            u64::from(rejects_unmoved_graph),
+        )
+        .with_counter("coordinate_visible", u64::from(visible)))
+}
+
 /// Construct → snapshot → transform → snapshot: the scene_goldens
 /// lifecycle form with geometry assertions (member/point counts move with
 /// the lifecycle points, never silently empty).
@@ -6465,6 +6544,28 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .tier(Tier::Fast),
     ];
     specs.push(spec(
+        "render_matrix.coordinate_placement.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(coordinate_placement_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("coordinate_endpoints", 1),
+            counter_eq("coordinate_inverse", 1),
+            counter_eq("coordinate_rendered_match", 1),
+            counter_eq("coordinate_rejects_unmoved_graph", 1),
+            counter_eq("coordinate_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.coordinate_placement",
+            vec![
+                FieldPred::str_eq("endpoints", "true"),
+                FieldPred::str_eq("rendered_match", "true"),
+                FieldPred::str_eq("rejects_unmoved_graph", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.bundle_render_state.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -8182,6 +8283,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 // Test entry points
 // ---------------------------------------------------------------------------
+
+#[test]
+fn coordinate_placement_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.coordinate_placement.v1")
+        .expect("the coordinate placement scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
 
 #[test]
 fn bundle_render_state_scenario_passes() {

@@ -55,9 +55,10 @@
 //!   transforms are the animation tier's (W9), and a built [`VMobject`]
 //!   here is plain detached geometry.
 //!
-//! `ThreeDAxes.get_graph` / `get_parametric_surface` are likewise
-//! omitted: they build `ParametricSurface`s, which land with the 3D
-//! solids (fm-2u6).
+//! Built charts support owning placement and native graph/surface construction.
+//! Their coordinate maps move with every axis, grid line, and attached label.
+
+mod placement;
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{

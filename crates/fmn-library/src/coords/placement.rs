@@ -118,6 +118,24 @@ macro_rules! coordinate_placement {
                 self.shifted(std::array::from_fn(|i| point[i] - center[i]))
             }
 
+            /// Place the chart beside another object, carrying its coordinate map.
+            #[must_use]
+            pub fn next_to(
+                self,
+                target: &crate::VMobject,
+                direction: fmn_core::types::Vec3,
+                buff: f64,
+                aligned_edge: fmn_core::types::Vec3,
+            ) -> Self {
+                let center = self.vmob().center_point();
+                let placed = self
+                    .vmob()
+                    .clone()
+                    .next_to(target, direction, buff, aligned_edge);
+                let target = placed.center_point();
+                self.shifted(std::array::from_fn(|i| target[i] - center[i]))
+            }
+
             /// Align the built family to a frame border using VMobject's layout rule.
             #[must_use]
             pub fn aligned_on_border(self, direction: fmn_core::types::Vec3, buff: f64) -> Self {
@@ -141,6 +159,7 @@ macro_rules! coordinate_placement {
         }
     };
 }
+pub(crate) use coordinate_placement;
 coordinate_placement!(Axes);
 
 #[cfg(test)]
@@ -246,6 +265,23 @@ mod tests {
                 [2.0, -1.0, 0.0],
             );
         }
+    }
+
+    #[test]
+    fn next_to_keeps_the_chart_with_its_drawn_axes() {
+        let base = axes();
+        let target = crate::Square::new().build().shifted([2.0, 1.0, 0.0]);
+        let expected = base
+            .vmob()
+            .clone()
+            .next_to(&target, LEFT, 0.3, super::super::UP);
+        let placed = base.clone().next_to(&target, LEFT, 0.3, super::super::UP);
+        family_near(placed.vmob(), &expected);
+        let offset = super::super::sub(expected.center_point(), base.vmob().center_point());
+        near(
+            placed.c2p(&[1.0, 2.0]),
+            super::super::add(base.c2p(&[1.0, 2.0]), offset),
+        );
     }
 
     #[test]
