@@ -177,18 +177,25 @@ Production wiring, as of 2026-10-09:
   is the same root `--clear-cache` and `fmn doctor` resolve. The render shares
   it across the prerun and the render (`0126fd51`). Each robot render record
   carries a `typesetting` object: hits, misses, bytes read and written,
-  corrupt entries recomputed, and the preflight's requests, workers, active
-  workers and wall time. None of these enter the manifest.
+  corrupt entries recomputed, store reads and writes that failed
+  (`store_errors`), layouts before `construct()`, before the first frame
+  and inside play, and the preflight's requests, workers, active workers and
+  wall time. None of these enter the manifest. An unavailable root is
+  `cache_error`; a root that opens but cannot read or write (read-only,
+  replaced) is `persistent: true` with nonzero `store_errors`.
 - **`fmn::render`.** Uses the same session and counters (`a89eaee9`,
   `46450092`, `0126fd51`).
 - **Portal.** Scene constructors use the persistent cache (`59807496`),
-  now at the config's `directories.cache` when set. `Scene.run` preflights
-  every literal `Tex`/`TexText` string in the scene class's own source on
-  the native worker pool before `setup()`.
+  now at the config's `directories.cache` when set; a value the cache
+  refuses leaves the thread typesetting in memory with the reason reported,
+  never a failed Scene. `Scene.run` preflights every literal
+  `Tex`/`TexText` string in the scene class's own source, its scene bases
+  and its mixins, on the native worker pool before `setup()`.
 - **Keys.** The engine fingerprint folds in the SHA-256 of every bundled
-  face and the pinned `franken_markdown` rev from `SUITE.lock`, besides the
-  probe layouts. A pin bump or a font edit therefore cold-starts the cache
-  even where no probe would have noticed.
+  face, the pinned `franken_markdown` rev from `SUITE.lock` and the fmn-tex
+  version, besides the probe layouts. A pin bump or a font edit therefore
+  cold-starts the cache even where no probe would have noticed; a unit test
+  in `engine.rs` fails if that identity stops reaching the fingerprint.
 
 Acceptance evidence (Linux, through RCH):
 - **Cache, fresh processes.** `crates/fmn-cli/tests/typeset_cache.rs`
@@ -199,7 +206,12 @@ Acceptance evidence (Linux, through RCH):
   detected, recomputed, republished and healed. `--clear-cache` empties the
   store and the next run is cold with the same bits.
 - **Preflight.** The same sheet is typeset in one batch on 2 or more
-  workers before the first frame, with 0 layouts inside play.
+  workers before `construct()` begins: all 21 layouts precede construction,
+  so construction lays out none and play none. "0 layouts inside play"
+  alone is not evidence of a preflight on this sheet, which builds every
+  formula before its first play: with its manifest emptied, play still lays
+  out 0, but construction lays out all 21 (`e5b0163f`). The tests assert
+  the before-`construct()` count.
   `crates/fmn/tests/native_typesetting.rs` plants typesetting inside a
   segment and the report catches it. The portal suite
   `crates/fmn-python/tests/typeset_static_preflight.py` finds 21 literal

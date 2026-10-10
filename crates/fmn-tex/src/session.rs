@@ -34,6 +34,10 @@ pub struct TypesetSessionReport {
     pub persistent_bytes_written: u64,
     /// Corrupt persistent entries detected, evicted, and recomputed.
     pub persistent_rejected: u64,
+    /// Reads and writes the attached store failed (not misses, not corrupt
+    /// entries). Nonzero means the store opened but is not caching: each
+    /// failure degraded to the memory front and a fresh layout.
+    pub persistent_store_errors: u64,
     /// Actual layouts, excluding engine-fingerprint probes. Every request
     /// that neither cache layer served is one layout: the run's misses.
     pub layout_computations: u64,
@@ -184,6 +188,7 @@ impl TexSession {
             persistent_bytes_read: engine.persistent_bytes_read(),
             persistent_bytes_written: engine.persistent_bytes_written(),
             persistent_rejected: engine.persistent_rejected_entries(),
+            persistent_store_errors: engine.persistent_store_errors(),
             layout_computations: engine.layout_computations(),
             preflight: engine.preflight_stats(),
             layouts_before_construct: self.segments.before_construct.get(),

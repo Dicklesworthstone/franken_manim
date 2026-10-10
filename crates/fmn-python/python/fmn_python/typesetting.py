@@ -17,6 +17,7 @@ import sys
 import textwrap
 from threading import local
 import time
+import tokenize
 from typing import Any
 
 
@@ -84,25 +85,32 @@ def _literal(node: ast.AST) -> str | None:
 def _static_tex_requests(scene_type: type, native: Any) -> list[tuple[str, str, str, bool, str]]:
     """Statically discover the literal Tex/TexText constructions a scene makes.
 
+    Every user-authored class ahead of the portal's ``Scene`` in the MRO is
+    read: the scene class, its scene bases, and mixins wherever they sit
+    among them (a mixin listed first must not hide the bases after it).
     Only calls whose callee resolves, in the defining module, to the portal's
     exact ``Tex`` or ``TexText`` class and whose layout inputs (positional
     strings, ``template``, ``additional_preamble``, ``alignment``) are all
     string literals are collected. Anything dynamic is left to construction:
     a missed or mismatched guess only costs an unused warm entry, never ink.
-    Returns de-duplicated ``(source, template, preamble, text_mode, align)``.
+    Unreadable source (none recorded, or a file edited since import) is
+    skipped, never an error. Returns de-duplicated
+    ``(source, template, preamble, text_mode, align)``.
     """
     kinds = {id(native.Tex): False, id(native.TexText): True}
     stop = native.Scene
     found: dict[tuple[str, str, str, bool, str], None] = {}
     for cls in scene_type.__mro__:
-        if cls is stop or not issubclass(cls, stop):
+        if cls is stop:
             break
         module = sys.modules.get(cls.__module__)
         if module is None or cls.__module__.startswith(("manimlib", "fmn_python")):
             continue
         try:
             tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
-        except (OSError, TypeError, SyntaxError, ValueError):
+        except (OSError, TypeError, SyntaxError, ValueError, tokenize.TokenError):
+            # Python 3.13+ reports a source file edited since import (an open
+            # string or bracket) as tokenize.TokenError, not SyntaxError.
             continue
         namespace = vars(module)
         for node in ast.walk(tree):
@@ -146,12 +154,16 @@ def install_typesetting(native: Any) -> None:
 
     Scene construction configures the persistent cache before construct():
     the config's ``directories.cache`` when set, else the platform default.
-    Direct Tex construction outside a Scene uses the same binding through the
-    native option-validation seam. Importing the package alone does no I/O.
+    A config value the cache refuses, like any refused root, leaves the
+    thread typesetting in memory with the reason in its report; it never
+    fails a Scene. Direct Tex construction outside a Scene uses the same
+    binding through the native option-validation seam. Importing the
+    package alone does no I/O.
 
     ``Scene.run`` also runs the static preflight before setup(): every literal
-    Tex/TexText string the scene's own source constructs is typeset on the
-    native worker pool, so construct() and play() find them warm.
+    Tex/TexText string the scene class's own source (and its user-authored
+    bases and mixins) constructs is typeset on the native worker pool, so
+    construct() and play() find them warm.
     """
     g = vars(native)
     if _STATE in g:
@@ -171,8 +183,21 @@ def install_typesetting(native: Any) -> None:
         return deepcopy(report)
 
     def ensure():
-        if not hasattr(state, "report"):
-            configure(_configured_cache_directory(native))
+        if hasattr(state, "report"):
+            return
+        configured = _configured_cache_directory(native)
+        try:
+            configure(configured)
+        except (TypeError, ValueError) as error:
+            # configure_tex_cache() refuses a bad explicit path loudly, but a
+            # config value (`..`, NUL, over-long) must not fail every Scene and
+            # Tex: like any refused root, typeset in memory and say why.
+            report = backend(None)
+            refusal = f"directories.cache {configured!r} refused: {error}"[:2048]
+            for row in report["templates"].values():
+                row["error"] = refusal
+            state.report = deepcopy(report)
+            _diagnose(report)
 
     def info():
         ensure()
@@ -285,14 +310,15 @@ def configure_static_tex_preflight(enabled: bool = True) -> None:
     """Enable or disable the current thread's automatic static preflight.
 
     When enabled (the default), ``Scene.run`` first typesets every literal
-    ``Tex``/``TexText`` string found in the scene class's own source on the
-    native worker pool. The receipt is ``scene._fmn_static_tex_preflight``.
+    ``Tex``/``TexText`` string found in the scene class's own source, and in
+    its user-authored bases and mixins, on the native worker pool. The
+    receipt is ``scene._fmn_static_tex_preflight``.
     """
     import_module("manimlib")._fmn_set_static_tex_preflight(enabled)
 
 
 _RECEIPT_COUNTERS = ("memory_hits", "disk_hits", "layout_computations", "disk_bytes_read",
-                     "disk_bytes_written", "disk_rejected")
+                     "disk_bytes_written", "disk_rejected", "disk_errors")
 
 
 def typesetting_receipt(scene: Any) -> dict[str, Any] | None:
@@ -318,6 +344,8 @@ def typesetting_receipt(scene: Any) -> dict[str, Any] | None:
         "misses": totals["layout_computations"],
         "bytes_read": totals["disk_bytes_read"], "bytes_written": totals["disk_bytes_written"],
         "rejected": totals["disk_rejected"],
+        # Reads/writes an attached store failed: attached, but not caching.
+        "store_errors": totals["disk_errors"],
         "preflight": {key: report[key] for key in ("enabled", "discovered", "requests",
                                                   "succeeded", "failed", "wall_ns")}
         | {"workers": int(after.get("preflight_workers", 0)),
@@ -333,6 +361,8 @@ def describe_receipt(receipt: dict[str, Any]) -> str:
             f"{receipt['bytes_written']} bytes written")
     if receipt["rejected"]:
         text += f", {receipt['rejected']} corrupt entries recomputed"
+    if receipt.get("store_errors"):
+        text += f", {receipt['store_errors']} cache reads or writes failed (typeset in memory)"
     preflight = receipt["preflight"]
     if preflight["requests"]:
         text += (f"; preflight {preflight['requests']} static strings on "

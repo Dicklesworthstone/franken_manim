@@ -253,9 +253,11 @@ fn a_warm_second_process_serves_every_formula_from_disk_with_identical_certified
     assert_eq!(warm.count("bytes_read"), written);
     assert_eq!(warm.count("bytes_written"), 0);
     assert_eq!(warm.count("rejected"), 0);
+    assert_eq!(warm.count("store_errors"), 0);
 
-    // Under --reproducible a hit is bit-identical to a miss, and the cache
-    // never enters the certified closure.
+    // Under --reproducible a hit is bit-identical to a miss, and warming the
+    // cache never changes the certified closure. (Its configured location
+    // does: `directories.cache` is part of the resolved config, C4.)
     assert_eq!(warm.frames.len(), cold.frames.len());
     assert!(warm.frames == cold.frames, "hit and miss frames differ");
     assert_eq!(warm.closure_digest(), cold.closure_digest());
@@ -343,6 +345,46 @@ fn a_corrupt_entry_is_detected_recomputed_and_republished_across_processes() {
     assert_eq!(healed.count("disk_hits"), SHEET_LAYOUTS);
     assert_eq!(healed.count("misses"), 0);
     assert!(healed.frames == cold.frames);
+}
+
+#[test]
+fn an_attached_store_that_cannot_read_or_write_is_reported_and_changes_no_frame() {
+    let fixture = Fixture::new();
+    let cache = cache_dir_args(&fixture.cache());
+    let cold = render(&fixture, "cold", "2", &cache);
+    assert_eq!(cold.count("store_errors"), 0, "{}", cold.typesetting());
+
+    // The typeset namespace's object directory becomes a plain file. The root
+    // is still owned and opens, so the store attaches, but no entry can be
+    // read or published: what a cache directory that turned read-only or was
+    // replaced looks like (and, unlike a permission bit, also for root).
+    let objects = fixture
+        .cache()
+        .join("ns")
+        .join("typeset")
+        .join(format!("v{}", fmn::tex::TYPESET_FORMAT_VERSION))
+        .join("objects");
+    fs::rename(&objects, objects.with_file_name("objects.moved")).expect("move objects aside");
+    fs::write(&objects, b"not a directory").expect("plant a file where objects were");
+
+    let broken = render(&fixture, "broken", "2", &cache);
+    // Attached and no open error, yet not caching: every one of the 21
+    // requests failed one read and one write, and the record says so.
+    assert!(broken.flag("persistent"), "{}", broken.typesetting());
+    assert!(
+        broken.typesetting().contains("\"cache_error\":null"),
+        "{}",
+        broken.typesetting()
+    );
+    assert_eq!(broken.count("store_errors"), 2 * SHEET_LAYOUTS);
+    assert_eq!(broken.count("disk_hits"), 0);
+    assert_eq!(broken.count("misses"), SHEET_LAYOUTS);
+    assert_eq!(broken.count("bytes_written"), 0);
+    assert_eq!(broken.count("rejected"), 0);
+    assert!(
+        broken.frames == cold.frames,
+        "a store that cannot cache changed a frame"
+    );
 }
 
 #[test]

@@ -99,12 +99,16 @@ lazily, when a scene first needs a formula: `fmn` renders (`fmn batch`
 included), `fmn::render`, and `fmn-python` scenes. The typeset cache lives in
 the `ns/typeset/v<TYPESET_FORMAT_VERSION>` namespace. The portal reads
 `directories.cache` from `custom_config.yml` before falling back to the
-platform convention. An unavailable or refused root never fails a render: the
-scene typesets in memory and the render record reports why (`cache_error`).
+platform convention. An unavailable or refused root (the portal's config value
+included) never fails a render: the scene typesets in memory and the render
+record reports why (`cache_error`). A root that opens but then cannot read or
+write (made read-only, replaced) is not silent either: each failed read or
+write is counted (`store_errors`) and degrades to memory and a fresh layout.
 Each `fmn` render record carries a `typesetting` object with that run's hits,
-misses, bytes read and written, corrupt entries recomputed, and the preflight's
-request count, workers and wall time. These are diagnostics, never manifest
-inputs: a warm cache renders the same certified bits as a cold one.
+misses, bytes read and written, corrupt entries recomputed, store errors, and
+the preflight's request count, workers and wall time. These are diagnostics,
+never manifest inputs: a warm cache renders the same certified bits as a cold
+one.
 
 ## Config file locations
 

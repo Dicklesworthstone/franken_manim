@@ -192,6 +192,47 @@ fn clearing_the_memory_front_forces_a_fresh_layout_or_a_verified_store_hit() {
 }
 
 #[test]
+fn an_attached_store_that_can_neither_read_nor_write_counts_every_failure() {
+    let source = "q^7+z";
+    let expected = engine().typeset(MATH, source).unwrap().to_bytes().unwrap();
+    let (store, fs) = store_with_fs();
+    let e = engine().with_cache(&store).unwrap();
+    // The namespace's object directory becomes a plain file: the store stays
+    // attached (it opened fine) but can neither read nor publish an entry,
+    // as with a cache directory that turned read-only or was replaced.
+    let objects = Path::new(ROOT)
+        .join("ns")
+        .join("typeset")
+        .join(format!("v{TYPESET_FORMAT_VERSION}"))
+        .join("objects");
+    fs.insert(objects, b"not a directory".to_vec());
+    let got = e.typeset(MATH, source).unwrap();
+    assert_eq!(
+        got.to_bytes().unwrap(),
+        expected,
+        "a broken store never changes a layout"
+    );
+    assert!(e.persistent_cache_enabled());
+    // One failed read and one failed write; nothing served, nothing stored,
+    // and no entry was corrupt.
+    assert_eq!(e.persistent_store_errors(), 2);
+    assert_eq!(e.persistent_cache_hits(), 0);
+    assert_eq!(e.persistent_bytes_written(), 0);
+    assert_eq!(e.persistent_rejected_entries(), 0);
+    assert_eq!(e.layout_computations(), 1);
+    // The memory front serves the repeat without touching the store.
+    e.typeset(MATH, source).unwrap();
+    assert_eq!(e.persistent_store_errors(), 2);
+    assert_eq!(e.memory_cache_stats().hits, 1);
+
+    // A healthy store counts no failure: a miss is not an error.
+    let healthy = engine().with_cache(&store_with_fs().0).unwrap();
+    healthy.typeset(MATH, source).unwrap();
+    assert_eq!(healthy.persistent_store_errors(), 0);
+    assert_eq!(healthy.persistent_bytes_written(), expected.len() as u64);
+}
+
+#[test]
 fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
     let store = store();
     let e = engine().with_cache(&store).unwrap();
@@ -220,6 +261,12 @@ fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
     }
     let stats = e.memory_cache_stats();
     assert_eq!((stats.hits, stats.misses, stats.entries), (2, 2, 2));
+    // Both foreign documents sit in checksum-valid envelopes, so each was
+    // rejected once, and the store refused to replace either incumbent with
+    // the recomputed payload: a write failure, reported, never silent.
+    assert_eq!(e.persistent_rejected_entries(), 2);
+    assert_eq!(e.persistent_store_errors(), 2);
+    assert_eq!(e.persistent_bytes_written(), 0);
 }
 
 #[test]

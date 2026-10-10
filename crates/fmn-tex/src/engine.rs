@@ -158,6 +158,8 @@ pub struct TexEngine {
     persistent_bytes_written: AtomicU64,
     /// Verified envelopes whose payload did not decode to this request.
     persistent_payload_rejections: AtomicU64,
+    /// Store reads and writes that failed (absence and corruption excluded).
+    persistent_store_errors: AtomicU64,
     layout_computations: AtomicU64,
     preflight: Mutex<TypesetPreflightStats>,
 }
@@ -206,6 +208,7 @@ impl TexEngine {
             persistent_bytes_read: AtomicU64::new(0),
             persistent_bytes_written: AtomicU64::new(0),
             persistent_payload_rejections: AtomicU64::new(0),
+            persistent_store_errors: AtomicU64::new(0),
             layout_computations: AtomicU64::new(0),
             preflight: Mutex::new(TypesetPreflightStats::default()),
         })
@@ -361,6 +364,20 @@ impl TexEngine {
         envelopes.saturating_add(self.persistent_payload_rejections.load(Ordering::Relaxed))
     }
 
+    /// Persistent-store reads and writes that failed since creation: a store
+    /// that opened but can no longer read or write (a read-only or replaced
+    /// directory, a full disk), or a write refused because a different
+    /// payload already holds the key. Absence is a miss and corruption is
+    /// [`Self::persistent_rejected_entries`]; neither counts here, and an
+    /// entry over the store's size ceiling is the documented retention
+    /// bypass, not a failure. Every failure degrades to the memory front and
+    /// a fresh layout, so a nonzero count means "attached, but not caching".
+    /// Diagnostic only.
+    #[must_use]
+    pub fn persistent_store_errors(&self) -> u64 {
+        self.persistent_store_errors.load(Ordering::Relaxed)
+    }
+
     /// Preflight batches observed on this engine since creation.
     #[must_use]
     pub fn preflight_stats(&self) -> TypesetPreflightStats {
@@ -433,7 +450,8 @@ impl TexEngine {
     /// verified hit reconstructs the layout and spans without re-layout;
     /// callers always receive independently mutable data. Preflight warms
     /// both layers. Oversized documents remain usable but bypass retention.
-    /// Cache trouble degrades to computing, never to a blank render.
+    /// Cache trouble degrades to computing, never to a blank render, and is
+    /// counted ([`Self::persistent_store_errors`]).
     ///
     /// # Errors
     ///
@@ -461,32 +479,45 @@ impl TexEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        if let Some(ns) = &cache
-            && let Ok(Some(bytes)) = ns.get(&key)
-        {
-            match Typeset::from_bytes(&bytes) {
-                Ok(hit) if hit.source == source => {
-                    self.persistent_hits.fetch_add(1, Ordering::Relaxed);
-                    self.persistent_bytes_read
-                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                    self.remember(key, bytes);
-                    return Ok(hit);
-                }
-                // A checksum-valid envelope with a foreign payload is never
-                // trusted either: count it, then recompute.
-                _ => {
-                    self.persistent_payload_rejections
-                        .fetch_add(1, Ordering::Relaxed);
+        if let Some(ns) = &cache {
+            match ns.get(&key) {
+                Ok(Some(bytes)) => match Typeset::from_bytes(&bytes) {
+                    Ok(hit) if hit.source == source => {
+                        self.persistent_hits.fetch_add(1, Ordering::Relaxed);
+                        self.persistent_bytes_read
+                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                        self.remember(key, bytes);
+                        return Ok(hit);
+                    }
+                    // A checksum-valid envelope with a foreign payload is
+                    // never trusted either: count it, then recompute.
+                    _ => {
+                        self.persistent_payload_rejections
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+                Ok(None) => {}
+                // Storage trouble is a miss for this request, but counted:
+                // an attached store that cannot read is not silently "warm".
+                Err(_) => {
+                    self.persistent_store_errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
         let fresh = self.layout(mode, source)?;
         if let Ok(bytes) = fresh.to_bytes() {
-            if let Some(ns) = &cache
-                && ns.put(&key, &bytes).is_ok()
-            {
-                self.persistent_bytes_written
-                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            if let Some(ns) = &cache {
+                match ns.put(&key, &bytes) {
+                    Ok(()) => {
+                        self.persistent_bytes_written
+                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    }
+                    // Oversized documents bypass retention by design.
+                    Err(fmn_cache::CacheError::EntryTooLarge { .. }) => {}
+                    Err(_) => {
+                        self.persistent_store_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
             self.remember(key, bytes);
         }
@@ -777,8 +808,19 @@ fn merged(base: &MacroSet, extra: &MacroSet) -> MacroSet {
 }
 
 /// The engine fingerprint: canonical layout bytes of a fixed probe set
-/// spanning every mechanism, plus the macro table's canonical bytes.
+/// spanning every mechanism, plus the macro table's canonical bytes and the
+/// engine's static identity ([`engine_identity`]).
 fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
+    fingerprint_with_identity(math, macros, engine_identity())
+}
+
+/// [`fingerprint`] over an explicit static identity, so a test can prove a
+/// pin bump or a font edit reaches every cache key.
+fn fingerprint_with_identity(
+    math: &fmd_math::Engine,
+    macros: &MacroSet,
+    identity: &[u8],
+) -> CacheKey {
     /// Constructs chosen to touch every layout mechanism: glyph metrics
     /// and kerning, scripts, fractions, radicals, big operators, accents,
     /// drawn delimiters past the ceiling, environments, stretchy bands,
@@ -831,7 +873,7 @@ fn fingerprint(math: &fmd_math::Engine, macros: &MacroSet) -> CacheKey {
     material.extend_from_slice(b"keyword-ink:");
     material.extend_from_slice(KEYWORD_INK_COMMANDS.join(",").as_bytes());
     material.push(0x1e);
-    material.extend_from_slice(engine_identity());
+    material.extend_from_slice(identity);
     CacheKey::of_content(&material)
 }
 
@@ -1015,6 +1057,33 @@ mod tests {
                 "face {name} is not hashed into the engine identity"
             );
         }
+    }
+
+    #[test]
+    fn a_pin_bump_or_a_font_edit_changes_the_fingerprint_every_cache_key_carries() {
+        let engine = TexEngine::new("fmd-math/pack/default", None).expect("bundled engine");
+        let identity = engine_identity();
+        // The production fingerprint is the identity-bearing one.
+        assert_eq!(
+            *engine.fingerprint(),
+            fingerprint_with_identity(&engine.math, &engine.macros, identity)
+        );
+        let fingerprint_of =
+            |identity: &[u8]| fingerprint_with_identity(&engine.math, &engine.macros, identity);
+        // Another franken_markdown rev with the very same probe layouts (a
+        // pin bump whose layout change no probe touches).
+        let rev = suite_revision(SUITE_LOCK, "franken_markdown");
+        let text = std::str::from_utf8(identity).expect("identity is text");
+        let bumped = text.replacen(rev, &"0".repeat(rev.len()), 1);
+        assert_ne!(bumped, text);
+        assert_ne!(fingerprint_of(bumped.as_bytes()), *engine.fingerprint());
+        // One edited bundled face: its digest is the last field.
+        let mut edited = identity.to_vec();
+        let last = edited.last_mut().expect("identity names the faces");
+        *last = if *last == b'0' { b'1' } else { b'0' };
+        assert_ne!(fingerprint_of(&edited), *engine.fingerprint());
+        // (The fingerprint reaching every cache key is pinned in
+        // tests/scribe2.rs, where a macro-table change separates keys.)
     }
 
     #[test]

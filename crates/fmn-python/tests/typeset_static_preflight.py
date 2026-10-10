@@ -128,6 +128,139 @@ def run_static_preflight(m):
             sys.modules.pop("fmn_static_preflight_scene", None)
 
 
+_MIXED_SOURCE = '''from manimlib import *
+
+
+class LabelledBase(Scene):
+    def label(self):
+        return Tex(r"a^2 + b^2"), TexText("Pythagoras")
+
+
+class Annotating:
+    """A plain mixin, listed ahead of the scene base below."""
+
+    def note(self):
+        return Tex(r"\\sqrt{2}")
+
+
+class Mixed(Annotating, LabelledBase):
+    def construct(self):
+        self.add(*self.label(), self.note(), Tex(r"c^2"))
+'''
+
+_EDITED_LATER = '''from manimlib import *
+
+
+class Edited(Scene):
+    def construct(self):
+        self.add(Tex(r"e^x"))
+'''
+
+
+def _load_named(directory, name, source):
+    path = Path(directory) / (name + ".py")
+    path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module, path
+
+
+def run_discovery_robustness(m):
+    """Mixins never hide scene bases; a source edited since import never
+    fails a render (Python 3.13+ raises tokenize.TokenError there)."""
+    import linecache
+    from fmn_python.typesetting import _static_tex_requests
+
+    with tempfile.TemporaryDirectory(prefix="fmn-static-discovery-") as directory:
+        try:
+            module, _ = _load_named(directory, "fmn_static_mixed_scene", _MIXED_SOURCE)
+            sources = sorted(source for source, *_ in _static_tex_requests(module.Mixed, m))
+            # The mixin's string and both base strings, not only Mixed's own.
+            assert sources == sorted([r"c^2", r"\sqrt{2}", r"a^2 + b^2", "Pythagoras"]), sources
+
+            module, path = _load_named(directory, "fmn_static_edited_scene", _EDITED_LATER)
+            assert [source for source, *_ in _static_tex_requests(module.Edited, m)] == ["e^x"]
+            # Mid-edit on disk: an unterminated string inside the class.
+            path.write_text(_EDITED_LATER.replace('Tex(r"e^x")', 'Tex("""e^x'), encoding="utf-8")
+            linecache.checkcache(str(path))
+            assert _static_tex_requests(module.Edited, m) == []
+            # The loaded class still renders; the preflight just finds nothing.
+            scene, _png = _render(m, module.Edited, Path(directory) / "edited.png")
+            assert scene._fmn_static_tex_preflight["discovered"] == 0
+        finally:
+            for name in ("fmn_static_mixed_scene", "fmn_static_edited_scene"):
+                sys.modules.pop(name, None)
+
+
+def run_store_errors_reported(m):
+    """An attached store that can neither read nor write is reported."""
+    from fmn_python.typesetting import configure_tex_cache, describe_receipt, typesetting_receipt
+
+    with tempfile.TemporaryDirectory(prefix="fmn-static-store-errors-") as directory:
+        root = Path(directory)
+        module, _ = _load_named(root, "fmn_static_store_scene",
+                                _EDITED_LATER.replace("Edited", "Stored"))
+        try:
+            configure_tex_cache(root / "cache")
+            scene, cold_png = _render(m, module.Stored, root / "cold.png")
+            healthy = typesetting_receipt(scene)
+            assert healthy["store_errors"] == 0 and healthy["bytes_written"] > 0, healthy
+            # The namespace's object directory becomes a plain file: the root
+            # still opens (persistent), but nothing can be read or written.
+            (objects,) = (root / "cache" / "ns" / "typeset").glob("v*/objects")
+            objects.rename(objects.with_name("objects.moved"))
+            objects.write_bytes(b"not a directory")
+            configure_tex_cache(root / "cache")
+            scene, broken_png = _render(m, module.Stored, root / "broken.png")
+            receipt = typesetting_receipt(scene)
+            # The literal and the scale probe each failed one read and one
+            # write in the preflight; construction then hit the memory front.
+            assert receipt["persistent"] and receipt["store_errors"] == 4, receipt
+            assert receipt["disk_hits"] == 0 and receipt["bytes_written"] == 0, receipt
+            assert "cache reads or writes failed" in describe_receipt(receipt)
+            assert broken_png == cold_png, "a store that cannot cache changed the PNG"
+        finally:
+            configure_tex_cache(enabled=False)
+            sys.modules.pop("fmn_static_store_scene", None)
+
+
+def run_refused_config_cache(m):
+    """A ``directories.cache`` the cache refuses never fails a Scene or Tex:
+    the thread typesets in memory and its report says why."""
+    directories = m.manim_config["directories"]
+    previous = directories.get("cache")
+    directories["cache"] = os.path.join("..", "fmn-refused-cache")
+    outcome = {}
+
+    def build():
+        try:
+            m._fmn_ensure_tex_cache()
+            row = m._fmn_tex_cache_info()["templates"]["default"]
+            outcome["persistent"] = row["persistent"]
+            outcome["error"] = row["error"]
+            receipt = m._preflight_tex([r"\frac{1}{2}"])
+            outcome["succeeded"] = receipt["succeeded"]
+        except BaseException as error:  # surfaced below
+            outcome["raised"] = repr(error)
+        finally:
+            m._fmn_configure_tex_cache(enabled=False)
+
+    gc.collect()
+    gc.disable()
+    try:
+        worker = threading.Thread(target=build)
+        worker.start()
+        worker.join()
+    finally:
+        gc.enable()
+        directories["cache"] = previous
+    assert "raised" not in outcome, outcome
+    assert outcome["persistent"] is False and outcome["succeeded"] == 1, outcome
+    assert "refused" in outcome["error"] and "parent-directory" in outcome["error"], outcome
+
+
 def run_config_selected_cache(m):
     """``directories.cache`` from the config selects a fresh thread's store."""
     with tempfile.TemporaryDirectory(prefix="fmn-config-cache-") as directory:
@@ -171,5 +304,8 @@ def run_config_selected_cache(m):
 if __name__ in ("__main__", "<run_path>"):
     import manimlib as m
     run_static_preflight(m)
+    run_discovery_robustness(m)
+    run_store_errors_reported(m)
     run_config_selected_cache(m)
+    run_refused_config_cache(m)
     print("static Tex preflight and config-selected cache acceptance passed")

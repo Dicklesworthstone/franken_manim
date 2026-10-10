@@ -6365,13 +6365,15 @@ fn configured_output_directory(config: &fmn_config::Config) -> PathBuf {
 /// traffic and preflight, as observed. Hits and misses are scheduling- and
 /// history-dependent diagnostics, so they live here and never in the
 /// manifest. `misses` counts fresh layouts: requests neither the memory
-/// front nor the persistent cache served.
+/// front nor the persistent cache served. `store_errors` counts reads and
+/// writes an attached store failed, so `persistent: true` with errors means
+/// the store opened but is not caching.
 fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
     let preflight = &report.preflight;
     format!(
         ",\"typesetting\":{{\"initialized\":{},\"persistent\":{},\"cache_error\":{},\
          \"hits\":{},\"memory_hits\":{},\"disk_hits\":{},\"misses\":{},\
-         \"bytes_read\":{},\"bytes_written\":{},\"rejected\":{},\
+         \"bytes_read\":{},\"bytes_written\":{},\"rejected\":{},\"store_errors\":{},\
          \"layouts_before_construct\":{},\"layouts_before_first_frame\":{},\
          \"layouts_inside_play\":{},\
          \"preflight\":{{\"batches\":{},\"requests\":{},\"workers\":{},\
@@ -6386,6 +6388,7 @@ fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
         report.persistent_bytes_read,
         report.persistent_bytes_written,
         report.persistent_rejected,
+        report.persistent_store_errors,
         report
             .layouts_before_construct
             .map_or_else(|| "null".to_owned(), |value| value.to_string()),
@@ -6421,6 +6424,13 @@ fn typesetting_human_summary(report: &fmn::tex::TypesetSessionReport) -> String 
             summary,
             ", {} corrupt entries recomputed",
             report.persistent_rejected
+        );
+    }
+    if report.persistent_store_errors > 0 {
+        let _ = write!(
+            summary,
+            ", {} cache reads or writes failed (typeset in memory)",
+            report.persistent_store_errors
         );
     }
     let preflight = &report.preflight;

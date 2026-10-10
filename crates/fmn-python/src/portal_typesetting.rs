@@ -21,6 +21,7 @@ fn stats<'py>(py: Python<'py>, engine: &fmn_library::TexEngine) -> PyResult<Boun
     row.set_item("disk_bytes_read", engine.persistent_bytes_read())?;
     row.set_item("disk_bytes_written", engine.persistent_bytes_written())?;
     row.set_item("disk_rejected", engine.persistent_rejected_entries())?;
+    row.set_item("disk_errors", engine.persistent_store_errors())?;
     row.set_item("layout_computations", engine.layout_computations())?;
     let preflight = engine.preflight_stats();
     row.set_item("preflight_batches", preflight.batches)?;
@@ -261,7 +262,13 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .unwrap();
-            for suite in ["run_static_preflight", "run_config_selected_cache"] {
+            for suite in [
+                "run_static_preflight",
+                "run_discovery_robustness",
+                "run_store_errors_reported",
+                "run_config_selected_cache",
+                "run_refused_config_cache",
+            ] {
                 globals
                     .get_item(suite)
                     .unwrap()
