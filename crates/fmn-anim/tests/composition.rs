@@ -334,6 +334,59 @@ fn a_groups_run_time_derives_from_its_members() {
 }
 
 #[test]
+fn common_lag_ratio_keeps_reference_duration_and_frame_count() {
+    // fm-7l9k: five one-second members at lag 0.3 in PythagoreanProofSketch.
+    // These are the pinned Reference's IEEE values, evaluated with its
+    // bezier.interpolate operation order, not decimal approximations.
+    let expected_start = f64::from_bits(0x3ff3_3333_3333_3332);
+    let expected_run_time = f64::from_bits(0x4001_9999_9999_9999);
+    let mut stage = Stage::new();
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let members = (0..5)
+        .map(|_| Probe::boxed(square(&mut stage), "member", 1.0, &log))
+        .collect();
+    let group =
+        AnimationGroup::with_lag_ratio(&mut stage, members, 0.3).expect("lagged group builds");
+    let last = *group.timings().last().expect("five member intervals");
+    let max_end_time = group.max_end_time();
+    let run_time = group.get_run_time();
+
+    let mut clock = RationalFrameClock::new(30).expect("30 fps clock");
+    let planned_frames = clock.segment(run_time).expect("segment plan").n_frames();
+    let rng = RngRoot::from_seed(7);
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(group)];
+    let mut emitted_frames = 0_i64;
+    let report = play_segment(
+        &mut stage,
+        &mut clock,
+        &rng,
+        &mut animations,
+        false,
+        &mut |_packet| emitted_frames += 1,
+    )
+    .expect("lagged group plays");
+
+    assert_eq!(
+        run_time.to_bits(),
+        expected_run_time.to_bits(),
+        "Reference duration is 2.1999999999999997; got {run_time:?}, \
+         planned {planned_frames} frames and emitted {emitted_frames}"
+    );
+    assert_eq!(last.start.to_bits(), expected_start.to_bits());
+    assert_eq!(last.end.to_bits(), expected_run_time.to_bits());
+    assert_eq!(max_end_time.to_bits(), expected_run_time.to_bits());
+    assert_eq!(report.run_time.to_bits(), expected_run_time.to_bits());
+    assert_eq!(planned_frames, 66, "exact rational duration ceiling");
+    assert_eq!(report.n_frames, 66, "playback report");
+    assert_eq!(emitted_frames, 66, "actual frame packets");
+    assert_eq!(
+        clock.now().frames(),
+        66,
+        "following segments start at frame 66"
+    );
+}
+
+#[test]
 fn a_successions_run_time_is_the_sum_of_its_members() {
     let mut stage = Stage::new();
     let log: Log = Rc::new(RefCell::new(Vec::new()));
