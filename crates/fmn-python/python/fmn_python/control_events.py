@@ -230,6 +230,13 @@ def _typed_textbox_constructor(g):
     Textbox, Text = g["Textbox"], g["Text"]
     signature = inspect.signature(Textbox.__init__)
     from .string_lifecycle import _publish
+    # Capture the native call site before authored hooks replace it. Scribe
+    # errors end there; hook errors end in user code, even with the same words.
+    text_points = getattr(Text, "init_points", None)
+    native_text_points_code = (
+        getattr(text_points, "__code__", None)
+        if getattr(text_points, "__globals__", None) is _publish.__globals__ else None
+    )
 
     def parts(self, current, replacement):
         value = current if replacement is None else replacement
@@ -242,7 +249,17 @@ def _typed_textbox_constructor(g):
             box_style.setdefault("fill_color", box_style.get("color", g["WHITE"]))
             box = _shape(g, "Rectangle", box_style, "box_kwargs")
             box.set_stroke(self.active_color if self.isActive else self.deactive_color)
-        text = Text(value, **self.text_kwargs)
+        try:
+            text = Text(value, **self.text_kwargs)
+        except ValueError as error:
+            trace = error.__traceback__
+            while trace is not None and trace.tb_next is not None:
+                trace = trace.tb_next
+            if (native_text_points_code is not None and trace is not None
+                    and trace.tb_frame.f_code is native_text_points_code
+                    and "has no glyph" in str(error)):
+                raise ValueError("unmapped glyph: " + str(error)) from error
+            raise
         width = box.get_width() - 2 * self.text_buff
         if not math.isfinite(width) or width < 0:
             raise ValueError("Textbox padding must leave a nonnegative finite text width")

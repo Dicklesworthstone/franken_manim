@@ -230,6 +230,41 @@ def test_textbox_copy_keeps_its_typed_label_attached_to_its_own_box():
         assert source.text.get_center()[0] < duplicate.text.get_center()[0] - 2
 
 
+def test_textbox_authored_errors_keep_identity_and_transactional_state():
+    widget = m.Textbox("valid")
+    m.Scene().add(widget)
+    label, family = widget.text, tuple(widget.get_family())
+    points = label.get_all_points().copy()
+    spans = list(label._string_sub_spans)
+    paths = [list(path) for path in label._string_sub_paths]
+    # Matching a native diagnostic's words must not recategorize a user error.
+    failure = ValueError("authored has no glyph failure")
+    original = m.Text.init_points
+    def authored_points(text):
+        raise failure
+    m.Text.init_points = authored_points
+    try:
+        for operation in (
+            lambda: m.Textbox("construction"),
+            lambda: widget.update_text("preview"),
+            lambda: widget.set_value("replacement"),
+        ):
+            try:
+                operation()
+            except ValueError as error:
+                assert error is failure
+                assert str(error) == "authored has no glyph failure"
+            else:
+                raise AssertionError("authored textbox error was swallowed")
+            assert widget.text is label and tuple(widget.get_family()) == family
+            assert widget.get_value() == label.string == "valid"
+            assert label._string_sub_spans == spans
+            assert label._string_sub_paths == paths
+            np.testing.assert_array_equal(label.get_all_points(), points)
+    finally:
+        m.Text.init_points = original
+
+
 def test_textbox_primitives_run_authored_hooks_before_control_initialization():
     seen = []
     rectangle_points, text_points = m.Rectangle.init_points, m.Text.init_points
@@ -496,7 +531,7 @@ def test_checkbox_copy_deepcopy_and_pickle_preserve_typed_native_families():
     import pickle
     source = m.Checkbox()
     source_points = source.box_content.get_all_points().copy()
-    for duplicate in (source.copy(), copy.deepcopy(source), pickle.loads(pickle.dumps(source))):
+    for duplicate in (source.copy(), copy.deepcopy(source), pickle.loads(pickle.dumps(source))):  # ubs:ignore -- round-trip of this test's own trusted object graph
         assert type(duplicate.box) is m.Rectangle
         assert type(duplicate.box_content) is m.VGroup
         assert all(type(child) is m.Line for child in duplicate.box_content)
@@ -592,6 +627,7 @@ for case in (
     test_textbox_edits_fit_live_box_and_preserve_preview_value_distinction,
     test_textbox_failed_native_typeset_preserves_value_text_family_and_spans,
     test_textbox_copy_keeps_its_typed_label_attached_to_its_own_box,
+    test_textbox_authored_errors_keep_identity_and_transactional_state,
     test_textbox_primitives_run_authored_hooks_before_control_initialization,
     test_checkbox_mark_replacements_keep_the_live_box_camera_lock,
     test_checkbox_uses_public_rectangle_and_two_native_lines,
