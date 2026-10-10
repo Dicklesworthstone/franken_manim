@@ -4650,6 +4650,90 @@ fn lifecycle_owned_tail_branches_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("owned_tail_distinct_frames", u64::from(distinct_frames)))
 }
 
+/// A succession's reverse rate curve must revisit the correct member, and
+/// native timeline seeking must reproduce those same certified pixels in any
+/// request order even though later members begin just in time.
+fn lifecycle_succession_reverse_seek_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, Succession, Transform};
+
+    let mut stage = Stage::new();
+    let mob = stage.add(fmn_library::Square::new().side_length(1.0).color(TEAL_B));
+    stage
+        .add_to_scene(mob)
+        .map_err(|error| fail(format!("adopt succession square: {error}")))?;
+    let initial_frame = render_certified_doc(&stage);
+    let mut members: Vec<Box<dyn fmn_anim::Animation>> = Vec::new();
+    for x in [2.0, 4.0] {
+        let target = stage
+            .copy_family(mob)
+            .map_err(|error| fail(format!("copy succession target: {error}")))?;
+        stage.shift(target, [x, 0.0, 0.0]);
+        members.push(Box::new(Transform::new(mob, target).with_config(
+            AnimConfig {
+                run_time: 1.0,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            },
+        )));
+    }
+    let succession = Succession::new(&mut stage, members)
+        .map_err(|error| fail(format!("construct succession: {error}")))?
+        .with_rate_func(RateFunc::Base(fmn_core::rate::there_and_back));
+    let mut timeline =
+        Timeline::new(4).map_err(|error| fail(format!("succession clock: {error}")))?;
+    timeline
+        .play(vec![Box::new(succession)])
+        .map_err(|error| fail(format!("schedule succession: {error}")))?;
+    let rng = RngRoot::from_seed(47);
+    let mut serial_frames = Vec::new();
+    let mut centers = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &rng, &mut |packet| {
+            let captured = packet.materialize_stage();
+            centers.push(captured.get_center(mob));
+            serial_frames.push(render_certified_doc(&captured));
+        })
+        .map_err(|error| fail(format!("render reverse succession: {error}")))?;
+    let checkpoint_replay = reports.len() == 1 && !reports[0].purity.is_pure();
+    let returns_to_start = serial_frames.last() == Some(&initial_frame)
+        && centers.last().is_some_and(|point| point[0].abs() < 1e-9);
+    let moves = centers
+        .get(3)
+        .is_some_and(|point| (point[0] - 4.0).abs() < 1e-6)
+        && serial_frames
+            .get(3)
+            .is_some_and(|frame| *frame != initial_frame);
+    let empty_frame = render_certified_doc(&Stage::new());
+    let visible = serial_frames.iter().all(|frame| *frame != empty_frame);
+    let mut seek_matches = 0_u64;
+    for frame in [8, 1, 4, 2, 7, 3, 6, 5] {
+        let packet = timeline
+            .seek(&mut stage, &rng, frame)
+            .map_err(|error| fail(format!("seek reverse succession frame {frame}: {error}")))?;
+        let rendered = render_certified_doc(&packet.materialize_stage());
+        let expected = serial_frames
+            .get((frame - 1) as usize)
+            .ok_or_else(|| fail("succession omitted a scheduled frame"))?;
+        let equal = rendered == *expected;
+        seek_matches += u64::from(equal);
+        ctx.event(
+            LogEvent::new("e2e.lifecycle.succession_reverse_seek")
+                .field("frame", frame as u64)
+                .field("checkpoint_replay", truth(checkpoint_replay))
+                .field("returns_to_start", truth(returns_to_start))
+                .field("equal", truth(equal))
+                .field("sha256", sha256(&rendered).to_hex()),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("succession_frames", serial_frames.len() as u64)
+        .with_counter("succession_checkpoint_replay", u64::from(checkpoint_replay))
+        .with_counter("succession_returns_to_start", u64::from(returns_to_start))
+        .with_counter("succession_moves", u64::from(moves))
+        .with_counter("succession_visible", u64::from(visible))
+        .with_counter("succession_seek_matches", seek_matches))
+}
+
 /// fm-c1up: TracingTail seeds its updater history while its public geometry
 /// stays empty until the first positive-dt observation is published.
 fn lifecycle_tracing_tail_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -6738,6 +6822,29 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(spec(
+        "lifecycle.succession_reverse_seek.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_succession_reverse_seek_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("succession_frames", 8),
+            counter_eq("succession_checkpoint_replay", 1),
+            counter_eq("succession_returns_to_start", 1),
+            counter_eq("succession_moves", 1),
+            counter_eq("succession_visible", 1),
+            counter_eq("succession_seek_matches", 8),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.succession_reverse_seek",
+            vec![
+                FieldPred::str_eq("checkpoint_replay", "true"),
+                FieldPred::str_eq("returns_to_start", "true"),
+                FieldPred::str_eq("equal", "true"),
+            ],
+        )],
+    ));
     specs.push(
         spec(
             "lifecycle.always_redraw_shared_source.v1",
@@ -8467,6 +8574,16 @@ fn owned_tail_branches_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.owned_tail_branches.v1")
         .expect("the owned-tail copy and snapshot scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn succession_reverse_seek_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.succession_reverse_seek.v1")
+        .expect("the reversible succession render and seek scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

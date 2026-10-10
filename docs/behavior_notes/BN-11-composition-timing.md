@@ -90,6 +90,65 @@ Locked by
 `::succession_walks_the_members_a_coarse_step_would_skip`, and
 `::a_just_in_time_begin_failure_surfaces_from_the_segment`.
 
+## Reverse curves and successive member lifetimes
+
+An accepted group curve can move its internal time backward. The native
+`Succession` previously located the earlier member but kept its active index
+moving forward, so a `there_and_back` curve continued sampling the last
+visited animation. Returning through separate mobjects left later objects
+transformed; returning through a chain on one mobject used the wrong starting
+copy.
+
+Initialized members now retain bounded content checkpoints from before
+`begin`, after preparation, and after their first `finish`. Returning to an
+earlier window restores later members in reverse order, applies the completed
+predecessors in author order, and samples the active member from its prepared
+state. This preserves shared child identities, record schemas, render state,
+and each just-in-time starting copy. It also works when successions are nested.
+Each member's authored `begin` and `finish` callbacks run once per play, even
+if the curve revisits it repeatedly. A begun member paused by a reverse curve
+still receives its closing lifecycle before the composition finishes.
+The existing member endpoint rule below still applies: a `there_and_back`
+sequence may capture its returned-to-start picture and then leave the live
+object at the selected member's own finish endpoint. That cleanup endpoint
+is not an additional captured frame.
+
+These checkpoints cover only the animated families. They do not restore the
+whole Stage, reset time or scene roots, replace updater registrations, or undo
+unrelated concurrent animation. Storage depends on initialized member families,
+with CoW record and image payloads, rather than the number of rendered frames.
+Ordinary forward sampling uses the existing live buffers; cached restoration
+starts only on reverse traversal or when a parent re-enters a nested member.
+An actual content restore detaches live record views under the ordinary V6 rule.
+Restoring a checkpoint refuses a deleted original handle instead of reviving
+it or rebinding a different object occupying its former slot.
+
+Backward sampling requires locally replayable interpolation and no updaters on
+the member's input/output families. Native pure transforms, fades, reveals, and
+compositions of replayable members meet that contract. An unclassified callback
+or updater-driven history cannot be undone by restoring drawable content; a
+backward sample therefore reports `AnimError::StatefulSuccessionRewind` before
+invoking that sample. Forward playback keeps its normal stateful semantics.
+Rounding the last clock sample past alpha one does not count as a reversal:
+the internal time is clipped to the composition's endpoint.
+
+`Succession` is conservatively classified as a stateful **segment**, including
+when its leaves support local backward sampling. Later members' starting copies
+do not yet exist in the whole segment's begin snapshot. Treating that snapshot
+as sufficient for independent frame interpolation previously reused an advanced
+active index and stale future handles. `Timeline.seek` now uses its existing
+checkpoint-and-serial-replay route for these segments, so arbitrary seek order
+matches the serial captures. Ordinary eagerly initialized `AnimationGroup`
+compositions retain their existing purity classification.
+
+Locked by the `succession_there_and_back_rewinds_distinct_members_without_resetting_other_state`,
+`succession_revisits_a_same_mobject_chain_from_its_original_member_inputs`,
+`succession_reverse_sampling_does_not_repeat_begin_or_finish_callbacks`,
+`nested_successions_restore_their_own_prepared_members`,
+`stateful_succession_reverse_is_named_and_releases_its_active_lifecycle`, and
+`succession_timeline_seek_matches_serial_frames_in_arbitrary_order` tests in
+`crates/fmn-anim/tests/composition.rs`.
+
 ## What is *not* changed
 
 A member still lands on **its own** `final_alpha_value` at `finish`; a

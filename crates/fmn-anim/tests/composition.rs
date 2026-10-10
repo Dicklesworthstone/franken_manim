@@ -13,7 +13,7 @@ use std::rc::Rc;
 use fmn_anim::animation::{AnimConfig, AnimError, AnimState, Animation, AnimationSignature};
 use fmn_anim::{
     AnimationGroup, DEFAULT_LAGGED_START_LAG_RATIO, Interval, RateFunc, RationalFrameClock,
-    Succession, build_timings, lagged_start, lagged_start_map, play_segment,
+    Succession, Transform, build_timings, lagged_start, lagged_start_map, play_segment,
 };
 use fmn_core::rate;
 use fmn_core::rng::RngRoot;
@@ -28,6 +28,24 @@ fn square(stage: &mut Stage) -> Mob {
         [0.5, 0.5, 0.0],
         [-0.5, 0.5, 0.0],
     ]))
+}
+
+fn move_to_x(stage: &mut Stage, mob: Mob, x: f64, duration: f64) -> Box<dyn Animation> {
+    let target = stage.copy_family(mob).expect("target copy");
+    stage.shift(target, [x - stage.get_center(target)[0], 0.0, 0.0]);
+    Box::new(Transform::new(mob, target).with_config(AnimConfig {
+        run_time: duration,
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    }))
+}
+
+fn assert_x(stage: &Stage, mob: Mob, expected: f64) {
+    let actual = stage.get_center(mob)[0];
+    assert!(
+        (actual - expected).abs() < 1e-6,
+        "x {actual} differs from expected {expected}"
+    );
 }
 
 // ------------------------------------------------------- a probe animation
@@ -147,6 +165,34 @@ impl Animation for FailingProbe {
     }
 
     fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _sub_alpha: f64) {}
+}
+
+struct DeferredBeginProbe {
+    state: AnimState,
+    error: Option<AnimError>,
+    teardowns: Rc<RefCell<usize>>,
+}
+
+impl Animation for DeferredBeginProbe {
+    fn state(&self) -> &AnimState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut AnimState {
+        &mut self.state
+    }
+
+    fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _alpha: f64) {
+        self.error = Some(AnimError::EmptyMobject);
+    }
+
+    fn deferred_error(&self) -> Option<AnimError> {
+        self.error.clone()
+    }
+
+    fn teardown(&mut self, _stage: &mut Stage) {
+        *self.teardowns.borrow_mut() += 1;
+    }
 }
 
 /// Every alpha the member `id` received, in order.
@@ -607,6 +653,368 @@ fn succession_walks_the_members_a_coarse_step_would_skip() {
     assert_eq!(succession.active_index(), 2);
 }
 
+#[test]
+fn succession_there_and_back_rewinds_distinct_members_without_resetting_other_state() {
+    let mut stage = Stage::new();
+    let a = square(&mut stage);
+    let b = square(&mut stage);
+    let c = square(&mut stage);
+    stage.shift(b, [10.0, 0.0, 0.0]);
+    stage.shift(c, [-10.0, 0.0, 0.0]);
+    let other = square(&mut stage);
+    stage.add_to_scene(other).expect("unrelated root");
+    let calls = Rc::new(RefCell::new(0));
+    let counter = Rc::clone(&calls);
+    stage
+        .add_updater(other, move |_, _| *counter.borrow_mut() += 1, false)
+        .expect("unrelated updater");
+    let members = vec![
+        move_to_x(&mut stage, a, 2.0, 1.0),
+        move_to_x(&mut stage, b, 14.0, 1.0),
+        move_to_x(&mut stage, c, -7.0, 1.0),
+    ];
+    let mut succession = Succession::new(&mut stage, members)
+        .expect("succession")
+        .with_rate_func(RateFunc::Base(rate::there_and_back));
+    succession.begin(&mut stage).expect("begin");
+    let roots = stage.roots().to_vec();
+    for (index, alpha) in [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0].into_iter().enumerate() {
+        stage.shift(other, [1.0, 0.0, 0.0]);
+        stage.set_time_from_clock(100.0 + index as f64);
+        succession.interpolate(&mut stage, alpha);
+        assert_eq!(succession.deferred_error(), None);
+        let time = 3.0 * rate::there_and_back(alpha);
+        for (member, start, delta, begin) in [
+            (a, 0.0, 2.0, 0.0),
+            (b, 10.0, 4.0, 1.0),
+            (c, -10.0, 3.0, 2.0),
+        ] {
+            assert_x(
+                &stage,
+                member,
+                start + delta * (time - begin).clamp(0.0, 1.0),
+            );
+        }
+        assert_x(&stage, other, (index + 1) as f64);
+        assert_eq!(stage.time(), 100.0 + index as f64);
+        assert_eq!(stage.roots(), roots);
+        assert_eq!(*calls.borrow(), 0, "sampling never runs unrelated updaters");
+    }
+    stage.update_mobject(other, 0.0);
+    assert_eq!(*calls.borrow(), 1, "the unrelated updater binding survived");
+}
+
+#[test]
+fn succession_revisits_a_same_mobject_chain_from_its_original_member_inputs() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let members = vec![
+        move_to_x(&mut stage, mob, 2.0, 1.0),
+        move_to_x(&mut stage, mob, 6.0, 2.0),
+        move_to_x(&mut stage, mob, -2.0, 1.0),
+    ];
+    let mut succession = Succession::new(&mut stage, members).expect("succession");
+    succession.begin(&mut stage).expect("begin");
+    for alpha in [1.0, 0.125, 0.5, 0.875, 0.0, 0.75, 0.375, 1.0] {
+        succession.interpolate(&mut stage, alpha);
+        assert_eq!(succession.deferred_error(), None);
+        let time = 4.0 * alpha;
+        let expected = if time < 1.0 {
+            2.0 * time
+        } else if time < 3.0 {
+            2.0 + 2.0 * (time - 1.0)
+        } else {
+            6.0 - 8.0 * (time - 3.0)
+        };
+        assert_x(&stage, mob, expected);
+    }
+}
+
+#[test]
+fn forward_succession_sampling_preserves_live_record_views_until_an_actual_rewind() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let target = stage.copy_family(mob).expect("target");
+    stage
+        .get_mut(target)
+        .expect("target")
+        .buffer
+        .write(0, "point", &[1.5, -0.5, 0.0]);
+    let transform = Transform::new(mob, target).with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    let mut succession =
+        Succession::new(&mut stage, vec![Box::new(transform)]).expect("succession");
+    succession.begin(&mut stage).expect("begin");
+    let view = stage.get_mut(mob).expect("live").buffer.export_view(true);
+    let storage = stage.get(mob).expect("live").buffer.storage_id();
+    for alpha in [0.2, 0.4, 0.8] {
+        succession.interpolate(&mut stage, alpha);
+        assert_eq!(succession.deferred_error(), None);
+        assert_eq!(stage.get(mob).expect("live").buffer.storage_id(), storage);
+        let observed = view.read(0, "point").expect("live point view");
+        assert!((f64::from(observed[0]) - (-0.5 + 2.0 * alpha)).abs() < 1e-6);
+        assert_eq!(
+            Some(observed),
+            stage.get(mob).expect("live").buffer.read(0, "point"),
+            "ordinary forward interpolation writes through its existing live view"
+        );
+    }
+    let last_forward = view.read(0, "point");
+    succession.interpolate(&mut stage, 0.1);
+    assert_eq!(succession.deferred_error(), None);
+    assert_ne!(stage.get(mob).expect("live").buffer.storage_id(), storage);
+    assert_eq!(
+        view.read(0, "point"),
+        last_forward,
+        "a real restore uses V6 detachment"
+    );
+    assert_ne!(
+        stage.get(mob).expect("live").buffer.read(0, "point"),
+        last_forward
+    );
+}
+
+#[test]
+fn succession_reverse_sampling_does_not_repeat_begin_or_finish_callbacks() {
+    let mut stage = Stage::new();
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let members = ["a", "b", "c"]
+        .into_iter()
+        .map(|id| Probe::boxed(square(&mut stage), id, 1.0, &log))
+        .collect();
+    let mut succession = Succession::new(&mut stage, members).expect("succession");
+    succession.begin(&mut stage).expect("begin");
+    for alpha in [1.0, 0.1, 0.6, 0.0, 0.9, 0.2] {
+        succession.interpolate(&mut stage, alpha);
+        assert_eq!(succession.deferred_error(), None);
+    }
+    succession.state_mut().config.final_alpha_value = 0.0;
+    succession.finish(&mut stage);
+    assert_eq!(succession.deferred_error(), None);
+    assert_eq!(
+        ids_of(&log, |event| match event {
+            Event::Begin(id) => Some(*id),
+            _ => None,
+        }),
+        ["a", "b", "c"]
+    );
+    assert_eq!(
+        ids_of(&log, |event| match event {
+            Event::Finish(id) => Some(*id),
+            _ => None,
+        }),
+        ["a", "b", "c"]
+    );
+    for member in stage.family(succession.group()) {
+        assert!(!stage.is_animating(member));
+        assert!(!stage.is_updating_suspended(member));
+    }
+}
+
+#[test]
+fn nested_successions_restore_their_own_prepared_members() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let inner_members = vec![
+        move_to_x(&mut stage, mob, 2.0, 1.0),
+        move_to_x(&mut stage, mob, 4.0, 1.0),
+    ];
+    let inner = Succession::new(&mut stage, inner_members).expect("inner");
+    let last = move_to_x(&mut stage, mob, 6.0, 1.0);
+    let mut outer = Succession::new(&mut stage, vec![Box::new(inner), last]).expect("outer");
+    outer.begin(&mut stage).expect("begin");
+    for alpha in [1.0, 0.5, 0.1, 0.8, 0.4, 0.0] {
+        outer.interpolate(&mut stage, alpha);
+        assert_eq!(outer.deferred_error(), None);
+        assert_x(&stage, mob, 6.0 * alpha);
+    }
+    outer.finish(&mut stage);
+    assert_eq!(outer.deferred_error(), None);
+    assert_x(&stage, mob, 6.0);
+    assert!(!stage.is_updating_suspended(mob));
+}
+
+#[test]
+fn succession_rewind_retains_fade_final_alpha_and_live_begin_state() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    // Base Mobject records start transparent; give this fade probe an opaque
+    // authored color before its targets and begin-state copies are created.
+    stage.get_mut(mob).expect("live").buffer.write_color_lanes(
+        "rgba",
+        Some([1.0, 0.5, 0.25]),
+        Some(1.0),
+    );
+    let first = move_to_x(&mut stage, mob, 2.0, 1.0);
+    let mut fade =
+        fmn_anim::fading::fade_out(&mut stage, mob, [0.0; 3], 1.0).expect("fade-out recipe");
+    fade.state_mut().config.rate_func = RateFunc::linear();
+    let last = move_to_x(&mut stage, mob, 4.0, 1.0);
+    let mut succession =
+        Succession::new(&mut stage, vec![first, Box::new(fade), last]).expect("succession");
+    succession.begin(&mut stage).expect("begin");
+    for (time, expected_x, expected_opacity) in [
+        (2.5, 3.0, 1.0),
+        (1.5, 2.0, 0.5),
+        (0.5, 1.0, 1.0),
+        (1.75, 2.0, 0.25),
+    ] {
+        succession.interpolate(&mut stage, time / 3.0);
+        assert_eq!(succession.deferred_error(), None);
+        assert_x(&stage, mob, expected_x);
+        let rgba = stage
+            .get(mob)
+            .expect("live")
+            .buffer
+            .read_column("rgba")
+            .expect("color");
+        assert!(
+            rgba.chunks_exact(4)
+                .all(|color| (f64::from(color[3]) - expected_opacity).abs() < 1e-6),
+            "at time {time}, expected opacity {expected_opacity}; got {rgba:?}"
+        );
+    }
+}
+
+#[test]
+fn stateful_succession_reverse_is_named_and_releases_its_active_lifecycle() {
+    for with_updater in [false, true] {
+        let mut stage = Stage::new();
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mob = square(&mut stage);
+        let mut probe = Probe::new(mob, "stateful", 1.0, &log);
+        if with_updater {
+            stage.add_updater(mob, |_, _| {}, false).expect("updater");
+        } else {
+            probe = probe.unclassified();
+        }
+        let mut succession =
+            Succession::new(&mut stage, vec![Box::new(probe)]).expect("stateful succession");
+        succession.begin(&mut stage).expect("begin");
+        succession.interpolate(&mut stage, 0.75);
+        let before = log.borrow().clone();
+        succession.interpolate(&mut stage, 0.25);
+        assert_eq!(
+            succession.deferred_error(),
+            Some(AnimError::StatefulSuccessionRewind)
+        );
+        assert_eq!(
+            *log.borrow(),
+            before,
+            "the refused sample invokes no callback"
+        );
+        succession.finish(&mut stage);
+        assert!(!stage.is_animating(mob));
+        assert!(!stage.is_updating_suspended(mob));
+    }
+}
+
+#[test]
+fn stateful_succession_rounded_endpoint_is_not_a_reverse_sample() {
+    for skip in [false, true] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let probe = Probe::new(mob, "stateful", 0.11, &log).unclassified();
+        let succession = Succession::new(&mut stage, vec![Box::new(probe)]).expect("succession");
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(succession)];
+        let mut clock = RationalFrameClock::new(30).expect("fps");
+        let report = play_segment(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(17),
+            &mut animations,
+            skip,
+            &mut |_| {},
+        )
+        .expect("rounded final alpha and finish(1) name the same endpoint");
+        assert_eq!(report.n_frames, 4);
+        assert_eq!(clock.now().frames(), 4);
+        assert_eq!(alphas_of(&log, "stateful").last(), Some(&1.0));
+        assert!(!stage.is_updating_suspended(mob));
+    }
+}
+
+#[test]
+fn succession_begin_clears_an_old_deferred_error_and_member_cache() {
+    let mut stage = Stage::new();
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let mob = square(&mut stage);
+    let mut succession = Succession::new(
+        &mut stage,
+        vec![Box::new(
+            Probe::new(mob, "stateful", 1.0, &log).unclassified(),
+        )],
+    )
+    .expect("succession");
+    succession.begin(&mut stage).expect("first begin");
+    succession.interpolate(&mut stage, 0.8);
+    succession.interpolate(&mut stage, 0.2);
+    assert_eq!(
+        succession.deferred_error(),
+        Some(AnimError::StatefulSuccessionRewind)
+    );
+    succession.abort(&mut stage);
+    succession.begin(&mut stage).expect("second begin");
+    assert_eq!(succession.deferred_error(), None);
+    succession.interpolate(&mut stage, 1.0);
+    succession.finish(&mut stage);
+    assert_eq!(succession.deferred_error(), None);
+    assert_eq!(alphas_of(&log, "stateful").last(), Some(&1.0));
+}
+
+#[test]
+fn succession_timeline_seek_matches_serial_frames_in_arbitrary_order() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).expect("root");
+    let members = vec![
+        move_to_x(&mut stage, mob, 2.0, 1.0),
+        move_to_x(&mut stage, mob, 4.0, 1.0),
+    ];
+    let succession = Succession::new(&mut stage, members)
+        .expect("succession")
+        .with_rate_func(RateFunc::Base(rate::there_and_back));
+    assert_eq!(
+        succession.effect_signature(),
+        AnimationSignature::Unclassified
+    );
+    let mut timeline = fmn_anim::timeline::Timeline::new(4).expect("fps");
+    timeline.play(vec![Box::new(succession)]).expect("author");
+    let rng = RngRoot::from_seed(47);
+    let mut centers = Vec::new();
+    timeline
+        .render(&mut stage, &rng, &mut |packet| {
+            let observed = packet.state().materialize();
+            centers.push(observed.get_center(mob).map(f64::to_bits));
+        })
+        .expect("serial render");
+    assert_eq!(centers.len(), 8);
+    assert_ne!(centers[1], centers[3], "the sequence actually moves");
+    assert_eq!(
+        f64::from_bits(centers[7][0]),
+        0.0,
+        "last captured sample returns"
+    );
+    assert_x(&stage, mob, 2.0);
+    // BN-11: closing the composition still lands the selected member on its
+    // own final_alpha_value. That post-capture endpoint is not another frame.
+    for frame in [8, 1, 4, 2, 7, 3, 6, 5, 8] {
+        let packet = timeline.seek(&mut stage, &rng, frame).expect("seek");
+        assert_eq!(
+            packet
+                .state()
+                .materialize()
+                .get_center(mob)
+                .map(f64::to_bits),
+            centers[usize::try_from(frame - 1).expect("positive frame")],
+            "seek must equal the serial sample at frame {frame}"
+        );
+    }
+}
+
 // ------------------------------------------------------------- lifecycle
 
 #[test]
@@ -1001,6 +1409,45 @@ fn a_just_in_time_begin_failure_surfaces_from_the_segment() {
     )
     .expect_err("the second member's begin refuses");
     assert_eq!(err, AnimError::EmptyMobject);
+}
+
+#[test]
+fn a_deferred_zero_sample_releases_a_partially_begun_nested_member() {
+    for skip in [false, true] {
+        let mut stage = Stage::new();
+        let first = square(&mut stage);
+        let failing = square(&mut stage);
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let teardowns = Rc::new(RefCell::new(0));
+        let probe = DeferredBeginProbe {
+            state: AnimState::new(failing, AnimConfig::default()),
+            error: None,
+            teardowns: Rc::clone(&teardowns),
+        };
+        let inner = Succession::new(&mut stage, vec![Box::new(probe)]).expect("inner");
+        let outer = Succession::new(
+            &mut stage,
+            vec![Probe::boxed(first, "before", 0.25, &log), Box::new(inner)],
+        )
+        .expect("outer");
+        let root = outer.group();
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(outer)];
+        let error = play_segment(
+            &mut stage,
+            &mut RationalFrameClock::new(4).expect("fps"),
+            &RngRoot::from_seed(59),
+            &mut animations,
+            skip,
+            &mut |_| {},
+        )
+        .expect_err("nested zero interpolation records its error after suspension");
+        assert_eq!(error, AnimError::EmptyMobject);
+        assert_eq!(*teardowns.borrow(), 1, "partial lifetime is released once");
+        for member in stage.family(root) {
+            assert!(!stage.is_animating(member));
+            assert!(!stage.is_updating_suspended(member));
+        }
+    }
 }
 
 #[test]
