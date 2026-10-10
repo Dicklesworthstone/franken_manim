@@ -103,8 +103,14 @@ def install_vector_solid_groups(native):
                 _finite(fill_opacity, 'Dodecahedron fill_opacity'), stroke_color,
                 _finite(stroke_width, 'Dodecahedron stroke_width'), config[2], 0)
             g['_hang_native_children'](scratch, specs)
-            g['_apply_vmobject_style_kwargs'](scratch, dict(config[0]))
-            assemble(Dodecahedron, self, scratch.submobjects, config)
+            # Atlas supplies the ordered topology; each public face retains
+            # Polygon's vertex API and authorable construction lifecycle.
+            polygon = symbol('Polygon')
+            faces = [
+                polygon(*face.get_points()[::2][:-1], **config[0])
+                for face in scratch.submobjects
+            ]
+            assemble(Dodecahedron, self, faces, config)
 
     def prismify(self, vmobject, depth=1.0, direction=g['_IN'], **kwargs):
         if not isinstance(vmobject, VMobject):

@@ -121,6 +121,49 @@ class VectorSolidLifecycleTests(unittest.TestCase):
         self.assertTrue(all(isinstance(p,Face) and p.get_fill_color()==m.RED for p in obj))
         self.assertAlmostEqual(obj[0].get_width(),1.,places=6)
 
+    def test_dodecahedron_exposes_polygon_faces_through_copy_and_animation(self):
+        obj=m.Dodecahedron()
+        self.assertEqual(len(obj),12)
+        for face in obj:
+            self.assertIsInstance(face,m.Polygon)
+            self.assertEqual(face.get_vertices().shape,(5,3))
+            np.testing.assert_array_equal(face.get_vertices(),face.get_points()[::2][:-1])
+        copied=obj.copy()
+        self.assertTrue(all(isinstance(face,m.Polygon) for face in copied))
+        self.assertTrue(all(a is not b for a,b in zip(obj,copied)))
+        vertices=obj[0].get_vertices().copy()
+        scene=m.Scene();scene.add(obj)
+        scene.play(obj.animate.shift(m.RIGHT),run_time=1/30,rate_func=m.linear)
+        np.testing.assert_allclose(obj[0].get_vertices(),vertices+m.RIGHT,atol=1e-6)
+        np.testing.assert_array_equal(copied[0].get_vertices(),vertices)
+
+    def test_dodecahedron_uses_public_polygon_factory_and_preserves_authored_faces(self):
+        made=[]
+        class Face(m.Polygon):
+            def init_points(self):
+                super().init_points()
+                self.shift(.25*m.UP)
+                made.append(self)
+            def init_colors(self):
+                super().init_colors()
+                self.set_fill(m.RED)
+        expected=native_vector('dodeca').shift(.25*m.UP)
+        with patch.object(three,'Polygon',Face,create=True):
+            obj=m.Dodecahedron()
+        self.assertEqual(list(obj),made)
+        self.assertEqual(len(made),12)
+        for face,native in zip(obj,expected):
+            self.assertIsInstance(face,Face)
+            self.assertEqual(face.get_fill_color(),m.RED)
+            np.testing.assert_allclose(face.get_points(),native.get_points(),atol=1e-6)
+        foreign=m.Polygon(m.LEFT,m.UP,m.RIGHT)
+        scene=m.Scene();scene.add(foreign)
+        before=foreign.get_points().copy()
+        with patch.object(three,'Polygon',lambda *args,**kwargs:foreign,create=True):
+            with self.assertRaisesRegex(ValueError,'duplicate|detached'):
+                m.Dodecahedron()
+        np.testing.assert_array_equal(foreign.get_points(),before)
+
     def test_prism_rescaling_is_virtual_and_accepts_cube_recipe_options(self):
         class Authored(m.VPrism):
             def init_data(self):self.calls=[];super().init_data()
