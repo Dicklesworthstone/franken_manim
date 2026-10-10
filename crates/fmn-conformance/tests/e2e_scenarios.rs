@@ -4156,6 +4156,127 @@ fn lifecycle_always_redraw_shared_source_run(
         .with_counter("redraw_roots_preserved", u64::from(roots_preserved)))
 }
 
+/// Pure execution alone does not prove that the FMTL record-lerp law can
+/// reconstruct a frame. Discrete draw state must survive ordinary and shared
+/// random-access replay, even when the endpoints have identical values.
+fn lifecycle_bundle_render_state_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    fn bundle_failure(error: impl std::fmt::Display) -> ScenarioError {
+        fail(error.to_string())
+    }
+    struct DepthSwitch {
+        state: fmn_anim::AnimState,
+    }
+    impl fmn_anim::Animation for DepthSwitch {
+        fn state(&self) -> &fmn_anim::AnimState {
+            &self.state
+        }
+        fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+            &mut self.state
+        }
+        fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+            stage
+                .get_mut(self.state.mobject())
+                .expect("the scene retains its animated drawable")
+                .uniforms_mut()
+                .depth_test = (0.5..1.0).contains(&alpha);
+        }
+        fn interpolate_submobject(&mut self, _: &mut Stage, _: &[Mob], _: f64) {}
+        fn effect_signature(&self) -> fmn_anim::AnimationSignature {
+            fmn_anim::AnimationSignature::Pure
+        }
+    }
+    let make = || -> Result<(Stage, Timeline), ScenarioError> {
+        let mut stage = Stage::new();
+        let mob = stage.add(VMobject::from_points(vec![
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        stage.add_to_scene(mob).map_err(bundle_failure)?;
+        let mut timeline = Timeline::new(4).map_err(bundle_failure)?;
+        timeline
+            .play(vec![Box::new(DepthSwitch {
+                state: fmn_anim::AnimState::new(
+                    mob,
+                    fmn_anim::AnimConfig {
+                        rate_func: RateFunc::linear(),
+                        ..fmn_anim::AnimConfig::default()
+                    },
+                ),
+            })])
+            .map_err(bundle_failure)?;
+        Ok((stage, timeline))
+    };
+    let rng = RngRoot::from_seed(31);
+    let (mut stage, mut timeline) = make()?;
+    let mut observed = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &rng, &mut |packet| {
+            observed.push(packet.materialize_stage())
+        })
+        .map_err(bundle_failure)?;
+    let nominated_pure = reports.len() == 1 && reports[0].purity.is_pure();
+    let (mut stage, timeline) = make()?;
+    let bytes =
+        fmn_scene::export_timeline_bundle(timeline, &mut stage, &rng).map_err(bundle_failure)?;
+    let bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(bundle_failure)?;
+    let recorded = bundle.segment_kind(0) == Some(fmn_scene::BundleSegmentKind::Stateful);
+    let shared = fmn_scene::TimelineBundle::from_bytes(&bytes)
+        .map_err(bundle_failure)?
+        .into_shared()
+        .map_err(bundle_failure)?;
+    let mut cache = fmn_scene::timeline_bundle::TimelineFrameCache::default();
+    let mut matches = 0_u64;
+    for index in [3, 1, 0, 2] {
+        let expected = observed
+            .get(index as usize)
+            .ok_or_else(|| fail("native timeline omitted a scheduled capture"))?;
+        let expected_bytes = expected
+            .snapshot()
+            .to_render_bytes()
+            .map_err(bundle_failure)?;
+        let ordinary = bundle.stage_at(index).map_err(bundle_failure)?;
+        let random_access = cache
+            .materialize(&shared.frame_job(index).map_err(bundle_failure)?)
+            .map_err(bundle_failure)?;
+        let wanted_depth = index == 1 || index == 2;
+        let ordinary_depth = ordinary
+            .roots()
+            .first()
+            .and_then(|mob| ordinary.get(*mob))
+            .is_some_and(|entry| entry.uniforms().depth_test);
+        let equal = ordinary
+            .snapshot()
+            .to_render_bytes()
+            .map_err(bundle_failure)?
+            == expected_bytes
+            && random_access
+                .snapshot()
+                .to_render_bytes()
+                .map_err(bundle_failure)?
+                == expected_bytes
+            && ordinary_depth == wanted_depth;
+        matches += u64::from(equal);
+        ctx.event(
+            LogEvent::new("e2e.lifecycle.bundle_render_state")
+                .field("frame", u64::from(index))
+                .field("nominated_pure", truth(nominated_pure))
+                .field("recorded", truth(recorded))
+                .field("depth_test", truth(ordinary_depth))
+                .field("equal", truth(equal))
+                .field("sha256", sha256(&expected_bytes).to_hex()),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter(
+            "bundle_render_state_frames",
+            u64::from(bundle.frame_count()),
+        )
+        .with_counter("bundle_render_state_pure", u64::from(nominated_pure))
+        .with_counter("bundle_render_state_recorded", u64::from(recorded))
+        .with_counter("bundle_render_state_matches", matches))
+}
+
 /// fm-c1up: TracingTail seeds its updater history while its public geometry
 /// stays empty until the first positive-dt observation is published.
 fn lifecycle_tracing_tail_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -6151,6 +6272,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     ];
+    specs.push(spec(
+        "lifecycle.bundle_render_state.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_bundle_render_state_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("bundle_render_state_frames", 4),
+            counter_eq("bundle_render_state_pure", 1),
+            counter_eq("bundle_render_state_recorded", 1),
+            counter_eq("bundle_render_state_matches", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.bundle_render_state",
+            vec![
+                FieldPred::str_eq("nominated_pure", "true"),
+                FieldPred::str_eq("recorded", "true"),
+                FieldPred::str_eq("equal", "true"),
+            ],
+        )],
+    ));
     specs.push(
         spec(
             "lifecycle.always_redraw_shared_source.v1",
@@ -7803,6 +7945,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 // Test entry points
 // ---------------------------------------------------------------------------
+
+#[test]
+fn bundle_render_state_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.bundle_render_state.v1")
+        .expect("the bundle render-state scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
 
 #[test]
 fn install_shared_family_scenario_passes() {

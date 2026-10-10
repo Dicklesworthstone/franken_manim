@@ -20,9 +20,10 @@
 //! [`fmn_anim::interpolate_between`] — the player's exact law, applied to
 //! the snapshots round-tripped through their canonical bytes, so the proof
 //! sees exactly what a player will decode — and requires bit-identity with
-//! the engine's own emitted frame over everything interpolation can write
-//! (record columns, placements, typed trackers, numeric uniforms), compared after the
-//! container's float canonicalization. The contract demands one
+//! the engine's own emitted frame over the complete rooted render state
+//! (record schemas and columns, placements, typed trackers, all uniforms,
+//! shape hints, renderer programs, image resources and exact family edges),
+//! compared after the container's float canonicalization. The contract demands one
 //! mid-segment frame; proving every frame is strictly stronger and costs
 //! only export time. Any mismatch, and the segment falls back to kind 1.
 //! Never guessed.
@@ -762,19 +763,24 @@ fn canonical_f64_equal(left: f64, right: f64) -> bool {
     canonicalize_f64(left).to_bits() == canonicalize_f64(right).to_bits()
 }
 
-/// Compare everything interpolation can write in two rooted forests without
-/// constructing whole-frame fingerprints. Handles and arena ordinals remain
-/// deliberately absent (they are process-local); record data, placements,
-/// numeric uniforms, z-order, roots, and family structure compare in their
-/// deterministic traversal order after container float canonicalization.
+/// Compare complete rooted render inputs without constructing whole-frame
+/// fingerprints. Both stages have been decoded against the SAME binding arena,
+/// so ordered handle equality is meaningful here: an equal-looking replacement
+/// must not stand in for an original shared child. Private animation copies and
+/// executable/restoration bookkeeping are deliberately outside this proof.
+///
+/// Purity says a frame depends only on begin state and alpha. It does not say
+/// that record interpolation can express changes to textures, programs, hints,
+/// boolean flags or family edges. Those inputs must match too, even though the
+/// player's interpolation does not write them.
 fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
-    if left.roots().len() != right.roots().len() {
+    if left.roots() != right.roots() {
         return false;
     }
     for (&left_root, &right_root) in left.roots().iter().zip(right.roots()) {
         let left_family = left.family(left_root);
         let right_family = right.family(right_root);
-        if left_family.len() != right_family.len() {
+        if left_family != right_family {
             return false;
         }
         for (left_mob, right_mob) in left_family.into_iter().zip(right_family) {
@@ -795,15 +801,14 @@ fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
                             .all(|(a, b)| canonical_f64_equal(a, b)) => {}
                 _ => return false,
             }
-            let left_fields = left_entry.buffer.schema().fields();
-            let right_fields = right_entry.buffer.schema().fields();
-            if left_fields.len() != right_fields.len() {
+            if left_entry.buffer.schema() != right_entry.buffer.schema()
+                || left_entry.buffer.len() != right_entry.buffer.len()
+            {
                 return false;
             }
+            let left_fields = left_entry.buffer.schema().fields();
+            let right_fields = right_entry.buffer.schema().fields();
             for (left_field, right_field) in left_fields.iter().zip(right_fields) {
-                if left_field != right_field {
-                    return false;
-                }
                 match (
                     left_entry.buffer.read_column(&left_field.name),
                     right_entry.buffer.read_column(&right_field.name),
@@ -843,8 +848,18 @@ fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
                     right_uniforms.anti_alias_width,
                 )
                 || left_uniforms.joint_type != right_uniforms.joint_type
+                || left_uniforms.flat_stroke != right_uniforms.flat_stroke
+                || left_uniforms.scale_stroke_with_zoom != right_uniforms.scale_stroke_with_zoom
+                || left_uniforms.stroke_behind != right_uniforms.stroke_behind
+                || left_uniforms.depth_test != right_uniforms.depth_test
+                || left_uniforms.use_winding_fill != right_uniforms.use_winding_fill
                 || left.z_index(left_mob) != right.z_index(right_mob)
-                || left_entry.submobjects().len() != right_entry.submobjects().len()
+                || left_entry.submobjects() != right_entry.submobjects()
+                || left_entry.render_primitive() != right_entry.render_primitive()
+                || left_entry.image_resource() != right_entry.image_resource()
+                || left.shape(left_mob) != right.shape(right_mob)
+                || left.primitive_hint(left_mob).is_some()
+                    != right.primitive_hint(right_mob).is_some()
             {
                 return false;
             }
