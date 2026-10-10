@@ -85,10 +85,13 @@ fn value<T: std::str::FromStr>(
     it: &mut impl Iterator<Item = String>,
     flag: &str,
 ) -> Result<T, String> {
-    it.next()
-        .ok_or_else(|| format!("{flag} needs a value"))?
-        .parse()
-        .map_err(|_| format!("bad {flag} value"))
+    let raw = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+    // No option value here starts with '-', so a following option means the
+    // value is missing: `--out --fps 30` must not write into "--fps".
+    if raw.starts_with('-') {
+        return Err(format!("{flag} needs a value, found {raw}"));
+    }
+    raw.parse().map_err(|_| format!("bad {flag} value"))
 }
 
 /// Parses the arguments after the program name. A mistyped flag is an error,
@@ -152,6 +155,17 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "-h" | "--help" => args.help = true,
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             other => args.targets.push(other.to_owned()),
+        }
+    }
+    // `all` never hides a misspelled chapter: every name must exist.
+    if args.command == "render" {
+        let known = chapters::registry();
+        if let Some(unknown) = args
+            .targets
+            .iter()
+            .find(|t| *t != "all" && !known.iter().any(|e| e.key == t.as_str()))
+        {
+            return Err(format!("unknown chapter {unknown}"));
         }
     }
     // Rate control on a software encoder: tune it for flat-shaded animation.
@@ -403,6 +417,48 @@ mod tests {
         ] {
             assert!(parse(line).is_err(), "{line:?} should be refused");
         }
+    }
+
+    #[test]
+    fn an_option_is_never_taken_as_the_previous_options_value() {
+        // `render all --out --fps 30` must not render every chapter at the
+        // default rate into a directory named "--fps".
+        for (line, error) in [
+            ("render all --out --fps 30", "--out needs a value"),
+            (
+                "render 01_hook --narration --silent",
+                "--narration needs a value",
+            ),
+            ("render --encoder --crf 18", "--encoder needs a value"),
+            ("render --preset --crf 18", "--preset needs a value"),
+        ] {
+            assert_eq!(
+                parse(line).err().as_deref().map(|e| e.starts_with(error)),
+                Some(true),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_does_not_hide_a_misspelled_chapter() {
+        // A stray name next to `all` is a mistake (`render all 30` meant
+        // `--fps 30`), not something to ignore while rendering everything.
+        for (line, chapter) in [
+            ("render all 30", "30"),
+            ("render all 01_hok", "01_hok"),
+            ("render 01_hook 09_extra", "09_extra"),
+        ] {
+            assert_eq!(
+                parse(line).err().as_deref(),
+                Some(format!("unknown chapter {chapter}").as_str()),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            parse("render all 01_hook").unwrap().targets,
+            ["all", "01_hook"]
+        );
     }
 
     #[test]
