@@ -184,7 +184,9 @@ def install_color_sliders(native: Any) -> None:
                 columns += 1
             if rows * columns > 65536:
                 raise ValueError("ColorSliders background exceeds 65536 squares")
-            colors = tuple(self._background_grid_colors)
+            # The style API treats an iterable as a gradient. Wrap each RGB
+            # triple as one scalar color without quantizing it through hex.
+            colors = tuple(g["_ColorValue"](rgb) for rgb in self._background_grid_colors)
             if not colors:
                 raise ValueError("ColorSliders background colors must not be empty")
             background = g["Square"](length).get_grid(n_rows=rows, n_cols=columns, buff=0.)
