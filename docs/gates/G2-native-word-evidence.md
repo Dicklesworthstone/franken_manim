@@ -240,16 +240,25 @@ Further evidence, 2026-10-09:
     counterpart.
   - Hit and miss are byte-identical for `png`, `png_sequence` and `y4m`
     under `--reproducible`, with the same closure digest for the same cache
-    root. A different `--cache-dir` changes the closure digest, because the
-    resolved config (C4) includes `directories.cache`
-    (`fm-cache-dir-in-certified-closure-2y2a`).
+    root. A different `--cache-dir` then changed the closure digest, because
+    the resolved config (C4) included `directories.cache`
+    (`fm-cache-dir-in-certified-closure-2y2a`). Since `98d3e923`, C4 carries
+    it as an inert marker, as it does `render.threads`: two cache roots give
+    one closure digest and the same frames (`typeset_cache.rs`), while
+    `tex.template`, `text.font` and the other `directories` keys still
+    separate configs. With the normalization removed, the test fails on two
+    different digests.
 - **Clean wheel.** At `e5b0163f` (CPython 3.13, Linux), the three typesetting
   suites pass and the runtime receipt passes (2007 reviewed rows, 0
   contradictions). The wheel was built from `6a21499d`, the same patch
   before a rebase onto a different base; that SHA is not on `main`. The
   gate now runs those suites (`3a625f16`). Separately,
-  the gate is red on `paired_output_cli` (`fm-djox`), which also fails at
-  `241def91`, before this work.
+  the gate was red on `paired_output_cli` (`fm-djox`), which also failed at
+  `241def91`, before this work. At `b27526fb` (CPython 3.13, Linux, a fresh
+  wheel) the whole gate passes, `paired_output_cli` included: 78/78 runpy
+  suites, among them the typesetting suites with the refused-root receipt
+  and trailing-mixin checks, and the receipt (2007 reviewed rows, 0
+  contradictions).
 - **Front-door timing.** `fmn` (release-perf), formula sheet, preflight wall
   for 20 formulas, on a shared 128-thread Linux host at load 2–6. These are
   unqualified observations, not a PG-7 pass:
