@@ -392,6 +392,10 @@ pub enum AnimError {
     InvalidFramePhase(&'static str),
     /// A non-finite point-path parameter, rejected before Stage mutation.
     InvalidPath(&'static str),
+    /// A succession's time moved backward through stateful interpolation or
+    /// updater-owned history. Those effects cannot be undone by restoring
+    /// mobject content; use Timeline seek's checkpoint-and-replay route.
+    StatefulSuccessionRewind,
 }
 
 impl std::fmt::Display for AnimError {
@@ -447,6 +451,11 @@ impl std::fmt::Display for AnimError {
                 )
             }
             Self::InvalidPath(message) => write!(f, "invalid animation path: {message}"),
+            Self::StatefulSuccessionRewind => write!(
+                f,
+                "Succession cannot reverse stateful or updater-driven members; \
+                 use Timeline seek to replay from a checkpoint"
+            ),
             Self::InvalidFramePhase(message) => {
                 write!(f, "invalid resumable frame phase: {message}")
             }
@@ -922,6 +931,27 @@ pub trait Animation {
     fn effect_signature(&self) -> AnimationSignature {
         AnimationSignature::Unclassified
     }
+
+    /// Whether interpolation can be sampled again after restoring this
+    /// animation's prepared output family, while its existing begin-time
+    /// copies remain live. The caller must also rule out updater-owned state.
+    ///
+    /// Pure leaves satisfy this narrower local contract. A just-in-time
+    /// composition may support it through its own initialized-member cache
+    /// while still requiring serial frame reconstruction: it is not enough
+    /// to declare the whole segment [`AnimationSignature::Pure`]. No setup,
+    /// teardown, or other authored lifecycle callback is replayed by this
+    /// capability.
+    fn can_replay_interpolation(&self) -> bool {
+        matches!(self.effect_signature(), AnimationSignature::Pure)
+    }
+
+    /// Notify a locally replayable animation that its parent restored its
+    /// prepared output family. Leaves keep their existing begin-time inputs;
+    /// just-in-time compositions must restore their own initialized members
+    /// before the next sample. This never repeats a lifecycle callback and
+    /// does not make a stateful segment eligible for pure-frame reconstruction.
+    fn prepare_interpolation_replay(&mut self) {}
 }
 
 /// The canonical, non-mutating begin checks shared by leaf animations and

@@ -23,7 +23,7 @@
 //!   storage it names is reserved.
 //!
 //! The honesty clause, stated where it binds (§8.7, §13.4): **updater
-//! callables never serialize.** A durable snapshot records each updater's
+//! callables and native executable attributes never serialize.** A durable snapshot records each updater's
 //! identity — `(UpdaterId, kind)` — and nothing else; decode returns that
 //! manifest ([`UpdaterManifest`]) alongside a [`Snapshot`] whose entries
 //! carry no callables. Re-binding callables (and invalidating a barrier
@@ -34,6 +34,9 @@
 //! identity through [`Stage::restore_updater_bindings`] restores the original
 //! canonical bytes. Byte-level re-open determinism holds directly for
 //! callable-free states.
+//! Native attributes registered with `add_dt_updater_with_state` must likewise
+//! be reconstructed by replay or explicitly restored with `set_updater_state`;
+//! the manifest alone does not describe an executable history.
 //!
 //! Handles serialize as `(slot index, generation)` — the stage id is a
 //! process-local mint, re-bound at decode against the target stage
@@ -1325,7 +1328,8 @@ impl Snapshot {
                     placement_revision: 0,
                     submobjects,
                     parents,
-                    updaters: Vec::new(), // callables never serialize
+                    updaters: Vec::new(),       // callables never serialize
+                    updater_states: Vec::new(), // replay owns executable state
                     updating_suspended,
                     is_animating,
                     tracker,

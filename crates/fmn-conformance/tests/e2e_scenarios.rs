@@ -4043,6 +4043,235 @@ fn render_certified_doc(stage: &Stage) -> Vec<u8> {
     encode_frame(&frame).expect("the frame encodes into its canonical document")
 }
 
+/// Surface and vector geometry share the production camera-bound painter.
+/// Keep the same viewport, scene scale, and certified identity as the 2D rows.
+fn render_certified_camera_doc(stage: &Stage) -> Vec<u8> {
+    use fmn_render::{
+        Camera, CameraConfig, CameraFrame, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    };
+
+    let config = scene_goldens::frame_config();
+    let mut camera_frame = CameraFrame::default();
+    camera_frame
+        .set_shape([
+            f64::from(config.viewport.width) / config.map.scale,
+            f64::from(config.viewport.height) / config.map.scale,
+        ])
+        .expect("bounded camera fixture shape");
+    let camera = Camera::new(CameraConfig {
+        resolution: (config.viewport.width, config.viewport.height),
+        background: config.background,
+        frame: camera_frame,
+        ..CameraConfig::default()
+    })
+    .expect("valid camera document fixture");
+    let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+        frame: config,
+        tiling: TILING,
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    })
+    .expect("bounded camera document renderer");
+    renderer
+        .render_with_camera(stage, &camera)
+        .expect("the camera route renders the surface and vector frame");
+    encode_frame(renderer.frame()).expect("the camera frame encodes into its canonical document")
+}
+
+/// A graph generated after native plane placement must occupy that plane's
+/// chart. The independent drawing oracle translates the original geometry;
+/// the negative witness leaves the graph at the old origin.
+fn coordinate_placement_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::CoordinateSystem;
+
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("coordinate fonts: {error}")))?;
+    let base = NumberPlane::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .faded_line_ratio(1)
+        .build(&book)
+        .map_err(|error| fail(format!("construct coordinate plane: {error}")))?;
+    let offset = [-2.0, 1.0, 0.0];
+    let placed = base.clone().shifted(offset);
+    let function = |x: f64| 0.5 * x;
+    let original_graph = base
+        .get_graph(function, None)
+        .build()
+        .map_err(|error| fail(format!("construct original graph: {error}")))?;
+    let graph = placed
+        .get_graph(function, None)
+        .build()
+        .map_err(|error| fail(format!("construct placed graph: {error}")))?;
+    let near = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-9);
+    let endpoints = graph
+        .points()
+        .first()
+        .is_some_and(|&point| near(point, [-3.0, 0.5, 0.0]))
+        && graph
+            .points()
+            .last()
+            .is_some_and(|&point| near(point, [-1.0, 1.5, 0.0]));
+    let inverse = [[-1.0, 0.5], [0.0, 0.0], [2.0, -3.0]]
+        .into_iter()
+        .all(|point| near(placed.p2c(placed.c2p(&point)), [point[0], point[1], 0.0]));
+    let drawing = |plane: VMobject, curve: VMobject| -> Result<Stage, ScenarioError> {
+        let mut stage = Stage::new();
+        let plane = stage.add(plane);
+        let curve = stage.add(curve);
+        stage
+            .add_to_scene(plane)
+            .map_err(|error| fail(error.to_string()))?;
+        stage
+            .add_to_scene(curve)
+            .map_err(|error| fail(error.to_string()))?;
+        Ok(stage)
+    };
+    let actual = drawing(placed.vmob().clone(), graph)?;
+    let expected = drawing(
+        base.vmob().clone().shifted(offset),
+        original_graph.clone().shifted(offset),
+    )?;
+    let wrong = drawing(placed.vmob().clone(), original_graph)?;
+    let pixels = render_certified_doc(&actual);
+    let rendered_match = pixels == render_certified_doc(&expected);
+    let rejects_unmoved_graph = pixels != render_certified_doc(&wrong);
+    let visible = pixels != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.coordinate_placement")
+            .field("endpoints", truth(endpoints))
+            .field("inverse", truth(inverse))
+            .field("rendered_match", truth(rendered_match))
+            .field("rejects_unmoved_graph", truth(rejects_unmoved_graph))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&pixels).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("coordinate_endpoints", u64::from(endpoints))
+        .with_counter("coordinate_inverse", u64::from(inverse))
+        .with_counter("coordinate_rendered_match", u64::from(rendered_match))
+        .with_counter(
+            "coordinate_rejects_unmoved_graph",
+            u64::from(rejects_unmoved_graph),
+        )
+        .with_counter("coordinate_visible", u64::from(visible)))
+}
+
+/// A live chart follows the real native Transform samples; graphs created
+/// afterward use that moved map while a previously captured map stays frozen.
+fn live_coordinate_animation_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, Transform};
+    use fmn_library::CoordinateSystem;
+
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("live coordinate fonts: {error}")))?;
+    let plane = NumberPlane::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .faded_line_ratio(1)
+        .build(&book)
+        .map_err(|error| fail(format!("build live plane: {error}")))?;
+    let mut stage = Stage::new();
+    let root = stage.add(plane.vmob().clone());
+    stage
+        .add_to_scene(root)
+        .map_err(|error| fail(format!("adopt live plane: {error}")))?;
+    let live = plane
+        .bind(&stage, root)
+        .map_err(|error| fail(format!("bind live plane: {error}")))?;
+    let frozen = live
+        .snapshot(&stage)
+        .map_err(|error| fail(format!("freeze initial chart: {error}")))?;
+    let target = stage
+        .copy_family(root)
+        .map_err(|error| fail(format!("copy chart animation target: {error}")))?;
+    let offset = [-2.0, 1.0, 0.0];
+    stage.shift(target, offset);
+    let mut timeline =
+        Timeline::new(4).map_err(|error| fail(format!("chart animation clock: {error}")))?;
+    timeline
+        .play(vec![Box::new(Transform::new(root, target).with_config(
+            AnimConfig {
+                run_time: 0.5,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            },
+        ))])
+        .map_err(|error| fail(format!("schedule chart movement: {error}")))?;
+    let mut sampled_origins = Vec::new();
+    timeline
+        .render(&mut stage, &RngRoot::from_seed(53), &mut |packet| {
+            sampled_origins.push(live.c2p(&packet.materialize_stage(), &[0.0, 0.0]));
+        })
+        .map_err(|error| fail(format!("animate live chart: {error}")))?;
+    let origins = sampled_origins
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| fail(format!("read chart animation sample: {error}")))?;
+    let near = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6);
+    let follows_frames =
+        origins.len() == 2 && near(origins[0], [-1.0, 0.5, 0.0]) && near(origins[1], offset);
+    let moved = live
+        .snapshot(&stage)
+        .map_err(|error| fail(format!("read moved chart: {error}")))?;
+    let frozen_unchanged =
+        near(frozen.c2p(&[0.0, 0.0]), [0.0; 3]) && near(moved.c2p(&[0.0, 0.0]), offset);
+    let inverse = [[-1.0, 0.5], [0.0, 0.0], [2.0, -3.0]]
+        .into_iter()
+        .all(|coords| near(moved.p2c(moved.c2p(&coords)), [coords[0], coords[1], 0.0]));
+    let graph = moved
+        .get_graph(|x| 0.5 * x)
+        .build()
+        .map_err(|error| fail(format!("build graph after chart movement: {error}")))?;
+    let endpoint = graph
+        .points()
+        .last()
+        .is_some_and(|&point| near(point, [-1.0, 1.5, 0.0]));
+    let graph = stage.add(graph);
+    stage
+        .add_to_scene(graph)
+        .map_err(|error| fail(format!("adopt live graph: {error}")))?;
+
+    let mut expected = Stage::new();
+    let expected_plane = expected.add(plane.vmob().clone().shifted(offset));
+    expected
+        .add_to_scene(expected_plane)
+        .map_err(|error| fail(format!("adopt expected plane: {error}")))?;
+    let original_graph = plane
+        .get_graph(|x| 0.5 * x, None)
+        .build()
+        .map_err(|error| fail(format!("build independent expected graph: {error}")))?;
+    let expected_graph = expected.add(original_graph.shifted(offset));
+    expected
+        .add_to_scene(expected_graph)
+        .map_err(|error| fail(format!("adopt expected graph: {error}")))?;
+    let rendered = render_certified_doc(&stage);
+    let rendered_match = rendered == render_certified_doc(&expected);
+    let visible = rendered != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.live_coordinate_animation")
+            .field("frames", origins.len() as u64)
+            .field("follows_frames", truth(follows_frames))
+            .field("frozen_unchanged", truth(frozen_unchanged))
+            .field("inverse", truth(inverse))
+            .field("endpoint", truth(endpoint))
+            .field("rendered_match", truth(rendered_match))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("live_coordinate_frames", origins.len() as u64)
+        .with_counter("live_coordinate_follows_frames", u64::from(follows_frames))
+        .with_counter(
+            "live_coordinate_frozen_unchanged",
+            u64::from(frozen_unchanged),
+        )
+        .with_counter("live_coordinate_inverse", u64::from(inverse))
+        .with_counter("live_coordinate_endpoint", u64::from(endpoint))
+        .with_counter("live_coordinate_rendered_match", u64::from(rendered_match))
+        .with_counter("live_coordinate_visible", u64::from(visible)))
+}
+
 /// Construct → snapshot → transform → snapshot: the scene_goldens
 /// lifecycle form with geometry assertions (member/point counts move with
 /// the lifecycle points, never silently empty).
@@ -4363,6 +4592,85 @@ fn lifecycle_bundle_render_state_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("bundle_render_state_matches", matches))
 }
 
+/// Live 3D helpers feed ordinary native surface and curve primitives through
+/// the same renderer as independently translated owning-chart constructions.
+fn live_coordinate_surface_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("live surface fonts: {error}")))?;
+    let axes = fmn_library::ThreeDAxes::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .z_range([-1.0, 1.0, 1.0])
+        .build(&book)
+        .map_err(|error| fail(format!("build live surface chart: {error}")))?;
+    let mut stage = Stage::new();
+    let chart = stage.add(axes.clone());
+    let live = axes
+        .bind(&stage, chart)
+        .map_err(|error| fail(format!("bind live surface chart: {error}")))?;
+    let offset = [0.5, -0.25, 0.25];
+    stage.shift(chart, offset);
+    let height = |x: f64, y: f64| 0.25 * x + 0.5 * y;
+    let path = |t: f64| [t, 0.0, 0.5];
+    let surface = live
+        .get_surface(&stage, height)
+        .map_err(|error| fail(format!("map live surface: {error}")))?
+        .resolution(5, 5)
+        .color(TEAL_B)
+        .shading([0.0; 3])
+        .build();
+    let vertices = surface.points().len() as u64;
+    let curve = live
+        .get_parametric_curve(&stage, path)
+        .map_err(|error| fail(format!("map live 3D curve: {error}")))?
+        .t_range([-0.75, 0.75, 0.25])
+        .build()
+        .map_err(|error| fail(format!("sample live 3D curve: {error}")))?;
+    let surface = stage.add(surface);
+    let curve = stage.add(curve);
+    stage
+        .add_many_to_scene(&[surface, curve])
+        .map_err(|error| fail(format!("adopt live 3D geometry: {error}")))?;
+
+    let mut expected = Stage::new();
+    let surface = expected.add(
+        axes.get_graph(height)
+            .resolution(5, 5)
+            .color(TEAL_B)
+            .shading([0.0; 3])
+            .build(),
+    );
+    let curve = expected.add(
+        axes.get_parametric_curve(path)
+            .t_range([-0.75, 0.75, 0.25])
+            .build()
+            .map_err(|error| fail(format!("sample independent 3D curve: {error}")))?,
+    );
+    expected
+        .add_many_to_scene(&[surface, curve])
+        .map_err(|error| fail(format!("adopt independent 3D geometry: {error}")))?;
+    let unmoved = render_certified_camera_doc(&expected);
+    expected.shift(surface, offset);
+    expected.shift(curve, offset);
+    let rendered = render_certified_camera_doc(&stage);
+    let matches = rendered == render_certified_camera_doc(&expected);
+    let rejects_unmoved = rendered != unmoved;
+    let visible = rendered != render_certified_camera_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.live_coordinate_surface")
+            .field("vertices", vertices)
+            .field("matches", truth(matches))
+            .field("rejects_unmoved", truth(rejects_unmoved))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("live_surface_vertices", vertices)
+        .with_counter("live_surface_matches", u64::from(matches))
+        .with_counter("live_surface_rejects_unmoved", u64::from(rejects_unmoved))
+        .with_counter("live_surface_visible", u64::from(visible)))
+}
+
 /// A native timeline must capture the configured temporal detail and duration
 /// of a trace, with a visible tapered stroke and no construction-time sample.
 fn lifecycle_traced_path_cadence_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -4467,6 +4775,193 @@ fn lifecycle_traced_path_cadence_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("traced_path_tapers", u64::from(tapers))
         .with_counter("traced_path_stateful", u64::from(stateful))
         .with_counter("traced_path_visible", u64::from(visible)))
+}
+
+/// Native updater attributes must branch with a copied family and remain
+/// frozen in frame snapshots, including their references to the traced source.
+fn lifecycle_owned_tail_branches_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let tail_failure = |error| fail(format!("native tail branch: {error}"));
+    let mut original = Stage::new();
+    let source = original.add(VMobject::from_points(vec![[0.0; 3]]));
+    let tail = fmn_library::TracingTail::new()
+        .with_time_traced(0.5)
+        .with_time_per_anchor(0.25)
+        .and_then(|tail| tail.add_to_stage(&mut original, source))
+        .map_err(|error| fail(format!("construct owned tail: {error}")))?;
+    let family = original.add(fmn_library::vmobject::v_group(Vec::new()));
+    original.attach(family, source).map_err(tail_failure)?;
+    original.attach(family, tail).map_err(tail_failure)?;
+    original.add_to_scene(family).map_err(tail_failure)?;
+    original
+        .set_points(source, &[[1.0, 0.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let frozen = original.snapshot();
+    let early_frame = render_certified_doc(&original);
+    let early_points = original.get_points(tail);
+
+    let mut copied = Stage::new();
+    let copied_family = original
+        .copy_into(family, &mut copied)
+        .map_err(tail_failure)?;
+    copied.add_to_scene(copied_family).map_err(tail_failure)?;
+    let children = copied
+        .get(copied_family)
+        .ok_or_else(|| fail("copied tail family is missing"))?
+        .submobjects()
+        .to_vec();
+    let [copied_source, copied_tail] = children.as_slice() else {
+        return Err(fail("copied tail family lost its source or trail"));
+    };
+    copied
+        .set_points(*copied_source, &[[2.0, -1.0, 0.0]])
+        .map_err(tail_failure)?;
+    copied.update(0.25);
+    let independent_history = original.get_points(tail) == early_points;
+    let anchors = |stage: &Stage, mob| {
+        stage
+            .get_points(mob)
+            .unwrap_or_default()
+            .into_iter()
+            .step_by(2)
+            .collect::<Vec<_>>()
+    };
+    let copied_source_remapped =
+        anchors(&copied, *copied_tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, -1.0, 0.0]];
+    original
+        .set_points(source, &[[2.0, 1.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let original_history =
+        anchors(&original, tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 1.0, 0.0]];
+    let original_frame = render_certified_doc(&original);
+    let copied_frame = render_certified_doc(&copied);
+    let snapshot_frozen = frozen.materialize().get_points(tail) == early_points
+        && render_certified_doc(&frozen.materialize()) == early_frame;
+
+    // Replaying from the captured frame must restore the internal history as
+    // well as the already drawn points, after both live branches have advanced.
+    original.restore(&frozen);
+    original
+        .set_points(source, &[[2.0, 1.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let snapshot_replay = render_certified_doc(&original) == original_frame
+        && anchors(&original, tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 1.0, 0.0]];
+    let empty_frame = render_certified_doc(&Stage::new());
+    let visible = original_frame != empty_frame && copied_frame != empty_frame;
+    let distinct_frames = original_frame != copied_frame;
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.owned_tail_branches")
+            .field("source_remapped", truth(copied_source_remapped))
+            .field("independent_history", truth(independent_history))
+            .field("original_history", truth(original_history))
+            .field("snapshot_frozen", truth(snapshot_frozen))
+            .field("snapshot_replay", truth(snapshot_replay))
+            .field("visible", truth(visible))
+            .field("distinct_frames", truth(distinct_frames))
+            .field("original_sha256", sha256(&original_frame).to_hex())
+            .field("copied_sha256", sha256(&copied_frame).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter(
+            "owned_tail_source_remapped",
+            u64::from(copied_source_remapped),
+        )
+        .with_counter(
+            "owned_tail_independent_history",
+            u64::from(independent_history),
+        )
+        .with_counter("owned_tail_original_history", u64::from(original_history))
+        .with_counter("owned_tail_snapshot_frozen", u64::from(snapshot_frozen))
+        .with_counter("owned_tail_snapshot_replay", u64::from(snapshot_replay))
+        .with_counter("owned_tail_visible", u64::from(visible))
+        .with_counter("owned_tail_distinct_frames", u64::from(distinct_frames)))
+}
+
+/// A succession's reverse rate curve must revisit the correct member, and
+/// native timeline seeking must reproduce those same certified pixels in any
+/// request order even though later members begin just in time.
+fn lifecycle_succession_reverse_seek_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, Succession, Transform};
+
+    let mut stage = Stage::new();
+    let mob = stage.add(fmn_library::Square::new().side_length(1.0).color(TEAL_B));
+    stage
+        .add_to_scene(mob)
+        .map_err(|error| fail(format!("adopt succession square: {error}")))?;
+    let initial_frame = render_certified_doc(&stage);
+    let mut members: Vec<Box<dyn fmn_anim::Animation>> = Vec::new();
+    // Keep the entire one-unit square inside the certified viewport at peak.
+    for x in [1.0, 2.0] {
+        let target = stage
+            .copy_family(mob)
+            .map_err(|error| fail(format!("copy succession target: {error}")))?;
+        stage.shift(target, [x, 0.0, 0.0]);
+        members.push(Box::new(Transform::new(mob, target).with_config(
+            AnimConfig {
+                run_time: 1.0,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            },
+        )));
+    }
+    let succession = Succession::new(&mut stage, members)
+        .map_err(|error| fail(format!("construct succession: {error}")))?
+        .with_rate_func(RateFunc::Base(fmn_core::rate::there_and_back));
+    let mut timeline =
+        Timeline::new(4).map_err(|error| fail(format!("succession clock: {error}")))?;
+    timeline
+        .play(vec![Box::new(succession)])
+        .map_err(|error| fail(format!("schedule succession: {error}")))?;
+    let rng = RngRoot::from_seed(47);
+    let mut serial_frames = Vec::new();
+    let mut centers = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &rng, &mut |packet| {
+            let captured = packet.materialize_stage();
+            centers.push(captured.get_center(mob));
+            serial_frames.push(render_certified_doc(&captured));
+        })
+        .map_err(|error| fail(format!("render reverse succession: {error}")))?;
+    let checkpoint_replay = reports.len() == 1 && !reports[0].purity.is_pure();
+    let returns_to_start = serial_frames.last() == Some(&initial_frame)
+        && centers.last().is_some_and(|point| point[0].abs() < 1e-9);
+    let moves = centers
+        .get(3)
+        .is_some_and(|point| (point[0] - 2.0).abs() < 1e-6)
+        && serial_frames
+            .get(3)
+            .is_some_and(|frame| *frame != initial_frame);
+    let empty_frame = render_certified_doc(&Stage::new());
+    let visible = serial_frames.iter().all(|frame| *frame != empty_frame);
+    let mut seek_matches = 0_u64;
+    for frame in [8, 1, 4, 2, 7, 3, 6, 5] {
+        let packet = timeline
+            .seek(&mut stage, &rng, frame)
+            .map_err(|error| fail(format!("seek reverse succession frame {frame}: {error}")))?;
+        let rendered = render_certified_doc(&packet.materialize_stage());
+        let expected = serial_frames
+            .get((frame - 1) as usize)
+            .ok_or_else(|| fail("succession omitted a scheduled frame"))?;
+        let equal = rendered == *expected;
+        seek_matches += u64::from(equal);
+        ctx.event(
+            LogEvent::new("e2e.lifecycle.succession_reverse_seek")
+                .field("frame", frame as u64)
+                .field("checkpoint_replay", truth(checkpoint_replay))
+                .field("returns_to_start", truth(returns_to_start))
+                .field("equal", truth(equal))
+                .field("sha256", sha256(&rendered).to_hex()),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("succession_frames", serial_frames.len() as u64)
+        .with_counter("succession_checkpoint_replay", u64::from(checkpoint_replay))
+        .with_counter("succession_returns_to_start", u64::from(returns_to_start))
+        .with_counter("succession_moves", u64::from(moves))
+        .with_counter("succession_visible", u64::from(visible))
+        .with_counter("succession_seek_matches", seek_matches))
 }
 
 /// fm-c1up: TracingTail seeds its updater history while its public geometry
@@ -6465,6 +6960,73 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .tier(Tier::Fast),
     ];
     specs.push(spec(
+        "render_matrix.coordinate_placement.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(coordinate_placement_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("coordinate_endpoints", 1),
+            counter_eq("coordinate_inverse", 1),
+            counter_eq("coordinate_rendered_match", 1),
+            counter_eq("coordinate_rejects_unmoved_graph", 1),
+            counter_eq("coordinate_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.coordinate_placement",
+            vec![
+                FieldPred::str_eq("endpoints", "true"),
+                FieldPred::str_eq("rendered_match", "true"),
+                FieldPred::str_eq("rejects_unmoved_graph", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.live_coordinate_animation.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(live_coordinate_animation_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("live_coordinate_frames", 2),
+            counter_eq("live_coordinate_follows_frames", 1),
+            counter_eq("live_coordinate_frozen_unchanged", 1),
+            counter_eq("live_coordinate_inverse", 1),
+            counter_eq("live_coordinate_endpoint", 1),
+            counter_eq("live_coordinate_rendered_match", 1),
+            counter_eq("live_coordinate_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.live_coordinate_animation",
+            vec![
+                FieldPred::str_eq("follows_frames", "true"),
+                FieldPred::str_eq("frozen_unchanged", "true"),
+                FieldPred::str_eq("rendered_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.live_coordinate_surface.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(live_coordinate_surface_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("live_surface_vertices", 25),
+            counter_eq("live_surface_matches", 1),
+            counter_eq("live_surface_rejects_unmoved", 1),
+            counter_eq("live_surface_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.live_coordinate_surface",
+            vec![
+                FieldPred::str_eq("matches", "true"),
+                FieldPred::str_eq("rejects_unmoved", "true"),
+                FieldPred::str_eq("visible", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.bundle_render_state.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -6507,6 +7069,54 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("cadence_and_window", "true"),
                 FieldPred::str_eq("stateful", "true"),
                 FieldPred::str_eq("visible", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.owned_tail_branches.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_owned_tail_branches_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("owned_tail_source_remapped", 1),
+            counter_eq("owned_tail_independent_history", 1),
+            counter_eq("owned_tail_original_history", 1),
+            counter_eq("owned_tail_snapshot_frozen", 1),
+            counter_eq("owned_tail_snapshot_replay", 1),
+            counter_eq("owned_tail_visible", 1),
+            counter_eq("owned_tail_distinct_frames", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.owned_tail_branches",
+            vec![
+                FieldPred::str_eq("source_remapped", "true"),
+                FieldPred::str_eq("snapshot_frozen", "true"),
+                FieldPred::str_eq("snapshot_replay", "true"),
+                FieldPred::str_eq("distinct_frames", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.succession_reverse_seek.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_succession_reverse_seek_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("succession_frames", 8),
+            counter_eq("succession_checkpoint_replay", 1),
+            counter_eq("succession_returns_to_start", 1),
+            counter_eq("succession_moves", 1),
+            counter_eq("succession_visible", 1),
+            counter_eq("succession_seek_matches", 8),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.succession_reverse_seek",
+            vec![
+                FieldPred::str_eq("checkpoint_replay", "true"),
+                FieldPred::str_eq("returns_to_start", "true"),
+                FieldPred::str_eq("equal", "true"),
             ],
         )],
     ));
@@ -8184,6 +8794,36 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 
 #[test]
+fn live_coordinate_surface_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.live_coordinate_surface.v1")
+        .expect("the live 3D coordinate surface scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn live_coordinate_animation_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.live_coordinate_animation.v1")
+        .expect("the live coordinate animation scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn coordinate_placement_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.coordinate_placement.v1")
+        .expect("the coordinate placement scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
 fn bundle_render_state_scenario_passes() {
     let scenario = catalog()
         .into_iter()
@@ -8219,6 +8859,26 @@ fn traced_path_cadence_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.traced_path_cadence.v1")
         .expect("the native traced-path cadence scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn owned_tail_branches_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.owned_tail_branches.v1")
+        .expect("the owned-tail copy and snapshot scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn succession_reverse_seek_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.succession_reverse_seek.v1")
+        .expect("the reversible succession render and seek scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

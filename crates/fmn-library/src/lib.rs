@@ -133,8 +133,8 @@ pub use controls::{
     add_scalar_control,
 };
 pub use coords::{
-    Axes, AxisConfig, CoordinateSystem, CoordsError, NumberLine, RiemannConfig, Slider,
-    UnitInterval, create_axis,
+    Axes, AxisConfig, CoordinateFrame, CoordinateFrameError, CoordinateSystem, CoordsError,
+    LiveCoordinateSystem, NumberLine, RiemannConfig, Slider, UnitInterval, create_axis,
 };
 pub use data_mobjects::{BarChart, DataMobjectError, TableMobject};
 pub use fields::{

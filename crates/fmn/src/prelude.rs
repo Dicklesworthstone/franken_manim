@@ -26,14 +26,15 @@ pub use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 pub use fmn_core::types::{Record, Semantic, Vec3};
 pub use fmn_library::{
     Annulus, Arc, ArcBetweenPoints, Arrow, Axes, BarChart, Brace, BraceLabel, Circle, Code,
-    CodeTheme, ComplexPlane, CoordinateSystem, Cube, Cylinder, DashedLine, DecimalNumber, Dot,
-    Ellipse, FunctionGraph, GraphLayout, ImageMobject, Integer, Line, Markdown, MarkdownMobject,
-    MarkupText, NetworkGraph, NumberLine, NumberPlane, ParametricCurve, Polygon, Rectangle,
-    RegularPolygon, SampleSpace, Sphere, Square, StreamLines, Style, SurroundingRectangle,
-    TableMobject, Tex, TexMobject, TexText, Text, TextMobject, ThreeDAxes, ThreeDModel, VMobject,
-    VStyle, VectorField, curved_arrow, curved_double_arrow, curves_as_submobjects, dashed_vmobject,
-    group, polyline, rounded_rectangle, sector, small_dot, svg_mobject, tangent_line, triangle,
-    v_group, v_highlight, vector, vectorized_point,
+    CodeTheme, ComplexPlane, CoordinateFrame, CoordinateFrameError, CoordinateSystem, Cube,
+    Cylinder, DashedLine, DecimalNumber, Dot, Ellipse, FunctionGraph, GraphLayout, ImageMobject,
+    Integer, Line, LiveCoordinateSystem, Markdown, MarkdownMobject, MarkupText, NetworkGraph,
+    NumberLine, NumberPlane, ParametricCurve, Polygon, Rectangle, RegularPolygon, SampleSpace,
+    Sphere, Square, StreamLines, Style, SurroundingRectangle, TableMobject, Tex, TexMobject,
+    TexText, Text, TextMobject, ThreeDAxes, ThreeDModel, VMobject, VStyle, VectorField,
+    curved_arrow, curved_double_arrow, curves_as_submobjects, dashed_vmobject, group, polyline,
+    rounded_rectangle, sector, small_dot, svg_mobject, tangent_line, triangle, v_group,
+    v_highlight, vector, vectorized_point,
 };
 pub use fmn_mobject::{
     AnimBuilder, AnimateArgs, AnimateError, Mob, Mobject, PosTarget, StageError,

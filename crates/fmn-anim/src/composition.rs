@@ -49,7 +49,7 @@
 //! its original state — and a group that overrode it would break every
 //! remover it contains.
 
-use fmn_mobject::{Mob, Mobject, Stage};
+use fmn_mobject::{FamilyCheckpoint, Mob, Mobject, Stage};
 
 use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, clip,
@@ -359,19 +359,10 @@ macro_rules! composite_common {
             Ok(())
         }
 
-        /// Pure only if every member is pure — the conservative rule (R20)
-        /// composes by conjunction, and one unclassified member demotes the
-        /// whole composition.
-        fn effect_signature(&self) -> AnimationSignature {
-            if self
-                .animations
+        fn can_replay_interpolation(&self) -> bool {
+            self.animations
                 .iter()
-                .all(|animation| matches!(animation.effect_signature(), AnimationSignature::Pure))
-            {
-                AnimationSignature::Pure
-            } else {
-                AnimationSignature::Unclassified
-            }
+                .all(|animation| animation.can_replay_interpolation())
         }
 
         /// The Reference's `AnimationGroup.clean_up_from_scene`: removal is
@@ -386,6 +377,26 @@ macro_rules! composite_common {
 
 impl Animation for AnimationGroup {
     composite_common!();
+
+    fn prepare_interpolation_replay(&mut self) {
+        for animation in &mut self.animations {
+            animation.prepare_interpolation_replay();
+        }
+    }
+
+    /// Eagerly begun groups have every member's frozen inputs in the segment
+    /// begin snapshot, so purity composes by conjunction.
+    fn effect_signature(&self) -> AnimationSignature {
+        if self
+            .animations
+            .iter()
+            .all(|animation| matches!(animation.effect_signature(), AnimationSignature::Pure))
+        {
+            AnimationSignature::Pure
+        } else {
+            AnimationSignature::Unclassified
+        }
+    }
 
     /// The Reference's `AnimationGroup.begin`: mark the container animating,
     /// then begin every member. No starting copy and no zero-interpolate at
@@ -478,6 +489,20 @@ pub struct Succession {
     max_end_time: f64,
     active: usize,
     deferred: Option<AnimError>,
+    playback: Vec<MemberPlayback>,
+    replayable: bool,
+    replaying: bool,
+    last_time: Option<f64>,
+}
+
+/// At most three content checkpoints per initialized member, independent of
+/// frame count. Lifecycle callbacks run once; revisiting a member restores its
+/// already-prepared or already-finished content instead of calling them again.
+struct MemberPlayback {
+    before: Option<FamilyCheckpoint>,
+    prepared: Option<FamilyCheckpoint>,
+    completed: Option<FamilyCheckpoint>,
+    finished: bool,
 }
 
 impl Succession {
@@ -514,6 +539,10 @@ impl Succession {
             max_end_time,
             active: 0,
             deferred: None,
+            playback: Vec::new(),
+            replayable: false,
+            replaying: false,
+            last_time: None,
         })
     }
 
@@ -575,18 +604,103 @@ impl Succession {
         index
     }
 
-    /// Walk the active member forward to `target`, finishing each member
-    /// passed and beginning the next — so a coarse alpha step that crosses
-    /// several members still runs every one of them in order (BN-11). The
-    /// Reference jumps straight to the target and silently drops the
-    /// members in between.
+    fn replay_sources_are_static(&self, stage: &Stage) -> bool {
+        self.can_replay_interpolation()
+            && self.animations.iter().all(|animation| {
+                animation
+                    .preflight_mobjects()
+                    .into_iter()
+                    .chain(animation.all_mobjects())
+                    .all(|mob| !stage.has_updaters_in_family(mob))
+            })
+    }
+
+    fn begin_member(&mut self, stage: &mut Stage, index: usize) -> Result<(), AnimError> {
+        let mob = self.animations[index].state().mobject();
+        let before = self
+            .replayable
+            .then(|| stage.checkpoint_family(mob))
+            .transpose()?;
+        // Own the attempted lifetime before calling user code. A canonical
+        // begin may already have suspended the family when its zero sample
+        // reports a deferred error; the segment's abort must still visit it.
+        self.playback.push(MemberPlayback {
+            before,
+            prepared: None,
+            completed: None,
+            finished: false,
+        });
+        self.animations[index].begin(stage)?;
+        if let Some(error) = self.animations[index].deferred_error() {
+            return Err(error);
+        }
+        // A setup hook may have installed updaters on an auxiliary object.
+        // Such state must never be silently reset by the content cache.
+        self.replayable &= self.replay_sources_are_static(stage);
+        self.playback[index].prepared = self
+            .replayable
+            .then(|| stage.checkpoint_family(mob))
+            .transpose()?;
+        Ok(())
+    }
+
+    /// Rebuild a visited member's local context. Undo later members in reverse
+    /// order, then apply finished predecessors in author order. This handles
+    /// both disjoint mobjects and chains that mutate the same family, including
+    /// alignments that changed its child topology or record schema.
+    fn restore_member(&self, stage: &mut Stage, target: usize) -> Result<(), AnimError> {
+        for member in self.playback.iter().rev() {
+            if let Some(before) = &member.before {
+                stage.restore_family_checkpoint(before)?;
+            }
+        }
+        for member in self.playback.iter().take(target) {
+            if let Some(completed) = &member.completed {
+                stage.restore_family_checkpoint(completed)?;
+            }
+        }
+        if let Some(prepared) = &self.playback[target].prepared {
+            stage.restore_family_checkpoint(prepared)?;
+        }
+        Ok(())
+    }
+
+    fn finish_member(&mut self, stage: &mut Stage, index: usize) -> Result<(), AnimError> {
+        if self.playback[index].finished {
+            if let Some(completed) = &self.playback[index].completed {
+                stage.restore_family_checkpoint(completed)?;
+            }
+            return Ok(());
+        }
+        self.animations[index].finish(stage);
+        self.playback[index].finished = true;
+        if let Some(error) = self.animations[index].deferred_error() {
+            return Err(error);
+        }
+        if self.replayable {
+            self.playback[index].completed =
+                Some(stage.checkpoint_family(self.animations[index].state().mobject())?);
+        }
+        Ok(())
+    }
+
+    /// First visits still walk and run every intermediate member. Revisits
+    /// never begin an animation a second time, so setup/teardown effects and
+    /// native starting copies retain their original lifetime.
     fn advance_to(&mut self, stage: &mut Stage, target: usize) {
-        while self.active < target && self.deferred.is_none() {
-            // The member being left behind lands on its own final alpha.
-            self.animations[self.active].finish(stage);
-            self.active += 1;
-            if let Err(err) = self.animations[self.active].begin(stage) {
-                self.deferred = Some(err);
+        while self.playback.len() <= target && self.deferred.is_none() {
+            let previous = self.playback.len() - 1;
+            let result = (|| {
+                if self.replayable && self.replaying {
+                    self.restore_member(stage, previous)?;
+                    self.animations[previous].prepare_interpolation_replay();
+                }
+                self.finish_member(stage, previous)?;
+                self.active = previous + 1;
+                self.begin_member(stage, self.active)
+            })();
+            if let Err(error) = result {
+                self.deferred = Some(error);
             }
         }
     }
@@ -595,26 +709,70 @@ impl Succession {
 impl Animation for Succession {
     composite_common!();
 
+    fn prepare_interpolation_replay(&mut self) {
+        self.replaying = true;
+    }
+
+    /// Later members' starting copies do not exist in the segment's begin
+    /// snapshot. Restoring that snapshot while retaining an advanced member
+    /// index would leave stale inputs, even when every leaf is pure. Timeline
+    /// seek therefore uses its existing checkpoint-and-serial-replay route.
+    fn effect_signature(&self) -> AnimationSignature {
+        AnimationSignature::Unclassified
+    }
+
     /// The Reference's `Succession.begin`: only the first member begins —
     /// the rest begin as the timeline reaches them.
     fn begin(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
         begin_composite(&mut self.state, stage)?;
         self.active = 0;
-        self.animations[0].begin(stage)
+        self.deferred = None;
+        self.playback.clear();
+        self.replaying = false;
+        self.last_time = None;
+        self.replayable = self.replay_sources_are_static(stage);
+        self.begin_member(stage, 0)
     }
 
     /// Locate the member the timeline is inside, walking (and running) any
     /// members passed on the way, then interpolate it at its window
     /// position.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-        let time = timeline_position(&self.state.config, alpha, self.max_end_time);
+        if self.deferred.is_some() || self.playback.is_empty() {
+            return;
+        }
+        // The rational clock may round the final raw alpha above one. Its
+        // clipped endpoint and finish(1) are the same timeline position, not
+        // a backwards traversal of stateful content.
+        let time = clip(
+            timeline_position(&self.state.config, alpha, self.max_end_time),
+            0.0,
+            self.max_end_time,
+        );
+        self.replayable &= self.replay_sources_are_static(stage);
+        if self.last_time.is_some_and(|last| time < last) {
+            if !self.replayable {
+                self.deferred = Some(AnimError::StatefulSuccessionRewind);
+                return;
+            }
+            self.replaying = true;
+        }
         let target = self.member_at(time);
         self.advance_to(stage, target);
         if self.deferred.is_some() {
             return;
         }
+        if self.replayable && self.replaying {
+            if let Err(error) = self.restore_member(stage, target) {
+                self.deferred = Some(error);
+                return;
+            }
+            self.animations[target].prepare_interpolation_replay();
+        }
+        self.active = target;
         let sub_alpha = self.timings[self.active].sub_alpha(time);
         self.animations[self.active].interpolate(stage, sub_alpha);
+        self.last_time = Some(time);
     }
 
     /// The Reference's `Succession.update_mobjects`: only the active member
@@ -629,16 +787,45 @@ impl Animation for Succession {
     /// members through `interpolate`), finish the member left active, and
     /// stop the container animating.
     fn finish(&mut self, stage: &mut Stage) {
+        // A reverse curve may leave the most recently begun member paused
+        // behind the current view. Balance that lifetime once before landing
+        // on the composition's final member; restoring checkpoints then puts
+        // the final view back without repeating any lifecycle callback.
+        if self.deferred.is_none()
+            && let Some(last) = self.playback.len().checked_sub(1)
+            && last != self.active
+            && !self.playback[last].finished
+        {
+            let result = (|| {
+                self.restore_member(stage, last)?;
+                self.animations[last].prepare_interpolation_replay();
+                self.finish_member(stage, last)
+            })();
+            if let Err(error) = result {
+                self.deferred = Some(error);
+            }
+        }
         let final_alpha = self.state.config.final_alpha_value;
         self.interpolate(stage, final_alpha);
         if self.deferred.is_none() {
-            self.animations[self.active].finish(stage);
+            if let Err(error) = self.finish_member(stage, self.active) {
+                self.deferred = Some(error);
+            }
+        } else {
+            // A named reverse refusal must not leave the active family's
+            // updaters suspended after the segment driver reports the error.
+            self.abort(stage);
         }
         stage.set_animating_status(self.state.mobject(), false, true);
     }
 
     fn abort(&mut self, stage: &mut Stage) {
-        self.animations[self.active].abort(stage);
+        for (animation, playback) in self.animations.iter_mut().zip(&mut self.playback) {
+            if !playback.finished {
+                animation.abort(stage);
+                playback.finished = true;
+            }
+        }
         stage.set_animating_status(self.state.mobject(), false, true);
     }
 

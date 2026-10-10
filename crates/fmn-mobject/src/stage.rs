@@ -20,6 +20,7 @@
 //! - Snapshots are CoW under the view protocol's rule V5: O(touched)
 //!   copies, verified by test.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -172,6 +173,71 @@ pub struct UpdaterSlot {
     pub func: UpdaterFn,
 }
 
+/// Native mobject attributes used by a shared updater callable. Keeping these
+/// apart from the callable is essential: `copy()` shares functions, but a
+/// tracer's observations or a boundary's clock belong to the receiving object.
+trait NativeUpdaterValue {
+    fn clone_value(&self) -> Box<dyn NativeUpdaterValue>;
+    fn remap_handles(&mut self, map: &CopyMap);
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl Clone for Box<dyn NativeUpdaterValue> {
+    fn clone(&self) -> Self {
+        self.clone_value()
+    }
+}
+
+struct TypedUpdaterValue<T> {
+    value: T,
+    remap: fn(&mut T, &CopyMap),
+}
+
+impl<T: Clone + 'static> NativeUpdaterValue for TypedUpdaterValue<T> {
+    fn clone_value(&self) -> Box<dyn NativeUpdaterValue> {
+        Box::new(Self {
+            value: self.value.clone(),
+            remap: self.remap,
+        })
+    }
+
+    fn remap_handles(&mut self, map: &CopyMap) {
+        (self.remap)(&mut self.value, map);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        &self.value
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        &mut self.value
+    }
+}
+
+/// CoW keeps frame capture cheap while freezing native updater attributes.
+/// Mutable access detaches before a write; callables remain shared by reference.
+#[derive(Clone)]
+pub(crate) struct NativeUpdaterState(Rc<Box<dyn NativeUpdaterValue>>);
+
+impl NativeUpdaterState {
+    fn new<T: Clone + 'static>(value: T, remap: fn(&mut T, &CopyMap)) -> Self {
+        Self(Rc::new(Box::new(TypedUpdaterValue { value, remap })))
+    }
+
+    fn remap_handles(&mut self, map: &CopyMap) {
+        Rc::make_mut(&mut self.0).remap_handles(map);
+    }
+
+    fn get<T: 'static>(&self) -> Option<&T> {
+        self.0.as_any().downcast_ref()
+    }
+
+    fn get_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        Rc::make_mut(&mut self.0).as_any_mut().downcast_mut()
+    }
+}
+
 /// Arena entry: record data plus graph edges and lifetime state. Edges are
 /// private so every structural mutation flows through [`Stage`] and the
 /// family cache invalidates correctly.
@@ -187,6 +253,7 @@ pub struct Entry {
     children_epoch: u64,
     parents: Vec<Mob>,
     updaters: Vec<UpdaterSlot>,
+    updater_states: Vec<(UpdaterId, NativeUpdaterState)>,
     /// `suspend_updating` state: while set, [`Stage::update`] prunes this
     /// entry's whole subtree (the Reference's early return).
     updating_suspended: bool,
@@ -243,6 +310,7 @@ impl Entry {
             children_epoch: fresh_epoch(),
             parents: Vec::new(),
             updaters: Vec::new(),
+            updater_states: Vec::new(),
             updating_suspended: false,
             is_animating: false,
             tracker: None,
@@ -287,6 +355,7 @@ impl Entry {
             children_epoch: fresh_epoch(),
             parents: self.parents.clone(),
             updaters: self.updaters.clone(),
+            updater_states: self.updater_states.clone(),
             updating_suspended: self.updating_suspended,
             is_animating: self.is_animating,
             tracker: self.tracker,
@@ -470,6 +539,7 @@ pub(crate) struct SnapshotEntry {
     pub(crate) submobjects: Vec<Mob>,
     pub(crate) parents: Vec<Mob>,
     pub(crate) updaters: Vec<UpdaterSlot>,
+    pub(crate) updater_states: Vec<(UpdaterId, NativeUpdaterState)>,
     pub(crate) updating_suspended: bool,
     pub(crate) is_animating: bool,
     pub(crate) tracker: Option<crate::dynamics::Tracker>,
@@ -1227,8 +1297,14 @@ impl Stage {
         // imported token so the stage-local allocator cannot collide.
         if let Some(next_imported_id) = entries
             .iter()
-            .flat_map(|(_, entry)| entry.updaters.iter())
-            .map(|slot| slot.id.raw().saturating_add(1))
+            .flat_map(|(_, entry)| {
+                entry
+                    .updaters
+                    .iter()
+                    .map(|slot| slot.id)
+                    .chain(entry.updater_states.iter().map(|(id, _)| *id))
+            })
+            .map(|id| id.raw().saturating_add(1))
             .max()
         {
             target.next_updater_id = target.next_updater_id.max(next_imported_id);
@@ -1241,7 +1317,8 @@ impl Stage {
             pairs.push((old, new));
             map.insert(old, new);
         }
-        for &(_, new) in &pairs {
+        let copied = CopyMap { pairs };
+        for &(_, new) in copied.pairs() {
             let entry = target.get_mut(new).expect("just allocated");
             for edges in [&mut entry.submobjects, &mut entry.parents] {
                 let mut seen: Vec<Mob> = Vec::new();
@@ -1260,8 +1337,11 @@ impl Stage {
             }
             // A moved entry arrives with its old stage's value.
             entry.children_epoch = fresh_epoch();
+            for (_, state) in &mut entry.updater_states {
+                state.remap_handles(&copied);
+            }
         }
-        CopyMap { pairs }
+        copied
     }
 
     /// manim `copy()` (§8.3): deep-copy the family subtree; family-internal
@@ -1706,6 +1786,102 @@ impl Stage {
         )
     }
 
+    /// Register a dt updater whose native object attributes are separate from
+    /// its callable. Copies share `updater` and its identity, while `state`
+    /// follows the receiving mobject through family copies and in-memory
+    /// snapshots. `remap` rewrites family-internal handles through the copy map;
+    /// references outside the copied family should remain unchanged.
+    ///
+    /// The callable reads or edits its attributes with [`Stage::updater_state`]
+    /// and [`Stage::updater_state_mut`], using the supplied identity. Finish any
+    /// mutable state borrow before calling other Stage methods. `T::clone` must
+    /// give mutable object attributes independent value semantics; shared
+    /// callback objects themselves should stay in the callable.
+    ///
+    /// Attributes survive removing or clearing the updater, just like ordinary
+    /// mobject attributes. This also preserves snapshot-per-tick execution when
+    /// an earlier callback removes a later callback from the same list.
+    /// Durable snapshots omit executable native attributes along with callable
+    /// bodies: replay must rebuild them, or reinstall them explicitly with
+    /// [`Stage::set_updater_state`] after binding the callable identity.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] or [`StageError::UpdaterIdExhausted`].
+    pub fn add_dt_updater_with_state<T: Clone + 'static>(
+        &mut self,
+        mob: Mob,
+        state: T,
+        remap: fn(&mut T, &CopyMap),
+        mut updater: impl FnMut(&mut Stage, Mob, UpdaterId, f64) + 'static,
+        call: bool,
+    ) -> Result<UpdaterId, StageError> {
+        let id = UpdaterId(self.next_updater_id);
+        self.register_updater(
+            mob,
+            UpdaterFn::Dt(Rc::new(RefCell::new(move |stage: &mut Stage, mob, dt| {
+                updater(stage, mob, id, dt);
+            }))),
+            None,
+            false,
+        )?;
+        self.set_updater_state(mob, id, state, remap)?;
+        if call {
+            self.update_mob(mob, 0.0);
+        }
+        Ok(id)
+    }
+
+    /// Install native attributes for an existing updater identity. This is
+    /// also the explicit state-rebinding seam after a durable snapshot's
+    /// callable manifest has been resolved. No native state is inferred from
+    /// a serialized updater identity.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] for a dead mobject or
+    /// [`StageError::UpdaterBindingMismatch`] for an unregistered identity.
+    pub fn set_updater_state<T: Clone + 'static>(
+        &mut self,
+        mob: Mob,
+        id: UpdaterId,
+        state: T,
+        remap: fn(&mut T, &CopyMap),
+    ) -> Result<(), StageError> {
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        if !entry.updaters.iter().any(|slot| slot.id == id) {
+            return Err(StageError::UpdaterBindingMismatch);
+        }
+        let state = NativeUpdaterState::new(state, remap);
+        if let Some((_, previous)) = entry.updater_states.iter_mut().find(|(key, _)| *key == id) {
+            *previous = state;
+        } else {
+            entry.updater_states.push((id, state));
+        }
+        Ok(())
+    }
+
+    /// Read a native updater's object-owned attributes. Returns `None` for a
+    /// stale handle, missing binding, or mismatched state type.
+    #[must_use]
+    pub fn updater_state<T: 'static>(&self, mob: Mob, id: UpdaterId) -> Option<&T> {
+        self.get(mob)?
+            .updater_states
+            .iter()
+            .find(|(key, _)| *key == id)?
+            .1
+            .get()
+    }
+
+    /// Edit native updater attributes, detaching any shared in-memory
+    /// snapshot or copied value before the write.
+    pub fn updater_state_mut<T: 'static>(&mut self, mob: Mob, id: UpdaterId) -> Option<&mut T> {
+        self.get_mut(mob)?
+            .updater_states
+            .iter_mut()
+            .find(|(key, _)| *key == id)?
+            .1
+            .get_mut()
+    }
+
     /// Insert a non-dt updater at `index` in the list (Reference
     /// `insert_updater`; no immediate call, matching it).
     ///
@@ -1750,14 +1926,51 @@ impl Stage {
     }
 
     /// Copy `source`'s updater list onto `mob` (Reference `match_updaters`:
-    /// callables shared by reference).
+    /// callables shared by reference). Native updater attributes copy by value
+    /// and rebind across aligned families; other target attributes remain.
     ///
     /// # Errors
-    /// [`StageError::StaleHandle`] if either handle is dead.
+    /// [`StageError::StaleHandle`] if either handle is dead, or
+    /// [`StageError::FamilyShapeMismatch`] if native attributes need rebinding
+    /// across families with different shapes.
     pub fn match_updaters(&mut self, mob: Mob, source: Mob) -> Result<(), StageError> {
-        let updaters = self.try_get(source)?.updaters.clone();
+        self.try_get(mob)?;
+        let source_entry = self.try_get(source)?;
+        let updaters = source_entry.updaters.clone();
+        let mut states: Vec<_> = source_entry
+            .updater_states
+            .iter()
+            .filter(|(id, _)| updaters.iter().any(|slot| slot.id == *id))
+            .cloned()
+            .collect();
+        if !states.is_empty() {
+            let source_family = self.family(source);
+            let target_family = self.family(mob);
+            if source_family.len() != target_family.len()
+                || source_family.iter().zip(&target_family).any(|(&a, &b)| {
+                    self.get(a).map(|entry| entry.submobjects.len())
+                        != self.get(b).map(|entry| entry.submobjects.len())
+                })
+            {
+                return Err(StageError::FamilyShapeMismatch);
+            }
+            let map = CopyMap {
+                pairs: source_family.into_iter().zip(target_family).collect(),
+            };
+            for (_, state) in &mut states {
+                state.remap_handles(&map);
+            }
+        }
         let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
         entry.updaters = updaters;
+        for (id, state) in states {
+            if let Some((_, previous)) = entry.updater_states.iter_mut().find(|(key, _)| *key == id)
+            {
+                *previous = state;
+            } else {
+                entry.updater_states.push((id, state));
+            }
+        }
         Ok(())
     }
 
@@ -2098,6 +2311,7 @@ impl Stage {
                                 submobjects: entry.submobjects.clone(),
                                 parents: entry.parents.clone(),
                                 updaters: entry.updaters.clone(),
+                                updater_states: entry.updater_states.clone(),
                                 updating_suspended: entry.updating_suspended,
                                 is_animating: entry.is_animating,
                                 tracker: entry.tracker,
@@ -2143,6 +2357,7 @@ impl Stage {
                     children_epoch: fresh_epoch(),
                     parents: e.parents.clone(),
                     updaters: e.updaters.clone(),
+                    updater_states: e.updater_states.clone(),
                     updating_suspended: e.updating_suspended,
                     is_animating: e.is_animating,
                     tracker: e.tracker,
@@ -2165,6 +2380,130 @@ impl Stage {
         self.roots = snapshot.roots.clone();
         self.next_updater_id = snapshot.next_updater_id;
         self.touch_topology();
+    }
+}
+
+/// An identity-preserving checkpoint of one family's content and animation
+/// lifecycle flags. Unlike [`Snapshot`], this is not an arena rollback: it
+/// retains no roots, clock, allocation state, pins, target/saved-state links,
+/// updater registrations, or updater closure state.
+///
+/// The captured graph is descendant-closed and preserves every shared child.
+/// Storage is proportional to that family, with record/image data shared under
+/// the ordinary snapshot CoW rules. No frame history or detached mobjects are
+/// allocated. Every original handle must remain live when restoring.
+pub struct FamilyCheckpoint {
+    entries: Vec<(Mob, FamilyCheckpointEntry)>,
+}
+
+struct FamilyCheckpointEntry {
+    buffer: RecordBuffer,
+    placement: Placement,
+    submobjects: Vec<Mob>,
+    updating_suspended: bool,
+    is_animating: bool,
+    tracker: Option<crate::dynamics::Tracker>,
+    uniforms: Uniforms,
+    z_index: i32,
+    shape: ShapeSlot,
+    render_primitive: RenderPrimitive,
+    image: Option<ImageResource>,
+}
+
+impl Stage {
+    /// Capture only `mob`'s current family for a composition's reversible
+    /// interpolation. Capturing does not run or copy executable updater state.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] for a dead or foreign root.
+    pub fn checkpoint_family(&self, mob: Mob) -> Result<FamilyCheckpoint, StageError> {
+        self.try_get(mob)?;
+        let entries = self
+            .family(mob)
+            .into_iter()
+            .map(|member| {
+                let entry = self.get(member).expect("a live family's member is live");
+                let buffer = entry.buffer.snapshot_clone();
+                let hint_was_live = entry.shape.point_revision.is_some()
+                    && entry.shape.point_revision == entry.buffer.field_revision("point")
+                    && !entry.buffer.writable_view_affects("point");
+                (
+                    member,
+                    FamilyCheckpointEntry {
+                        shape: ShapeSlot {
+                            tag: entry.shape.tag,
+                            point_revision: hint_was_live
+                                .then(|| buffer.field_revision("point"))
+                                .flatten(),
+                        },
+                        buffer,
+                        placement: entry.placement,
+                        submobjects: entry.submobjects.clone(),
+                        updating_suspended: entry.updating_suspended,
+                        is_animating: entry.is_animating,
+                        tracker: entry.tracker,
+                        uniforms: entry.uniforms,
+                        z_index: entry.z_index,
+                        render_primitive: entry.render_primitive,
+                        image: entry.image.clone(),
+                    },
+                )
+            })
+            .collect();
+        Ok(FamilyCheckpoint { entries })
+    }
+
+    /// Restore a family's captured content in place without changing other
+    /// families, scene membership, time, or updater state. Live views detach
+    /// from restored records under the same V6 rule as an arena restore.
+    ///
+    /// Current children absent from the checkpoint are detached, never deleted.
+    /// External parents and their sibling edges survive. The snapshot's graph
+    /// is descendant-closed, so restoring its own outgoing edges cannot create
+    /// a cycle through an external node. Removing changed edges first also
+    /// avoids temporary cycles between two different valid family layouts.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if any original member has been deleted or
+    /// the checkpoint belongs to a different Stage. All handles are checked
+    /// before any content or topology changes; deleted identities are never
+    /// resurrected or rebound to a recycled slot.
+    pub fn restore_family_checkpoint(
+        &mut self,
+        checkpoint: &FamilyCheckpoint,
+    ) -> Result<(), StageError> {
+        for (member, _) in &checkpoint.entries {
+            self.try_get(*member)?;
+        }
+        let changed: Vec<_> = checkpoint
+            .entries
+            .iter()
+            .filter(|(member, saved)| {
+                self.get(*member).expect("prechecked").submobjects != saved.submobjects
+            })
+            .map(|(member, saved)| (*member, &saved.submobjects))
+            .collect();
+        for &(member, _) in &changed {
+            self.replace_children(member, &[])?;
+        }
+        for &(member, children) in &changed {
+            self.replace_children(member, children)?;
+        }
+        for (member, saved) in &checkpoint.entries {
+            let entry = self.get_mut(*member).expect("prechecked");
+            entry.buffer = saved.buffer.snapshot_clone();
+            entry.set_placement(saved.placement);
+            entry.updating_suspended = saved.updating_suspended;
+            entry.is_animating = saved.is_animating;
+            entry.tracker = saved.tracker;
+            entry.uniforms = saved.uniforms;
+            entry.z_index = saved.z_index;
+            entry.shape = saved.shape;
+            entry.render_primitive = saved.render_primitive;
+            entry.replace_image_resource(saved.image.clone());
+            *entry.bbox.borrow_mut() = BboxCache::default();
+        }
+        Ok(())
     }
 }
 

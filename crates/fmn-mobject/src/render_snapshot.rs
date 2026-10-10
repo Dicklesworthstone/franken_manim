@@ -301,6 +301,7 @@ fn project(
                 submobjects: children,
                 parents: Vec::new(),
                 updaters: Vec::new(),
+                updater_states: Vec::new(),
                 updating_suspended: false,
                 is_animating: false,
                 tracker: None,

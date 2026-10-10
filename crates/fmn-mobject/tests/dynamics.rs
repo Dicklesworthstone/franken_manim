@@ -373,6 +373,74 @@ fn always_redraw_rebuilds_per_tick_without_arena_growth() {
 }
 
 #[test]
+fn always_redraw_copies_share_factory_but_retire_only_their_own_content() {
+    let mut stage = Stage::new();
+    let builds = Rc::new(Cell::new(0));
+    let factory_builds = Rc::clone(&builds);
+    let original = stage.always_redraw(move |stage| {
+        let x = factory_builds.get();
+        factory_builds.set(x + 1);
+        stage.add(Mobject::from_points(&[[f64::from(x), 0.0, 0.0]]))
+    });
+    let copy = stage.copy_family(original).unwrap();
+    let original_child = stage.get(original).unwrap().submobjects()[0];
+    let retired_copy_child = stage.get(copy).unwrap().submobjects()[0];
+    stage.update_mobject(copy, 0.25);
+    let current_copy_child = stage.get(copy).unwrap().submobjects()[0];
+    assert_eq!(stage.get_x(copy), 1.0);
+    assert_eq!(stage.get_x(original), 0.0);
+    assert!(stage.contains(original_child));
+    assert!(!stage.contains(retired_copy_child));
+    stage.update_mobject(original, 0.25);
+    assert_eq!(stage.get_x(original), 2.0);
+    assert_eq!(stage.get_x(copy), 1.0);
+    assert!(!stage.contains(original_child));
+    assert!(stage.contains(current_copy_child));
+    assert_eq!(builds.get(), 3, "factory identity stays shared on copy");
+}
+
+#[test]
+fn clearing_updaters_during_a_tick_preserves_pending_native_attributes() {
+    let mut stage = Stage::new();
+    let mob = stage.add(square());
+    stage
+        .add_updater(mob, |stage, me| stage.clear_updaters(me, false), false)
+        .unwrap();
+    let native = stage
+        .add_dt_updater_with_state(
+            mob,
+            vec![1.0_f64],
+            |_, _| {},
+            |stage, me, id, dt| {
+                stage
+                    .updater_state_mut::<Vec<f64>>(me, id)
+                    .unwrap()
+                    .push(dt);
+            },
+            false,
+        )
+        .unwrap();
+    stage.update_mobject(mob, 2.0);
+    assert!(stage.updater_ids(mob).is_empty());
+    assert_eq!(
+        stage.updater_state::<Vec<f64>>(mob, native),
+        Some(&vec![1.0, 2.0])
+    );
+    stage.update_mobject(mob, 4.0);
+    assert_eq!(
+        stage.updater_state::<Vec<f64>>(mob, native),
+        Some(&vec![1.0, 2.0])
+    );
+    assert_eq!(stage.updater_state::<f64>(mob, native), None);
+    assert_eq!(stage.updater_state_mut::<f64>(mob, native), None);
+    assert_eq!(
+        stage.set_updater_state(mob, native, 10.0, |_, _| {}),
+        Err(StageError::UpdaterBindingMismatch),
+        "rebinding state requires an installed callable identity"
+    );
+}
+
+#[test]
 fn always_redraw_keeps_reused_content_alive_even_when_pinned() {
     for pinned in [false, true] {
         let mut stage = Stage::new();
