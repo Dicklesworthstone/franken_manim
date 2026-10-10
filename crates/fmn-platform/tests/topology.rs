@@ -247,9 +247,25 @@ fn macos_m4_pro_sysctl_derives_ten_p_four_e_and_their_l2_clusters() {
     );
     // Apple's system-level cache is not reported as an L3.
     assert!(t.l3_domains.is_empty());
+    // REGEN_TOPOLOGY writes the committed snapshot from this code, so every
+    // fact it records is pinned here as well: CPUs in order, one package, one
+    // core per CPU (no SMT), and one NUMA node and one processor group that
+    // each hold all fourteen CPUs.
+    let all: Vec<u32> = (0..14).collect();
+    assert_eq!(
+        t.cpus
+            .iter()
+            .map(|cpu| (cpu.id, cpu.package_id, cpu.core_id))
+            .collect::<Vec<_>>(),
+        all.iter().map(|&i| (i, 0, i)).collect::<Vec<_>>()
+    );
     assert_eq!(t.numa_nodes.len(), 1);
-    assert_eq!(t.numa_nodes[0].cpus.len(), 14);
+    assert_eq!((t.numa_nodes[0].id, &t.numa_nodes[0].cpus), (0, &all));
     assert_eq!(t.processor_groups.len(), 1);
+    assert_eq!(
+        (t.processor_groups[0].id, &t.processor_groups[0].cpus),
+        (0, &all)
+    );
     assert_eq!(t.total_memory_bytes, Some(64 * 1024 * 1024 * 1024));
 
     // Planted negative: the L2 assertion reads the recorded cluster width.
