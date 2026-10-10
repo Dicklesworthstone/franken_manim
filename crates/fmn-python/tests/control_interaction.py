@@ -196,9 +196,18 @@ def test_textbox_failed_native_typeset_preserves_value_text_family_and_spans():
     try:
         widget.set_value("\U0001f980")
     except ValueError as error:
-        assert "unmapped" in str(error).lower()
+        # The portal's Textbox refusal names the schema-level class and keeps
+        # Scribe's precise diagnostic (the native textbox_error spelling).
+        assert str(error).startswith("unmapped glyph: "), error
+        assert "U+1F980" in str(error) and "has no glyph" in str(error), error
     else:
         raise AssertionError("unmapped textbox glyph was accepted")
+    try:
+        widget.update_text("\U0001f980")
+    except ValueError as error:
+        assert str(error).startswith("unmapped glyph: "), error
+    else:
+        raise AssertionError("unmapped textbox preview glyph was accepted")
     assert widget.text is label and tuple(label.submobjects) == children
     assert widget.get_value() == label.string == "valid"
     assert label._string_sub_spans == spans
