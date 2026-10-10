@@ -40,8 +40,9 @@ def install_surface_lifecycle(native):
             raise RuntimeError("surface initialization is already in progress")
         opacity = kwargs.pop("opacity", None)
         z_index = int(kwargs.pop("z_index", 0))
-        g["_refuse_unrouted"](type(self).__name__ + "()",
-                              [(key, True) for key in sorted(kwargs)])
+        # A keyword outside the Reference's Surface/Mobject chain is its own
+        # TypeError; an accepted keyword Atlas does not route yet is refused.
+        g["_refuse_surface_keywords"](type(self).__name__ + "()", kwargs)
         options = sampling_options(dict(resolution=resolution, u_range=u_range,
             v_range=v_range, preferred_creation_axis=preferred_creation_axis,
             epsilon=epsilon, normal_nudge=normal_nudge))

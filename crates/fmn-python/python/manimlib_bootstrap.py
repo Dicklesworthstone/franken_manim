@@ -7667,6 +7667,30 @@ def _refuse_unrouted(class_name, entries):
         )
 
 
+# Keywords the Reference's Surface.__init__ and Mobject.__init__ accept
+# through a solid's **kwargs (three_dimensions.py at 6199a00d).
+_SURFACE_CHAIN_KEYWORDS = frozenset((
+    "color", "opacity", "shading", "texture_paths", "is_fixed_in_frame",
+    "depth_test", "z_index", "u_range", "v_range", "resolution",
+    "preferred_creation_axis", "epsilon", "normal_nudge",
+))
+
+
+def _refuse_surface_keywords(class_name, kwargs):
+    """Leftover keywords of a Surface-family solid. A name the Reference's
+    Surface/Mobject chain accepts but Atlas does not route yet is the precise
+    unrouted refusal; any other name is the Reference's own TypeError from
+    Mobject.__init__."""
+    # Python names the first unexpected keyword in call order.
+    unknown = [name for name in kwargs if name not in _SURFACE_CHAIN_KEYWORDS]
+    if unknown:
+        raise TypeError(
+            "Mobject.__init__() got an unexpected keyword argument "
+            + repr(unknown[0])
+        )
+    _refuse_unrouted(class_name, [(name, True) for name in sorted(kwargs)])
+
+
 # tex_mobject.py's get_command_matches: a control word or control symbol, or
 # a run of braces.
 _TEX_COMMAND_OR_BRACES = _re.compile(
@@ -12362,10 +12386,7 @@ class Surface(Mobject):
     ):
         opacity = kwargs.pop("opacity", None)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted(
-            type(self).__name__ + "()",
-            [(name, True) for name in sorted(kwargs)],
-        )
+        _refuse_surface_keywords(type(self).__name__ + "()", kwargs)
         _install_live_state(self)
         self.u_range = tuple(u_range)
         self.v_range = tuple(v_range)
@@ -12748,7 +12769,7 @@ class Sphere(Surface):
         preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        _refuse_unrouted("Sphere()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Sphere()", kwargs)
         _install_live_state(self)
         self.radius = float(radius)
         self.clockwise = bool(clockwise)
@@ -12801,7 +12822,7 @@ class Torus(Surface):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Torus()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Torus()", kwargs)
         _install_live_state(self)
         self.r1 = float(r1)
         self.r2 = float(r2)
@@ -12857,7 +12878,7 @@ class Cylinder(Surface):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Cylinder()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Cylinder()", kwargs)
         _install_live_state(self)
         self.height = float(height)
         self.radius = float(radius)
@@ -12925,7 +12946,7 @@ class Cone(Cylinder):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Cone()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Cone()", kwargs)
         _install_live_state(self)
         self.height = float(height)
         self.radius = float(radius)
@@ -12984,7 +13005,7 @@ class Line3D(Cylinder):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Line3D()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Line3D()", kwargs)
         _install_live_state(self)
         start_point = _np.array(_vec3(start), dtype=float)
         end_point = _np.array(_vec3(end), dtype=float)
@@ -13040,7 +13061,7 @@ class Disk3D(Surface):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Disk3D()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Disk3D()", kwargs)
         _install_live_state(self)
         self.radius = float(radius)
         self.u_range = tuple(u_range)
@@ -13088,7 +13109,7 @@ class Square3D(Surface):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Square3D()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Square3D()", kwargs)
         _install_live_state(self)
         self.side_length = float(side_length)
         self.u_range = tuple(u_range)
@@ -13131,10 +13152,7 @@ class Cube(SGroup):
     ):
         depth_test = kwargs.pop("depth_test", True)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted(
-            type(self).__name__ + "()",
-            [(name, True) for name in sorted(kwargs)],
-        )
+        _refuse_surface_keywords(type(self).__name__ + "()", kwargs)
         _install_live_state(self)
         self.resolution = (
             int(square_resolution[0]),
@@ -13166,7 +13184,7 @@ class Prism(Cube):
         shading = kwargs.pop("shading", None)
         depth_test = kwargs.pop("depth_test", True)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Prism()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Prism()", kwargs)
         _install_live_state(self)
         self.resolution = (2, 2)
         self.preferred_creation_axis = 1
