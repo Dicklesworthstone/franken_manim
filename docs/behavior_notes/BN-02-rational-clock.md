@@ -75,38 +75,54 @@ plays are chunked.
   `bn02-frame-count`). `UniformSamples` (`_2023/convolutions2/continuous.py`)
   waits 0.1 s a hundred times: 35.000 s in the Reference, 38.333 s here.
 
-## Native tracing-tail time windows
+## Native tracing cadence and time windows
 
-Native `TracingTail`, including the Python portal's already-bound mobject
-source, measures its history in elapsed seconds. `time_per_anchor` spaces
-observations on a regular temporal grid; the moving `time_traced` boundary
-and the current endpoint interpolate between those observations. Smoothing
-and the true-arc-length stroke and opacity tapers still operate on that
-path. Scene frame sampling and the rational clock are unchanged.
+Native `TracedPath` and `TracingTail`, including the Python portal's
+already-bound tail source, measure history in elapsed seconds.
+`time_per_anchor` spaces observations on a regular temporal grid; the
+moving `time_traced` boundary and the current endpoint interpolate between
+those observations. Smoothing and the true-arc-length stroke and opacity
+tapers still operate on that path. Scene frame sampling and the rational
+clock are unchanged.
 
 The Reference chooses a recent-point count from the latest `dt`, so a
 change of update size changes the duration represented by older samples.
-The native tail instead retains the configured time window under tiny,
-irregular, and large positive updates. Its storage and sampling work are
+The native tracers retain the configured time window under tiny,
+irregular, and large positive updates. Their storage and sampling work are
 bounded by the window/cadence ratio, including the predecessor needed to
 clip the boundary. Expired samples within a large update are skipped;
 they are never allocated. Configurations exceeding the shared 100,000
 anchor budget fail before stage adoption.
 
-Construction seeds stationary history at the source's current center but
-keeps public geometry empty. Zero-dt updates leave it empty; the first
-positive update publishes the seeded path. This preserves the Reference's
-construction lifecycle while correcting the previous native eager path.
+`TracedPath` begins at its first positive-dt observation. Construction and
+zero-dt updates neither call its source function nor invent earlier
+history. Its default infinite duration retains all regular grid samples
+up to the same anchor budget. A step that would exceed that budget fails
+before changing the stored history or geometry; the caller can choose a
+finite window or a larger `time_per_anchor` for a longer recording.
+
+`TracingTail` instead seeds stationary history at the source's current
+center while keeping public geometry empty. Zero-dt updates leave it
+empty; the first positive update publishes the seeded path. This preserves
+the Reference's construction lifecycle while correcting the previous
+native eager path.
 
 **Migration:** use `time_per_anchor` to choose temporal detail and
-`time_traced` for duration. Code that inspects native tail points directly
-after construction should advance by the intended positive scene step
-first. A caller supplying negative or non-finite native updater deltas now
-gets an explicit panic before tail history or geometry changes; the
-infallible `Stage::update` API does not roll back its own clock.
+`time_traced` for duration. Native `TracedPath` previously stored
+`time_per_anchor` without applying it; direct point inspection now reflects
+that cadence instead of one anchor per update. Code that inspects native
+trace points directly after construction should advance by the intended
+positive scene step first. A caller supplying negative or non-finite
+native updater deltas, or non-finite source coordinates, gets an explicit
+panic before trace history or geometry changes. The infallible
+`Stage::update` API does not roll back its own clock or arbitrary source
+callback effects.
 
 The native regressions are in `crates/fmn-library/src/fields.rs`; the
 bound-source portal cases are in `crates/fmn-python/tests/bridge.py` and
 `crates/fmn-python/tests/detached_tracing_tail.py`. The registered
 `lifecycle.tracing_tail_empty_until_update.v1` scenario covers stage
 adoption, zero-dt behavior, seed/endpoints, tapers, and stateful scheduling.
+`lifecycle.traced_path_cadence.v1` drives the native timeline and renderer,
+checking first observation, regular anchors, the exact retained window,
+tapers, stateful scheduling, and visible output.

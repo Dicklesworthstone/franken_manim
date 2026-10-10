@@ -3061,7 +3061,7 @@ impl NativeStudioWorker {
                 if camera_route::builtin(&scene).is_some() {
                     return Err(CliError::new(
                         "capability",
-                        "camera registrations currently use offline render; Studio camera inspection is not yet registered",
+                        "this camera witness has no live Studio program; use offline render",
                     ));
                 }
                 let mut program = if let Some(scene) = fmn::builtins::tex_span_scene(&scene) {
@@ -7587,7 +7587,7 @@ pub fn run_internal_studio_worker_os(args: &[OsString]) -> RunOutput {
 fn studio_scene_name(fs: &dyn FileSystem, command: &RenderCommand) -> Result<String, CliError> {
     if studio_live::selected(command) {
         studio_live::validate_selection(command)?;
-        return Ok(fmn::builtins::INTERACTIVE_SCENE_NAME.to_owned());
+        return Ok(command.scene_names[0].clone());
     }
     match resolve_native_render_input(fs, command)? {
         NativeRenderInput::Builtin { mut names } => {

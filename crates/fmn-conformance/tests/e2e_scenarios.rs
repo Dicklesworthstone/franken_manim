@@ -1687,6 +1687,92 @@ fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("studio_backend_journaled", 1))
 }
 
+/// Exercise the live mixed 3D registration through the public Studio root.
+/// Surfaces, point clouds, images and vectors must reach the camera renderer,
+/// retain their motion, and produce identical pixels at either thread width.
+fn studio_camera_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let fs = fmn_platform::fs::VirtualFs::new();
+    let mut baseline = None;
+    let mut camera_frames = 0_u64;
+    let mut moving_runs = 0_u64;
+    let mut matching_runs = 0_u64;
+    let mut artifact = Vec::new();
+    for threads in ["1", "4"] {
+        let invocation = fmn_cli::parse_args([
+            "studio",
+            "--no-browser",
+            "--resolution",
+            "64x48",
+            "--fps",
+            "8",
+            "--threads",
+            threads,
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "mixed_camera.v1",
+        ])
+        .map_err(|error| fail(format!("parse live camera Studio: {error}")))?;
+        let fmn_cli::Invocation::Studio(command) = invocation else {
+            return Err(fail("camera Studio parsed to a different front door"));
+        };
+        let mut frames = Vec::new();
+        for index in [0, 8] {
+            let stream = fmn_cli::compose_studio_preview_frame(&fs, &command, index)
+                .map_err(|error| fail(format!("compose live camera frame: {error}")))?;
+            stream
+                .validate(fmn_studio::ProtocolLimits::default())
+                .map_err(|error| fail(format!("validate live camera frame: {error}")))?;
+            let camera_identity = stream.render_backends.len() == 1
+                && stream.render_backends[0]
+                    .identity()
+                    .windows(b"lumen-retained-camera-cpu-v1".len())
+                    .any(|part| part == b"lumen-retained-camera-cpu-v1");
+            if !camera_identity
+                || stream.scene != "mixed_camera.v1"
+                || stream.frame_index != index as u64
+                || (stream.width, stream.height) != (64, 48)
+            {
+                return Err(fail(
+                    "live Studio lost its requested scene, frame or camera renderer",
+                ));
+            }
+            let fmn_studio::FramePayload::Pipe { bytes, .. } = stream.payload else {
+                return Err(fail("live camera Studio omitted its bounded PNG payload"));
+            };
+            let decoded = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(format!("decode live camera frame: {error}")))?;
+            if (decoded.width, decoded.height) != (64, 48) {
+                return Err(fail(
+                    "live camera PNG dimensions differ from the frame protocol",
+                ));
+            }
+            camera_frames += 1;
+            ctx.event(
+                LogEvent::new("e2e.studio.camera_preview")
+                    .field("scene", "mixed_camera.v1")
+                    .field("threads", threads)
+                    .field("frame", index as u64)
+                    .field("camera_identity", truth(camera_identity))
+                    .field("sha256", sha256(&decoded.rgba).to_hex()),
+            );
+            frames.push(decoded.rgba);
+            if threads == "1" && index == 8 {
+                artifact = bytes;
+            }
+        }
+        moving_runs += u64::from(frames[0] != frames[1]);
+        if let Some(expected) = &baseline {
+            matching_runs += u64::from(&frames == expected);
+        } else {
+            baseline = Some(frames);
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("studio_camera_frame.png", artifact)
+        .with_counter("studio_camera_frames", camera_frames)
+        .with_counter("studio_camera_moving_runs", moving_runs)
+        .with_counter("studio_camera_matching_runs", matching_runs))
+}
+
 const STUDIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const STUDIO_HEADER_LIMIT: usize = 16 * 1024;
 const STUDIO_BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -4156,6 +4242,233 @@ fn lifecycle_always_redraw_shared_source_run(
         .with_counter("redraw_roots_preserved", u64::from(roots_preserved)))
 }
 
+/// Pure execution alone does not prove that the FMTL record-lerp law can
+/// reconstruct a frame. Discrete draw state must survive ordinary and shared
+/// random-access replay, even when the endpoints have identical values.
+fn lifecycle_bundle_render_state_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    fn bundle_failure(error: impl std::fmt::Display) -> ScenarioError {
+        fail(error.to_string())
+    }
+    struct DepthSwitch {
+        state: fmn_anim::AnimState,
+    }
+    impl fmn_anim::Animation for DepthSwitch {
+        fn state(&self) -> &fmn_anim::AnimState {
+            &self.state
+        }
+        fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+            &mut self.state
+        }
+        fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+            stage
+                .get_mut(self.state.mobject())
+                .expect("the scene retains its animated drawable")
+                .uniforms_mut()
+                .depth_test = (0.5..1.0).contains(&alpha);
+        }
+        fn interpolate_submobject(&mut self, _: &mut Stage, _: &[Mob], _: f64) {}
+        fn effect_signature(&self) -> fmn_anim::AnimationSignature {
+            fmn_anim::AnimationSignature::Pure
+        }
+    }
+    let make = || -> Result<(Stage, Timeline), ScenarioError> {
+        let mut stage = Stage::new();
+        let mob = stage.add(VMobject::from_points(vec![
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        stage.add_to_scene(mob).map_err(bundle_failure)?;
+        let mut timeline = Timeline::new(4).map_err(bundle_failure)?;
+        timeline
+            .play(vec![Box::new(DepthSwitch {
+                state: fmn_anim::AnimState::new(
+                    mob,
+                    fmn_anim::AnimConfig {
+                        rate_func: RateFunc::linear(),
+                        ..fmn_anim::AnimConfig::default()
+                    },
+                ),
+            })])
+            .map_err(bundle_failure)?;
+        Ok((stage, timeline))
+    };
+    let rng = RngRoot::from_seed(31);
+    let (mut stage, mut timeline) = make()?;
+    let mut observed = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &rng, &mut |packet| {
+            observed.push(packet.materialize_stage())
+        })
+        .map_err(bundle_failure)?;
+    let nominated_pure = reports.len() == 1 && reports[0].purity.is_pure();
+    let (mut stage, timeline) = make()?;
+    let bytes =
+        fmn_scene::export_timeline_bundle(timeline, &mut stage, &rng).map_err(bundle_failure)?;
+    let bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(bundle_failure)?;
+    let recorded = bundle.segment_kind(0) == Some(fmn_scene::BundleSegmentKind::Stateful);
+    let shared = fmn_scene::TimelineBundle::from_bytes(&bytes)
+        .map_err(bundle_failure)?
+        .into_shared()
+        .map_err(bundle_failure)?;
+    let mut cache = fmn_scene::timeline_bundle::TimelineFrameCache::default();
+    let mut matches = 0_u64;
+    for index in [3, 1, 0, 2] {
+        let expected = observed
+            .get(index as usize)
+            .ok_or_else(|| fail("native timeline omitted a scheduled capture"))?;
+        let expected_bytes = expected
+            .snapshot()
+            .to_render_bytes()
+            .map_err(bundle_failure)?;
+        let ordinary = bundle.stage_at(index).map_err(bundle_failure)?;
+        let random_access = cache
+            .materialize(&shared.frame_job(index).map_err(bundle_failure)?)
+            .map_err(bundle_failure)?;
+        let wanted_depth = index == 1 || index == 2;
+        let ordinary_depth = ordinary
+            .roots()
+            .first()
+            .and_then(|mob| ordinary.get(*mob))
+            .is_some_and(|entry| entry.uniforms().depth_test);
+        let equal = ordinary
+            .snapshot()
+            .to_render_bytes()
+            .map_err(bundle_failure)?
+            == expected_bytes
+            && random_access
+                .snapshot()
+                .to_render_bytes()
+                .map_err(bundle_failure)?
+                == expected_bytes
+            && ordinary_depth == wanted_depth;
+        matches += u64::from(equal);
+        ctx.event(
+            LogEvent::new("e2e.lifecycle.bundle_render_state")
+                .field("frame", u64::from(index))
+                .field("nominated_pure", truth(nominated_pure))
+                .field("recorded", truth(recorded))
+                .field("depth_test", truth(ordinary_depth))
+                .field("equal", truth(equal))
+                .field("sha256", sha256(&expected_bytes).to_hex()),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter(
+            "bundle_render_state_frames",
+            u64::from(bundle.frame_count()),
+        )
+        .with_counter("bundle_render_state_pure", u64::from(nominated_pure))
+        .with_counter("bundle_render_state_recorded", u64::from(recorded))
+        .with_counter("bundle_render_state_matches", matches))
+}
+
+/// A native timeline must capture the configured temporal detail and duration
+/// of a trace, with a visible tapered stroke and no construction-time sample.
+fn lifecycle_traced_path_cadence_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::{StrokeProfile, TracedPath};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let calls = Rc::new(Cell::new(0_u64));
+    let mut stage = Stage::new();
+    let trace = TracedPath::new()
+        .with_time_traced(0.5)
+        .with_time_per_anchor(0.25)
+        .with_stroke_width(StrokeProfile::Taper(vec![0.0, 4.0]))
+        .with_stroke_opacity(StrokeProfile::Taper(vec![0.0, 1.0]))
+        .add_to_stage(&mut stage, {
+            let calls = Rc::clone(&calls);
+            move |stage| {
+                calls.set(calls.get() + 1);
+                [stage.time(), 0.5 * stage.time(), 0.0]
+            }
+        })
+        .map_err(|error| fail(format!("construct native trace: {error}")))?;
+    stage
+        .add_to_scene(trace)
+        .map_err(|error| fail(format!("adopt native trace: {error}")))?;
+    stage.update(0.0);
+    let starts_empty = stage
+        .get_points(trace)
+        .is_some_and(|points| points.is_empty())
+        && calls.get() == 0;
+    let mut timeline =
+        Timeline::new(8).map_err(|error| fail(format!("create native trace clock: {error}")))?;
+    timeline
+        .wait(1.0)
+        .map_err(|error| fail(format!("schedule native trace: {error}")))?;
+    let mut captures = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &RngRoot::from_seed(41), &mut |packet| {
+            captures.push(packet.materialize_stage());
+        })
+        .map_err(|error| fail(format!("capture native trace: {error}")))?;
+    let first = captures
+        .first()
+        .ok_or_else(|| fail("trace omitted its first capture"))?;
+    let last = captures
+        .last()
+        .ok_or_else(|| fail("trace omitted its final capture"))?;
+    let first_observation = first.get_points(trace) == Some(vec![[0.125, 0.0625, 0.0]]);
+    let points = last
+        .get_points(trace)
+        .ok_or_else(|| fail("trace capture lost its drawable"))?;
+    let anchors: Vec<_> = points.iter().copied().step_by(2).collect();
+    let cadence_and_window = anchors
+        == vec![
+            [0.5, 0.25, 0.0],
+            [0.625, 0.3125, 0.0],
+            [0.875, 0.4375, 0.0],
+            [1.0, 0.5, 0.0],
+        ];
+    let entry = last
+        .get(trace)
+        .ok_or_else(|| fail("trace capture lost its style"))?;
+    let widths = entry
+        .buffer
+        .read_column("stroke_width")
+        .ok_or_else(|| fail("trace has no widths"))?;
+    let rgba = entry
+        .buffer
+        .read_column("stroke_rgba")
+        .ok_or_else(|| fail("trace has no stroke color"))?;
+    let tapers = widths.first() == Some(&0.0)
+        && widths.last() == Some(&4.0)
+        && rgba.get(3) == Some(&0.0)
+        && rgba.last() == Some(&1.0);
+    let stateful = reports.len() == 1 && !reports[0].purity.is_pure();
+    let rendered = render_certified_doc(last);
+    let visible = rendered != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.traced_path_cadence")
+            .field("frames", captures.len() as u64)
+            .field("source_calls", calls.get())
+            .field("starts_empty", truth(starts_empty))
+            .field("first_observation", truth(first_observation))
+            .field("cadence_and_window", truth(cadence_and_window))
+            .field("tapers", truth(tapers))
+            .field("stateful", truth(stateful))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("traced_path_frames", captures.len() as u64)
+        .with_counter("traced_path_source_calls", calls.get())
+        .with_counter("traced_path_starts_empty", u64::from(starts_empty))
+        .with_counter(
+            "traced_path_first_observation",
+            u64::from(first_observation),
+        )
+        .with_counter(
+            "traced_path_cadence_and_window",
+            u64::from(cadence_and_window),
+        )
+        .with_counter("traced_path_tapers", u64::from(tapers))
+        .with_counter("traced_path_stateful", u64::from(stateful))
+        .with_counter("traced_path_visible", u64::from(visible)))
+}
+
 /// fm-c1up: TracingTail seeds its updater history while its public geometry
 /// stays empty until the first positive-dt observation is published.
 fn lifecycle_tracing_tail_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -6151,6 +6464,52 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     ];
+    specs.push(spec(
+        "lifecycle.bundle_render_state.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_bundle_render_state_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("bundle_render_state_frames", 4),
+            counter_eq("bundle_render_state_pure", 1),
+            counter_eq("bundle_render_state_recorded", 1),
+            counter_eq("bundle_render_state_matches", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.bundle_render_state",
+            vec![
+                FieldPred::str_eq("nominated_pure", "true"),
+                FieldPred::str_eq("recorded", "true"),
+                FieldPred::str_eq("equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.traced_path_cadence.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_traced_path_cadence_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("traced_path_frames", 8),
+            counter_eq("traced_path_source_calls", 8),
+            counter_eq("traced_path_starts_empty", 1),
+            counter_eq("traced_path_first_observation", 1),
+            counter_eq("traced_path_cadence_and_window", 1),
+            counter_eq("traced_path_tapers", 1),
+            counter_eq("traced_path_stateful", 1),
+            counter_eq("traced_path_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.traced_path_cadence",
+            vec![
+                FieldPred::str_eq("cadence_and_window", "true"),
+                FieldPred::str_eq("stateful", "true"),
+                FieldPred::str_eq("visible", "true"),
+            ],
+        )],
+    ));
     specs.push(
         spec(
             "lifecycle.always_redraw_shared_source.v1",
@@ -6444,6 +6803,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("encoding", "png"),
                 FieldPred::str_eq("backend_is_stream", "true"),
                 FieldPred::str_eq("dimensions_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.studio_camera_preview.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::StudioInProcess,
+        Invocation::new(studio_camera_preview_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["studio_camera_frame.png".to_owned()]),
+            counter_eq("studio_camera_frames", 4),
+            counter_eq("studio_camera_moving_runs", 2),
+            counter_eq("studio_camera_matching_runs", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.camera_preview",
+            vec![
+                FieldPred::str_eq("scene", "mixed_camera.v1"),
+                FieldPred::str_eq("camera_identity", "true"),
             ],
         )],
     ));
@@ -7805,6 +8184,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 
 #[test]
+fn bundle_render_state_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.bundle_render_state.v1")
+        .expect("the bundle render-state scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
 fn install_shared_family_scenario_passes() {
     let scenario = catalog()
         .into_iter()
@@ -7820,6 +8209,16 @@ fn always_redraw_shared_source_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.always_redraw_shared_source.v1")
         .expect("the shared-source redraw lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn traced_path_cadence_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.traced_path_cadence.v1")
+        .expect("the native traced-path cadence scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
@@ -8076,6 +8475,16 @@ fn python_portal_png_still_scenario_passes() {
 }
 
 /// Focused entry for the same mandatory fast-tier production lifecycle row.
+#[test]
+fn studio_camera_preview_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.studio_camera_preview.v1")
+        .expect("the live Studio camera scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 #[test]
 fn studio_native_worker_lifecycle_scenario_passes() {
     let scenario = catalog()
