@@ -103,6 +103,17 @@ class LiveGraphingAcceptance(unittest.TestCase):
         np.testing.assert_allclose(axes.i2gp(.5, graph), axes.c2p(.5, 1.5 * math.sin(.5)), atol=1e-5)
         self.assertEqual(len(graph.updaters), 1)
 
+    def test_binding_takes_the_function_shape_without_a_frame(self):
+        # fm-skpp: the Reference binds through add_updater(call=True), so a
+        # bound graph follows its function before any scene frame runs.
+        axes = self.axes()
+        graph = axes.get_graph(lambda x: 0.)
+        self.assertAlmostEqual(graph.get_height(), 0.)
+        axes.bind_graph_to_func(graph, lambda xs: np.exp(-xs ** 2))
+        np.testing.assert_allclose(axes.i2gp(0., graph), axes.c2p(0., 1.), atol=1e-5)
+        self.assertGreater(graph.get_height(), .9)
+        self.assertEqual(len(graph.updaters), 1)
+
     def test_moving_discontinuity_keeps_full_domain_and_disconnected_native_paths(self):
         axes = self.axes()
         cut = m.ValueTracker(0)
@@ -382,7 +393,7 @@ class RiemannAcceptance(unittest.TestCase):
 
 suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(cls)
                            for cls in (RecordComparison, LiveGraphingAcceptance, RiemannAcceptance))
-if suite.countTestCases() != 19:
+if suite.countTestCases() != 20:
     raise AssertionError('live graph native acceptance inventory drift')
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():

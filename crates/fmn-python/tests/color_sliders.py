@@ -224,6 +224,37 @@ class ColorSliderAcceptance(unittest.TestCase):
         native, _, _ = bank._native_color_slider_parts((255.,255.,255.,1.), apply_value=False)
         for square, template in zip(bank.background, native[0]):
             np.testing.assert_allclose(square.get_bounding_box(), template.get_bounding_box(), atol=3e-6)
+    def test_custom_rgb_checkerboard_keeps_precision_when_regenerated(self):
+        colors = ((.123456789, .345678912, .789123456),
+                  (.876543219, .654321987, .210987654))
+        bank = self.bank(
+            rect_kwargs={"width": 1., "height": .5},
+            background_grid_kwargs={"colors": colors, "single_square_len": .25},
+        )
+        bank.shift(m.RIGHT + m.UP)
+        family = tuple(bank.get_family())
+        before = [square.data["fill_rgba"].copy() for square in bank.background]
+        regenerated = bank.get_background()
+        self.assertIsNot(regenerated, bank.background)
+        self.assertEqual(tuple(bank.get_family()), family)
+        np.testing.assert_allclose(regenerated.get_center(),
+                                   bank.selected_color_box.get_center(), atol=3e-6)
+        for background in (bank.background, regenerated):
+            self.assertIs(type(background), m.VGroup)
+            self.assertEqual(len(background), 10)
+            for index, square in enumerate(background):
+                self.assertIs(type(square), m.Square)
+                self.assertEqual(len(square.get_vertices()), 4)
+                rgba = np.asarray(square.data["fill_rgba"])
+                self.assertGreater(len(rgba), 0)
+                np.testing.assert_allclose(rgba[:, :3],
+                                           np.tile(colors[index % 2], (len(rgba), 1)),
+                                           rtol=0, atol=1e-7)
+                np.testing.assert_array_equal(rgba[:, 3], np.ones(len(rgba)))
+                self.assertTrue(square.is_fixed_in_frame())
+        for square, expected in zip(bank.background, before):
+            np.testing.assert_array_equal(square.data["fill_rgba"], expected)
+
     def test_default_checkerboard_matches_the_reference_grid(self):
         # The Reference's ColorSliders() (class-sweep facts at 6199a00d):
         # 105 Square members in a 5x21 grid whose fills alternate GREY_A and

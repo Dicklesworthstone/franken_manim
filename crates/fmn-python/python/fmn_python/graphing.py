@@ -19,6 +19,7 @@ _MAX_DISCONTINUITIES = 1_024
 _MAX_RECORDS = 4 * _MAX_SAMPLES + 2 * _MAX_DISCONTINUITIES
 _EPSILON = 1e-6
 _BINDING = "_fmn_function_graph_binding"
+_UNSET = object()
 _GRAPH_UPDATES = InvocationGuard()
 # Keep the public bind hook's original callable identity. A get_graph() call
 # supplies a scalar function; direct bind_graph_to_func() supplies an array one.
@@ -246,11 +247,33 @@ def install_graphing(native):
 
         # A binding owns one updater, not the author's entire updater list.
         # Rebinding replaces that one callback and retains the original grid.
+        updaters = list(graph.updaters)
+        function = vars(graph).get("underlying_function", _UNSET)
         graph.add_updater(update, call=False)
         if previous is not None:
             graph.remove_updater(previous.updater)
         vars(graph)[_BINDING] = _Binding(update, self, samples)
         graph.underlying_function = func if scalar else query
+        # The Reference binds through add_updater's default call=True, so the
+        # graph takes its function's shape at once, not at the next frame: a
+        # scene that never plays still draws it (fm-skpp). Only the binding's
+        # own update runs here, and a failing first evaluation leaves the
+        # graph as it was before the bind.
+        suspended = getattr(graph, "_is_updating_suspended", None)
+        if suspended is None or not suspended():
+            try:
+                update(graph)
+            except BaseException:
+                graph.updaters = updaters
+                if previous is not None:
+                    vars(graph)[_BINDING] = previous
+                else:
+                    vars(graph).pop(_BINDING, None)
+                if function is _UNSET:
+                    vars(graph).pop("underlying_function", None)
+                else:
+                    graph.underlying_function = function
+                raise
         return graph
 
     def unbind(self, graph):

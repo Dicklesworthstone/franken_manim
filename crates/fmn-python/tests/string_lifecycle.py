@@ -186,6 +186,23 @@ def assert_paints(test, obj, fill, stroke):
         test.assertEqual(member.get_stroke_color(), stroke)
 
 
+class StringRootStyle(unittest.TestCase):
+    def test_point_less_roots_report_the_reference_root_style(self):
+        # fm-78b6: the Reference's StringMobject root takes no fill opacity
+        # and a zero stroke width; the glyphs carry the paint.
+        for base, text in FRONT_DOORS:
+            with self.subTest(base=base.__name__):
+                obj = base(text)
+                self.assertFalse(obj.has_points())
+                self.assertEqual(obj.get_fill_opacity(), 0.0)
+                self.assertEqual(obj.get_stroke_width(), 0.0)
+                self.assertEqual(obj.family_members_with_points()[0].get_fill_opacity(), 1.0)
+
+    def test_caller_styles_still_reach_the_root(self):
+        self.assertEqual(m.Tex('ab', fill_opacity=0.5).get_fill_opacity(), 0.5)
+        self.assertEqual(m.Text('ab', stroke_width=2).get_stroke_width(), 2.0)
+
+
 class TextChannelColors(unittest.TestCase):
     def test_explicit_channels_win_independently_at_every_text_front_door(self):
         cases = ((dict(fill_color=m.BLUE), m.BLUE, m.RED),

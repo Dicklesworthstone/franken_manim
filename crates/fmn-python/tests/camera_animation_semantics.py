@@ -1,7 +1,7 @@
 """Real-extension camera-pose and choreography acceptance; no fixture storage."""
 import math
 import numpy as np
-from manimlib import CameraFrame, Transform, Scene, Square, AnimationGroup, Succession, linear
+from manimlib import CameraFrame, Transform, Scene, Square, AnimationGroup, Succession, ValueTracker, linear
 
 
 def state(frame):
@@ -154,6 +154,23 @@ def camera_authored_lifecycle_keeps_source_identity():
     np.testing.assert_allclose(scene.frame.get_center(), [2., 0., 0.])
 
 
+def camera_play_keeps_present_roots_in_draw_order():
+    # fm-kpvx: like the Reference's begin_animations, a camera play adds
+    # only animated roots missing from the scene; a present root keeps its
+    # place in the draw order.
+    scene = Scene()
+    first, tracker, last = Square(), ValueTracker(0.), Square()
+    scene.add(first, tracker, last)
+    order = [id(first), id(tracker), id(last)]
+    scene.play(first.animate.shift((1., 0., 0.)), scene.frame.animate.shift((1., 0., 0.)), run_time=2 / 30)
+    assert [id(m) for m in scene.mobjects] == order
+    scene.play(tracker.animate.set_value(1.), scene.frame.animate.shift((-1., 0., 0.)), run_time=2 / 30)
+    assert [id(m) for m in scene.mobjects] == order
+    fresh = Square()
+    scene.play(fresh.animate.shift((0., 1., 0.)), scene.frame.animate.shift((0., 1., 0.)), run_time=2 / 30)
+    assert [id(m) for m in scene.mobjects] == order + [id(fresh)]
+
+
 def authored_timing_table_controls_camera_delay():
     scene = Scene()
     animation = Transform(scene.frame, scene.frame.copy().shift((4., 0., 0.)), run_time=4 / 30, rate_func=linear)
@@ -278,6 +295,7 @@ _CASES = [pose_interpolates_every_native_component, direct_transform_uses_pose_n
           native_camera_locks_and_failure_are_atomic, closed_camera_excursion_uses_reference_control_points,
           camera_builder_owns_runtime_and_renderer_identity, nested_camera_succession_uses_predecessor_pose,
           authored_camera_path_runs_during_native_drawable_coplay, camera_authored_lifecycle_keeps_source_identity,
+          camera_play_keeps_present_roots_in_draw_order,
           authored_timing_table_controls_camera_delay, camera_rate_curve_final_alpha_and_time_span_are_live,
           group_suspends_only_owned_live_camera_updaters, camera_failure_unwinds_and_allows_next_play,
           nested_camera_changes_real_rendered_frames]

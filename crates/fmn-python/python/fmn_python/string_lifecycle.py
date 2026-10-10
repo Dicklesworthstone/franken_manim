@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import abc
 from bisect import bisect_left
-
 from .coordinate_lifecycle import _bind
 from .copying import FamilyRefs
 
@@ -79,67 +78,6 @@ def _publish(g, obj, candidate, specs):
     return obj
 
 
-def _order_infix_fraction_rules(candidate, source):
-    """Place infix fraction bars before denominator ink in the public family.
-
-    Scribe's primitive tables keep glyphs, rules and paths in separate lanes.
-    Their ordinals (and cache/wire representations) remain unchanged. Only the
-    freshly built Python family is reordered; the existing source paths are
-    remapped with it. The native span map identifies an actual ``\\over`` rule,
-    so this does not parse TeX, infer glyphs from their outlines, or typeset a
-    second expression. Prefix fractions and other constructs retain their
-    existing native ordering.
-    """
-    spans, paths = candidate._string_sub_spans, candidate._string_sub_paths
-    payload = source.encode("utf-8")
-    groups = {}
-    for span, path in zip(spans, paths):
-        groups.setdefault(tuple(path[:-1]), []).append((path[-1], span))
-    # Freeze original parents before any permutation changes their paths.
-    parents = {(): candidate}
-    for path in groups:
-        for depth, index in enumerate(path):
-            parents.setdefault(path[:depth + 1], parents[path[:depth]].submobjects[index])
-    remaps = {}
-    for parent_path, entries in groups.items():
-        rules = {index for index, (start, end) in entries if payload[start:end] == b"\\over"}
-        if not rules:
-            continue
-        # Source order is not necessarily glyph emission order (scripts), so
-        # query the earliest native sibling to the right of each keyword.
-        # Suffix minima avoid an O(rules * glyphs) scan on large formulas.
-        following = sorted((span[0], index) for index, span in entries if index not in rules)
-        starts = [start for start, _ in following]
-        minima = [index for _, index in following]
-        for i in range(len(minima) - 2, -1, -1):
-            minima[i] = min(minima[i], minima[i + 1])
-        before = {}
-        for index, (start, end) in entries:
-            if index not in rules:
-                continue
-            position = bisect_left(starts, end)
-            if position < len(minima):
-                anchor = minima[position]
-                if anchor < index:
-                    before.setdefault(anchor, []).append((start, index))
-        if not before:
-            continue
-        parent = parents[parent_path]
-        old = tuple(parent.submobjects)
-        moved = {index for rows in before.values() for _, index in rows}
-        order = []
-        for index in range(len(old)):
-            order.extend(rule for _, rule in sorted(before.get(index, ())))
-            if index not in moved:
-                order.append(index)
-        parent.set_submobjects([old[index] for index in order])
-        remaps[parent_path] = {old_index: new_index for new_index, old_index in enumerate(order)}
-    candidate._string_sub_paths = [
-        [remaps.get(tuple(path[:i]), {}).get(index, index) for i, index in enumerate(path)]
-        for path in paths
-    ]
-
-
 def install_string_lifecycle(native):
     g = vars(native)
     if g.get("_FMN_STRING_LIFECYCLE_INSTALLED", False):
@@ -147,6 +85,11 @@ def install_string_lifecycle(native):
     Markup, Tex = g["MarkupText"], g["Tex"]
 
     def init_colors(self):
+        # The Reference's StringMobject passes no fill opacity and a zero
+        # stroke width to its own VMobject init, so its point-less root
+        # reports 0 for both while the glyphs carry the paint (fm-78b6).
+        self.set_fill(opacity=0.0, recurse=False)
+        self.set_stroke(width=0.0, recurse=False)
         # Only explicit caller styles override the native per-glyph paints.
         # Give the mutating style adapter a fresh dictionary on every call.
         g["_apply_vmobject_style_kwargs"](self, dict(self._fmn_string_style))
@@ -181,10 +124,6 @@ def install_string_lifecycle(native):
             bool(self._native_group_single_part), self.template, self.additional_preamble,
             g["_tex_line_align"](self.alignment, bool(self._native_text_mode)),
         )
-        if "\\over" in self.string:
-            g["_hang_native_children"](candidate, specs)
-            _order_infix_fraction_rules(candidate, self.string)
-            specs = ()
         return _publish(g, self, candidate, specs)
 
     def tex_init(self, *tex_strings, font_size=48, alignment="\\centering", template="",

@@ -3,9 +3,12 @@
 //! class. The asset-backed census classes wait on fm-7lx1's ruling and are
 //! deliberately absent.
 
-use fmn_core::constants::TAU;
+use fmn_core::constants::{BLACK, GREY_A, GREY_E, TAU, WHITE};
 use fmn_hash::sha256;
-use fmn_library::drawings::{Clock, dartboard, die_face, piano, piano_3d, speedometer};
+use fmn_library::drawings::{
+    Clock, MAX_PIANO_WHITE_KEYS, PianoBuild, PianoError, dartboard, die_face, piano, piano_3d,
+    piano_with, speedometer,
+};
 use fmn_library::vmobject::VMobject;
 use fmn_text::FontBook;
 
@@ -105,6 +108,443 @@ fn dartboard_carries_the_full_ring_stack() {
     let _ = TAU;
 }
 
+// fm-c1up: independent keyboard facts from the pinned Piano constructor.
+// Seven complete 12-key groups plus the final four keys of its 88-key run.
+const PIANO_BLACK_INDICES: [usize; 36] = [
+    1, 4, 6, 9, 11, 13, 16, 18, 21, 23, 25, 28, 30, 33, 35, 37, 40, 42, 45, 47, 49, 52, 54, 57, 59,
+    61, 64, 66, 69, 71, 73, 76, 78, 81, 83, 85,
+];
+
+fn keyboard(
+    count: usize,
+    pattern: &[usize],
+    octave: usize,
+    white: (f64, f64),
+    black: (f64, f64),
+    gap: f64,
+    width: f64,
+) -> Result<PianoBuild, PianoError> {
+    piano_with(
+        count, pattern, octave, white, black, gap, WHITE, GREY_E, width,
+    )
+}
+
+fn close(actual: f64, expected: f64, context: &str) {
+    assert!(
+        (actual - expected).abs() < 1e-8,
+        "{context}: expected {expected}, got {actual}"
+    );
+}
+
+/// These fixtures use axis-aligned polygonal keys. Check that precondition
+/// before treating anchors as polygon vertices in the independent area oracle.
+fn key_polygon(key: &VMobject) -> Vec<[f64; 2]> {
+    assert!(key.children().is_empty());
+    let points = key.points();
+    assert!(points.len() >= 7 && points.len() % 2 == 1);
+    for curve in points.windows(3).step_by(2) {
+        for axis in 0..3 {
+            close(
+                curve[1][axis],
+                0.5 * (curve[0][axis] + curve[2][axis]),
+                "straight key edge",
+            );
+        }
+        assert!(
+            (curve[0][0] - curve[2][0]).abs() < 1e-8 || (curve[0][1] - curve[2][1]).abs() < 1e-8,
+            "key edge is not axis aligned"
+        );
+    }
+    let polygon: Vec<_> = points
+        .iter()
+        .step_by(2)
+        .map(|point| [point[0], point[1]])
+        .collect();
+    for axis in 0..2 {
+        close(
+            polygon[0][axis],
+            polygon[polygon.len() - 1][axis],
+            "closed key outline",
+        );
+    }
+    polygon
+}
+
+fn polygon_area(polygon: &[[f64; 2]]) -> f64 {
+    0.5 * polygon
+        .windows(2)
+        .map(|edge| edge[0][0] * edge[1][1] - edge[1][0] * edge[0][1])
+        .sum::<f64>()
+        .abs()
+}
+
+/// Exact vertical-strip integration for these rectilinear polygons. This
+/// does not invoke the boolean kernel used to construct the keyboard.
+fn overlap_with_rectangle(polygon: &[[f64; 2]], min: [f64; 3], max: [f64; 3]) -> f64 {
+    let mut cuts = vec![min[0], max[0]];
+    cuts.extend(polygon.iter().map(|point| point[0].clamp(min[0], max[0])));
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let mut area = 0.0;
+    for interval in cuts.windows(2) {
+        let x = 0.5 * (interval[0] + interval[1]);
+        let mut crossings = Vec::new();
+        for edge in polygon.windows(2) {
+            let (a, b) = (edge[0], edge[1]);
+            if (a[0] > x) != (b[0] > x) {
+                crossings.push(a[1] + (x - a[0]) * (b[1] - a[1]) / (b[0] - a[0]));
+            }
+        }
+        crossings.sort_by(f64::total_cmp);
+        assert_eq!(
+            crossings.len() % 2,
+            0,
+            "closed outline has paired crossings"
+        );
+        for span in crossings.as_chunks::<2>().0 {
+            area +=
+                (interval[1] - interval[0]) * (span[1].min(max[1]) - span[0].max(min[1])).max(0.0);
+        }
+    }
+    area
+}
+
+#[test]
+fn piano_default_is_an_88_key_keyboard_in_chromatic_order() {
+    let built = piano().expect("default keyboard builds");
+    assert!(built.points().is_empty());
+    assert_eq!(
+        built.children().len(),
+        88,
+        "52 white keys plus 36 black keys"
+    );
+    let black: Vec<_> = built
+        .children()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, key)| (key.style().fill_color == GREY_E).then_some(index))
+        .collect();
+    assert_eq!(black, PIANO_BLACK_INDICES);
+    assert_eq!(
+        built
+            .children()
+            .iter()
+            .filter(|key| key.style().fill_color == WHITE)
+            .count(),
+        52
+    );
+    assert!(
+        built
+            .children()
+            .windows(2)
+            .all(|pair| pair[0].center_point()[0] < pair[1].center_point()[0])
+    );
+    close(built.length_over_dim(0), 13.0, "default width");
+    for component in built.center_point() {
+        close(component, 0.0, "centered keyboard");
+    }
+}
+
+#[test]
+fn piano_custom_motif_selects_included_gaps_and_reports_sorted_indices() {
+    // Four white keys per cycle, with black keys in gaps 1 and 3. Repeated
+    // and out-of-cycle entries do not create duplicate or extra keys.
+    let built = keyboard(9, &[1, 1, 3, 7], 4, (2.0, 4.0), (1.0, 2.0), 0.2, 19.6).unwrap();
+    assert_eq!(built.vmob.children().len(), 13);
+    assert_eq!(built.black_key_indices, [2, 5, 8, 11]);
+    for (index, key) in built.vmob.children().iter().enumerate() {
+        assert_eq!(
+            key.style().fill_color == GREY_E,
+            built.black_key_indices.contains(&index)
+        );
+    }
+    let no_black = keyboard(4, &[], 4, (2.0, 4.0), (1.0, 2.0), 0.2, 8.6).unwrap();
+    assert_eq!(no_black.vmob.children().len(), 4);
+    assert!(no_black.black_key_indices.is_empty());
+    let single = keyboard(1, &[0], 1, (2.0, 4.0), (1.0, 2.0), 0.0, 2.0).unwrap();
+    assert_eq!(single.vmob.children().len(), 1);
+    assert!(single.black_key_indices.is_empty());
+}
+
+#[test]
+fn piano_notches_both_neighbors_without_black_white_overlap() {
+    // Natural-width fixture: white keys are [-2.1,-0.1] and [0.1,2.1]
+    // by [-2,2]. The black key spans [-0.5,0.5] by [0,2]; its clearance
+    // cutter spans [-0.6,0.6] by [-0.2,2]. Each white key loses area 1.1.
+    let built = keyboard(2, &[0], 7, (2.0, 4.0), (1.0, 2.0), 0.2, 4.2).unwrap();
+    assert_eq!(built.black_key_indices, [1]);
+    assert_eq!(built.vmob.children().len(), 3);
+    let keys = built.vmob.children();
+    let (black_min, black_max) = keys[1].extent().unwrap();
+    close(black_min[0], -0.5, "black left");
+    close(black_max[0], 0.5, "black right");
+    close(black_min[1], 0.0, "black bottom");
+    close(black_max[1], 2.0, "black top");
+    close(polygon_area(&key_polygon(&keys[1])), 2.0, "black key area");
+    for (index, notch_x) in [(0, -0.6), (2, 0.6)] {
+        let polygon = key_polygon(&keys[index]);
+        close(
+            polygon_area(&polygon),
+            6.9,
+            "white area after its neighboring notch",
+        );
+        close(
+            overlap_with_rectangle(&polygon, black_min, black_max),
+            0.0,
+            "black-white intersection area",
+        );
+        assert!(
+            polygon
+                .iter()
+                .any(|point| (point[0] - notch_x).abs() < 1e-8 && (point[1] + 0.2).abs() < 1e-8),
+            "notch must reach y=-0.2 at x={notch_x}; a uniform cutter scale cuts too deep: {polygon:?}"
+        );
+        // The cutter clears the full top-side gap but leaves the material
+        // immediately below its exact bottom. This rejects a deeper cutter
+        // even if another change happened to preserve the total key area.
+        let (x0, x1) = if index == 0 {
+            (-0.45, -0.25)
+        } else {
+            (0.25, 0.45)
+        };
+        close(
+            overlap_with_rectangle(&polygon, [x0, -0.4, 0.0], [x1, -0.3, 0.0]),
+            0.02,
+            "material below notch",
+        );
+        close(
+            overlap_with_rectangle(&polygon, [x0, -0.1, 0.0], [x1, 0.0, 0.0]),
+            0.0,
+            "clearance above notch bottom",
+        );
+    }
+}
+
+#[test]
+fn piano_centers_and_scales_all_axes_by_the_requested_width() {
+    let built = keyboard(4, &[0, 2], 4, (2.0, 4.0), (1.0, 2.0), 0.2, 17.2).unwrap();
+    let (min, max) = built.vmob.extent().unwrap();
+    for (actual, expected) in min.into_iter().zip([-8.6, -4.0, 0.0]) {
+        close(actual, expected, "uniformly scaled lower extent");
+    }
+    for (actual, expected) in max.into_iter().zip([8.6, 4.0, 0.0]) {
+        close(actual, expected, "uniformly scaled upper extent");
+    }
+    assert_eq!(built.black_key_indices, [1, 4]);
+    let expected_x = [-6.6, -4.4, -2.2, 2.2, 4.4, 6.6];
+    assert_eq!(built.vmob.children().len(), expected_x.len());
+    for (index, (key, x)) in built.vmob.children().iter().zip(expected_x).enumerate() {
+        close(key.center_point()[0], x, "scaled key center");
+        let is_black = built.black_key_indices.contains(&index);
+        close(
+            key.length_over_dim(0),
+            if is_black { 2.0 } else { 4.0 },
+            "scaled key width",
+        );
+        close(
+            key.length_over_dim(1),
+            if is_black { 4.0 } else { 8.0 },
+            "scaled key height",
+        );
+    }
+}
+
+#[test]
+fn piano_3d_elevates_exactly_the_black_keys_and_preserves_white_keys() {
+    let built = piano_3d().expect("three-dimensional keyboard builds");
+    assert_eq!(built.children().len(), 88);
+    close(built.length_over_dim(0), 13.0, "3D keyboard width");
+    close(
+        built.center_point()[0],
+        0.0,
+        "3D keyboard horizontal center",
+    );
+    let mut elevated = Vec::new();
+    for (index, key) in built.children().iter().enumerate() {
+        let (min, max) = key.extent().unwrap();
+        let is_black = PIANO_BLACK_INDICES.contains(&index);
+        close(
+            min[2],
+            if is_black { -0.05 } else { -0.1 },
+            "extruded key bottom",
+        );
+        close(
+            max[2],
+            if is_black { 0.05 } else { 0.0 },
+            "extruded key top",
+        );
+        if max[2] > 0.025 {
+            elevated.push(index);
+        }
+        assert!(key.children().len() >= 3, "key has front, sides, and back");
+        for face in key.children() {
+            assert_eq!(
+                face.style().fill_color,
+                if is_black { BLACK } else { GREY_A }
+            );
+            assert_eq!(face.style().stroke_color, BLACK);
+            close(face.style().stroke_width, 0.25, "3D outline width");
+        }
+    }
+    assert_eq!(elevated, PIANO_BLACK_INDICES);
+
+    // Lumen reads each face's own uniforms after Stage adoption and the
+    // frame snapshot boundary; point-free group uniforms do not propagate.
+    let expected_faces: usize = built
+        .children()
+        .iter()
+        .map(|key| key.children().len())
+        .sum();
+    let mut stage = fmn_mobject::Stage::new();
+    let piano = stage.add(built);
+    let frame = stage.snapshot().materialize();
+    let mut rendered_faces = 0;
+    for member in frame.family(piano) {
+        let entry = frame.get(member).expect("piano family member is live");
+        if entry.buffer.is_empty() {
+            continue;
+        }
+        assert!(entry.submobjects().is_empty(), "key face is a leaf");
+        assert_eq!(
+            entry.uniforms().shading,
+            [1.0, 0.2, 0.2],
+            "visible key face must receive Piano3D lighting"
+        );
+        assert!(
+            entry.uniforms().depth_test,
+            "visible key face is depth-tested"
+        );
+        assert_eq!(entry.uniforms().joint_type, fmn_mobject::JointType::NoJoint);
+        rendered_faces += 1;
+    }
+    assert_eq!(rendered_faces, expected_faces, "every key face was checked");
+}
+
+#[test]
+fn piano_invalid_parameters_refuse_with_the_argument_name() {
+    let check = |result: Result<PianoBuild, PianoError>, parameter: &str| {
+        let error = result.expect_err("invalid keyboard input must refuse");
+        assert!(
+            matches!(error, PianoError::InvalidParameter(_)),
+            "wrong error: {error}"
+        );
+        assert!(
+            error.to_string().contains(parameter),
+            "error does not name {parameter}: {error}"
+        );
+    };
+    check(
+        keyboard(0, &[0], 7, (2.0, 4.0), (1.0, 2.0), 0.2, 4.2),
+        "n_white_keys",
+    );
+    check(
+        keyboard(2, &[0], 0, (2.0, 4.0), (1.0, 2.0), 0.2, 4.2),
+        "white_keys_per_octave",
+    );
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        check(
+            keyboard(2, &[0], 7, (invalid, 4.0), (1.0, 2.0), 0.2, 4.2),
+            "white_key_dims width",
+        );
+        check(
+            keyboard(2, &[0], 7, (2.0, invalid), (1.0, 2.0), 0.2, 4.2),
+            "white_key_dims height",
+        );
+        check(
+            keyboard(2, &[0], 7, (2.0, 4.0), (invalid, 2.0), 0.2, 4.2),
+            "black_key_dims width",
+        );
+        check(
+            keyboard(2, &[0], 7, (2.0, 4.0), (1.0, invalid), 0.2, 4.2),
+            "black_key_dims height",
+        );
+        check(
+            keyboard(2, &[0], 7, (2.0, 4.0), (1.0, 2.0), 0.2, invalid),
+            "total_width",
+        );
+    }
+    for gap in [-1.0, f64::NAN, f64::INFINITY] {
+        check(
+            keyboard(2, &[0], 7, (2.0, 4.0), (1.0, 2.0), gap, 4.2),
+            "key_buff",
+        );
+    }
+    assert!(
+        keyboard(2, &[0], 7, (2.0, 4.0), (1.0, 2.0), 0.0, 4.0).is_ok(),
+        "zero clearance is valid"
+    );
+}
+
+#[test]
+fn piano_refuses_unbounded_or_nonfinite_derived_geometry() {
+    let cases = [
+        (
+            "one key above the family budget",
+            keyboard(
+                MAX_PIANO_WHITE_KEYS + 1,
+                &[0],
+                7,
+                (2.0, 4.0),
+                (1.0, 2.0),
+                0.2,
+                4.2,
+            ),
+            "n_white_keys",
+        ),
+        (
+            "key count cannot wrap or allocate without a bound",
+            keyboard(usize::MAX, &[0], 7, (2.0, 4.0), (1.0, 2.0), 0.2, 4.2),
+            "n_white_keys",
+        ),
+        (
+            "combined white-key widths overflow",
+            keyboard(2, &[], 7, (f64::MAX, 4.0), (1.0, 2.0), 0.0, 4.2),
+            "overflow",
+        ),
+        (
+            "white-key stride overflows even with one key",
+            keyboard(1, &[], 7, (f64::MAX, 4.0), (1.0, 2.0), f64::MAX, 4.2),
+            "overflow",
+        ),
+        (
+            "black-key cutter width overflows",
+            keyboard(1, &[], 7, (2.0, 4.0), (f64::MAX, 2.0), f64::MAX, 4.2),
+            "overflow",
+        ),
+        (
+            "black-key cutter height overflows",
+            keyboard(1, &[], 7, (2.0, 4.0), (1.0, f64::MAX), f64::MAX, 4.2),
+            "overflow",
+        ),
+        (
+            "uniform fit would use an infinite scale",
+            keyboard(1, &[], 7, (1e-300, 1.0), (1.0, 2.0), 0.0, 1e300),
+            "total_width",
+        ),
+        (
+            "finite scale would overflow the key height",
+            keyboard(1, &[], 7, (1.0, 1e308), (0.5, 0.5), 0.0, 10.0),
+            "total_width",
+        ),
+        (
+            "a black-key cutter erases its whole white neighbor",
+            keyboard(3, &[0, 1], 3, (1.0, 1.0), (4.0, 2.0), 0.0, 3.0),
+            "black_key_dims",
+        ),
+    ];
+    for (description, result, parameter) in cases {
+        let error = result.expect_err(description);
+        assert!(
+            matches!(error, PianoError::InvalidParameter(_)),
+            "{description}: wrong error: {error}"
+        );
+        assert!(
+            error.to_string().contains(parameter),
+            "{description}: error does not name {parameter}: {error}"
+        );
+    }
+}
+
 #[test]
 fn self_goldens_lock_each_class_s_canonical_output() {
     let book = FontBook::bundled().expect("bundled book");
@@ -146,11 +586,11 @@ fn self_goldens_lock_each_class_s_canonical_output() {
         ),
         (
             "piano",
-            "2e17730728ece6b4b7a1412a968eab6b8f714ab05a9c3a742ef848344cbe8a41",
+            "01d6838fc38123acf754ad2c88690b5754661bc99e2518bf34082a887788daf5",
         ),
         (
             "piano_3d",
-            "8e62f98b0fcf17256c8e988c1135c37a1b8d056eb2c2ecf5c95647f6a9da7fdd",
+            "4a80e1e40ad9f6fc12d60925c112ffce1e12070931dbcfd287c9c0823415c31a",
         ),
         ("laptop", "PENDING_LAPTOP"),
     ];

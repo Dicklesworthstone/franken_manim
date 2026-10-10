@@ -103,7 +103,9 @@ pub fn build_timings(run_times: &[f64], lag_ratio: f64) -> Vec<Interval> {
         let end = start + run_time;
         out.push(Interval { start, end });
         // The Reference's `interpolate(start_time, end_time, lag_ratio)`.
-        curr_time = start + (end - start) * lag_ratio;
+        // Preserve its operation order: reassociation can add one frame
+        // when max_end_time reaches the rational clock (fm-7l9k).
+        curr_time = (1.0 - lag_ratio) * start + lag_ratio * end;
     }
     out
 }

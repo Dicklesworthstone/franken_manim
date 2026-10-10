@@ -230,6 +230,13 @@ def _typed_textbox_constructor(g):
     Textbox, Text = g["Textbox"], g["Text"]
     signature = inspect.signature(Textbox.__init__)
     from .string_lifecycle import _publish
+    # Capture the native call site before authored hooks replace it. Scribe
+    # errors end there; hook errors end in user code, even with the same words.
+    text_points = getattr(Text, "init_points", None)
+    native_text_points_code = (
+        getattr(text_points, "__code__", None)
+        if getattr(text_points, "__globals__", None) is _publish.__globals__ else None
+    )
 
     def parts(self, current, replacement):
         value = current if replacement is None else replacement
@@ -245,11 +252,14 @@ def _typed_textbox_constructor(g):
         try:
             text = Text(value, **self.text_kwargs)
         except ValueError as error:
-            # Keep the portal's schema-level Textbox refusal (the native
-            # textbox_error spelling) while preserving Scribe's diagnostic.
-            if "has no glyph" not in str(error):
-                raise
-            raise ValueError("unmapped glyph: " + str(error)) from error
+            trace = error.__traceback__
+            while trace is not None and trace.tb_next is not None:
+                trace = trace.tb_next
+            if (native_text_points_code is not None and trace is not None
+                    and trace.tb_frame.f_code is native_text_points_code
+                    and "has no glyph" in str(error)):
+                raise ValueError("unmapped glyph: " + str(error)) from error
+            raise
         width = box.get_width() - 2 * self.text_buff
         if not math.isfinite(width) or width < 0:
             raise ValueError("Textbox padding must leave a nonnegative finite text width")

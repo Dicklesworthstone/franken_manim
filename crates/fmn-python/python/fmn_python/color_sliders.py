@@ -186,7 +186,8 @@ def install_color_sliders(native: Any) -> None:
                 raise ValueError("ColorSliders background exceeds 65536 squares")
             # The bank stores each validated grid color as an RGB triple. A
             # bare triple passed to set_fill is a three-color gradient of
-            # scalars, so each one becomes an exact single color value.
+            # scalars, so each one becomes an exact single color value without
+            # quantizing through hex.
             colors = tuple(g["_ColorValue"](rgb) for rgb in self._background_grid_colors)
             if not colors:
                 raise ValueError("ColorSliders background colors must not be empty")

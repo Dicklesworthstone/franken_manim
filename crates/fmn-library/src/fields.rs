@@ -4,7 +4,7 @@
 //!
 //! Ported from `manimlib/mobject/vector_field.py` and
 //! `manimlib/mobject/changing.py` @ `6199a00d`. The sampling semantics are
-//! the Reference's exactly; three deliberate, documented divergences:
+//! the Reference's exactly; four deliberate, documented divergences:
 //!
 //! * **A real integrator.** The Reference's `ode_solution_points` rides
 //!   SciPy's `solve_ivp` at default tolerances and draws the solver's
@@ -25,6 +25,10 @@
 //!   the single RNG's named [`STREAM_LINES_SUBSTREAM`] substream
 //!   (`RngRoot::substream`), so field seeding never perturbs another
 //!   subsystem's draws (§6.5). The Reference's global `np.random` is dead.
+//! * **Timestamped finite tails.** `TracingTail` retains an elapsed-time
+//!   window on its declared anchor grid, replacing the Reference's estimate
+//!   from the most recent frame delta. Only observed source positions are
+//!   interpolated; a finite window bounds both storage and work per update.
 //!
 //! **Purity (§9.5).** `TimeVaryingVectorField`, `AnimatedStreamLines`,
 //! `TracedPath`, `TracingTail`, and `AnimatedBoundary` are updater-bound
@@ -36,6 +40,7 @@
 //! through the same probe"). The pure builders ([`VectorField`],
 //! [`StreamLines`]) are detached values like every other library class.
 
+use std::collections::VecDeque;
 use std::fmt;
 
 use fmn_core::color::Srgb;
@@ -1840,6 +1845,96 @@ impl StrokeProfile {
     }
 }
 
+/// A finite tail's regularly spaced observations, newest first. Ages are
+/// relative to the latest observation rather than an ever-growing clock.
+/// Keeping the grid point before the cutoff permits exact temporal clipping;
+/// the current endpoint is published separately between grid observations.
+struct TailSamples {
+    window: f64,
+    spacing: f64,
+    phase: f64,
+    previous: Vec3,
+    anchors: VecDeque<Vec3>,
+}
+
+impl TailSamples {
+    fn new(window: f64, spacing: f64, intervals: usize, start: Vec3) -> Self {
+        Self {
+            window,
+            spacing,
+            phase: 0.0,
+            previous: start,
+            anchors: VecDeque::from(vec![start; intervals + 1]),
+        }
+    }
+
+    /// The caller validates the finite, positive delta before reading its
+    /// source. Neither work nor storage is proportional to `window / dt` or
+    /// `dt / spacing`: samples already older than the cutoff are never built.
+    fn advance(&mut self, point: Vec3, dt: f64) -> Vec<Vec3> {
+        if self.window == 0.0 {
+            self.previous = point;
+            self.anchors[0] = point;
+            return vec![point];
+        }
+
+        // Reduce before addition so even huge finite steps cannot overflow
+        // the local clock. The subtraction branch also avoids phase + dt.
+        let remainder = dt % self.spacing;
+        let until_anchor = self.spacing - self.phase;
+        let mut phase = if remainder >= until_anchor {
+            remainder - until_anchor
+        } else {
+            self.phase + remainder
+        };
+        // A sum strictly below spacing can round onto its upper endpoint.
+        if phase == self.spacing {
+            phase = 0.0;
+        }
+
+        // The deque spans the full window and its predecessor. Iterating
+        // backward from the newest grid point skips the expired prefix of a
+        // large step without computing an unbounded absolute grid index.
+        let new_count = (0..self.anchors.len())
+            .take_while(|&index| phase + index as f64 * self.spacing < dt)
+            .count();
+        for index in (0..new_count).rev() {
+            let age = phase + index as f64 * self.spacing;
+            let alpha = (1.0 - age / dt).clamp(0.0, 1.0);
+            let anchor = lerp3(self.previous, point, alpha);
+            let _ = self.anchors.pop_back();
+            self.anchors.push_front(anchor);
+        }
+        self.phase = phase;
+        self.previous = point;
+
+        let mut points = Vec::with_capacity(self.anchors.len() + 1);
+        if self.window < phase {
+            // Both the cutoff and the endpoint lie after the newest grid
+            // observation; no expired grid point belongs in the visible path.
+            points.push(lerp3(self.anchors[0], point, 1.0 - self.window / phase));
+        } else {
+            let intervals = (self.window - phase) / self.spacing;
+            let inside = intervals.ceil() as usize;
+            let boundary = if inside == 0 {
+                self.anchors[0]
+            } else {
+                lerp3(
+                    self.anchors[inside],
+                    self.anchors[inside - 1],
+                    (inside as f64 - intervals).clamp(0.0, 1.0),
+                )
+            };
+            points.push(boundary);
+            points.extend((0..inside).rev().map(|index| self.anchors[index]));
+        }
+        if phase > 0.0 {
+            points.push(point);
+        }
+        points
+    }
+}
+
 /// `TracedPath` (changing.py:66): record where a point goes, drawing the
 /// trace. Updater-bound — stateful by construction (§9.5).
 #[derive(Debug, Clone)]
@@ -1917,6 +2012,17 @@ impl TracedPath {
         stage: &mut Stage,
         traced_point_func: impl Fn(&Stage) -> Vec3 + 'static,
     ) -> Result<Mob, FieldError> {
+        self.add_to_stage_with_history(stage, traced_point_func, None)
+    }
+
+    /// Seed observations without publishing a path before the first updater
+    /// tick. TracingTail has construction-time history; TracedPath does not.
+    fn add_to_stage_with_history(
+        self,
+        stage: &mut Stage,
+        traced_point_func: impl Fn(&Stage) -> Vec3 + 'static,
+        mut tail_samples: Option<TailSamples>,
+    ) -> Result<Mob, FieldError> {
         let mob = stage.add(VMobject::new().with_style(Style::default().stroke(
             self.stroke_color,
             match &self.stroke_width {
@@ -1933,15 +2039,29 @@ impl TracedPath {
         stage.add_dt_updater(
             mob,
             move |stage: &mut Stage, mob: Mob, dt: f64| {
+                if tail_samples.is_some() {
+                    // Stage's updater API is infallible. Refuse violations
+                    // of its tail time precondition before source sampling or
+                    // changing geometry/history, rather than hiding errors.
+                    assert!(
+                        dt.is_finite() && dt >= 0.0,
+                        "TracingTail updater dt must be finite and nonnegative"
+                    );
+                }
                 // changing.py:92 update_path: dt == 0 is an explicit no-op.
                 if dt == 0.0 {
                     return;
                 }
                 let point = (traced_point_func)(stage);
-                traced_points.push(point);
 
-                let points = if config.time_traced.is_finite() {
-                    let n_relevant = ((config.time_traced / dt) + 0.5) as usize;
+                let points = if let Some(samples) = tail_samples.as_mut() {
+                    samples.advance(point, dt)
+                } else if config.time_traced.is_finite() {
+                    traced_points.push(point);
+                    // A zero/sub-frame window still observes its current
+                    // point. Otherwise the empty window never publishes any
+                    // geometry, even after the source starts moving.
+                    let n_relevant = (((config.time_traced / dt) + 0.5) as usize).max(1);
                     let n_tps = traced_points.len();
                     let window = if n_tps < n_relevant {
                         let mut w = traced_points.clone();
@@ -1956,6 +2076,7 @@ impl TracedPath {
                     }
                     window
                 } else {
+                    traced_points.push(point);
                     traced_points.clone()
                 };
 
@@ -1989,8 +2110,8 @@ impl TracedPath {
 #[derive(Debug, Clone)]
 pub struct TracingTail {
     traced: TracedPath,
-    /// Pre-fill: `int(time_traced / time_per_anchor)` copies of the start
-    /// point, the Reference's constructor seed.
+    /// Complete anchor intervals covering the window. The sampler also
+    /// retains the grid observation preceding its moving cutoff.
     prefill: usize,
 }
 
@@ -1999,10 +2120,10 @@ impl TracingTail {
     /// opacity taper `(0, 1)`.
     #[must_use]
     pub fn new() -> Self {
-        let time_traced = 1.0;
-        let time_per_anchor = 1.0 / 15.0;
+        let time_traced = 1.0_f64;
+        let time_per_anchor = 1.0_f64 / 15.0;
         Self {
-            prefill: (time_traced / time_per_anchor) as usize,
+            prefill: (time_traced / time_per_anchor).ceil() as usize,
             traced: TracedPath {
                 stroke_width: StrokeProfile::Taper(vec![0.0, 3.0]),
                 stroke_opacity: StrokeProfile::Taper(vec![0.0, 1.0]),
@@ -2017,12 +2138,12 @@ impl TracingTail {
     #[must_use]
     pub fn with_time_traced(mut self, time_traced: f64) -> Self {
         self.traced.time_traced = time_traced;
-        self.prefill = (time_traced / self.traced.time_per_anchor) as usize;
+        self.prefill = (time_traced / self.traced.time_per_anchor).ceil() as usize;
         self
     }
 
-    /// `time_per_anchor` (Reference default 1/15): the cadence used to
-    /// pre-fill the tail with copies of its starting point.
+    /// `time_per_anchor` (Reference default 1/15): the temporal spacing of
+    /// the tail's grid observations, including its stationary prehistory.
     ///
     /// # Errors
     /// [`FieldError::NonFiniteControl`] when the cadence is non-finite or
@@ -2033,7 +2154,7 @@ impl TracingTail {
             time_per_anchor,
         )?;
         self.traced.time_per_anchor = time_per_anchor;
-        self.prefill = (self.traced.time_traced / time_per_anchor) as usize;
+        self.prefill = (self.traced.time_traced / time_per_anchor).ceil() as usize;
         Ok(self)
     }
 
@@ -2059,22 +2180,41 @@ impl TracingTail {
     }
 
     /// Add to a stage following `target`'s center (the Reference's
-    /// `mobject_or_func.get_center`), pre-filled with copies of the
-    /// current point. Returns the tail's handle.
+    /// `mobject_or_func.get_center`), with copies of the current point in
+    /// the sample history. Geometry remains empty until a positive-dt
+    /// update publishes that history. Returns the tail's handle.
     ///
     /// # Errors
-    /// [`FieldError::Stage`] on a stale handle.
+    /// [`FieldError::Stage`] on a stale handle, [`FieldError::NonFiniteControl`]
+    /// for an invalid window, or [`FieldError::Sampling`] when its initial
+    /// history exceeds the portal's shared 100,000-anchor resource ceiling.
+    ///
+    /// # Panics
+    /// The installed updater requires finite, nonnegative deltas. Since
+    /// [`Stage::update`] has no fallible updater channel, an invalid delta
+    /// panics before this tail reads its source or changes its history/points.
+    /// The enclosing stage's already-advanced clock is not rolled back.
     pub fn add_to_stage(self, stage: &mut Stage, target: Mob) -> Result<Mob, FieldError> {
-        let start = stage.get_center(target);
-        let mob = self
-            .traced
-            .add_to_stage(stage, move |s: &Stage| s.get_center(target))?;
-        if self.prefill > 0 {
-            let points = vec![start; self.prefill];
-            let path = smooth_polyline(&points);
-            let _ = stage.set_points(mob, path.points());
+        if !self.traced.time_traced.is_finite() || self.traced.time_traced < 0.0 {
+            return Err(FieldError::NonFiniteControl {
+                context: "TracingTail time_traced must be finite and nonnegative",
+            });
         }
-        Ok(mob)
+        SamplingBudget::new(100_000 - 3)
+            .ensure_total("TracingTail initial sample history", self.prefill)?;
+        stage.try_get(target)?;
+        let start = stage.get_center(target);
+        let samples = TailSamples::new(
+            self.traced.time_traced,
+            self.traced.time_per_anchor,
+            self.prefill,
+            start,
+        );
+        self.traced.add_to_stage_with_history(
+            stage,
+            move |s: &Stage| s.get_center(target),
+            Some(samples),
+        )
     }
 }
 
@@ -2894,7 +3034,7 @@ mod tests {
     }
 
     #[test]
-    fn tracing_tail_prefills_and_demotes() {
+    fn tracing_tail_seeds_history_but_stays_empty_until_positive_dt() {
         let mut stage = Stage::new();
         let cursor = stage.add(VMobject::from_points(vec![[2.0, 1.0, 0.0]]));
         stage
@@ -2908,17 +3048,12 @@ mod tests {
         stage
             .add_to_scene(tail)
             .unwrap_or_else(|e| std::panic::panic_any(format!("root: {e}")));
-        // Prefill: int(1.0 / (1/15)) = 15 copies of the start point.
+        // The Reference seeds only traced_points. Construction and zero-dt
+        // updates must not turn that history into a degenerate visible path.
         let points = stage
             .get_points(tail)
             .unwrap_or_else(|| std::panic::panic_any("tail points"));
-        assert!(!points.is_empty());
-        assert!(
-            points
-                .iter()
-                .all(|p| space_ops::get_dist(*p, [2.0, 1.0, 0.0]) < 1e-6),
-            "prefilled tail must sit on the start point"
-        );
+        assert!(points.is_empty());
 
         let custom_tail = TracingTail::new()
             .with_time_per_anchor(1.0 / 30.0)
@@ -2927,10 +3062,40 @@ mod tests {
         let custom_tail = custom_tail
             .add_to_stage(&mut stage, cursor)
             .unwrap_or_else(|error| std::panic::panic_any(format!("custom tail: {error}")));
-        let custom_points = stage
-            .get_points(custom_tail)
-            .unwrap_or_else(|| std::panic::panic_any("custom tail points"));
-        assert_eq!(custom_points.len(), 59);
+        stage
+            .add_to_scene(custom_tail)
+            .unwrap_or_else(|error| std::panic::panic_any(format!("custom root: {error}")));
+        stage.update(0.0);
+        for handle in [tail, custom_tail] {
+            assert!(stage.get_points(handle).unwrap().is_empty());
+        }
+
+        stage.set_points(cursor, &[[3.0, 2.0, 0.0]]).unwrap();
+        stage.update(1.0 / 30.0);
+        for handle in [tail, custom_tail] {
+            let points = stage.get_points(handle).unwrap();
+            assert!(points.len() > 1);
+            // A geometry-only seed is lost on the first update. These two
+            // endpoints independently prove that the updater owns its seed.
+            assert_eq!(points.first(), Some(&[2.0, 1.0, 0.0]));
+            assert_eq!(points.last(), Some(&[3.0, 2.0, 0.0]));
+            let widths = stage
+                .get(handle)
+                .unwrap()
+                .buffer
+                .read_column("stroke_width")
+                .unwrap();
+            let colors = stage
+                .get(handle)
+                .unwrap()
+                .buffer
+                .read_column("stroke_rgba")
+                .unwrap();
+            assert_eq!(widths.first(), Some(&0.0));
+            assert_eq!(widths.last(), Some(&3.0));
+            assert_eq!(colors[3], 0.0);
+            assert_eq!(colors.last(), Some(&1.0));
+        }
         for cadence in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(matches!(
                 TracingTail::new().with_time_per_anchor(cadence),
@@ -2938,6 +3103,261 @@ mod tests {
             ));
         }
         assert!(!classify_wait(&stage, false).is_pure());
+    }
+
+    #[test]
+    fn tracing_tail_zero_window_publishes_only_the_current_point() {
+        let mut stage = Stage::new();
+        let cursor = stage.add(VMobject::from_points(vec![[2.0, 1.0, 0.0]]));
+        let tail = TracingTail::new()
+            .with_time_traced(0.0)
+            .add_to_stage(&mut stage, cursor)
+            .unwrap();
+        stage.add_to_scene(tail).unwrap();
+        assert!(stage.get_points(tail).unwrap().is_empty());
+        for point in [[3.0, 2.0, 0.0], [5.0, 4.0, 0.0]] {
+            stage.set_points(cursor, &[point]).unwrap();
+            stage.update(0.125);
+            assert_eq!(stage.get_points(tail).unwrap(), vec![point]);
+        }
+    }
+
+    #[test]
+    fn tracing_tail_irregular_deltas_keep_the_same_temporal_grid() {
+        fn run(deltas: &[f64]) -> Vec<Vec3> {
+            let mut stage = Stage::new();
+            let cursor = stage.add(VMobject::from_points(vec![[0.0; 3]]));
+            let tail = TracingTail::new()
+                .with_time_traced(0.875)
+                .with_time_per_anchor(0.25)
+                .unwrap()
+                .add_to_stage(&mut stage, cursor)
+                .unwrap();
+            stage.add_to_scene(tail).unwrap();
+            let mut time = 0.0;
+            for &dt in deltas {
+                time += dt;
+                stage
+                    .set_points(cursor, &[[time, 2.0 * time, 0.0]])
+                    .unwrap();
+                stage.update(dt);
+            }
+            stage
+                .get_points(tail)
+                .unwrap()
+                .into_iter()
+                .step_by(2)
+                .collect()
+        }
+
+        // The cutoff is between grid points. A long frame followed by a
+        // short frame must neither collapse the window nor revive old data.
+        let expected = vec![
+            [0.625, 1.25, 0.0],
+            [0.75, 1.5, 0.0],
+            [1.0, 2.0, 0.0],
+            [1.25, 2.5, 0.0],
+            [1.5, 3.0, 0.0],
+        ];
+        assert_eq!(run(&[0.0625; 24]), expected);
+        assert_eq!(
+            run(&[0.375, 0.125, 0.75, 0.000_976_562_5, 0.249_023_437_5]),
+            expected
+        );
+    }
+
+    #[test]
+    fn tracing_tail_clips_piecewise_observations_between_grid_points() {
+        let mut stage = Stage::new();
+        let cursor = stage.add(VMobject::from_points(vec![[0.0; 3]]));
+        let tail = TracingTail::new()
+            .with_time_traced(0.5)
+            .with_time_per_anchor(0.25)
+            .unwrap()
+            .add_to_stage(&mut stage, cursor)
+            .unwrap();
+        stage.add_to_scene(tail).unwrap();
+        for (dt, point) in [
+            (0.25, [1.0, 0.0, 0.0]),
+            (0.25, [1.0, 1.0, 0.0]),
+            (0.25, [2.0, 1.0, 0.0]),
+            (0.125, [2.0, 2.0, 0.0]),
+        ] {
+            stage.set_points(cursor, &[point]).unwrap();
+            stage.update(dt);
+        }
+        let anchors: Vec<_> = stage
+            .get_points(tail)
+            .unwrap()
+            .into_iter()
+            .step_by(2)
+            .collect();
+        assert_eq!(
+            anchors,
+            vec![
+                [1.0, 0.5, 0.0],
+                [1.0, 1.0, 0.0],
+                [2.0, 1.0, 0.0],
+                [2.0, 2.0, 0.0],
+            ]
+        );
+
+        // The next grid point interpolates the two actual latest source
+        // observations, including the one between earlier grid points.
+        stage.set_points(cursor, &[[4.0, 2.0, 0.0]]).unwrap();
+        stage.update(0.375);
+        let anchors: Vec<_> = stage
+            .get_points(tail)
+            .unwrap()
+            .into_iter()
+            .step_by(2)
+            .collect();
+        assert_eq!(anchors.len(), 3);
+        assert_eq!(anchors[0], [2.0, 1.0, 0.0]);
+        assert!((anchors[1][0] - 8.0 / 3.0).abs() < 1e-6);
+        assert_eq!(anchors[1][1], 2.0);
+        assert_eq!(anchors[2], [4.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn tracing_tail_tiny_steps_keep_seed_and_bound_the_geometry() {
+        let mut stage = Stage::new();
+        let start = [2.0, 1.0, 0.0];
+        let cursor = stage.add(VMobject::from_points(vec![start]));
+        let tail = TracingTail::new().add_to_stage(&mut stage, cursor).unwrap();
+        stage.add_to_scene(tail).unwrap();
+        for (dt, point) in [
+            (1e-12, [3.0, 2.0, 0.0]),
+            (1e-9, [4.0, 3.0, 0.0]),
+            (1e-10, [5.0, 4.0, 0.0]),
+        ] {
+            stage.set_points(cursor, &[point]).unwrap();
+            stage.update(dt);
+            let points = stage.get_points(tail).unwrap();
+            assert!(
+                points.len() <= 35,
+                "tiny dt must not allocate a frame-count window"
+            );
+            assert_eq!(points.first(), Some(&start));
+            assert_eq!(points.last(), Some(&point));
+            assert!(points.iter().flatten().all(|value| value.is_finite()));
+        }
+    }
+
+    #[test]
+    fn tracing_tail_large_steps_skip_expired_samples() {
+        // Direct sample values avoid f32 geometry rounding masking a narrow
+        // temporal window after a very large observed displacement in time.
+        let mut samples = TailSamples::new(1.0, 0.25, 4, [0.0; 3]);
+        let points = samples.advance([64.0, 0.0, 0.0], 1e6);
+        assert_eq!(points.len(), 5);
+        for (index, point) in points.iter().enumerate() {
+            let age = 1.0 - index as f64 * 0.25;
+            assert!((point[0] - 64.0 * (1.0 - age / 1e6)).abs() < 1e-12);
+        }
+
+        // dt / spacing overflows, but the finite tail still has only eight
+        // grid intervals. No absolute time or grid index is required.
+        let spacing = f64::from_bits(1);
+        let mut samples = TailSamples::new(8.0 * spacing, spacing, 8, [0.0; 3]);
+        for point in [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]] {
+            let points = samples.advance(point, f64::MAX);
+            assert!(points.len() <= 11);
+            assert!(points.iter().flatten().all(|value| value.is_finite()));
+            assert_eq!(points.last(), Some(&point));
+            assert!(points.iter().all(|sample| sample == &point));
+        }
+    }
+
+    #[test]
+    fn tracing_tail_invalid_deltas_do_not_sample_or_change_tail_state() {
+        use std::cell::Cell;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::rc::Rc;
+
+        let source = Rc::new(Cell::new([0.0; 3]));
+        let make = |stage: &mut Stage, calls: Rc<Cell<usize>>| {
+            let source = Rc::clone(&source);
+            let tail = TracingTail::new()
+                .with_time_traced(0.5)
+                .with_time_per_anchor(0.125)
+                .unwrap();
+            let samples = TailSamples::new(0.5, 0.125, tail.prefill, source.get());
+            let mob = tail
+                .traced
+                .add_to_stage_with_history(
+                    stage,
+                    move |_| {
+                        calls.set(calls.get() + 1);
+                        source.get()
+                    },
+                    Some(samples),
+                )
+                .unwrap();
+            stage.add_to_scene(mob).unwrap();
+            mob
+        };
+        let mut stage = Stage::new();
+        let mut control = Stage::new();
+        let calls = Rc::new(Cell::new(0));
+        let tail = make(&mut stage, Rc::clone(&calls));
+        let expected = make(&mut control, Rc::new(Cell::new(0)));
+        stage.update(0.0);
+        assert_eq!(calls.get(), 0);
+        assert!(stage.get_points(tail).unwrap().is_empty());
+
+        for (step, (dt, point)) in [(0.25, [1.0, 1.0, 0.0]), (0.125, [2.0, 1.0, 0.0])]
+            .into_iter()
+            .enumerate()
+        {
+            let before = stage.get_points(tail).unwrap();
+            source.set([99.0, 99.0, 0.0]);
+            for invalid in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert!(catch_unwind(AssertUnwindSafe(|| stage.update(invalid))).is_err());
+                assert_eq!(calls.get(), step);
+                assert_eq!(stage.get_points(tail).unwrap(), before);
+            }
+            source.set(point);
+            stage.update(dt);
+            control.update(dt);
+            assert_eq!(calls.get(), step + 1);
+            // Valid continuation proves hidden history stayed unchanged too.
+            // Stage::update has already advanced its own clock on invalid
+            // input; this assertion is intentionally about the tail only.
+            assert_eq!(
+                stage.get_points(tail).unwrap(),
+                control.get_points(expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn tracing_tail_refuses_invalid_or_unbounded_initial_history() {
+        let mut stage = Stage::new();
+        let cursor = stage.add(VMobject::from_points(vec![[2.0, 1.0, 0.0]]));
+        for duration in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                TracingTail::new()
+                    .with_time_traced(duration)
+                    .add_to_stage(&mut stage, cursor),
+                Err(FieldError::NonFiniteControl { .. })
+            ));
+        }
+        assert!(matches!(
+            TracingTail::new()
+                .with_time_traced(1e6)
+                .add_to_stage(&mut stage, cursor),
+            Err(FieldError::Sampling(_))
+        ));
+        // A floor-only admission would accept this extra partial interval.
+        assert!(matches!(
+            TracingTail::new()
+                .with_time_traced(99_997.25)
+                .with_time_per_anchor(1.0)
+                .unwrap()
+                .add_to_stage(&mut stage, cursor),
+            Err(FieldError::Sampling(_))
+        ));
     }
 
     #[test]

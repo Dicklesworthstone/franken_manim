@@ -73,9 +73,29 @@ class DetachedTailTests(unittest.TestCase):
         self.assertTrue(tail._is_bound())
         self.assertIs(tail._scene, scene)
         self.assertEqual(tail.updaters, [], "bound source lost its native updater")
+        self.assertEqual(tail.get_num_points(), 0)
         scene.add(tail)
+        scene.update_frame(0)
+        self.assertEqual(tail.get_num_points(), 0)
         scene.play(source.animate.shift(m.RIGHT), run_time=.25, rate_func=m.linear)
         np.testing.assert_allclose(tail.get_end(), source.get_center(), atol=1e-6)
+
+    def test_bound_tail_uses_elapsed_time_and_bounded_geometry(self):
+        scene, source = m.Scene(), m.Dot()
+        scene.add(source)
+        tail = m.TracingTail(source, time_traced=.5, time_per_anchor=.125)
+        scene.add(tail)
+        elapsed = 0.
+        for delta in (1e-9, .03125, .09375, .25, .375, 4.):
+            elapsed += delta
+            source.move_to(elapsed * m.RIGHT)
+            scene.update_frame(delta)
+            self.assertEqual(tail.updaters, [])
+            self.assertLessEqual(tail.get_num_points(), 13)
+            np.testing.assert_allclose(tail.get_start(),
+                                       max(0., elapsed - .5) * m.RIGHT, atol=1e-6)
+            np.testing.assert_allclose(tail.get_end(),
+                                       elapsed * m.RIGHT, atol=1e-6)
 
     def test_authored_source_exception_preserves_history_and_allows_retry(self):
         failure = LookupError("authored center failed")
@@ -130,7 +150,7 @@ class DetachedTailTests(unittest.TestCase):
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(DetachedTailTests)
-assert suite.countTestCases() == 8, "detached-tail acceptance inventory changed"
+assert suite.countTestCases() == 9, "detached-tail acceptance inventory changed"
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 gc.collect()
 if not result.wasSuccessful():
