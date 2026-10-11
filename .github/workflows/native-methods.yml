@@ -1,0 +1,110 @@
+name: Native method animation
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/native-methods.yml'
+      - 'crates/fmn-anim/**'
+      - 'crates/fmn/src/prelude.rs'
+      - 'crates/fmn/tests/deferred_method_render.rs'
+      - 'crates/fmn-scene/tests/deferred_method_bundle.rs'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-method-animation
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: target/portable
+      CARGO_BUILD_JOBS: '2'
+      PYO3_PYTHON: python3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: native-methods-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - run: rustup show active-toolchain
+      - name: Prepare bounded candidate or check already-published source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-methods'
+          out.mkdir()
+          paths = ['crates/fmn-anim/src/apply_method.rs', 'crates/fmn-anim/src/lib.rs',
+                   'crates/fmn-anim/tests/apply_method.rs', 'crates/fmn/src/prelude.rs']
+          candidate = not pathlib.Path(paths[0]).exists()
+          if candidate:
+              chunks = []
+              for sha in ['e2323b316a9a89c3aad4c1f277fb239f4a5223f1',
+                          '125be62edbe54549cac27772d4f1afa7885380df',
+                          '8c220c3a7c094860757a9a165bc573d86d06550e']:
+                  request = urllib.request.Request(
+                      f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+                      headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'User-Agent':'fmn-native-method-validation'})
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      data = base64.b64decode(json.load(response)['content'])
+                  assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == sha
+                  chunks.append(data)
+              patch = gzip.decompress(b''.join(chunks))
+              assert hashlib.sha256(patch).hexdigest() == 'f3df9d266ff566f7678d0fd48a009a89a681c379aa8edbaedbd028c177e36197'
+              patch_path = out / 'candidate.patch'
+              patch_path.write_bytes(patch)
+              stats = subprocess.check_output(['git','apply','--numstat',str(patch_path)], text=True)
+              assert {line.split('\t',2)[2] for line in stats.splitlines()} == set(paths)
+              subprocess.run(['git','apply','--check',str(patch_path)],check=True)
+              subprocess.run(['git','apply',str(patch_path)],check=True)
+          subprocess.run(['rustfmt',*([] if candidate else ['--check']), '--edition','2024',
+                          '--config','skip_children=true', *paths],check=True)
+          subprocess.run(['git','diff','--check'],check=True)
+          manifest = {'base_commit':os.environ['GITHUB_SHA'], 'candidate_applied':candidate, 'files':[]}
+          for path in paths:
+              data = pathlib.Path(path).read_bytes()
+              manifest['files'].append({'path':path,'sha':hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()})
+          (out/'source.json').write_text(json.dumps(manifest,indent=2))
+          subprocess.run(['tar','czf',str(out/'source.tar.gz'),*paths],check=True)
+          PY
+      - name: Run native semantics, rendering dependencies and strict compilation
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-methods'
+          commands = [
+              ('focused', ['cargo','test','--locked','-p','fmn-anim','--test','apply_method','--','--nocapture']),
+              ('animation-scene-facade', ['cargo','test','--locked','-p','fmn-anim','-p','fmn-scene','-p','fmn','--no-fail-fast']),
+              ('release-method', ['cargo','test','--release','--locked','-p','fmn-anim','--test','apply_method']),
+              ('clippy', ['cargo','clippy','--locked','-p','fmn-anim','-p','fmn-scene','-p','fmn','--all-targets','--','-D','warnings']),
+              ('workspace-check', ['cargo','check','--locked','--workspace','--all-targets']),
+          ]
+          results = {}
+          for name, command in commands:
+              print('RUN', name, flush=True)
+              with (out/(name+'.log')).open('w') as log:
+                  result = subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)
+              results[name] = result.returncode
+              (out/'results.json').write_text(json.dumps(results,indent=2))
+              print((out/(name+'.log')).read_text()[-14000:],flush=True)
+          assert all(code == 0 for code in results.values()), results
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-methods-${{ github.run_id }}
+          path: ${{ runner.temp }}/native-methods
+          retention-days: 7
