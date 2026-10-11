@@ -6,11 +6,10 @@ on:
       - '.github/workflows/native-render.yml'
   workflow_dispatch:
 # Candidate validation only. No commit, push or ref update is performed.
-# The source publication commit restores this workflow to read-only CI.
 permissions:
   contents: write
 concurrency:
-  group: native-fmtl-rate-validation
+  group: native-fmtl-producer-validation
   cancel-in-progress: true
 jobs:
   native-render:
@@ -26,6 +25,7 @@ jobs:
       CARGO_TERM_COLOR: never
       CARGO_TARGET_DIR: target/portable
       CARGO_BUILD_JOBS: '2'
+      PYO3_PYTHON: python3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -41,7 +41,7 @@ jobs:
           key: fmtl-rates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
-      - name: Apply the immutable symbolic-rate candidate
+      - name: Apply immutable catalog and producer candidates
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -49,30 +49,46 @@ jobs:
           import base64, hashlib, json, os, pathlib, subprocess, urllib.request
           out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fmtl-rate-validation'
           out.mkdir()
-          sha = 'fa9e02e8eab10fcbf6a21565fb9ab9f08984346a'
-          request = urllib.request.Request(
-              f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
-              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-                       'User-Agent': 'OpenAI File Downloader, XaiImageApiFetch/1.0'})
-          with urllib.request.urlopen(request, timeout=60) as response:
-              value = json.load(response)
-          patch = base64.b64decode(value['content'])
-          assert hashlib.sha1(b'blob '+str(len(patch)).encode()+b'\0'+patch).hexdigest() == sha
-          assert hashlib.sha256(patch).hexdigest() == '2978d55b84510e1386a357bfab769d8cef3bc1772f3be9817499713a8ba662bf'
-          path = out / 'candidate.patch'
-          path.write_bytes(patch)
-          allowed = {
-              'crates/fmn-core/src/rate.rs', 'crates/fmn-anim/src/animation.rs',
-              'crates/fmn-anim/src/bundle.rs', 'crates/fmn-anim/tests/catalog_rates.rs',
-              'crates/fmn-scene/tests/shared_bundle.rs', 'crates/fmn-cli/tests/timeline_catalog.rs',
+          def blob(sha):
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+                  headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'User-Agent': 'fmn-candidate-validation'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  value = json.load(response)
+              data = base64.b64decode(value['content'])
+              assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == sha
+              return data
+          candidates = {
+              'fa9e02e8eab10fcbf6a21565fb9ab9f08984346a': {
+                  'crates/fmn-core/src/rate.rs', 'crates/fmn-anim/src/animation.rs',
+                  'crates/fmn-anim/src/bundle.rs', 'crates/fmn-anim/tests/catalog_rates.rs',
+                  'crates/fmn-scene/tests/shared_bundle.rs', 'crates/fmn-cli/tests/timeline_catalog.rs'},
+              'd2d57a8172fbaa93453ab50d482ea64716d778fb': {'crates/fmn-scene/src/timeline_bundle.rs'},
+              '90f392eab6266dafa5c0f7cb12a8499848ca250d': {'crates/fmn-cli/tests/compiled_pipeline.rs'},
+              'bdd92f417310068bedcae73b1f0a07704fdd2b3f': {
+                  'crates/fmn-anim/src/creation.rs', 'crates/fmn-anim/src/fading.rs',
+                  'crates/fmn-anim/src/indication.rs', 'crates/fmn-anim/src/rotation.rs',
+                  'crates/fmn-python/src/lib.rs'},
           }
-          stats = subprocess.check_output(['git','apply','--numstat',str(path)], text=True)
-          assert {line.split('\t',2)[2] for line in stats.splitlines()} == allowed
-          subprocess.run(['git','apply','--check',str(path)], check=True)
+          allowed = set()
+          for sha, paths in candidates.items():
+              patch = out / (sha+'.patch')
+              patch.write_bytes(blob(sha))
+              stats = subprocess.check_output(['git','apply','--numstat',str(patch)], text=True)
+              assert {line.split('\t',2)[2] for line in stats.splitlines()} == paths
+              subprocess.run(['git','apply','--check',str(patch)], check=True)
+              subprocess.run(['git','apply',str(patch)], check=True)
+              allowed.update(paths)
+          for path, sha in {
+              'crates/fmn-scene/tests/exported_rate_identity.rs':'6bc8f59b0af3a95316cb631132d6a0825e4ee2fd',
+              'crates/fmn-anim/tests/builtin_rate_identity.rs':'864e5980b1694f7f149124220a6dcea96c579d5d',
+              'crates/fmn-python/src/catalog_rate_identity.rs':'bfbbf546352edf1aa4ae710b647271558186bce4',
+          }.items():
+              assert not pathlib.Path(path).exists(), path
+              pathlib.Path(path).write_bytes(blob(sha))
+              allowed.add(path)
           (out / 'paths.json').write_text(json.dumps(sorted(allowed)))
-          fixture = pathlib.Path('demo/wasm/bundle.fmtl').read_bytes()
-          (out / 'fixture.sha256').write_text(hashlib.sha256(fixture).hexdigest())
-          subprocess.run(['git','apply',str(path)], check=True)
+          (out / 'fixture.sha256').write_text(hashlib.sha256(pathlib.Path('demo/wasm/bundle.fmtl').read_bytes()).hexdigest())
           subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*sorted(allowed)], check=True)
           subprocess.run(['git','diff','--check'], check=True)
           PY
@@ -83,10 +99,11 @@ jobs:
           out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fmtl-rate-validation'
           commands = [
               ('debug-core-anim-scene', ['cargo','test','--locked','-p','fmn-core','-p','fmn-anim','-p','fmn-scene','--no-fail-fast']),
-              ('release-catalog', ['cargo','test','--release','--locked','-p','fmn-anim','--test','catalog_rates']),
-              ('release-bundle', ['cargo','test','--release','--locked','-p','fmn-scene','--test','shared_bundle','--test','shared_rate_catalog','--test','tracker_bundle','--test','method_bundle']),
+              ('release-catalog', ['cargo','test','--release','--locked','-p','fmn-anim','--test','catalog_rates','--test','builtin_rate_identity']),
+              ('release-bundle', ['cargo','test','--release','--locked','-p','fmn-scene','--test','exported_rate_identity','--test','shared_bundle','--test','shared_rate_catalog','--test','tracker_bundle','--test','method_bundle']),
               ('release-cli', ['cargo','test','--release','--locked','-p','fmn-cli','--features','cli,batch','--test','timeline_catalog','--test','compiled_pipeline','--test','readme_bundle']),
               ('wasm-player-host', ['cargo','test','--release','--locked','-p','fmn-wasm','--lib']),
+              ('portal-named-rates', ['cargo','test','--locked','-p','fmn-python','--lib','catalog_rate_identity','--','--nocapture']),
               ('clippy', ['cargo','clippy','--locked','-p','fmn-core','-p','fmn-anim','-p','fmn-scene','--all-targets','--','-D','warnings']),
               ('workspace-check', ['cargo','check','--locked','--workspace','--all-targets']),
           ]
@@ -121,8 +138,7 @@ jobs:
               request = urllib.request.Request(
                   f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs',
                   method='POST', data=json.dumps({'content':base64.b64encode(data).decode(),'encoding':'base64'}).encode(),
-                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json',
-                           'User-Agent':'OpenAI File Downloader, XaiImageApiFetch/1.0'})
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json','User-Agent':'fmn-candidate-validation'})
               with urllib.request.urlopen(request, timeout=60) as response:
                   returned = json.load(response)
               assert returned['sha'] == sha
