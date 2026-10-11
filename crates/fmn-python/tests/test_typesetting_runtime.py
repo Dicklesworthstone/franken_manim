@@ -32,6 +32,10 @@ def protocol(error=None):
             if kwargs.get("fail"):
                 raise ValueError("scene constructor refused")
             self.received = (args, kwargs)
+        def _run_lifecycle(self):
+            # install_typesetting wraps the run for the static Tex preflight
+            # (fm-typeset-cache-preflight-wiring-1sn0); these cases never run it.
+            return None
     def backend(directory):
         calls.append(("cache", directory))
         return {"schema": "fmn-python.typeset-cache", "version": 1,
