@@ -13,7 +13,7 @@ concurrency:
 jobs:
   validate:
     if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 55
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
@@ -59,6 +59,8 @@ jobs:
                '851712ae1f70a7785a6847a9a195de8906c2c3c490dab995ac0e4a3e02b79bea', True),
               (['cb2e465372c3dc08ce1c0583ffa8bf6004fe255d'],
                '7e5771f5c5388287ee71fd874a83e0947a5d22ae37cc50da57a506cae467dd84', False),
+              (['99ccc58a686119f977e5860a4e878772b00c59e2'],
+               'b4c416ffad788eb764ef9973e38d70474d5e30288cf1f3ef21fc1c6cc726b880', False),
           ]
           allowed = {
               'crates/fmn-mobject/src/lib.rs', 'crates/fmn-mobject/src/stage.rs',
@@ -144,6 +146,10 @@ jobs:
         run: |
           set -o pipefail
           cargo check --locked --workspace 2>&1 | tee "$RUNNER_TEMP/native-prepare/workspace-check.log"
+      - name: Clippy for changed production crates and tests
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p fmn-mobject -p fmn-anim -p fmn -p fmn-cli --features fmn-cli/cli,fmn-cli/batch --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/native-prepare/clippy.log"
       - name: Archive exact validated source blobs
         env:
           GH_TOKEN: ${{ github.token }}
