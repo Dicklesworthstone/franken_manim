@@ -15,9 +15,9 @@ pub use crate::{
     run_scene_with_typesetting,
 };
 pub use fmn_anim::{
-    AnimConfig, AnimError, Animation, AnimationGroup, FramePacket, IntoAnimation, IntoAnimations,
-    MoveAlongPath, RateFunc, Rotating, ShowPartial, Succession, Transform, fade_in, fade_out,
-    prepare_animation, prepare_animations, rotate, show_creation, write,
+    AnimConfig, AnimError, Animation, AnimationGroup, ApplyMethod, FramePacket, IntoAnimation,
+    IntoAnimations, MoveAlongPath, RateFunc, Rotating, ShowPartial, Succession, Transform, fade_in,
+    fade_out, prepare_animation, prepare_animations, rotate, show_creation, write,
 };
 pub use fmn_config::Config;
 pub use fmn_core::color::Srgb;
