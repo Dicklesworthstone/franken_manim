@@ -9,7 +9,7 @@
 //! one from serialized bytes.  Unsupported platforms and incomplete probes
 //! fail before measurement rather than silently becoming qualified.
 
-use crate::perf::{BenchmarkKey, EvidenceKind, EvidenceRef, PerfError};
+use crate::perf::{Baseline, BenchmarkKey, EvidenceKind, EvidenceRef, PerfError};
 use fmn_hash::{Digest, Sha256, sha256};
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_platform::topology::{HardwareTopology, parse_cpu_list};
@@ -634,6 +634,42 @@ pub fn measurement_identity(
     key.bare_metal = true;
     key.isolated = true;
     Ok((key, vec![qualification.evidence.clone()]))
+}
+
+/// Reviewed exact-host profiles, one `<profile_id>.tsv` per host, relative
+/// to the fmn-conformance crate.
+pub const REVIEWED_HOST_PROFILE_DIR: &str = "tests/artifacts/perf/hosts";
+
+/// Refuse a committed baseline that claims a qualified host without a
+/// reviewed profile for it (fm-5wq.32).
+///
+/// [`measurement_identity`] never trusts a baseline's `bare_metal` and
+/// `isolated` fields, but a committed fixture that states them for a host
+/// with no reviewed profile still mislabels its evidence class for every
+/// reader of the file.
+///
+/// # Errors
+/// [`PerfError::Baseline`] naming `path`, its `profile_id` and the claimed
+/// fields.
+pub fn check_baseline_host_claims(
+    path: &str,
+    baseline: &Baseline,
+    reviewed_profiles: &BTreeSet<String>,
+) -> Result<(), PerfError> {
+    let key = &baseline.key;
+    let claimed: Vec<&str> = [("bare_metal", key.bare_metal), ("isolated", key.isolated)]
+        .into_iter()
+        .filter_map(|(name, value)| value.then_some(name))
+        .collect();
+    if claimed.is_empty() || reviewed_profiles.contains(&key.profile_id) {
+        return Ok(());
+    }
+    Err(PerfError::Baseline(format!(
+        "{path} claims {} for profile_id {} without a reviewed host profile in \
+         {REVIEWED_HOST_PROFILE_DIR}",
+        claimed.join(" and "),
+        key.profile_id
+    )))
 }
 
 fn attest_linux_host(
@@ -1472,6 +1508,76 @@ mod tests {
 
     fn digest(value: &str) -> Digest {
         sha256(value.as_bytes())
+    }
+
+    fn crate_file(relative: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    fn reviewed_host_profiles() -> BTreeSet<String> {
+        std::fs::read_dir(crate_file(REVIEWED_HOST_PROFILE_DIR))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| Some(entry.path().file_stem()?.to_str()?.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn committed_baselines_claim_no_unreviewed_host_qualification() {
+        // fm-5wq.32: the PG-8 fixtures once claimed bare_metal and isolated for
+        // the shared dev host, which has no reviewed profile.
+        let reviewed = reviewed_host_profiles();
+        let mut checked = 0;
+        for entry in std::fs::read_dir(crate_file("tests/artifacts/perf")).expect("perf artifacts")
+        {
+            let path = entry
+                .expect("perf artifact entry")
+                .path()
+                .join("baseline.tsv");
+            if !path.is_file() {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .expect("inside the crate")
+                .display()
+                .to_string();
+            let text = std::fs::read_to_string(&path).expect("baseline text");
+            let baseline = Baseline::from_tsv(&text).expect("committed baseline parses");
+            let verdict = check_baseline_host_claims(&relative, &baseline, &reviewed);
+            println!(
+                "{relative}\tprofile_id={}\tbare_metal={}\tisolated={}\tverdict={}",
+                baseline.key.profile_id,
+                baseline.key.bare_metal,
+                baseline.key.isolated,
+                if verdict.is_ok() { "ok" } else { "refused" }
+            );
+            verdict.expect("committed baseline host claims");
+            checked += 1;
+        }
+        assert!(checked >= 4, "found {checked} committed baselines");
+    }
+
+    #[test]
+    fn a_planted_overclaimed_baseline_is_refused_by_name() {
+        let path = "tests/artifacts/perf/planted/pg8-overclaimed-baseline.tsv";
+        let text = std::fs::read_to_string(crate_file(path)).expect("planted fixture");
+        let baseline = Baseline::from_tsv(&text).expect("planted fixture parses");
+        let message = check_baseline_host_claims(path, &baseline, &BTreeSet::new())
+            .expect_err("an unreviewed qualification claim is refused")
+            .to_string();
+        assert!(
+            message.contains(path)
+                && message.contains("bare_metal and isolated")
+                && message.contains("pg8-shared-dev-host"),
+            "{message}"
+        );
+        let reviewed = BTreeSet::from(["pg8-shared-dev-host".to_owned()]);
+        check_baseline_host_claims(path, &baseline, &reviewed)
+            .expect("a reviewed profile admits the same claim");
     }
 
     fn profile_text() -> String {

@@ -27,8 +27,8 @@ config_digest	785992d095a56814dbdf1e19a73dea68f675888cf14aafa15e2532a4a7c3d19a
 cache_state	none
 output_mode	record-buffer-state
 external_tool_fingerprint	-
-bare_metal	true
-isolated	true
+bare_metal	false
+isolated	false
 producer_commit	9f6823d185cb83601dd90e9297e49c2e936f24f5
 observed_total	-
 observed_valid	-
