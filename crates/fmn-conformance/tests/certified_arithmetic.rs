@@ -1087,25 +1087,26 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
         "lib.rs",
         "log10",
         1,
-        "fm-wi8l: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
-         at thresholds, never the solution values",
+        "fm-9esi: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
+         at thresholds, never the solution values. Fixed upstream in frankenscipy d00db63ac \
+         (fm-wi8l); it leaves with the pin bump",
     ),
     (
         "frankenscipy/crates/fsci-runtime",
         "policy.rs",
         "exp",
         1,
-        "fm-wi8l: the solve policy's softmax, whose posterior picks FailClosed/FullValidate. \
-         frankenscipy-8xgmd routes it through deterministic_exp; it leaves with the fm-9esi pin bump",
+        "fm-9esi: the solve policy's softmax, whose posterior picks FailClosed/FullValidate. \
+         Fixed upstream in frankenscipy d00db63ac (fm-wi8l); it leaves with the pin bump",
     ),
     (
         "frankenscipy/crates/fsci-runtime",
         "lib.rs",
         "log10",
         2,
-        "fm-wi8l: the solve portfolio's rcond map (condition_posterior) and outcome row \
-         (rcond_decade). frankenscipy-8xgmd routes both through deterministic_log10; they \
-         leave with the fm-9esi pin bump",
+        "fm-9esi: the solve portfolio's rcond map (condition_posterior) and outcome row \
+         (rcond_decade). Fixed upstream in frankenscipy d00db63ac (fm-wi8l); they leave with \
+         the pin bump",
     ),
     (
         "frankenscipy/crates/fsci-linalg",
