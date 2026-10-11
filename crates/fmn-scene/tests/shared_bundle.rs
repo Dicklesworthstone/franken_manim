@@ -185,3 +185,67 @@ fn malformed_inputs_and_out_of_range_jobs_keep_the_readers_refusal() {
     assert_eq!(empty.snapshot_bytes(), 0);
     assert!(empty.frame_job(0).is_err());
 }
+
+#[test]
+fn checked_in_demo_replays_without_retagging_decoded_function_pointers() {
+    // This is the actual README/browser asset, not a freshly exported file
+    // that might accidentally carry this build's function-address choices.
+    let bytes = include_bytes!("../../../demo/wasm/bundle.fmtl");
+    let eager = TimelineBundle::from_bytes(bytes).unwrap();
+    assert_eq!(eager.frame_count(), 45);
+    let shared = SharedTimelineBundle::from_bytes(bytes).unwrap();
+    let mut cache = TimelineFrameCache::default();
+    for index in (0..45).rev().chain(0..45) {
+        assert_eq!(
+            state(
+                &cache
+                    .materialize(&shared.frame_job(index).unwrap())
+                    .unwrap()
+            ),
+            state(&eager.stage_at(index).unwrap()),
+            "README bundle frame {index}",
+        );
+    }
+}
+
+#[test]
+fn every_catalog_export_round_trips_through_eager_and_shared_readers() {
+    // Address acquisition, nomination, encoding, decoding and shared replay
+    // cross several crates. Run this under --release as well as debug.
+    for function in [
+        rate::linear as fn(f64) -> f64,
+        rate::smooth,
+        rate::rush_into,
+        rate::rush_from,
+        rate::slow_into,
+        rate::double_smooth,
+        rate::there_and_back,
+        rate::lingering,
+    ] {
+        let bytes = export(function, 1.0, 8);
+        assert_eq!(bytes, export(function, 1.0, 8));
+        let eager = TimelineBundle::from_bytes(&bytes).unwrap();
+        let shared = SharedTimelineBundle::from_bytes(&bytes).unwrap();
+        assert_eq!(shared.frame_count(), 8);
+        assert_eq!(shared.segment_kind(0), eager.segment_kind(0));
+        let mut cache = TimelineFrameCache::default();
+        for index in [7, 0, 3, 1, 6, 2, 5, 4, 0] {
+            assert_eq!(
+                state(
+                    &cache
+                        .materialize(&shared.frame_job(index).unwrap())
+                        .unwrap()
+                ),
+                state(&eager.stage_at(index).unwrap()),
+            );
+        }
+    }
+    // Matching endpoint values do not make an arbitrary function a known
+    // catalog rate. Preserve the writer's fail-closed stateful fallback.
+    fn custom(alpha: f64) -> f64 {
+        alpha * alpha
+    }
+    let bytes = export(custom, 1.0, 8);
+    let shared = SharedTimelineBundle::from_bytes(&bytes).unwrap();
+    assert_eq!(shared.segment_kind(0), Some(BundleSegmentKind::Stateful));
+}

@@ -148,11 +148,14 @@ pub(crate) fn interpolate_linear_column(a: &[f32], b: &[f32], alpha: f64) -> Vec
 /// inspectable, which is what lets the replay journal and the API schema
 /// name the rate curve of any animation.
 ///
-/// Capturing closures (the Python front door's lambdas) join this type with
-/// fmn-python's bridge work; every non-capturing `fn(f64) -> f64` — the
-/// entire native catalog — fits [`RateFunc::Base`] today.
+/// Known catalog entries retain their validated identity in
+/// [`RateFunc::Catalog`], including when decoded from FMTL. Arbitrary
+/// non-capturing `fn(f64) -> f64` callbacks fit [`RateFunc::Base`].
 #[derive(Clone, Debug)]
 pub enum RateFunc {
+    /// A known catalog rate, whose wire identity survives cloning and
+    /// optimized cross-crate calls without function-pointer comparisons.
+    Catalog(rate::CatalogRate),
     /// A plain rate function (any `fn(f64) -> f64`, e.g. the fmn-core
     /// catalog).
     Base(fn(f64) -> f64),
@@ -191,7 +194,7 @@ pub enum RateFunc {
 impl Default for RateFunc {
     /// The Reference's default: `smooth`.
     fn default() -> Self {
-        Self::Base(rate::smooth)
+        Self::smooth()
     }
 }
 
@@ -199,13 +202,13 @@ impl RateFunc {
     /// `smooth` — the constructor-surface default.
     #[must_use]
     pub fn smooth() -> Self {
-        Self::Base(rate::smooth)
+        Self::Catalog(rate::CatalogRate::Smooth)
     }
 
     /// `linear`.
     #[must_use]
     pub fn linear() -> Self {
-        Self::Base(rate::linear)
+        Self::Catalog(rate::CatalogRate::Linear)
     }
 
     /// Wrap in `squish_rate_func(self, a, b)`.
@@ -231,6 +234,7 @@ impl RateFunc {
     #[must_use]
     pub fn eval(&self, t: f64) -> f64 {
         match self {
+            Self::Catalog(rate) => rate.function()(t),
             Self::Base(f) => f(t),
             Self::Sampled(samples) => match samples.len() {
                 0 => t,
