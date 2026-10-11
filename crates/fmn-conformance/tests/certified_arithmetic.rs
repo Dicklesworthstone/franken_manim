@@ -1174,16 +1174,18 @@ const THIRD_PARTY_NOT_SWEPT: &[(&str, &str)] = &[
         "typenum",
         "type-level integers for static dimensions: no runtime arithmetic",
     ),
+    (
+        "matrixmultiply",
+        "its dgemm picks an FMA kernel at run time, which no needle sees. nalgebra's gemm reaches \
+         it only for f64 products whose dimensions all exceed 5. On fmn's path the one such \
+         product is the SVD fallback's pseudo-inverse, and fmn-geom's \
+         closed_smoothing_solves_never_leave_lu pins that fallback as unreachable (fm-77rt)",
+    ),
 ];
 
 /// Crates on a certified path whose arithmetic this sweep cannot judge, each
 /// owned by an open bead: (crate, owner). Recording one is not arguing it out.
-const CERTIFIED_PATH_GAPS: &[(&str, &str)] = &[(
-    "matrixmultiply",
-    "fm-77rt: nalgebra's gemm calls its dgemm for f64 products whose dimensions all exceed 5 \
-     (fsci-linalg's SVD-fallback pseudo-inverse), and dgemm picks an FMA kernel at run time \
-     (is_x86_feature_detected!(\"fma\")): FMA in intrinsics, which no needle sees",
-)];
+const CERTIFIED_PATH_GAPS: &[(&str, &str)] = &[];
 
 /// Calls this guard reports but does not yet fail on, each owned by an open
 /// bead: (label, file, needle, exact count, owner). An entry whose count no
@@ -1241,22 +1243,23 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
         "svd.rs",
         "hypot",
         2,
-        "fm-77rt: the SVD fsci_linalg::solve falls back to when LU fails; simba's f64 hypot is \
-         the platform libm's",
+        "fm-dboe: fsci-linalg estimates rcond for n <= 4 from this SVD's singular values, on \
+         every 2- and 3-anchor closed smoothing solve; the rcond only steers decisions, far from \
+         their thresholds there. simba's f64 hypot is the platform libm's",
     ),
     (
         "crates.io/nalgebra",
         "svd2.rs",
         "atan2",
         2,
-        "fm-77rt: the 2x2 SVD inside the solve's SVD fallback",
+        "fm-dboe: the 2x2 SVD inside that n <= 4 rcond estimate",
     ),
     (
         "crates.io/nalgebra",
         "svd2.rs",
         "sin_cos",
         2,
-        "fm-77rt: the 2x2 SVD inside the solve's SVD fallback",
+        "fm-dboe: the 2x2 SVD inside that n <= 4 rcond estimate",
     ),
 ];
 
