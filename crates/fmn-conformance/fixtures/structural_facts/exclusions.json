@@ -271,13 +271,25 @@
       "reason": "The portal's point-cloud records carry glow_factor; the Reference's is a uniform."
     },
     {
+      "id": "bn07-c29-become-point-less-style",
+      "kind": "behavior-note",
+      "ref": "BN-07",
+      "scope": ["scenes"],
+      "subject": ["RepeatedConvolution", "RepeatedConvolutionDoubleLump", "RepeatedConvolutionExp", "RepeatedConvolutionGaussian"],
+      "class": "VGroup",
+      "fact": ["style.fill_color", "style.fill_opacity", "style.stroke_color", "style.stroke_width"],
+      "reference_values": ["#888888", "#DDDDDD", 0, 4000],
+      "reason": "C-29: prod_rhs = fg_label[6:] then prod_rhs.become(new_prod_rhs). At the pin become() copies data only, so the sliced VGroup's point-less root keeps VMobject's defaults. FrankenManim's become() carries the source root's style (BN-07)."
+    },
+    {
       "id": "fm-78b6-style-defaults-sweep",
       "kind": "open-bead",
       "ref": "fm-78b6",
       "scope": ["scenes"],
+      "subject": ["AnalyzeStepAlongDiagonalLine", "VisualizeMaxOfPairCDF", "Graph15Case", "CompareFirstTwoMethods"],
       "class": ["VGroup", "Line", "Rectangle"],
       "fact": ["style.fill_color", "style.fill_opacity", "style.stroke_color", "style.stroke_width"],
-      "reason": "Eight corpus scenes, measured on wheel10 (2026-10-11), was 29. Four RepeatedConvolution* scenes: become() onto a sliced VGroup carries the point-less root's style (C-29, BN-07), and the Reference keeps the slice's default grey. A point-less VGroup's fill opacity (AnalyzeStepAlongDiagonalLine). NumberLine's tick-group root stroke (VisualizeMaxOfPairCDF). Two Riemann rectangles' negative_color near a zero crossing (Graph15Case). A Line's undrawn fill (CompareFirstTwoMethods)."
+      "reason": "Four corpus scenes, measured on wheel10 (2026-10-11): a point-less VGroup's fill opacity (AnalyzeStepAlongDiagonalLine); NumberLine's tick-group root stroke (VisualizeMaxOfPairCDF); two Riemann rectangles' negative_color near a zero crossing (Graph15Case); a Line's undrawn fill (CompareFirstTwoMethods). The four C-29 scenes are behavior (bn07-c29-become-point-less-style)."
     },
     {
       "id": "fm-c1up-rounded-rectangle-corners",

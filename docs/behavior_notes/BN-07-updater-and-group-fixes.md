@@ -305,7 +305,12 @@ ever reached stays at opacity 0, though its glyph is visible again.
 **FrankenManim:** `become()` and `restore()` carry each member's style,
 with or without points.
 
-Locked by the C-29 assertions in `crates/fmn-python/tests/bridge.py`.
+Locked by the C-29 assertions in `crates/fmn-python/tests/bridge.py`. The
+same rule shows in `_2023/convolutions2/continuous.py` `RepeatedConvolution`
+(and its three subclasses). `prod_rhs = fg_label[6:]` is a sliced `VGroup`,
+and `prod_rhs.become(...)` leaves its point-less root grey in the Reference
+but carries the source's style in FrankenManim. The corpus differential
+excludes it by the `bn07-c29-become-point-less-style` row.
 
 **Migration:** none needed. A scene that reads a restored member's style
 gets the saved value, matching what is drawn.
