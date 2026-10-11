@@ -47,14 +47,16 @@ jobs:
           import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
           out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-methods'
           out.mkdir()
-          paths = ['crates/fmn-anim/src/apply_method.rs', 'crates/fmn-anim/src/lib.rs',
-                   'crates/fmn-anim/tests/apply_method.rs', 'crates/fmn/src/prelude.rs']
-          candidate = not pathlib.Path(paths[0]).exists()
+          paths = ['crates/fmn-anim/src/apply_method.rs', 'crates/fmn-anim/tests/apply_method_maps.rs',
+                   'crates/fmn/tests/deferred_method_render.rs', 'crates/fmn-scene/tests/deferred_method_bundle.rs']
+          candidate = not pathlib.Path(paths[1]).exists()
           if candidate:
+              source = pathlib.Path(paths[0]).read_bytes()
+              assert hashlib.sha1(b'blob '+str(len(source)).encode()+b'\0'+source).hexdigest() == '9e01dd2ef74f44fe1bfdbf2ead8398822f247163'
               chunks = []
-              for sha in ['e2323b316a9a89c3aad4c1f277fb239f4a5223f1',
-                          '125be62edbe54549cac27772d4f1afa7885380df',
-                          '8c220c3a7c094860757a9a165bc573d86d06550e']:
+              for sha in ['1d8f9650b72f9fcac5ae9d0bac62e5fe0b8d2927',
+                          'a04cd9c7d1345a34df6ccb0560313c699e1d03f8',
+                          'f4122d8c5ea7c9051d97194b0d3961c322e4bc68']:
                   request = urllib.request.Request(
                       f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
                       headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'User-Agent':'fmn-native-method-validation'})
@@ -63,7 +65,7 @@ jobs:
                   assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == sha
                   chunks.append(data)
               patch = gzip.decompress(b''.join(chunks))
-              assert hashlib.sha256(patch).hexdigest() == 'f3df9d266ff566f7678d0fd48a009a89a681c379aa8edbaedbd028c177e36197'
+              assert hashlib.sha256(patch).hexdigest() == 'f7d8fa39f0684c7ba729a0c4b3d61e570412a87c295c296402067c5bbfebc752'
               patch_path = out / 'candidate.patch'
               patch_path.write_bytes(patch)
               stats = subprocess.check_output(['git','apply','--numstat',str(patch_path)], text=True)
@@ -80,15 +82,19 @@ jobs:
           (out/'source.json').write_text(json.dumps(manifest,indent=2))
           subprocess.run(['tar','czf',str(out/'source.tar.gz'),*paths],check=True)
           PY
-      - name: Run native semantics, rendering dependencies and strict compilation
+      - name: Run native semantics, actual pixels and callback-free replay
         run: |
           python3 - <<'PY'
           import json, os, pathlib, subprocess
           out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-methods'
           commands = [
-              ('focused', ['cargo','test','--locked','-p','fmn-anim','--test','apply_method','--','--nocapture']),
+              ('focused', ['cargo','test','--locked','-p','fmn-anim','--test','apply_method','--test','apply_method_maps','--','--nocapture']),
+              ('bundle-replay', ['cargo','test','--locked','-p','fmn-scene','--test','deferred_method_bundle','--','--nocapture']),
+              ('actual-render', ['cargo','test','--locked','-p','fmn','--test','deferred_method_render','--','--nocapture']),
               ('animation-scene-facade', ['cargo','test','--locked','-p','fmn-anim','-p','fmn-scene','-p','fmn','--no-fail-fast']),
-              ('release-method', ['cargo','test','--release','--locked','-p','fmn-anim','--test','apply_method']),
+              ('release-method', ['cargo','test','--release','--locked','-p','fmn-anim','--test','apply_method','--test','apply_method_maps']),
+              ('release-render', ['cargo','test','--release','--locked','-p','fmn','--test','deferred_method_render']),
+              ('release-bundle', ['cargo','test','--release','--locked','-p','fmn-scene','--test','deferred_method_bundle']),
               ('clippy', ['cargo','clippy','--locked','-p','fmn-anim','-p','fmn-scene','-p','fmn','--all-targets','--','-D','warnings']),
               ('workspace-check', ['cargo','check','--locked','--workspace','--all-targets']),
           ]
