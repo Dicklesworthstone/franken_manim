@@ -41,7 +41,7 @@ jobs:
           key: fmtl-rates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
-      - name: Apply immutable catalog and producer candidates
+      - name: Verify published catalog and apply immutable producer candidates
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -49,6 +49,17 @@ jobs:
           import base64, hashlib, json, os, pathlib, subprocess, urllib.request
           out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fmtl-rate-validation'
           out.mkdir()
+          def git_hash(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          for path, sha in {
+              'crates/fmn-anim/src/animation.rs':'4c70f4ebeed48e48ed8022c0f73f50c9d4bc477e',
+              'crates/fmn-anim/src/bundle.rs':'fe4ec929cdb10ea232e5b92815049aa2437f37c0',
+              'crates/fmn-anim/tests/catalog_rates.rs':'8fee076a846fa148795026869bb623bffb294517',
+              'crates/fmn-cli/tests/timeline_catalog.rs':'3b94101410811fa455143f68654a5b23ae0ee5b5',
+              'crates/fmn-core/src/rate.rs':'05d89481117a836b591826ee0fbf75019f9ed9f0',
+              'crates/fmn-scene/tests/shared_bundle.rs':'f9c9dd1862b2700e7e551d2a13063491d79f0ef0',
+          }.items():
+              assert git_hash(pathlib.Path(path).read_bytes()) == sha, path
           def blob(sha):
               request = urllib.request.Request(
                   f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
@@ -56,19 +67,16 @@ jobs:
               with urllib.request.urlopen(request, timeout=60) as response:
                   value = json.load(response)
               data = base64.b64decode(value['content'])
-              assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == sha
+              assert git_hash(data) == sha
               return data
           candidates = {
-              'fa9e02e8eab10fcbf6a21565fb9ab9f08984346a': {
-                  'crates/fmn-core/src/rate.rs', 'crates/fmn-anim/src/animation.rs',
-                  'crates/fmn-anim/src/bundle.rs', 'crates/fmn-anim/tests/catalog_rates.rs',
-                  'crates/fmn-scene/tests/shared_bundle.rs', 'crates/fmn-cli/tests/timeline_catalog.rs'},
               'd2d57a8172fbaa93453ab50d482ea64716d778fb': {'crates/fmn-scene/src/timeline_bundle.rs'},
               '90f392eab6266dafa5c0f7cb12a8499848ca250d': {'crates/fmn-cli/tests/compiled_pipeline.rs'},
               'bdd92f417310068bedcae73b1f0a07704fdd2b3f': {
                   'crates/fmn-anim/src/creation.rs', 'crates/fmn-anim/src/fading.rs',
                   'crates/fmn-anim/src/indication.rs', 'crates/fmn-anim/src/rotation.rs',
                   'crates/fmn-python/src/lib.rs'},
+              'eb1e479c93668dcd08948390188a09c75108711d': {'crates/fmn-anim/tests/composition.rs'},
           }
           allowed = set()
           for sha, paths in candidates.items():
