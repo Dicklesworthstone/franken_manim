@@ -743,16 +743,17 @@ impl RenderSink {
                     "ffmpeg video is outside the certified artifact set; use RenderFormat::PngSequence or RenderFormat::Y4m with certified determinism",
                 ));
             }
+            // Invalid profiles have the same refusal with or without a host
+            // ffmpeg capability. Admission itself needs no process access.
+            let job = negotiate_video(options.format, config, options.camera.as_ref())?
+                .with_quality(options.effective_video_quality()?)
+                .map_err(RenderError::Negotiation)?;
             if options.ffmpeg.is_none() {
                 return Err(RenderError::Capability(
                     "video output requires RenderOptions::ffmpeg (or render() with the `ffmpeg` feature); native PNG-sequence, GIF and Y4M outputs need no external tool",
                 ));
             }
-            Some(
-                negotiate_video(options.format, config, options.camera.as_ref())?
-                    .with_quality(options.effective_video_quality()?)
-                    .map_err(RenderError::Negotiation)?,
-            )
+            Some(job)
         } else {
             None
         };

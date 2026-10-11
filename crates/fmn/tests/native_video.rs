@@ -104,34 +104,42 @@ fn certified_video_is_refused_instead_of_mislabelled() {
 
 #[test]
 fn incompatible_video_profiles_fail_before_any_process() {
+    // These pure refusals must also work when no ffmpeg capability exists.
     // Odd dimensions cannot be 4:2:0.
     let mut odd = options("/movie.mp4", RenderFormat::Mp4);
     odd.config.camera.resolution = (65, 36);
-    odd.ffmpeg = host_capability();
     assert_refused(odd, "even width and height");
+
+    let mut empty = options("/movie.mp4", RenderFormat::Mp4);
+    empty.config.camera.resolution = (0, 36);
+    assert_refused(empty, "zero frame dimensions");
+
+    let mut stopped = options("/movie.mp4", RenderFormat::Mp4);
+    stopped.config.camera.fps = 0;
+    assert_refused(stopped, "zero frame rate");
 
     // A translucent background needs the alpha-preserving MOV route.
     let mut translucent = options("/movie.mp4", RenderFormat::Mp4);
     translucent.config.camera.background_opacity = 0.5;
-    translucent.ffmpeg = host_capability();
     assert_refused(translucent, "RenderFormat::Mov");
 
     // Color transforms would need ffmpeg filters, which D2 forbids.
     let mut graded = options("/movie.mp4", RenderFormat::Mp4);
     graded.config.file_writer.gamma = 1.2;
-    graded.ffmpeg = host_capability();
     assert_refused(graded, "ffmpeg filters are forbidden");
 
     // Encoder names are argv tokens, never shell fragments.
     let mut hostile = options("/movie.mp4", RenderFormat::Mp4);
     hostile.config.file_writer.video_codec = "libx264 -vf eq".to_owned();
-    hostile.ffmpeg = host_capability();
     assert_refused(hostile, "video_codec");
 
     let mut unknown_wire = options("/movie.mp4", RenderFormat::Mp4);
     unknown_wire.config.file_writer.pixel_format = "yuv444p".to_owned();
-    unknown_wire.ffmpeg = host_capability();
     assert_refused(unknown_wire, "pixel_format");
+
+    let mut invalid_quality = options("/movie.mp4", RenderFormat::Mp4);
+    invalid_quality.config.file_writer.video_crf = Some(52);
+    assert_refused(invalid_quality, "file_writer.video_crf must lie in 0..=51");
 }
 
 /// Read an MP4/MOV box tree far enough to list top-level and `moov` track
