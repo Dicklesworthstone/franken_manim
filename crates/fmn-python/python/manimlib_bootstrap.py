@@ -24340,18 +24340,21 @@ def _install_config_module():
         return config
 
     def initialize_manim_config():
+        # The Reference's default_config.yml at the pin, with the camera and
+        # directories sections under the cwd custom_config.yml, resolved by
+        # the one native config reader (no PyYAML). The camera section is
+        # the layer Scene's camera merges (fm-e661).
+        pinned = _pinned_manim_config()
+        sections = {
+            name: dict(vars(getattr(pinned, name)))
+            for name in ("sizes", "key_bindings", "vmobject", "mobject", "text", "tex")
+        }
         config = _ConfigDict(
             {
-                "camera": {
-                    "frame_rate": 30,
-                    "pixel_height": 1080,
-                    "pixel_width": 1920,
-                },
-                # Reference defaults merged with the cwd custom_config.yml,
-                # resolved by the one native config reader (no PyYAML).
+                **sections,
+                "colors": dict(pinned.colors),
+                "camera": _reference_camera_layer(),
                 "directories": _FMN_ROOT._resolved_directories(_cwd_custom_config()),
-                "tex": {"font_size_for_unit_height": 48},
-                "text": {"font_size_for_unit_height": 48},
                 "log_level": "INFO",
             }
         )
