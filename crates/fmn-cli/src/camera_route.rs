@@ -377,7 +377,7 @@ mod tests {
                     sink.render_stage(&stage, u64::from(index)).unwrap();
                 }
             }
-            let report = sink.finish().unwrap();
+            let report = sink.finish(None).unwrap();
             assert_eq!(
                 report.backend.route,
                 if compiled {

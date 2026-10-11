@@ -2777,7 +2777,9 @@ fn ffmpeg_invocations_json(invocations: &[InvocationReport]) -> String {
 
 enum RenderArtifactReport {
     Native(NativeArtifactReport),
-    Video(VideoArtifactReport),
+    // Boxed: the encoded-video report carries the ffmpeg and soundtrack
+    // provenance, far larger than the native one.
+    Video(Box<VideoArtifactReport>),
 }
 
 impl RenderArtifactReport {
@@ -4641,7 +4643,7 @@ impl RenderSink {
                         "ffmpeg publication omitted invocation provenance",
                     )
                 })?;
-                RenderArtifactReport::Video(VideoArtifactReport {
+                RenderArtifactReport::Video(Box::new(VideoArtifactReport {
                     path: report.boundary.destination.clone(),
                     frame_count: report.frame_count,
                     input_bytes: report.input_bytes,
@@ -4669,7 +4671,7 @@ impl RenderSink {
                     audio_decodes,
                     audio_inputs,
                     soundtrack: soundtrack_report,
-                })
+                }))
             }
         };
         Ok(FinishedRender {
