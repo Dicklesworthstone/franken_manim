@@ -7,7 +7,6 @@ No SVG parser, second typesetter, or substitute interpolation is introduced.
 from __future__ import annotations
 
 import abc
-from bisect import bisect_left
 from .coordinate_lifecycle import _bind
 from .copying import FamilyRefs
 
@@ -55,6 +54,34 @@ def initialize_string(g, obj, style):
     g["_init_native_vmobject"](obj, options)
 
 
+def _reclass_leaves(g, candidate, paths):
+    """Give each typeset leaf the Reference's class (fm-15k9).
+
+    The Reference builds strings through SVGMobject: every glyph is a
+    VMobjectFromSVGPath, and every TeX rule (fraction bar, radical
+    overline) is the Rectangle of dvisvgm's <rect>. Native storage is
+    unchanged; only the leaf's Python class moves. A rule's contour runs
+    from its bottom-right corner, so its start anchors are the Reference's
+    vertices. Strings without kinds (Text, MarkupText) are all glyphs.
+    """
+    kinds = getattr(candidate, "_string_sub_kinds", None) or ["glyph"] * len(paths)
+    if len(kinds) != len(paths):
+        raise ValueError("native string kinds do not match its span paths")
+    glyph_class, rule_class = g["VMobjectFromSVGPath"], g["Rectangle"]
+    for path, kind in zip(paths, kinds):
+        leaf = candidate
+        for index in path:
+            leaf = leaf.submobjects[index]
+        if kind == "rule":
+            leaf.__class__ = rule_class
+            leaf.vertices = leaf.get_start_anchors()
+            leaf.width, leaf.height = leaf.get_width(), leaf.get_height()
+        else:
+            leaf.__class__ = glyph_class
+            leaf.transform_cache = None
+            leaf.path_obj = None
+
+
 def _publish(g, obj, candidate, specs):
     g["_hang_native_children"](candidate, specs)
     spans = list(candidate._string_sub_spans)
@@ -65,6 +92,7 @@ def _publish(g, obj, candidate, specs):
     offset = len(retained)
     if any(not path or not 0 <= path[0] < len(children) for path in paths):
         raise ValueError("native string span paths do not identify glyph children")
+    _reclass_leaves(g, candidate, paths)
     # Rebase only the first component: TeX parts retain their nested structure.
     paths = [[path[0] + offset, *path[1:]] for path in paths]
     # Plain tuples keep shallow references under the public copy contract.

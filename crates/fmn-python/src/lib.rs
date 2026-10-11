@@ -7284,6 +7284,20 @@ impl BridgeMobject {
             .iter()
             .map(|sub| (sub.span.start, sub.span.end))
             .collect();
+        // Which primitive each sub is, parallel to the spans: the portal
+        // classes glyphs and paths as the Reference's VMobjectFromSVGPath
+        // and rules as its Rectangle (dvisvgm's <rect>) (fm-15k9).
+        let kinds: Vec<&str> = built
+            .typeset
+            .subs
+            .iter()
+            .map(|sub| match sub.prim {
+                fmn_library::TexPrim::Glyph(_) => "glyph",
+                fmn_library::TexPrim::Rule(_) => "rule",
+                fmn_library::TexPrim::Path(_) => "path",
+            })
+            .collect();
+        slf.as_any().setattr("_string_sub_kinds", kinds)?;
         if parts.is_empty() || (parts.len() == 1 && !group_single_part) {
             let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
             slf.as_any().setattr("_string_sub_spans", spans)?;

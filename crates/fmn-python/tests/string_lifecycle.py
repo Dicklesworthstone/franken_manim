@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import inspect
 import copy
+import pickle
 import unittest
 
 import numpy as np
@@ -201,6 +202,42 @@ class StringRootStyle(unittest.TestCase):
     def test_caller_styles_still_reach_the_root(self):
         self.assertEqual(m.Tex('ab', fill_opacity=0.5).get_fill_opacity(), 0.5)
         self.assertEqual(m.Text('ab', stroke_width=2).get_stroke_width(), 2.0)
+
+
+class StringLeafClasses(unittest.TestCase):
+    # fm-15k9: the Reference builds strings through SVGMobject, so each glyph
+    # is a VMobjectFromSVGPath and each TeX rule is dvisvgm's <rect>, a
+    # Rectangle. Native storage is unchanged; only the leaf class moves.
+    def test_glyphs_are_svg_paths_at_every_front_door(self):
+        for base, text in FRONT_DOORS:
+            with self.subTest(base=base.__name__):
+                leaves = base(text).family_members_with_points()
+                self.assertTrue(leaves)
+                for leaf in leaves:
+                    self.assertIs(type(leaf), m.VMobjectFromSVGPath)
+                    self.assertEqual(type(leaf).__mro__[1:3], (m.VMobject, m.Mobject))
+
+    def test_a_fraction_bar_is_a_rectangle_with_the_reference_vertices(self):
+        tex = m.Tex(r'\frac{1}{2}')
+        self.assertEqual([type(leaf).__name__ for leaf in tex],
+                         ['VMobjectFromSVGPath', 'Rectangle', 'VMobjectFromSVGPath'])
+        bar = tex[1]
+        (x0, y0, _), (x1, y1, _) = bar.get_bounding_box()[[0, 2]]
+        # dvisvgm's <rect> as the Reference's Rectangle reports it: BR, TR, TL, BL.
+        np.testing.assert_allclose(bar.get_vertices(), [[x1, y0, 0], [x1, y1, 0],
+                                                        [x0, y1, 0], [x0, y0, 0]], atol=1e-6)
+        self.assertAlmostEqual(bar.width, x1 - x0)
+        self.assertAlmostEqual(bar.height, y1 - y0)
+
+    def test_classes_survive_copy_pickle_and_regeneration(self):
+        tex = m.Tex(r'\sqrt{x} = \frac{a}{b}')
+        expected = [type(leaf) for leaf in tex]
+        self.assertIn(m.Rectangle, expected)
+        for twin in (tex.copy(), copy.deepcopy(tex), pickle.loads(pickle.dumps(tex))):
+            self.assertEqual([type(leaf) for leaf in twin], expected)
+        text = m.Text('ab')
+        text.become(m.Text('cd'))
+        self.assertTrue(all(type(leaf) is m.VMobjectFromSVGPath for leaf in text))
 
 
 class TextChannelColors(unittest.TestCase):
