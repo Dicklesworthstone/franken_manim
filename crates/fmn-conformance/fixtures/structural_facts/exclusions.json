@@ -282,14 +282,35 @@
       "reason": "C-29: prod_rhs = fg_label[6:] then prod_rhs.become(new_prod_rhs). At the pin become() copies data only, so the sliced VGroup's point-less root keeps VMobject's defaults. FrankenManim's become() carries the source root's style (BN-07)."
     },
     {
+      "id": "bn20-riemann-sign",
+      "kind": "behavior-note",
+      "ref": "BN-20",
+      "scope": ["scenes"],
+      "subject": ["Graph15Case"],
+      "class": "Rectangle",
+      "fact": "style.fill_color",
+      "reference_values": ["#FC6255"],
+      "reason": "BN-20: the Reference's get_riemann_rectangles takes a rectangle's sign from i2gp(sample, graph), a curve-proportion lookup in world space. FrankenManim samples in data coordinates, so near a zero crossing two of Graph15Case's rectangles take the positive color where the Reference shows negative_color."
+    },
+    {
+      "id": "fm-v4lv-write-point-less-root",
+      "kind": "open-bead",
+      "ref": "fm-v4lv",
+      "scope": ["scenes"],
+      "subject": ["AnalyzeStepAlongDiagonalLine"],
+      "class": "VGroup",
+      "fact": "style.fill_opacity",
+      "reason": "Write's DrawBorderThenFill leaves a point-less root at the outline's fill opacity (0); the Reference keeps 0.5."
+    },
+    {
       "id": "fm-78b6-style-defaults-sweep",
       "kind": "open-bead",
       "ref": "fm-78b6",
       "scope": ["scenes"],
-      "subject": ["AnalyzeStepAlongDiagonalLine", "VisualizeMaxOfPairCDF", "Graph15Case", "CompareFirstTwoMethods"],
-      "class": ["VGroup", "Line", "Rectangle"],
-      "fact": ["style.fill_color", "style.fill_opacity", "style.stroke_color", "style.stroke_width"],
-      "reason": "Four corpus scenes, measured on wheel10 (2026-10-11): a point-less VGroup's fill opacity (AnalyzeStepAlongDiagonalLine); NumberLine's tick-group root stroke (VisualizeMaxOfPairCDF); two Riemann rectangles' negative_color near a zero crossing (Graph15Case); a Line's undrawn fill (CompareFirstTwoMethods). The four C-29 scenes are behavior (bn07-c29-become-point-less-style)."
+      "subject": ["VisualizeMaxOfPairCDF", "CompareFirstTwoMethods"],
+      "class": ["VGroup", "Line"],
+      "fact": ["style.fill_color", "style.stroke_color"],
+      "reason": "Two corpus scenes, measured on wheel10 (2026-10-11). NumberLine's tick-group root stroke in a scene context (VisualizeMaxOfPairCDF; standalone NumberLine and Axes agree); a Line's undrawn fill (CompareFirstTwoMethods). C-29 scenes are bn07-c29-become-point-less-style, Graph15Case is BN-20 and AnalyzeStepAlongDiagonalLine is fm-v4lv."
     },
     {
       "id": "fm-c1up-rounded-rectangle-corners",
