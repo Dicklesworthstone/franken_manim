@@ -13,6 +13,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(test)]
+mod catalog_rate_identity;
+#[cfg(test)]
 mod corpus;
 mod crossing;
 mod ladder;
@@ -10347,15 +10349,16 @@ fn rate_func_from_py(value: &Bound<'_, PyAny>) -> PyResult<fmn_anim::RateFunc> {
 }
 
 fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
-    let function: fn(f64) -> f64 = match name {
-        "linear" => fmn_core::rate::linear,
-        "smooth" => fmn_core::rate::smooth,
-        "rush_into" => fmn_core::rate::rush_into,
-        "rush_from" => fmn_core::rate::rush_from,
-        "slow_into" => fmn_core::rate::slow_into,
-        "double_smooth" => fmn_core::rate::double_smooth,
-        "there_and_back" => fmn_core::rate::there_and_back,
-        "lingering" => fmn_core::rate::lingering,
+    use fmn_core::rate::CatalogRate;
+    let rate = match name {
+        "linear" => CatalogRate::Linear,
+        "smooth" => CatalogRate::Smooth,
+        "rush_into" => CatalogRate::RushInto,
+        "rush_from" => CatalogRate::RushFrom,
+        "slow_into" => CatalogRate::SlowInto,
+        "double_smooth" => CatalogRate::DoubleSmooth,
+        "there_and_back" => CatalogRate::ThereAndBack,
+        "lingering" => CatalogRate::Lingering,
         other => {
             return Err(PyValueError::new_err(format!(
                 "rate_func `{other}` is not in the engine's named catalog \
@@ -10365,7 +10368,7 @@ fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
             )));
         }
     };
-    Ok(fmn_anim::RateFunc::Base(function))
+    Ok(fmn_anim::RateFunc::Catalog(rate))
 }
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {

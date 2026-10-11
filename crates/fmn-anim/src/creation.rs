@@ -355,7 +355,7 @@ impl DrawBorderThenFill {
         let config = AnimConfig {
             name: "DrawBorderThenFill".to_owned(),
             run_time: 2.0,
-            rate_func: RateFunc::Base(rate::double_smooth),
+            rate_func: RateFunc::Catalog(rate::CatalogRate::DoubleSmooth),
             ..AnimConfig::default()
         };
         Self {

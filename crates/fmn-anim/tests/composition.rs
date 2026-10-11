@@ -871,7 +871,9 @@ fn succession_rewind_retains_fade_final_alpha_and_live_begin_state() {
             .read_column("rgba")
             .expect("color");
         assert!(
-            rgba.chunks_exact(4)
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
                 .all(|color| (f64::from(color[3]) - expected_opacity).abs() < 1e-6),
             "at time {time}, expected opacity {expected_opacity}; got {rgba:?}"
         );
