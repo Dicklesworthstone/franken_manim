@@ -336,13 +336,19 @@ pub fn encode_argv(job: &VideoJob, out: &Path) -> Result<Vec<String>, Negotiatio
     }
     match job.container {
         Container::Mp4 | Container::Mov => {
-            // yuv output planes; 10-bit in stays 10-bit out.
-            let out_fmt = if job.wire == WireFormat::P010 {
-                "yuv420p10le"
-            } else {
-                "yuv420p"
-            };
-            push(&mut argv, &["-pix_fmt", out_fmt]);
+            // Keep the documented libx264 software profile byte-for-byte,
+            // but do not force a native NV12 encoder through planar 4:2:0.
+            // With no output -pix_fmt, ffmpeg negotiates against the selected
+            // encoder's actual supported formats: NV12 stays NV12 when it is
+            // accepted, otherwise ffmpeg chooses a compatible encoder input.
+            // This is capability-driven, not a list of hardware brand names.
+            // P010 remains explicit: an unconstrained choice could silently
+            // reduce its bit depth on an 8-bit-only encoder.
+            if job.wire == WireFormat::P010 {
+                push(&mut argv, &["-pix_fmt", "yuv420p10le"]);
+            } else if job.wire != WireFormat::Nv12 || encoder.as_deref() == Some("libx264") {
+                push(&mut argv, &["-pix_fmt", "yuv420p"]);
+            }
         }
         Container::MovTransparent => push(&mut argv, &["-pix_fmt", "argb"]),
         Container::Gif => push(&mut argv, &["-f", "gif"]),
