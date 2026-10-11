@@ -1,0 +1,136 @@
+name: Native frame preparation
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/native-frame-preparation.yml']
+  workflow_dispatch:
+    inputs:
+      patch_blobs:
+        description: 'Comma-separated immutable blobs containing consecutive base64 gzip patch chunks'
+        default: '813648ec48a605a854069ed58883c5114862ab33,0e1f3f4ed7c9c243d7286000dfcf898aea867566'
+        required: true
+      patch_sha256:
+        description: 'SHA256 of the uncompressed patch'
+        default: '99565d19fc25c3fe03e2a6bcd0876fee2fe177b00733bf6e3f90f9a33dd44239'
+        required: true
+# Only immutable Git blobs are created. No branch, commit or ref is published.
+permissions:
+  contents: write
+concurrency:
+  group: native-frame-preparation-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: target/portable
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: native-prepare-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+            fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
+      - name: Verify and apply immutable Rust candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCH_BLOBS: ${{ inputs.patch_blobs || '813648ec48a605a854069ed58883c5114862ab33,0e1f3f4ed7c9c243d7286000dfcf898aea867566' }}
+          PATCH_SHA256: ${{ inputs.patch_sha256 || '99565d19fc25c3fe03e2a6bcd0876fee2fe177b00733bf6e3f90f9a33dd44239' }}
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, re, subprocess, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-prepare'
+          out.mkdir()
+          chunks = []
+          for sha in os.environ['PATCH_BLOBS'].split(','):
+              assert re.fullmatch('[0-9a-f]{40}', sha)
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  value = json.load(response)
+              content = base64.b64decode(value['content'])
+              assert hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest() == sha
+              chunks.append(content)
+          patch = gzip.decompress(base64.b64decode(b''.join(chunks), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == os.environ['PATCH_SHA256']
+          path = out / 'candidate.patch'
+          path.write_bytes(patch)
+          stats = subprocess.check_output(['git','apply','--numstat',str(path)], text=True)
+          paths = sorted(line.split('\t',2)[2] for line in stats.splitlines())
+          allowed = {
+              'crates/fmn-mobject/src/lib.rs', 'crates/fmn-mobject/src/stage.rs',
+              'crates/fmn-mobject/src/stage/frozen_render.rs', 'crates/fmn-mobject/tests/frozen_render.rs',
+              'crates/fmn-anim/src/frame.rs', 'crates/fmn-anim/tests/render_handoff.rs',
+              'crates/fmn/src/rendering/pipeline.rs', 'crates/fmn/src/rendering.rs',
+              'crates/fmn/tests/native_preparation.rs',
+              'crates/fmn-cli/src/offline_cpu.rs', 'crates/fmn-cli/src/lib.rs',
+          }
+          assert paths and set(paths) <= allowed, paths
+          subprocess.run(['git','apply','--check',str(path)], check=True)
+          subprocess.run(['git','apply',str(path)], check=True)
+          subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*paths], check=True)
+          subprocess.run(['git','add','-N','--',*paths], check=True)
+          subprocess.run(['git','diff','--check'], check=True)
+          (out / 'paths.json').write_text(json.dumps(paths))
+          (out / 'base.txt').write_text(os.environ['GITHUB_SHA'])
+          PY
+      - name: Test snapshot ownership and native consumers
+        run: |
+          set -o pipefail
+          cargo test --locked -p fmn-mobject -p fmn-anim -p fmn --all-targets 2>&1 | tee "$RUNNER_TEMP/native-prepare/native-tests.log"
+      - name: Test real CLI CPU pipeline
+        run: |
+          set -o pipefail
+          cargo test --locked -p fmn-cli --features cli,batch --lib offline_cpu 2>&1 | tee "$RUNNER_TEMP/native-prepare/cli-tests.log"
+      - name: Check workspace integration
+        run: |
+          set -o pipefail
+          cargo check --locked --workspace 2>&1 | tee "$RUNNER_TEMP/native-prepare/workspace-check.log"
+      - name: Archive exact validated source blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-prepare'
+          entries = []
+          for name in json.loads((out / 'paths.json').read_text()):
+              content = pathlib.Path(name).read_bytes()
+              expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs',
+                  data=json.dumps({'encoding':'base64','content':base64.b64encode(content).decode()}).encode(),
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Content-Type':'application/json'},
+                  method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  blob = json.load(response)
+              assert blob['sha'] == expected
+              entries.append({'path':name,'mode':'100644','type':'blob','sha':expected})
+              target = out / 'source' / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(content)
+          manifest = {'base':os.environ['GITHUB_SHA'], 'files':entries}
+          (out / 'validated-blobs.json').write_text(json.dumps(manifest, indent=2))
+          print(json.dumps(manifest, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-preparation-${{ github.run_id }}
+          path: ${{ runner.temp }}/native-prepare
+          if-no-files-found: error
