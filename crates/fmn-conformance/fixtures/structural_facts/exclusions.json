@@ -303,14 +303,26 @@
       "reason": "Write's DrawBorderThenFill leaves a point-less root at the outline's fill opacity (0); the Reference keeps 0.5."
     },
     {
-      "id": "fm-78b6-style-defaults-sweep",
-      "kind": "open-bead",
-      "ref": "fm-78b6",
+      "id": "bn07-c31-axes-ticks-match-style",
+      "kind": "behavior-note",
+      "ref": "BN-07",
       "scope": ["scenes"],
-      "subject": ["VisualizeMaxOfPairCDF", "CompareFirstTwoMethods"],
-      "class": ["VGroup", "Line"],
+      "subject": ["VisualizeMaxOfPairCDF"],
+      "class": "VGroup",
+      "fact": "style.stroke_color",
+      "reference_values": ["#DDDDDD"],
+      "reason": "C-31: a match_style inside a play reaches a ThreeDAxes tick group's point-less root. The Reference drops it (set_style writes data only) and the root keeps VGroup's grey; FrankenManim's root takes the matched axis color (BN-07)."
+    },
+    {
+      "id": "bn03-chord-length-threshold",
+      "kind": "behavior-note",
+      "ref": "BN-03",
+      "scope": ["scenes"],
+      "subject": ["CompareFirstTwoMethods"],
+      "class": "Line",
       "fact": ["style.fill_color", "style.stroke_color"],
-      "reason": "Two corpus scenes, measured on wheel10 (2026-10-11). NumberLine's tick-group root stroke in a scene context (VisualizeMaxOfPairCDF; standalone NumberLine and Axes agree); a Line's undrawn fill (CompareFirstTwoMethods). C-29 scenes are bn07-c29-become-point-less-style, Graph15Case is BN-20 and AnalyzeStepAlongDiagonalLine is fm-v4lv."
+      "reference_values": ["#FFFFFF", "#58C4DD"],
+      "reason": "BN-03: the scene colors a random chord BLUE when it is longer than the inscribed triangle's side, and builds chords from circle.pfp(random()). True-arclength point_from_proportion moves the endpoints slightly, so one chord at the threshold flips color."
     },
     {
       "id": "fm-c1up-rounded-rectangle-corners",

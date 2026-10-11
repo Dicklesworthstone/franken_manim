@@ -49,6 +49,13 @@ arc-length fraction.
 overestimates curved paths (its outer polygon dominates). Dash counts and
 tip placements derived from it move accordingly — by design.
 
+Points sampled with `point_from_proportion` move as well, and a decision
+taken on them can flip near its threshold. `_2021/bertrands_paradox.py`
+`CompareFirstTwoMethods` builds random chords from `circle.pfp(random())` and
+colors those longer than the inscribed triangle's side. One chord in a
+thousand changes color (corpus differential row
+`bn03-chord-length-threshold`).
+
 Tip attachment also follows the actual curve. Classic manim aims a curved
 tip from the final control handle and then shortens the shaft by applying
 `put_start_and_end_on` to the whole path. The head can therefore follow a

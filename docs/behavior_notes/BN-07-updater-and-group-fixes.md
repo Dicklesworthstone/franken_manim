@@ -347,7 +347,10 @@ calls `self.match_style(vmobject, recurse=False)` on its point-less root
 (`vectorized_mobject.py:1414`), which keeps VMobject's default colors, and
 `VGroup().match_style(Circle())` stays grey. `cube.match_style(square)` on a
 `VCube` restyles the faces but leaves the root's BLUE_D fill
-(`_2026/spheres_talk/random_puzzles.py` `SumOfTwoSquares`).
+(`_2026/spheres_talk/random_puzzles.py` `SumOfTwoSquares`). A `match_style`
+inside a play leaves a `ThreeDAxes` tick group's root grey
+(`_2024/puzzles/max_rand.py` `VisualizeMaxOfPairCDF`, row
+`bn07-c31-axes-ticks-match-style`).
 
 **FrankenManim:** a point-less member takes the matched style, as C-29
 carries it through `become()` and `restore()`.
