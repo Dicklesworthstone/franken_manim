@@ -280,6 +280,15 @@ const fn transfer_name(transfer: Transfer) -> &'static str {
     }
 }
 
+// Primaries and matrix coefficients are independent: RGB wire bytes have
+// the identity matrix even though their primaries are shared with BT.709.
+fn push_color_description(argv: &mut Vec<String>, color: ColorDescription, rgb: bool) {
+    push(argv, &["-color_primaries", "bt709"]);
+    push(argv, &["-color_trc", transfer_name(color.transfer)]);
+    push(argv, &["-colorspace", if rgb { "rgb" } else { "bt709" }]);
+    push(argv, &["-color_range", range_name(color.range)]);
+}
+
 /// The common prefix of every boundary invocation.
 fn base_argv() -> Vec<String> {
     vec!["-hide_banner".into(), "-loglevel".into(), "error".into()]
@@ -300,6 +309,11 @@ pub fn encode_argv(job: &VideoJob, out: &Path) -> Result<Vec<String>, Negotiatio
     argv.push(format!("{}x{}", job.width, job.height));
     argv.push("-framerate".into());
     argv.push(format!("{}/{}", job.fps.0, job.fps.1));
+    // These describe already-converted native pixels, not a requested
+    // correction. Without input-side metadata, ffmpeg sees an unknown YUV
+    // matrix/range and may insert an unintended color transform when the
+    // output is labelled BT.709. Tag both sides of the encode boundary.
+    push_color_description(&mut argv, job.color, job.wire.has_alpha());
     push(&mut argv, &["-i", "-"]);
 
     // Output. Only this pure negotiation layer emits encoder controls.
@@ -336,13 +350,11 @@ pub fn encode_argv(job: &VideoJob, out: &Path) -> Result<Vec<String>, Negotiatio
     if job.container == Container::Mp4 {
         push(&mut argv, &["-movflags", "+faststart"]);
     }
-    push(&mut argv, &["-color_primaries", "bt709"]);
-    push(
+    push_color_description(
         &mut argv,
-        &["-color_trc", transfer_name(job.color.transfer)],
+        job.color,
+        matches!(job.container, Container::MovTransparent | Container::Gif),
     );
-    push(&mut argv, &["-colorspace", "bt709"]);
-    push(&mut argv, &["-color_range", range_name(job.color.range)]);
     argv.push("-y".into());
     argv.push(out.display().to_string());
     Ok(argv)
