@@ -619,16 +619,16 @@ dependencies = [
 
 [[package]]
 name = "fsci-fft"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ed84bdd15e75e1257c624d12f90d1436f51e12d5#ed84bdd15e75e1257c624d12f90d1436f51e12d5"
 dependencies = [
  "fsci-runtime",
 ]
 
 [[package]]
 name = "fsci-integrate"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ed84bdd15e75e1257c624d12f90d1436f51e12d5#ed84bdd15e75e1257c624d12f90d1436f51e12d5"
 dependencies = [
  "fsci-opt",
  "fsci-runtime",
@@ -638,8 +638,8 @@ dependencies = [
 
 [[package]]
 name = "fsci-linalg"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ed84bdd15e75e1257c624d12f90d1436f51e12d5#ed84bdd15e75e1257c624d12f90d1436f51e12d5"
 dependencies = [
  "fsci-fft",
  "fsci-runtime",
@@ -651,8 +651,8 @@ dependencies = [
 
 [[package]]
 name = "fsci-opt"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ed84bdd15e75e1257c624d12f90d1436f51e12d5#ed84bdd15e75e1257c624d12f90d1436f51e12d5"
 dependencies = [
  "fsci-runtime",
  "rand",
@@ -662,8 +662,8 @@ dependencies = [
 
 [[package]]
 name = "fsci-runtime"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ed84bdd15e75e1257c624d12f90d1436f51e12d5#ed84bdd15e75e1257c624d12f90d1436f51e12d5"
 dependencies = [
  "blake3",
  "serde",
@@ -672,8 +672,8 @@ dependencies = [
 
 [[package]]
 name = "fsci-sparse"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ed84bdd15e75e1257c624d12f90d1436f51e12d5#ed84bdd15e75e1257c624d12f90d1436f51e12d5"
 dependencies = [
  "fsci-linalg",
  "fsci-runtime",
@@ -960,9 +960,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom",
@@ -1171,18 +1171,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
