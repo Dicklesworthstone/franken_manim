@@ -83,6 +83,44 @@ impl ApplyMethod {
         }
     }
 
+    /// Map every world-space point of the begin-time family copy.
+    ///
+    /// This is the deferred `ApplyPointwiseFunction` form, with its native
+    /// three-second default. The map uses Marionette's existing point-mapping
+    /// operation about the true origin, including auxiliary pointlike fields.
+    /// Changing the live family before begin is therefore included in the
+    /// target. Non-point record fields keep Transform's normal interpolation.
+    #[must_use]
+    pub fn pointwise(mobject: Mob, map: impl Fn(Vec3) -> Vec3 + 'static) -> Self {
+        Self::new(mobject, move |stage, target| {
+            stage.apply_points_function(target, &map, Some([0.0; 3]), None);
+            Ok(())
+        })
+        .with_config(AnimConfig {
+            name: "ApplyPointwiseFunction".to_owned(),
+            run_time: 3.0,
+            ..AnimConfig::default()
+        })
+    }
+
+    /// Move the begin-time copy's center to `map(center)` without deforming it.
+    ///
+    /// The center and destination are both evaluated at begin, after preceding
+    /// succession members have finished. The map is called once per begin,
+    /// not per member, interpolation sample or rendered frame.
+    #[must_use]
+    pub fn pointwise_to_center(mobject: Mob, mut map: impl FnMut(Vec3) -> Vec3 + 'static) -> Self {
+        Self::new(mobject, move |stage, target| {
+            let destination = map(stage.get_center(target));
+            stage.move_to(target, destination, [0.0; 3]);
+            Ok(())
+        })
+        .with_config(AnimConfig {
+            name: "ApplyPointwiseFunctionToCenter".to_owned(),
+            ..AnimConfig::default()
+        })
+    }
+
     /// Set ordinary animation arguments without evaluating the method.
     #[must_use]
     pub fn with_config(mut self, config: AnimConfig) -> Self {

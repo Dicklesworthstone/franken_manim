@@ -39,54 +39,20 @@ jobs:
             fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
       - run: rustup show active-toolchain
-      - name: Prepare bounded candidate or check already-published source
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Check the published source, without applying patches
         run: |
-          python3 - <<'PY'
-          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-methods'
-          out.mkdir()
-          paths = ['crates/fmn-anim/src/apply_method.rs', 'crates/fmn-anim/tests/apply_method_maps.rs',
-                   'crates/fmn/tests/deferred_method_render.rs', 'crates/fmn-scene/tests/deferred_method_bundle.rs']
-          candidate = not pathlib.Path(paths[1]).exists()
-          if candidate:
-              source = pathlib.Path(paths[0]).read_bytes()
-              assert hashlib.sha1(b'blob '+str(len(source)).encode()+b'\0'+source).hexdigest() == '9e01dd2ef74f44fe1bfdbf2ead8398822f247163'
-              chunks = []
-              for sha in ['1d8f9650b72f9fcac5ae9d0bac62e5fe0b8d2927',
-                          'a04cd9c7d1345a34df6ccb0560313c699e1d03f8',
-                          'f4122d8c5ea7c9051d97194b0d3961c322e4bc68']:
-                  request = urllib.request.Request(
-                      f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
-                      headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'User-Agent':'fmn-native-method-validation'})
-                  with urllib.request.urlopen(request, timeout=60) as response:
-                      data = base64.b64decode(json.load(response)['content'])
-                  assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == sha
-                  chunks.append(data)
-              patch = gzip.decompress(b''.join(chunks))
-              assert hashlib.sha256(patch).hexdigest() == 'f7d8fa39f0684c7ba729a0c4b3d61e570412a87c295c296402067c5bbfebc752'
-              patch_path = out / 'candidate.patch'
-              patch_path.write_bytes(patch)
-              stats = subprocess.check_output(['git','apply','--numstat',str(patch_path)], text=True)
-              assert {line.split('\t',2)[2] for line in stats.splitlines()} == set(paths)
-              subprocess.run(['git','apply','--check',str(patch_path)],check=True)
-              subprocess.run(['git','apply',str(patch_path)],check=True)
-          subprocess.run(['rustfmt',*([] if candidate else ['--check']), '--edition','2024',
-                          '--config','skip_children=true', *paths],check=True)
-          subprocess.run(['git','diff','--check'],check=True)
-          manifest = {'base_commit':os.environ['GITHUB_SHA'], 'candidate_applied':candidate, 'files':[]}
-          for path in paths:
-              data = pathlib.Path(path).read_bytes()
-              manifest['files'].append({'path':path,'sha':hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()})
-          (out/'source.json').write_text(json.dumps(manifest,indent=2))
-          subprocess.run(['tar','czf',str(out/'source.tar.gz'),*paths],check=True)
-          PY
+          rustfmt --check --edition 2024 --config skip_children=true \
+            crates/fmn-anim/src/apply_method.rs crates/fmn-anim/src/lib.rs \
+            crates/fmn-anim/tests/apply_method.rs crates/fmn-anim/tests/apply_method_maps.rs \
+            crates/fmn-scene/tests/deferred_method_bundle.rs \
+            crates/fmn/src/prelude.rs crates/fmn/tests/deferred_method_render.rs
       - name: Run native semantics, actual pixels and callback-free replay
         run: |
           python3 - <<'PY'
           import json, os, pathlib, subprocess
           out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-methods'
+          out.mkdir()
+          (out/'source-commit.txt').write_text(os.environ['GITHUB_SHA']+'\n')
           commands = [
               ('focused', ['cargo','test','--locked','-p','fmn-anim','--test','apply_method','--test','apply_method_maps','--','--nocapture']),
               ('bundle-replay', ['cargo','test','--locked','-p','fmn-scene','--test','deferred_method_bundle','--','--nocapture']),
@@ -106,6 +72,7 @@ jobs:
               results[name] = result.returncode
               (out/'results.json').write_text(json.dumps(results,indent=2))
               print((out/(name+'.log')).read_text()[-14000:],flush=True)
+          subprocess.run(['git','diff','--exit-code'],check=True)
           assert all(code == 0 for code in results.values()), results
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
