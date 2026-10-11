@@ -1207,26 +1207,26 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
         "lib.rs",
         "log10",
         1,
-        "fm-9esi: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
+        "fm-pexg: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
          at thresholds, never the solution values. Fixed upstream in frankenscipy d00db63ac \
-         (fm-wi8l); it leaves with the pin bump",
+         (fm-wi8l); it leaves with fm-pexg's pin bump",
     ),
     (
         "frankenscipy/crates/fsci-runtime",
         "policy.rs",
         "exp",
         1,
-        "fm-9esi: the solve policy's softmax, whose posterior picks FailClosed/FullValidate. \
-         Fixed upstream in frankenscipy d00db63ac (fm-wi8l); it leaves with the pin bump",
+        "fm-pexg: the solve policy's softmax, whose posterior picks FailClosed/FullValidate. \
+         Fixed upstream in frankenscipy d00db63ac (fm-wi8l); it leaves with fm-pexg's pin bump",
     ),
     (
         "frankenscipy/crates/fsci-runtime",
         "lib.rs",
         "log10",
         2,
-        "fm-9esi: the solve portfolio's rcond map (condition_posterior) and outcome row \
+        "fm-pexg: the solve portfolio's rcond map (condition_posterior) and outcome row \
          (rcond_decade). Fixed upstream in frankenscipy d00db63ac (fm-wi8l); they leave with \
-         the pin bump",
+         fm-pexg's pin bump",
     ),
     (
         "frankenscipy/crates/fsci-linalg",
@@ -1243,23 +1243,25 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
         "svd.rs",
         "hypot",
         2,
-        "fm-dboe: fsci-linalg estimates rcond for n <= 4 from this SVD's singular values, on \
-         every 2- and 3-anchor closed smoothing solve; the rcond only steers decisions, far from \
-         their thresholds there. simba's f64 hypot is the platform libm's",
+        "fm-pexg: at the 85edd7a9 pin fsci-linalg estimates rcond for n <= 4 from this SVD's \
+         singular values, on every 2- and 3-anchor closed smoothing solve; the rcond only steers \
+         decisions, far from their thresholds there. simba's f64 hypot is the platform libm's. \
+         frankenscipy ed84bdd15 (fm-dboe) drops that use; after fm-pexg's bump only the SVD \
+         fallback, pinned unreachable for fmn (fm-77rt), still calls it",
     ),
     (
         "crates.io/nalgebra",
         "svd2.rs",
         "atan2",
         2,
-        "fm-dboe: the 2x2 SVD inside that n <= 4 rcond estimate",
+        "fm-pexg: the 2x2 SVD inside that n <= 4 rcond estimate (see svd.rs)",
     ),
     (
         "crates.io/nalgebra",
         "svd2.rs",
         "sin_cos",
         2,
-        "fm-dboe: the 2x2 SVD inside that n <= 4 rcond estimate",
+        "fm-pexg: the 2x2 SVD inside that n <= 4 rcond estimate (see svd.rs)",
     ),
 ];
 
